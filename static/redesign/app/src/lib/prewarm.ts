@@ -42,6 +42,7 @@ import {
   type SessionProfile,
 } from './streaming'
 import { apiFetchResponse, withToken } from './api'
+import { currentMaxStreamBps } from './appearance'
 
 export interface PrewarmTarget {
   fileId: number
@@ -245,6 +246,9 @@ export async function prewarm(t: PrewarmTarget): Promise<void> {
       fileId: t.fileId,
       fileType: t.fileType,
       startSec: t.startSec,
+      // Same source the player reads — a mismatch here would make every
+      // warmed session miss its request key and get thrown away.
+      maxBps: currentMaxStreamBps(),
     })
     // Deliberately NOT abortable: a transcode CreateSession spawns a server-side
     // ffmpeg session, so we must always learn its session_id to delete it if

@@ -13,23 +13,33 @@ import (
 // constraint that stores them. A code emitted here that the column rejects
 // would fail the ingest INSERT and lose the whole row.
 func TestReasonCodeVocabularyMatchesSchema(t *testing.T) {
-	source, err := os.ReadFile("../../migrations/056_playback_qoe.up.sql")
-	if err != nil {
-		t.Fatalf("read migration 056: %v", err)
-	}
+	// Migration 058 replaced the CHECK that 056 created, so the LIVE
+	// vocabulary is 058's. Both files are read: 056 must still carry a
+	// constraint (the column's origin), and the later definition wins.
 	re := regexp.MustCompile(`(?s)CHECK\s*\(\s*decision_reason\s+IN\s*\((.*?)\)\s*\)`)
-	m := re.FindStringSubmatch(string(source))
-	if m == nil {
-		t.Fatal("no decision_reason CHECK found in migration 056")
+	var latest string
+	for _, file := range []string{
+		"../../migrations/056_playback_qoe.up.sql",
+		"../../migrations/058_playback_qoe_bitrate_reason.up.sql",
+	} {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		m := re.FindStringSubmatch(string(source))
+		if m == nil {
+			t.Fatalf("no decision_reason CHECK found in %s", file)
+		}
+		latest = m[1]
 	}
 	sqlValues := map[string]bool{}
-	for _, v := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(m[1], -1) {
+	for _, v := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(latest, -1) {
 		sqlValues[v[1]] = true
 	}
 
 	goValues := []string{
 		ReasonCompatible, ReasonContainer, ReasonVideoCodec, ReasonAudioCodec,
-		ReasonBitDepth, ReasonAudioTrack, ReasonUnspecified,
+		ReasonBitDepth, ReasonAudioTrack, ReasonBitrate, ReasonUnspecified,
 	}
 	for _, v := range goValues {
 		if !sqlValues[v] {
@@ -222,6 +232,14 @@ func TestReasonCodeEveryBucketIsReachable(t *testing.T) {
 		// Reached by construction, not by DecidePlayback prose.
 		ReasonUnspecified: ReasonCode(PlaybackDecision{Decision: "transcode"}) == ReasonUnspecified,
 	}
+	// The bitrate ceiling needs the full input form: a playable file whose
+	// probed bitrate sits above the client's declared ceiling.
+	capped := *basic
+	capped.MaxBitrate = 8_000_000
+	produced[ReasonCode(DecidePlaybackFor(DecisionInput{
+		Container: "mp4", VideoCodec: "h264", PixFmt: "yuv420p",
+		AudioTracks: aac, Caps: &capped, SourceBitrate: 40_000_000,
+	}))] = true
 	for _, s := range []struct {
 		container, codec, pixFmt string
 		tracks                   []models.AudioTrack
@@ -240,7 +258,7 @@ func TestReasonCodeEveryBucketIsReachable(t *testing.T) {
 
 	for _, bucket := range []string{
 		ReasonCompatible, ReasonContainer, ReasonVideoCodec,
-		ReasonAudioCodec, ReasonBitDepth, ReasonAudioTrack, ReasonUnspecified,
+		ReasonAudioCodec, ReasonBitDepth, ReasonAudioTrack, ReasonBitrate, ReasonUnspecified,
 	} {
 		if !produced[bucket] {
 			t.Errorf("bucket %q is never produced by any real decision — it is dead "+

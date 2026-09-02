@@ -507,6 +507,79 @@ transcode:
 	}
 }
 
+// TestTranscodeDeliveryKnobs pins the September 2026 playback knobs through
+// every surface they can be set from — defaults, YAML keys, env overrides —
+// so a knob that parses on one surface and is silently dropped on another
+// cannot ship (the quality policy shipped exactly that way once).
+func TestTranscodeDeliveryKnobs(t *testing.T) {
+	setRequired := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+		t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+		t.Setenv("TRANSCODE_STEREO_DOWNMIX", "")
+		t.Setenv("TRANSCODE_HEVC_OUTPUT", "")
+	}
+
+	t.Run("defaults", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.Transcode.StereoDownmix != "standard" {
+			t.Errorf("Transcode.StereoDownmix default = %q, want standard", cfg.Transcode.StereoDownmix)
+		}
+		if cfg.Transcode.HEVCOutput != "auto" {
+			t.Errorf("Transcode.HEVCOutput default = %q, want auto", cfg.Transcode.HEVCOutput)
+		}
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		setRequired(t)
+		dir := t.TempDir()
+		yamlPath := filepath.Join(dir, "aurora.yaml")
+		body := "transcode:\n  stereo_downmix: \"night\"\n  hevc_output: \"all\"\n"
+		if err := os.WriteFile(yamlPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AURORA_CONFIG_FILE", yamlPath)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.Transcode.StereoDownmix != "night" {
+			t.Errorf("yaml stereo_downmix = %q, want night", cfg.Transcode.StereoDownmix)
+		}
+		if cfg.Transcode.HEVCOutput != "all" {
+			t.Errorf("yaml hevc_output = %q, want all", cfg.Transcode.HEVCOutput)
+		}
+	})
+
+	t.Run("env overrides yaml", func(t *testing.T) {
+		setRequired(t)
+		dir := t.TempDir()
+		yamlPath := filepath.Join(dir, "aurora.yaml")
+		body := "transcode:\n  stereo_downmix: \"night\"\n  hevc_output: \"all\"\n"
+		if err := os.WriteFile(yamlPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AURORA_CONFIG_FILE", yamlPath)
+		t.Setenv("TRANSCODE_STEREO_DOWNMIX", "dialogue")
+		t.Setenv("TRANSCODE_HEVC_OUTPUT", "off")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.Transcode.StereoDownmix != "dialogue" {
+			t.Errorf("env stereo_downmix = %q, want dialogue", cfg.Transcode.StereoDownmix)
+		}
+		if cfg.Transcode.HEVCOutput != "off" {
+			t.Errorf("env hevc_output = %q, want off", cfg.Transcode.HEVCOutput)
+		}
+	})
+}
+
 func TestAllowedOrigins_Override(t *testing.T) {
 	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")

@@ -139,25 +139,90 @@ export function shouldAutoOpenPartyPlayer(
 
 /**
  * Sequential HLS can seek only inside the active session's produced window.
- * A target before the FFmpeg -ss anchor or at/past the buffered edge needs a
+ * A target before the FFmpeg -ss anchor or at/past the servable edge needs a
  * fresh session anchored at that absolute media position.
+ *
+ * The servable edge is the FURTHER of two things: what hls.js has buffered
+ * around the playhead, and what the server has actually produced — the end
+ * of the last fragment in the current level's playlist (`producedEndSec`,
+ * absolute seconds). Before that second input existed this compared against
+ * the buffered edge alone, which is 30–60 s ahead of the playhead at most,
+ * while the encoder (paced at 4× realtime) can be tens of minutes ahead. So
+ * every skip longer than the buffer tore the session down and paid a cold
+ * FFmpeg start for content that was already on disk. hls.js seeks anywhere
+ * inside a playlist's fragment range by itself, including inside a
+ * still-growing EVENT playlist, so only a target past what has been produced
+ * needs the rebuild. Callers without a produced edge (native HLS, older
+ * servers) pass 0 and keep the buffered-edge behaviour.
  */
 export function needsHlsSessionRebuild(
   targetSec: number,
   sessionStartSec: number,
   bufferedEndSec: number,
   edgeToleranceSec = 0.5,
+  producedEndSec = 0,
 ): boolean {
   const target = Math.max(0, targetSec)
   const start = Math.max(0, sessionStartSec)
   if (target < start) return true
 
-  // A just-booted session may not have emitted `progress` yet. We still know
-  // that a forward jump away from its anchor cannot be served; rebuilding is
-  // safer than assigning currentTime into an empty future range and stalling.
-  if (bufferedEndSec <= start) return target > start + edgeToleranceSec
+  const servableEndSec = Math.max(bufferedEndSec, producedEndSec)
 
-  return target >= bufferedEndSec - edgeToleranceSec
+  // A just-booted session may not have emitted `progress` (or loaded a
+  // playlist) yet. We still know that a forward jump away from its anchor
+  // cannot be served; rebuilding is safer than assigning currentTime into an
+  // empty future range and stalling.
+  if (servableEndSec <= start) return target > start + edgeToleranceSec
+
+  return target >= servableEndSec - edgeToleranceSec
+}
+
+/**
+ * Tolerance for `levelLagsPlayhead`. hls.js's own test is `currentTime <=
+ * edge` with no tolerance at all, and the playhead cannot get past what
+ * hls.js has buffered — which the level playlist always covers — so any real
+ * excess means the playhead is beyond everything the level in play has
+ * published. 100 ms absorbs timestamp rounding, nothing more.
+ */
+export const LEVEL_LAG_TOLERANCE_SEC = 0.1
+
+/**
+ * Up-switch stall containment (September 2026 playback pass; second and
+ * third reviews).
+ *
+ * Every rung encodes sequentially from the session anchor, so a rung hls.js
+ * switches onto minutes into a title publishes from the anchor, and hls.js
+ * 1.6 does NOT wait for it quietly. Its stream controller runs
+ * `synchronizeToLiveEdge` on every load of a live (no ENDLIST) playlist, and
+ * when the playhead is past that level's edge with `readyState < 4` it
+ * REWINDS the element to the live-sync position, ~three segments behind the
+ * lagging level's edge — from a 25-minute in-session skip, a 20-minute
+ * rewind. `readyState` drops below 4 at the buffer underflow on Chromium,
+ * while several seconds of buffer still remain on Firefox, and it is 1 right
+ * after any seek. Before the produced-edge seek rule a long skip rebuilt the
+ * session at the target and re-anchored every rung there, which kept the gap
+ * short enough for the chase to close inside the buffer.
+ *
+ * This is the rule: the loaded level's produced edge (absolute seconds, from
+ * its playlist) is behind the playhead. The player applies it at two points,
+ * and both rebuild the session at the playhead so every rung re-anchors there
+ * and playback resumes after a cold start: on LEVEL_UPDATED, which hls.js
+ * emits inside its own onLevelLoaded BEFORE synchronizeToLiveEdge — the one
+ * listener that runs before the rewind — under the rewind's own condition
+ * (`readyState < 4`), pre-empting it; and on hls.js's non-fatal
+ * BUFFER_STALLED_ERROR, which Chromium reports within ~100 ms of the
+ * underflow, seconds before the next playlist reload would. A stall with the
+ * edge at or ahead of the playhead — a hole, a slow network, an encoder that
+ * is simply slower than realtime on the level in play — is left to hls.js.
+ * An unknown edge (0: nothing loaded yet, native HLS) never triggers.
+ */
+export function levelLagsPlayhead(
+  playheadAbsSec: number,
+  producedEdgeSec: number,
+  toleranceSec = LEVEL_LAG_TOLERANCE_SEC,
+): boolean {
+  if (!(producedEdgeSec > 0) || !Number.isFinite(playheadAbsSec)) return false
+  return playheadAbsSec - producedEdgeSec > toleranceSec
 }
 
 /**

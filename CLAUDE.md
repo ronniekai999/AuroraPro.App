@@ -346,3 +346,130 @@ Invariants to preserve when touching this area:
   extension — `mov` normalizes to `mp4` and must not get its own entry.
   Note `.webm` files probe as `matroska` and are therefore stored as
   container `mkv` (pre-existing; documented in the client contract).
+
+## Playback pass, September 2026 (decision inputs, downmix, pacing)
+
+Code: `DecidePlaybackFor`/`DecisionInput` + `capLadder` (decision engine and
+ladder cap), `internal/streaming/downmix.go`, `lang.go`, the `-readrate`
+burst in `inputPacingArgs`, `injectTonemapFilter`, `ProbeHEVCEncoder`;
+migration 058; SPA `lib/appearance.ts` (two new prefs), `lib/streaming.ts`
+(`playbackPrefsQuery`), `needsHlsSessionRebuild`'s produced-edge input.
+Client contract additions are in `docs/native-client-caps.md`.
+
+Invariants to preserve:
+
+- **`ClientCaps.MaxBitrate` and `SessionOpts.MaxBitrate` are viewer
+  constraints, not capabilities and not a trust boundary.** They are set
+  by the API layer from `max_bps` (never parsed from the caps string), are
+  self-limiting (a wrong value only costs that client a transcode or a
+  smaller ladder), and an unknown source bitrate (0) never trips the
+  ceiling. `capLadder` always keeps the lowest rung. The reason bucket is
+  `bitrate`, named ONLY when the ceiling is decisive — when the uncapped
+  decision would not have been a transcode (`bitrateDecisive`); a file
+  that transcodes for its codec anyway keeps the codec wording, because
+  `bitrate` is the one reason an operator can address with a setting. The
+  CHECK constraint lives in migration 058 now, and the two vocabulary
+  tests read the LATEST definition — a further widening needs a new
+  migration and both tests pointed at it.
+- **The language preference selects the preferred-language track in two
+  codec-blind gates plus one copy-aware ranking.** `preferredLanguageTrack`
+  (codec-blind) names the track the preference means; direct play is
+  withheld unless that track is the one direct play would select (the
+  playable default) — `findBestAudioTrack` ranks only tracks the CLIENT
+  can play, so without that gate a preferred track outside the client's
+  caps (DTS on a browser, TrueHD on a client that stops at DTS) was passed
+  over and the wrong-language default direct-played (second review
+  finding). On the HLS path `findBestAudioTrack` ranks only tracks the
+  delivery path can COPY (default first among matches; a non-default match
+  pays the same remux any non-default pick does), and a preferred track it
+  cannot copy is selected by the override and RE-ENCODED on the remux
+  path, the same recode an uncopyable default track already gets. Without
+  that override the engine fell through every remux branch into a full
+  video transcode of the wrong track (first review finding). Native
+  clients that would rather pick tracks themselves omit `audio_lang`.
+  `normalizeLang` folds the whole ISO 639-1 → 639-2/T table, the twenty
+  639-2/B twins, and `langExtraFolds` (jp, cmn, fil → tgl, nob/nno → nor);
+  extend those rather than comparing tags literally. When the video itself
+  cannot be remuxed (VP8/VP9/AV1, Hi10P, the legacy codecs) a preference
+  for a non-default track costs a FULL transcode — the only HLS path that
+  can select a track — for browsers and native clients alike; `hls_native`
+  is not a "my player selects tracks" signal (the SPA sends it for
+  Safari), so a direct-play-with-`audio_track_index` shortcut needs a new
+  opt-in capability key, which is the open follow-up. Note the one
+  deliberate decision change for clients that send nothing new: a file
+  whose FIRST flagged default the client cannot decode used to direct-play
+  (silent audio) and now remuxes the playable track.
+- **`transcode.stereo_downmix` — `legacy` is the byte-identical rollback**
+  (bare `-ac 2`). The matrices are indexed by channel POSITION and keyed
+  on channel COUNT (the probe records no layout, so a 6.0/octagonal track
+  loses its c3 as if it were the LFE); they cover exactly 6 and 8 channels
+  and every other layout keeps the bare fold. `standard` mirrors
+  swresample's fold — centre AND both surround pairs at 0.707, LFE dropped,
+  no 7.1-specific rule (measured, second review) — plus a limiter, and
+  every chain converts to float FIRST (`downmixFloat`): `pan` folds in the
+  source's own sample format, so on PCM/FLAC/DTS-HD/TrueHD the overs
+  saturated inside pan before the limiter saw them (fourth review). The
+  crest-factor fixture test is the guard. The channel count that selects a matrix comes from the
+  library's per-track probe in the session handler, not the client echo:
+  `pan` does not fail on a wrong count, it silently drops the terms for
+  channels the track lacks and discards channels the matrix never names,
+  so a wrong count is a quietly wrong mix. The fixture test runs all four
+  policies on real 5.1 and 7.1 sources; it proves FFmpeg accepts the
+  chains and emits stereo, not the sound (the argument test pins the
+  matrices).
+- **HEVC output is hardware-only under `hevc_output: auto`**; `all` opts
+  libx265 in (and gets the x265-scaled CRF via `softwareCRF`). Do not
+  re-enable software HEVC by default: a one-frame probe proves nothing
+  about realtime, and encoder lag reads to hls.js as a stalled live
+  playlist it will never switch away from.
+- **`-readrate_initial_burst` is gated on FFmpeg 6.1 by major AND minor**
+  (`readrateInitialBurstSupported`); 6.0 rejects the option and an unknown
+  option is fatal at launch. Remux stays unpaced.
+- **The tonemap chain scales first** (`scale=W:-2,` then the zscale/hable
+  chain). The fixture matrix's HDR→SDR assertion is the guard; keep the
+  VAAPI `format=nv12,hwupload` anchor after the chain, `injectBurnInFilter`
+  keys off it.
+- **Forward seeks rebuild only past the PRODUCED edge**, fed from hls.js
+  `LEVEL_LOADED`/`LEVEL_UPDATED` into `producedEdgeSecRef`; the buffered
+  edge is only a lower bound. The native-HLS path passes 0 and keeps the
+  old behaviour. This widens the up-switch stall's reach — before it, a
+  long skip re-anchored EVERY rung at the target as a side effect — so it
+  ships with the containment below; do not take one without the other.
+- **The up-switch stall is contained by pre-empting hls.js's live-edge
+  REWIND, not by waiting for a stall.** hls.js 1.6 does not wait quietly
+  for a lagging rung: its stream controller runs `synchronizeToLiveEdge`
+  on every load of a live (no ENDLIST) playlist and rewinds the element to
+  the live-sync position whenever the playhead is past the loaded level's
+  edge with `readyState < 4` (at the underflow on Chromium, with seconds
+  of buffer left on Firefox, right after any seek). `LEVEL_UPDATED` is
+  emitted inside hls.js's `onLevelLoaded` BEFORE that sync — the one
+  listener that runs before the rewind — so the player checks
+  `levelLagsPlayhead` there under the same `readyState` condition, and
+  again on the non-fatal `BUFFER_STALLED_ERROR` (Chromium's faster path);
+  either rebuilds the session at the playhead through `seekToRealSec`'s
+  `forceRebuild` (one-shot per session, `lagRebuildFiredRef`) and shadows
+  the disposable instance's `liveSyncPosition` so it cannot rewind while
+  the rebuild is in flight. The tolerance is 100 ms, because hls.js's own
+  test has none and the playhead cannot pass what the level has published;
+  a stall with the edge AT the playhead — an encoder slower than realtime
+  on the level in play — is left to hls.js. Reasoned from the hls.js
+  1.6.17 source (`synchronizeToLiveEdge`, gap-controller), not exercised in
+  a browser; per-browser `readyState` timing is reasoned, not measured.
+- **`effectiveDefaultIndex` is the one model of "the track a player
+  starts"**: the FIRST flagged default, else track 0. Files with several
+  flagged tracks are real (MP4Box, Apple tooling, `ffmpeg -c copy` of
+  either); treating each as "the default" direct-played the wrong track
+  (third review). Every default check goes through it.
+
+Known limits, stated plainly: the up-switch stall (a rung started mid-play
+encodes from the session anchor, not the playhead) is CONTAINED here, not
+fixed — a multi-minute rewind-or-stall becomes one cold restart at the
+playhead. The fix is the segment-addressable VOD playlist model, which is
+the open strategic item. `capLadder` judges rungs by their DECLARED
+bandwidth, which counts a copied audio track at its re-encode figure, so a
+kept rung can sit a copied track's delta over the ceiling (the probe records
+no per-track bitrate). Dolby Vision profile 5 is still undetected by the
+scanner; detection alone would only move its wrong colours from direct play
+to a transcode until a DV-aware tonemap (libplacebo) is probed in. The
+limiter policies carry a fixed 5 ms audio delay (alimiter's uncompensated
+look-ahead; see `downmixLimiter`).

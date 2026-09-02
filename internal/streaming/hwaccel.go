@@ -582,12 +582,37 @@ func hevcEncoderForType(t HWAccelType) string {
 // unavailable — the decision engine then never selects HEVC output and
 // every transcode stays on the H.264 path.
 //
-// forceType "off"/"none"/"disabled" (transcode.hevc_output) skips probing
-// entirely — the operator rollback knob.
+// forceType (transcode.hevc_output): "off"/"none"/"disabled" skips probing
+// entirely — the operator rollback knob. "auto" (default) probes HARDWARE
+// encoders only; "all" also admits libx265 on software-only hosts.
+//
+// Software is opt-in on purpose. The probe below proves that one frame
+// encodes, which says nothing about keeping up with playback: x265 at a given
+// preset name is several times slower than x264 at the same one
+// (qualitypolicy.go), and the realtime allowlist that protects the x264 path
+// (NewTranscodeManager's software_preset validation) never covered x265. On a
+// CPU-only box "auto" therefore used to hand every HEVC-capable client —
+// Safari, most Chromes — a libx265 encode on every rung including 2160p, and
+// an encoder that falls behind looks to the player like a stalled live
+// playlist, not a slow download, so it never switches away. An operator who
+// has measured their CPU can turn it on; nobody should get it by default.
 func ProbeHEVCEncoder(h HWAccelInfo, forceType string) string {
+	allowSoftware := false
 	switch strings.ToLower(strings.TrimSpace(forceType)) {
 	case "off", "none", "disabled", "false", "0":
 		slog.Info("HEVC output disabled by config")
+		return ""
+	case "all", "software", "force":
+		allowSoftware = true
+	case "", "auto", "hardware", "hw":
+	default:
+		slog.Warn("unknown transcode hevc_output value, using auto (hardware encoders only)",
+			"configured", forceType)
+	}
+	if h.Type == HWAccelNone && !allowSoftware {
+		slog.Info("HEVC output unavailable: no hardware encoder, and libx265 is opt-in " +
+			"(transcode.hevc_output: all) because it cannot keep up with on-demand " +
+			"playback at the ladder's upper rungs — transcodes stay on H.264")
 		return ""
 	}
 	enc := hevcEncoderForType(h.Type)

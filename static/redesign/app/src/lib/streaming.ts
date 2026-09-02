@@ -27,6 +27,7 @@
 import Hls from 'hls.js'
 
 import { apiFetch, apiFetchResponse, type SkipMarker } from './api'
+import { currentMaxStreamBps, currentPreferredAudioLanguage } from './appearance'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -130,6 +131,11 @@ export interface CreateSessionRequest {
   // GOP boundary), which the client adds back when reporting
   // progress.
   start_sec?: number
+  // Client bitrate ceiling in bits per second (Settings → Quality). The
+  // server drops ABR rungs above it — the same value getStreamInfo sends
+  // as ?max_bps, where it forces a transcode for sources that exceed it.
+  // Omitted when there is no limit.
+  max_bps?: number
 }
 
 export interface SessionProfile {
@@ -202,11 +208,17 @@ export function buildSessionRequest(
     audioTrackIndex?: number
     // Phase 5 auto-fallback: force a full transcode (disables remux)
     forceTranscode?: boolean
+    // Bitrate ceiling in bps (currentMaxStreamBps()); 0/undefined = none.
+    // Passed in rather than read here so this stays pure — both callers
+    // (player + pre-warm) must hand over the same value for the warmed
+    // session's request key to match.
+    maxBps?: number
   },
 ): CreateSessionRequest {
   return {
     file_id: opts.fileId,
     file_type: opts.fileType,
+    max_bps: opts.maxBps && opts.maxBps > 0 ? Math.round(opts.maxBps) : undefined,
     remux: opts.forceTranscode ? false : !!stream.remux,
     audio_passthrough: stream.audio_passthrough,
     audio_track_index: opts.audioTrackIndex ?? stream.audio_track_index,
@@ -397,9 +409,25 @@ export async function getStreamInfo(
   const caps = clientCaps()
   const capsParam = caps ? `&caps=${encodeURIComponent(caps)}` : ''
   return apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?type=${fileType}${capsParam}`,
+    `/api/stream/info/${fileId}?type=${fileType}${capsParam}${playbackPrefsQuery()}`,
     { signal },
   )
+}
+
+// Viewer constraints that ride every stream-info request beside the caps:
+// the bitrate ceiling (`max_bps`, forces a transcode for sources above it)
+// and the preferred audio language (`audio_lang`, steers the default track
+// pick). Read fresh on every call — Settings writes them, and a change must
+// take effect on the next play without a reload. Both are omitted at their
+// "no preference" values so older servers see exactly the request they
+// always did.
+export function playbackPrefsQuery(): string {
+  let q = ''
+  const bps = currentMaxStreamBps()
+  if (bps > 0) q += `&max_bps=${bps}`
+  const lang = currentPreferredAudioLanguage()
+  if (lang !== 'auto') q += `&audio_lang=${encodeURIComponent(lang)}`
+  return q
 }
 
 export async function createSession(

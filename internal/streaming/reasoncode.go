@@ -35,6 +35,7 @@ const (
 	ReasonAudioCodec  = "audio_codec" // client can't decode the audio codec
 	ReasonBitDepth    = "bit_depth"   // >8-bit source the client's profile rejects
 	ReasonAudioTrack  = "audio_track" // compatible audio exists but isn't default
+	ReasonBitrate     = "bitrate"     // source above the client's declared bitrate ceiling
 	ReasonUnspecified = "unspecified"
 )
 
@@ -86,6 +87,13 @@ func firstClause(reason string) string {
 // bucketClause maps one lowercase clause onto a bucket.
 func bucketClause(clause string) string {
 	switch {
+	// The bitrate ceiling is checked first: its prose names no codec, but it
+	// is the one cause that overrides everything else in DecidePlayback (a
+	// file the client could decode still transcodes), so it must not be
+	// mistaken for a capability gate.
+	case strings.Contains(clause, "bitrate"):
+		return ReasonBitrate
+
 	case strings.Contains(clause, "10-bit"),
 		strings.Contains(clause, "bit depth"),
 		strings.Contains(clause, "hi10p"),

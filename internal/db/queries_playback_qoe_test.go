@@ -20,10 +20,10 @@ func TestValidPlaybackQoESessionToken(t *testing.T) {
 	}{
 		{"0123456789abcdef0123456789abcdef", true},
 		{"", false},
-		{"0123456789abcdef0123456789abcde", false},  // 31 chars
+		{"0123456789abcdef0123456789abcde", false},   // 31 chars
 		{"0123456789abcdef0123456789abcdef0", false}, // 33 chars
-		{"0123456789ABCDEF0123456789ABCDEF", false}, // uppercase
-		{"0123456789abcdef0123456789abcdeg", false}, // non-hex
+		{"0123456789ABCDEF0123456789ABCDEF", false},  // uppercase
+		{"0123456789abcdef0123456789abcdeg", false},  // non-hex
 		{"'; DROP TABLE playback_qoe_sessions--", false},
 	}
 	for _, tc := range cases {
@@ -95,11 +95,24 @@ func TestPlaybackQoEVocabulariesMatchMigration(t *testing.T) {
 		"terminal":         PlaybackQoETerminals,
 	}
 
+	// Migration 058 replaced decision_reason's CHECK (to admit 'bitrate'), so
+	// for that column the live constraint is 058's, not 056's. Every other
+	// column is still defined by 056 alone.
+	later, err := os.ReadFile("../../migrations/058_playback_qoe_bitrate_reason.up.sql")
+	if err != nil {
+		t.Fatalf("read migration 058: %v", err)
+	}
+	replaced := map[string]string{"decision_reason": string(later)}
+
 	for column, goValues := range columns {
 		t.Run(column, func(t *testing.T) {
-			sqlValues, ok := checkConstraintValues(sql, column)
+			source := sql
+			if s, ok := replaced[column]; ok {
+				source = s
+			}
+			sqlValues, ok := checkConstraintValues(source, column)
 			if !ok {
-				t.Fatalf("no CHECK (%s IN (...)) found in migration 056 — either the "+
+				t.Fatalf("no CHECK (%s IN (...)) found in its defining migration — either the "+
 					"column lost its constraint or this test's parser needs updating", column)
 			}
 			got, want := append([]string(nil), goValues...), append([]string(nil), sqlValues...)

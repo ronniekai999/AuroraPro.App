@@ -57,7 +57,15 @@ transcode:
                                 # under "balanced".
   # software_preset: "veryfast" # libx264/libx265 preset for SOFTWARE transcodes: ultrafast..medium.
                                 # OVERRIDES quality_policy for the software encoders when set.
-  # hevc_output: "auto"           # auto (emit HEVC for HEVC-capable clients when an encoder is available), off (H.264 only)
+  # hevc_output: "auto"           # auto (emit HEVC for HEVC-capable clients when a HARDWARE encoder is available),
+                                #   all (also use libx265 on CPU-only hosts — opt-in; x265 rarely keeps up above 1080p),
+                                #   off (H.264 only)
+  # stereo_downmix: "standard"  # how 5.1/7.1 audio is folded to stereo AAC when it must be re-encoded:
+                                #   standard (default) — the ITU matrix, written out explicitly, plus a limiter
+                                #                        so loud passages no longer clip
+                                #   dialogue           — centre-forward: speech stays on top on small speakers
+                                #   night              — dialogue-forward plus dynamic-range compression
+                                #   legacy             — the bare `-ac 2` fold, byte-identical to older installs
   session_timeout_sec: 120
   segment_duration: 6
   profiles:

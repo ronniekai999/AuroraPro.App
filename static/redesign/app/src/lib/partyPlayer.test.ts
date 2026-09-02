@@ -4,6 +4,7 @@ import {
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
+  levelLagsPlayhead,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
@@ -170,6 +171,76 @@ describe('sequential HLS seek policy', () => {
 
   it('does not rebuild again when the new session is anchored at the target', () => {
     expect(needsHlsSessionRebuild(13 * 60 + 11, 13 * 60 + 11, 0)).toBe(false)
+  })
+
+  describe('produced edge (September 2026 playback pass)', () => {
+    // The encoder runs at 4x realtime: ten minutes in, hls.js has ~60s
+    // buffered (t=10:00 → 11:00) but the server has published to ~40:00.
+    const start = 0
+    const buffered = 11 * 60
+    const produced = 40 * 60
+
+    it('keeps a forward seek inside the produced window in the current session', () => {
+      expect(needsHlsSessionRebuild(20 * 60, start, buffered, 0.5, produced)).toBe(false)
+      expect(needsHlsSessionRebuild(39 * 60 + 59, start, buffered, 0.5, produced)).toBe(false)
+    })
+
+    it('still rebuilds for a seek at or past the produced edge', () => {
+      expect(needsHlsSessionRebuild(40 * 60, start, buffered, 0.5, produced)).toBe(true)
+      expect(needsHlsSessionRebuild(55 * 60, start, buffered, 0.5, produced)).toBe(true)
+    })
+
+    it('never shrinks the window below the buffered edge', () => {
+      // A stale or absent produced edge (0) must not turn an in-buffer seek
+      // into a rebuild — the native-HLS path always passes 0.
+      expect(needsHlsSessionRebuild(10 * 60 + 30, start, buffered, 0.5, 0)).toBe(false)
+      expect(needsHlsSessionRebuild(10 * 60 + 30, start, buffered, 0.5, 5 * 60)).toBe(false)
+    })
+
+    it('rebuilds a forward jump off a just-booted session with nothing produced', () => {
+      expect(needsHlsSessionRebuild(90, 60, 0, 0.5, 0)).toBe(true)
+      // …but not once the playlist says the target has been produced.
+      expect(needsHlsSessionRebuild(90, 60, 0, 0.5, 120)).toBe(false)
+    })
+
+    it('rewinds before the anchor still rebuild regardless of the produced edge', () => {
+      expect(needsHlsSessionRebuild(30, 60, buffered, 0.5, produced)).toBe(true)
+    })
+  })
+
+  describe('levelLagsPlayhead (up-switch stall containment)', () => {
+    it('flags a rung whose playlist ends behind the playhead', () => {
+      // Skipped to 35:00 in-session, then hls.js switched up onto a rung
+      // that has published 12 s from the anchor: hls.js would rewind to
+      // ~0:00 on the next playlist load once readyState drops below 4.
+      expect(levelLagsPlayhead(35 * 60, 12)).toBe(true)
+      // Anchored session: the edge is absolute, so is the playhead.
+      expect(levelLagsPlayhead(600 + 35 * 60, 600 + 12)).toBe(true)
+      // Any real excess counts — hls.js's own test has no tolerance, and a
+      // small lag rewinds just the same (~18 s) rather than resolving.
+      expect(levelLagsPlayhead(1200.5, 1200)).toBe(true)
+      expect(levelLagsPlayhead(1212, 1200)).toBe(true)
+    })
+
+    it('leaves a stall at the produced edge to hls.js', () => {
+      // An encoder slower than realtime on the level in play: the playhead
+      // sits AT the edge (it cannot pass buffered content), never beyond it.
+      expect(levelLagsPlayhead(1200, 1200)).toBe(false)
+      expect(levelLagsPlayhead(1199.5, 1200)).toBe(false)
+      // Timestamp rounding, within the tolerance.
+      expect(levelLagsPlayhead(1200.05, 1200)).toBe(false)
+    })
+
+    it('never triggers on an unknown edge or a bad playhead', () => {
+      expect(levelLagsPlayhead(1200, 0)).toBe(false)
+      expect(levelLagsPlayhead(1200, -1)).toBe(false)
+      expect(levelLagsPlayhead(NaN, 12)).toBe(false)
+      expect(levelLagsPlayhead(Infinity, 12)).toBe(false)
+    })
+
+    it('does not flag the ordinary state where the edge is ahead', () => {
+      expect(levelLagsPlayhead(600, 40 * 60)).toBe(false)
+    })
   })
 
   describe('needsBackwardSessionRebuild (issue #488 guest drift loop)', () => {

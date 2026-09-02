@@ -1540,6 +1540,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // apply HDR-to-SDR tonemapping
 		VideoCodec       string `json:"video_codec,omitempty"`       // source video codec for BSF selection in remux
 		StartSec         int    `json:"start_sec,omitempty"`         // resume position: FFmpeg -ss seek offset in seconds
+		MaxBPS           int64  `json:"max_bps,omitempty"`           // client bitrate ceiling (bits/sec): caps the ABR ladder; 0 = none
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1617,13 +1618,34 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		sourceAudioCodec, h.transcode.FMP4Enabled(),
 	)
 
+	// Same trust boundary for the channel count. The stereo downmix matrix
+	// is indexed by input channel, so it must describe the track FFmpeg will
+	// actually read: `pan` silently drops the terms of an echoed channel the
+	// track does not have (and silently discards channels the matrix never
+	// names), so a wrong count is a quietly wrong mix. The library's
+	// per-track probe is authoritative; the echo is only used for rows
+	// scanned before channel counts were recorded.
+	audioChannels := req.AudioChannels
+	if audioTrackIdx >= 0 && audioTrackIdx < len(fileAudioTracks) {
+		if ch := fileAudioTracks[audioTrackIdx].Channels; ch > 0 {
+			audioChannels = ch
+		}
+	} else if len(fileAudioTracks) > 0 {
+		if ch := fileAudioTracks[0].Channels; ch > 0 {
+			audioChannels = ch
+		}
+	}
+
 	opts := streaming.SessionOpts{
 		Remux:            req.Remux,
 		AudioPassthrough: !req.Remux && audioCopy,
 		AudioTrackIndex:  audioTrackIdx,
-		AudioChannels:    req.AudioChannels,
-		AudioCodecOut:    audioCodecOut,
-		HDRTonemap:       req.HDRTonemap,
+		AudioChannels:    audioChannels,
+		// Self-limiting, so an echo is fine here: the worst a wrong value
+		// does is hand this client a smaller ladder.
+		MaxBitrate:    clampMaxBPS(req.MaxBPS),
+		AudioCodecOut: audioCodecOut,
+		HDRTonemap:    req.HDRTonemap,
 		// Resolved from the library's own probe data, NOT echoed from the
 		// client: CreateSession uses it to force tonemapping whenever a
 		// session re-encodes video that the stream-info decision expected to
@@ -1938,6 +1960,35 @@ func writeSessionCreateError(w http.ResponseWriter, userID int64, err error) {
 	}
 }
 
+// maxBPSCeiling bounds the client bitrate ceiling. Anything above a gigabit is
+// not a real delivery limit, and a number that large is either a unit mix-up
+// (kbps typed as bps) or garbage; either way it must not reach the ladder.
+const maxBPSCeiling = 1_000_000_000
+
+// clampMaxBPS normalizes a client-declared bitrate ceiling: <= 0 (or absent)
+// means none, and implausibly large values are treated as none rather than
+// as a ceiling nothing exceeds.
+func clampMaxBPS(v int64) int64 {
+	if v <= 0 || v > maxBPSCeiling {
+		return 0
+	}
+	return v
+}
+
+// parseMaxBPS reads the `max_bps` query parameter (bits per second) through
+// the same normalization. Unparseable input means no ceiling.
+func parseMaxBPS(raw string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return clampMaxBPS(v)
+}
+
 // parseResolution parses "1920x1080" into width, height. Returns 1920x1080 as default.
 func parseResolution(res string) (int, int) {
 	parts := strings.SplitN(res, "x", 2)
@@ -1978,11 +2029,17 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		// (2026-08 review item #5): the decision engine may only choose
 		// "hevc" when this host actually has a working HEVC encoder.
 		clientCaps.HEVCEncode = h.transcode.HEVCEncodeEnabled()
+		// Client-declared delivery ceiling (bits/sec). A constraint the
+		// viewer set, not a capability — see ClientCaps.MaxBitrate.
+		clientCaps.MaxBitrate = parseMaxBPS(r.URL.Query().Get("max_bps"))
 	}
+	// Preferred spoken language, any ISO 639 form; "" = no preference.
+	// Ignored on the no-caps static path, which has no track selection.
+	preferredAudioLang := r.URL.Query().Get("audio_lang")
 
 	var filePath, container, videoCodec, audioCodec, resolution, videoPixFmt string
 	var colorTransfer, colorPrimaries string
-	var durationMs int64
+	var durationMs, sourceBitrate int64
 	var audioTracks []models.AudioTrack
 
 	if fileType == "episode" {
@@ -1997,6 +2054,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		audioCodec = f.AudioCodec
 		resolution = f.Resolution
 		durationMs = f.DurationMs
+		sourceBitrate = f.Bitrate
 		audioTracks = f.AudioTracks
 		videoPixFmt = f.VideoPixFmt
 		colorTransfer = f.ColorTransfer
@@ -2013,6 +2071,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		audioCodec = f.AudioCodec
 		resolution = f.Resolution
 		durationMs = f.DurationMs
+		sourceBitrate = f.Bitrate
 		audioTracks = f.AudioTracks
 		videoPixFmt = f.VideoPixFmt
 		colorTransfer = f.ColorTransfer
@@ -2025,7 +2084,15 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use the client-aware decision engine (falls back to static if no caps)
-	pd := streaming.DecidePlayback(container, videoCodec, audioTracks, clientCaps, videoPixFmt)
+	pd := streaming.DecidePlaybackFor(streaming.DecisionInput{
+		Container:          container,
+		VideoCodec:         videoCodec,
+		PixFmt:             videoPixFmt,
+		AudioTracks:        audioTracks,
+		Caps:               clientCaps,
+		SourceBitrate:      sourceBitrate,
+		PreferredAudioLang: preferredAudioLang,
+	})
 
 	var streamURL string
 	if pd.Decision == "direct_play" && clientCaps != nil {

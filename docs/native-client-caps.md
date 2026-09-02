@@ -111,6 +111,17 @@ Claim only what your build actually decodes. A false claim is not a security
 problem — it only breaks playback for the client that lied — but it does mean
 a black screen instead of a working transcode.
 
+## Viewer constraints beside the caps
+
+Two optional query parameters ride `GET /api/stream/info/{fileID}` next to
+`caps`. Neither is a capability: both describe what the viewer WANTS, and
+both are omitted for "no preference".
+
+| Parameter | Meaning |
+|---|---|
+| `max_bps=<bits per second>` | A delivery ceiling. A source whose probed bitrate exceeds it can neither direct-play nor remux (both hand you the source bitrate verbatim, and a single-rendition stream has nothing to adapt down to), so the decision becomes `transcode` with reason code `bitrate`. Send the same value as `max_bps` in the `POST /api/stream/sessions` body and the ABR ladder is capped to rungs whose declared bandwidth fits under it (at least the lowest rung is always kept). The cap uses the same BANDWIDTH figure the playlist advertises, which counts a *copied* audio track at its re-encode figure (192 kbps AAC / 448 kbps AC-3), so a copied 640 kbps AC-3 track can leave a kept rung up to ~200 kbps over your ceiling. Self-limiting: a wrong value only costs this client a transcode or a smaller ladder. Values above 1 Gbps read as "no limit". |
+| `audio_lang=<ISO 639 code>` | Preferred spoken language, in 639-1 or 639-2 form — every 639-1 code and both 639-2 spellings fold (`en`, `eng`, `en-US`; `de` matches both `ger` and `deu`, `fa` matches `per` and `fas`; `nb`/`nn`/`no` all mean Norwegian). The track in that language is selected **whatever codec it is in**: when it is the file's default and you can play it, the decision is unchanged (direct play stays direct play); otherwise — it is not the default, or it is the default in a codec you did not claim — the decision becomes a remux that selects it, copied if the HLS path can carry its codec and re-encoded to AAC (or AC-3 surround when your caps include `ac3`) if not, exactly as an uncopyable default track is re-encoded today. Direct play is never used to serve you the wrong-language default just because you cannot decode the preferred track. One case is dearer than a remux: when the video itself cannot be remuxed (VP8/VP9/AV1, Hi10P, MPEG-2/MPEG-4 Part 2/VC-1 — see "What still transcodes"), the only HLS path that can select a track is a **full transcode**, and the preference costs exactly that, for you as for a browser. So a native client that sends `audio_lang` trades direct play of such a file for a remux — or, for those codecs, a transcode; if you would rather receive the whole file and pick the track yourself, omit the parameter and read `audio_track_index`. (`hls_native` cannot stand in for "my player selects tracks": Safari sends it too. A capability key that says so, letting the server keep direct play and name the track, is the open follow-up.) |
+
 ## What still transcodes, and why
 
 Even with everything claimed, three cases do not direct-play:
@@ -126,14 +137,16 @@ Even with everything claimed, three cases do not direct-play:
   *other* reason, its DTS track is re-encoded — and if a copyable AAC track
   sits beside it, that track is selected instead.
 
-  > **This can change the spoken language, not just the codec.** Track
-  > selection has no language awareness: given a DTS Japanese default track
-  > and an AAC English track, the HLS path picks the AAC one, so the user
-  > hears the English dub. Browsers have always behaved this way, so it is not
-  > new — but a native client is the first client that could have avoided it,
-  > and it only happens on the fallback path. If your player exposes a track
-  > picker, honor `audio_track_index` from the decision but let the user
-  > override it.
+  > **This can change the spoken language, not just the codec — unless you
+  > send `audio_lang`.** Without a preference, track selection has no
+  > language awareness: given a DTS Japanese default track and an AAC
+  > English track, the HLS path picks the AAC one, so the user hears the
+  > English dub. Browsers have always behaved this way, so it is not new —
+  > but a native client is the first client that could have avoided it, and
+  > it only happens on the fallback path. With `audio_lang=ja` the DTS track
+  > is selected and re-encoded instead (see "Viewer constraints" above). If
+  > your player exposes a track picker, honor `audio_track_index` from the
+  > decision but let the user override it.
 
 These are properties of the HLS delivery path, not of your player. Direct play
 is unaffected: it serves the original file, so every track and every profile

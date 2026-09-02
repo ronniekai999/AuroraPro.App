@@ -43,7 +43,7 @@ import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import { playerSurface } from '@/lib/playerSurface'
 import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
-import { writePrefKey } from '@/lib/appearance'
+import { currentMaxStreamBps, writePrefKey } from '@/lib/appearance'
 import {
   buildSessionRequest,
   createCastToken,
@@ -80,6 +80,7 @@ import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
+  levelLagsPlayhead,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
@@ -616,6 +617,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // exclude high-frequency buffer updates. This ref gives an explicit remote
   // seek the current absolute produced edge without tearing down that interval.
   const bufferedSecRef = useRef(0)
+  // producedEdgeSecRef is the absolute end of the last fragment the server
+  // has PUBLISHED for the level hls.js is on — fed from LEVEL_LOADED /
+  // LEVEL_UPDATED — as opposed to what hls.js has buffered. It is the second
+  // input to needsHlsSessionRebuild: a forward seek inside the produced
+  // window is a plain hls.js seek, and only a target past this edge needs
+  // the session rebuilt. Stays 0 on the native-HLS path, which keeps the
+  // buffered-edge behaviour.
+  const producedEdgeSecRef = useRef(0)
+  // One-shot per session for the up-switch stall containment (the hls.js
+  // ERROR handler): a rebuild at the playhead is the whole response, and it
+  // replaces the session, so a second trigger inside the same session could
+  // only be the same stall reported again while that rebuild is in flight.
+  const lagRebuildFiredRef = useRef(false)
   // realDurationSec is the source-file duration from streamInfo.
   // Falls back to vid.duration when not provided.
   const [realDurationSec, setRealDurationSec] = useState(0)
@@ -1869,6 +1883,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // glitch during the ~half-second transition between sessions.
     setCurrentSec(0)
     bufferedSecRef.current = 0
+    producedEdgeSecRef.current = 0
+    lagRebuildFiredRef.current = false
     setBufferedSec(0)
     setRealDurationSec(0)
     setPlaying(false)
@@ -2184,6 +2200,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           startSec: resumeSec,
           audioTrackIndex: target.audioTrackIndex,
           forceTranscode: target.forceTranscode,
+          // Bitrate ceiling from Settings → Quality; the pre-warm reads the
+          // same helper so its request key matches this one.
+          maxBps: currentMaxStreamBps(),
         })
         // Pre-warm fast path: if the details page already created a session
         // for this EXACT request, adopt it and skip CreateSession's ffprobe +
@@ -2533,6 +2552,86 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         hls.on(Hls.Events.LEVEL_SWITCHED, () => {
           qoeRef.current?.noteRenditionSwitch()
         })
+        // Track the server's produced edge for the level hls.js is loading
+        // from: the end of the last fragment in its playlist, in absolute
+        // (real-file) seconds. Every playlist refresh of a still-encoding
+        // session fires LEVEL_UPDATED, so this advances with the encoder;
+        // seekToRealSec reads it to avoid rebuilding the session for seeks
+        // the existing session can already serve.
+        //
+        // It is PER LEVEL, not per session, on purpose: every rung encodes
+        // sequentially from the session anchor, so a rung hls.js has just
+        // switched onto may have published far less than the rung it left,
+        // and a seek is served from the rung hls.js will actually fetch. So
+        // right after an ABR switch the edge can drop, and a forward seek
+        // into content the previous rung had produced rebuilds — correct
+        // for the level in play.
+        //
+        // The trade this rule makes (second review): before it, a long
+        // forward skip always rebuilt at the target, which incidentally
+        // re-anchored EVERY rung there, so a later up-switch cost one cold
+        // start. Keeping the skip in-session leaves the other rungs at the
+        // old anchor, and an up-switch after it chases from there — the
+        // documented up-switch stall, now reachable with a far longer gap.
+        // The same per-level edge is what contains that, at two points
+        // below (LEVEL_UPDATED and the BUFFER_STALLED_ERROR handler): the
+        // level's edge behind the playhead rebuilds at the playhead.
+        const noteProducedEdge = (details?: { fragments?: Array<{ start: number; duration: number }> }): number => {
+          const frags = details?.fragments
+          if (!frags || frags.length === 0) return 0
+          const last = frags[frags.length - 1]
+          producedEdgeSecRef.current = last.start + last.duration + (startSecRef.current ?? 0)
+          return producedEdgeSecRef.current
+        }
+        // Up-switch stall containment — the rule and the hls.js behaviour it
+        // answers are documented on levelLagsPlayhead. hls.js 1.6's
+        // stream controller does not wait quietly for a lagging rung: its
+        // synchronizeToLiveEdge REWINDS the element to the live-sync position
+        // when the playhead is past the loaded level's edge with
+        // readyState < 4 (third review; reasoned from the 1.6.17 source, not
+        // exercised in a browser). Either trigger rebuilds the session at
+        // the playhead — every rung re-anchors there — through seekToRealSec
+        // so the party/pause-intent handling is the seek-rebuild's.
+        const rebuildAtPlayheadForLaggingLevel = (playheadAbs: number, edgeAbs: number, trigger: string) => {
+          if (cancelled || !playerReadyRef.current || sessionIdRef.current === null || lagRebuildFiredRef.current) return
+          // Without a rebuild callback there is nothing to do — and nothing
+          // may be consumed or disabled on the way to finding that out: the
+          // one-shot and the liveSyncPosition shadow below would otherwise
+          // leave the element stalled with hls.js's own recovery neutered
+          // (fourth review). The seek path's rebuildAtTarget makes the same
+          // check; App.tsx always wires the callback today.
+          if (!keepaliveRecoveryRef.current.onSeekRebuild) return
+          lagRebuildFiredRef.current = true
+          console.warn('[Aurora hls.js] level', hls.currentLevel, 'has produced to',
+            edgeAbs.toFixed(1), 's but the playhead is at', playheadAbs.toFixed(1),
+            's (' + trigger + ') — rebuilding the session here')
+          // The rebuild replaces this instance on the next render. Until
+          // then its synchronizeToLiveEdge — which runs right after the
+          // LEVEL_UPDATED listeners return, and on every later playlist
+          // load — would still rewind the element. It reads
+          // `this.hls.liveSyncPosition` and bails on null, so shadowing that
+          // getter on this now-disposable instance makes it a no-op and the
+          // element keeps the position the rebuild captured.
+          try {
+            Object.defineProperty(hls, 'liveSyncPosition', { value: null, configurable: true })
+          } catch { /* best effort — the rebuild target is already captured */ }
+          setStatus('Rendition fell behind — restarting from here…')
+          seekToRealSecRef.current(playheadAbs, { forceRebuild: true })
+        }
+        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => { noteProducedEdge(data.details) })
+        hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => {
+          const edgeAbs = noteProducedEdge(data.details)
+          // hls.js emits LEVEL_UPDATED inside its own onLevelLoaded BEFORE
+          // synchronizeToLiveEdge, so this listener — and only this one —
+          // runs before the rewind. Catch the lagging level under the
+          // rewind's own condition and rebuild instead. (Our LEVEL_LOADED
+          // listener runs after hls.js's, i.e. after the rewind.)
+          if (!data.details.live || !(edgeAbs > 0)) return
+          const playheadAbs = vid.currentTime + (startSecRef.current ?? 0)
+          if (vid.readyState < HTMLMediaElement.HAVE_ENOUGH_DATA && levelLagsPlayhead(playheadAbs, edgeAbs)) {
+            rebuildAtPlayheadForLaggingLevel(playheadAbs, edgeAbs, 'live-edge sync')
+          }
+        })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
@@ -2687,6 +2786,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         })
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (cancelled) return
+          // Up-switch stall containment, second trigger (see
+          // rebuildAtPlayheadForLaggingLevel and levelLagsPlayhead). hls.js
+          // reports a starved buffer once per stall as this non-fatal error
+          // (gap-controller `_reportStall`, "due to low buffer"), on Chromium
+          // within ~100 ms of the underflow — seconds before the next
+          // playlist load would reach the LEVEL_UPDATED trigger. A stall with
+          // the level's edge at or ahead of the playhead is left to hls.js.
+          if (!data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+            const playheadAbs = vid.currentTime + (startSecRef.current ?? 0)
+            if (levelLagsPlayhead(playheadAbs, producedEdgeSecRef.current)) {
+              rebuildAtPlayheadForLaggingLevel(playheadAbs, producedEdgeSecRef.current, 'buffer stall')
+            }
+            return
+          }
           if (!data.fatal) return
           // Look for 401 in the response shape hls.js exposes.
           // `data.response?.code` is the standard place; `data.networkDetails`
@@ -3219,6 +3332,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           targetAbsSec,
           startSecRef.current ?? 0,
           bufferedSecRef.current,
+          0.5,
+          producedEdgeSecRef.current,
         )) {
           const preservePause = shouldPreservePauseOnSeekRebuild(
             explicitSeek.running ?? party.isPlaying,
@@ -4090,13 +4205,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // trigger the same transcode rebuild the scrubber does, instead of
   // stalling. `sec` is the absolute media position (REAL-FILE seconds),
   // matching what PlayerControls' onSeek emits.
-  const seekToRealSec = useCallback((sec: number) => {
+  // `opts.forceRebuild` is "stay here, on a fresh session" — the up-switch
+  // stall containment in the hls.js ERROR handler. It skips the window check
+  // (the current session provably cannot serve the playhead on the level in
+  // play) and, for a party guest, is not a scrub, so the guest guard lets it
+  // by; everything else (pause intent, party revision, host broadcast) is the
+  // ordinary seek-rebuild's.
+  const seekToRealSec = useCallback((sec: number, opts?: { forceRebuild?: boolean }) => {
     // Map a REAL-FILE second back into the local video element's
     // currentTime by subtracting the session's startSec offset.
     const vid = videoRef.current
     if (!vid) return
     const targetSec = Math.max(0, sec)
     const localSec = targetSec - (startSecRef.current ?? 0)
+    const forceRebuild = opts?.forceRebuild === true
     // Reuses the component-level partyControlsMedia rather than
     // recomputing the same predicate (2026-08 review nit, issue #461
     // follow-up) — both read the exact same party/target closure in the
@@ -4107,7 +4229,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Guests mirror the host. Letting a guest scrub locally either causes a
     // brief snap-back inside the current buffer or stalls outside it, and the
     // server rejects their request-seek anyway. Give one honest response.
-    if (isPartyControllingThisMedia && party && !party.isHost) {
+    if (!forceRebuild && isPartyControllingThisMedia && party && !party.isHost) {
       setStatus('Only the party host can seek')
       return
     }
@@ -4151,6 +4273,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       broadcastHostPartySeek()
       onSeekRebuild(targetSec)
       return true
+    }
+
+    // A forced rebuild has nothing to decide: the session cannot serve the
+    // playhead on the level in play (see the hls.js ERROR handler). Without a
+    // rebuild callback there is nothing to do — the stall is hls.js's.
+    if (forceRebuild) {
+      rebuildAtTarget()
+      return
     }
 
     // While Chromecasting, the RECEIVER — not the frozen local <video>
@@ -4218,10 +4348,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Rebase for either direction outside it. In a party the host first moves
     // the canonical server anchor; every guest receives that explicit seek and
     // independently rebuilds its own session in the sync interval above.
+    // The produced edge (from the level playlist) is what bounds the window;
+    // the hls.js buffer is only a lower bound on it.
     if (needsHlsSessionRebuild(
       targetSec,
       startSecRef.current ?? 0,
       bufferedSec,
+      0.5,
+      producedEdgeSecRef.current,
     )) {
       if (rebuildAtTarget()) return
 

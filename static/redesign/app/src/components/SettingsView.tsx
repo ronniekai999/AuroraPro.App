@@ -25,16 +25,23 @@ import {
 } from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
 import {
+  AUDIO_LANGUAGE_OPTIONS,
   FONT_OPTIONS,
   GLOW_OPTIONS,
+  MAX_STREAM_BITRATE_OPTIONS,
   applyFont,
   applyGlow,
+  applyMaxStreamBps,
+  applyPreferredAudioLanguage,
   applyPreferredQuality,
   currentFont,
   currentGlow,
+  currentMaxStreamBps,
+  currentPreferredAudioLanguage,
   currentPreferredQuality,
   readPrefsSnapshot,
   writePrefs,
+  type AudioLanguageChoice,
   type FontChoice,
   type GlowChoice,
   type QualityChoice,
@@ -114,6 +121,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   const [fontChoice, setFontChoice] = useState<FontChoice>(currentFont)
   const [glowChoice, setGlowChoice] = useState<GlowChoice>(currentGlow)
   const [quality, setQuality] = useState<QualityChoice>(currentPreferredQuality)
+  // Delivery preferences (September 2026 playback pass): both are read at
+  // play time by lib/streaming.ts, so a change here applies to the next play.
+  const [audioLang, setAudioLang] = useState<AudioLanguageChoice>(currentPreferredAudioLanguage)
+  const [maxBps, setMaxBps] = useState<number>(currentMaxStreamBps)
 
   // Persist on every change, merging over a FRESH read so unknown keys
   // (volume, muted, legacy V1 values) round-trip unmodified.
@@ -608,25 +619,76 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <Icon name="play" size={18} className="text-purple-400" />
             Quality
           </h2>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-white/80 text-sm font-medium">Preferred resolution</p>
-              <p className="text-white/40 text-xs">When a title has multiple files, pick this resolution if available.</p>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-white/80 text-sm font-medium">Preferred resolution</p>
+                <p className="text-white/40 text-xs">When a title has multiple files, pick this resolution if available.</p>
+              </div>
+              <select
+                aria-label="Preferred resolution"
+                value={quality}
+                onChange={e => {
+                  const q = e.target.value as QualityChoice
+                  applyPreferredQuality(q)
+                  setQuality(q)
+                }}
+                className="text-sm py-2 px-3"
+              >
+                <option value="auto">Auto (1080p preferred)</option>
+                <option value="1080p">1080p</option>
+                <option value="4k">4K when available</option>
+              </select>
             </div>
-            <select
-              aria-label="Preferred resolution"
-              value={quality}
-              onChange={e => {
-                const q = e.target.value as QualityChoice
-                applyPreferredQuality(q)
-                setQuality(q)
-              }}
-              className="text-sm py-2 px-3"
-            >
-              <option value="auto">Auto (1080p preferred)</option>
-              <option value="1080p">1080p</option>
-              <option value="4k">4K when available</option>
-            </select>
+            {/* Bitrate ceiling — the remote-viewer knob. Above it the server
+                transcodes onto a ladder capped at this rate instead of handing
+                this browser a direct play or remux it cannot sustain. */}
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-white/80 text-sm font-medium">Streaming bitrate limit</p>
+                <p className="text-white/40 text-xs">Set this on a slow connection. Files above the limit are transcoded down instead of buffering.</p>
+              </div>
+              <select
+                aria-label="Streaming bitrate limit"
+                value={String(maxBps)}
+                onChange={e => {
+                  const bps = Number(e.target.value)
+                  applyMaxStreamBps(bps)
+                  setMaxBps(bps)
+                }}
+                className="text-sm py-2 px-3"
+              >
+                {MAX_STREAM_BITRATE_OPTIONS.map(o => (
+                  <option key={o.bps} value={String(o.bps)}>{o.label}</option>
+                ))}
+                {/* A stored value outside the preset list (only reachable by
+                    editing localStorage) must still be SHOWN, or the select
+                    would read "No limit" while every request carried it. */}
+                {!MAX_STREAM_BITRATE_OPTIONS.some(o => o.bps === maxBps) && (
+                  <option value={String(maxBps)}>{`Custom (${(maxBps / 1_000_000).toFixed(1)} Mbps)`}</option>
+                )}
+              </select>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-white/80 text-sm font-medium">Preferred audio language</p>
+                <p className="text-white/40 text-xs">Picks this language's track by default when the file has one. The in-player track menu still overrides it.</p>
+              </div>
+              <select
+                aria-label="Preferred audio language"
+                value={audioLang}
+                onChange={e => {
+                  const l = e.target.value as AudioLanguageChoice
+                  applyPreferredAudioLanguage(l)
+                  setAudioLang(l)
+                }}
+                className="text-sm py-2 px-3"
+              >
+                {AUDIO_LANGUAGE_OPTIONS.map(o => (
+                  <option key={o.id} value={o.id}>{o.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 

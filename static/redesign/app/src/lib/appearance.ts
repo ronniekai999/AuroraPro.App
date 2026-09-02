@@ -203,3 +203,82 @@ export function applyGlow(id: GlowChoice): void {
 export function applyPreferredQuality(q: QualityChoice): void {
   writePref('preferred_quality', q)
 }
+
+// ---------------------------------------------------------------------------
+// Playback delivery preferences (September 2026 playback pass). Both ride the
+// same `aurora_prefs` bucket and are read at play time — by getStreamInfo and
+// buildSessionRequest in lib/streaming.ts — so the details-page pre-warm and
+// the player send byte-identical requests and the warmed session is adopted.
+// ---------------------------------------------------------------------------
+
+/**
+ * Preferred spoken language for the audio track the server picks by default.
+ * 'auto' = no preference (the file's default track, as before). Codes are
+ * ISO 639-1; the server folds them onto the 639-2 tags ffprobe reports
+ * (`en` matches "eng", `de` matches both "ger" and "deu", …). The in-player
+ * track picker remains the per-title override.
+ */
+export type AudioLanguageChoice =
+  | 'auto' | 'en' | 'ja' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'ru' | 'zh' | 'ko' | 'hi' | 'ar'
+
+export const AUDIO_LANGUAGE_OPTIONS: readonly { id: AudioLanguageChoice; label: string }[] = [
+  { id: 'auto', label: 'Auto (file default)' },
+  { id: 'en', label: 'English' },
+  { id: 'ja', label: 'Japanese' },
+  { id: 'es', label: 'Spanish' },
+  { id: 'fr', label: 'French' },
+  { id: 'de', label: 'German' },
+  { id: 'it', label: 'Italian' },
+  { id: 'pt', label: 'Portuguese' },
+  { id: 'ru', label: 'Russian' },
+  { id: 'zh', label: 'Chinese' },
+  { id: 'ko', label: 'Korean' },
+  { id: 'hi', label: 'Hindi' },
+  { id: 'ar', label: 'Arabic' },
+]
+
+/** The stored audio-language preference, 'auto' when unset/invalid. */
+export function currentPreferredAudioLanguage(): AudioLanguageChoice {
+  const v = readPrefs().preferred_audio_language
+  return AUDIO_LANGUAGE_OPTIONS.some(o => o.id === v) ? (v as AudioLanguageChoice) : 'auto'
+}
+
+export function applyPreferredAudioLanguage(l: AudioLanguageChoice): void {
+  writePref('preferred_audio_language', l)
+}
+
+/**
+ * Streaming bitrate ceiling in bits per second, 0 = no limit.
+ *
+ * This is the remote-viewer knob every peer server has and Aurora lacked: a
+ * source above the ceiling can neither direct-play nor remux (both deliver
+ * the source bitrate verbatim, and a single-rendition stream has nothing to
+ * adapt down to), so the server transcodes it onto an ABR ladder capped at
+ * the ceiling. Below the ceiling nothing changes. Self-limiting by design —
+ * the worst a wrong value does is give THIS browser a smaller ladder.
+ */
+export const MAX_STREAM_BITRATE_OPTIONS: readonly { bps: number; label: string }[] = [
+  { bps: 0, label: 'No limit (LAN)' },
+  { bps: 40_000_000, label: '40 Mbps' },
+  { bps: 20_000_000, label: '20 Mbps' },
+  { bps: 8_000_000, label: '8 Mbps' },
+  { bps: 4_000_000, label: '4 Mbps' },
+  { bps: 2_000_000, label: '2 Mbps' },
+]
+
+// Mirrors the server's clampMaxBPS: anything above a gigabit is a unit
+// mix-up or garbage, and reads as "no limit" on both sides.
+const MAX_STREAM_BPS_CEILING = 1_000_000_000
+
+/** The stored bitrate ceiling in bps, 0 when unset/invalid/no limit. */
+export function currentMaxStreamBps(): number {
+  const v = readPrefs().max_stream_bps
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_STREAM_BPS_CEILING) return 0
+  return Math.round(n)
+}
+
+export function applyMaxStreamBps(bps: number): void {
+  const n = Number.isFinite(bps) && bps > 0 && bps <= MAX_STREAM_BPS_CEILING ? Math.round(bps) : 0
+  writePref('max_stream_bps', n)
+}
