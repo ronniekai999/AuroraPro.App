@@ -11,6 +11,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
+import { GridSkeleton } from '@/components/Skeletons'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { searchMedia } from '@/lib/api'
 import { type Media } from '@/lib/types'
@@ -121,7 +122,12 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
         }
       />
 
-      {!loading && query && results.length === 0 && !error ? (
+      {loading && results.length === 0 ? (
+        // First search (or a new query after an empty result): hold the
+        // grid's shape. With results already on screen the previous grid
+        // stays up until the new one lands, as before.
+        <GridSkeleton />
+      ) : !loading && query && results.length === 0 && !error ? (
         <div className="text-center py-20">
           <Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />
           <h2 className="text-white/60 text-lg">No results found</h2>

@@ -126,6 +126,7 @@ import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefre
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
+import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
 // Chunk loaders, named so the nav can PREFETCH a view's code on hover /
@@ -1297,8 +1298,15 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         </div>
       )}
       {loading && !rails && (
-        <div className="mb-6 px-5 py-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-200 text-sm">
-          Loading your library…
+        // Rail-shaped skeletons where the rails will land, in the shapes
+        // the first three usually take (Continue Watching is landscape).
+        // The banner this replaces was one line of purple text; the whole
+        // page then popped in around it. The announcement stays, sr-only.
+        <div className="stage-gutter">
+          <p className="sr-only" role="status">Loading your library…</p>
+          <RailSkeleton aspect="landscape" count={5} />
+          <RailSkeleton />
+          <RailSkeleton />
         </div>
       )}
       {effectiveRails.map((rail, i) => {
@@ -2005,14 +2013,12 @@ function BrowseLoadingState({ title }: { title: string }) {
     // skeleton flashed edge-to-edge and then snapped in by 48px.
     <div className="animate-fade-in stage-gutter pt-8">
       <div className="mb-8">
-        <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
-        <p className="text-white/60 text-sm mt-2">Loading your library…</p>
+        {/* PageHeader's title scale, so Movies / TV Shows agree with My
+            Library, Search and Requests instead of a one-off text-4xl. */}
+        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
+        <p className="text-white/60 text-sm mt-2" role="status">Loading your library…</p>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
-        {Array.from({ length: 12 }).map((_, i) => (
-          <div key={i} className="aspect-[2/3] rounded-xl bg-white/[0.02] border border-white/[0.04] animate-pulse" />
-        ))}
-      </div>
+      <GridSkeleton />
     </div>
   )
 }
@@ -2491,6 +2497,11 @@ export default function App() {
     try { localStorage.setItem('aurora_my_library', JSON.stringify(library)) }
     catch { /* quota / private mode — non-fatal */ }
   }, [library])
+  // False until the reconcile below has answered once for the active
+  // profile (success OR failure — an offline device keeps its cache and
+  // must not sit on a skeleton). LibraryView uses it to hold a grid
+  // skeleton instead of the empty state on a device whose cache is empty.
+  const [libraryLoaded, setLibraryLoaded] = useState(false)
   // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
   // The reconcile below re-applies these on top of the server snapshot so a
   // save/unsave that completes DURING the fetch isn't clobbered by the
@@ -2504,9 +2515,11 @@ export default function App() {
     if (!user || !activeProfileId) return
     let cancelled = false
     const ac = new AbortController()
+    setLibraryLoaded(false)
     getLibrary(activeProfileId, ac.signal)
       .then(items => {
         if (cancelled) return
+        setLibraryLoaded(true)
         setLibrary(prev => {
           const cachedById = new Map(prev.map(m => [m.id, m]))
           const pending = pendingLibOpsRef.current
@@ -2525,7 +2538,11 @@ export default function App() {
           return merged
         })
       })
-      .catch(() => { /* offline / transient — keep the localStorage cache */ })
+      .catch(() => {
+        // offline / transient — keep the localStorage cache, and stop
+        // showing the skeleton: what is cached is what there is.
+        if (!cancelled) setLibraryLoaded(true)
+      })
     return () => { cancelled = true; ac.abort() }
   }, [user, activeProfileId])
   // Memoized ID set so MediaRail / BrowseView / LibraryView can do
@@ -5967,6 +5984,7 @@ export default function App() {
             <ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
                 library={library}
+                loading={!libraryLoaded}
                 continueItems={continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
@@ -5979,9 +5997,9 @@ export default function App() {
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
               page (or worse, a flash of the home view). */}
-          {view === 'detail' && !selectedMedia && <ViewFallback />}
+          {view === 'detail' && !selectedMedia && <DetailSkeleton />}
           {view === 'detail' && selectedMedia && (
-            <ViewSuspense fallback={<ViewFallback />}>
+            <ViewSuspense fallback={<DetailSkeleton />}>
               <DetailView
                 // Reset internal state (active tab, cast-expand) per title so
                 // detail→detail navigation (e.g. Cmd+K search) never leaves a

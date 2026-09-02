@@ -2405,6 +2405,12 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 13px;
   border-radius: 10px;
 }
+/* Round variant for the hero / detail / Load-More CTAs, which were
+   rounded-full bespoke Tailwind buttons. Declared AFTER .stage-btn-sm on
+   purpose: equal specificity, and -sm sets its own 10px radius. */
+.stage-btn-pill {
+  border-radius: var(--r-pill);
+}
 .stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
 .stage-btn:focus-visible {

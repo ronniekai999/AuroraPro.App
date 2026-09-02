@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
+import { GridSkeleton } from '@/components/Skeletons'
 import { isResumable } from '@/lib/format'
 import { mapContinueToMedia, type ContinueWatchingItem } from '@/lib/api'
 import { type Media } from '@/lib/types'
@@ -19,11 +20,17 @@ import { type Media } from '@/lib/types'
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue }: {
+export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, loading = false }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
   onToggleLib: (m: Media) => void
+  // True until the server's copy of the library has been reconciled once.
+  // `library` hydrates from localStorage, so on a device that has never
+  // seen this account it starts EMPTY and the view showed the "No saved
+  // titles yet" empty state for the whole round trip, then replaced it
+  // with the grid. A skeleton holds the shape instead.
+  loading?: boolean
   // 2026-05-27 — Continue Watching one-click resume in the
   // LibraryView CW grid. When set, each CW card gets a Resume pill
   // on hover (same pattern as the home CW rail). Optional so the
@@ -88,7 +95,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
           which read as contradictory when the Continue Watching rail
           below it had items. Distinguish the two surfaces in the
           copy: "saved titles" vs "in-progress watches". */}
-      {library.length === 0 ? (
+      {library.length === 0 && loading ? (
+        <GridSkeleton className="mb-12" />
+      ) : library.length === 0 ? (
         <div className="text-center py-16">
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
           <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>

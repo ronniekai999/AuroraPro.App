@@ -14,6 +14,7 @@ import { RecapModal } from '@/components/detail/RecapModal'
 import { DetailTabs, type DetailTab } from '@/components/detail/DetailTabs'
 import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
+import { TextSkeleton } from '@/components/Skeletons'
 import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
@@ -409,7 +410,12 @@ export default function DetailView({
     ? `${subtitleTracks[0].codec.toUpperCase()} / ${subtitleTracks[0].bitmap ? 'image-based' : 'text'}`
     : undefined
 
-  const overviewText = loading && !detail ? 'Loading details…' : (description || 'No description available.')
+  // While the detail payload is in flight the storyline holds its shape with
+  // text-line placeholders rather than the words "Loading details…" — the
+  // hero, poster and tab strip are already real, so a sentence of status text
+  // was the one element that then changed size when the copy arrived.
+  const overviewLoading = loading && !detail
+  const overviewText = description || 'No description available.'
 
   // Tabs: Overview always; Episodes (shows), Cast, Media only when present.
   // Default tab = Overview, which renders the full stacked column.
@@ -421,7 +427,9 @@ export default function DetailView({
   const storylineNode = (
     <section>
       <h3 className="text-lg font-semibold font-display mb-3">Storyline</h3>
-      <p className="text-white/75 text-[15.5px] leading-[1.75] max-w-3xl">{overviewText}</p>
+      {overviewLoading
+        ? <TextSkeleton lines={4} />
+        : <p className="text-white/75 text-[15.5px] leading-[1.75] max-w-3xl">{overviewText}</p>}
     </section>
   )
   const episodesNode = isShow ? (
@@ -433,7 +441,8 @@ export default function DetailView({
       rows={episodeRows}
       onPlay={(id, fileId) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep, fileId) }}
       onUnavailable={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onEpisodeUnavailable?.(ep) }}
-      emptyText={loading ? 'Loading episodes…' : 'No episodes available yet.'}
+      loading={loading}
+      emptyText="No episodes available yet."
     />
   ) : null
   const castNode = <CastGrid cast={castVMs} totalCount={castMembers.length} onViewAll={() => setShowAllCast(true)} />
