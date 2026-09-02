@@ -4,6 +4,7 @@ import {
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
+  levelLagsPlayhead,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
@@ -204,6 +205,37 @@ describe('sequential HLS seek policy', () => {
 
     it('rewinds before the anchor still rebuild regardless of the produced edge', () => {
       expect(needsHlsSessionRebuild(30, 60, buffered, 0.5, produced)).toBe(true)
+    })
+  })
+
+  describe('levelLagsPlayhead (up-switch stall containment)', () => {
+    it('flags a stall on a rung whose playlist ends well behind the playhead', () => {
+      // Skipped to 35:00 in-session, then hls.js switched up onto a rung
+      // that has published 12 s from the anchor: the chase is minutes long.
+      expect(levelLagsPlayhead(35 * 60, 12)).toBe(true)
+      // Anchored session: the edge is absolute, so is the playhead.
+      expect(levelLagsPlayhead(600 + 35 * 60, 600 + 12)).toBe(true)
+    })
+
+    it('leaves a stall at or near the produced edge to hls.js', () => {
+      // An encoder slower than realtime on the level in play: the playhead
+      // sits AT the edge (it cannot pass buffered content), never behind it.
+      expect(levelLagsPlayhead(1200, 1200)).toBe(false)
+      expect(levelLagsPlayhead(1200.4, 1200)).toBe(false)
+      // A chase within the threshold resolves on its own within seconds.
+      expect(levelLagsPlayhead(1212, 1200)).toBe(false)
+      expect(levelLagsPlayhead(1212.5, 1200)).toBe(true)
+    })
+
+    it('never triggers on an unknown edge or a bad playhead', () => {
+      expect(levelLagsPlayhead(1200, 0)).toBe(false)
+      expect(levelLagsPlayhead(1200, -1)).toBe(false)
+      expect(levelLagsPlayhead(NaN, 12)).toBe(false)
+      expect(levelLagsPlayhead(Infinity, 12)).toBe(false)
+    })
+
+    it('does not flag the ordinary state where the edge is ahead', () => {
+      expect(levelLagsPlayhead(600, 40 * 60)).toBe(false)
     })
   })
 

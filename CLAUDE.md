@@ -364,32 +364,45 @@ Invariants to preserve:
   self-limiting (a wrong value only costs that client a transcode or a
   smaller ladder), and an unknown source bitrate (0) never trips the
   ceiling. `capLadder` always keeps the lowest rung. The reason bucket is
-  `bitrate`; the CHECK constraint lives in migration 058 now, and the two
-  vocabulary tests read the LATEST definition — a further widening needs a
-  new migration and both tests pointed at it.
+  `bitrate`, named ONLY when the ceiling is decisive — when the uncapped
+  decision would not have been a transcode (`bitrateDecisive`); a file
+  that transcodes for its codec anyway keeps the codec wording, because
+  `bitrate` is the one reason an operator can address with a setting. The
+  CHECK constraint lives in migration 058 now, and the two vocabulary
+  tests read the LATEST definition — a further widening needs a new
+  migration and both tests pointed at it.
 - **The language preference selects the preferred-language track in two
-  halves.** `findBestAudioTrack` ranks only tracks the delivery path can
-  COPY (default first among matches, so a file that already defaults to
-  the viewer's language keeps direct play; a non-default match pays the
-  same remux any non-default pick does). A preferred track that path
-  cannot copy — DTS on a browser, Opus under hls.js — is then selected by
-  `DecidePlaybackFor`'s override and RE-ENCODED on the remux path, the
-  same recode an uncopyable default track already gets. Without that
-  override the engine picked the wrong-language default and fell through
-  every remux branch into a full video transcode of it (first review
-  finding). Direct play is kept only when the preferred track is the
-  file's default; native clients that would rather pick tracks themselves
-  omit `audio_lang`. `normalizeLang` folds 639-1 / 639-2 B and T aliases;
-  extend the table rather than comparing tags literally.
+  codec-blind gates plus one copy-aware ranking.** `preferredLanguageTrack`
+  (codec-blind) names the track the preference means; direct play is
+  withheld unless that track is the one direct play would select (the
+  playable default) — `findBestAudioTrack` ranks only tracks the CLIENT
+  can play, so without that gate a preferred track outside the client's
+  caps (DTS on a browser, TrueHD on a client that stops at DTS) was passed
+  over and the wrong-language default direct-played (second review
+  finding). On the HLS path `findBestAudioTrack` ranks only tracks the
+  delivery path can COPY (default first among matches; a non-default match
+  pays the same remux any non-default pick does), and a preferred track it
+  cannot copy is selected by the override and RE-ENCODED on the remux
+  path, the same recode an uncopyable default track already gets. Without
+  that override the engine fell through every remux branch into a full
+  video transcode of the wrong track (first review finding). Native
+  clients that would rather pick tracks themselves omit `audio_lang`.
+  `normalizeLang` folds the whole ISO 639-1 → 639-2/T table, the twenty
+  639-2/B twins, and `langExtraFolds` (jp, cmn, nob/nno → nor); extend
+  those rather than comparing tags literally.
 - **`transcode.stereo_downmix` — `legacy` is the byte-identical rollback**
   (bare `-ac 2`). The matrices are indexed by channel POSITION and cover
-  exactly 6 and 8 channels; every other layout keeps the bare fold. The
-  channel count that selects a matrix comes from the library's per-track
-  probe in the session handler, not the client echo: `pan` does not fail
-  on a wrong count, it silently drops the terms for channels the track
-  lacks and discards channels the matrix never names, so a wrong count is
-  a quietly wrong mix. The fixture test runs all four policies on real 5.1
-  and 7.1 sources.
+  exactly 6 and 8 channels; every other layout keeps the bare fold.
+  `standard` mirrors swresample's fold — centre AND both surround pairs at
+  0.707, LFE dropped, no 7.1-specific rule (measured, second review) —
+  plus a limiter. The channel count that selects a matrix comes from the
+  library's per-track probe in the session handler, not the client echo:
+  `pan` does not fail on a wrong count, it silently drops the terms for
+  channels the track lacks and discards channels the matrix never names,
+  so a wrong count is a quietly wrong mix. The fixture test runs all four
+  policies on real 5.1 and 7.1 sources; it proves FFmpeg accepts the
+  chains and emits stereo, not the sound (the argument test pins the
+  matrices).
 - **HEVC output is hardware-only under `hevc_output: auto`**; `all` opts
   libx265 in (and gets the x265-scaled CRF via `softwareCRF`). Do not
   re-enable software HEVC by default: a one-frame probe proves nothing
@@ -405,11 +418,27 @@ Invariants to preserve:
 - **Forward seeks rebuild only past the PRODUCED edge**, fed from hls.js
   `LEVEL_LOADED`/`LEVEL_UPDATED` into `producedEdgeSecRef`; the buffered
   edge is only a lower bound. The native-HLS path passes 0 and keeps the
-  old behaviour.
+  old behaviour. This widens the up-switch stall's reach — before it, a
+  long skip re-anchored EVERY rung at the target as a side effect — so it
+  ships with the containment below; do not take one without the other.
+- **The up-switch stall is contained at the STALL, not at the switch.**
+  hls.js reports a starved buffer once per stall as a non-fatal
+  `BUFFER_STALLED_ERROR`; when the level's produced edge is more than
+  `LEVEL_LAG_REBUILD_SEC` behind the playhead (`levelLagsPlayhead`), the
+  player rebuilds the session at the playhead through `seekToRealSec`'s
+  `forceRebuild` (one-shot per session, `lagRebuildFiredRef`). Keying on
+  the stall keeps every up-switch whose catch-up the buffer covers
+  seamless, and a stall with the edge AT the playhead — an encoder slower
+  than realtime on the level in play — is left to hls.js. Reasoned from
+  the hls.js 1.6 gap-controller source, not exercised in a browser.
 
 Known limits, stated plainly: the up-switch stall (a rung started mid-play
-encodes from the session anchor, not the playhead) is NOT fixed here — it
-needs the segment-addressable VOD playlist model, which is the open
-strategic item — and Dolby Vision profile 5 is still undetected by the
-scanner; detection alone would only move its wrong colours from direct
-play to a transcode until a DV-aware tonemap (libplacebo) is probed in.
+encodes from the session anchor, not the playhead) is CONTAINED here, not
+fixed — a multi-minute or permanent stall becomes one cold restart at the
+playhead after the old level's buffer plays out. The fix is the
+segment-addressable VOD playlist model, which is the open strategic item.
+Dolby Vision profile 5 is still undetected by the scanner; detection alone
+would only move its wrong colours from direct play to a transcode until a
+DV-aware tonemap (libplacebo) is probed in. The limiter policies carry a
+fixed 5 ms audio delay (alimiter's uncompensated look-ahead; see
+`downmixLimiter`).

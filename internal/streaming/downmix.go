@@ -86,6 +86,13 @@ func ParseStereoDownmix(raw string) (StereoDownmix, bool) {
 // integer path and it is exactly the "downmix is too quiet" complaint every
 // peer ends up compensating with a fixed boost. level=false keeps the limiter
 // from applying its own make-up gain, so below the ceiling it is a no-op.
+//
+// Known limit: alimiter's look-ahead is not latency-compensated by default,
+// so the two limiter policies carry a fixed audio delay of the attack window
+// (5 ms) — far below any lip-sync threshold. Its `latency` option would
+// compensate, but it is not on every 5.x build and an unknown option is fatal
+// at filter init, so adding it needs the same kind of version gate the
+// readrate burst has.
 const downmixLimiter = "alimiter=limit=0.98:attack=5:release=50:level=false"
 
 // downmixNightCompressor is the dynamic-range compression the night policy
@@ -127,10 +134,13 @@ func stereoDownmixFilter(policy StereoDownmix, channels int) string {
 		case 6:
 			pan = "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5"
 		case 8:
-			// swresample folds 7.1 with the backs at 0.5 and the sides at
-			// 0.707 (BL gets slev*M_SQRT1_2 when the input also has SL);
-			// mirrored here so standard stays the sound people have today.
-			pan = "pan=stereo|c0=c0+0.707*c2+0.5*c4+0.707*c6|c1=c1+0.707*c2+0.5*c5+0.707*c7"
+			// swresample folds BOTH surround pairs into the fronts at the
+			// surround level: rematrix.c adds BACK_LEFT and SIDE_LEFT to
+			// FRONT_LEFT at slev (0.707) independently, with no 7.1-specific
+			// rule. Measured on 7.0.2 (second review): a tone on BL alone and
+			// on SL alone come through the bare fold at the same level.
+			// Mirrored here so standard stays the sound people have today.
+			pan = "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7"
 		}
 	}
 	if pan == "" {

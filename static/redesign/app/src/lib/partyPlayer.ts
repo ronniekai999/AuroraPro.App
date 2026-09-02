@@ -178,6 +178,48 @@ export function needsHlsSessionRebuild(
 }
 
 /**
+ * Two 6 s segments. A rendition whose playlist ends further than this behind
+ * the playhead is not about to catch up: `producedEdgeSec` lags the encoder
+ * by at most one playlist refresh (~one segment), and a chase that is within
+ * a segment or two of the playhead resolves on its own within seconds.
+ */
+export const LEVEL_LAG_REBUILD_SEC = 12
+
+/**
+ * Up-switch stall containment (September 2026 playback pass, second review).
+ *
+ * Every rung encodes sequentially from the session anchor, so a rung hls.js
+ * switches onto minutes into a title publishes from the anchor and hls.js
+ * chases it: it keeps loading the newest fragment of the new level — all of
+ * them behind the playhead — while the old level's buffer plays out, then
+ * stalls until the new rung's playlist passes the playhead. That is minutes
+ * after a long in-session skip (which the produced-edge seek rule now keeps
+ * in-session instead of re-anchoring every rung at the target), and forever
+ * on an encoder slower than realtime.
+ *
+ * hls.js reports the starved buffer once per stall as a non-fatal
+ * BUFFER_STALLED_ERROR. This decides, at that report, whether the stall is
+ * that chase: the level's produced edge (absolute seconds, from its playlist)
+ * is behind the playhead by more than the threshold. Then the only way out is
+ * a session rebuild at the playhead, which re-anchors every rung there and
+ * resumes after a cold start instead of the stall. A stall for any other
+ * reason — a hole, a slow network, an encoder that is simply slower than
+ * realtime on the level in play (its edge is AT the playhead, never behind
+ * it) — is left to hls.js. Keying on the stall rather than on the level
+ * switch itself keeps every up-switch whose catch-up the buffer covers
+ * seamless. An unknown edge (0: nothing loaded yet, native HLS) never
+ * triggers.
+ */
+export function levelLagsPlayhead(
+  playheadAbsSec: number,
+  producedEdgeSec: number,
+  thresholdSec = LEVEL_LAG_REBUILD_SEC,
+): boolean {
+  if (!(producedEdgeSec > 0) || !Number.isFinite(playheadAbsSec)) return false
+  return playheadAbsSec - producedEdgeSec > thresholdSec
+}
+
+/**
  * The periodic guest drift-correction tick (VideoPlayer.tsx) converts the
  * party's canonical absolute position into THIS session's HLS-relative
  * seconds via `Math.max(0, absMs/1000 - sessionStartSec)`. When the

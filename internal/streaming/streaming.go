@@ -528,6 +528,12 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 	// scanner has it for every file it probed, and a wrong guess here would
 	// transcode files that play fine.
 	overBitrate := clientCaps.MaxBitrate > 0 && in.SourceBitrate > clientCaps.MaxBitrate
+	// The uncapped flags are kept for the transcode REASON: an HEVC file on
+	// an H.264-only client transcodes with or without a ceiling, and filing
+	// that under `bitrate` would tell an operator that raising the ceiling
+	// changes something (second review finding). The decision itself uses
+	// the capped flags below.
+	uncappedVideoOK, uncappedRemuxOK := videoOK, remuxVideoOK
 	if overBitrate {
 		videoOK = false
 		remuxVideoOK = false
@@ -544,7 +550,23 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 	// Direct play serves the original file — no HLS, no .ts segments.
 	// The browser plays natively, so all MSE-reported codecs are valid.
 	dpIdx, dpCodec, dpAudioOK, dpIsDefault := findBestAudioTrack(audioTracks, clientCaps, in.PreferredAudioLang)
-	if videoOK && containerOK && dpAudioOK && dpIsDefault {
+	// Preferred language, first half. Direct play hands the client the whole
+	// file and a browser plays its default track, so the viewer's language
+	// is heard on this path ONLY when the preferred-language track is the
+	// one direct play would select. findBestAudioTrack cannot say that by
+	// itself: it ranks only tracks the full caps can play, so when the
+	// preferred track's codec is outside them — DTS on a browser, TrueHD on
+	// a client that stops at DTS — it falls through to the playable default
+	// and reports THAT as the pick, and direct play of the wrong-language
+	// default won (second review finding). preferredLanguageTrack is
+	// codec-blind, so this gate holds whatever the client decodes; the HLS
+	// path below then selects the preferred track and re-encodes it. A
+	// native client that would rather receive the whole file and pick the
+	// track itself omits audio_lang.
+	prefIdx := preferredLanguageTrack(audioTracks, in.PreferredAudioLang)
+	langOK := prefIdx < 0 || prefIdx == dpIdx
+	directPlayable := containerOK && dpAudioOK && dpIsDefault && langOK
+	if videoOK && directPlayable {
 		return PlaybackDecision{
 			Decision:         "direct_play",
 			AudioTrackIndex:  dpIdx,
@@ -552,6 +574,10 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 			AudioCodec:       dpCodec,
 		}
 	}
+	// The ceiling is named as the transcode reason only when the UNCAPPED
+	// decision would not have been a transcode: direct play as just checked,
+	// or a remux — every remux branch below fires once remuxVideoOK holds.
+	bitrateDecisive := overBitrate && ((uncappedVideoOK && directPlayable) || uncappedRemuxOK)
 
 	// --- HLS paths (remux / transcode) use HLS.js-restricted audio caps ---
 	//
@@ -613,10 +639,9 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 	// any track by re-encoding it — the `!audioOK` branch below already does
 	// exactly that for an uncopyable default track — so select the preferred
 	// track here and let the copy/recode rules decide how it travels. Direct
-	// play is kept only when the preferred track is the file's default (the
-	// first pass above), because a browser cannot switch tracks on a native
-	// <video>. A native client that would rather direct-play the whole file
-	// and pick tracks itself simply omits audio_lang.
+	// play was already withheld above unless the preferred track is the one
+	// direct play would select, so every shape with a preferred track that
+	// is not the playable default lands here.
 	langOverride := false
 	if pref := normalizeLang(in.PreferredAudioLang); pref != "" && bestIdx >= 0 {
 		if li := preferredLanguageTrack(audioTracks, pref); li >= 0 && normalizeLang(audioTracks[bestIdx].Language) != pref {
@@ -693,8 +718,12 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 
 	// Video codec not supported (or a codec the HLS segment pipeline can't
 	// carry, or H.264 10-bit) → full transcode
+	// The wordings below describe the CODEC situation, so they read the
+	// uncapped flags: when the ceiling is not what closed the other paths,
+	// a claimed-but-unremuxable codec must still say "cannot be remuxed"
+	// rather than "not supported by browser".
 	reason := fmt.Sprintf("video codec %q not supported by browser", vc)
-	if overBitrate {
+	if bitrateDecisive {
 		// Checked first: the client may well decode everything in this file,
 		// and every other wording below would claim it cannot. ReasonCode
 		// buckets the "bitrate" clause on its own.
@@ -710,7 +739,7 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 		reason = "H.264 10-bit (Hi10P) not supported by browser MediaSource API; transcoding to 8-bit H.264"
 	} else if isHEVC10bit && !clientCaps.HEVCMain10 {
 		reason = "HEVC 10-bit (Main 10) not supported by this browser; transcoding to 8-bit H.264"
-	} else if videoOK && !remuxVideoOK && (vc == "vp8" || vc == "vp9" || vc == "av1" || directPlayOnlyVideoCodecs[vc]) {
+	} else if uncappedVideoOK && !uncappedRemuxOK && (vc == "vp8" || vc == "vp9" || vc == "av1" || directPlayOnlyVideoCodecs[vc]) {
 		// Shared with the legacy native-player codecs (MPEG-4 Part 2, MPEG-2,
 		// VC-1): the situation is identical — the client DID claim the codec,
 		// so "not supported by browser" would be a lie in the QoE record; it
@@ -719,7 +748,7 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 		// Reusing the wording keeps both in ReasonCode's "cannot be remuxed"
 		// bucket instead of needing a new rule there.
 		reason = fmt.Sprintf("%s cannot be remuxed into HLS segments; transcoding to H.264", strings.ToUpper(vc))
-	} else if videoOK && !remuxVideoOK && (vc == "hevc" || vc == "h265") {
+	} else if uncappedVideoOK && !uncappedRemuxOK && (vc == "hevc" || vc == "h265") {
 		reason = "HEVC requires fMP4 HLS segments for native playback (Apple HLS spec); transcoding to H.264"
 	}
 	// Full-transcode path: audio passthrough requires (a) the client decodes
@@ -2069,9 +2098,13 @@ func ffmpegVersion(banner string) (major, minor int) {
 	// leading digits, but the date-stamped form ("2023-06-05-git-…") does,
 	// and reading its year as a major would enable every version-gated flag
 	// on a build that may predate all of them — the burst flag is fatal at
-	// launch on a build that lacks it (review finding).
-	if strings.Contains(ver, "git") {
-		return 0, 0
+	// launch on a build that lacks it (review finding). The marker is a whole
+	// dash-separated field, not a substring: a vendor suffix that merely
+	// contains the letters ("6.1.1-digital") is still a release.
+	for _, field := range strings.Split(ver, "-") {
+		if field == "git" {
+			return 0, 0
+		}
 	}
 	i := 0
 	for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {

@@ -39,8 +39,13 @@ func TestFFmpegVersionMinor(t *testing.T) {
 		// 2023 as a major would enable the burst flag on a build that may
 		// predate it, and an unknown option is fatal at launch (review).
 		{"ffmpeg version 2023-06-05-git-2f7f6e3a5e Copyright", 0, 0},
+		{"ffmpeg version git-2020-03-04-e2eb04b Copyright", 0, 0},
 		{"ffmpeg version 2024-01-01", 0, 0},
 		{"ffmpeg version 6.1", 6, 1},
+		// The snapshot marker is a whole dash-separated field; a vendor
+		// suffix that merely contains the letters is still a release.
+		{"ffmpeg version 6.1.1-digital Copyright", 6, 1},
+		{"ffmpeg version 7.1-legit Copyright", 7, 1},
 		{"garbage", 0, 0},
 		{"", 0, 0},
 	} {
@@ -246,9 +251,16 @@ func TestStereoDownmixFilter(t *testing.T) {
 	if strings.Contains(std, "c3") {
 		t.Errorf("standard must discard the LFE, like swresample: %q", std)
 	}
+	// 7.1: swresample adds the back AND the side pairs to the fronts at the
+	// same surround level (0.707 each, no 7.1-specific rule); a matrix with
+	// the backs at 0.5 was 3 dB quieter than the fold it claims to mirror
+	// (second review, measured on a real 7.1 tone).
 	std8 := stereoDownmixFilter(DownmixStandard, 8)
-	if !strings.Contains(std8, "0.5*c4") || !strings.Contains(std8, "0.707*c6") {
-		t.Errorf("standard 7.1 must mirror swresample (backs 0.5, sides 0.707): %q", std8)
+	if !strings.HasPrefix(std8, "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7") {
+		t.Errorf("standard 7.1 must mirror swresample (backs and sides both 0.707): %q", std8)
+	}
+	if strings.Contains(std8, "c3") || !strings.HasSuffix(std8, downmixLimiter) {
+		t.Errorf("standard 7.1 must discard the LFE and end in the limiter: %q", std8)
 	}
 
 	dlg := stereoDownmixFilter(DownmixDialogue, 6)
@@ -400,12 +412,76 @@ func TestNormalizeLang(t *testing.T) {
 		"": "", "und": "", "auto": "", "AUTO": "", "none": "",
 		"en": "eng", "eng": "eng", "en-US": "eng", "EN_GB": "eng",
 		"ger": "deu", "deu": "deu", "de": "deu",
-		"fre": "fra", "fra": "fra", "chi": "zho", "zh-Hant": "zho",
+		"fre": "fra", "fra": "fra", "chi": "zho", "zh-Hant": "zho", "cmn": "zho",
 		"ja": "jpn", "jpn": "jpn", "jp": "jpn",
-		"xx": "xx", "tlh": "tlh", // unknown tags match themselves
+		"xx": "xx", "tlh": "tlh", "yue": "yue", // unknown tags match themselves
+		// Second review: the contract promises 639-1 OR 639-2 form for any
+		// language, so every 639-1 code and every B/T twin has to fold.
+		"fa": "fas", "per": "fas", "fas": "fas",
+		"ms": "msa", "may": "msa", "msa": "msa",
+		"sk": "slk", "slo": "slk", "slk": "slk",
+		"sq": "sqi", "alb": "sqi",
+		"hy": "hye", "arm": "hye",
+		"eu": "eus", "baq": "eus",
+		"my": "mya", "bur": "mya",
+		"ka": "kat", "geo": "kat",
+		"is": "isl", "ice": "isl",
+		"bo": "bod", "tib": "bod",
+		"cy": "cym", "wel": "cym",
+		"mk": "mkd", "mac": "mkd",
+		"mi": "mri", "mao": "mri",
+		"bn": "ben", "ta": "tam", "hr": "hrv", "sr": "srp", "bg": "bul", "ca": "cat",
+		"he": "heb", "hi": "hin", "ko": "kor", "pt-BR": "por", "es_419": "spa",
+		// Norwegian: one preference covers both written forms.
+		"no": "nor", "nor": "nor", "nb": "nor", "nob": "nor", "nn": "nor", "nno": "nor",
 	} {
 		if got := normalizeLang(in); got != want {
 			t.Errorf("normalizeLang(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLangTablesShape pins the tables structurally: ISO 639-1 has exactly
+// 184 codes, every entry is a two-letter → three-letter fold, the twenty
+// bibliographic codes all resolve to a terminology code the 639-1 table also
+// produces, and no bibliographic code is itself a 639-1 value (they would
+// otherwise fold twice).
+func TestLangTablesShape(t *testing.T) {
+	if got := len(iso6391To6392T); got != 184 {
+		t.Errorf("ISO 639-1 table has %d entries, want 184", got)
+	}
+	tCodes := map[string]bool{}
+	isLower := func(s string) bool {
+		for _, r := range s {
+			if r < 'a' || r > 'z' {
+				return false
+			}
+		}
+		return true
+	}
+	for k, v := range iso6391To6392T {
+		if len(k) != 2 || !isLower(k) || len(v) != 3 || !isLower(v) {
+			t.Errorf("639-1 entry %q → %q is not a two→three letter fold", k, v)
+		}
+		tCodes[v] = true
+	}
+	if got := len(iso6392BToT); got != 20 {
+		t.Errorf("639-2/B table has %d entries, want 20", got)
+	}
+	for b, tc := range iso6392BToT {
+		if len(b) != 3 || !isLower(b) {
+			t.Errorf("639-2/B code %q malformed", b)
+		}
+		if !tCodes[tc] {
+			t.Errorf("639-2/B %q → %q: target is not a 639-2/T code the 639-1 table produces", b, tc)
+		}
+		if tCodes[b] {
+			t.Errorf("639-2/B %q is also a 639-1 target — it would fold twice", b)
+		}
+	}
+	for from, to := range langExtraFolds {
+		if normalizeLang(to) != to {
+			t.Errorf("extra fold %q → %q must land on a canonical code (got %q)", from, to, normalizeLang(to))
 		}
 	}
 }
@@ -544,6 +620,141 @@ func TestDecidePlaybackFor_PreferredAudioLanguage(t *testing.T) {
 	}
 	if pd := decide("en", engTwice, chromium); pd.Decision != "direct_play" || pd.AudioTrackIndex != 1 {
 		t.Errorf("default among matches: %s track %d, want direct_play track 1", pd.Decision, pd.AudioTrackIndex)
+	}
+}
+
+// TestDecidePlaybackFor_PreferredLanguageGatesDirectPlay pins the second
+// review's finding. findBestAudioTrack ranks only tracks the CLIENT's caps can
+// play, so when the preferred track's codec was outside them it reported the
+// wrong-language default as the direct-play pick, and direct play won —
+// whether the viewer's language was honoured depended on whether the client
+// happened to claim the preferred track's codec, inverted from what the
+// delivery path can do (it can re-encode either way). The direct-play gate is
+// now codec-blind: a file with a track in the preferred language direct-plays
+// only when that track is the one direct play would select.
+func TestDecidePlaybackFor_PreferredLanguageGatesDirectPlay(t *testing.T) {
+	decide := func(container, lang string, tracks []models.AudioTrack, caps *ClientCaps) PlaybackDecision {
+		return DecidePlaybackFor(DecisionInput{
+			Container: container, VideoCodec: "h264", PixFmt: "yuv420p",
+			AudioTracks: tracks, Caps: caps, PreferredAudioLang: lang,
+		})
+	}
+	chromium := ParseClientCaps("h264,aac,ac3,mp4_container,webm_container,hls_js")
+	chromium.FMP4 = true
+	nativeNoDTS := ParseClientCaps("h264,hevc,aac,ac3,eac3,mp4_container,mkv_container,hls_native")
+	nativeNoDTS.FMP4 = true
+	nativeDTSNoTrueHD := ParseClientCaps("h264,hevc,aac,ac3,dts,mp4_container,mkv_container,hls_native")
+	nativeDTSNoTrueHD.FMP4 = true
+
+	aacEngDefaultDtsJpn := []models.AudioTrack{
+		{Index: 0, Codec: "aac", Channels: 2, Language: "eng", IsDefault: true},
+		{Index: 1, Codec: "dts", Channels: 6, Language: "jpn"},
+	}
+	ac3EngDefaultTruehdJpn := []models.AudioTrack{
+		{Index: 0, Codec: "ac3", Channels: 6, Language: "eng", IsDefault: true},
+		{Index: 1, Codec: "truehd", Channels: 8, Language: "jpn"},
+	}
+	noFlags := []models.AudioTrack{ // mkvmerge style: nothing flagged, players take the first
+		{Index: 0, Codec: "aac", Channels: 2, Language: "eng"},
+		{Index: 1, Codec: "dts", Channels: 6, Language: "jpn"},
+	}
+	for _, tt := range []struct {
+		name, container string
+		tracks          []models.AudioTrack
+		caps            *ClientCaps
+	}{
+		{"browser, MP4, AAC English default + DTS Japanese", "mp4", aacEngDefaultDtsJpn, chromium},
+		{"native without dts, MKV", "mkv", aacEngDefaultDtsJpn, nativeNoDTS},
+		{"native with dts but not truehd, MKV", "mkv", ac3EngDefaultTruehdJpn, nativeDTSNoTrueHD},
+		{"native without dts, MKV, no default flags", "mkv", noFlags, nativeNoDTS},
+	} {
+		// No preference: the default direct-plays, exactly as before.
+		if pd := decide(tt.container, "", tt.tracks, tt.caps); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+			t.Errorf("%s, no pref: %s track %d, want direct_play track 0", tt.name, pd.Decision, pd.AudioTrackIndex)
+		}
+		// Japanese: never direct play of the English default. The preferred
+		// track is selected and re-encoded on the remux path.
+		pd := decide(tt.container, "ja", tt.tracks, tt.caps)
+		if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioNeedsRecode || pd.AudioPassthrough || !pd.Remux {
+			t.Errorf("%s, ja: %s track %d recode=%v copy=%v remux=%v (reason %q), want direct_stream track 1 re-encoded",
+				tt.name, pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode, pd.AudioPassthrough, pd.Remux, pd.TranscodeReason)
+		}
+		if pd.VideoCodecOut != "" {
+			t.Errorf("%s, ja: a remux must not carry a transcode output codec, got %q", tt.name, pd.VideoCodecOut)
+		}
+		if got := ReasonCode(pd); got != ReasonAudioCodec {
+			t.Errorf("%s, ja: bucket = %q, want %q", tt.name, got, ReasonAudioCodec)
+		}
+		// A language the file lacks leaves direct play alone.
+		if pd := decide(tt.container, "de", tt.tracks, tt.caps); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+			t.Errorf("%s, de: %s track %d, want direct_play track 0", tt.name, pd.Decision, pd.AudioTrackIndex)
+		}
+	}
+
+	// The mirror image — the preferred track IS the default but the client
+	// cannot decode it — was already a remux + recode; it must stay one.
+	dtsJpnDefaultAacEng := []models.AudioTrack{
+		{Index: 0, Codec: "dts", Channels: 6, Language: "jpn", IsDefault: true},
+		{Index: 1, Codec: "aac", Channels: 2, Language: "eng"},
+	}
+	pd := decide("mp4", "ja", dtsJpnDefaultAacEng, chromium)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 0 || !pd.AudioNeedsRecode {
+		t.Errorf("default-but-undecodable preferred track: %s track %d recode=%v, want direct_stream track 0 re-encoded",
+			pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode)
+	}
+	// And a client that CAN decode the preferred default keeps direct play.
+	if pd := decide("mp4", "ja", dtsJpnDefaultAacEng, nativeDTSNoTrueHD); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+		t.Errorf("decodable preferred default: %s track %d, want direct_play track 0", pd.Decision, pd.AudioTrackIndex)
+	}
+}
+
+// TestDecidePlaybackFor_BitrateReasonOnlyWhenDecisive: the `bitrate` bucket is
+// the one transcode reason an operator can address by changing a setting, so
+// it must be named only when the ceiling is what closed direct play and remux.
+// A file that transcodes for its codec anyway keeps the codec wording (second
+// review finding).
+func TestDecidePlaybackFor_BitrateReasonOnlyWhenDecisive(t *testing.T) {
+	aac := []models.AudioTrack{{Index: 0, Codec: "aac", Channels: 2, IsDefault: true}}
+	decide := func(capsStr, container, codec string, ceiling, source int64) PlaybackDecision {
+		caps := ParseClientCaps(capsStr)
+		caps.FMP4 = true
+		caps.MaxBitrate = ceiling
+		return DecidePlaybackFor(DecisionInput{
+			Container: container, VideoCodec: codec, PixFmt: "yuv420p",
+			AudioTracks: aac, Caps: caps, SourceBitrate: source,
+		})
+	}
+	h264Only := "h264,aac,ac3,mp4_container,webm_container,hls_js"
+
+	// HEVC on an H.264-only client: a transcode with or without the ceiling.
+	pd := decide(h264Only, "mp4", "hevc", 8_000_000, 60_000_000)
+	if pd.Decision != "transcode" {
+		t.Fatalf("hevc over ceiling = %q, want transcode", pd.Decision)
+	}
+	if got := ReasonCode(pd); got != ReasonVideoCodec {
+		t.Errorf("hevc over ceiling bucket = %q (reason %q), want %q", got, pd.TranscodeReason, ReasonVideoCodec)
+	}
+	// VP9 in an unclaimed container: the client decodes it, remux is closed
+	// to it, the container is not direct-playable — a transcode regardless,
+	// and the wording must still say "cannot be remuxed", not "not supported".
+	vp9 := "h264,vp9,aac,ac3,mp4_container,webm_container,hls_js"
+	pd = decide(vp9, "mkv", "vp9", 8_000_000, 60_000_000)
+	if pd.Decision != "transcode" || !strings.Contains(pd.TranscodeReason, "cannot be remuxed") {
+		t.Errorf("vp9 in mkv over ceiling = %q %q, want a transcode that says cannot be remuxed", pd.Decision, pd.TranscodeReason)
+	}
+	if got := ReasonCode(pd); got == ReasonBitrate {
+		t.Errorf("vp9 in mkv over ceiling bucket = %q; the ceiling changed nothing", got)
+	}
+	// The same VP9 file in a claimed container direct-plays uncapped, so
+	// there the ceiling IS decisive.
+	pd = decide(vp9, "webm", "vp9", 8_000_000, 60_000_000)
+	if pd.Decision != "transcode" || ReasonCode(pd) != ReasonBitrate {
+		t.Errorf("vp9 in webm over ceiling = %q bucket %q (reason %q), want transcode/bitrate", pd.Decision, ReasonCode(pd), pd.TranscodeReason)
+	}
+	// H.264 in MKV: uncapped it remuxes, so the ceiling is decisive.
+	pd = decide(h264Only, "mkv", "h264", 8_000_000, 60_000_000)
+	if pd.Decision != "transcode" || ReasonCode(pd) != ReasonBitrate {
+		t.Errorf("h264 in mkv over ceiling = %q bucket %q, want transcode/bitrate", pd.Decision, ReasonCode(pd))
 	}
 }
 
