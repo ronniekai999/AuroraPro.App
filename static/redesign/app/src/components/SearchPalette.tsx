@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { lockBodyScroll } from '@/lib/scrollLock'
+import { useExitTransition } from '@/hooks/useExitTransition'
 import { searchStatusMessage } from '@/lib/searchStatus'
 import { searchMedia, type UIMedia } from '@/lib/api'
 import { Icon } from '@/components/Icon'
@@ -61,22 +62,28 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // the highlighted row into view if the user arrow-keys past the
   // visible window.
   const listRef = useRef<HTMLDivElement | null>(null)
+  // The palette stays mounted for its exit fade after `open` flips false.
+  const exit = useExitTransition(open)
 
   // Focus the input on every open. autoFocus on the input only
   // works on first mount; this effect handles re-opens too. setTimeout
   // hop ensures the element is in the DOM and laid out before focus
   // (avoids a Safari quirk where focus() fires before render).
   useEffect(() => {
-    if (!open) {
-      // Reset state on close so a re-open is a clean slate.
-      setQuery(initialQuery)
-      setResults([])
-      setHighlighted(0)
-      return
-    }
+    if (!open) return
     const t = window.setTimeout(() => inputRef.current?.focus(), 0)
     return () => window.clearTimeout(t)
-  }, [open, initialQuery])
+  }, [open])
+  // Reset state once the palette has actually LEFT the DOM, so a re-open
+  // is a clean slate. Keyed on `mounted`, not `open`: for the exit fade the
+  // palette is still visible after `open` flips false, and resetting then
+  // emptied the result list under the user mid-fade.
+  useEffect(() => {
+    if (exit.mounted) return
+    setQuery(initialQuery)
+    setResults([])
+    setHighlighted(0)
+  }, [exit.mounted, initialQuery])
 
   // Debounced search. AbortController cancels in-flight requests on
   // each new keystroke so we don't race-condition the result list.
@@ -194,7 +201,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
     row?.scrollIntoView({ block: 'nearest' })
   }, [highlighted, open])
 
-  if (!open) return null
+  if (!exit.mounted) return null
 
   // The listbox element is rendered iff there are options to put in it, and
   // `aria-expanded` tracks exactly that — see the note at the combobox.
@@ -208,7 +215,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in"
+      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in${exit.closing ? ' is-closing' : ''}`}
       onClick={(e) => {
         // Click outside the panel closes. The backdrop below is a
         // covering child, so target !== currentTarget for backdrop

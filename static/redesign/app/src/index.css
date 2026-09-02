@@ -2504,6 +2504,32 @@ html[data-glow="subtle"] .badge-glass {
   animation: fadeIn 0.4s ease-out forwards;
 }
 
+/* Exit animations (UI polish pass). Surfaces that enter with
+   .animate-fade-in get `.is-closing` from useExitTransition for the last
+   --dur-fast before they unmount; the toast, which enters with slideIn,
+   gets `.is-leaving`. Both are declared AFTER the enter rules so the exit
+   wins the `animation` shorthand at equal specificity, and both animate to
+   opacity 0 with `forwards` so the surface cannot flash back to full
+   opacity between the animation's end and the unmount. Class selectors
+   (not bare [data-state]) because audit-reduced-motion resolves a
+   keyframe's owner by class. */
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes slideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+.animate-fade-in.is-closing {
+  animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+.toast.is-leaving {
+  animation: slideOut var(--dur-base) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
 /* Hero backdrop layers (HeroSection). The transform reads the parallax
    custom properties the section writes from a rAF (--hero-px/--hero-py,
    each in [-1, 1] → ±1% drift inside the 5% overscan), and the fade is
@@ -4020,6 +4046,13 @@ textarea:focus-visible {
      leaves them at their author style (visible, untransformed). */
   .animate-fade-in,
   .toast {
+    animation: none !important;
+  }
+  /* Exits, too — the hook unmounts immediately under reduced motion, so
+     these never run there; nulled for the audit's coverage check and for
+     any caller that adds the class by hand. */
+  .animate-fade-in.is-closing,
+  .toast.is-leaving {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than

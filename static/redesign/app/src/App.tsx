@@ -127,6 +127,7 @@ import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/pu
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
+import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
 // Chunk loaders, named so the nav can PREFETCH a view's code on hover /
@@ -1638,7 +1639,9 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
     const id = window.setInterval(tick, 5000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [open, isAdmin])
-  if (!open) return null
+  // Stays mounted for the exit fade (is-closing) after `open` flips false.
+  const exit = useExitTransition(open)
+  if (!exit.mounted) return null
   const fmtBytes = (n: number): string => {
     if (n <= 0) return '0 B'
     const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -1704,7 +1707,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1845,7 +1848,9 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     if (diff < 86_400_000) return `${hrs} ${hrs === 1 ? 'hr' : 'hrs'} ago`
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
-  if (!open) return null
+  // Stays mounted for the exit fade (is-closing) after `open` flips false.
+  const exit = useExitTransition(open)
+  if (!exit.mounted) return null
   // QA BUG-006 — anchor near the Notifications trigger rather than the
   // top-left of the content area, where it covered the page heading and
   // looked unrelated to the button that opened it. As with ServerPanel,
@@ -1862,7 +1867,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
