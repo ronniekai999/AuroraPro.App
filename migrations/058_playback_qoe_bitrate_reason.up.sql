@@ -12,10 +12,15 @@
 --
 -- The CHECK is replaced rather than altered in place (Postgres has no ALTER
 -- CONSTRAINT for CHECK). The constraint name is the one Postgres generated
--- for the inline column CHECK in migration 056.
+-- for the inline column CHECK in migration 056 (<table>_<column>_check).
+-- The DROP is deliberately NOT `IF EXISTS`: if the name ever differed, a
+-- lenient drop would leave the old CHECK in place beside the new one and
+-- every 'bitrate' row would be rejected at runtime — the exact failure the
+-- vocabulary test exists to prevent — whereas a strict drop fails here, at
+-- migration time, where it is seen.
 
 ALTER TABLE playback_qoe_sessions
-    DROP CONSTRAINT IF EXISTS playback_qoe_sessions_decision_reason_check;
+    DROP CONSTRAINT playback_qoe_sessions_decision_reason_check;
 
 ALTER TABLE playback_qoe_sessions
     ADD CONSTRAINT playback_qoe_sessions_decision_reason_check

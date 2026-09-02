@@ -236,6 +236,12 @@ func ResolveProfiles(enabled []string, sourceWidth, sourceHeight int) []QualityP
 // ladder still has to play something, and the smallest rung is the best the
 // server can do for it. Profiles arrive highest-first (ProfileOrder), so the
 // lowest rung is the last entry.
+//
+// audioBitsPerSec is the DECLARED audio figure (AudioDeclaredBitrate), which
+// under-declares a copied track on purpose, so a rung is judged against the
+// bandwidth the playlist advertises rather than the bytes a copied 640 kbps
+// AC-3 track actually costs — a kept rung can sit that delta over the
+// ceiling. Known and documented; the probe records no per-track bitrate.
 func capLadder(profiles []QualityProfile, maxBitrate int64, audioBitsPerSec int) []QualityProfile {
 	if maxBitrate <= 0 || len(profiles) == 0 {
 		return profiles

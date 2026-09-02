@@ -2573,17 +2573,58 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // start. Keeping the skip in-session leaves the other rungs at the
         // old anchor, and an up-switch after it chases from there — the
         // documented up-switch stall, now reachable with a far longer gap.
-        // The same per-level edge is what the BUFFER_STALLED_ERROR handler
-        // below reads to contain that: a stall with the level's edge well
-        // behind the playhead rebuilds at the playhead.
-        const noteProducedEdge = (details?: { fragments?: Array<{ start: number; duration: number }> }) => {
+        // The same per-level edge is what contains that, at two points
+        // below (LEVEL_UPDATED and the BUFFER_STALLED_ERROR handler): the
+        // level's edge behind the playhead rebuilds at the playhead.
+        const noteProducedEdge = (details?: { fragments?: Array<{ start: number; duration: number }> }): number => {
           const frags = details?.fragments
-          if (!frags || frags.length === 0) return
+          if (!frags || frags.length === 0) return 0
           const last = frags[frags.length - 1]
           producedEdgeSecRef.current = last.start + last.duration + (startSecRef.current ?? 0)
+          return producedEdgeSecRef.current
         }
-        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => noteProducedEdge(data.details))
-        hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => noteProducedEdge(data.details))
+        // Up-switch stall containment — the rule and the hls.js behaviour it
+        // answers are documented on levelLagsPlayhead. hls.js 1.6's
+        // stream controller does not wait quietly for a lagging rung: its
+        // synchronizeToLiveEdge REWINDS the element to the live-sync position
+        // when the playhead is past the loaded level's edge with
+        // readyState < 4 (third review; reasoned from the 1.6.17 source, not
+        // exercised in a browser). Either trigger rebuilds the session at
+        // the playhead — every rung re-anchors there — through seekToRealSec
+        // so the party/pause-intent handling is the seek-rebuild's.
+        const rebuildAtPlayheadForLaggingLevel = (playheadAbs: number, edgeAbs: number, trigger: string) => {
+          if (cancelled || !playerReadyRef.current || sessionIdRef.current === null || lagRebuildFiredRef.current) return
+          lagRebuildFiredRef.current = true
+          console.warn('[Aurora hls.js] level', hls.currentLevel, 'has produced to',
+            edgeAbs.toFixed(1), 's but the playhead is at', playheadAbs.toFixed(1),
+            's (' + trigger + ') — rebuilding the session here')
+          // The rebuild replaces this instance on the next render. Until
+          // then its synchronizeToLiveEdge — which runs right after the
+          // LEVEL_UPDATED listeners return, and on every later playlist
+          // load — would still rewind the element. It reads
+          // `this.hls.liveSyncPosition` and bails on null, so shadowing that
+          // getter on this now-disposable instance makes it a no-op and the
+          // element keeps the position the rebuild captured.
+          try {
+            Object.defineProperty(hls, 'liveSyncPosition', { value: null, configurable: true })
+          } catch { /* best effort — the rebuild target is already captured */ }
+          setStatus('Rendition fell behind — restarting from here…')
+          seekToRealSecRef.current(playheadAbs, { forceRebuild: true })
+        }
+        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => { noteProducedEdge(data.details) })
+        hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => {
+          const edgeAbs = noteProducedEdge(data.details)
+          // hls.js emits LEVEL_UPDATED inside its own onLevelLoaded BEFORE
+          // synchronizeToLiveEdge, so this listener — and only this one —
+          // runs before the rewind. Catch the lagging level under the
+          // rewind's own condition and rebuild instead. (Our LEVEL_LOADED
+          // listener runs after hls.js's, i.e. after the rewind.)
+          if (!data.details.live || !(edgeAbs > 0)) return
+          const playheadAbs = vid.currentTime + (startSecRef.current ?? 0)
+          if (vid.readyState < HTMLMediaElement.HAVE_ENOUGH_DATA && levelLagsPlayhead(playheadAbs, edgeAbs)) {
+            rebuildAtPlayheadForLaggingLevel(playheadAbs, edgeAbs, 'live-edge sync')
+          }
+        })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
@@ -2738,39 +2779,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         })
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (cancelled) return
-          // Up-switch stall containment (September 2026 pass, second review;
-          // the rule itself is levelLagsPlayhead). Every rung encodes
-          // sequentially from the session anchor, so a rung hls.js switches
-          // onto minutes into a title publishes from the anchor and hls.js
-          // chases it: it keeps loading the newest fragment of the new level
-          // (all behind the playhead, evicted at once) while the old level's
-          // buffer plays out, then stalls until the new rung's playlist
-          // passes the playhead — minutes after a long in-session skip, and
-          // forever on an encoder slower than realtime. hls.js reports that
-          // starved buffer once per stall as a non-fatal BUFFER_STALLED_ERROR
-          // (gap-controller `_reportStall`, "due to low buffer"). When the
-          // level's produced edge is well behind the playhead, the chase
-          // cannot be near its end, so rebuild the session at the playhead:
-          // every rung re-anchors there and playback resumes after a cold
-          // start instead of the stall. Routed through seekToRealSec so the
-          // party/pause-intent handling is the seek-rebuild's. Keyed on the
-          // stall rather than the switch, so an up-switch whose catch-up the
-          // buffer covers stays seamless, and any other stall (edge ahead of
-          // the playhead) is left to hls.js's own nudge.
+          // Up-switch stall containment, second trigger (see
+          // rebuildAtPlayheadForLaggingLevel and levelLagsPlayhead). hls.js
+          // reports a starved buffer once per stall as this non-fatal error
+          // (gap-controller `_reportStall`, "due to low buffer"), on Chromium
+          // within ~100 ms of the underflow — seconds before the next
+          // playlist load would reach the LEVEL_UPDATED trigger. A stall with
+          // the level's edge at or ahead of the playhead is left to hls.js.
           if (!data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
             const playheadAbs = vid.currentTime + (startSecRef.current ?? 0)
-            if (
-              playerReadyRef.current &&
-              sessionIdRef.current !== null &&
-              !lagRebuildFiredRef.current &&
-              levelLagsPlayhead(playheadAbs, producedEdgeSecRef.current)
-            ) {
-              lagRebuildFiredRef.current = true
-              console.warn('[Aurora hls.js] level', hls.currentLevel, 'produced to',
-                producedEdgeSecRef.current.toFixed(1), 's but the playhead is at',
-                playheadAbs.toFixed(1), 's — rebuilding the session here')
-              setStatus('Rendition fell behind — restarting from here…')
-              seekToRealSecRef.current(playheadAbs, { forceRebuild: true })
+            if (levelLagsPlayhead(playheadAbs, producedEdgeSecRef.current)) {
+              rebuildAtPlayheadForLaggingLevel(playheadAbs, producedEdgeSecRef.current, 'buffer stall')
             }
             return
           }

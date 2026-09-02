@@ -42,10 +42,18 @@ func TestFFmpegVersionMinor(t *testing.T) {
 		{"ffmpeg version git-2020-03-04-e2eb04b Copyright", 0, 0},
 		{"ffmpeg version 2024-01-01", 0, 0},
 		{"ffmpeg version 6.1", 6, 1},
-		// The snapshot marker is a whole dash-separated field; a vendor
-		// suffix that merely contains the letters is still a release.
-		{"ffmpeg version 6.1.1-digital Copyright", 6, 1},
-		{"ffmpeg version 7.1-legit Copyright", 7, 1},
+		// FFmpeg's version.sh falls back to the RELEASE file without git
+		// metadata, and on master that file reads "N.N.git": a snapshot whose
+		// digits name the release it PRECEDES (third review). "git"/"dev"
+		// anywhere in the token means unknown — over-broadly on purpose,
+		// because unknown only costs a build the burst and the pacing while
+		// a snapshot read as a release costs it every transcode.
+		{"ffmpeg version 6.1.git Copyright", 0, 0},
+		{"ffmpeg version 7.1.git-20240902 Copyright", 0, 0},
+		{"ffmpeg version n6.1-dev-1234-gabcdef Copyright", 0, 0},
+		{"ffmpeg version 6.1.1-digital Copyright", 0, 0}, // over-broad, by design
+		// A release-branch build described from its tag is a real release.
+		{"ffmpeg version n7.0.2-6-g1234abc Copyright", 7, 0},
 		{"garbage", 0, 0},
 		{"", 0, 0},
 	} {
@@ -432,6 +440,7 @@ func TestNormalizeLang(t *testing.T) {
 		"mi": "mri", "mao": "mri",
 		"bn": "ben", "ta": "tam", "hr": "hrv", "sr": "srp", "bg": "bul", "ca": "cat",
 		"he": "heb", "hi": "hin", "ko": "kor", "pt-BR": "por", "es_419": "spa",
+		"tl": "tgl", "tgl": "tgl", "fil": "tgl",
 		// Norwegian: one preference covers both written forms.
 		"no": "nor", "nor": "nor", "nb": "nor", "nob": "nor", "nn": "nor", "nno": "nor",
 	} {
@@ -705,6 +714,88 @@ func TestDecidePlaybackFor_PreferredLanguageGatesDirectPlay(t *testing.T) {
 	// And a client that CAN decode the preferred default keeps direct play.
 	if pd := decide("mp4", "ja", dtsJpnDefaultAacEng, nativeDTSNoTrueHD); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
 		t.Errorf("decodable preferred default: %s track %d, want direct_play track 0", pd.Decision, pd.AudioTrackIndex)
+	}
+}
+
+func TestEffectiveDefaultIndex(t *testing.T) {
+	if got := effectiveDefaultIndex(nil); got != -1 {
+		t.Errorf("no tracks: %d, want -1", got)
+	}
+	noFlags := []models.AudioTrack{{Index: 0}, {Index: 1}}
+	if got := effectiveDefaultIndex(noFlags); got != 0 {
+		t.Errorf("no flags: %d, want 0", got)
+	}
+	secondFlagged := []models.AudioTrack{{Index: 0}, {Index: 1, IsDefault: true}}
+	if got := effectiveDefaultIndex(secondFlagged); got != 1 {
+		t.Errorf("second flagged: %d, want 1", got)
+	}
+	bothFlagged := []models.AudioTrack{{Index: 0, IsDefault: true}, {Index: 1, IsDefault: true}}
+	if got := effectiveDefaultIndex(bothFlagged); got != 0 {
+		t.Errorf("both flagged: %d, want 0 (players start the first)", got)
+	}
+	if !effectiveDefaultTrack(bothFlagged, 0) || effectiveDefaultTrack(bothFlagged, 1) {
+		t.Error("exactly one track is the effective default")
+	}
+	if effectiveDefaultTrack(bothFlagged, -1) || effectiveDefaultTrack(bothFlagged, 2) {
+		t.Error("out-of-range indices are never the default")
+	}
+}
+
+// TestDecidePlaybackFor_MultipleDefaultFlags: files with the default flag on
+// several audio tracks are real (GPAC/MP4Box, Apple tooling, `ffmpeg -c copy`
+// of either), and a player starts exactly one of them — the first. Treating
+// every flagged track as "the default" direct-played a file for a track the
+// browser would never start (third review).
+func TestDecidePlaybackFor_MultipleDefaultFlags(t *testing.T) {
+	chromium := ParseClientCaps("h264,aac,ac3,mp4_container,webm_container,hls_js")
+	chromium.FMP4 = true
+	decide := func(lang string, tracks []models.AudioTrack) PlaybackDecision {
+		return DecidePlaybackFor(DecisionInput{
+			Container: "mp4", VideoCodec: "h264", PixFmt: "yuv420p",
+			AudioTracks: tracks, Caps: chromium, PreferredAudioLang: lang,
+		})
+	}
+
+	bothDefault := []models.AudioTrack{
+		{Index: 0, Codec: "aac", Channels: 2, Language: "eng", IsDefault: true},
+		{Index: 1, Codec: "aac", Channels: 2, Language: "jpn", IsDefault: true},
+	}
+	// The browser would start track 0: Japanese needs a remux to select
+	// track 1, copied. It used to direct-play — the English track.
+	pd := decide("ja", bothDefault)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioPassthrough {
+		t.Errorf("both flagged, ja: %s track %d copy=%v, want direct_stream track 1 copied", pd.Decision, pd.AudioTrackIndex, pd.AudioPassthrough)
+	}
+	if got := ReasonCode(pd); got != ReasonAudioTrack {
+		t.Errorf("both flagged, ja: bucket %q, want %q (reason %q)", got, ReasonAudioTrack, pd.TranscodeReason)
+	}
+	for _, lang := range []string{"", "en"} {
+		if pd := decide(lang, bothDefault); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+			t.Errorf("both flagged, %q: %s track %d, want direct_play track 0", lang, pd.Decision, pd.AudioTrackIndex)
+		}
+	}
+
+	// DTS Japanese (first flagged) + AAC Japanese (also flagged) + AAC English.
+	threeTracks := []models.AudioTrack{
+		{Index: 0, Codec: "dts", Channels: 6, Language: "jpn", IsDefault: true},
+		{Index: 1, Codec: "aac", Channels: 2, Language: "jpn", IsDefault: true},
+		{Index: 2, Codec: "aac", Channels: 2, Language: "eng"},
+	}
+	// Japanese: the copyable AAC track, selected by remux — NOT a full video
+	// transcode of a decodable file (the review's reproduction).
+	pd = decide("ja", threeTracks)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioPassthrough || pd.VideoCodecOut != "" {
+		t.Errorf("three tracks, ja: %s track %d copy=%v out=%q (reason %q), want direct_stream track 1 copied",
+			pd.Decision, pd.AudioTrackIndex, pd.AudioPassthrough, pd.VideoCodecOut, pd.TranscodeReason)
+	}
+	// No preference: the browser would start the DTS track it cannot decode,
+	// so this file is a remux of track 1 — it used to direct-play (silently).
+	pd = decide("", threeTracks)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioPassthrough {
+		t.Errorf("three tracks, no pref: %s track %d copy=%v, want direct_stream track 1 copied", pd.Decision, pd.AudioTrackIndex, pd.AudioPassthrough)
+	}
+	if pd := decide("en", threeTracks); pd.Decision != "direct_stream" || pd.AudioTrackIndex != 2 || !pd.AudioPassthrough {
+		t.Errorf("three tracks, en: %s track %d copy=%v, want direct_stream track 2 copied", pd.Decision, pd.AudioTrackIndex, pd.AudioPassthrough)
 	}
 }
 

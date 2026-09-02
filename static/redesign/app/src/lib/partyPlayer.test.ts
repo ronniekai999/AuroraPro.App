@@ -209,22 +209,26 @@ describe('sequential HLS seek policy', () => {
   })
 
   describe('levelLagsPlayhead (up-switch stall containment)', () => {
-    it('flags a stall on a rung whose playlist ends well behind the playhead', () => {
+    it('flags a rung whose playlist ends behind the playhead', () => {
       // Skipped to 35:00 in-session, then hls.js switched up onto a rung
-      // that has published 12 s from the anchor: the chase is minutes long.
+      // that has published 12 s from the anchor: hls.js would rewind to
+      // ~0:00 on the next playlist load once readyState drops below 4.
       expect(levelLagsPlayhead(35 * 60, 12)).toBe(true)
       // Anchored session: the edge is absolute, so is the playhead.
       expect(levelLagsPlayhead(600 + 35 * 60, 600 + 12)).toBe(true)
+      // Any real excess counts — hls.js's own test has no tolerance, and a
+      // small lag rewinds just the same (~18 s) rather than resolving.
+      expect(levelLagsPlayhead(1200.5, 1200)).toBe(true)
+      expect(levelLagsPlayhead(1212, 1200)).toBe(true)
     })
 
-    it('leaves a stall at or near the produced edge to hls.js', () => {
+    it('leaves a stall at the produced edge to hls.js', () => {
       // An encoder slower than realtime on the level in play: the playhead
-      // sits AT the edge (it cannot pass buffered content), never behind it.
+      // sits AT the edge (it cannot pass buffered content), never beyond it.
       expect(levelLagsPlayhead(1200, 1200)).toBe(false)
-      expect(levelLagsPlayhead(1200.4, 1200)).toBe(false)
-      // A chase within the threshold resolves on its own within seconds.
-      expect(levelLagsPlayhead(1212, 1200)).toBe(false)
-      expect(levelLagsPlayhead(1212.5, 1200)).toBe(true)
+      expect(levelLagsPlayhead(1199.5, 1200)).toBe(false)
+      // Timestamp rounding, within the tolerance.
+      expect(levelLagsPlayhead(1200.05, 1200)).toBe(false)
     })
 
     it('never triggers on an unknown edge or a bad playhead', () => {

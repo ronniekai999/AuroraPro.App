@@ -86,12 +86,15 @@ var iso6392BToT = map[string]string{
 //   - "jp" is not a 639 code but is common in fan-tagged files;
 //   - "cmn" (639-3 Mandarin) is what a "zh" preference means in practice;
 //   - Bokmål and Nynorsk fold onto Norwegian, so one preference — "no" —
-//     covers both written forms, and "nb"/"nn" match a track tagged "nor".
+//     covers both written forms, and "nb"/"nn" match a track tagged "nor";
+//   - "fil" (Filipino) folds onto Tagalog: files carry either tag for the
+//     same dub, and 639-1 has only "tl".
 var langExtraFolds = map[string]string{
 	"jp":  "jpn",
 	"cmn": "zho",
 	"nob": "nor",
 	"nno": "nor",
+	"fil": "tgl",
 }
 
 // normalizeLang folds a language tag onto its canonical code. "" (no tag),

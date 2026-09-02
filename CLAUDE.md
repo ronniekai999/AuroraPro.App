@@ -421,24 +421,41 @@ Invariants to preserve:
   old behaviour. This widens the up-switch stall's reach — before it, a
   long skip re-anchored EVERY rung at the target as a side effect — so it
   ships with the containment below; do not take one without the other.
-- **The up-switch stall is contained at the STALL, not at the switch.**
-  hls.js reports a starved buffer once per stall as a non-fatal
-  `BUFFER_STALLED_ERROR`; when the level's produced edge is more than
-  `LEVEL_LAG_REBUILD_SEC` behind the playhead (`levelLagsPlayhead`), the
-  player rebuilds the session at the playhead through `seekToRealSec`'s
-  `forceRebuild` (one-shot per session, `lagRebuildFiredRef`). Keying on
-  the stall keeps every up-switch whose catch-up the buffer covers
-  seamless, and a stall with the edge AT the playhead — an encoder slower
-  than realtime on the level in play — is left to hls.js. Reasoned from
-  the hls.js 1.6 gap-controller source, not exercised in a browser.
+- **The up-switch stall is contained by pre-empting hls.js's live-edge
+  REWIND, not by waiting for a stall.** hls.js 1.6 does not wait quietly
+  for a lagging rung: its stream controller runs `synchronizeToLiveEdge`
+  on every load of a live (no ENDLIST) playlist and rewinds the element to
+  the live-sync position whenever the playhead is past the loaded level's
+  edge with `readyState < 4` (at the underflow on Chromium, with seconds
+  of buffer left on Firefox, right after any seek). `LEVEL_UPDATED` is
+  emitted inside hls.js's `onLevelLoaded` BEFORE that sync — the one
+  listener that runs before the rewind — so the player checks
+  `levelLagsPlayhead` there under the same `readyState` condition, and
+  again on the non-fatal `BUFFER_STALLED_ERROR` (Chromium's faster path);
+  either rebuilds the session at the playhead through `seekToRealSec`'s
+  `forceRebuild` (one-shot per session, `lagRebuildFiredRef`) and shadows
+  the disposable instance's `liveSyncPosition` so it cannot rewind while
+  the rebuild is in flight. The tolerance is 100 ms, because hls.js's own
+  test has none and the playhead cannot pass what the level has published;
+  a stall with the edge AT the playhead — an encoder slower than realtime
+  on the level in play — is left to hls.js. Reasoned from the hls.js
+  1.6.17 source (`synchronizeToLiveEdge`, gap-controller), not exercised in
+  a browser; per-browser `readyState` timing is reasoned, not measured.
+- **`effectiveDefaultIndex` is the one model of "the track a player
+  starts"**: the FIRST flagged default, else track 0. Files with several
+  flagged tracks are real (MP4Box, Apple tooling, `ffmpeg -c copy` of
+  either); treating each as "the default" direct-played the wrong track
+  (third review). Every default check goes through it.
 
 Known limits, stated plainly: the up-switch stall (a rung started mid-play
 encodes from the session anchor, not the playhead) is CONTAINED here, not
-fixed — a multi-minute or permanent stall becomes one cold restart at the
-playhead after the old level's buffer plays out. The fix is the
-segment-addressable VOD playlist model, which is the open strategic item.
-Dolby Vision profile 5 is still undetected by the scanner; detection alone
-would only move its wrong colours from direct play to a transcode until a
-DV-aware tonemap (libplacebo) is probed in. The limiter policies carry a
-fixed 5 ms audio delay (alimiter's uncompensated look-ahead; see
-`downmixLimiter`).
+fixed — a multi-minute rewind-or-stall becomes one cold restart at the
+playhead. The fix is the segment-addressable VOD playlist model, which is
+the open strategic item. `capLadder` judges rungs by their DECLARED
+bandwidth, which counts a copied audio track at its re-encode figure, so a
+kept rung can sit a copied track's delta over the ceiling (the probe records
+no per-track bitrate). Dolby Vision profile 5 is still undetected by the
+scanner; detection alone would only move its wrong colours from direct play
+to a transcode until a DV-aware tonemap (libplacebo) is probed in. The
+limiter policies carry a fixed 5 ms audio delay (alimiter's uncompensated
+look-ahead; see `downmixLimiter`).

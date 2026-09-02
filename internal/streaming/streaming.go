@@ -657,6 +657,29 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 	// This ensures HEVC files on HLS.js clients fall through to full
 	// transcode rather than producing unplayable .ts segments.
 
+	if remuxVideoOK && containerOK && audioOK && isDefaultTrack {
+		// Every path-level check passed and the HLS pick is the playable
+		// default, yet direct play was withheld above — the one gate left is
+		// the language one, and with one effective default per file that
+		// combination is unreachable: a withheld preferred track is either
+		// not the default (branch below) or not copyable (branch after it).
+		// It is guarded anyway because the fall-through is the worst answer
+		// in the file — a full video transcode of a decodable file with a
+		// "video codec not supported" reason (third review, reached through
+		// the multi-default inconsistency effectiveDefaultIndex closed). A
+		// remux that selects the track is the honest floor.
+		safe := RemuxAudioCopySafe(bestCodec, clientCaps.FMP4)
+		return PlaybackDecision{
+			Decision:         "direct_stream",
+			TranscodeReason:  fmt.Sprintf("direct play unavailable for audio track %d; remux needed to select it", bestIdx),
+			AudioTrackIndex:  bestIdx,
+			AudioNeedsRecode: !safe,
+			Remux:            true,
+			AudioPassthrough: safe,
+			AudioCodec:       bestCodec,
+		}
+	}
+
 	if remuxVideoOK && containerOK && audioOK && !isDefaultTrack {
 		// Video + container OK, audio IS compatible but only a non-default
 		// track. Must remux to select the compatible track via -map 0:a:N.
@@ -1231,23 +1254,35 @@ func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps, prefLang s
 	return 0, strings.ToLower(tracks[0].Codec), false, true
 }
 
-// effectiveDefaultTrack reports whether track i is the one a player selects
-// on its own: the track flagged default, or — because many containers
-// (especially MKV from mkvmerge) flag none, in which case players take the
-// first — track 0 when no track carries the flag.
-func effectiveDefaultTrack(tracks []models.AudioTrack, i int) bool {
-	if i < 0 || i >= len(tracks) {
-		return false
+// effectiveDefaultIndex returns the ONE track a player selects on its own,
+// or -1 for a file with no audio: the first track flagged default, or —
+// because many containers (especially MKV from mkvmerge) flag none, in which
+// case players take the first — track 0 when no track carries the flag.
+//
+// "First flagged", not "any flagged": a file can carry the flag on several
+// tracks (GPAC/MP4Box and Apple tooling enable every track, and `ffmpeg -map
+// 0 -c copy` keeps the dispositions), and every player still starts exactly
+// one of them, the first. Treating every flagged track as "the default" let
+// the engine direct-play a file for a track the browser would never start
+// (third review): a second-flagged preferred-language track direct-played
+// the wrong language, and a second-flagged copyable track direct-played a
+// file whose actual default was undecodable.
+func effectiveDefaultIndex(tracks []models.AudioTrack) int {
+	if len(tracks) == 0 {
+		return -1
 	}
-	if tracks[i].IsDefault {
-		return true
-	}
-	for _, t := range tracks {
+	for i, t := range tracks {
 		if t.IsDefault {
-			return false
+			return i
 		}
 	}
-	return i == 0
+	return 0
+}
+
+// effectiveDefaultTrack reports whether track i is the one a player selects
+// on its own — see effectiveDefaultIndex.
+func effectiveDefaultTrack(tracks []models.AudioTrack, i int) bool {
+	return i >= 0 && i == effectiveDefaultIndex(tracks)
 }
 
 // pathWithinRoot reports whether target, after symlink resolution, stays inside
@@ -2098,13 +2133,17 @@ func ffmpegVersion(banner string) (major, minor int) {
 	// leading digits, but the date-stamped form ("2023-06-05-git-…") does,
 	// and reading its year as a major would enable every version-gated flag
 	// on a build that may predate all of them — the burst flag is fatal at
-	// launch on a build that lacks it (review finding). The marker is a whole
-	// dash-separated field, not a substring: a vendor suffix that merely
-	// contains the letters ("6.1.1-digital") is still a release.
-	for _, field := range strings.Split(ver, "-") {
-		if field == "git" {
-			return 0, 0
-		}
+	// launch on a build that lacks it (review finding). FFmpeg's version.sh
+	// also falls back to the RELEASE file when there is no git metadata, and
+	// on master that file reads "N.N.git" ("6.1.git", "7.1.git-20240902"),
+	// with "nN.N-dev-…" from `git describe` on a dev tag — all snapshots
+	// whose leading digits name a release they PRECEDE (third review). So a
+	// "git" or "dev" anywhere in the token means unknown, over-broadly on
+	// purpose: a vendor suffix that merely contains the letters
+	// ("6.1.1-digital") loses the burst and the pacing, which is the safe
+	// direction; a snapshot read as a release loses every transcode.
+	if strings.Contains(ver, "git") || strings.Contains(ver, "dev") {
+		return 0, 0
 	}
 	i := 0
 	for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
@@ -2757,7 +2796,13 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		// Client bitrate ceiling: rungs the client asked not to receive are
 		// never offered, so hls.js cannot climb onto them and the server
 		// never starts their encoders. Done before the variant directories
-		// are created below, so a dropped rung leaves nothing on disk.
+		// are created below, so a dropped rung leaves nothing on disk. The
+		// cap compares the same declared bandwidth the playlist advertises,
+		// which counts a COPIED audio track at its re-encode figure
+		// (AudioDeclaredBitrate under-declares on purpose; the probe carries
+		// no per-track bitrate to do better), so a copied 640 kbps AC-3 track
+		// can leave a kept rung ~200 kbps over the ceiling. Self-limiting,
+		// like the rest of the parameter, and documented in the contract.
 		if len(opts) > 0 {
 			profiles = capLadder(profiles, opts[0].MaxBitrate, audioBits)
 		}

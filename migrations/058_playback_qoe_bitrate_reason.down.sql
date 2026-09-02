@@ -4,7 +4,7 @@ UPDATE playback_qoe_sessions SET decision_reason = 'unspecified'
     WHERE decision_reason = 'bitrate';
 
 ALTER TABLE playback_qoe_sessions
-    DROP CONSTRAINT IF EXISTS playback_qoe_sessions_decision_reason_check;
+    DROP CONSTRAINT playback_qoe_sessions_decision_reason_check;
 
 ALTER TABLE playback_qoe_sessions
     ADD CONSTRAINT playback_qoe_sessions_decision_reason_check
