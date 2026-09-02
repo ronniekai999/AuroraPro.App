@@ -230,6 +230,28 @@ func ResolveProfiles(enabled []string, sourceWidth, sourceHeight int) []QualityP
 	return result
 }
 
+// capLadder drops the rungs whose declared bandwidth (video plus the session's
+// audio cost) exceeds the client's bitrate ceiling. maxBitrate <= 0 means no
+// ceiling. At least the lowest rung is always kept: a ceiling below the whole
+// ladder still has to play something, and the smallest rung is the best the
+// server can do for it. Profiles arrive highest-first (ProfileOrder), so the
+// lowest rung is the last entry.
+func capLadder(profiles []QualityProfile, maxBitrate int64, audioBitsPerSec int) []QualityProfile {
+	if maxBitrate <= 0 || len(profiles) == 0 {
+		return profiles
+	}
+	kept := make([]QualityProfile, 0, len(profiles))
+	for _, p := range profiles {
+		if int64(p.LadderBandwidth(audioBitsPerSec)) <= maxBitrate {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		kept = append(kept, profiles[len(profiles)-1])
+	}
+	return kept
+}
+
 // AdjustProfileHeight computes the correct output height for a target width
 // while preserving the source aspect ratio. The result is always even
 // (required by H.264 encoders).

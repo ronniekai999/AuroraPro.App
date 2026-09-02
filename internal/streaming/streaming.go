@@ -173,6 +173,15 @@ type ClientCaps struct {
 	// transcode may emit HEVC instead of H.264 for clients that can decode
 	// it. 2026-08 review item #5.
 	HEVCEncode bool
+	// MaxBitrate is the client's declared delivery ceiling in bits per
+	// second, 0 = none. NOT parsed from the caps string — the API layer sets
+	// it from the `max_bps` request parameter, alongside FMP4/HEVCEncode. It
+	// is a constraint the client asks for (a remote viewer's uplink), not a
+	// capability, and it is self-limiting: the worst a wrong value does is
+	// transcode a file the client could have played. DecidePlaybackFor
+	// compares it against the source's probed bitrate; CreateSession caps
+	// the ABR ladder to rungs that fit under it.
+	MaxBitrate int64
 }
 
 // PlaybackDecision is the result of analyzing a file against client capabilities.
@@ -355,6 +364,29 @@ func ParseClientCaps(raw string) *ClientCaps {
 	return caps
 }
 
+// DecisionInput bundles the source facts and viewer constraints a playback
+// decision reads beyond the codec triple. DecidePlayback's positional form
+// stays for every caller that only has codecs; the API layer uses this.
+type DecisionInput struct {
+	Container   string
+	VideoCodec  string
+	PixFmt      string
+	AudioTracks []models.AudioTrack
+	Caps        *ClientCaps
+	// SourceBitrate is the file's probed overall bitrate in bits per second
+	// (ffprobe's format bit_rate), 0 when unknown. Compared against
+	// Caps.MaxBitrate: a source above the client's ceiling can neither be
+	// direct-played nor remuxed — both hand the client the source bitrate
+	// verbatim, and a single-rendition stream has nothing to adapt down to —
+	// so it transcodes, onto a ladder CreateSession caps at the same ceiling.
+	SourceBitrate int64
+	// PreferredAudioLang is the viewer's preferred spoken language in any ISO
+	// 639-1 / 639-2 form ("en", "eng", "en-US"); normalizeLang folds the
+	// aliases. Empty means no preference: the file's default track wins as
+	// it always has.
+	PreferredAudioLang string
+}
+
 // DecidePlayback evaluates a file's codecs against client capabilities and returns
 // the optimal playback strategy. If clientCaps is nil, falls back to static
 // allowlists for backward compatibility.
@@ -364,14 +396,28 @@ func ParseClientCaps(raw string) *ClientCaps {
 // via MediaSource API, even though ffprobe reports the codec as plain "h264".
 // Pass an empty string if unknown.
 func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrack, clientCaps *ClientCaps, pixFmt ...string) PlaybackDecision {
-	nc := NormalizeContainer(container)
-	vc := strings.ToLower(videoCodec)
-
-	// Extract optional pixFmt (variadic for backward compatibility)
-	videoPixFmt := ""
-	if len(pixFmt) > 0 {
-		videoPixFmt = strings.ToLower(pixFmt[0])
+	in := DecisionInput{
+		Container:   container,
+		VideoCodec:  videoCodec,
+		AudioTracks: audioTracks,
+		Caps:        clientCaps,
 	}
+	// Extract optional pixFmt (variadic for backward compatibility)
+	if len(pixFmt) > 0 {
+		in.PixFmt = pixFmt[0]
+	}
+	return DecidePlaybackFor(in)
+}
+
+// DecidePlaybackFor is DecidePlayback with the full input set: the bitrate
+// ceiling and the language preference only change a decision when the caller
+// supplies them, so every existing call site behaves exactly as before.
+func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
+	nc := NormalizeContainer(in.Container)
+	vc := strings.ToLower(in.VideoCodec)
+	videoPixFmt := strings.ToLower(in.PixFmt)
+	audioTracks := in.AudioTracks
+	clientCaps := in.Caps
 
 	// Determine primary audio codec (first track, backward compat)
 	primaryAudio := ""
@@ -466,6 +512,21 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		remuxVideoOK = false
 	}
 
+	// Bitrate ceiling (ClientCaps.MaxBitrate). Direct play and remux both
+	// deliver the source bitrate verbatim, and neither is a ladder hls.js can
+	// step down: a remote viewer handed a 60 Mbps UHD remux over a 25 Mbps
+	// link stalls in a loop with no fallback, because the transcode fallback
+	// only fires on decode errors. Above the ceiling the ONLY path is a
+	// transcode onto a ladder capped at that ceiling (CreateSession's
+	// capLadder). An unknown source bitrate (0) never trips this — the
+	// scanner has it for every file it probed, and a wrong guess here would
+	// transcode files that play fine.
+	overBitrate := clientCaps.MaxBitrate > 0 && in.SourceBitrate > clientCaps.MaxBitrate
+	if overBitrate {
+		videoOK = false
+		remuxVideoOK = false
+	}
+
 	// Check container support. Caps-driven via containerCapKey — a container
 	// with no key, or one the client did not claim, stays unsupported.
 	containerOK := false
@@ -476,7 +537,7 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// --- Direct play check (uses FULL client caps) ---
 	// Direct play serves the original file — no HLS, no .ts segments.
 	// The browser plays natively, so all MSE-reported codecs are valid.
-	dpIdx, dpCodec, dpAudioOK, dpIsDefault := findBestAudioTrack(audioTracks, clientCaps)
+	dpIdx, dpCodec, dpAudioOK, dpIsDefault := findBestAudioTrack(audioTracks, clientCaps, in.PreferredAudioLang)
 	if videoOK && containerOK && dpAudioOK && dpIsDefault {
 		return PlaybackDecision{
 			Decision:         "direct_play",
@@ -533,7 +594,7 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	}
 	hlsCaps := &restricted
 
-	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps)
+	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps, in.PreferredAudioLang)
 
 	// For remux paths below, use remuxVideoOK instead of videoOK.
 	// This ensures HEVC files on HLS.js clients fall through to full
@@ -595,7 +656,13 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// Video codec not supported (or a codec the HLS segment pipeline can't
 	// carry, or H.264 10-bit) → full transcode
 	reason := fmt.Sprintf("video codec %q not supported by browser", vc)
-	if isH264_10bit && clientCaps.H264Hi10 {
+	if overBitrate {
+		// Checked first: the client may well decode everything in this file,
+		// and every other wording below would claim it cannot. ReasonCode
+		// buckets the "bitrate" clause on its own.
+		reason = fmt.Sprintf("source bitrate %d kbps exceeds the client's %d kbps ceiling; transcoding onto a capped ladder",
+			in.SourceBitrate/1000, clientCaps.MaxBitrate/1000)
+	} else if isH264_10bit && clientCaps.H264Hi10 {
 		// Claimed Hi10P but direct play was unavailable (container not
 		// claimed, or incompatible default audio) — and remux is closed to
 		// Hi10P. Both wordings carry "10-bit", so ReasonCode files either as
@@ -1028,13 +1095,23 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 }
 
 // findBestAudioTrack evaluates all audio tracks and returns the best one the
-// client can play. Preference: compatible default → any compatible → default → first.
+// client can play. Preference: compatible track in the preferred language
+// (default first) → compatible default → any compatible → default → first.
 //
 // The isDefault return value indicates whether the chosen track is the one the
 // browser would select automatically in direct play mode (the track marked
 // default, or the first track if none is marked). When isDefault is false,
 // direct play cannot select the right track — a remux with -map is required.
-func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps) (index int, codec string, compatible bool, isDefault bool) {
+//
+// prefLang is the viewer's preferred spoken language ("" = none). A compatible
+// track in that language outranks the default even when the default is also
+// compatible — that is the point of the preference — and when it is not the
+// default the decision engine pays a remux to select it, exactly as it does
+// for a non-default compatible track today. The preference never picks an
+// incompatible track: a DTS track in the right language on a browser still
+// loses to an AAC track in the wrong one, and the in-player picker remains
+// the override.
+func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps, prefLang string) (index int, codec string, compatible bool, isDefault bool) {
 	if len(tracks) == 0 {
 		// No audio tracks = no audio incompatibility. Silent videos (dashcam
 		// footage, GIF-to-MP4 conversions) should still qualify for direct play.
@@ -1052,12 +1129,31 @@ func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps) (index int
 			break
 		}
 	}
+	effectiveDefault := func(i int, t models.AudioTrack) bool {
+		return t.IsDefault || (!hasExplicitDefault && i == 0)
+	}
+
+	// Language passes: a compatible track in the preferred language, the
+	// default one first so a file that already defaults to the viewer's
+	// language keeps its direct-play verdict.
+	if pref := normalizeLang(prefLang); pref != "" {
+		for pass := 0; pass < 2; pass++ {
+			for i, t := range tracks {
+				tc := strings.ToLower(t.Codec)
+				if !caps.AudioCodecs[tc] || normalizeLang(t.Language) != pref {
+					continue
+				}
+				if isDef := effectiveDefault(i, t); isDef || pass == 1 {
+					return i, tc, true, isDef
+				}
+			}
+		}
+	}
 
 	// First pass: compatible default track (explicit or effective)
 	for i, t := range tracks {
 		tc := strings.ToLower(t.Codec)
-		effectiveDefault := t.IsDefault || (!hasExplicitDefault && i == 0)
-		if effectiveDefault && caps.AudioCodecs[tc] {
+		if effectiveDefault(i, t) && caps.AudioCodecs[tc] {
 			return i, tc, true, true
 		}
 	}
@@ -1204,6 +1300,17 @@ type TranscodeManager struct {
 	// outruns playback doesn't burn CPU/disk encoding the whole file
 	// up-front. Review 2026-06 item P1.
 	readrateOK bool
+	// readrateBurstOK reports whether the local ffmpeg also supports
+	// `-readrate_initial_burst` (FFmpeg >= 6.1). Pacing throttles input from
+	// the very first packet — FFmpeg's built-in burst is only 0.5 s — so
+	// without this the first 6 s segment cannot land in under ~1.4 s of wall
+	// time however fast the encoder is, on every fresh session and every
+	// seek rebuild. With it the first readRateInitialBurstSec of media are
+	// read unthrottled and the encode-ahead cap only applies after that.
+	readrateBurstOK bool
+	// stereoDownmix is the operator's policy for folding multichannel audio
+	// into the stereo AAC the re-encode path emits (downmix.go).
+	stereoDownmix StereoDownmix
 	// hwDecodeCaps is the decode-augmented HWAccelInfo published by the
 	// ASYNC ProbeHWDecode goroutine (2026-07). nil until the probe lands;
 	// decodeCaps() falls back to the encode-only hwAccel until then, so
@@ -1509,6 +1616,31 @@ const defaultMaxSessionsPerUser = 3
 // remux is beneficial (EnsureVariant serves the completed playlist).
 const readRateFactor = "4.0"
 
+// readRateInitialBurstSec is how much media (in seconds) a paced FFmpeg may
+// read at full speed before `-readrate` starts throttling it. FFmpeg's own
+// default is 0.5 s, which puts a floor under time-to-first-frame: a 6 s
+// segment then needs ~1.4 s of wall time before it can exist, however fast
+// the encoder is. 30 s is five segments — enough to fill hls.js's initial
+// buffer at encoder speed — and costs a few seconds of unthrottled CPU per
+// launch, after which the 4× cap applies exactly as before. Every launch
+// bursts: fresh sessions, seek rebuilds, reap resumes and crash restarts.
+const readRateInitialBurstSec = "30"
+
+// inputPacingArgs returns the input-side read pacing flags for one variant
+// launch. Remux is never paced (codec copy is nearly free and a fast-finishing
+// remux playlist is beneficial); the burst rides only on FFmpeg builds that
+// know the option (>= 6.1), because an unknown option kills the launch.
+func inputPacingArgs(remux, readrateOK, burstOK bool) []string {
+	if remux || !readrateOK {
+		return nil
+	}
+	args := []string{"-readrate", readRateFactor}
+	if burstOK {
+		args = append(args, "-readrate_initial_burst", readRateInitialBurstSec)
+	}
+	return args
+}
+
 // variantIdleTimeout is how long a started variant may go without any
 // playlist/segment fetch before the reaper cancels its FFmpeg (review
 // 2026-06 finding P1). hls.js polls the active level's EVENT playlist every
@@ -1739,6 +1871,18 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 			"configured", tcCfg.SegmentFormat)
 	}
 
+	// Stereo downmix policy (transcode.stereo_downmix). Unknown values fail
+	// SAFE to standard with a warning — "legacy" is the byte-identical
+	// rollback to the bare `-ac 2` swresample fold.
+	downmix, ok := ParseStereoDownmix(tcCfg.StereoDownmix)
+	if !ok {
+		slog.Warn("unknown transcode stereo_downmix, using standard",
+			"configured", tcCfg.StereoDownmix)
+	}
+
+	// One version probe answers both pacing questions.
+	ffMajor, ffMinor := ffmpegProbeVersion()
+
 	tm := &TranscodeManager{
 		sessions:        make(map[string]*TranscodeSession),
 		baseDir:         baseDir,
@@ -1748,7 +1892,9 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		maxCacheBytes:   maxCache,
 		done:            make(chan struct{}),
 		fmp4:            fmp4,
-		readrateOK:      ffmpegSupportsReadrate(),
+		readrateOK:      readrateSupported(ffMajor),
+		readrateBurstOK: readrateInitialBurstSupported(ffMajor, ffMinor),
+		stereoDownmix:   downmix,
 	}
 
 	go tm.cleanupLoop()
@@ -1786,6 +1932,8 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		// actually be asked for, per the family that was detected.
 		"quality_policy", hwAccel.policy().Describe(hwAccel.Type, hwAccel.SWPreset),
 		"readrate_pacing", tm.readrateOK,
+		"readrate_initial_burst", tm.readrateBurstOK,
+		"stereo_downmix", string(downmix),
 	)
 
 	return tm, nil
@@ -1814,6 +1962,27 @@ func (tm *TranscodeManager) HEVCEncodeEnabled() bool {
 // erroring, matching the manager's general posture that a missing ffmpeg
 // surfaces at session creation, not construction.
 func ffmpegSupportsReadrate() bool {
+	major, _ := ffmpegProbeVersion()
+	return readrateSupported(major)
+}
+
+// readrateSupported is the version rule behind ffmpegSupportsReadrate.
+func readrateSupported(major int) bool {
+	return major >= 5
+}
+
+// readrateInitialBurstSupported reports whether `-readrate_initial_burst`
+// exists: FFmpeg 6.1 introduced it (fftools/ffmpeg_demux.c, default 0.5 s).
+// A major-only check is not enough — 6.0 rejects the option, and an unknown
+// option is fatal at argv parse time, so the gate has to read the minor
+// version. Unknown (0, 0) means off, same posture as pacing itself.
+func readrateInitialBurstSupported(major, minor int) bool {
+	return major > 6 || (major == 6 && minor >= 1)
+}
+
+// ffmpegProbeVersion runs `ffmpeg -version` once and parses the banner.
+// (0, 0) on any failure.
+func ffmpegProbeVersion() (major, minor int) {
 	// Two bounds, and this startup path needs both. The CONTEXT bounds the
 	// process: `ffmpeg -version` returns instantly on any working build, so one
 	// that doesn't — a snap/flatpak shim waiting on its daemon, a binary on a
@@ -1826,9 +1995,9 @@ func ffmpegSupportsReadrate() bool {
 	defer cancel()
 	out, err := boundedOutput(exec.CommandContext(ctx, "ffmpeg", "-version"))
 	if err != nil {
-		return false
+		return 0, 0
 	}
-	return ffmpegMajorVersion(string(out)) >= 5
+	return ffmpegVersion(string(out))
 }
 
 // ffmpegMajorVersion extracts the major version from `ffmpeg -version`
@@ -1836,20 +2005,36 @@ func ffmpegSupportsReadrate() bool {
 // doesn't carry a leading numeric version (git builds: "ffmpeg version
 // N-109983-g4d216654ca") — callers treat 0 as "unknown → feature off".
 func ffmpegMajorVersion(banner string) int {
+	major, _ := ffmpegVersion(banner)
+	return major
+}
+
+// ffmpegVersion parses "<major>.<minor>..." out of an `ffmpeg -version`
+// banner. A banner with no leading digits (git snapshots) yields (0, 0); a
+// bare major ("ffmpeg version 5") yields (5, 0).
+func ffmpegVersion(banner string) (major, minor int) {
 	fields := strings.Fields(banner)
 	// Expected shape: ffmpeg version <ver> ...
 	if len(fields) < 3 || fields[0] != "ffmpeg" || fields[1] != "version" {
-		return 0
+		return 0, 0
 	}
 	ver := strings.TrimPrefix(fields[2], "n") // FFmpeg release tags: n5.1.4
-	major := 0
-	for _, r := range ver {
-		if r < '0' || r > '9' {
-			break
-		}
-		major = major*10 + int(r-'0')
+	i := 0
+	for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
+		major = major*10 + int(ver[i]-'0')
+		i++
 	}
-	return major
+	if i == 0 {
+		return 0, 0
+	}
+	if i < len(ver) && ver[i] == '.' {
+		i++
+		for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
+			minor = minor*10 + int(ver[i]-'0')
+			i++
+		}
+	}
+	return major, minor
 }
 
 // SetMaxSessions updates the maximum concurrent transcode sessions at runtime.
@@ -2292,6 +2477,11 @@ type SessionOpts struct {
 	// ActiveStreamCount saw it as an independent stream, which is precisely
 	// the double-count this field exists to remove.
 	CastCloneOf string
+	// MaxBitrate is the client's declared delivery ceiling in bits per
+	// second (0 = none) — the same value the stream-info decision compared
+	// the source against (ClientCaps.MaxBitrate). CreateSession drops ABR
+	// rungs whose declared bandwidth exceeds it, keeping at least the lowest.
+	MaxBitrate int64
 }
 
 // CreateSession creates a new adaptive transcode session for a media file.
@@ -2466,6 +2656,13 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		// to sustain. Deriving it from the profile's own -maxrate/-b:v keeps
 		// the declaration and the encoder configuration in lockstep.
 		audioBits := AudioDeclaredBitrate(session.AudioCodecOut, session.AudioPassthrough)
+		// Client bitrate ceiling: rungs the client asked not to receive are
+		// never offered, so hls.js cannot climb onto them and the server
+		// never starts their encoders. Done before the variant directories
+		// are created below, so a dropped rung leaves nothing on disk.
+		if len(opts) > 0 {
+			profiles = capLadder(profiles, opts[0].MaxBitrate, audioBits)
+		}
 		for i := range profiles {
 			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
 			profiles[i].HLSBandwidth = profiles[i].LadderBandwidth(audioBits)
@@ -3537,7 +3734,13 @@ func hlsCodecString(height int, audioCodec string, fps float64, videoOut ...stri
 // sources are capped at 6 channels. Explicit -ar 48000 avoids the sample-rate
 // mismatch that produced deep/slow audio when 48 kHz sources were re-encoded
 // without a declared output rate.
-func audioEncodeArgs(session *TranscodeSession) []string {
+//
+// The stereo fold of a multichannel source goes through the operator's
+// downmix policy (downmix.go) rather than the bare `-ac 2` — see
+// stereoDownmixFilter for what the bare form actually does to dialogue and
+// peaks. The `-ac 2` stays: it is a no-op behind the pan filter and the only
+// fold for channel layouts the matrices do not cover.
+func audioEncodeArgs(session *TranscodeSession, downmix StereoDownmix) []string {
 	if session.AudioCodecOut == "ac3" {
 		ch := session.AudioChannels
 		if ch <= 0 || ch > 6 {
@@ -3545,7 +3748,27 @@ func audioEncodeArgs(session *TranscodeSession) []string {
 		}
 		return []string{"-c:a", "ac3", "-ac", strconv.Itoa(ch), "-ar", "48000", "-b:a", "448k"}
 	}
-	return []string{"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k"}
+	var args []string
+	if filter := stereoDownmixFilter(downmix, session.AudioChannels); filter != "" {
+		args = append(args, "-af", filter)
+	}
+	return append(args, "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k")
+}
+
+// x265CRFOffset maps the ladder's x264-scaled CRF onto x265's scale. The two
+// encoders' CRF numbers are not comparable: x264's default is 23 and x265's is
+// 28 for roughly the same perceptual quality, so handing libx265 the ladder's
+// 18–24 asked it for far more quality (and far more encode time, pinned at
+// -maxrate anyway) than the rung intended. Only the software HEVC path reads
+// this; hardware encoders take bitrate-mode arguments and ignore CRF.
+const x265CRFOffset = 5
+
+// softwareCRF returns the -crf value for a software encode of one rung.
+func softwareCRF(x264CRF int, hevc bool) int {
+	if hevc {
+		return x264CRF + x265CRFOffset
+	}
+	return x264CRF
 }
 
 // audioBitrate returns an appropriate AAC bitrate string scaled by channel
@@ -3694,9 +3917,9 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// option (must precede -i) and exists on FFmpeg >= 5.0 only — older
 	// builds run unpaced, exactly as before. Remux is never paced: codec
 	// copy is nearly free and a fast-finishing remux playlist is beneficial.
-	if !session.Remux && tm.readrateOK {
-		args = append(args, "-readrate", readRateFactor)
-	}
+	// On FFmpeg >= 6.1 the first readRateInitialBurstSec are read unpaced so
+	// pacing no longer sets a floor under time-to-first-frame.
+	args = append(args, inputPacingArgs(session.Remux, tm.readrateOK, tm.readrateBurstOK)...)
 
 	// Hardware decode (2026-07): input-side flags, must precede -i. Remux
 	// sessions never decode at all. PlanDecode gates on the async-probed
@@ -3785,7 +4008,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			// non-default track). audioEncodeArgs picks stereo AAC by default,
 			// or AC-3 5.1 when the client supports AC-3 and the source is
 			// multichannel — preserving surround instead of downmixing.
-			args = append(args, audioEncodeArgs(session)...)
+			args = append(args, audioEncodeArgs(session, tm.stereoDownmix)...)
 		}
 	} else {
 		// ── Full transcode mode ──
@@ -3837,7 +4060,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 
 		// Bitrate control
 		if tm.hwAccel.Type == HWAccelNone {
-			args = append(args, "-crf", strconv.Itoa(p.CRF))
+			args = append(args, "-crf", strconv.Itoa(softwareCRF(p.CRF, hevcOut)))
 		} else {
 			args = append(args, "-b:v", p.VideoBitrate)
 		}
@@ -3862,7 +4085,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		} else {
 			// Re-encode: stereo AAC by default, or AC-3 5.1 for surround on
 			// AC-3-capable clients (see audioEncodeArgs).
-			args = append(args, audioEncodeArgs(session)...)
+			args = append(args, audioEncodeArgs(session, tm.stereoDownmix)...)
 		}
 	}
 
@@ -5129,29 +5352,41 @@ const tonemapChain = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,to
 // tonemapping. This is needed when transcoding 10-bit HEVC HDR content to
 // 8-bit H.264 to prevent washed-out colors.
 //
-// Software/NVENC/QSV/AMF pipeline: tonemap on CPU frames, then CPU scale.
+// The scale runs FIRST, on the 10-bit source frames, and the float tonemap
+// chain runs on the already-downscaled frames. The chain — two zscale
+// colorspace passes, a float conversion and the hable curve — is per-pixel
+// and by far the most expensive thing this pipeline does (readinessTimeout
+// budgets an extra 90 s for it), and tonemapping at SOURCE resolution meant
+// a 4K source paid the full 8.3-megapixel cost for every rung: four times
+// the necessary work on the 1080p rung and nine times on 720p. Scaling
+// first is what every consumer player does too (they tonemap at output
+// resolution); swscale handles 10-bit input and passes the colour tags
+// zscale reads (transfer/primaries) through untouched, so the chain still
+// sees an HDR frame — just a smaller one.
+//
+// Software/NVENC/QSV/AMF pipeline: CPU scale, then CPU tonemap.
 // VAAPI pipeline: the tonemap filters are CPU-only and cannot run on
 // hardware surfaces — but this pipeline's DECODE side is already CPU (no
-// -hwaccel input flag), so the tonemap runs on the decoded CPU frames
-// BEFORE format=nv12,hwupload, keeping scale + encode on the GPU.
-// Previously this branch skipped tonemapping entirely and VAAPI hosts got
-// washed-out HDR transcodes (review 2026-06 finding Q1). Tonemapping 4K on
-// the CPU is heavy, but zscale is SIMD-optimized and readinessTimeout
-// already budgets +90s for HDRTonemap sessions.
+// -hwaccel input flag), so scale + tonemap run on the decoded CPU frames
+// BEFORE format=nv12,hwupload; the GPU scale_vaapi that follows is then a
+// same-size pass and the upload itself moves a rung-sized frame instead of
+// the source. Previously this branch skipped tonemapping entirely and VAAPI
+// hosts got washed-out HDR transcodes (review 2026-06 finding Q1).
 func injectTonemapFilter(args []string, width, height int) []string {
 	result := make([]string, 0, len(args)+2)
+	scaleFirst := fmt.Sprintf("scale=%d:-2", width)
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-vf" && i+1 < len(args) {
 			existingVF := args[i+1]
 			if strings.Contains(existingVF, "hwupload") {
-				// VAAPI: CPU tonemap at source resolution, then the original
-				// upload + GPU scale chain (existingVF =
-				// "format=nv12,hwupload,scale_vaapi=…"). tonemapChain ends in
-				// yuv420p; the nv12 step hwupload needs is preserved.
-				result = append(result, "-vf", tonemapChain+","+existingVF)
+				// VAAPI: CPU scale + tonemap, then the original upload + GPU
+				// scale chain (existingVF = "format=nv12,hwupload,scale_vaapi=…").
+				// tonemapChain ends in yuv420p; the nv12 step hwupload needs is
+				// preserved.
+				result = append(result, "-vf", scaleFirst+","+tonemapChain+","+existingVF)
 			} else {
-				// CPU-frame pipelines: tonemap, then scale to the profile width.
-				result = append(result, "-vf", fmt.Sprintf("%s,scale=%d:-2", tonemapChain, width))
+				// CPU-frame pipelines: scale to the profile width, then tonemap.
+				result = append(result, "-vf", scaleFirst+","+tonemapChain)
 			}
 			i++ // skip original filter value
 			continue

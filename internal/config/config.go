@@ -292,11 +292,20 @@ type TranscodeConfig struct {
 	// every family, so upgrading without setting this changes nothing.
 	QualityPolicy string
 	// HEVCOutput controls HEVC transcode OUTPUT (2026-08): "auto"
-	// (default — probe the hevc_* counterpart of the detected encoder,
-	// emit HEVC for HEVC-capable clients) or "off" (every transcode stays
-	// on H.264, the pre-2026-08 behavior).
+	// (default — probe the hevc_* counterpart of the detected HARDWARE
+	// encoder, emit HEVC for HEVC-capable clients), "all" (also admit
+	// libx265 on CPU-only hosts — opt-in, because a one-frame probe says
+	// nothing about x265 keeping up with playback at the upper rungs) or
+	// "off" (every transcode stays on H.264, the pre-2026-08 behavior).
 	HEVCOutput string
-	Profiles   []string
+	// StereoDownmix picks how multichannel audio is folded into the stereo
+	// AAC the re-encode path emits (streaming.StereoDownmix): "standard"
+	// (default — the ITU matrix, written out explicitly, plus a limiter so
+	// loud passages stop clipping), "dialogue" (centre-forward), "night"
+	// (dialogue-forward plus dynamic-range compression) or "legacy" (the
+	// bare `-ac 2` fold, byte-identical to installs before the knob).
+	StereoDownmix string
+	Profiles      []string
 	// MaxCacheBytes bounds the total on-disk size of the transcode output
 	// tree (HLS EVENT playlists keep every segment of a title so seek-back
 	// works, so long/concurrent transcodes can grow it without bound). When
@@ -365,6 +374,7 @@ type yamlConfig struct {
 		SoftwarePreset     string   `yaml:"software_preset"`
 		QualityPolicy      string   `yaml:"quality_policy"`
 		HEVCOutput         string   `yaml:"hevc_output"`
+		StereoDownmix      string   `yaml:"stereo_downmix"`
 		Profiles           []string `yaml:"profiles"`
 		MaxCacheGB         int      `yaml:"max_cache_gb"`
 	} `yaml:"transcode"`
@@ -518,9 +528,12 @@ func Default() *Config {
 			// "balanced" reproduces the historical arguments exactly.
 			QualityPolicy: "balanced",
 			// HEVC transcode output for HEVC-capable clients (probe the
-			// hevc_* counterpart of the detected encoder). "off" keeps
-			// every transcode on H.264.
+			// hevc_* counterpart of the detected HARDWARE encoder). "all"
+			// also admits libx265; "off" keeps every transcode on H.264.
 			HEVCOutput: "auto",
+			// Explicit ITU stereo fold plus a limiter. "legacy" restores the
+			// bare `-ac 2` swresample fold byte-for-byte.
+			StereoDownmix: "standard",
 			// 2160p included so 4K sources can be offered at full resolution
 			// when transcoding is unavoidable. It sits at the TOP of the ABR
 			// ladder and variants start on-demand, so low-bandwidth clients
@@ -816,6 +829,9 @@ func loadYAML(cfg *Config) error {
 	if yc.Transcode.HEVCOutput != "" {
 		cfg.Transcode.HEVCOutput = yc.Transcode.HEVCOutput
 	}
+	if yc.Transcode.StereoDownmix != "" {
+		cfg.Transcode.StereoDownmix = yc.Transcode.StereoDownmix
+	}
 	if yc.Transcode.MaxSessionsPerUser > 0 {
 		cfg.Transcode.MaxSessionsPerUser = yc.Transcode.MaxSessionsPerUser
 	}
@@ -1058,6 +1074,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("TRANSCODE_QUALITY_POLICY"); v != "" {
 		cfg.Transcode.QualityPolicy = v
+	}
+	if v := os.Getenv("TRANSCODE_HEVC_OUTPUT"); v != "" {
+		cfg.Transcode.HEVCOutput = v
+	}
+	if v := os.Getenv("TRANSCODE_STEREO_DOWNMIX"); v != "" {
+		cfg.Transcode.StereoDownmix = v
 	}
 	if v := os.Getenv("TRANSCODE_MAX_SESSIONS_PER_USER"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

@@ -139,25 +139,42 @@ export function shouldAutoOpenPartyPlayer(
 
 /**
  * Sequential HLS can seek only inside the active session's produced window.
- * A target before the FFmpeg -ss anchor or at/past the buffered edge needs a
+ * A target before the FFmpeg -ss anchor or at/past the servable edge needs a
  * fresh session anchored at that absolute media position.
+ *
+ * The servable edge is the FURTHER of two things: what hls.js has buffered
+ * around the playhead, and what the server has actually produced — the end
+ * of the last fragment in the current level's playlist (`producedEndSec`,
+ * absolute seconds). Before that second input existed this compared against
+ * the buffered edge alone, which is 30–60 s ahead of the playhead at most,
+ * while the encoder (paced at 4× realtime) can be tens of minutes ahead. So
+ * every skip longer than the buffer tore the session down and paid a cold
+ * FFmpeg start for content that was already on disk. hls.js seeks anywhere
+ * inside a playlist's fragment range by itself, including inside a
+ * still-growing EVENT playlist, so only a target past what has been produced
+ * needs the rebuild. Callers without a produced edge (native HLS, older
+ * servers) pass 0 and keep the buffered-edge behaviour.
  */
 export function needsHlsSessionRebuild(
   targetSec: number,
   sessionStartSec: number,
   bufferedEndSec: number,
   edgeToleranceSec = 0.5,
+  producedEndSec = 0,
 ): boolean {
   const target = Math.max(0, targetSec)
   const start = Math.max(0, sessionStartSec)
   if (target < start) return true
 
-  // A just-booted session may not have emitted `progress` yet. We still know
-  // that a forward jump away from its anchor cannot be served; rebuilding is
-  // safer than assigning currentTime into an empty future range and stalling.
-  if (bufferedEndSec <= start) return target > start + edgeToleranceSec
+  const servableEndSec = Math.max(bufferedEndSec, producedEndSec)
 
-  return target >= bufferedEndSec - edgeToleranceSec
+  // A just-booted session may not have emitted `progress` (or loaded a
+  // playlist) yet. We still know that a forward jump away from its anchor
+  // cannot be served; rebuilding is safer than assigning currentTime into an
+  // empty future range and stalling.
+  if (servableEndSec <= start) return target > start + edgeToleranceSec
+
+  return target >= servableEndSec - edgeToleranceSec
 }
 
 /**

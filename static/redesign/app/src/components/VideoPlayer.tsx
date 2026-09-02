@@ -43,7 +43,7 @@ import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import { playerSurface } from '@/lib/playerSurface'
 import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
-import { writePrefKey } from '@/lib/appearance'
+import { currentMaxStreamBps, writePrefKey } from '@/lib/appearance'
 import {
   buildSessionRequest,
   createCastToken,
@@ -616,6 +616,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // exclude high-frequency buffer updates. This ref gives an explicit remote
   // seek the current absolute produced edge without tearing down that interval.
   const bufferedSecRef = useRef(0)
+  // producedEdgeSecRef is the absolute end of the last fragment the server
+  // has PUBLISHED for the level hls.js is on — fed from LEVEL_LOADED /
+  // LEVEL_UPDATED — as opposed to what hls.js has buffered. It is the second
+  // input to needsHlsSessionRebuild: a forward seek inside the produced
+  // window is a plain hls.js seek, and only a target past this edge needs
+  // the session rebuilt. Stays 0 on the native-HLS path, which keeps the
+  // buffered-edge behaviour.
+  const producedEdgeSecRef = useRef(0)
   // realDurationSec is the source-file duration from streamInfo.
   // Falls back to vid.duration when not provided.
   const [realDurationSec, setRealDurationSec] = useState(0)
@@ -1869,6 +1877,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // glitch during the ~half-second transition between sessions.
     setCurrentSec(0)
     bufferedSecRef.current = 0
+    producedEdgeSecRef.current = 0
     setBufferedSec(0)
     setRealDurationSec(0)
     setPlaying(false)
@@ -2184,6 +2193,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           startSec: resumeSec,
           audioTrackIndex: target.audioTrackIndex,
           forceTranscode: target.forceTranscode,
+          // Bitrate ceiling from Settings → Quality; the pre-warm reads the
+          // same helper so its request key matches this one.
+          maxBps: currentMaxStreamBps(),
         })
         // Pre-warm fast path: if the details page already created a session
         // for this EXACT request, adopt it and skip CreateSession's ffprobe +
@@ -2533,6 +2545,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         hls.on(Hls.Events.LEVEL_SWITCHED, () => {
           qoeRef.current?.noteRenditionSwitch()
         })
+        // Track the server's produced edge for the level hls.js is loading
+        // from: the end of the last fragment in its playlist, in absolute
+        // (real-file) seconds. Every playlist refresh of a still-encoding
+        // session fires LEVEL_UPDATED, so this advances with the encoder;
+        // seekToRealSec reads it to avoid rebuilding the session for seeks
+        // the existing session can already serve.
+        const noteProducedEdge = (details?: { fragments?: Array<{ start: number; duration: number }> }) => {
+          const frags = details?.fragments
+          if (!frags || frags.length === 0) return
+          const last = frags[frags.length - 1]
+          producedEdgeSecRef.current = last.start + last.duration + (startSecRef.current ?? 0)
+        }
+        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => noteProducedEdge(data.details))
+        hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => noteProducedEdge(data.details))
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
@@ -3219,6 +3245,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           targetAbsSec,
           startSecRef.current ?? 0,
           bufferedSecRef.current,
+          0.5,
+          producedEdgeSecRef.current,
         )) {
           const preservePause = shouldPreservePauseOnSeekRebuild(
             explicitSeek.running ?? party.isPlaying,
@@ -4218,10 +4246,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Rebase for either direction outside it. In a party the host first moves
     // the canonical server anchor; every guest receives that explicit seek and
     // independently rebuilds its own session in the sync interval above.
+    // The produced edge (from the level playlist) is what bounds the window;
+    // the hls.js buffer is only a lower bound on it.
     if (needsHlsSessionRebuild(
       targetSec,
       startSecRef.current ?? 0,
       bufferedSec,
+      0.5,
+      producedEdgeSecRef.current,
     )) {
       if (rebuildAtTarget()) return
 

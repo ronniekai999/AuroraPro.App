@@ -692,7 +692,7 @@ func TestFindBestAudioTrack(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			idx, codec, compat, isDef := findBestAudioTrack(tt.tracks, caps)
+			idx, codec, compat, isDef := findBestAudioTrack(tt.tracks, caps, "")
 			if idx != tt.wantIdx {
 				t.Errorf("index = %d, want %d", idx, tt.wantIdx)
 			}

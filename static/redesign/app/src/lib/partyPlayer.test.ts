@@ -172,6 +172,41 @@ describe('sequential HLS seek policy', () => {
     expect(needsHlsSessionRebuild(13 * 60 + 11, 13 * 60 + 11, 0)).toBe(false)
   })
 
+  describe('produced edge (September 2026 playback pass)', () => {
+    // The encoder runs at 4x realtime: ten minutes in, hls.js has ~60s
+    // buffered (t=10:00 → 11:00) but the server has published to ~40:00.
+    const start = 0
+    const buffered = 11 * 60
+    const produced = 40 * 60
+
+    it('keeps a forward seek inside the produced window in the current session', () => {
+      expect(needsHlsSessionRebuild(20 * 60, start, buffered, 0.5, produced)).toBe(false)
+      expect(needsHlsSessionRebuild(39 * 60 + 59, start, buffered, 0.5, produced)).toBe(false)
+    })
+
+    it('still rebuilds for a seek at or past the produced edge', () => {
+      expect(needsHlsSessionRebuild(40 * 60, start, buffered, 0.5, produced)).toBe(true)
+      expect(needsHlsSessionRebuild(55 * 60, start, buffered, 0.5, produced)).toBe(true)
+    })
+
+    it('never shrinks the window below the buffered edge', () => {
+      // A stale or absent produced edge (0) must not turn an in-buffer seek
+      // into a rebuild — the native-HLS path always passes 0.
+      expect(needsHlsSessionRebuild(10 * 60 + 30, start, buffered, 0.5, 0)).toBe(false)
+      expect(needsHlsSessionRebuild(10 * 60 + 30, start, buffered, 0.5, 5 * 60)).toBe(false)
+    })
+
+    it('rebuilds a forward jump off a just-booted session with nothing produced', () => {
+      expect(needsHlsSessionRebuild(90, 60, 0, 0.5, 0)).toBe(true)
+      // …but not once the playlist says the target has been produced.
+      expect(needsHlsSessionRebuild(90, 60, 0, 0.5, 120)).toBe(false)
+    })
+
+    it('rewinds before the anchor still rebuild regardless of the produced edge', () => {
+      expect(needsHlsSessionRebuild(30, 60, buffered, 0.5, produced)).toBe(true)
+    })
+  })
+
   describe('needsBackwardSessionRebuild (issue #488 guest drift loop)', () => {
     it('rebuilds when the canonical target is before this session\'s own anchor', () => {
       // Guest's session is anchored at 20:00 (e.g. started the party's

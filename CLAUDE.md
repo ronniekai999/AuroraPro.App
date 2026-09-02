@@ -346,3 +346,60 @@ Invariants to preserve when touching this area:
   extension — `mov` normalizes to `mp4` and must not get its own entry.
   Note `.webm` files probe as `matroska` and are therefore stored as
   container `mkv` (pre-existing; documented in the client contract).
+
+## Playback pass, September 2026 (decision inputs, downmix, pacing)
+
+Code: `DecidePlaybackFor`/`DecisionInput` + `capLadder` (decision engine and
+ladder cap), `internal/streaming/downmix.go`, `lang.go`, the `-readrate`
+burst in `inputPacingArgs`, `injectTonemapFilter`, `ProbeHEVCEncoder`;
+migration 058; SPA `lib/appearance.ts` (two new prefs), `lib/streaming.ts`
+(`playbackPrefsQuery`), `needsHlsSessionRebuild`'s produced-edge input.
+Client contract additions are in `docs/native-client-caps.md`.
+
+Invariants to preserve:
+
+- **`ClientCaps.MaxBitrate` and `SessionOpts.MaxBitrate` are viewer
+  constraints, not capabilities and not a trust boundary.** They are set
+  by the API layer from `max_bps` (never parsed from the caps string), are
+  self-limiting (a wrong value only costs that client a transcode or a
+  smaller ladder), and an unknown source bitrate (0) never trips the
+  ceiling. `capLadder` always keeps the lowest rung. The reason bucket is
+  `bitrate`; the CHECK constraint lives in migration 058 now, and the two
+  vocabulary tests read the LATEST definition — a further widening needs a
+  new migration and both tests pointed at it.
+- **The language preference never selects a track the client cannot
+  play**, and among matches the default wins, so a file that already
+  defaults to the viewer's language keeps direct play. A non-default match
+  pays the same remux any non-default pick does. `normalizeLang` folds
+  639-1 / 639-2 B and T aliases; extend the table rather than comparing
+  tags literally.
+- **`transcode.stereo_downmix` — `legacy` is the byte-identical rollback**
+  (bare `-ac 2`). The matrices are indexed by channel POSITION and cover
+  exactly 6 and 8 channels; every other layout keeps the bare fold. The
+  channel count that selects a matrix comes from the library's per-track
+  probe in the session handler, not the client echo, because a wrong count
+  references input channels that do not exist and kills FFmpeg at filter
+  init. The fixture test runs all four policies on real 5.1 and 7.1 sources.
+- **HEVC output is hardware-only under `hevc_output: auto`**; `all` opts
+  libx265 in (and gets the x265-scaled CRF via `softwareCRF`). Do not
+  re-enable software HEVC by default: a one-frame probe proves nothing
+  about realtime, and encoder lag reads to hls.js as a stalled live
+  playlist it will never switch away from.
+- **`-readrate_initial_burst` is gated on FFmpeg 6.1 by major AND minor**
+  (`readrateInitialBurstSupported`); 6.0 rejects the option and an unknown
+  option is fatal at launch. Remux stays unpaced.
+- **The tonemap chain scales first** (`scale=W:-2,` then the zscale/hable
+  chain). The fixture matrix's HDR→SDR assertion is the guard; keep the
+  VAAPI `format=nv12,hwupload` anchor after the chain, `injectBurnInFilter`
+  keys off it.
+- **Forward seeks rebuild only past the PRODUCED edge**, fed from hls.js
+  `LEVEL_LOADED`/`LEVEL_UPDATED` into `producedEdgeSecRef`; the buffered
+  edge is only a lower bound. The native-HLS path passes 0 and keeps the
+  old behaviour.
+
+Known limits, stated plainly: the up-switch stall (a rung started mid-play
+encodes from the session anchor, not the playhead) is NOT fixed here — it
+needs the segment-addressable VOD playlist model, which is the open
+strategic item — and Dolby Vision profile 5 is still undetected by the
+scanner; detection alone would only move its wrong colours from direct
+play to a transcode until a DV-aware tonemap (libplacebo) is probed in.

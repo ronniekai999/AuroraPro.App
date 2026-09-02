@@ -52,11 +52,15 @@ func ValidPlaybackQoESessionToken(token string) bool {
 // whole row, where normalizing keeps the rest of a still-useful sample.
 // TestPlaybackQoEVocabulariesMatchMigration asserts the two never drift, since
 // a Go-side list that outgrew the CHECK would reintroduce exactly that 500.
+//
+// decision_reason's "bitrate" arrived with migration 058 (a source above the
+// client's declared bitrate ceiling), which replaced that column's CHECK; the
+// drift test reads the later definition for it.
 var (
 	PlaybackQoEDecisions       = []string{"direct_play", "direct_stream", "transcode"}
 	PlaybackQoEDecisionReasons = []string{
 		"compatible", "container", "video_codec", "audio_codec",
-		"bit_depth", "audio_track", "unspecified",
+		"bit_depth", "audio_track", "bitrate", "unspecified",
 	}
 	PlaybackQoEOutputCodecs    = []string{"none", "copy", "h264", "hevc"}
 	PlaybackQoEEncoderFamilies = []string{"none", "software", "nvenc", "qsv", "vaapi", "amf"}

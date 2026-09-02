@@ -111,6 +111,17 @@ Claim only what your build actually decodes. A false claim is not a security
 problem — it only breaks playback for the client that lied — but it does mean
 a black screen instead of a working transcode.
 
+## Viewer constraints beside the caps
+
+Two optional query parameters ride `GET /api/stream/info/{fileID}` next to
+`caps`. Neither is a capability: both describe what the viewer WANTS, and
+both are omitted for "no preference".
+
+| Parameter | Meaning |
+|---|---|
+| `max_bps=<bits per second>` | A delivery ceiling. A source whose probed bitrate exceeds it can neither direct-play nor remux (both hand you the source bitrate verbatim, and a single-rendition stream has nothing to adapt down to), so the decision becomes `transcode` with reason code `bitrate`. Send the same value as `max_bps` in the `POST /api/stream/sessions` body and the ABR ladder is capped to rungs whose declared bandwidth fits under it (at least the lowest rung is always kept). Self-limiting: a wrong value only costs this client a transcode or a smaller ladder. Values above 1 Gbps read as "no limit". |
+| `audio_lang=<ISO 639 code>` | Preferred spoken language, in 639-1 or 639-2 form (`en`, `eng`, `en-US`; `de` matches both `ger` and `deu`). A compatible track in that language outranks the file's default; when it is not the default the decision pays a remux to select it (`audio_track`), exactly as for any non-default pick. It never selects a track your caps cannot play — a DTS track in the right language on a browser still loses to an AAC track in the wrong one. Direct play is unaffected in the sense that you receive every track either way; `audio_track_index` tells you which one the server would have chosen. |
+
 ## What still transcodes, and why
 
 Even with everything claimed, three cases do not direct-play:
