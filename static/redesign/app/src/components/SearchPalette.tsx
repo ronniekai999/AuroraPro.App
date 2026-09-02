@@ -218,12 +218,16 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
     >
       {/* Backdrop — deep blur + violet tint so the page beneath
           feels far away. */}
-      <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl" aria-hidden="true" />
+      {/* .aurora-glass-overlay: a full-viewport backdrop blur plus the two
+          120px/100px filter blurs below is the most expensive glass in the
+          app, and it had no Glow = Subtle override. Under data-glow="subtle"
+          the scrim becomes a flat fill and the blobs are dropped. */}
+      <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl aurora-glass-overlay" aria-hidden="true" />
 
       {/* Aurora-violet glow blobs behind the palette so the
           backdrop isn't a flat sheet of blur. Decorative only. */}
-      <div className="absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-purple-600/[0.12] blur-[120px] pointer-events-none" aria-hidden="true" />
-      <div className="absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.08] blur-[100px] pointer-events-none" aria-hidden="true" />
+      <div className="stage-palette-blob absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-purple-600/[0.12] blur-[120px] pointer-events-none" aria-hidden="true" />
+      <div className="stage-palette-blob absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.08] blur-[100px] pointer-events-none" aria-hidden="true" />
 
       {/* Palette panel */}
       <div

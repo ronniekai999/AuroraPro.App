@@ -80,6 +80,17 @@ module.exports = {
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
       },
+      // One motion curve for the whole app: the ~225 `transition-*`
+      // utilities in TSX now ease on the same tokens the hand-written CSS
+      // uses (index.css :root), instead of Tailwind's own literal curve.
+      // Values are identical to Tailwind's defaults, so nothing moves; the
+      // point is that changing the token changes both systems together.
+      transitionTimingFunction: {
+        DEFAULT: "var(--ease-standard)",
+      },
+      transitionDuration: {
+        DEFAULT: "var(--dur-fast)",
+      },
       keyframes: {
         "accordion-down": {
           from: { height: "0" },

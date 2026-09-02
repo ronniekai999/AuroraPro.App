@@ -3,7 +3,7 @@
 // (2026-06-17 app split, Phase 2.4) so the lazy BrowseView chunk can reuse it
 // without reaching back into App. RailTint + railIconFor (title → {icon,tint}
 // resolver) are module-private — only MediaRail uses them.
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
@@ -104,14 +104,24 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
     setCanLeft(el.scrollLeft > 2)
     setCanRight(el.scrollLeft < max - 2)
   }, [])
-  useEffect(() => {
+  // Layout effect so the right paddle is correct on the first paint rather
+  // than popping in one frame after mount.
+  useLayoutEffect(() => {
     updatePaddles()
+  }, [items, updatePaddles])
+  useEffect(() => {
     window.addEventListener('resize', updatePaddles)
     return () => window.removeEventListener('resize', updatePaddles)
-  }, [items, updatePaddles])
+  }, [updatePaddles])
   const page = (dir: -1 | 1) => {
     const el = scrollRef.current
-    if (el) el.scrollBy({ left: dir * el.clientWidth * 0.9, behavior: 'smooth' })
+    if (!el) return
+    // Whole cards per page — card width plus the 18px rail gap — so the
+    // smooth scroll lands ON a snap point. Paging by 90% of the viewport
+    // landed mid-card and the (then mandatory) snap yanked it afterwards.
+    const step = (aspect === 'poster' ? 206 : 336) + 18
+    const cards = Math.max(1, Math.floor((el.clientWidth * 0.9) / step))
+    el.scrollBy({ left: dir * cards * step, behavior: 'smooth' })
   }
   // Resolve icon + tint. Caller-supplied value wins; otherwise look
   // up by title; otherwise the generic compass / purple chip.

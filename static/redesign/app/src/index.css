@@ -281,6 +281,35 @@
     --tint-1: radial-gradient(1100px 700px at 70% -8%, rgba(124, 58, 237, 0.22), transparent 62%);
     --tint-2: radial-gradient(800px 600px at -5% 40%, rgba(30, 27, 75, 0.50), transparent 60%);
     --tint-3: radial-gradient(900px 700px at 105% 85%, rgba(14, 116, 144, 0.10), transparent 55%);
+
+    /* ============================================================
+       Polish pass — motion, radius and surface tokens.
+       ============================================================
+       Before these, index.css carried 34 distinct transition durations, 7
+       easings and 22 border radii, and Tailwind's utilities (150ms,
+       cubic-bezier(.4,0,.2,1)) ran on a different curve from the
+       hand-written rules (0.15s/0.18s `ease`) — so a CSS-styled pill and a
+       utility-styled pill next to it eased differently. tailwind.config.js
+       points its transition defaults at the same two tokens.
+       Durations: fast for hover/focus colour, base for reveals and fades,
+       slow for the card lift. Radii: sm thumbs, md controls/toasts, lg cards,
+       xl shelves, pill for round buttons. `--radius` (10px) stays the
+       shadcn token the live dialog/select read; do not merge them.
+       --surface-1 names the de-facto panel ink (#0a0a0f, 20 arbitrary
+       Tailwind classes) — NOT the #050505 page ink, which stays literal on
+       the app root and hero because two audits anchor on it. */
+    --dur-fast: 150ms;
+    --dur-base: 220ms;
+    --dur-slow: 350ms;
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 14px;
+    --r-xl: 18px;
+    --r-pill: 999px;
+    --surface-1: #0a0a0f;
+    --surface-2: #14121e;
   }
 
   html[data-glow="subtle"] {
@@ -368,6 +397,12 @@
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     background: rgba(10, 8, 16, 0.92) !important;
+  }
+  /* The ⌘K palette's decorative filter-blur blobs (SearchPalette). A
+     120px Gaussian over a 700px disc is GPU work with no information in
+     it; Subtle drops them along with the scrim's backdrop blur. */
+  html[data-glow="subtle"] .stage-palette-blob {
+    display: none;
   }
 
   body {
@@ -2788,7 +2823,19 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
   gap: 18px;
   overflow-x: auto;
-  scroll-snap-type: x mandatory;
+  /* proximity, not mandatory: mandatory forced a snap at the end of EVERY
+     trackpad and touch gesture, which is the "rail fights my scroll"
+     feel, and it yanked the paddles' 90%-of-width page to the nearest
+     card edge after the smooth scroll had already stopped. Proximity keeps
+     the alignment when a gesture ends near a boundary and lets a free
+     scroll rest where it stopped; the paddles now page by whole cards
+     (MediaRail) so both agree. */
+  scroll-snap-type: x proximity;
+  /* A horizontal swipe past either end no longer chains into the
+     browser's back/forward gesture. */
+  overscroll-behavior-x: contain;
+  /* Snapped card sits inside the 4px inline padding, not on the edge. */
+  scroll-padding-inline: 4px;
   padding: 8px 4px;
   -webkit-overflow-scrolling: touch;
 }
@@ -2812,20 +2859,29 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: rgba(10, 8, 18, 0.78);
   border: 1px solid var(--glow-border);
   color: rgba(255, 255, 255, 0.85);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  transition: opacity var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
-.rail-scroll-wrap:hover .rail-paddle,
+/* Keyboard reveal is unconditional; the hover reveal is gated on a real
+   hover-capable pointer, because iOS Safari and Android Chrome apply :hover
+   on tap and hold it until the next tap — a tapped rail kept both paddles
+   up over its cards. Same trap this file documents for .card-overlay. */
 .rail-paddle:focus-visible {
   opacity: 1;
   pointer-events: auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  .rail-scroll-wrap:hover .rail-paddle {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 .rail-paddle:hover {
   background: rgba(30, 24, 48, 0.92);
@@ -2858,12 +2914,22 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 .rail-container {
   background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
   border: 1px solid var(--glow-border);
-  border-radius: 18px;
+  border-radius: var(--r-xl);
   box-shadow: var(--glow-halo);
   padding: 18px 20px 22px;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   margin-bottom: 28px;
+}
+/* The one large blurred surface that multiplies — 5–10 of these on Home,
+   each full-width and ~400px tall — and it had no Glow = Subtle override,
+   so the lever the Settings page offers weak GPUs skipped the heaviest
+   layer. Separate rule on purpose: audit-glass-contrast parses the base
+   `.rail-container` background above and must keep finding it. */
+html[data-glow="subtle"] .rail-container {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(12, 10, 18, 0.96);
 }
 .rail-header {
   display: flex;
@@ -2956,20 +3022,27 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    ==================================================================== */
 .media-card-cinema {
   position: relative;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
   border: 1px solid var(--glow-border);
   box-shadow: var(--glow-halo);
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform var(--dur-slow) var(--ease-standard),
+              box-shadow var(--dur-slow) var(--ease-standard),
+              border-color var(--dur-slow) var(--ease-standard);
   cursor: pointer;
 }
+/* The glow strengthens on any :hover (a stuck glow on touch is harmless);
+   the LIFT and the poster scale are gated on a hover-capable pointer, so a
+   tapped card on a phone does not stay raised until the next tap. */
 .media-card-cinema:hover {
-  transform: translateY(-6px);
   border-color: var(--glow-border-strong);
   box-shadow: var(--glow-halo-strong);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover {
+    transform: translateY(-6px);
+  }
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -3009,7 +3082,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   aspect-ratio: 2 / 3;
   object-fit: cover;
   /* No radius — the card clips. See the .poster-wrap note above. */
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+  transition: transform 0.5s var(--ease-standard), opacity var(--dur-base) var(--ease-standard);
 }
 /* Fade-in on decode: invisible until the <img> sets data-loaded (see
    MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
@@ -3025,8 +3098,11 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    image's radius entirely (the card is the sole clipping authority), so
    that specific artifact can no longer occur — 1.02 is kept because the
    lift (translateY on the parent) does most of the work and a bigger scale
-   just costs texture sharpness. */
-.media-card-cinema:hover .poster-img { transform: scale(1.02); }
+   just costs texture sharpness. Hover-capable pointers only — see the
+   lift above. */
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .poster-img { transform: scale(1.02); }
+}
 
 /* Larger "+" / library badge — sits in poster top-left. Filled
    purple when item is in the user's library, dark glass otherwise.
@@ -3137,15 +3213,23 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   background: linear-gradient(to top, rgba(8, 6, 16, 0.96) 0%, rgba(8, 6, 16, 0.9) 60%, rgba(8, 6, 16, 0) 100%);
   opacity: 0;
   transform: translateY(6px);
-  transition: opacity 0.22s ease, transform 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard), transform var(--dur-base) var(--ease-standard);
   /* never intercept the card's click-to-detail: the reveal is driven by
      the CARD's :hover / :focus-within, not by hovering the scrim itself. */
   pointer-events: none;
 }
-.media-card-cinema:hover .reason-scrim,
+/* focus-within (keyboard, and the gem's tap-to-focus on touch) reveals on
+   every device; :hover only where hover is real, so a tapped card does not
+   keep the reason up over its title until the next tap. */
 .media-card-cinema:focus-within .reason-scrim {
   opacity: 1;
   transform: translateY(0);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .reason-scrim {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 /* 2026-06-05 (Home redesign) — AI cards now carry BOTH a reveal-on-hover
    .reason-scrim AND the quality/maturity .card-badges, which share the
@@ -3155,11 +3239,15 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    cards that actually have a reason — badge-only cards (no scrim) keep
    their badges on hover. */
 .media-card-cinema .reason-scrim ~ .card-badges {
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
 }
-.media-card-cinema:hover .reason-scrim ~ .card-badges,
 .media-card-cinema:focus-within .reason-scrim ~ .card-badges {
   opacity: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .reason-scrim ~ .card-badges {
+    opacity: 0;
+  }
 }
 .media-card-cinema .reason-text {
   margin: 0;
@@ -3176,6 +3264,12 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
 @media (prefers-reduced-motion: reduce) {
+  /* The card lift and poster scale were the only card motion this block
+     did not cover. Later in the file than the hover rules at equal
+     specificity, so these win. */
+  .media-card-cinema { transition: none; }
+  .media-card-cinema:hover { transform: none; }
+  .media-card-cinema:hover .poster-img { transform: none; }
   .media-card-cinema .poster-img { transition: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
@@ -3776,12 +3870,16 @@ textarea:focus-visible {
   justify-content: center;
   background: linear-gradient(0deg, rgba(5, 5, 5, 0.55), rgba(5, 5, 5, 0.05) 55%, transparent);
   opacity: 0;
-  transition: opacity 0.25s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
   pointer-events: none;
 }
-.media-card-cinema:hover .card-hover-preview,
 .media-card-cinema:focus-within .card-hover-preview {
   opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-hover-preview {
+    opacity: 1;
+  }
 }
 .media-card-cinema .card-hover-preview .chp-play {
   width: 48px;
@@ -3797,9 +3895,13 @@ textarea:focus-visible {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
 .media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
-.media-card-cinema:hover .card-hover-preview .chp-play,
 .media-card-cinema:focus-within .card-hover-preview .chp-play {
   transform: translateY(0) scale(1);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-hover-preview .chp-play {
+    transform: translateY(0) scale(1);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .media-card-cinema .card-hover-preview { transition: opacity 0.25s ease; }
@@ -3832,7 +3934,10 @@ textarea:focus-visible {
   color: rgba(255, 255, 255, 0.9);
   background: rgba(10, 8, 18, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.18);
-  backdrop-filter: blur(4px);
+  /* No backdrop-filter. This is the same per-badge blur deep-debug Bug 25
+     removed from .lib-badge: with showBadges on Browse it was hundreds of
+     4px blur layers over poster art, re-composited on every scroll frame,
+     for a tint the 0.72 fill already reads identically at 10px type. */
 }
 .media-card-cinema .card-badge.is-quality {
   color: #f5edff;
