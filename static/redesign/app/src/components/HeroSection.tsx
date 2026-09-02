@@ -164,6 +164,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
     })
   }, [bgImage])
   const markLoaded = (src: string) => {
+    // A retry that succeeded is no longer a failed src — otherwise every
+    // later rotation into it would take the failed branch above and wash
+    // to the gradient instead of dissolving.
+    if (failedSrcRef.current === src) failedSrcRef.current = null
     setLayers(l => (l.incoming && l.incoming.src === src && !l.incoming.loaded
       ? { ...l, incoming: { src, loaded: true } }
       : l))
@@ -351,8 +355,9 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             aria-hidden="true"
             className={`stage-hero-img is-incoming${layers.incoming.loaded ? ' is-loaded' : ''}`}
             loading="eager"
-            // The first backdrop is the page's largest above-the-fold paint.
-            fetchPriority="high"
+            // The FIRST backdrop is the page's largest above-the-fold paint;
+            // later rotations should not outrank the rail posters below.
+            fetchPriority={layers.shown ? 'auto' : 'high'}
             decoding="async"
             // A cached image can be complete before React attaches onLoad
             // (the load event is queued as a task, but belt and braces): the

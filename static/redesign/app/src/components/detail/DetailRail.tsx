@@ -219,6 +219,9 @@ export function DetailRail({
         {/* decoding=async keeps a 2:3 decode off the click-to-detail frame;
             a poster that 404s hides itself and the box's own fill shows. */}
         <img
+          // key: a src swap (media.poster → the detail payload's poster)
+          // remounts the node so an earlier hide-on-error cannot stick.
+          key={poster}
           src={poster}
           alt={title}
           className="w-full aspect-[2/3] object-cover"

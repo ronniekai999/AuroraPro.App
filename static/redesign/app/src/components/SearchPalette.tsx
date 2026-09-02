@@ -481,6 +481,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             >
               {m.poster ? (
                 <img
+                  key={m.poster}
                   src={m.poster}
                   alt=""
                   className="w-10 h-14 rounded object-cover flex-shrink-0 ring-1 ring-white/10 bg-white/[0.05]"

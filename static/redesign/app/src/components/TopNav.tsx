@@ -275,6 +275,10 @@ function AvatarMenu({
           // of a `menu`.
           aria-labelledby="avatar-menu-heading"
           onKeyDown={onPanelKeyDown}
+          // inert while the exit plays: pointer-events:none does not stop
+          // Tab, and a focus landing on a node 150ms from unmount would
+          // drop to <body>.
+          inert={exit.closing || undefined}
           className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-fade-in${exit.closing ? ' is-closing' : ''}`}
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
@@ -489,6 +493,8 @@ function MobileSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Menu"
+        // inert during the exit fade — see AvatarMenu.
+        inert={closing || undefined}
         className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-2xl p-2 animate-fade-in max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
         style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >

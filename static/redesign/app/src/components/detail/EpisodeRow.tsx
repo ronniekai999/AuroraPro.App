@@ -74,6 +74,7 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
           detail main column got wider when the rail moved to 216px. */}
       <div className="relative w-[140px] sm:w-[176px] lg:w-[212px] aspect-video rounded-xl overflow-hidden flex-shrink-0 bg-white/5">
         <img
+          key={ep.still}
           src={ep.still}
           alt=""
           loading="lazy"
