@@ -44,14 +44,19 @@ func TestFFmpegVersionMinor(t *testing.T) {
 		{"ffmpeg version 6.1", 6, 1},
 		// FFmpeg's version.sh falls back to the RELEASE file without git
 		// metadata, and on master that file reads "N.N.git": a snapshot whose
-		// digits name the release it PRECEDES (third review). "git"/"dev"
-		// anywhere in the token means unknown — over-broadly on purpose,
-		// because unknown only costs a build the burst and the pacing while
-		// a snapshot read as a release costs it every transcode.
+		// digits name the release it PRECEDES (third review). The marker is
+		// the delimited field right after the numeric version.
 		{"ffmpeg version 6.1.git Copyright", 0, 0},
 		{"ffmpeg version 7.1.git-20240902 Copyright", 0, 0},
 		{"ffmpeg version n6.1-dev-1234-gabcdef Copyright", 0, 0},
-		{"ffmpeg version 6.1.1-digital Copyright", 0, 0}, // over-broad, by design
+		{"ffmpeg version 6.1.dev Copyright", 0, 0},
+		// Vendor suffixes that merely contain the letters are releases; an
+		// unknown here would cost them the readrate pacing too (fourth review).
+		{"ffmpeg version 6.1.1-digital Copyright", 6, 1},
+		{"ffmpeg version 7.1.1-full_build-www.gyan.dev Copyright", 7, 1},
+		{"ffmpeg version 7.1.1-essentials_build-www.gyan.dev Copyright", 7, 1},
+		{"ffmpeg version 6.0-devuan1 Copyright", 6, 0},
+		{"ffmpeg version 7.1-legit Copyright", 7, 1},
 		// A release-branch build described from its tag is a real release.
 		{"ffmpeg version n7.0.2-6-g1234abc Copyright", 7, 0},
 		{"garbage", 0, 0},
@@ -250,8 +255,11 @@ func TestStereoDownmixFilter(t *testing.T) {
 	}
 
 	std := stereoDownmixFilter(DownmixStandard, 6)
-	if !strings.HasPrefix(std, "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5") {
-		t.Errorf("standard 5.1 must be the ITU Lo/Ro matrix: %q", std)
+	// Every chain converts to float FIRST: pan folds in the source's own
+	// sample format, and on an integer source the overs saturate inside pan
+	// before the limiter sees them (fourth review).
+	if !strings.HasPrefix(std, downmixFloat+",pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5") {
+		t.Errorf("standard 5.1 must fold in float with the ITU Lo/Ro matrix: %q", std)
 	}
 	if !strings.HasSuffix(std, downmixLimiter) {
 		t.Errorf("standard must end in the limiter: %q", std)
@@ -264,7 +272,7 @@ func TestStereoDownmixFilter(t *testing.T) {
 	// the backs at 0.5 was 3 dB quieter than the fold it claims to mirror
 	// (second review, measured on a real 7.1 tone).
 	std8 := stereoDownmixFilter(DownmixStandard, 8)
-	if !strings.HasPrefix(std8, "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7") {
+	if !strings.HasPrefix(std8, downmixFloat+",pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7") {
 		t.Errorf("standard 7.1 must mirror swresample (backs and sides both 0.707): %q", std8)
 	}
 	if strings.Contains(std8, "c3") || !strings.HasSuffix(std8, downmixLimiter) {
@@ -272,11 +280,11 @@ func TestStereoDownmixFilter(t *testing.T) {
 	}
 
 	dlg := stereoDownmixFilter(DownmixDialogue, 6)
-	if !strings.Contains(dlg, "c0=0.707*c0+c2+0.5*c4") || !strings.HasSuffix(dlg, downmixLimiter) {
+	if !strings.HasPrefix(dlg, downmixFloat+",") || !strings.Contains(dlg, "c0=0.707*c0+c2+0.5*c4") || !strings.HasSuffix(dlg, downmixLimiter) {
 		t.Errorf("dialogue 5.1 = %q", dlg)
 	}
 	night := stereoDownmixFilter(DownmixNight, 6)
-	if !strings.HasPrefix(night, "pan=stereo|c0=c2+0.3*c0+0.3*c4") || !strings.Contains(night, "dynaudnorm=") {
+	if !strings.HasPrefix(night, downmixFloat+",pan=stereo|c0=c2+0.3*c0+0.3*c4") || !strings.Contains(night, "dynaudnorm=") {
 		t.Errorf("night 5.1 = %q", night)
 	}
 	if strings.Contains(night, "alimiter") {
@@ -294,7 +302,7 @@ func TestAudioEncodeArgsAppliesDownmixOnlyToStereoAAC(t *testing.T) {
 	// 5.1 source → stereo AAC: the pan chain rides in front of the encoder.
 	s := &TranscodeSession{AudioChannels: 6}
 	args := audioEncodeArgs(s, DownmixStandard)
-	if args[0] != "-af" || !strings.HasPrefix(args[1], "pan=stereo") {
+	if args[0] != "-af" || !strings.HasPrefix(args[1], downmixFloat+",pan=stereo") {
 		t.Errorf("5.1→stereo AAC must carry the downmix filter: %v", args)
 	}
 	assertContains(t, args, "-c:a", "aac")

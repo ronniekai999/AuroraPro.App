@@ -2594,6 +2594,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // so the party/pause-intent handling is the seek-rebuild's.
         const rebuildAtPlayheadForLaggingLevel = (playheadAbs: number, edgeAbs: number, trigger: string) => {
           if (cancelled || !playerReadyRef.current || sessionIdRef.current === null || lagRebuildFiredRef.current) return
+          // Without a rebuild callback there is nothing to do — and nothing
+          // may be consumed or disabled on the way to finding that out: the
+          // one-shot and the liveSyncPosition shadow below would otherwise
+          // leave the element stalled with hls.js's own recovery neutered
+          // (fourth review). The seek path's rebuildAtTarget makes the same
+          // check; App.tsx always wires the callback today.
+          if (!keepaliveRecoveryRef.current.onSeekRebuild) return
           lagRebuildFiredRef.current = true
           console.warn('[Aurora hls.js] level', hls.currentLevel, 'has produced to',
             edgeAbs.toFixed(1), 's but the playhead is at', playheadAbs.toFixed(1),

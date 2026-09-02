@@ -2137,16 +2137,15 @@ func ffmpegVersion(banner string) (major, minor int) {
 	// also falls back to the RELEASE file when there is no git metadata, and
 	// on master that file reads "N.N.git" ("6.1.git", "7.1.git-20240902"),
 	// with "nN.N-dev-…" from `git describe` on a dev tag — all snapshots
-	// whose leading digits name a release they PRECEDE (third review). So a
-	// "git" or "dev" anywhere in the token means unknown, over-broadly on
-	// purpose: a vendor suffix that merely contains the letters
-	// ("6.1.1-digital") loses the burst and the pacing, which is the safe
-	// direction; a snapshot read as a release loses every transcode.
-	if strings.Contains(ver, "git") || strings.Contains(ver, "dev") {
-		return 0, 0
-	}
+	// whose leading digits name a release they PRECEDE (third review). The
+	// marker is the field RIGHT AFTER the numeric version, delimited: a
+	// vendor suffix that merely contains the letters ("6.1.1-digital",
+	// "7.1.1-full_build-www.gyan.dev", "…-devuan") is still a release, and
+	// reading it as unknown would cost that build the readrate pacing, not
+	// only the burst (fourth review).
+	isDigit := func(c byte) bool { return c >= '0' && c <= '9' }
 	i := 0
-	for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
+	for i < len(ver) && isDigit(ver[i]) {
 		major = major*10 + int(ver[i]-'0')
 		i++
 	}
@@ -2155,9 +2154,26 @@ func ffmpegVersion(banner string) (major, minor int) {
 	}
 	if i < len(ver) && ver[i] == '.' {
 		i++
-		for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
+		for i < len(ver) && isDigit(ver[i]) {
 			minor = minor*10 + int(ver[i]-'0')
 			i++
+		}
+	}
+	// Optional patch level ("6.1.1"), skipped so the marker test below sees
+	// what follows the whole numeric version.
+	if i < len(ver) && ver[i] == '.' {
+		j := i + 1
+		for j < len(ver) && isDigit(ver[j]) {
+			j++
+		}
+		if j > i+1 {
+			i = j
+		}
+	}
+	rest := strings.TrimLeft(ver[i:], ".-_")
+	for _, marker := range []string{"git", "dev"} {
+		if strings.HasPrefix(rest, marker) && (len(rest) == len(marker) || strings.ContainsRune(".-_", rune(rest[len(marker)]))) {
+			return 0, 0
 		}
 	}
 	// A "major" no release will reach in this project's lifetime is a date

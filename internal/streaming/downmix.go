@@ -31,6 +31,12 @@ package streaming
 //	6 channels: c0 FL, c1 FR, c2 FC, c3 LFE, c4 BL|SL, c5 BR|SR
 //	8 channels: c0 FL, c1 FR, c2 FC, c3 LFE, c4 BL, c5 BR, c6 SL, c7 SR
 //
+// The selection is keyed on channel COUNT because the probe records no
+// layout: a 6-channel 6.0/hexagonal or an 8-channel octagonal track (no LFE)
+// is mixed as 5.1/7.1 and loses its c3 as if it were the LFE. Those layouts
+// are rare outside test corpora; a layout-keyed selection needs the scanner
+// to record the layout first.
+//
 // Anything else (mono, 3.0, 4.0, 5.0, 6.1, the odd 22.2) keeps the bare
 // swresample fold. `pan` does not fail on a wrong-shaped matrix — an input
 // index the layout lacks is silently dropped from the expression, an input
@@ -101,6 +107,19 @@ const downmixLimiter = "alimiter=limit=0.98:attack=5:release=50:level=false"
 // sample on full scale.
 const downmixNightCompressor = "dynaudnorm=f=200:g=3:r=0.9:p=0.95:m=100:s=12"
 
+// downmixFloat runs the fold in float. `pan` drives its own swresample
+// instance in the SOURCE sample format with a custom matrix and no
+// auto-rescale, so on an integer-decoded source — PCM, FLAC, DTS-HD MA
+// (s32p), TrueHD, ALAC: exactly the lossless surround tracks that most often
+// take this path — the summed overs of a hot passage saturate INSIDE pan,
+// before the limiter ever sees them, and the limiter then trims an already
+// hard-clipped square wave (fourth review, measured on a 0.9-amplitude s16
+// 5.1 tone: 66,720 of 96,000 samples pinned at full scale). AAC/AC-3/E-AC-3
+// decode to float already, which is why the fixture matrix did not catch it.
+// Converting first keeps the whole chain in float, where the overs survive
+// to the limiter.
+const downmixFloat = "aformat=sample_fmts=fltp"
+
 // stereoDownmixFilter returns the `-af` chain that folds `channels` source
 // channels into stereo under policy, or "" when the caller should keep the
 // bare `-ac 2`: the legacy policy, a source already at or below stereo, or a
@@ -128,7 +147,7 @@ func stereoDownmixFilter(policy StereoDownmix, channels int) string {
 		if pan == "" {
 			return ""
 		}
-		return pan + "," + downmixNightCompressor
+		return downmixFloat + "," + pan + "," + downmixNightCompressor
 	default: // DownmixStandard, and the fail-safe for anything unrecognized
 		switch channels {
 		case 6:
@@ -146,5 +165,5 @@ func stereoDownmixFilter(policy StereoDownmix, channels int) string {
 	if pan == "" {
 		return ""
 	}
-	return pan + "," + downmixLimiter
+	return downmixFloat + "," + pan + "," + downmixLimiter
 }

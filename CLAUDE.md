@@ -388,14 +388,28 @@ Invariants to preserve:
   video transcode of the wrong track (first review finding). Native
   clients that would rather pick tracks themselves omit `audio_lang`.
   `normalizeLang` folds the whole ISO 639-1 → 639-2/T table, the twenty
-  639-2/B twins, and `langExtraFolds` (jp, cmn, nob/nno → nor); extend
-  those rather than comparing tags literally.
+  639-2/B twins, and `langExtraFolds` (jp, cmn, fil → tgl, nob/nno → nor);
+  extend those rather than comparing tags literally. When the video itself
+  cannot be remuxed (VP8/VP9/AV1, Hi10P, the legacy codecs) a preference
+  for a non-default track costs a FULL transcode — the only HLS path that
+  can select a track — for browsers and native clients alike; `hls_native`
+  is not a "my player selects tracks" signal (the SPA sends it for
+  Safari), so a direct-play-with-`audio_track_index` shortcut needs a new
+  opt-in capability key, which is the open follow-up. Note the one
+  deliberate decision change for clients that send nothing new: a file
+  whose FIRST flagged default the client cannot decode used to direct-play
+  (silent audio) and now remuxes the playable track.
 - **`transcode.stereo_downmix` — `legacy` is the byte-identical rollback**
-  (bare `-ac 2`). The matrices are indexed by channel POSITION and cover
-  exactly 6 and 8 channels; every other layout keeps the bare fold.
-  `standard` mirrors swresample's fold — centre AND both surround pairs at
-  0.707, LFE dropped, no 7.1-specific rule (measured, second review) —
-  plus a limiter. The channel count that selects a matrix comes from the
+  (bare `-ac 2`). The matrices are indexed by channel POSITION and keyed
+  on channel COUNT (the probe records no layout, so a 6.0/octagonal track
+  loses its c3 as if it were the LFE); they cover exactly 6 and 8 channels
+  and every other layout keeps the bare fold. `standard` mirrors
+  swresample's fold — centre AND both surround pairs at 0.707, LFE dropped,
+  no 7.1-specific rule (measured, second review) — plus a limiter, and
+  every chain converts to float FIRST (`downmixFloat`): `pan` folds in the
+  source's own sample format, so on PCM/FLAC/DTS-HD/TrueHD the overs
+  saturated inside pan before the limiter saw them (fourth review). The
+  crest-factor fixture test is the guard. The channel count that selects a matrix comes from the
   library's per-track probe in the session handler, not the client echo:
   `pan` does not fail on a wrong count, it silently drops the terms for
   channels the track lacks and discards channels the matrix never names,
