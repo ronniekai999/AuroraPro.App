@@ -1303,7 +1303,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         // the first three usually take (Continue Watching is landscape).
         // The banner this replaces was one line of purple text; the whole
         // page then popped in around it. The announcement stays, sr-only.
-        <div className="stage-gutter">
+        // Plain wrapper: this already sits inside HomeView's .stage-gutter,
+        // and a second gutter made the skeletons 2× the page padding
+        // narrower than the rails that replace them.
+        <div>
           <p className="sr-only" role="status">Loading your library…</p>
           <RailSkeleton aspect="landscape" count={5} />
           <RailSkeleton />

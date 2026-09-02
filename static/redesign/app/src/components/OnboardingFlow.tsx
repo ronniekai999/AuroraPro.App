@@ -520,7 +520,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             <path d="M14 11L26 18L14 25Z" fill="#fff" />
           </svg>
           <span className="font-display text-[1.05rem] font-bold tracking-tight text-white">
-            Aurora<span className="font-medium text-[color:var(--stage-purple-lt)]/85"> Pro</span>
+            {/* Literal hex, not the --stage-purple-lt token: Tailwind 3 drops
+                an opacity modifier on a var() colour and emits NOTHING for
+                the class (review finding on the token sweep). */}
+            Aurora<span className="font-medium text-[#d8b4fe]/85"> Pro</span>
           </span>
         </div>
         <div className="hidden flex-1 items-center justify-center gap-1.5 sm:flex">
@@ -1130,7 +1133,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
 
 function Eyebrow({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-3 flex items-center gap-2 text-[0.72rem] uppercase tracking-[0.22em] text-[color:var(--stage-purple-lt)]/80">
+    // Literal hex with its alpha: `text-[color:var(--stage-purple-lt)]/80`
+    // compiles to no CSS in Tailwind 3 (opacity modifiers need a parseable
+    // colour), which silently turned every eyebrow white.
+    <div className="mb-3 flex items-center gap-2 text-[0.72rem] uppercase tracking-[0.22em] text-[#d8b4fe]/80">
       <span className="h-1.5 w-1.5 rounded-full bg-[#a855f7] shadow-[0_0_8px_#a855f7]" />
       {children}
     </div>

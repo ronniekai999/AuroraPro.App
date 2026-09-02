@@ -99,7 +99,7 @@ module.exports = {
       // — `all` animated those too whenever a control resized. Progress
       // fills, whose animated property IS layout, use `transition-[width]`.
       transitionProperty: {
-        ui: "color, background-color, border-color, opacity, transform, box-shadow",
+        ui: "color, background-color, border-color, outline-color, opacity, transform, box-shadow, filter",
       },
       // The accordion-down/up and caret-blink keyframes that shipped with
       // the shadcn scaffold went with ui/accordion.tsx and ui/input-otp.tsx,

@@ -153,8 +153,13 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
     setLayers(l => {
       if (!bgImage) return l.shown === null && l.incoming === null ? l : { shown: null, incoming: null }
       if (bgImage === l.shown) return l.incoming ? { ...l, incoming: null } : l
-      if (failedSrcRef.current === bgImage) return l
       if (l.incoming?.src === bgImage) return l
+      // A src that 404'd last time round: drop the PREVIOUS title's art
+      // right away (it must not sit under this title while the retry is in
+      // flight — the gradient base is the honest frame) and try again, since
+      // the server mirrors TMDB art lazily and may have it by now. A second
+      // 404 clears the layers again via onError.
+      if (failedSrcRef.current === bgImage) return { shown: null, incoming: { src: bgImage, loaded: false } }
       return { ...l, incoming: { src: bgImage, loaded: false } }
     })
   }, [bgImage])
@@ -301,6 +306,11 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       onMouseEnter={() => onPauseChange?.(true)}
       onMouseLeave={() => {
         onPauseChange?.(false)
+        // Drop any pointer sample still queued for the next frame, or the
+        // rAF scheduled by the last mousemove would rewrite the offset the
+        // reset below just cleared and the art would rest off-centre.
+        parallaxPending.current = null
+        if (parallaxRaf.current !== null) { cancelAnimationFrame(parallaxRaf.current); parallaxRaf.current = null }
         const node = sectionRef.current
         if (node) { node.style.setProperty('--hero-px', '0'); node.style.setProperty('--hero-py', '0') }
       }}

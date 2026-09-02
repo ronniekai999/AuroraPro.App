@@ -761,7 +761,11 @@
   background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.72));
   backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  transition: background-color var(--dur-base) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
+  /* box-shadow only. The base fill is a gradient (background-color is
+     transparent under it), so transitioning background-color to the
+     scrolled fill would ramp from TRANSPARENT and show content through
+     the bar for the duration. The fill swaps instantly; the shadow eases. */
+  transition: box-shadow var(--dur-base) var(--ease-standard);
 }
 /* Once the page has scrolled the bar sits over content, not the hero: it
    firms up to a near-solid fill with a hairline shadow so the boundary
@@ -770,8 +774,7 @@
    the base rule is untouched (audit-glass-contrast reads it). Toggled by
    TopNav from a passive scroll listener. */
 .stage-topnav[data-scrolled] {
-  background-color: rgba(5, 5, 5, 0.94);
-  background-image: none;
+  background: rgba(5, 5, 5, 0.94);
   backdrop-filter: blur(12px);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
@@ -797,7 +800,7 @@ html[data-glow="subtle"] .stage-topnav {
   position: relative;
   padding: 9px 13px;
   border-radius: 10px;
-  font-size: 13.5px;
+  font-size: var(--fs-body-sm);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -854,7 +857,7 @@ html[data-glow="subtle"] .stage-topnav {
   /* The mockup draws this at 8.5px (≈6.4pt), below any practical
      legibility floor — and the same class is reused in the mobile sheet's
      15px rows, where 8.5px reads as an artefact. */
-  font-size: 10px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -956,7 +959,7 @@ html[data-glow="subtle"] .stage-topnav {
   font-size: 16px;
 }
 @media (min-width: 1024px) {
-  .stage-navsearch input:not([type="range"]) { font-size: 12.5px; }
+  .stage-navsearch input:not([type="range"]) { font-size: var(--fs-meta); }
 }
 /* `all: unset` above only resets the BASE state, so on focus the global rule
    re-applied its own background and a 3px ring, drawing a second ring nested
@@ -1455,7 +1458,7 @@ html[data-glow="subtle"] .stage-toolbar {
   height: 34px;
   padding: 0 14px;
   border-radius: 999px;
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   font-weight: 500;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.05);
@@ -1552,7 +1555,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* Media-kind tag ("MOVIE" / "TV") — neutral, so it reads as a category
    rather than competing with the status badge beside it. */
 .stage-typetag {
-  font-size: 10px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.06em;
   padding: 3px 8px;
@@ -1772,7 +1775,7 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.05);
   padding: 6px 7px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: rgba(255, 255, 255, 0.75);
   font-variant-numeric: tabular-nums;
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
@@ -2200,7 +2203,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   position: absolute;
   bottom: 18px;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   background: rgba(10, 8, 18, 0.92);
@@ -2374,7 +2377,7 @@ html[data-glow="subtle"] .stage-upnext {
   background: #0c0a14;
 }
 .stage-upnext-eyebrow {
-  font-size: 10px;
+  font-size: var(--fs-label);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--stage-purple-lt);
@@ -2387,7 +2390,7 @@ html[data-glow="subtle"] .stage-upnext {
 .stage-smartchip {
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 700;
   color: #f5d0fe;
   background: rgba(168, 85, 247, 0.16);
@@ -3676,7 +3679,9 @@ textarea:focus-visible {
   align-items: center;
   gap: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  animation: slideIn 0.3s ease;
+  /* forwards: holds the "to" frame so a re-render can never snap the toast
+     back to its off-screen "from" (the same defence .animate-fade-in has). */
+  animation: slideIn 0.3s ease forwards;
 }
 
 /* ====================================================================
