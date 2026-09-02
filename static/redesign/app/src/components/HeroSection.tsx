@@ -355,8 +355,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             aria-hidden="true"
             className={`stage-hero-img is-incoming${layers.incoming.loaded ? ' is-loaded' : ''}`}
             loading="eager"
-            // The FIRST backdrop is the page's largest above-the-fold paint;
-            // later rotations should not outrank the rail posters below.
+            // High priority whenever NO settled layer is on screen: the first
+            // paint, and a retry after a 404 (the gradient is showing, so this
+            // is the largest pending paint either way). An ordinary rotation
+            // over settled art must not outrank the rail posters below.
             fetchPriority={layers.shown ? 'auto' : 'high'}
             decoding="async"
             // A cached image can be complete before React attaches onLoad
