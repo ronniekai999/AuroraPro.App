@@ -71,15 +71,17 @@ describe('collectionStrips', () => {
     // The rolling-deploy case: frontend shipped ahead of the backend field.
     //
     // The size assertion is the point. cover_path fills a full-width 118px
-    // band, so it needs the wide `original` backdrop URL — swapping
-    // backdropURL for posterURL(…, 'w185') stretches a 2:3 portrait across it,
-    // and a test that only checked the path contained '/cover.jpg' passed
-    // happily through that mutation.
+    // band, so it needs a wide BACKDROP size (w780 — backdrops are sized per
+    // surface now; `original` was every surface's size until the UI polish
+    // pass) — swapping backdropURL for posterURL(…, 'w185') stretches a 2:3
+    // portrait across it, and a test that only checked the path contained
+    // '/cover.jpg' passed happily through that mutation. Backdrop sizes are
+    // the set the proxy allows above w500; poster sizes are excluded by name.
     const out = collectionStrips({ cover_path: '/cover.jpg' })
     expect(out).toHaveLength(1)
     expect(out[0]).toContain('/cover.jpg')
-    expect(out[0]).toContain('original')
-    expect(out[0]).not.toContain('w185')
+    expect(out[0]).toMatch(/\/api\/images\/(w780|w1280|original)\//)
+    expect(out[0]).not.toMatch(/\/(w92|w154|w185|w342|w500)\//)
   })
 
   it('treats an empty poster_paths array as absent, not as zero strips', () => {

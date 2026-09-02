@@ -12,6 +12,7 @@
 
 import { Fragment } from 'react'
 import { ArrowLeftIcon, StarIcon } from './icons'
+import { backdropSrcSet } from '@/lib/api'
 
 interface DetailHeroProps {
   backdrop: string
@@ -58,11 +59,21 @@ export function DetailHero({
 
   return (
     <section className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden">
+      {/* The detail page's largest paint. It shipped with no loading hints
+          and no error path: a backdrop the server has not mirrored yet
+          rendered the browser's broken-image glyph across a 58vh banner.
+          Hidden on error; the gradient ramp below carries the frame. */}
       <img
+        key={backdrop}
         src={backdrop}
+        srcSet={backdropSrcSet(backdrop)}
         alt=""
         className="w-full h-full object-cover scale-105"
         style={{ objectPosition }}
+        loading="eager"
+        fetchPriority="high"
+        decoding="async"
+        onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
       />
       {/* Phase 5 — the mockup's two-layer ramp as one element, replacing two
           inline-styled gradient divs.

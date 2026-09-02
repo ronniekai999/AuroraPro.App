@@ -77,7 +77,10 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
           src={ep.still}
           alt=""
           loading="lazy"
+          decoding="async"
           className={cn('w-full h-full object-cover', watched && 'opacity-65')}
+          // A missing still leaves the row's own bg-white/5 box, not a glyph.
+          onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
         />
         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-black/60 backdrop-blur-sm">
           E{ep.number}

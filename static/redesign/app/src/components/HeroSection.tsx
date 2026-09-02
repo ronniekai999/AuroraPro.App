@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
-import { recordRecommendationExposure, type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
+import { backdropSrcSet, recordRecommendationExposure, type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
 
 // Stable, deterministic "match %" for the hero ring — the COLD-START
 // FALLBACK only. The recommender now returns a real Aurora Score
@@ -323,6 +323,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       {layers.shown && (
         <img
           src={layers.shown}
+          srcSet={backdropSrcSet(layers.shown)}
           alt=""
           aria-hidden="true"
           className="stage-hero-img"
@@ -335,10 +336,13 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           <img
             key={incomingSrc}
             src={incomingSrc}
+            srcSet={backdropSrcSet(incomingSrc)}
             alt=""
             aria-hidden="true"
             className={`stage-hero-img is-incoming${layers.incoming.loaded ? ' is-loaded' : ''}`}
             loading="eager"
+            // The first backdrop is the page's largest above-the-fold paint.
+            fetchPriority="high"
             decoding="async"
             // A cached image can be complete before React attaches onLoad
             // (the load event is queued as a task, but belt and braces): the

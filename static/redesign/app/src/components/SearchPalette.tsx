@@ -472,8 +472,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
                 <img
                   src={m.poster}
                   alt=""
-                  className="w-10 h-14 rounded object-cover flex-shrink-0 ring-1 ring-white/10"
+                  className="w-10 h-14 rounded object-cover flex-shrink-0 ring-1 ring-white/10 bg-white/[0.05]"
                   loading="lazy"
+                  decoding="async"
+                  // Keep the box, drop the glyph: the fill above reads as the
+                  // same placeholder the no-poster branch renders.
+                  onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
                 />
               ) : (
                 <div className="w-10 h-14 rounded bg-white/[0.05] border border-white/10 flex-shrink-0" />

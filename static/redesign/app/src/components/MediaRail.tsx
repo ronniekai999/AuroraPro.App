@@ -26,12 +26,15 @@ import { type Media } from '@/lib/types'
 // case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
+export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, eagerCount = 0 }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
+  // How many leading cards fetch their art eagerly. HomeView passes it for
+  // the first rail only — the one whose top row sits under the hero fold.
+  eagerCount?: number
   // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
   // subtitle under the rail title, and an "✨ AI PICK" chip beside the
   // title for recommender-driven rails (discover / anchor). Both are
@@ -153,10 +156,11 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           </button>
         )}
         <div ref={scrollRef} className="rail-scroll scrollbar-hide" onScroll={updatePaddles}>
-          {items.map((item) => (
+          {items.map((item, idx) => (
             <MediaCardCinema
               key={item.id}
               item={item}
+              eager={idx < eagerCount}
               // Stable references, not per-item closures: the card calls
               // these with its own item, so React.memo on MediaCardCinema
               // can skip every card whose data did not change.

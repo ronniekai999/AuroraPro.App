@@ -16,6 +16,16 @@
     <meta name="theme-color" content="#050505" />
     <link rel="apple-touch-icon" href="/v2/apple-touch-icon.png" />
     <title>Aurora Pro</title>
+    <!-- Preload the default typeface pair (ECLIPSE: Inter body, Bricolage
+         display). Both @font-face rules are `font-display: swap`, so without
+         a preload every cold load painted the 84px hero title in the system
+         fallback and then swapped — a reflow in the one place the type
+         scale's comments spend the most effort avoiding. Vite rewrites these
+         hrefs to the same hashed asset URLs the CSS emits, so the preload
+         and the @font-face fetch the identical file. The other five
+         families are user-selected and are not preloaded. -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/src/fonts/inter.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/src/fonts/bricolage-grotesque.woff2" />
     <!-- Boot splash (below, #boot-splash) styles. Inline ON PURPOSE: the
          splash exists to cover the window before the JS/CSS bundles arrive,
          so its styles cannot live in the bundled index.css. It also replaces

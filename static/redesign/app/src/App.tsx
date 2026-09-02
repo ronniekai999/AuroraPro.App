@@ -1350,6 +1350,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             key={`${rail.title}-${i}`}
             title={rail.title}
             items={rail.items}
+            // First rail's first row sits at the hero fold: fetch it eagerly.
+            eagerCount={i === 0 ? 6 : 0}
             onSelect={onSelect}
             aspect={rail.aspect}
             onCardContext={onCardContext}
@@ -2078,7 +2080,7 @@ function mapFollowedToMedia(w: FollowedWatch): Media {
     genre: '',
     type: w.type === 'show' ? 'show' : 'movie',
     poster: posterURL(w.poster_path),
-    backdrop: backdropURL(w.backdrop_path),
+    backdrop: backdropURL(w.backdrop_path, 'w780'),
     description: '',
   }
 }

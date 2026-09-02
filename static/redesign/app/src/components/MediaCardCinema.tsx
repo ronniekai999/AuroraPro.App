@@ -17,7 +17,7 @@
 // also keeps the rendered SVG markup smaller — `Icon` ships every
 // listed glyph in its lookup table even when only one is used.
 
-import { Fragment, memo } from 'react'
+import { Fragment, memo, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react'
 
 // MediaLike is the structural subset of App.tsx's `Media` interface
@@ -114,6 +114,9 @@ export interface MediaCardCinemaProps<T extends MediaLike = MediaLike> {
   showLength?: boolean
   showBadges?: boolean
   hoverPreview?: boolean
+  // Above-the-fold cards (the first few of the first Home rail) fetch their
+  // art eagerly; everything else stays lazy. Default lazy.
+  eager?: boolean
 }
 
 /* ─────────────────────── meta row (pure) ───────────────────────── */
@@ -212,7 +215,7 @@ function MovieSvg() {
 function MediaCardCinemaInner<T extends MediaLike>({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
   className = '', subtitle, aspect = 'poster', topRightOverlay, onResume,
-  showLength = false, showBadges = false, hoverPreview = false,
+  showLength = false, showBadges = false, hoverPreview = false, eager = false,
 }: MediaCardCinemaProps<T>) {
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
@@ -220,7 +223,21 @@ function MediaCardCinemaInner<T extends MediaLike>({
   // Landscape (Continue Watching) cards fill a 16:9 frame, so prefer the
   // backdrop and fall back to the poster; portrait cards always use the
   // poster. Without this a 2:3 poster center-crops into a sliver.
-  const artSrc = aspect === 'landscape' ? (item.backdrop ?? item.poster) : item.poster
+  const wantedSrc = aspect === 'landscape' ? (item.backdrop ?? item.poster) : item.poster
+  // A poster that 404s (the server has not mirrored the TMDB file yet)
+  // used to render the browser's broken-image glyph on the primary browse
+  // surface. Remember the failed URL and fall through to the same
+  // placeholder a posterless item gets; a later src change retries.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null)
+  const artSrc = wantedSrc && wantedSrc !== failedSrc ? wantedSrc : undefined
+  // Fade-in on decode. `data-loaded` is set on the DOM node, not React
+  // state, so a loaded poster never re-renders the card; the <img> is keyed
+  // by src so a swapped URL starts invisible again. The ref callback covers
+  // an image that completed before onLoad was attached (cache hits on
+  // back-nav); naturalWidth guards a 404 that reports complete=true.
+  const markLoaded = (el: HTMLImageElement | null) => {
+    if (el && el.complete && el.naturalWidth > 0) el.setAttribute('data-loaded', '')
+  }
   // Poster badges (quality / maturity). Only when the caller opts in
   // AND the item actually carries tags — keeps Continue-Watching and
   // metadata-less rows clean.
@@ -321,11 +338,16 @@ function MediaCardCinemaInner<T extends MediaLike>({
       <div className="poster-wrap">
         {artSrc ? (
           <img
+            key={artSrc}
             src={artSrc}
             alt={item.title}
             className="poster-img"
-            loading="lazy"
+            loading={eager ? 'eager' : 'lazy'}
+            decoding="async"
             style={landscapeStyle}
+            ref={markLoaded}
+            onLoad={(e) => e.currentTarget.setAttribute('data-loaded', '')}
+            onError={() => setFailedSrc(artSrc)}
           />
         ) : (
           // Placeholder for items with no poster (search hits mid-

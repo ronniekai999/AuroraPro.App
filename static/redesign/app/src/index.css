@@ -3009,7 +3009,16 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   aspect-ratio: 2 / 3;
   object-fit: cover;
   /* No radius — the card clips. See the .poster-wrap note above. */
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+}
+/* Fade-in on decode: invisible until the <img> sets data-loaded (see
+   MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
+   <div class="poster-img poster-placeholder"> that never fires onLoad, and
+   a bare `.poster-img:not([data-loaded])` would hide every posterless card
+   forever. A transition, not an animation, so audit-reduced-motion Check 1b
+   does not apply; the reduced-motion block still stills it. */
+.media-card-cinema img.poster-img:not([data-loaded]) {
+  opacity: 0;
 }
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
    own 9px corners clipped against the wrap's edge. Phase 3 removed the
@@ -3167,6 +3176,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
 @media (prefers-reduced-motion: reduce) {
+  .media-card-cinema .poster-img { transition: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
   .media-card-cinema .reason-scrim { transform: none; transition: opacity 0.22s ease; }

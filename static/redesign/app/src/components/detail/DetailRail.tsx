@@ -216,7 +216,15 @@ export function DetailRail({
           broken-image glyph — previously against flat #050505 below the hero,
           now against backdrop artwork at ~17% scrim alpha. */}
       <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12]">
-        <img src={poster} alt={title} className="w-full aspect-[2/3] object-cover" />
+        {/* decoding=async keeps a 2:3 decode off the click-to-detail frame;
+            a poster that 404s hides itself and the box's own fill shows. */}
+        <img
+          src={poster}
+          alt={title}
+          className="w-full aspect-[2/3] object-cover"
+          decoding="async"
+          onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
+        />
         {hasProgress && (
           <>
             <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/85 to-transparent" />
