@@ -2592,6 +2592,33 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   animation: fadeIn 0.4s ease-out forwards;
 }
 
+/* Hero backdrop layers (HeroSection). The transform reads the parallax
+   custom properties the section writes from a rAF (--hero-px/--hero-py,
+   each in [-1, 1] → ±1% drift inside the 5% overscan), and the fade is
+   OPACITY-ONLY on its own keyframe. That separation is the point: the
+   <img> used to carry .animate-fade-in, whose `forwards` fill ends in
+   `transform: translateY(0)`, and an animation declaration outranks the
+   inline style the parallax was written to — so scale and drift were dead
+   from the day `forwards` was added (see the note above .animate-slide-in).
+   `.is-incoming` starts invisible and `.is-loaded` starts the fade; they are
+   two rules on purpose, so no single rule pairs `opacity: 0` with an
+   animation (audit-reduced-motion Check 1b). */
+.stage-hero-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.05) translate(calc(var(--hero-px, 0) * 1%), calc(var(--hero-py, 0) * 1%));
+  transition: transform 0.7s ease-out;
+}
+.stage-hero-img.is-incoming { opacity: 0; }
+.stage-hero-img.is-incoming.is-loaded { animation: heroFadeIn 0.5s ease-out forwards; }
+@keyframes heroFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .aurora-pulse-blob {
   position: absolute;
   border-radius: 50%;
@@ -4160,5 +4187,14 @@ textarea:focus-visible {
   .animate-fade-in,
   .animate-slide-in {
     animation: none !important;
+  }
+  /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than
+     stilled — `.is-incoming` starts at opacity 0 and relies on heroFadeIn to
+     appear, so nulling the animation alone would leave the new art invisible
+     until the promotion timer swapped it in. */
+  .stage-hero-img { transition: none; }
+  .stage-hero-img.is-incoming.is-loaded {
+    animation: none !important;
+    opacity: 1;
   }
 }

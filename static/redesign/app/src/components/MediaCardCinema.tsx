@@ -17,7 +17,7 @@
 // also keeps the rendered SVG markup smaller — `Icon` ships every
 // listed glyph in its lookup table even when only one is used.
 
-import { Fragment } from 'react'
+import { Fragment, memo } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react'
 
 // MediaLike is the structural subset of App.tsx's `Media` interface
@@ -64,13 +64,17 @@ export interface MediaLike {
   tags?: string[]
 }
 
-export interface MediaCardCinemaProps {
-  item: MediaLike
-  onSelect: () => void
-  onCardContext?: (e: ReactMouseEvent) => void
+export interface MediaCardCinemaProps<T extends MediaLike = MediaLike> {
+  item: T
+  // Callbacks receive the card's own `item` back. That is what lets a rail
+  // or grid hand every card the SAME function reference instead of a fresh
+  // per-item closure — and same-reference props are what make the
+  // React.memo on this component do anything (see the export at the end).
+  onSelect: (item: T) => void
+  onCardContext?: (e: ReactMouseEvent, item: T) => void
   // Library state. When BOTH provided the lib badge renders.
   libraryIds?: Set<number>
-  onToggleLib?: () => void
+  onToggleLib?: (item: T) => void
   // Optional sizing class — rails pass `w-[206px]` (or `w-[336px]` for
   // landscape), grids leave it empty (the grid column sets the width).
   className?: string
@@ -205,11 +209,11 @@ function MovieSvg() {
   )
 }
 
-export function MediaCardCinema({
+function MediaCardCinemaInner<T extends MediaLike>({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
   className = '', subtitle, aspect = 'poster', topRightOverlay, onResume,
   showLength = false, showBadges = false, hoverPreview = false,
-}: MediaCardCinemaProps) {
+}: MediaCardCinemaProps<T>) {
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
     aspect === 'landscape' ? { aspectRatio: '16 / 9' } : undefined
@@ -235,8 +239,8 @@ export function MediaCardCinema({
     // point. Class is harmless when no overlay is passed.
     <div
       className={`media-card-cinema group ${className}`}
-      onClick={onSelect}
-      onContextMenu={onCardContext}
+      onClick={() => onSelect(item)}
+      onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
       // 2026-06-17 (a11y quick-win) — make the whole card keyboard-
       // activatable so the default browse surface isn't mouse-only.
       // role="button" + tabIndex put it in the tab order; onKeyDown
@@ -303,7 +307,7 @@ export function MediaCardCinema({
         if (e.target !== e.currentTarget) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          onSelect()
+          onSelect(item)
         }
       }}
       // 2026-06-04 — the AI reason is NO LONGER a native title= tooltip on
@@ -353,7 +357,7 @@ export function MediaCardCinema({
             the library entry without also opening the detail view. */}
         {onToggleLib && (
           <button
-            onClick={(e) => { e.stopPropagation(); onToggleLib() }}
+            onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
             title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
             aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
             className={`lib-badge ${isInLib ? 'in-lib' : ''}`}
@@ -520,3 +524,13 @@ export function MediaCardCinema({
     </div>
   )
 }
+
+// Memoized export, shallow prop comparison, NO custom comparator: a
+// comparator that ignored function props to "help" would freeze
+// CollectionsView's per-item `topRightOverlay` and any caller that
+// legitimately passes a new closure. Callers earn the skip by passing
+// stable callbacks (the item-passing contract on the props) and a stable
+// `item` reference (HomeView memoizes its rails array); a caller that
+// builds `item` inline per render simply gets today's behaviour. The cast
+// keeps the generic signature, which memo() would otherwise erase.
+export const MediaCardCinema = memo(MediaCardCinemaInner) as typeof MediaCardCinemaInner

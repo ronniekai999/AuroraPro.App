@@ -135,9 +135,9 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
             <MediaCardCinema
               key={item.id}
               item={item}
-              onSelect={() => onSelect(item)}
+              onSelect={onSelect}
               libraryIds={libraryIds}
-              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              onToggleLib={onToggleLib}
             />
           ))}
         </div>

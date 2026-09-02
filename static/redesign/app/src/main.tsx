@@ -34,6 +34,14 @@ installSyncDebug()
 // see lib/pwa.ts; nothing here can affect app startup.
 initPWA()
 
+// Scroll position across history entries is restored by App (per entry,
+// after the destination view has committed) rather than by the browser.
+// Native restoration runs on popstate while the OUTGOING view is still
+// mounted: it clamps to that document's height, then the SPA re-renders
+// under it — so Back from a title landed at the top of a Home you had
+// scrolled six rails down. See App's scroll-memory layout effect.
+if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual'
+
 // Audit M4 fix (Phase 8) — basename is derived from Vite's
 // `import.meta.env.BASE_URL` instead of hardcoded "/v2". This makes
 // Vite's `base` config (`vite.config.ts`) the single source of truth

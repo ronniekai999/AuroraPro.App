@@ -566,6 +566,9 @@ export interface TopNavProps {
   user: ApiUser
   currentView: string
   onNavigate: (v: string) => void
+  /** Warms a lazy view's chunk on hover/focus of its tab, so the click that
+   *  follows mounts real content instead of the Suspense fallback. */
+  onPrefetch?: (v: string) => void
   /** Inline search — the same controlled input the old header owned. */
   searchQuery: string
   onSearchQueryChange: (v: string) => void
@@ -613,6 +616,7 @@ export function TopNav({
   user,
   currentView,
   onNavigate,
+  onPrefetch,
   searchQuery,
   onSearchQueryChange,
   onSearchFocus,
@@ -760,6 +764,11 @@ export function TopNav({
               className="stage-tab"
               aria-current={active ? 'page' : undefined}
               onClick={() => go(tab.id)}
+              // Intent, not commitment: hovering or tabbing onto a tab is
+              // enough signal to fetch its code. import() dedupes, so a tab
+              // hovered ten times costs one request.
+              onPointerEnter={() => onPrefetch?.(tab.id)}
+              onFocus={() => onPrefetch?.(tab.id)}
             >
               {tab.label}
               {tab.admin && <span className="stage-tab-adm">admin</span>}

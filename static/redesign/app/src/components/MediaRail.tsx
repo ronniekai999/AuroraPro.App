@@ -157,10 +157,13 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
             <MediaCardCinema
               key={item.id}
               item={item}
-              onSelect={() => onSelect(item)}
-              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              // Stable references, not per-item closures: the card calls
+              // these with its own item, so React.memo on MediaCardCinema
+              // can skip every card whose data did not change.
+              onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
-              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              onToggleLib={onToggleLib}
               // 2026-07-25 (Aurora Stage Phase 3) — 180→206 / 320→336. The
               // art is the card now (no text shelf below it), so the poster
               // carries the whole design and gets the room back.

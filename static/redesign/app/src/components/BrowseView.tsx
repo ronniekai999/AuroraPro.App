@@ -416,10 +416,10 @@ export default function BrowseView({
             <MediaCardCinema
               key={item.id}
               item={item}
-              onSelect={() => onSelect(item)}
-              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
-              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              onToggleLib={onToggleLib}
               showLength
               showBadges
               hoverPreview

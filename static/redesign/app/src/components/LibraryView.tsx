@@ -110,9 +110,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
             <MediaCardCinema
               key={m.id}
               item={m}
-              onSelect={() => onSelect(m)}
+              onSelect={onSelect}
               libraryIds={libraryIds}
-              onToggleLib={() => onToggleLib(m)}
+              onToggleLib={onToggleLib}
             />
           ))}
         </div>
@@ -160,9 +160,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
                 <MediaCardCinema
                   key={`${c.media_item_id}-${c.episode_id ?? ''}`}
                   item={m}
-                  onSelect={() => onSelect(m)}
+                  onSelect={onSelect}
                   libraryIds={libraryIds}
-                  onToggleLib={() => onToggleLib(m)}
+                  onToggleLib={onToggleLib}
                   subtitle={sub}
                   onResume={resumeHandler}
                 />

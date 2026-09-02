@@ -3,13 +3,14 @@
 // reaching into App. The only change vs. the original is the import
 // shape (`type ReactNode` instead of the `React.ReactNode` namespace
 // reference) — required by tsconfig.app.json's `verbatimModuleSyntax`.
-// The component body, the icon-path map, and the a11y comment below
-// are byte-for-byte the original.
+// The icon-path map and the a11y comment below are byte-for-byte the
+// original; the map has since been hoisted to module scope (it used to be
+// rebuilt — ~50 JSX entries — on every render of every <Icon>, dozens of
+// times per page, to return one entry; it closes over nothing).
 
 import { type ReactNode } from 'react'
 
-export function Icon({ name, size = 20, className = '' }: { name: string; size?: number; className?: string }) {
-  const icons: Record<string, ReactNode> = {
+const icons: Record<string, ReactNode> = {
     home: <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10" />,
     movie: <><rect x="2" y="2" width="20" height="20" rx="2.18" /><path d="M7 2v20M17 2v20M2 12h20" /></>,
     tv: <><rect x="2" y="7" width="20" height="15" rx="2" /><polyline points="17 2 12 7 7 2" /></>,
@@ -90,7 +91,9 @@ export function Icon({ name, size = 20, className = '' }: { name: string; size?:
     // rail). Callers can also pass an explicit `icon` to MediaRail
     // to override resolution entirely.
     compass: <><circle cx="12" cy="12" r="10" /><polygon points="16 8 14 14 8 16 10 10 16 8" fill="currentColor" stroke="none" /></>,
-  }
+}
+
+export function Icon({ name, size = 20, className = '' }: { name: string; size?: number; className?: string }) {
   return (
     // 2026-05-27 (deep-debug Bug 19) — aria-hidden because icons are
     // almost always decorative; the surrounding button/link carries the

@@ -103,10 +103,84 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
     onPlay: (c: ContinueWatchingItem) => void
   }
 }) {
-  // useState MUST be called before any conditional return so hook
-  // ordering stays stable across renders (Rules of Hooks).
-  const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
+  // Hooks MUST be called before any conditional return so hook ordering
+  // stays stable across renders (Rules of Hooks).
   const sectionRef = useRef<HTMLElement>(null)
+  // Parallax — written straight to CSS custom properties on the section
+  // from one requestAnimationFrame per pointer frame, NOT React state. The
+  // previous implementation kept the pointer in useState and re-rendered
+  // the whole hero (match-ring SVG, CTA row, provenance pill) on every
+  // mousemove to produce an inline `transform` the browser then discarded:
+  // `.animate-fade-in` on the same <img> ends in `transform: translateY(0)`
+  // with `animation-fill-mode: forwards`, and animation declarations
+  // outrank inline style in the cascade, so neither the 1.05 scale nor the
+  // drift ever painted. The fade now lives on a class that animates opacity
+  // only (.stage-hero-img, index.css) and the transform reads
+  // --hero-px/--hero-py, so the effect is visible again at zero render cost.
+  // Coarse pointers have no hover to track and prefers-reduced-motion users
+  // get a still frame — both gates are cached in parallaxOn below.
+  const parallaxRaf = useRef<number | null>(null)
+  const parallaxPending = useRef<{ px: number; py: number } | null>(null)
+  const parallaxOn = useRef(false)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const coarse = window.matchMedia('(pointer: coarse)')
+    const sync = () => { parallaxOn.current = !reduce.matches && !coarse.matches }
+    sync()
+    reduce.addEventListener('change', sync)
+    coarse.addEventListener('change', sync)
+    return () => {
+      reduce.removeEventListener('change', sync)
+      coarse.removeEventListener('change', sync)
+      if (parallaxRaf.current !== null) cancelAnimationFrame(parallaxRaf.current)
+    }
+  }, [])
+  // Backdrop → poster → gradient fallback chain (some TMDB rows have no
+  // backdrop image). Computed before the early return because the layer
+  // state below has to be, too.
+  const bgImage = heroProp ? (heroProp.backdrop || heroProp.poster || '') : ''
+  // Two backdrop layers make the rotation a real dissolve. `shown` is the
+  // settled image; `incoming` mounts INVISIBLE, is marked loaded once its
+  // bytes have decoded (so a slow fetch never flashes the gradient), fades
+  // in over the old art, and is promoted to `shown` after the fade. A
+  // backdrop that 404s (the server has not mirrored the TMDB art yet)
+  // drops both layers so the gradient base shows for the new title rather
+  // than the previous title's art lingering under it.
+  const [layers, setLayers] = useState<{ shown: string | null; incoming: { src: string; loaded: boolean } | null }>({ shown: null, incoming: null })
+  const failedSrcRef = useRef<string | null>(null)
+  useEffect(() => {
+    setLayers(l => {
+      if (!bgImage) return l.shown === null && l.incoming === null ? l : { shown: null, incoming: null }
+      if (bgImage === l.shown) return l.incoming ? { ...l, incoming: null } : l
+      if (failedSrcRef.current === bgImage) return l
+      if (l.incoming?.src === bgImage) return l
+      return { ...l, incoming: { src: bgImage, loaded: false } }
+    })
+  }, [bgImage])
+  const markLoaded = (src: string) => {
+    setLayers(l => (l.incoming && l.incoming.src === src && !l.incoming.loaded
+      ? { ...l, incoming: { src, loaded: true } }
+      : l))
+  }
+  const failBackdrop = (src: string) => {
+    failedSrcRef.current = src
+    setLayers(l => (l.incoming?.src === src ? { shown: null, incoming: null } : l))
+  }
+  // Promote the incoming layer once its fade has run. A timer rather than
+  // `animationend`: under prefers-reduced-motion the animation is nulled and
+  // the event never fires, and jsdom has no animations at all. 600ms clears
+  // the 500ms fade; for the 100ms overlap both layers sit at full opacity,
+  // which is invisible.
+  const incomingLoaded = layers.incoming?.loaded ? layers.incoming.src : null
+  useEffect(() => {
+    if (!incomingLoaded) return
+    const src = incomingLoaded
+    const t = window.setTimeout(() => {
+      setLayers(l => (l.incoming?.src === src ? { shown: src, incoming: null } : l))
+    }, 600)
+    return () => window.clearTimeout(t)
+  }, [incomingLoaded])
   useEffect(() => {
     if (!heroProp || !slateToken || compact || isCatalogFallback) return
     const el = sectionRef.current
@@ -170,9 +244,6 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
     )
   }
   const hero = heroProp
-  // Backdrop → poster → gradient fallback chain (some TMDB rows have
-  // no backdrop image).
-  const bgImage = hero.backdrop || hero.poster || ''
   // Ring value: the personal Match when we have one (personalized pool), else
   // the global Aurora Score (cold-start), else a derived estimate as a last
   // resort. `showingPersonal` drives the ring's label so "92% Match" only
@@ -180,12 +251,6 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   const showingPersonal = !!(match && match > 0)
   const matchScore = (match && match > 0) ? match : (score && score > 0) ? score : heroMatchScore(hero)
   const matchCircumference = 2 * Math.PI * 36
-  // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
-  // doesn't feel like a static still. The transition smooths cursor
-  // jitter into a slow drift instead of jumpy 1:1 tracking.
-  const parallaxX = (mousePos.x - 0.5) * 2
-  const parallaxY = (mousePos.y - 0.5) * 2
-
   return (
     <>
     <section
@@ -208,18 +273,37 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           : 'relative w-full h-[62vh] min-h-[480px] max-h-[680px] overflow-hidden bg-[#050505]'
       }
       onMouseMove={(e) => {
+        if (!parallaxOn.current) return
         const rect = e.currentTarget.getBoundingClientRect()
-        setMousePos({
-          x: (e.clientX - rect.left) / rect.width,
-          y: (e.clientY - rect.top) / rect.height
+        // Subtle parallax: backdrop drifts ~1% with the mouse so the hero
+        // doesn't feel like a static still; the CSS transition on
+        // .stage-hero-img smooths cursor jitter into a slow drift. Latest
+        // pointer wins; one style write per animation frame.
+        parallaxPending.current = {
+          px: ((e.clientX - rect.left) / rect.width - 0.5) * 2,
+          py: ((e.clientY - rect.top) / rect.height - 0.5) * 2,
+        }
+        if (parallaxRaf.current !== null) return
+        parallaxRaf.current = requestAnimationFrame(() => {
+          parallaxRaf.current = null
+          const p = parallaxPending.current
+          const node = sectionRef.current
+          if (!p || !node) return
+          node.style.setProperty('--hero-px', p.px.toFixed(3))
+          node.style.setProperty('--hero-py', p.py.toFixed(3))
         })
       }}
       // Pause rotation over the entire hero. Do NOT put key={hero.id}
       // on this <section>: a remount-based crossfade breaks pause-on-
       // hover because browsers don't reliably synthesize mouseenter
-      // on element replacement. Key the <img> instead.
+      // on element replacement. The backdrop layers are keyed by src
+      // instead. Leaving the hero drifts the art back to centre.
       onMouseEnter={() => onPauseChange?.(true)}
-      onMouseLeave={() => onPauseChange?.(false)}
+      onMouseLeave={() => {
+        onPauseChange?.(false)
+        const node = sectionRef.current
+        if (node) { node.style.setProperty('--hero-px', '0'); node.style.setProperty('--hero-py', '0') }
+      }}
     >
       {/* Brand-gradient fallback base layer. The positioned gradient
           stack above only covers part of the hero; this paints the
@@ -229,31 +313,45 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         aria-hidden="true"
         className="absolute inset-0 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]"
       />
-      {/* Backdrop image. Key on the IMG (not the section) so the
-          image element remounts on rotation — drives the fade-in
-          animation per-tick — without unmounting the parent that
-          owns the hover handlers and mousePos state. */}
-      {bgImage ? (
+      {/* Backdrop — two layers, see the `layers` state above. The previous
+          single <img key={src}> remounted on every rotation: the old frame
+          vanished the instant the new one STARTED loading (a flash of the
+          gradient on anything but a warm cache), and the shared fadeIn
+          keyframe slid it 10px — a jolt, not a dissolve, on a 62vh
+          full-bleed frame. Both layers carry .stage-hero-img, which owns
+          the parallax transform; only the incoming one animates. */}
+      {layers.shown && (
         <img
-          key={bgImage}
-          src={bgImage}
+          src={layers.shown}
           alt=""
           aria-hidden="true"
-          className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out animate-fade-in"
-          style={{
-            transform: `scale(1.05) translate(${parallaxX}%, ${parallaxY}%)`,
-          }}
-          loading="eager"
+          className="stage-hero-img"
           decoding="async"
-          onError={(e) => {
-            // 404 happens when the server hasn't mirrored the TMDB
-            // image yet. Hide the broken-image icon; the gradient
-            // layer below takes over.
-            const img = e.currentTarget
-            img.style.display = 'none'
-          }}
         />
-      ) : null}
+      )}
+      {layers.incoming && (() => {
+        const incomingSrc = layers.incoming.src
+        return (
+          <img
+            key={incomingSrc}
+            src={incomingSrc}
+            alt=""
+            aria-hidden="true"
+            className={`stage-hero-img is-incoming${layers.incoming.loaded ? ' is-loaded' : ''}`}
+            loading="eager"
+            decoding="async"
+            // A cached image can be complete before React attaches onLoad
+            // (the load event is queued as a task, but belt and braces): the
+            // ref callback catches that case. naturalWidth guards a 404 that
+            // reports complete=true.
+            ref={(el) => { if (el && el.complete && el.naturalWidth > 0) markLoaded(incomingSrc) }}
+            onLoad={() => markLoaded(incomingSrc)}
+            // 404 happens when the server hasn't mirrored the TMDB image
+            // yet. Drop the layers; the gradient base below takes over.
+            onError={() => failBackdrop(incomingSrc)}
+          />
+        )
+      })()}
 
       {/* Phase 4 — the two-layer sweep from the mockup, as one element:
           a left→right ramp for the text column plus a bottom fade that

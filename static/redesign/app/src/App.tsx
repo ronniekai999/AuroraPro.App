@@ -128,27 +128,66 @@ import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
+// Chunk loaders, named so the nav can PREFETCH a view's code on hover /
+// focus of its tab (prefetchView, below) ahead of the click that needs it.
+// `lazy()` wraps the same thunk, and a dynamic import() resolves once per
+// module, so a prefetched chunk is simply already there when the view
+// mounts — the Suspense fallback never paints for it. This is the honest
+// version of what `startTransition` cannot do here: each view mounts its
+// own <ViewSuspense>, and React shows a NEWLY mounted boundary's fallback
+// immediately, transition or not.
+const VIEW_LOADERS = {
+  admin: () => import('@/components/admin/AdminView'),
+  collections: () => import('@/components/CollectionsView'),
+  calendar: () => import('@/components/CalendarView'),
+  settings: () => import('@/components/SettingsView'),
+  requests: () => import('@/components/RequestsView'),
+  browse: () => import('@/components/BrowseView'),
+  detail: () => import('@/components/DetailView'),
+  library: () => import('@/components/LibraryView'),
+  search: () => import('@/components/SearchView'),
+  member: () => import('@/components/UserProfileView'),
+  members: () => import('@/components/MembersView'),
+} as const
+// Nav tab id → chunk. Home is eager (no entry); movies and shows share the
+// browse chunk; detail/member are never reached from a tab.
+const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
+  admin: 'admin', collections: 'collections', calendar: 'calendar',
+  settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
+  library: 'library', search: 'search', members: 'members',
+}
+const prefetched = new Set<keyof typeof VIEW_LOADERS>()
+function prefetchView(view: string): void {
+  const key = PREFETCH_BY_VIEW[view]
+  if (!key || prefetched.has(key)) return
+  prefetched.add(key)
+  // A failed prefetch (offline, stale deploy) is not an error to surface:
+  // the real navigation retries the import and ErrorBoundary owns THAT
+  // failure. Forget the attempt so a later hover can try again.
+  void VIEW_LOADERS[key]().catch(() => { prefetched.delete(key) })
+}
+
 // 2026-06-17 (app split) — Admin is the first lazy-loaded view chunk.
 // Non-admins never fetch the ~2,330-line admin bundle; it loads on
 // first /admin nav by an admin, with <ViewFallback> as the Suspense
 // placeholder. ErrorBoundary in main.tsx catches chunk-load failures
 // (offline / stale deploy); ViewSuspense complements it.
-const AdminView = lazy(() => import('@/components/admin/AdminView'))
+const AdminView = lazy(VIEW_LOADERS.admin)
 // 2.1 — Collections & Calendar are already standalone modules; the
 // only change is swapping their static import for a lazy import and
 // wrapping the render site in <ViewSuspense>. First slice to exercise
 // the lazy + ViewSuspense wiring end-to-end.
-const CollectionsView = lazy(() => import('@/components/CollectionsView'))
-const CalendarView = lazy(() => import('@/components/CalendarView'))
+const CollectionsView = lazy(VIEW_LOADERS.collections)
+const CalendarView = lazy(VIEW_LOADERS.calendar)
 // 2.2 — Settings (profile, connected accounts, profiles + watchlists,
 // appearance / content-tone). ConnectedAccountsCard rides along as a
 // module-private helper; the OAuth provider-label helper it shares with
 // App's link-mode toast moved to @/lib/oauth. Loads on first /settings nav.
-const SettingsView = lazy(() => import('@/components/SettingsView'))
+const SettingsView = lazy(VIEW_LOADERS.settings)
 // 2.3 — Requests (submitted-request statuses + inline TMDB search/create).
 // humanizeRequestError rides along as a module-private helper. Loads on
 // first /requests nav.
-const RequestsView = lazy(() => import('@/components/RequestsView'))
+const RequestsView = lazy(VIEW_LOADERS.requests)
 // 2.4 — Movies / TV Shows browse grid (hero, sort, genre filter, paginate,
 // Continue Watching rail). Shares MediaRail + HeroSection with the eager
 // HomeView; Media/Episode moved to @/lib/types and resume helpers to
@@ -156,7 +195,7 @@ const RequestsView = lazy(() => import('@/components/RequestsView'))
 // /movies or /shows nav. App keeps the list === null data gate and wraps
 // the block in <ViewSuspense fallback={<BrowseLoadingState/>}> so the
 // chunk-load + data-load fallbacks are visually identical.
-const BrowseView = lazy(() => import('@/components/BrowseView'))
+const BrowseView = lazy(VIEW_LOADERS.browse)
 // 2.5 — Detail (hero, tabs, episodes, cast, files, recap, trailer). App owns
 // the data + handlers; the inline `resume` IIFE + `onEpisodeUnavailable`
 // closure stay in App's render block (they close over App state) and are
@@ -164,29 +203,29 @@ const BrowseView = lazy(() => import('@/components/BrowseView'))
 // keeps key={selectedMedia.id} so it remounts per title (resets active tab /
 // cast-expand — the one check the build can't catch). Loads on first
 // card→detail nav.
-const DetailView = lazy(() => import('@/components/DetailView'))
+const DetailView = lazy(VIEW_LOADERS.detail)
 // 2.6 — My Library (saved titles + Continue Watching). Shares isResumable,
 // MediaCardCinema, Icon, and the app-side Media type with the other views.
 // App owns the saved `library` state + `continueItems` and passes them as
 // props; the Resume pill resolves the freshest CW record via a ref. Loads
 // on first /library nav.
-const LibraryView = lazy(() => import('@/components/LibraryView'))
+const LibraryView = lazy(VIEW_LOADERS.library)
 // 2.7 — Search (debounced 300ms/keystroke results grid). Shares Icon,
 // MediaCardCinema, searchMedia, and the app-side Media type. App owns the
 // query string + library set and passes them as props; the debounce +
 // searchMedia call live in the view. No dependency on UpdatePanel's
 // ACTIVE_STATES/updateStateMeta/timeAgo (those stay in the admin chunk).
 // Loads on first /search nav.
-const SearchView = lazy(() => import('@/components/SearchView'))
+const SearchView = lazy(VIEW_LOADERS.search)
 // Social phase 1 — member profile page (/user/:username). Self-contained:
 // fetches its own data by username, so App only parses the URL (see
 // memberUsernameFromPath) and threads onSelect for the recent-watches
 // rail. Loads on first profile nav.
-const UserProfileView = lazy(() => import('@/components/UserProfileView'))
+const UserProfileView = lazy(VIEW_LOADERS.member)
 // Social phase 2 — the member directory (/members): find + follow people.
 // Reached from the avatar dropdown, not the tab strip (the strip is curated
 // browse surfaces; this is an occasional destination like Settings).
-const MembersView = lazy(() => import('@/components/MembersView'))
+const MembersView = lazy(VIEW_LOADERS.members)
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -2071,6 +2110,21 @@ function pathToView(pathname: string): string {
   return VIEW_BY_PATH['/' + (first ?? '')] ?? 'home'
 }
 
+// Scroll memory — one offset per history entry, keyed by react-router's
+// location.key. `history.scrollRestoration` is 'manual' (main.tsx) because
+// native restoration fires on popstate while the OUTGOING view is still
+// mounted: it clamps to that document's height and the SPA then re-renders
+// under it, which is how Back from a title landed at the top of a Home you
+// had scrolled six rails down. App records the offset when it leaves an
+// entry in-app (handleSelect / handleNavigate) and the layout effect next
+// to the URL-sync effect restores it once the destination VIEW has
+// committed. A Map, not sessionStorage: after a reload every view's data is
+// gone as well, so there is nothing to restore onto until it refetches.
+const scrollMemory = new Map<string, number>()
+function rememberScroll(key: string): void {
+  scrollMemory.set(key, window.scrollY)
+}
+
 export default function App() {
   const [view, setView] = useState('home')
   // Bumped every time the user clicks the current view's nav item.
@@ -2770,6 +2824,44 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, closePlayer])
 
+  // Restore (or reset) the scroll offset once the URL's view is the one on
+  // screen. Keyed on `view` as well as the history key on purpose: on
+  // popstate the location changes one render BEFORE the URL-sync effect
+  // above flips `view`, and restoring while the outgoing view is still
+  // mounted is exactly the clamp-to-the-wrong-document failure native
+  // restoration has. useLayoutEffect so the jump happens before paint.
+  const restoredKeyRef = useRef<string | null>(null)
+  const prevViewRef = useRef(view)
+  useLayoutEffect(() => {
+    const viewChanged = prevViewRef.current !== view
+    prevViewRef.current = view
+    if (view !== pathToView(location.pathname)) return
+    if (restoredKeyRef.current === location.key) return
+    restoredKeyRef.current = location.key
+    const saved = scrollMemory.get(location.key)
+    if (saved === undefined) {
+      // A page entered fresh starts at the top. A key change that kept the
+      // same view (a replace navigation, query-string sync) leaves the
+      // viewport where it is.
+      if (viewChanged) window.scrollTo(0, 0)
+      return
+    }
+    // The destination's data lives in App state, so its full height is
+    // normally in this very commit — but a lazy view's chunk or a refetch
+    // can leave the document short for a frame or two. Retry briefly
+    // rather than clamp.
+    let raf = 0
+    let attempts = 0
+    const tryRestore = () => {
+      const max = document.documentElement.scrollHeight - window.innerHeight
+      if (max >= saved || attempts >= 8) { window.scrollTo(0, saved); return }
+      attempts++
+      raf = requestAnimationFrame(tryRestore)
+    }
+    tryRestore()
+    return () => cancelAnimationFrame(raf)
+  }, [location.key, location.pathname, view])
+
 
   // security — bounce a non-admin who lands on /admin (typed URL,
   // bookmark, stale link) back home. Pairs with the role gate on the
@@ -2979,8 +3071,9 @@ export default function App() {
     // swapped <main> view) persists and the receiver keeps playing until the
     // user stops it or the media ends. Mirrors the Escape gate above.
     if (!playerMinimizedRef.current) closePlayer(true)
+    rememberScroll(location.key)
     navigate(`/${v}`)
-  }, [view, navigate, closePlayer])
+  }, [view, navigate, closePlayer, location.key])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -2988,7 +3081,9 @@ export default function App() {
     // Real URL per title: refresh keeps the page, browser Back returns to
     // the grid this was opened from, and the address bar is shareable.
     // selectedMedia is already set above so the deep-link hydration
-    // effect no-ops for in-app opens.
+    // effect no-ops for in-app opens. Record where the grid was first, so
+    // Back lands on the card that was clicked (see scrollMemory).
+    rememberScroll(location.key)
     navigate(`/title/${m.id}`)
     // Issue #261 — clicking into a movie/show must open the detail page
     // at the top; the window otherwise keeps whatever scroll offset the
@@ -2996,7 +3091,7 @@ export default function App() {
     // Instant (not smooth) because the page content is being replaced —
     // a smooth scroll would animate over swapped-in content and look off.
     window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [navigate])
+  }, [navigate, location.key])
 
   // Play resolution. The UI Media type doesn't carry server file
   // IDs, so we resolve them here:
@@ -4378,11 +4473,21 @@ export default function App() {
     setDetailSelectedSeason(null)
     ;(async () => {
       try {
+        // The seasons list depends only on the id, and `selectedMedia.type`
+        // already says whether this is a show — so start both requests
+        // together. They were strictly serialized before (detail → seasons
+        // → episodes), which made a show's episode list wait a whole extra
+        // round trip for nothing. The no-op catch marks the parallel
+        // promise handled so an abort while getMedia is in flight cannot
+        // surface as an unhandled rejection; awaiting it below still
+        // rethrows into the same error path as before.
+        const seasonsPromise = selectedMedia.type === 'show' ? getSeasons(selectedMedia.id, ac.signal) : null
+        void seasonsPromise?.catch(() => undefined)
         const detail = await getMedia(selectedMedia.id, ac.signal)
         if (cancelled) return
         setDetailItem(detail)
         if (detail.type === 'show') {
-          const seasonsRaw = await getSeasons(selectedMedia.id, ac.signal)
+          const seasonsRaw = await (seasonsPromise ?? getSeasons(selectedMedia.id, ac.signal))
           if (cancelled) return
           // Sort by season_number so Detail doesn't show the wrong
           // season at the top.
@@ -5315,7 +5420,12 @@ export default function App() {
   // effect to restart the 9s dwell from the chosen pick without affecting
   // steady-state cadence.
   useEffect(() => {
-    if (heroPool.length < 2 || heroPaused) return
+    // Only while Home is on screen. Without the view gate this interval
+    // kept firing on Settings, Detail, Admin — three setState calls every
+    // 9s → a full re-render of App and every eager child on pages that
+    // never show the hero. Pool and index are untouched while skipped, so
+    // returning to Home resumes from the same pick.
+    if (view !== 'home' || heroPool.length < 2 || heroPaused) return
     // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion (see
     // the BrowseView hero for rationale): skip the 9s auto-rotation so
     // the hero doesn't swap art + text out from under a low-vision
@@ -5327,7 +5437,59 @@ export default function App() {
       setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
     }, 9000)
     return () => window.clearInterval(id)
-  }, [heroPool, heroPaused, rotEpoch])
+  }, [view, heroPool, heroPaused, rotEpoch])
+
+  // Home rails, memoized. This was an inline IIFE in the JSX, so every App
+  // render — each hero tick, toast, poll, keystroke — built new arrays and
+  // every one of the 100–160 cards on Home re-rendered with them. Same
+  // logic and inputs; one array identity until an input changes, which is
+  // what lets React.memo on MediaCardCinema skip the untouched cards.
+  const homeRailsProp = useMemo<HomeViewProps['rails']>(() => {
+    // Phase D — conversational discovery: when a vibe search is
+    // active, pin its results as the first rail.
+    const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
+      ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
+      : []
+    if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
+    const base = homeRails ?? []
+    if (continueItems.length === 0) return [...convoRail, ...base]
+    // Prepend the Continue Watching rail. Dedupe by media_item_id at the
+    // rail level so a show with progress on multiple episodes only
+    // surfaces one card (most-recently-watched) — avoids duplicate-key
+    // warnings and the "click the old card, play the new episode"
+    // confusion. LibraryView keeps every row.
+    const seen = new Set<number>()
+    const deduped = continueItems.filter(c => {
+      if (seen.has(c.media_item_id)) return false
+      seen.add(c.media_item_id)
+      return true
+    })
+    // 2026-06-05 (Home redesign C) — per-card subtitle map
+    // ("S2E4 · 23m left" / "Movie · 1h 12m left") computed
+    // here where the source ContinueWatchingItem is in scope
+    // (Media alone can't reconstruct remaining time). Keyed by
+    // media_item_id to match MediaCardCinema's item.id.
+    const cwSubtitles: Record<number, string> = {}
+    for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
+    return [
+      ...convoRail,
+      {
+        title: 'Continue Watching',
+        items: deduped.map(c => mapContinueToMedia(c)) as Media[],
+        // 2026-06-05 (Home redesign C) — switched to 'landscape'
+        // (16:9 backdrop) per the redesign. The cards now lead
+        // with the backdrop + a "min left" subtitle rather than
+        // poster art; MediaCardCinema renders the landscape
+        // aspect, progress bar, resume pill, and subtitle.
+        aspect: 'landscape' as const,
+        // Stable identifier for HomeView's resume-play
+        // interceptor (title is for display only).
+        kind: 'continue-watching' as const,
+        cardSubtitles: cwSubtitles,
+      },
+      ...base,
+    ]
+  }, [homeRails, continueItems, convoResults, convoQuery])
 
   // Continue Watching rail. Its own fetch (independent of home
   // rails) so retry/failure paths don't couple. Re-fetches on
@@ -5568,6 +5730,7 @@ export default function App() {
             user={user}
             currentView={view}
             onNavigate={handleNavigate}
+            onPrefetch={prefetchView}
             searchQuery={searchQuery}
             onSearchQueryChange={(v) => {
               setSearchQuery(v)
@@ -5639,53 +5802,9 @@ export default function App() {
               onSelect={handleSelect}
               onPlay={handlePlay}
               hero={homeHero ?? undefined}
-              // Prepend the Continue Watching rail. Dedupe by
-              // media_item_id at the rail level so a show with
-              // progress on multiple episodes only surfaces one card
-              // (most-recently-watched) — avoids duplicate-key
-              // warnings and the "click the old card, play the new
-              // episode" confusion. LibraryView keeps every row.
-              rails={(() => {
-                // Phase D — conversational discovery: when a vibe search is
-                // active, pin its results as the first rail.
-                const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
-                  ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
-                  : []
-                if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
-                const base = homeRails ?? []
-                if (continueItems.length === 0) return [...convoRail, ...base]
-                const seen = new Set<number>()
-                const deduped = continueItems.filter(c => {
-                  if (seen.has(c.media_item_id)) return false
-                  seen.add(c.media_item_id)
-                  return true
-                })
-                // 2026-06-05 (Home redesign C) — per-card subtitle map
-                // ("S2E4 · 23m left" / "Movie · 1h 12m left") computed
-                // here where the source ContinueWatchingItem is in scope
-                // (Media alone can't reconstruct remaining time). Keyed by
-                // media_item_id to match MediaCardCinema's item.id.
-                const cwSubtitles: Record<number, string> = {}
-                for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
-                return [
-                  ...convoRail,
-                  {
-                    title: 'Continue Watching',
-                    items: deduped.map(c => mapContinueToMedia(c)) as Media[],
-                    // 2026-06-05 (Home redesign C) — switched to 'landscape'
-                    // (16:9 backdrop) per the redesign. The cards now lead
-                    // with the backdrop + a "min left" subtitle rather than
-                    // poster art; MediaCardCinema renders the landscape
-                    // aspect, progress bar, resume pill, and subtitle.
-                    aspect: 'landscape' as const,
-                    // Stable identifier for HomeView's resume-play
-                    // interceptor (title is for display only).
-                    kind: 'continue-watching' as const,
-                    cardSubtitles: cwSubtitles,
-                  },
-                  ...base,
-                ]
-              })()}
+              // Memoized above (homeRailsProp) — Continue Watching prepended
+              // and deduped, conversational results pinned first.
+              rails={homeRailsProp}
               loading={homeLoading}
               convoLoading={convoLoading}
               error={homeError}
