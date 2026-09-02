@@ -1033,7 +1033,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         // Submit button below the fold unreachable. max-h + overflow-y-auto
         // makes the modal scroll; overscroll-contain stops the chain at its
         // scroll boundaries; overflow-x-hidden preserves the rounded corners.
-        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[#0a0a0f] rounded-2xl border border-white/[0.08] shadow-2xl"
+        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         // Holistic deep-debug M2 — drop aria-modal during recording
@@ -1496,7 +1496,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         data-screenshot-exclude="true"
         role="status"
         aria-live="polite"
-        className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] inline-flex items-center gap-3 px-4 py-2.5 rounded-full bg-[#0a0a0f] border border-rose-500/80 shadow-2xl"
+        className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] inline-flex items-center gap-3 px-4 py-2.5 rounded-full bg-[color:var(--surface-1)] border border-rose-500/80 shadow-2xl"
       >
         {/* Pulsing red dot — the universal "recording active" cue.
             Deep-debug L5 — motion-safe: prefix so users with

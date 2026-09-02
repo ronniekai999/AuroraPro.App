@@ -545,7 +545,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-all duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
+            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
             {submitting ? (
               <>
@@ -702,7 +702,7 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
       // from the accessibility tree instead of announcing as unavailable.
       aria-disabled={disabled || undefined}
       onClick={(e) => { if (disabled) e.preventDefault() }}
-      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-all duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
+      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >
       {config.icon}
       {label}
@@ -1441,7 +1441,7 @@ function YourWeekBand() {
           </span>
           <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
           <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
-            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
           </span>
           <span className="text-[11px] text-white/40 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
@@ -6523,7 +6523,7 @@ export default function App() {
 
       {addToListMedia && activeProfileId && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAddToListMedia(null)}>
-          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
+          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
             {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}

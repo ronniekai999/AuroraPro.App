@@ -139,7 +139,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
         // the outline is suppressed for the pointer path and replaced with a
         // ring that only paints for keyboard focus — the same shape the
         // focus-indicator audit requires of every outline suppression.
-        className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5 max-h-[90vh] overflow-y-auto overscroll-contain focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[90vh] overflow-y-auto overscroll-contain focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-baseline justify-between gap-3">

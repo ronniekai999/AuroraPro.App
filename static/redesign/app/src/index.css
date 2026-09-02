@@ -310,6 +310,16 @@
     --r-pill: 999px;
     --surface-1: #0a0a0f;
     --surface-2: #14121e;
+    /* Small-end type. The display scale above stops at --fs-rail (21px);
+       everything smaller was 217 arbitrary `text-[Npx]` utilities across
+       ten values including half-pixels. These four name the clusters
+       (labels 10, captions 11, meta 12.5, small body 13.5). Adopted where
+       index.css set the same literals; the TSX utilities are migrated only
+       where they cluster, not swept. */
+    --fs-label: 10px;
+    --fs-caption: 11px;
+    --fs-meta: 12.5px;
+    --fs-body-sm: 13.5px;
   }
 
   html[data-glow="subtle"] {
@@ -445,7 +455,11 @@
     backdrop-filter: blur(12px);
     border: 1px solid var(--glow-border);
     box-shadow: var(--glow-halo);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    /* The three properties :hover changes — not `all`, which also animated
+       any incidental layout change (padding, width) on these cards. */
+    transition: background-color var(--dur-slow) var(--ease-standard),
+                border-color var(--dur-slow) var(--ease-standard),
+                box-shadow var(--dur-slow) var(--ease-standard);
   }
 
   .glass-card:hover {
@@ -469,7 +483,7 @@
        empty space above/below the trailing "↵ to search" hint, so it read as
        floating mid-bar even when flush. A defined vertical right edge lets the
        hint actually hug it. */
-    border-radius: 1rem;
+    border-radius: var(--r-xl);
     background:
       linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
       linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
@@ -477,7 +491,7 @@
     box-shadow:
       0 8px 28px -10px rgba(124, 58, 237, 0.4),
       0 0 20px -6px rgba(34, 211, 238, 0.25);
-    transition: box-shadow 0.35s ease;
+    transition: box-shadow var(--dur-slow) var(--ease-standard);
   }
   /* The breathing halo. `z-index: -1` means this paints BEHIND its own parent's
      background, which only works while something contains it.
@@ -498,7 +512,7 @@
     content: '';
     position: absolute;
     inset: -3px;
-    border-radius: 1.2rem;
+    border-radius: calc(var(--r-xl) + 3px); /* tracks the bar radius + the 3px inset */
     background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
     filter: blur(16px);
     opacity: 0.28;
@@ -784,7 +798,7 @@ html[data-glow="subtle"] .stage-topnav {
      Both halves are needed — the label alone does not reach 4.5. */
   color: rgba(255, 255, 255, 0.62);
   cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 .stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
 /* Two active selectors, one treatment (Aurora Stage Phase 7a).
@@ -895,7 +909,7 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  transition: border-color 0.18s ease, background-color 0.18s ease;
+  transition: border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 /* `all: unset` on the input (below) strips its own border and background,
    so the global input:focus treatment has nothing to paint and the global
@@ -980,7 +994,7 @@ html[data-glow="subtle"] .stage-topnav {
   height: 20px;
   border-radius: 999px;
   color: rgba(255, 255, 255, 0.5);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 .stage-navsearch-clear:hover,
 .stage-navsearch-clear:focus-visible {
@@ -1001,7 +1015,7 @@ html[data-glow="subtle"] .stage-topnav {
   border: 1px solid rgba(255, 255, 255, 0.09);
   color: rgba(255, 255, 255, 0.8);
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
 .stage-iconbtn[aria-expanded="true"] {
@@ -1439,7 +1453,7 @@ html[data-glow="subtle"] .stage-toolbar {
      can't quietly erode it. */
   color: rgba(255, 255, 255, 0.7);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 /* Declared BEFORE the [aria-pressed="true"] rule below, and that order matters.
    Both are (0,2,0) and both set `background` and `color`, so source order
@@ -1485,7 +1499,7 @@ html[data-glow="subtle"] .stage-toolbar {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-req:hover { background: rgba(255, 255, 255, 0.045); border-color: rgba(255, 255, 255, 0.12); }
 .stage-req-poster {
@@ -1566,7 +1580,7 @@ html[data-glow="subtle"] .stage-toolbar {
      dead declaration — and a latent trap, since a future `hover:scale-*` would
      make this card a stacking context and change how its z-[2] click target
      and z-[3] badge row resolve against each other. */
-  transition: border-color 0.18s ease;
+  transition: border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-colcard:hover { border-color: rgba(168, 85, 247, 0.5); }
 /* NO `outline: none` here — this rule used to have it, and that made focus
@@ -1639,7 +1653,7 @@ html[data-glow="subtle"] .stage-toolbar {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-newcol:hover { background: rgba(168, 85, 247, 0.14); border-color: rgba(168, 85, 247, 0.75); }
 .stage-newcol:focus-visible {
@@ -1661,7 +1675,7 @@ html[data-glow="subtle"] .stage-toolbar {
   font-weight: 500;
   color: rgba(255, 255, 255, 0.62);
   background: rgba(255, 255, 255, 0.04);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 .stage-seg > button:hover { color: rgba(255, 255, 255, 0.9); }
 /* Same aria-pressed-drives-style argument as .stage-fpill.
@@ -1709,7 +1723,7 @@ html[data-glow="subtle"] .stage-toolbar {
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-calrow:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.1); }
 .stage-eptag {
@@ -1748,7 +1762,7 @@ html[data-glow="subtle"] .stage-toolbar {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.75);
   font-variant-numeric: tabular-nums;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 /* The :not() pair is load-bearing, and its absence was a real bug.
    `:hover` alone is (0,2,0); .stage-calcell-today and -sel are single classes
@@ -1851,7 +1865,7 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.09);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-opt:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.18); }
 /* Declared after :hover so hovering the selected chip keeps its purple — the
@@ -2194,7 +2208,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   color: #fff;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
 .stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -2280,7 +2294,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   border: 1px solid rgba(0, 0, 0, 0.42);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
-  transition: background-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard);
 }
 .stage-skip-pill:hover { background: #fff; }
 
@@ -2334,7 +2348,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
 /* Up-next card, shown over the credits. */
 .stage-upnext {
   width: 252px;
-  border-radius: 15px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: linear-gradient(180deg, rgba(30, 26, 46, 0.94), rgba(12, 10, 20, 0.97));
   backdrop-filter: blur(20px);
@@ -2393,7 +2407,7 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 14.5px;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 /* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
    scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
@@ -2649,7 +2663,7 @@ html[data-glow="subtle"] .badge-glass {
   height: 100%;
   background: linear-gradient(90deg, #A855F7, #D8B4FE);
   box-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
-  transition: width 0.3s ease;
+  transition: width var(--dur-slow) var(--ease-standard);
 }
 
 /* Rail scroll container */
@@ -3017,7 +3031,7 @@ html[data-glow="subtle"] .rail-container {
   /* Interactive now (was pointer-events:none) so a touch/click focuses it
      and reveals the reason; cursor hints it's actionable. */
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
 .media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(216, 180, 254, 0.7); }
 .media-card-cinema .ai-gem:focus-visible { outline: 2px solid rgba(216, 180, 254, 0.95); outline-offset: 2px; }
@@ -3108,7 +3122,7 @@ html[data-glow="subtle"] .rail-container {
   .media-card-cinema .poster-img { transition: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
-  .media-card-cinema .reason-scrim { transform: none; transition: opacity 0.22s ease; }
+  .media-card-cinema .reason-scrim { transform: none; transition: opacity var(--dur-base) var(--ease-standard); }
 }
 
 /* ── Card overlay: title + meta ON the art (Aurora Stage Phase 3) ──
@@ -3209,7 +3223,7 @@ html[data-glow="subtle"] .rail-container {
    card itself (it is role="button" tabIndex=0), so it also erased the
    label of the exact card a keyboard user had tabbed onto. */
 .media-card-cinema .reason-scrim ~ .card-overlay {
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
 }
 /* :hover ONLY, and only where hover is real.
    
@@ -3324,7 +3338,7 @@ html[data-glow="subtle"] .rail-container {
   opacity: 0;
   pointer-events: none;
   transform: translateY(2px);
-  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  transition: opacity var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
 .media-card-cinema:hover .resume-pill,
 .media-card-cinema:focus-within .resume-pill,
@@ -3345,7 +3359,7 @@ html[data-glow="subtle"] .rail-container {
 @media (prefers-reduced-motion: reduce) {
   .media-card-cinema .resume-pill {
     transform: none;
-    transition: opacity 0.18s ease;
+    transition: opacity var(--dur-fast) var(--ease-standard);
   }
 }
 
@@ -3375,7 +3389,12 @@ input:not([type="range"]), select, textarea {
   color: #fff;
   padding: 12px 16px;
   font-size: 0.9rem;
-  transition: all 0.2s ease;
+  /* Only what the focus rule below changes. `all` on EVERY input, select and
+     textarea in the app also animated padding/width/height whenever a field
+     was resized or re-laid-out. */
+  transition: background-color var(--dur-base) var(--ease-standard),
+              border-color var(--dur-base) var(--ease-standard),
+              box-shadow var(--dur-base) var(--ease-standard);
 }
 
 /* Focus treatment for EVERY input/select/textarea in the app. Phase 8 rewrote
@@ -3522,7 +3541,7 @@ textarea:focus-visible {
   border-radius: 13px;
   position: relative;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background-color var(--dur-slow) var(--ease-standard);
 }
 
 .toggle.active {
@@ -3537,7 +3556,7 @@ textarea:focus-visible {
   position: absolute;
   top: 2px;
   left: 2px;
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.3s var(--ease-standard);
 }
 
 .toggle.active .toggle-handle {
@@ -3583,7 +3602,7 @@ textarea:focus-visible {
   backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   padding: 14px 20px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -3636,7 +3655,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   transform: translateY(4px) scale(0.86);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.25s var(--ease-standard);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
 .media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
@@ -3649,7 +3668,7 @@ textarea:focus-visible {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .card-hover-preview { transition: opacity 0.25s ease; }
+  .media-card-cinema .card-hover-preview { transition: opacity var(--dur-base) var(--ease-standard); }
   .media-card-cinema .card-hover-preview .chp-play { transform: none; transition: none; }
 }
 
@@ -3809,7 +3828,7 @@ textarea:focus-visible {
   overflow: hidden;
   width: 40px;
   height: 58px;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(160deg, rgba(168, 85, 247, 0.22), rgba(14, 12, 22, 0.9));
 }

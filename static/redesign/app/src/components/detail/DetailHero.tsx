@@ -103,7 +103,7 @@ export function DetailHero({
         // 24px at md+ vs the page's 48 was never deliberate the way the nav's 30px
         // is; there is no comment claiming it and no measurement behind it, so this
         // adopts the page inset outright rather than preserving an accident.
-        className="absolute top-6 left-[var(--page-pad-x)] z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-all border border-white/10"
+        className="absolute top-6 left-[var(--page-pad-x)] z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-ui border border-white/10"
       >
         <ArrowLeftIcon size={16} /> Back
       </button>

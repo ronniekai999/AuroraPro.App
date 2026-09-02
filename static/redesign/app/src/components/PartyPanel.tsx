@@ -574,7 +574,7 @@ export function PartyPanel({
             onClick={() => setShowLeaveConfirm(false)}
           >
             <div
-              className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6"
+              className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6"
               onClick={e => e.stopPropagation()}
             >
               {canHandOff ? (

@@ -663,7 +663,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // 2026-06-05 (Home redesign B) — relative + overflow so
                 // the thin embedded progress fill (below) clips to the
                 // pill. extra bottom padding leaves room for the 3px bar.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >
@@ -690,7 +690,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // Names the target: in compact the heading is the page name,
                 // so "Play" alone had no referent for a screen reader.
                 aria-label={`Play ${hero.title}`}
-                className={`flex items-center gap-2 rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple bg-purple-600 hover:bg-purple-500 text-white ${
+                className={`flex items-center gap-2 rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple bg-purple-600 hover:bg-purple-500 text-white ${
                   compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
                 }`}
               >
@@ -708,7 +708,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                   onClick={() => onToggleLib(hero)}
                   aria-label={inLib ? `Remove ${hero.title} from My List` : `Add ${hero.title} to My List`}
                   title={inLib ? 'In My List — click to remove' : 'Add to My List'}
-                  className={`flex items-center gap-2 px-6 py-3 backdrop-blur-md rounded-full font-medium transition-all duration-200 border ${
+                  className={`flex items-center gap-2 px-6 py-3 backdrop-blur-md rounded-full font-medium transition-ui duration-200 border ${
                     inLib
                       ? 'bg-purple-500/20 text-purple-100 border-purple-400/40 hover:bg-purple-500/30'
                       : 'bg-white/10 text-white border-white/10 hover:bg-white/15 hover:border-white/20'
@@ -721,7 +721,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             <button
               onClick={() => onInfo(hero)}
               aria-label={`More info about ${hero.title}`}
-              className={`flex items-center gap-2 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20 ${
+              className={`flex items-center gap-2 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-ui duration-200 border border-white/10 hover:border-white/20 ${
                 compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
               }`}
             >

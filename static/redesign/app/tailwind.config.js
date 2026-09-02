@@ -93,6 +93,14 @@ module.exports = {
       transitionDuration: {
         DEFAULT: "var(--dur-fast)",
       },
+      // `transition-ui`: the explicit list that replaced 43 `transition-all`
+      // utilities. Everything an interactive surface animates on hover /
+      // focus / press, and nothing that is layout (width, height, padding)
+      // — `all` animated those too whenever a control resized. Progress
+      // fills, whose animated property IS layout, use `transition-[width]`.
+      transitionProperty: {
+        ui: "color, background-color, border-color, opacity, transform, box-shadow",
+      },
       // The accordion-down/up and caret-blink keyframes that shipped with
       // the shadcn scaffold went with ui/accordion.tsx and ui/input-otp.tsx,
       // their only consumers. tailwindcss-animate (the plugin below) is what

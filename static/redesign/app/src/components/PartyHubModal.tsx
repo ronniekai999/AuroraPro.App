@@ -155,7 +155,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6 max-h-[90vh] overflow-y-auto"
+        className="w-full max-w-md bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6 max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         <h2 className="text-white text-lg font-semibold mb-1">Watch Party</h2>
