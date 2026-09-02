@@ -90,9 +90,11 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
         type="button"
         onClick={leave}
         aria-label="Dismiss notification"
-        className="ml-1 text-white/50 hover:text-white transition-colors flex-shrink-0"
+        // The shared glyph instead of a bare "×" character, on a 28px
+        // target with a hover fill so it reads as a control.
+        className="ml-1 w-7 h-7 rounded-md inline-flex items-center justify-center text-white/50 hover:text-white hover:bg-white/[0.06] transition-colors flex-shrink-0"
       >
-        ×
+        <Icon name="x" size={14} />
       </button>
     </div>
   )

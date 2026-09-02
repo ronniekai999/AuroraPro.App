@@ -377,7 +377,10 @@ export default function BrowseView({
           <select
             value={sortBy}
             onChange={(e) => onSortChange(e.target.value as BrowseSort)}
-            className="text-sm py-2 px-3"
+            // Native select, styled to the glass toolbar (.stage-select) —
+            // it sat here as the one platform-chrome form control among
+            // bespoke chips. Still native: iOS keeps its picker.
+            className="stage-select"
             aria-label="Sort titles"
           >
             <option value="rating">Top Rated</option>

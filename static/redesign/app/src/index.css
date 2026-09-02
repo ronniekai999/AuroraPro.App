@@ -761,6 +761,19 @@
   background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.72));
   backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background-color var(--dur-base) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
+}
+/* Once the page has scrolled the bar sits over content, not the hero: it
+   firms up to a near-solid fill with a hairline shadow so the boundary
+   reads, and the blur radius can drop. Strictly DARKER than the base rule
+   above, so the tab-label contrast argument at .stage-tab only improves;
+   the base rule is untouched (audit-glass-contrast reads it). Toggled by
+   TopNav from a passive scroll listener. */
+.stage-topnav[data-scrolled] {
+  background-color: rgba(5, 5, 5, 0.94);
+  background-image: none;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 @media (min-width: 768px) {
   /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
@@ -2427,6 +2440,9 @@ html[data-glow="subtle"] .stage-upnext {
 }
 .stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
+/* Press feedback. Buttons had hover and focus states and nothing for the
+   click itself; a 2% settle is the smallest tactile cue that reads. */
+.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.98); }
 .stage-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
@@ -2448,6 +2464,22 @@ html[data-glow="subtle"] .stage-upnext {
   font-weight: 500;
 }
 .stage-btn-quiet:hover { color: #fff; }
+/* Ghost's toggled-on state (the hero's "✓ In My List"): the purple tint
+   the deleted .stage-pill.is-on carried, as a modifier here so a caller
+   does not need `!important` utilities to beat .stage-btn-ghost's fill. */
+.stage-btn-ghost.is-on {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+}
+.stage-btn-ghost.is-on:hover { background: rgba(168, 85, 247, 0.24); }
+/* Destructive tertiary (the detail rail's "Not interested"). */
+.stage-btn-danger {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: rgba(252, 165, 165, 0.9);
+}
+.stage-btn-danger:hover { background: rgba(239, 68, 68, 0.14); color: #fecaca; }
 
 /* Removed with the dead CSS (UI polish pass): .stage-pill (+ .is-on /
    aria states), .stage-badge, .stage-qb / -4k / -hdr / -hd and
@@ -2455,11 +2487,38 @@ html[data-glow="subtle"] .stage-upnext {
    that no later phase consumed — the filter pills shipped as .stage-fpill,
    the chips as .card-badge and .badge-glass. */
 
-/* Reduced motion — the lift on hover is decorative. */
+/* Reduced motion — the lift on hover and the settle on press are decorative. */
 @media (prefers-reduced-motion: reduce) {
   .stage-btn { transition: none; }
-  .stage-btn:not(:disabled):hover { transform: none; }
+  .stage-btn:not(:disabled):hover,
+  .stage-btn:not(:disabled):active { transform: none; }
 }
+
+/* Native <select> styled to the toolbar (BrowseView's sort). Kept NATIVE
+   on purpose — the OS picker on iOS and the built-in keyboard model are
+   worth more than a portal menu — but `appearance: none` drops the
+   platform chrome that sat like a form control in the middle of the glass
+   toolbar. The chevron is an inline SVG; the global input/select rule's
+   focus treatment still applies (this class sets no focus styles). */
+.stage-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 34px;
+  padding: 0 32px 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.05);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.stage-select:hover { background-color: rgba(255, 255, 255, 0.08); color: #fff; }
+.stage-select option { background: var(--surface-1); color: #fff; }
 
 /* Glow = Subtle honours the blur budget the same way .aurora-glass-overlay
    does (see the html[data-glow="subtle"] note above): the Stage primitives
@@ -2980,6 +3039,16 @@ html[data-glow="subtle"] .rail-container {
   transition: background 0.2s, border-color 0.2s, transform 0.2s;
   z-index: 3;
   cursor: pointer;
+}
+/* Hit-area expanders. Both corner controls draw at 30x30, under the 44px
+   WCAG 2.5.5 target; a pseudo-element 7px outside the box takes the tap
+   without changing what is painted. Both buttons are position:absolute,
+   so the inset resolves against their own box. */
+.media-card-cinema .lib-badge::before,
+.media-card-cinema .ai-gem::before {
+  content: '';
+  position: absolute;
+  inset: -7px;
 }
 .media-card-cinema .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
 .media-card-cinema .lib-badge.in-lib {

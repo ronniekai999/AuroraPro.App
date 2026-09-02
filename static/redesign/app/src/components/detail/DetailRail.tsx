@@ -260,7 +260,9 @@ export function DetailRail({
           onFocus={onPrimaryIntent}
           aria-label={primaryAriaLabel}
           title={primaryTitle}
-          className="w-full h-12 inline-flex items-center justify-center gap-2.5 rounded-full font-semibold bg-purple-600 hover:bg-purple-500 transition-ui shadow-[0_0_24px_rgba(168,85,247,0.45)]"
+          // Shared button family (index.css .stage-btn) — the same primary,
+          // ghost and small/danger variants the hero and Load More use.
+          className="w-full stage-btn stage-btn-pill stage-btn-primary"
         >
           <PlayIcon size={19} />
           {primaryLabel}
@@ -269,7 +271,7 @@ export function DetailRail({
           <button
             type="button"
             onClick={onSecondary}
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-white/85 transition-ui"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost"
           >
             <RestartIcon size={16} />
             {secondaryLabel}
@@ -280,7 +282,7 @@ export function DetailRail({
             type="button"
             onClick={onPrevious}
             title="Catch up on the story so far — spoiler-free"
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-purple-500/10 hover:bg-purple-500/20 border border-purple-400/25 text-purple-100 transition-ui"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost is-on"
           >
             <SparkleIcon size={16} />
             Previously
@@ -291,7 +293,7 @@ export function DetailRail({
             type="button"
             onClick={onWatchTrailer}
             title="Watch the trailer"
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-white/85 transition-ui"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost"
           >
             <PlayIcon size={16} />
             Watch Trailer
@@ -352,7 +354,7 @@ export function DetailRail({
                   type="button"
                   onClick={onRefresh}
                   title="Re-fetch metadata from TMDB/TVDB"
-                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-ui"
+                  className="flex-1 stage-btn stage-btn-sm stage-btn-ghost"
                 >
                   <RefreshIcon size={15} />
                   Refresh
@@ -363,7 +365,7 @@ export function DetailRail({
                   type="button"
                   onClick={onIdentify}
                   title="Manually search TMDB/TVDB and pick the correct match"
-                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-ui"
+                  className="flex-1 stage-btn stage-btn-sm stage-btn-ghost"
                 >
                   <InfoIcon size={15} />
                   Identify
@@ -376,7 +378,7 @@ export function DetailRail({
               type="button"
               onClick={onDelete}
               title="Remove from Aurora — deletes the library entry (files on disk are kept)"
-              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-red-500/[0.06] hover:bg-red-500/[0.14] border border-red-500/15 text-red-300/70 hover:text-red-200 transition-ui"
+              className="w-full stage-btn stage-btn-sm stage-btn-danger"
             >
               <TrashIcon size={15} />
               Remove from Library

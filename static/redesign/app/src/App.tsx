@@ -1291,7 +1291,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           {onRetry && (
             <button
               onClick={onRetry}
-              className="px-4 py-2 bg-white/10 hover:bg-white/15 rounded-lg text-white/90 text-sm transition-colors"
+              className="stage-btn stage-btn-sm stage-btn-ghost"
             >
               Retry
             </button>

@@ -657,6 +657,26 @@ export function TopNav({
   const sheetExit = useExitTransition(sheetOpen)
   const stripRef = useRef<HTMLDivElement | null>(null)
   const menuBtnRef = useRef<HTMLButtonElement | null>(null)
+  const navRef = useRef<HTMLElement | null>(null)
+
+  // `data-scrolled` on the bar once the page has moved past the top, so it
+  // firms up over content (.stage-topnav[data-scrolled]). Written straight
+  // to the DOM from one rAF per scroll frame — no React state, no re-render
+  // of the nav on scroll. Passive listener: never blocks scrolling.
+  useEffect(() => {
+    let raf = 0
+    const apply = () => {
+      raf = 0
+      navRef.current?.toggleAttribute('data-scrolled', window.scrollY > 8)
+    }
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(apply) }
+    apply()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [])
   const searchPillRef = useRef<HTMLDivElement | null>(null)
 
   // Stable identity: MobileSheet keys its document listeners on onClose, and
@@ -741,7 +761,7 @@ export function TopNav({
     // the blur), so it would work on one appearance setting and break on
     // another.
     <>
-    <nav className="stage-topnav">
+    <nav ref={navRef} className="stage-topnav">
       {/* Brand → home. Matches the pre-Stage sidebar behavior (clicking the
           logo always returns home) and every media-app convention. */}
       <button

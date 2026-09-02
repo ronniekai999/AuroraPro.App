@@ -663,7 +663,11 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // 2026-06-05 (Home redesign B) — relative + overflow so
                 // the thin embedded progress fill (below) clips to the
                 // pill. extra bottom padding leaves room for the 3px bar.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple"
+                // Kept bespoke (not .stage-btn): the embedded progress bar
+                // needs the extra bottom padding and overflow clip that the
+                // family's fixed height would collide with. Purple, not
+                // indigo — it is the same primary action as Play.
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >
@@ -690,9 +694,9 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // Names the target: in compact the heading is the page name,
                 // so "Play" alone had no referent for a screen reader.
                 aria-label={`Play ${hero.title}`}
-                className={`flex items-center gap-2 rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple bg-purple-600 hover:bg-purple-500 text-white ${
-                  compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
-                }`}
+                // The shared button family (index.css .stage-btn): one
+                // primary look across hero, detail rail and Load More.
+                className={`stage-btn stage-btn-pill stage-btn-primary${compact ? ' stage-btn-sm' : ''}`}
               >
                 <Icon name="play" size={compact ? 15 : 18} /> Play
               </button>
@@ -708,11 +712,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                   onClick={() => onToggleLib(hero)}
                   aria-label={inLib ? `Remove ${hero.title} from My List` : `Add ${hero.title} to My List`}
                   title={inLib ? 'In My List — click to remove' : 'Add to My List'}
-                  className={`flex items-center gap-2 px-6 py-3 backdrop-blur-md rounded-full font-medium transition-ui duration-200 border ${
-                    inLib
-                      ? 'bg-purple-500/20 text-purple-100 border-purple-400/40 hover:bg-purple-500/30'
-                      : 'bg-white/10 text-white border-white/10 hover:bg-white/15 hover:border-white/20'
-                  }`}
+                  className={`stage-btn stage-btn-pill stage-btn-ghost${inLib ? ' is-on' : ''}${compact ? ' stage-btn-sm' : ''}`}
                 >
                   <Icon name={inLib ? 'check' : 'plus'} size={18} /> {inLib ? 'In My List' : 'My List'}
                 </button>
@@ -721,9 +721,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             <button
               onClick={() => onInfo(hero)}
               aria-label={`More info about ${hero.title}`}
-              className={`flex items-center gap-2 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-ui duration-200 border border-white/10 hover:border-white/20 ${
-                compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
-              }`}
+              className={`stage-btn stage-btn-pill stage-btn-ghost${compact ? ' stage-btn-sm' : ''}`}
             >
               <Icon name="info" size={compact ? 15 : 18} /> More Info
             </button>
