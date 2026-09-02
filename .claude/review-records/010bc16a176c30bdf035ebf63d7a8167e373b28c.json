@@ -1,0 +1,10 @@
+{
+  "sha": "010bc16a176c30bdf035ebf63d7a8167e373b28c",
+  "verdict": "clean",
+  "summary": "Three independent fresh-context passes over static/redesign/app (UI polish, 12 commits). Pass 1 (through c8b7e6a): fix-first - HIGH two onboarding text utilities with an alpha on a var() colour compiled to no CSS; MED hero failed-src branch left previous art under a new title; MED Home skeleton double gutter; 4 low, 5 nit. All resolved in 69d6f3c (+ tests for useExitTransition and backdropURL/backdropSrcSet). Pass 2 (full diff through 69d6f3c): lows-only - 3 low (recovered hero src stayed flagged failed; three hide-on-error imgs unkeyed; promotion-frame flash plausible), 4 nit. Lows fixed in 1653c9e. Pass 3 (delta 1653c9e): clean - 0 critical/high/medium/low, 1 documentation nit, reworded in the final comment-only commit. Checked: hooks rules, exit-transition and hero layer state machines, timers/rAF cleanup, scroll memory, memo contract at all six card call sites, dead-code completeness (src/scripts/Go/index.html, lockfile via npm ls), font preload hashes vs built CSS, reduced-motion coverage, audit anchors, Tailwind var()/alpha emission in the built stylesheet. Residual: browser-only behaviours (parallax, dissolve, Back scroll restore, Tab during exit) reasoned not exercised.",
+  "reviewer": "claude-code fresh-context adversarial review subagent (3 passes: full diff -> fix-first; full diff -> lows-only; delta 1653c9e -> clean)",
+  "findings": "1",
+  "diff_digest": "0bae06447801a1f6469f98b9c68bbb9d1f2c2103e2e31c25403ed2bc451423e4",
+  "branch": "claude/aurora-ui-improvements-kaoxp1",
+  "recorded_at": "2026-09-02T23:57:00Z"
+}
