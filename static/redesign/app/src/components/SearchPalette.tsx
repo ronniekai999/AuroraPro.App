@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { lockBodyScroll } from '@/lib/scrollLock'
+import { useExitTransition } from '@/hooks/useExitTransition'
 import { searchStatusMessage } from '@/lib/searchStatus'
 import { searchMedia, type UIMedia } from '@/lib/api'
 import { Icon } from '@/components/Icon'
@@ -61,22 +62,28 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // the highlighted row into view if the user arrow-keys past the
   // visible window.
   const listRef = useRef<HTMLDivElement | null>(null)
+  // The palette stays mounted for its exit fade after `open` flips false.
+  const exit = useExitTransition(open)
 
   // Focus the input on every open. autoFocus on the input only
   // works on first mount; this effect handles re-opens too. setTimeout
   // hop ensures the element is in the DOM and laid out before focus
   // (avoids a Safari quirk where focus() fires before render).
   useEffect(() => {
-    if (!open) {
-      // Reset state on close so a re-open is a clean slate.
-      setQuery(initialQuery)
-      setResults([])
-      setHighlighted(0)
-      return
-    }
+    if (!open) return
     const t = window.setTimeout(() => inputRef.current?.focus(), 0)
     return () => window.clearTimeout(t)
-  }, [open, initialQuery])
+  }, [open])
+  // Reset state once the palette has actually LEFT the DOM, so a re-open
+  // is a clean slate. Keyed on `mounted`, not `open`: for the exit fade the
+  // palette is still visible after `open` flips false, and resetting then
+  // emptied the result list under the user mid-fade.
+  useEffect(() => {
+    if (exit.mounted) return
+    setQuery(initialQuery)
+    setResults([])
+    setHighlighted(0)
+  }, [exit.mounted, initialQuery])
 
   // Debounced search. AbortController cancels in-flight requests on
   // each new keystroke so we don't race-condition the result list.
@@ -194,7 +201,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
     row?.scrollIntoView({ block: 'nearest' })
   }, [highlighted, open])
 
-  if (!open) return null
+  if (!exit.mounted) return null
 
   // The listbox element is rendered iff there are options to put in it, and
   // `aria-expanded` tracks exactly that — see the note at the combobox.
@@ -208,7 +215,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in"
+      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in${exit.closing ? ' is-closing' : ''}`}
       onClick={(e) => {
         // Click outside the panel closes. The backdrop below is a
         // covering child, so target !== currentTarget for backdrop
@@ -218,12 +225,16 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
     >
       {/* Backdrop — deep blur + violet tint so the page beneath
           feels far away. */}
-      <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl" aria-hidden="true" />
+      {/* .aurora-glass-overlay: a full-viewport backdrop blur plus the two
+          120px/100px filter blurs below is the most expensive glass in the
+          app, and it had no Glow = Subtle override. Under data-glow="subtle"
+          the scrim becomes a flat fill and the blobs are dropped. */}
+      <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl aurora-glass-overlay" aria-hidden="true" />
 
       {/* Aurora-violet glow blobs behind the palette so the
           backdrop isn't a flat sheet of blur. Decorative only. */}
-      <div className="absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-purple-600/[0.12] blur-[120px] pointer-events-none" aria-hidden="true" />
-      <div className="absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.08] blur-[100px] pointer-events-none" aria-hidden="true" />
+      <div className="stage-palette-blob absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-purple-600/[0.12] blur-[120px] pointer-events-none" aria-hidden="true" />
+      <div className="stage-palette-blob absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.08] blur-[100px] pointer-events-none" aria-hidden="true" />
 
       {/* Palette panel */}
       <div
@@ -470,10 +481,15 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             >
               {m.poster ? (
                 <img
+                  key={m.poster}
                   src={m.poster}
                   alt=""
-                  className="w-10 h-14 rounded object-cover flex-shrink-0 ring-1 ring-white/10"
+                  className="w-10 h-14 rounded object-cover flex-shrink-0 ring-1 ring-white/10 bg-white/[0.05]"
                   loading="lazy"
+                  decoding="async"
+                  // Keep the box, drop the glyph: the fill above reads as the
+                  // same placeholder the no-poster branch renders.
+                  onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
                 />
               ) : (
                 <div className="w-10 h-14 rounded bg-white/[0.05] border border-white/10 flex-shrink-0" />

@@ -125,7 +125,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
 
   return (
     <div
-      className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+      className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
       onClick={onClose}
       role="presentation"
     >
@@ -135,7 +135,11 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
         role="dialog"
         aria-modal="true"
         aria-label="Watch party share card"
-        className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5 max-h-[90vh] overflow-y-auto focus:outline-none"
+        // The dialog itself takes programmatic focus on open (tabIndex -1), so
+        // the outline is suppressed for the pointer path and replaced with a
+        // ring that only paints for keyboard focus — the same shape the
+        // focus-indicator audit requires of every outline suppression.
+        className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[90vh] overflow-y-auto overscroll-contain focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-baseline justify-between gap-3">

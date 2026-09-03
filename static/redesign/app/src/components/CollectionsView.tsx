@@ -48,7 +48,7 @@ export function collectionStrips(
   c: Pick<Collection, 'poster_paths' | 'cover_path'>,
 ): string[] {
   if (c.poster_paths?.length) return c.poster_paths.map(p => posterURL(p, 'w185'))
-  if (c.cover_path) return [backdropURL(c.cover_path)]
+  if (c.cover_path) return [backdropURL(c.cover_path, 'w780')]
   return []
 }
 

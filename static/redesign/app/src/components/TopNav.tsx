@@ -27,6 +27,7 @@ import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
 import type { Profile, User as ApiUser } from '@/lib/api'
 import { lockBodyScroll } from '@/lib/scrollLock'
+import { useExitTransition } from '@/hooks/useExitTransition'
 
 export interface NavTab {
   id: string
@@ -99,6 +100,8 @@ function AvatarMenu({
   onOpenMembers?: () => void
 }) {
   const [open, setOpen] = useState(false)
+  // The dropdown stays mounted for its exit fade after `open` flips false.
+  const exit = useExitTransition(open)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   // NOT a `role="menu"`. Phase 9 first implemented the full APG Menu contract
@@ -265,14 +268,18 @@ function AvatarMenu({
           </span>
         )}
       </button>
-      {open && (
+      {exit.mounted && (
         <div
           // No role. `aria-labelledby` points at the username header below, which
           // is now ordinary readable content rather than an invalid owned element
           // of a `menu`.
           aria-labelledby="avatar-menu-heading"
           onKeyDown={onPanelKeyDown}
-          className="absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-fade-in"
+          // inert while the exit plays: pointer-events:none does not stop
+          // Tab, and a focus landing on a node 150ms from unmount would
+          // drop to <body>.
+          inert={exit.closing || undefined}
+          className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-fade-in${exit.closing ? ' is-closing' : ''}`}
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
@@ -388,6 +395,7 @@ function MobileSheet({
   tabs,
   currentView,
   onNavigate,
+  closing = false,
   onClose,
   profiles,
   activeProfileId,
@@ -402,6 +410,8 @@ function MobileSheet({
   currentView: string
   onNavigate: (v: string) => void
   onClose: () => void
+  /** True while the sheet plays its exit; TopNav owns the timing. */
+  closing?: boolean
   profiles: Profile[]
   activeProfileId: number | null
   onSelectProfile: (id: number) => void
@@ -472,7 +482,7 @@ function MobileSheet({
           menu button that closes this, the avatar, search — stay lit and
           tappable, the way the old drawer kept its hamburger reachable. */}
       <div
-        className="fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden"
+        className={`fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden animate-fade-in${closing ? ' is-closing' : ''}`}
         style={{ top: 'var(--chrome-h, var(--topnav-h))' }}
         onClick={onClose}
         aria-hidden="true"
@@ -483,7 +493,9 @@ function MobileSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Menu"
-        className="fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-2xl p-2 animate-fade-in max-h-[70vh] overflow-y-auto"
+        // inert during the exit fade — see AvatarMenu.
+        inert={closing || undefined}
+        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-2xl p-2 animate-fade-in max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
         style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >
         {/* Real search field, not a shortcut to the palette. The palette
@@ -566,6 +578,9 @@ export interface TopNavProps {
   user: ApiUser
   currentView: string
   onNavigate: (v: string) => void
+  /** Warms a lazy view's chunk on hover/focus of its tab, so the click that
+   *  follows mounts real content instead of the Suspense fallback. */
+  onPrefetch?: (v: string) => void
   /** Inline search — the same controlled input the old header owned. */
   searchQuery: string
   onSearchQueryChange: (v: string) => void
@@ -613,6 +628,7 @@ export function TopNav({
   user,
   currentView,
   onNavigate,
+  onPrefetch,
   searchQuery,
   onSearchQueryChange,
   onSearchFocus,
@@ -643,8 +659,30 @@ export function TopNav({
   const isAdmin = user.role === 'admin'
   const tabs = useMemo(() => navTabsFor(user.role), [user.role])
   const [sheetOpen, setSheetOpen] = useState(false)
+  // The sheet stays mounted for its exit fade after sheetOpen flips false.
+  const sheetExit = useExitTransition(sheetOpen)
   const stripRef = useRef<HTMLDivElement | null>(null)
   const menuBtnRef = useRef<HTMLButtonElement | null>(null)
+  const navRef = useRef<HTMLElement | null>(null)
+
+  // `data-scrolled` on the bar once the page has moved past the top, so it
+  // firms up over content (.stage-topnav[data-scrolled]). Written straight
+  // to the DOM from one rAF per scroll frame — no React state, no re-render
+  // of the nav on scroll. Passive listener: never blocks scrolling.
+  useEffect(() => {
+    let raf = 0
+    const apply = () => {
+      raf = 0
+      navRef.current?.toggleAttribute('data-scrolled', window.scrollY > 8)
+    }
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(apply) }
+    apply()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [])
   const searchPillRef = useRef<HTMLDivElement | null>(null)
 
   // Stable identity: MobileSheet keys its document listeners on onClose, and
@@ -729,7 +767,7 @@ export function TopNav({
     // the blur), so it would work on one appearance setting and break on
     // another.
     <>
-    <nav className="stage-topnav">
+    <nav ref={navRef} className="stage-topnav">
       {/* Brand → home. Matches the pre-Stage sidebar behavior (clicking the
           logo always returns home) and every media-app convention. */}
       <button
@@ -760,6 +798,11 @@ export function TopNav({
               className="stage-tab"
               aria-current={active ? 'page' : undefined}
               onClick={() => go(tab.id)}
+              // Intent, not commitment: hovering or tabbing onto a tab is
+              // enough signal to fetch its code. import() dedupes, so a tab
+              // hovered ten times costs one request.
+              onPointerEnter={() => onPrefetch?.(tab.id)}
+              onFocus={() => onPrefetch?.(tab.id)}
             >
               {tab.label}
               {tab.admin && <span className="stage-tab-adm">admin</span>}
@@ -928,8 +971,9 @@ export function TopNav({
         </button>
       </div>
     </nav>
-    {sheetOpen && (
+    {sheetExit.mounted && (
       <MobileSheet
+        closing={sheetExit.closing}
         tabs={tabs}
         currentView={currentView}
         onNavigate={onNavigate}

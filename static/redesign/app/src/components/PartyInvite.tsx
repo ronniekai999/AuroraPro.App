@@ -118,7 +118,7 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
           <button
             type="button"
             onClick={() => void copy(normalized, 'code')}
-            className="group mt-1 flex items-center gap-2 font-display text-2xl font-bold tracking-[0.18em] text-white transition-colors hover:text-[#D8B4FE]"
+            className="group mt-1 flex items-center gap-2 font-display text-2xl font-bold tracking-[0.18em] text-white transition-colors hover:text-[color:var(--stage-purple-lt)]"
             title="Copy code"
             aria-label={`Copy join code ${normalized}`}
           >
@@ -129,7 +129,7 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
           <button
             type="button"
             onClick={() => void copy(joinUrl, 'link')}
-            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-500/[0.12] px-3 py-2 text-sm font-medium text-[#D8B4FE] transition-colors hover:bg-purple-500/20"
+            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-500/[0.12] px-3 py-2 text-sm font-medium text-[color:var(--stage-purple-lt)] transition-colors hover:bg-purple-500/20"
           >
             <CopyGlyph active={copied === 'link'} />
             {copied === 'link' ? 'Link copied' : 'Copy invite link'}

@@ -3,7 +3,7 @@
 // (2026-06-17 app split, Phase 2.4) so the lazy BrowseView chunk can reuse it
 // without reaching back into App. RailTint + railIconFor (title → {icon,tint}
 // resolver) are module-private — only MediaRail uses them.
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
@@ -26,12 +26,15 @@ import { type Media } from '@/lib/types'
 // case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
+export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, eagerCount = 0 }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
+  // How many leading cards fetch their art eagerly. HomeView passes it for
+  // the first rail only — the one whose top row sits under the hero fold.
+  eagerCount?: number
   // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
   // subtitle under the rail title, and an "✨ AI PICK" chip beside the
   // title for recommender-driven rails (discover / anchor). Both are
@@ -101,14 +104,24 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
     setCanLeft(el.scrollLeft > 2)
     setCanRight(el.scrollLeft < max - 2)
   }, [])
-  useEffect(() => {
+  // Layout effect so the right paddle is correct on the first paint rather
+  // than popping in one frame after mount.
+  useLayoutEffect(() => {
     updatePaddles()
+  }, [items, updatePaddles])
+  useEffect(() => {
     window.addEventListener('resize', updatePaddles)
     return () => window.removeEventListener('resize', updatePaddles)
-  }, [items, updatePaddles])
+  }, [updatePaddles])
   const page = (dir: -1 | 1) => {
     const el = scrollRef.current
-    if (el) el.scrollBy({ left: dir * el.clientWidth * 0.9, behavior: 'smooth' })
+    if (!el) return
+    // Whole cards per page — card width plus the 18px rail gap — so the
+    // smooth scroll lands ON a snap point. Paging by 90% of the viewport
+    // landed mid-card and the (then mandatory) snap yanked it afterwards.
+    const step = (aspect === 'poster' ? 206 : 336) + 18
+    const cards = Math.max(1, Math.floor((el.clientWidth * 0.9) / step))
+    el.scrollBy({ left: dir * cards * step, behavior: 'smooth' })
   }
   // Resolve icon + tint. Caller-supplied value wins; otherwise look
   // up by title; otherwise the generic compass / purple chip.
@@ -153,14 +166,18 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           </button>
         )}
         <div ref={scrollRef} className="rail-scroll scrollbar-hide" onScroll={updatePaddles}>
-          {items.map((item) => (
+          {items.map((item, idx) => (
             <MediaCardCinema
               key={item.id}
               item={item}
-              onSelect={() => onSelect(item)}
-              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              eager={idx < eagerCount}
+              // Stable references, not per-item closures: the card calls
+              // these with its own item, so React.memo on MediaCardCinema
+              // can skip every card whose data did not change.
+              onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
-              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              onToggleLib={onToggleLib}
               // 2026-07-25 (Aurora Stage Phase 3) — 180→206 / 320→336. The
               // art is the card now (no text shelf below it), so the poster
               // carries the whole design and gets the room back.

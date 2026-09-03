@@ -42,7 +42,7 @@ function mapWatchToMedia(w: MemberRecentWatch): Media {
     genre: '',
     type: w.type === 'show' ? 'show' : 'movie',
     poster: posterURL(w.poster_path),
-    backdrop: backdropURL(w.backdrop_path),
+    backdrop: backdropURL(w.backdrop_path, 'w780'),
     description: '',
   }
 }

@@ -255,7 +255,7 @@ function SignInSlot({
             key={p}
             href={companionOAuthStartUrl(p, joinCode)}
             className={[
-              'flex w-full items-center justify-center gap-3 rounded-2xl py-3 font-medium transition-all',
+              'flex w-full items-center justify-center gap-3 rounded-2xl py-3 font-medium transition-ui',
               reduced ? '' : 'hover:scale-[1.01]',
               meta.className,
             ].join(' ')}

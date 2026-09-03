@@ -81,7 +81,7 @@ export function GamificationCard() {
             </div>
             <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700"
+                className="h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700"
                 style={{ width: `${pct}%` }}
               />
             </div>
@@ -128,7 +128,7 @@ export function GamificationCard() {
             return (
               <div
                 key={a.key}
-                className={`p-4 rounded-xl border text-center transition-all ${
+                className={`p-4 rounded-xl border text-center transition-ui ${
                   isUnlocked
                     ? 'bg-purple-500/10 border-purple-500/30 text-white'
                     : 'bg-white/[0.02] border-white/[0.06] text-white/40 grayscale'

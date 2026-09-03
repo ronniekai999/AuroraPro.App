@@ -77,7 +77,7 @@ interface DetailRailProps {
 }
 
 const TILE =
-  'flex flex-col items-center justify-center gap-1.5 py-3.5 rounded-[0.9rem] border text-[0.78rem] font-semibold transition-all'
+  'flex flex-col items-center justify-center gap-1.5 py-3.5 rounded-[0.9rem] border text-[0.78rem] font-semibold transition-ui'
 
 function Tile({
   onClick,
@@ -155,7 +155,7 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
             onFocus={() => setHovered(n)}
             onBlur={() => setHovered(0)}
             className={cn(
-              'p-1.5 rounded-lg transition-all hover:scale-110',
+              'p-1.5 rounded-lg transition-ui hover:scale-110',
               n <= shown ? 'text-yellow-400' : 'text-white/25 hover:text-white/50',
             )}
           >
@@ -216,7 +216,18 @@ export function DetailRail({
           broken-image glyph — previously against flat #050505 below the hero,
           now against backdrop artwork at ~17% scrim alpha. */}
       <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12]">
-        <img src={poster} alt={title} className="w-full aspect-[2/3] object-cover" />
+        {/* decoding=async keeps a 2:3 decode off the click-to-detail frame;
+            a poster that 404s hides itself and the box's own fill shows. */}
+        <img
+          // key: a src swap (media.poster → the detail payload's poster)
+          // remounts the node so an earlier hide-on-error cannot stick.
+          key={poster}
+          src={poster}
+          alt={title}
+          className="w-full aspect-[2/3] object-cover"
+          decoding="async"
+          onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
+        />
         {hasProgress && (
           <>
             <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/85 to-transparent" />
@@ -252,7 +263,9 @@ export function DetailRail({
           onFocus={onPrimaryIntent}
           aria-label={primaryAriaLabel}
           title={primaryTitle}
-          className="w-full h-12 inline-flex items-center justify-center gap-2.5 rounded-full font-semibold bg-purple-600 hover:bg-purple-500 transition-all shadow-[0_0_24px_rgba(168,85,247,0.45)]"
+          // Shared button family (index.css .stage-btn) — the same primary,
+          // ghost and small/danger variants the hero and Load More use.
+          className="w-full stage-btn stage-btn-pill stage-btn-primary"
         >
           <PlayIcon size={19} />
           {primaryLabel}
@@ -261,7 +274,7 @@ export function DetailRail({
           <button
             type="button"
             onClick={onSecondary}
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-white/85 transition-all"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost"
           >
             <RestartIcon size={16} />
             {secondaryLabel}
@@ -272,7 +285,7 @@ export function DetailRail({
             type="button"
             onClick={onPrevious}
             title="Catch up on the story so far — spoiler-free"
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-purple-500/10 hover:bg-purple-500/20 border border-purple-400/25 text-purple-100 transition-all"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost is-on"
           >
             <SparkleIcon size={16} />
             Previously
@@ -283,7 +296,7 @@ export function DetailRail({
             type="button"
             onClick={onWatchTrailer}
             title="Watch the trailer"
-            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-white/85 transition-all"
+            className="w-full stage-btn stage-btn-pill stage-btn-ghost"
           >
             <PlayIcon size={16} />
             Watch Trailer
@@ -344,7 +357,7 @@ export function DetailRail({
                   type="button"
                   onClick={onRefresh}
                   title="Re-fetch metadata from TMDB/TVDB"
-                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
+                  className="flex-1 stage-btn stage-btn-sm stage-btn-ghost"
                 >
                   <RefreshIcon size={15} />
                   Refresh
@@ -355,7 +368,7 @@ export function DetailRail({
                   type="button"
                   onClick={onIdentify}
                   title="Manually search TMDB/TVDB and pick the correct match"
-                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
+                  className="flex-1 stage-btn stage-btn-sm stage-btn-ghost"
                 >
                   <InfoIcon size={15} />
                   Identify
@@ -368,7 +381,7 @@ export function DetailRail({
               type="button"
               onClick={onDelete}
               title="Remove from Aurora — deletes the library entry (files on disk are kept)"
-              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-red-500/[0.06] hover:bg-red-500/[0.14] border border-red-500/15 text-red-300/70 hover:text-red-200 transition-all"
+              className="w-full stage-btn stage-btn-sm stage-btn-danger"
             >
               <TrashIcon size={15} />
               Remove from Library

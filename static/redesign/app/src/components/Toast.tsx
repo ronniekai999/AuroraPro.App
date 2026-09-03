@@ -6,7 +6,7 @@
 // importing App. Carries the 2026-06-17 a11y quick-win (live-region
 // roles + hover/focus pause + keyboard dismiss) verbatim.
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 
 export interface Toast {
@@ -47,14 +47,29 @@ export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove
 // effect only re-runs on pause toggle, not every parent render.
 function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }) {
   const [paused, setPaused] = useState(false)
+  // Exit: the toast used to vanish in one frame when its timer fired or the
+  // × was clicked (App's removeToast filters it out of the array). It now
+  // plays .toast.is-leaving (slideOut, --dur-base) and asks to be removed
+  // when that has run. App still owns removal; this only delays the ask.
+  // Under prefers-reduced-motion the exit is nulled in CSS and skipped here.
+  const [leaving, setLeaving] = useState(false)
+  const leaveTimer = useRef<number | null>(null)
+  const leave = useCallback(() => {
+    if (leaveTimer.current !== null) return
+    const reduce = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (reduce) { onRemove(t.id); return }
+    setLeaving(true)
+    leaveTimer.current = window.setTimeout(() => onRemove(t.id), 220)
+  }, [onRemove, t.id])
+  useEffect(() => () => { if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current) }, [])
   useEffect(() => {
-    if (paused) return
-    const id = window.setTimeout(() => onRemove(t.id), 3000)
+    if (paused || leaving) return
+    const id = window.setTimeout(leave, 3000)
     return () => window.clearTimeout(id)
-  }, [paused, t.id, onRemove])
+  }, [paused, leaving, leave])
   return (
     <div
-      className="toast"
+      className={`toast${leaving ? ' is-leaving' : ''}`}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
@@ -73,11 +88,13 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
       <p className="text-white/80 text-sm" role={t.type === 'error' ? 'alert' : 'status'}>{t.message}</p>
       <button
         type="button"
-        onClick={() => onRemove(t.id)}
+        onClick={leave}
         aria-label="Dismiss notification"
-        className="ml-1 text-white/50 hover:text-white transition-colors flex-shrink-0"
+        // The shared glyph instead of a bare "×" character, on a 28px
+        // target with a hover fill so it reads as a control.
+        className="ml-1 w-7 h-7 rounded-md inline-flex items-center justify-center text-white/50 hover:text-white hover:bg-white/[0.06] transition-colors flex-shrink-0"
       >
-        ×
+        <Icon name="x" size={14} />
       </button>
     </div>
   )

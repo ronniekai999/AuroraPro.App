@@ -281,6 +281,45 @@
     --tint-1: radial-gradient(1100px 700px at 70% -8%, rgba(124, 58, 237, 0.22), transparent 62%);
     --tint-2: radial-gradient(800px 600px at -5% 40%, rgba(30, 27, 75, 0.50), transparent 60%);
     --tint-3: radial-gradient(900px 700px at 105% 85%, rgba(14, 116, 144, 0.10), transparent 55%);
+
+    /* ============================================================
+       Polish pass — motion, radius and surface tokens.
+       ============================================================
+       Before these, index.css carried 34 distinct transition durations, 7
+       easings and 22 border radii, and Tailwind's utilities (150ms,
+       cubic-bezier(.4,0,.2,1)) ran on a different curve from the
+       hand-written rules (0.15s/0.18s `ease`) — so a CSS-styled pill and a
+       utility-styled pill next to it eased differently. tailwind.config.js
+       points its transition defaults at the same two tokens.
+       Durations: fast for hover/focus colour, base for reveals and fades,
+       slow for the card lift. Radii: sm thumbs, md controls/toasts, lg cards,
+       xl shelves, pill for round buttons. `--radius` (10px) stays the
+       shadcn token the live dialog/select read; do not merge them.
+       --surface-1 names the de-facto panel ink (#0a0a0f, 20 arbitrary
+       Tailwind classes) — NOT the #050505 page ink, which stays literal on
+       the app root and hero because two audits anchor on it. */
+    --dur-fast: 150ms;
+    --dur-base: 220ms;
+    --dur-slow: 350ms;
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 14px;
+    --r-xl: 18px;
+    --r-pill: 999px;
+    --surface-1: #0a0a0f;
+    --surface-2: #14121e;
+    /* Small-end type. The display scale above stops at --fs-rail (21px);
+       everything smaller was 217 arbitrary `text-[Npx]` utilities across
+       ten values including half-pixels. These four name the clusters
+       (labels 10, captions 11, meta 12.5, small body 13.5). Adopted where
+       index.css set the same literals; the TSX utilities are migrated only
+       where they cluster, not swept. */
+    --fs-label: 10px;
+    --fs-caption: 11px;
+    --fs-meta: 12.5px;
+    --fs-body-sm: 13.5px;
   }
 
   html[data-glow="subtle"] {
@@ -369,6 +408,12 @@
     -webkit-backdrop-filter: none !important;
     background: rgba(10, 8, 16, 0.92) !important;
   }
+  /* The ⌘K palette's decorative filter-blur blobs (SearchPalette). A
+     120px Gaussian over a 700px disc is GPU work with no information in
+     it; Subtle drops them along with the scrim's backdrop blur. */
+  html[data-glow="subtle"] .stage-palette-blob {
+    display: none;
+  }
 
   body {
     @apply bg-background text-foreground;
@@ -398,14 +443,6 @@
     font-family: var(--font-display);
   }
 
-  .text-gradient {
-    background: linear-gradient(135deg, #A855F7 0%, #D8B4FE 50%, #A855F7 100%);
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
   .glass-panel {
     background: rgba(255, 255, 255, 0.03);
     backdrop-filter: blur(20px);
@@ -418,7 +455,11 @@
     backdrop-filter: blur(12px);
     border: 1px solid var(--glow-border);
     box-shadow: var(--glow-halo);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    /* The three properties :hover changes — not `all`, which also animated
+       any incidental layout change (padding, width) on these cards. */
+    transition: background-color var(--dur-slow) var(--ease-standard),
+                border-color var(--dur-slow) var(--ease-standard),
+                box-shadow var(--dur-slow) var(--ease-standard);
   }
 
   .glass-card:hover {
@@ -429,10 +470,6 @@
 
   .glow-purple {
     box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
-  }
-
-  .glow-text {
-    text-shadow: 0 0 20px rgba(168, 85, 247, 0.5), 0 0 40px rgba(168, 85, 247, 0.3);
   }
 
   /* Phase D — conversational "mood box": a focal, on-brand search pill that
@@ -446,7 +483,7 @@
        empty space above/below the trailing "↵ to search" hint, so it read as
        floating mid-bar even when flush. A defined vertical right edge lets the
        hint actually hug it. */
-    border-radius: 1rem;
+    border-radius: var(--r-xl);
     background:
       linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
       linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
@@ -454,7 +491,7 @@
     box-shadow:
       0 8px 28px -10px rgba(124, 58, 237, 0.4),
       0 0 20px -6px rgba(34, 211, 238, 0.25);
-    transition: box-shadow 0.35s ease;
+    transition: box-shadow var(--dur-slow) var(--ease-standard);
   }
   /* The breathing halo. `z-index: -1` means this paints BEHIND its own parent's
      background, which only works while something contains it.
@@ -475,7 +512,7 @@
     content: '';
     position: absolute;
     inset: -3px;
-    border-radius: 1.2rem;
+    border-radius: calc(var(--r-xl) + 3px); /* tracks the bar radius + the 3px inset */
     background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
     filter: blur(16px);
     opacity: 0.28;
@@ -577,7 +614,8 @@
   .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
   .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
   .type-section { font-size: var(--fs-section); line-height: 1.1;  letter-spacing: -0.01em; }
-  .type-rail    { font-size: var(--fs-rail);    line-height: 1.15; letter-spacing: -0.01em; }
+  /* .type-rail was defined here too and never consumed (rail titles are
+     .rail-title, which reads --fs-rail directly); removed with the dead CSS. */
 }
 
 /* ====================================================================
@@ -723,6 +761,22 @@
   background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.72));
   backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  /* box-shadow only. The base fill is a gradient (background-color is
+     transparent under it), so transitioning background-color to the
+     scrolled fill would ramp from TRANSPARENT and show content through
+     the bar for the duration. The fill swaps instantly; the shadow eases. */
+  transition: box-shadow var(--dur-base) var(--ease-standard);
+}
+/* Once the page has scrolled the bar sits over content, not the hero: it
+   firms up to a near-solid fill with a hairline shadow so the boundary
+   reads, and the blur radius can drop. Strictly DARKER than the base rule
+   above, so the tab-label contrast argument at .stage-tab only improves;
+   the base rule is untouched (audit-glass-contrast reads it). Toggled by
+   TopNav from a passive scroll listener. */
+.stage-topnav[data-scrolled] {
+  background: rgba(5, 5, 5, 0.94);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 @media (min-width: 768px) {
   /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
@@ -746,7 +800,7 @@ html[data-glow="subtle"] .stage-topnav {
   position: relative;
   padding: 9px 13px;
   border-radius: 10px;
-  font-size: 13.5px;
+  font-size: var(--fs-body-sm);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -760,7 +814,7 @@ html[data-glow="subtle"] .stage-topnav {
      Both halves are needed — the label alone does not reach 4.5. */
   color: rgba(255, 255, 255, 0.62);
   cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 .stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
 /* Two active selectors, one treatment (Aurora Stage Phase 7a).
@@ -803,7 +857,7 @@ html[data-glow="subtle"] .stage-topnav {
   /* The mockup draws this at 8.5px (≈6.4pt), below any practical
      legibility floor — and the same class is reused in the mobile sheet's
      15px rows, where 8.5px reads as an artefact. */
-  font-size: 10px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -871,7 +925,7 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  transition: border-color 0.18s ease, background-color 0.18s ease;
+  transition: border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 /* `all: unset` on the input (below) strips its own border and background,
    so the global input:focus treatment has nothing to paint and the global
@@ -905,7 +959,7 @@ html[data-glow="subtle"] .stage-topnav {
   font-size: 16px;
 }
 @media (min-width: 1024px) {
-  .stage-navsearch input:not([type="range"]) { font-size: 12.5px; }
+  .stage-navsearch input:not([type="range"]) { font-size: var(--fs-meta); }
 }
 /* `all: unset` above only resets the BASE state, so on focus the global rule
    re-applied its own background and a 3px ring, drawing a second ring nested
@@ -956,7 +1010,7 @@ html[data-glow="subtle"] .stage-topnav {
   height: 20px;
   border-radius: 999px;
   color: rgba(255, 255, 255, 0.5);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 .stage-navsearch-clear:hover,
 .stage-navsearch-clear:focus-visible {
@@ -977,7 +1031,7 @@ html[data-glow="subtle"] .stage-topnav {
   border: 1px solid rgba(255, 255, 255, 0.09);
   color: rgba(255, 255, 255, 0.8);
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
 .stage-iconbtn[aria-expanded="true"] {
@@ -1404,7 +1458,7 @@ html[data-glow="subtle"] .stage-toolbar {
   height: 34px;
   padding: 0 14px;
   border-radius: 999px;
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   font-weight: 500;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.05);
@@ -1415,7 +1469,7 @@ html[data-glow="subtle"] .stage-toolbar {
      can't quietly erode it. */
   color: rgba(255, 255, 255, 0.7);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 /* Declared BEFORE the [aria-pressed="true"] rule below, and that order matters.
    Both are (0,2,0) and both set `background` and `color`, so source order
@@ -1461,7 +1515,7 @@ html[data-glow="subtle"] .stage-toolbar {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-req:hover { background: rgba(255, 255, 255, 0.045); border-color: rgba(255, 255, 255, 0.12); }
 .stage-req-poster {
@@ -1501,7 +1555,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* Media-kind tag ("MOVIE" / "TV") — neutral, so it reads as a category
    rather than competing with the status badge beside it. */
 .stage-typetag {
-  font-size: 10px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.06em;
   padding: 3px 8px;
@@ -1542,7 +1596,7 @@ html[data-glow="subtle"] .stage-toolbar {
      dead declaration — and a latent trap, since a future `hover:scale-*` would
      make this card a stacking context and change how its z-[2] click target
      and z-[3] badge row resolve against each other. */
-  transition: border-color 0.18s ease;
+  transition: border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-colcard:hover { border-color: rgba(168, 85, 247, 0.5); }
 /* NO `outline: none` here — this rule used to have it, and that made focus
@@ -1615,7 +1669,7 @@ html[data-glow="subtle"] .stage-toolbar {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-newcol:hover { background: rgba(168, 85, 247, 0.14); border-color: rgba(168, 85, 247, 0.75); }
 .stage-newcol:focus-visible {
@@ -1637,7 +1691,7 @@ html[data-glow="subtle"] .stage-toolbar {
   font-weight: 500;
   color: rgba(255, 255, 255, 0.62);
   background: rgba(255, 255, 255, 0.04);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 .stage-seg > button:hover { color: rgba(255, 255, 255, 0.9); }
 /* Same aria-pressed-drives-style argument as .stage-fpill.
@@ -1685,7 +1739,7 @@ html[data-glow="subtle"] .stage-toolbar {
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-calrow:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.1); }
 .stage-eptag {
@@ -1721,10 +1775,10 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.05);
   padding: 6px 7px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: rgba(255, 255, 255, 0.75);
   font-variant-numeric: tabular-nums;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 /* The :not() pair is load-bearing, and its absence was a real bug.
    `:hover` alone is (0,2,0); .stage-calcell-today and -sel are single classes
@@ -1827,7 +1881,7 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.09);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-opt:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.18); }
 /* Declared after :hover so hovering the selected chip keeps its purple — the
@@ -2149,7 +2203,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   position: absolute;
   bottom: 18px;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   background: rgba(10, 8, 18, 0.92);
@@ -2170,7 +2224,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   color: #fff;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 .stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
 .stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -2256,7 +2310,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   border: 1px solid rgba(0, 0, 0, 0.42);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
-  transition: background-color 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-standard);
 }
 .stage-skip-pill:hover { background: #fff; }
 
@@ -2310,7 +2364,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
 /* Up-next card, shown over the credits. */
 .stage-upnext {
   width: 252px;
-  border-radius: 15px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: linear-gradient(180deg, rgba(30, 26, 46, 0.94), rgba(12, 10, 20, 0.97));
   backdrop-filter: blur(20px);
@@ -2323,7 +2377,7 @@ html[data-glow="subtle"] .stage-upnext {
   background: #0c0a14;
 }
 .stage-upnext-eyebrow {
-  font-size: 10px;
+  font-size: var(--fs-label);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--stage-purple-lt);
@@ -2336,7 +2390,7 @@ html[data-glow="subtle"] .stage-upnext {
 .stage-smartchip {
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 700;
   color: #f5d0fe;
   background: rgba(168, 85, 247, 0.16);
@@ -2369,7 +2423,7 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 14.5px;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
 /* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
    scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
@@ -2381,8 +2435,17 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 13px;
   border-radius: 10px;
 }
+/* Round variant for the hero / detail / Load-More CTAs, which were
+   rounded-full bespoke Tailwind buttons. Declared AFTER .stage-btn-sm on
+   purpose: equal specificity, and -sm sets its own 10px radius. */
+.stage-btn-pill {
+  border-radius: var(--r-pill);
+}
 .stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
+/* Press feedback. Buttons had hover and focus states and nothing for the
+   click itself; a 2% settle is the smallest tactile cue that reads. */
+.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.98); }
 .stage-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
@@ -2392,7 +2455,6 @@ html[data-glow="subtle"] .stage-upnext {
   color: #fff;
   box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
 }
-.stage-btn-white { background: #fff; color: #0a0a0a; }
 .stage-btn-ghost {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
@@ -2405,137 +2467,77 @@ html[data-glow="subtle"] .stage-upnext {
   font-weight: 500;
 }
 .stage-btn-quiet:hover { color: #fff; }
-
-/* ── Filter / toggle pills ─────────────────────────────────────────── */
-.stage-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 15px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-  cursor: pointer;
-  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
-}
-.stage-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
-.stage-pill.is-on,
-.stage-pill[aria-pressed="true"],
-.stage-pill[aria-selected="true"] {
+/* Ghost's toggled-on state (the hero's "✓ In My List"): the purple tint
+   the deleted .stage-pill.is-on carried, as a modifier here so a caller
+   does not need `!important` utilities to beat .stage-btn-ghost's fill. */
+.stage-btn-ghost.is-on {
   background: rgba(168, 85, 247, 0.16);
   border-color: rgba(168, 85, 247, 0.5);
   color: #e9d5ff;
-  font-weight: 600;
 }
-.stage-pill:focus-visible {
-  outline: none;
-  border-color: rgba(216, 180, 254, 0.8);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+.stage-btn-ghost.is-on:hover { background: rgba(168, 85, 247, 0.24); }
+/* Destructive tertiary (the detail rail's "Not interested"). */
+.stage-btn-danger {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: rgba(252, 165, 165, 0.9);
 }
+.stage-btn-danger:hover { background: rgba(239, 68, 68, 0.14); color: #fecaca; }
 
-/* ── Badges ───────────────────────────────────────────────────────────
-   .stage-badge is the mockup's glass chip for artwork overlays. UNUSED as of
-   Phase 5 — the detail hero's "MOVIE" / "PG-13" chips it was written for use
-   the pre-existing .badge-glass instead, and nothing else adopted it. Kept
-   like the html[data-font="eclipse"] block: an intentionally-redundant
-   primitive, not dead weight, since later phases still style artwork
-   overlays. The thing to know is that the data-glow="subtle" gate below now
-   covers BOTH this and .badge-glass; for four phases it covered only this
-   one, so the class actually on screen kept its blur when a user had asked
-   for the reduced-blur mode. */
-.stage-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
-  border-radius: 8px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  background: rgba(10, 8, 18, 0.55);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: rgba(255, 255, 255, 0.9);
-}
+/* Removed with the dead CSS (UI polish pass): .stage-pill (+ .is-on /
+   aria states), .stage-badge, .stage-qb / -4k / -hdr / -hd and
+   .stage-btn-white. All were Phase 0 primitives ported 1:1 from the mockup
+   that no later phase consumed — the filter pills shipped as .stage-fpill,
+   the chips as .card-badge and .badge-glass. */
 
-/* Quality badges. These go on card art in Phase 3, so each variant
-   carries its own opaque-enough fill — they must not rely on the poster
-   underneath for contrast. */
-.stage-qb {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  line-height: 1;
-  padding: 3px 7px;
-  border-radius: 6px;
-  color: #fff;
-}
-.stage-qb-4k {
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.9), rgba(126, 34, 206, 0.9));
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
-}
-.stage-qb-hdr {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.9), rgba(180, 83, 9, 0.9));
-}
-.stage-qb-hd {
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(6px);
-}
-
-/* Reduced motion — the lift on hover is decorative. */
+/* Reduced motion — the lift on hover and the settle on press are decorative. */
 @media (prefers-reduced-motion: reduce) {
   .stage-btn { transition: none; }
-  .stage-btn:not(:disabled):hover { transform: none; }
+  .stage-btn:not(:disabled):hover,
+  .stage-btn:not(:disabled):active { transform: none; }
 }
+
+/* Native <select> styled to the toolbar (BrowseView's sort). Kept NATIVE
+   on purpose — the OS picker on iOS and the built-in keyboard model are
+   worth more than a portal menu — but `appearance: none` drops the
+   platform chrome that sat like a form control in the middle of the glass
+   toolbar. The chevron is an inline SVG; the global input/select rule's
+   focus treatment still applies (this class sets no focus styles). */
+.stage-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 34px;
+  padding: 0 32px 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.05);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.stage-select:hover { background-color: rgba(255, 255, 255, 0.08); color: #fff; }
+.stage-select option { background: var(--surface-1); color: #fff; }
 
 /* Glow = Subtle honours the blur budget the same way .aurora-glass-overlay
    does (see the html[data-glow="subtle"] note above): the Stage primitives
    that layer backdrop-blur drop it for a flat fill. */
 html[data-glow="subtle"] .stage-btn-ghost,
-html[data-glow="subtle"] .stage-badge,
-html[data-glow="subtle"] .badge-glass,
-html[data-glow="subtle"] .stage-qb-hd {
+html[data-glow="subtle"] .badge-glass {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
-/* Only .stage-badge gets a replacement fill. .badge-glass deliberately has NO
-   background of its own — every call site supplies one as a Tailwind
-   `bg-<colour>/<alpha>` utility — and this selector is (0,2,0), so adding
-   `background`
-   here would beat all of them and repaint sixteen differently-coloured chips
-   (4K purple, status ambers/emeralds, the admin role pill) a uniform grey.
+/* No replacement fill for .badge-glass: it deliberately has NO background
+   of its own — every call site supplies one as a Tailwind `bg-<colour>/<alpha>`
+   utility — and this selector is (0,2,0), so adding `background` here would
+   beat all of them and repaint sixteen differently-coloured chips (4K
+   purple, status ambers/emeralds, the admin role pill) a uniform grey.
    Dropping the blur is the whole of the blur budget's ask; the fills are
    already opaque enough to stand without it. */
-html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
-
-@keyframes chromaticShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0px); }
-  50% { transform: translateY(-10px); }
-
-}
-
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 20px rgba(168, 85, 247, 0.3); }
-  50% { box-shadow: 0 0 40px rgba(168, 85, 247, 0.5); }
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
 
 @keyframes slideIn {
   from { transform: translateX(100%); opacity: 0; }
@@ -2554,42 +2556,81 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 }
 
 
-.animate-chromatic {
-  animation: chromaticShift 4s ease infinite;
-}
+/* Removed with the dead CSS (UI polish pass): .animate-chromatic,
+   .animate-float, .animate-pulse-glow, .animate-shimmer, .animate-slide-in
+   and the chromaticShift / float / pulse-glow / shimmer keyframes, plus
+   .holo-text, .media-card (the pre-cinema card), .card-actions, .action-btn,
+   .status-dot, .text-gradient and .glow-text. None had a consumer in the
+   SPA. slideIn stays: .toast uses it. */
 
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
+/* 2026-05-26 — fill-mode: forwards. Without it, animation-fill-mode
+   defaults to "none" and the element snaps BACK to its un-animated state
+   after completion. For .animate-fade-in on the hero <img> (at the time),
+   the un-animated state was the keyframes' "from" (opacity: 0,
+   translateY(10px)) — so any React re-render that re-applied the class
+   would leave the backdrop invisible. Observed in production QA: hero
+   backdrop stuck at opacity:0 on multiple page loads, only visible after
+   manually forcing opacity:1 via DevTools. "forwards" holds the "to" state
+   (opacity:1) after the animation completes.
 
-.animate-pulse-glow {
-  animation: pulse-glow 3s ease-in-out infinite;
-}
-
-.animate-shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
-  background-size: 200% 100%;
-  animation: shimmer 2s infinite;
-}
-
-/* 2026-05-26 — fill-mode: forwards added to both finite animations
-   below. Without it, animation-fill-mode defaults to "none" and the
-   element snaps BACK to its un-animated state after completion. For
-   .animate-fade-in on the hero <img>, the un-animated state is the
-   keyframes' "from" (opacity: 0, translateY(10px)) — so any React
-   re-render that re-applied the class would leave the backdrop
-   invisible. Observed in production QA: hero backdrop stuck at
-   opacity:0 on multiple page loads, only visible after manually
-   forcing opacity:1 via DevTools. "forwards" holds the "to" state
-   (opacity:1) after the animation completes, so the backdrop stays
-   visible even if re-rendered. Same reasoning applies to slideIn —
-   defense in depth before its first user complaint. */
-.animate-slide-in {
-  animation: slideIn 0.3s ease-out forwards;
-}
-
+   The cost of that fix is documented at .stage-hero-img below: the held
+   `transform: translateY(0)` also outranked the hero's inline parallax
+   transform, which is why the hero no longer uses this class. */
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
+}
+
+/* Exit animations (UI polish pass). Surfaces that enter with
+   .animate-fade-in get `.is-closing` from useExitTransition for the last
+   --dur-fast before they unmount; the toast, which enters with slideIn,
+   gets `.is-leaving`. Both are declared AFTER the enter rules so the exit
+   wins the `animation` shorthand at equal specificity, and both animate to
+   opacity 0 with `forwards` so the surface cannot flash back to full
+   opacity between the animation's end and the unmount. Class selectors
+   (not bare [data-state]) because audit-reduced-motion resolves a
+   keyframe's owner by class. */
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes slideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+.animate-fade-in.is-closing {
+  animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+.toast.is-leaving {
+  animation: slideOut var(--dur-base) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
+/* Hero backdrop layers (HeroSection). The transform reads the parallax
+   custom properties the section writes from a rAF (--hero-px/--hero-py,
+   each in [-1, 1] → ±1% drift inside the 5% overscan), and the fade is
+   OPACITY-ONLY on its own keyframe. That separation is the point: the
+   <img> used to carry .animate-fade-in, whose `forwards` fill ends in
+   `transform: translateY(0)`, and an animation declaration outranks the
+   inline style the parallax was written to — so scale and drift were dead
+   from the day `forwards` was added (see the note above .animate-slide-in).
+   `.is-incoming` starts invisible and `.is-loaded` starts the fade; they are
+   two rules on purpose, so no single rule pairs `opacity: 0` with an
+   animation (audit-reduced-motion Check 1b). */
+.stage-hero-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.05) translate(calc(var(--hero-px, 0) * 1%), calc(var(--hero-py, 0) * 1%));
+  transition: transform 0.7s ease-out;
+}
+.stage-hero-img.is-incoming { opacity: 0; }
+.stage-hero-img.is-incoming.is-loaded { animation: heroFadeIn 0.5s ease-out forwards; }
+@keyframes heroFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .aurora-pulse-blob {
@@ -2659,77 +2700,9 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
                               side of the rail's title.
    ==================================================================== */
 
-/* Media card hover effect */
-.media-card {
-  position: relative;
-  overflow: hidden;
-  border-radius: 12px;
-  border: 1px solid var(--glow-border);
-  box-shadow: var(--glow-halo);
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  cursor: pointer;
-}
-
-.media-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(5,5,5,0.9) 0%, transparent 60%);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  z-index: 1;
-  border-radius: 12px;
-}
-
-.media-card:hover {
-  transform: translateY(-8px) scale(1.02);
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong), 0 20px 40px rgba(0, 0, 0, 0.6);
-}
-
-.media-card:hover::before {
-  opacity: 1;
-}
-
-.media-card img {
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.media-card:hover img {
-  transform: scale(1.08);
-}
-
-/* Holographic text effect */
-.holo-text {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: 10px;
-  text-transform: uppercase;
-  background: linear-gradient(90deg, #A855F7 0%, #FFFFFF 50%, #A855F7 100%);
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: screen;
-  position: relative;
-}
-
-.holo-text::before {
-  content: attr(data-text);
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(45deg, #ff00cc, #3333ff, #00ffcc);
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: color-dodge;
-  animation: chromaticShift 4s ease infinite;
-  opacity: 0.6;
-}
+/* .media-card (the pre-cinema card: ::before scrim, -8px lift, 1.08 image
+   zoom) and .holo-text — REMOVED (UI polish pass). Neither had a consumer;
+   every card surface renders .media-card-cinema below. */
 
 /* Sidebar nav link */
 /* .nav-link-item — REMOVED 2026-07-25 (Aurora Stage Phase 2).
@@ -2752,7 +2725,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   height: 100%;
   background: linear-gradient(90deg, #A855F7, #D8B4FE);
   box-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
-  transition: width 0.3s ease;
+  transition: width var(--dur-slow) var(--ease-standard);
 }
 
 /* Rail scroll container */
@@ -2761,7 +2734,19 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
   gap: 18px;
   overflow-x: auto;
-  scroll-snap-type: x mandatory;
+  /* proximity, not mandatory: mandatory forced a snap at the end of EVERY
+     trackpad and touch gesture, which is the "rail fights my scroll"
+     feel, and it yanked the paddles' 90%-of-width page to the nearest
+     card edge after the smooth scroll had already stopped. Proximity keeps
+     the alignment when a gesture ends near a boundary and lets a free
+     scroll rest where it stopped; the paddles now page by whole cards
+     (MediaRail) so both agree. */
+  scroll-snap-type: x proximity;
+  /* A horizontal swipe past either end no longer chains into the
+     browser's back/forward gesture. */
+  overscroll-behavior-x: contain;
+  /* Snapped card sits inside the 4px inline padding, not on the edge. */
+  scroll-padding-inline: 4px;
   padding: 8px 4px;
   -webkit-overflow-scrolling: touch;
 }
@@ -2785,20 +2770,29 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: rgba(10, 8, 18, 0.78);
   border: 1px solid var(--glow-border);
   color: rgba(255, 255, 255, 0.85);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  transition: opacity var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
-.rail-scroll-wrap:hover .rail-paddle,
+/* Keyboard reveal is unconditional; the hover reveal is gated on a real
+   hover-capable pointer, because iOS Safari and Android Chrome apply :hover
+   on tap and hold it until the next tap — a tapped rail kept both paddles
+   up over its cards. Same trap this file documents for .card-overlay. */
 .rail-paddle:focus-visible {
   opacity: 1;
   pointer-events: auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  .rail-scroll-wrap:hover .rail-paddle {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 .rail-paddle:hover {
   background: rgba(30, 24, 48, 0.92);
@@ -2831,12 +2825,22 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 .rail-container {
   background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
   border: 1px solid var(--glow-border);
-  border-radius: 18px;
+  border-radius: var(--r-xl);
   box-shadow: var(--glow-halo);
   padding: 18px 20px 22px;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   margin-bottom: 28px;
+}
+/* The one large blurred surface that multiplies — 5–10 of these on Home,
+   each full-width and ~400px tall — and it had no Glow = Subtle override,
+   so the lever the Settings page offers weak GPUs skipped the heaviest
+   layer. Separate rule on purpose: audit-glass-contrast parses the base
+   `.rail-container` background above and must keep finding it. */
+html[data-glow="subtle"] .rail-container {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(12, 10, 18, 0.96);
 }
 .rail-header {
   display: flex;
@@ -2929,20 +2933,27 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    ==================================================================== */
 .media-card-cinema {
   position: relative;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
   border: 1px solid var(--glow-border);
   box-shadow: var(--glow-halo);
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform var(--dur-slow) var(--ease-standard),
+              box-shadow var(--dur-slow) var(--ease-standard),
+              border-color var(--dur-slow) var(--ease-standard);
   cursor: pointer;
 }
+/* The glow strengthens on any :hover (a stuck glow on touch is harmless);
+   the LIFT and the poster scale are gated on a hover-capable pointer, so a
+   tapped card on a phone does not stay raised until the next tap. */
 .media-card-cinema:hover {
-  transform: translateY(-6px);
   border-color: var(--glow-border-strong);
   box-shadow: var(--glow-halo-strong);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover {
+    transform: translateY(-6px);
+  }
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -2982,15 +2993,27 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   aspect-ratio: 2 / 3;
   object-fit: cover;
   /* No radius — the card clips. See the .poster-wrap note above. */
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.5s var(--ease-standard), opacity var(--dur-base) var(--ease-standard);
+}
+/* Fade-in on decode: invisible until the <img> sets data-loaded (see
+   MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
+   <div class="poster-img poster-placeholder"> that never fires onLoad, and
+   a bare `.poster-img:not([data-loaded])` would hide every posterless card
+   forever. A transition, not an animation, so audit-reduced-motion Check 1b
+   does not apply; the reduced-motion block still stills it. */
+.media-card-cinema img.poster-img:not([data-loaded]) {
+  opacity: 0;
 }
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
    own 9px corners clipped against the wrap's edge. Phase 3 removed the
    image's radius entirely (the card is the sole clipping authority), so
    that specific artifact can no longer occur — 1.02 is kept because the
    lift (translateY on the parent) does most of the work and a bigger scale
-   just costs texture sharpness. */
-.media-card-cinema:hover .poster-img { transform: scale(1.02); }
+   just costs texture sharpness. Hover-capable pointers only — see the
+   lift above. */
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .poster-img { transform: scale(1.02); }
+}
 
 /* Larger "+" / library badge — sits in poster top-left. Filled
    purple when item is in the user's library, dark glass otherwise.
@@ -3019,6 +3042,16 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   transition: background 0.2s, border-color 0.2s, transform 0.2s;
   z-index: 3;
   cursor: pointer;
+}
+/* Hit-area expanders. Both corner controls draw at 30x30, under the 44px
+   WCAG 2.5.5 target; a pseudo-element 7px outside the box takes the tap
+   without changing what is painted. Both buttons are position:absolute,
+   so the inset resolves against their own box. */
+.media-card-cinema .lib-badge::before,
+.media-card-cinema .ai-gem::before {
+  content: '';
+  position: absolute;
+  inset: -7px;
 }
 .media-card-cinema .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
 .media-card-cinema .lib-badge.in-lib {
@@ -3070,7 +3103,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   /* Interactive now (was pointer-events:none) so a touch/click focuses it
      and reveals the reason; cursor hints it's actionable. */
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
 .media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(216, 180, 254, 0.7); }
 .media-card-cinema .ai-gem:focus-visible { outline: 2px solid rgba(216, 180, 254, 0.95); outline-offset: 2px; }
@@ -3101,15 +3134,23 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   background: linear-gradient(to top, rgba(8, 6, 16, 0.96) 0%, rgba(8, 6, 16, 0.9) 60%, rgba(8, 6, 16, 0) 100%);
   opacity: 0;
   transform: translateY(6px);
-  transition: opacity 0.22s ease, transform 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard), transform var(--dur-base) var(--ease-standard);
   /* never intercept the card's click-to-detail: the reveal is driven by
      the CARD's :hover / :focus-within, not by hovering the scrim itself. */
   pointer-events: none;
 }
-.media-card-cinema:hover .reason-scrim,
+/* focus-within (keyboard, and the gem's tap-to-focus on touch) reveals on
+   every device; :hover only where hover is real, so a tapped card does not
+   keep the reason up over its title until the next tap. */
 .media-card-cinema:focus-within .reason-scrim {
   opacity: 1;
   transform: translateY(0);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .reason-scrim {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 /* 2026-06-05 (Home redesign) — AI cards now carry BOTH a reveal-on-hover
    .reason-scrim AND the quality/maturity .card-badges, which share the
@@ -3119,11 +3160,15 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    cards that actually have a reason — badge-only cards (no scrim) keep
    their badges on hover. */
 .media-card-cinema .reason-scrim ~ .card-badges {
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
 }
-.media-card-cinema:hover .reason-scrim ~ .card-badges,
 .media-card-cinema:focus-within .reason-scrim ~ .card-badges {
   opacity: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .reason-scrim ~ .card-badges {
+    opacity: 0;
+  }
 }
 .media-card-cinema .reason-text {
   margin: 0;
@@ -3140,9 +3185,16 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
 @media (prefers-reduced-motion: reduce) {
+  /* The card lift and poster scale were the only card motion this block
+     did not cover. Later in the file than the hover rules at equal
+     specificity, so these win. */
+  .media-card-cinema { transition: none; }
+  .media-card-cinema:hover { transform: none; }
+  .media-card-cinema:hover .poster-img { transform: none; }
+  .media-card-cinema .poster-img { transition: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
-  .media-card-cinema .reason-scrim { transform: none; transition: opacity 0.22s ease; }
+  .media-card-cinema .reason-scrim { transform: none; transition: opacity var(--dur-base) var(--ease-standard); }
 }
 
 /* ── Card overlay: title + meta ON the art (Aurora Stage Phase 3) ──
@@ -3243,7 +3295,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    card itself (it is role="button" tabIndex=0), so it also erased the
    label of the exact card a keyboard user had tabbed onto. */
 .media-card-cinema .reason-scrim ~ .card-overlay {
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
 }
 /* :hover ONLY, and only where hover is real.
    
@@ -3358,7 +3410,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   opacity: 0;
   pointer-events: none;
   transform: translateY(2px);
-  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  transition: opacity var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
 .media-card-cinema:hover .resume-pill,
 .media-card-cinema:focus-within .resume-pill,
@@ -3379,7 +3431,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 @media (prefers-reduced-motion: reduce) {
   .media-card-cinema .resume-pill {
     transform: none;
-    transition: opacity 0.18s ease;
+    transition: opacity var(--dur-fast) var(--ease-standard);
   }
 }
 
@@ -3409,7 +3461,12 @@ input:not([type="range"]), select, textarea {
   color: #fff;
   padding: 12px 16px;
   font-size: 0.9rem;
-  transition: all 0.2s ease;
+  /* Only what the focus rule below changes. `all` on EVERY input, select and
+     textarea in the app also animated padding/width/height whenever a field
+     was resized or re-laid-out. */
+  transition: background-color var(--dur-base) var(--ease-standard),
+              border-color var(--dur-base) var(--ease-standard),
+              box-shadow var(--dur-base) var(--ease-standard);
 }
 
 /* Focus treatment for EVERY input/select/textarea in the app. Phase 8 rewrote
@@ -3556,7 +3613,7 @@ textarea:focus-visible {
   border-radius: 13px;
   position: relative;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background-color var(--dur-slow) var(--ease-standard);
 }
 
 .toggle.active {
@@ -3571,108 +3628,18 @@ textarea:focus-visible {
   position: absolute;
   top: 2px;
   left: 2px;
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.3s var(--ease-standard);
 }
 
 .toggle.active .toggle-handle {
   transform: translateX(22px);
 }
 
-/* Status dot */
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.status-dot.online {
-  background: #10b981;
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
-}
-
-.status-dot.offline {
-  background: #ef4444;
-}
-
-.status-dot.processing {
-  background: #f59e0b;
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
-/* Card overlay actions
- *
- * QA BUG-001 — the previous layout centered the action buttons via
- * `inset: 0; flex center`, putting the 44px Play button at the
- * geometric center of every card. Users instinctively click center —
- * they thought "click the poster" auto-played the title. The card's
- * onClick already navigates to detail; only the Play button starts
- * playback. Anchoring the buttons to the bottom-right corner with
- * a small bias gives the Play button its own affordance while
- * leaving the rest of the card's surface area to the detail-nav
- * click target.
- *
- * BUG-009 — making the Play button visible-on-hover is the requested
- * "on-card Play affordance"; the existing `.media-card::before`
- * gradient + scale-lift transform handle the broader "this is
- * interactive" hover cue.
- */
-.card-actions {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  opacity: 0;
-  /* translateY animates the button "in" from below on hover; subtle
-   * but signals direction so users notice the new affordance. */
-  transform: translateY(4px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  z-index: 2;
-  /* pointer-events: none on the container is critical for touch
-   * devices that have no hover: the button DOM node would otherwise
-   * stay hit-testable while opacity:0, intercepting taps in the
-   * bottom-right corner and firing Play instead of bubbling to the
-   * card's onSelect (detail-nav). The hover rule below re-enables
-   * pointer-events only when the button is actually visible. */
-  pointer-events: none;
-}
-
-.media-card:hover .card-actions {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
-}
-
-.action-btn {
-  /* Slightly smaller than the previous 44px center button — corner
-   * anchored buttons read as accessories rather than the primary CTA,
-   * which matches the actual UX intent (Play is one option; the card
-   * click going to Detail is the default).
-   *
-   * No box-shadow — the parent `.relative.overflow-hidden.rounded-xl`
-   * (~5 call sites) clips it to a sliver that contributes no lift.
-   * The :hover ::before gradient on .media-card provides enough
-   * background contrast for the white button to read clearly. */
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.95);
-  border: none;
-  color: #050505;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.action-btn:hover {
-  transform: scale(1.1);
-  background: #A855F7;
-  color: #fff;
-}
+/* .status-dot (+ .online / .offline / .processing) and the legacy card's
+   .card-actions / .action-btn — REMOVED (UI polish pass). The QA BUG-001 /
+   BUG-009 history they carried concerned the pre-cinema .media-card, which
+   is gone too; the cinema card's resume pill and hover preview are the
+   surviving affordances. */
 
 /* Table styling */
 .data-table {
@@ -3707,12 +3674,14 @@ textarea:focus-visible {
   backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   padding: 14px 20px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   display: flex;
   align-items: center;
   gap: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  animation: slideIn 0.3s ease;
+  /* forwards: holds the "to" frame so a re-render can never snap the toast
+     back to its off-screen "from" (the same defence .animate-fade-in has). */
+  animation: slideIn 0.3s ease forwards;
 }
 
 /* ====================================================================
@@ -3739,12 +3708,16 @@ textarea:focus-visible {
   justify-content: center;
   background: linear-gradient(0deg, rgba(5, 5, 5, 0.55), rgba(5, 5, 5, 0.05) 55%, transparent);
   opacity: 0;
-  transition: opacity 0.25s ease;
+  transition: opacity var(--dur-base) var(--ease-standard);
   pointer-events: none;
 }
-.media-card-cinema:hover .card-hover-preview,
 .media-card-cinema:focus-within .card-hover-preview {
   opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-hover-preview {
+    opacity: 1;
+  }
 }
 .media-card-cinema .card-hover-preview .chp-play {
   width: 48px;
@@ -3756,16 +3729,20 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   transform: translateY(4px) scale(0.86);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.25s var(--ease-standard);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
 .media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
-.media-card-cinema:hover .card-hover-preview .chp-play,
 .media-card-cinema:focus-within .card-hover-preview .chp-play {
   transform: translateY(0) scale(1);
 }
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-hover-preview .chp-play {
+    transform: translateY(0) scale(1);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .card-hover-preview { transition: opacity 0.25s ease; }
+  .media-card-cinema .card-hover-preview { transition: opacity var(--dur-base) var(--ease-standard); }
   .media-card-cinema .card-hover-preview .chp-play { transform: none; transition: none; }
 }
 
@@ -3795,7 +3772,10 @@ textarea:focus-visible {
   color: rgba(255, 255, 255, 0.9);
   background: rgba(10, 8, 18, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.18);
-  backdrop-filter: blur(4px);
+  /* No backdrop-filter. This is the same per-badge blur deep-debug Bug 25
+     removed from .lib-badge: with showBadges on Browse it was hundreds of
+     4px blur layers over poster art, re-composited on every scroll frame,
+     for a tint the 0.72 fill already reads identically at 10px type. */
 }
 .media-card-cinema .card-badge.is-quality {
   color: #f5edff;
@@ -3922,7 +3902,7 @@ textarea:focus-visible {
   overflow: hidden;
   width: 40px;
   height: 58px;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(160deg, rgba(168, 85, 247, 0.22), rgba(14, 12, 22, 0.9));
 }
@@ -4133,32 +4113,48 @@ textarea:focus-visible {
 /* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
    blocks above already guard most decorative motion (convo-search,
    media-card, onboarding, recap), but these infinite animations had no
-   guard: .animate-pulse-glow, .status-dot.processing, .animate-chromatic
-   + .holo-text::before, .animate-float, .animate-shimmer,
-   .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
+   guard: .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
    (skeletons + spinners become static — still visible, just not
-   animating). */
+   animating). The list used to also name .animate-pulse-glow,
+   .status-dot.processing, .animate-chromatic, .holo-text::before,
+   .animate-float and .animate-shimmer; those rules were dead and were
+   removed with the rest of the unused CSS. */
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-glow,
-  .status-dot.processing,
-  .animate-chromatic,
-  .holo-text::before,
-  .animate-float,
-  .animate-shimmer,
   .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin,
   /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
-     translateY, i.e. real motion, and were missed by the sweep above. The
-     gap is old; the blast radius is new, because the nav now applies
-     .animate-fade-in to the avatar dropdown and the mobile menu sheet —
-     the primary navigation of every phone session.
+     translateY/translateX, i.e. real motion, and were missed by the sweep
+     above. The gap is old; the blast radius is new, because the nav now
+     applies .animate-fade-in to the avatar dropdown and the mobile menu
+     sheet — the primary navigation of every phone session.
 
-     `animation: none` is safe for these two, unlike `.onb-stagger > *`
-     handled above: neither declares a base `opacity: 0`, so removing the
-     animation leaves them at their author style (visible, untransformed).*/
+     `.toast` is slideIn's only remaining owner (the unused
+     .animate-slide-in utility was removed with the dead CSS), and the
+     audit's coverage check had been satisfied by that utility's entry, not
+     by the toast — so the toast slid under reduced motion. Nulled here.
+
+     `animation: none` is safe for both, unlike `.onb-stagger > *` handled
+     above: neither declares a base `opacity: 0`, so removing the animation
+     leaves them at their author style (visible, untransformed). */
   .animate-fade-in,
-  .animate-slide-in {
+  .toast {
     animation: none !important;
+  }
+  /* Exits, too — the hook unmounts immediately under reduced motion, so
+     these never run there; nulled for the audit's coverage check and for
+     any caller that adds the class by hand. */
+  .animate-fade-in.is-closing,
+  .toast.is-leaving {
+    animation: none !important;
+  }
+  /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than
+     stilled — `.is-incoming` starts at opacity 0 and relies on heroFadeIn to
+     appear, so nulling the animation alone would leave the new art invisible
+     until the promotion timer swapped it in. */
+  .stage-hero-img { transition: none; }
+  .stage-hero-img.is-incoming.is-loaded {
+    animation: none !important;
+    opacity: 1;
   }
 }

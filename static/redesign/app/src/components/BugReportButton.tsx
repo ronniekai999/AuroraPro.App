@@ -117,7 +117,7 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
           bottom: 'max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom, 0px)))',
           ...(hidden ? { display: 'none' } : {}),
         }}
-        className="fixed right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-purple-500/15 border border-purple-500/20 hover:border-purple-500/40 text-white/70 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
+        className="fixed right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-purple-500/15 border border-purple-500/20 hover:border-purple-500/40 text-white/70 hover:text-white text-xs font-medium transition-ui backdrop-blur-md shadow-lg"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
             Bug icon = stylized beetle with antennae and legs (Feather's

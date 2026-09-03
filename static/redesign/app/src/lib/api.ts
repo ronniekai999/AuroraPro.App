@@ -297,10 +297,28 @@ export function posterURL(
   if (!cleaned) return ''
   return `/api/images/${size}/${cleaned}`
 }
-export function backdropURL(p?: string): string {
+// Backdrops used to be `original` unconditionally — a 1920x1080 (often
+// 3840x2160) JPEG for every surface, including the 336x189 Continue Watching
+// card. Sized now: w1280 for the two full-bleed heroes (the default), w780
+// for cards, strips and covers. Both sizes are in the proxy's allowlist
+// (internal/metadata/imageproxy.go). `original` stays available for the
+// hero's 2x srcset (backdropSrcSet below).
+export type BackdropSize = 'w780' | 'w1280' | 'original'
+export function backdropURL(p?: string, size: BackdropSize = 'w1280'): string {
   const cleaned = imgPath(p)
   if (!cleaned) return ''
-  return `/api/images/original/${cleaned}`
+  return `/api/images/${size}/${cleaned}`
+}
+// srcset for a hero <img>: the w1280 URL at 1x and the original at 2x, so a
+// 1440px hero on a Retina display (2880 device px) is not upscaled from
+// 1280. Derived from the URL rather than a path so callers that only hold a
+// `Media.backdrop` string can use it; a URL that is not a proxy backdrop
+// (a TVDB absolute URL, a poster fallback) gets no srcset.
+export function backdropSrcSet(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  const m = /^\/api\/images\/(w780|w1280)\/(.+)$/.exec(url)
+  if (!m) return undefined
+  return `${url} 1x, /api/images/original/${m[2]} 2x`
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -2782,7 +2800,8 @@ export function mapContinueToMedia(c: ContinueWatchingItem): UIMedia {
     genre: c.genre ?? '',
     type: c.type === 'show' ? 'show' : 'movie',
     poster: posterURL(c.poster_path),
-    backdrop: backdropURL(c.backdrop_path),
+    // Continue Watching renders landscape cards at 336px; w780 is already 2x.
+    backdrop: backdropURL(c.backdrop_path, 'w780'),
     description: c.episode_title
       ? `S${c.season_number}E${c.episode_number}${c.episode_title ? ' — ' + c.episode_title : ''}`
       : '',

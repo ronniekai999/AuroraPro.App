@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react'
 import { cn } from '../../lib/utils'
 import { EpisodeRow, type EpisodeRowVM } from './EpisodeRow'
+import { SkeletonBlock } from '@/components/Skeletons'
 
 export interface SeasonOpt {
   season_number: number
@@ -20,7 +21,31 @@ interface EpisodeListProps {
   onPlay: (id: number, fileId?: number) => void
   onUnavailable: (id: number) => void
   emptyText?: string
+  // Rows are still in flight: render row-shaped placeholders instead of the
+  // empty-state sentence, so the list does not announce "no episodes" for
+  // a season that is simply loading and then jump when the rows land.
+  loading?: boolean
   className?: string
+}
+
+/** Three episode-row silhouettes: still, title line, synopsis line. Same
+ *  outer shape as EpisodeRow (rounded-2xl, p-[0.7rem], the 140/176/212px
+ *  still) so the real rows replace them in place. */
+function EpisodeRowsSkeleton() {
+  return (
+    <div className="space-y-2.5" aria-hidden="true">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div key={i} className="flex gap-4 p-[0.7rem] rounded-2xl border border-white/[0.05] bg-white/[0.02]">
+          <SkeletonBlock className="w-[140px] sm:w-[176px] lg:w-[212px] aspect-video shrink-0" />
+          <div className="flex-1 min-w-0 py-1 space-y-3">
+            <SkeletonBlock className="h-4 w-[55%] rounded-md" />
+            <SkeletonBlock className="h-3.5 w-[85%] rounded-md" />
+            <SkeletonBlock className="h-3.5 w-[40%] rounded-md" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export function EpisodeList({
@@ -32,6 +57,7 @@ export function EpisodeList({
   onPlay,
   onUnavailable,
   emptyText,
+  loading = false,
   className,
 }: EpisodeListProps) {
   const showPicker = !!seasons && seasons.length > 1
@@ -69,7 +95,7 @@ export function EpisodeList({
                   onClick={() => onSelectSeason?.(s.season_number)}
                   title={s.episode_count ? `${s.episode_count} episodes` : undefined}
                   className={cn(
-                    'inline-flex items-center px-3.5 py-[7px] rounded-full text-[13px] font-semibold transition-all border',
+                    'inline-flex items-center px-3.5 py-[7px] rounded-full text-[13px] font-semibold transition-ui border',
                     on
                       ? 'bg-purple-500/22 border-purple-400/45 text-purple-100'
                       : 'bg-white/[0.03] border-white/[0.07] text-white/60 hover:bg-white/[0.07] hover:text-white',
@@ -91,6 +117,8 @@ export function EpisodeList({
             </div>
           ))}
         </div>
+      ) : loading ? (
+        <EpisodeRowsSkeleton />
       ) : (
         <p className="text-white/40 text-sm">{emptyText ?? 'No episodes available yet.'}</p>
       )}

@@ -37,6 +37,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
+import { useExitTransition } from '@/hooks/useExitTransition'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
@@ -125,6 +126,10 @@ export function PartyPanel({
     p => p.user_id !== currentUserId && !p.companion,
   )
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
+  // The confirm stays mounted for its exit fade after the flag flips false;
+  // a re-open mid-fade cancels the pending unmount (partyPanelLeave.test
+  // closes and re-opens it within one test).
+  const leaveExit = useExitTransition(showLeaveConfirm)
 
   // Auto-scroll chat to bottom on new messages — only if the user
   // was already near the bottom, so a user scrolled up reading
@@ -563,13 +568,13 @@ export function PartyPanel({
         >
           {isHost && !canHandOff ? 'End Party' : 'Leave Party'}
         </button>
-        {showLeaveConfirm && (
+        {leaveExit.mounted && (
           <div
-            className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+            className={`fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in${leaveExit.closing ? ' is-closing' : ''}`}
             onClick={() => setShowLeaveConfirm(false)}
           >
             <div
-              className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6"
+              className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6"
               onClick={e => e.stopPropagation()}
             >
               {canHandOff ? (

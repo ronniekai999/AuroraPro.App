@@ -11,7 +11,9 @@ module.exports = {
   // instead of depending on whether some comment happens to mention it.
   safelist: [
     'type-hero', 'type-detail', 'type-browse',
-    'type-page', 'type-section', 'type-rail',
+    'type-page', 'type-section',
+    // type-rail was safelisted too, but its rule never had a consumer (rail
+    // titles use .rail-title) and was removed with the other dead CSS.
   ],
   theme: {
     extend: {
@@ -80,25 +82,29 @@ module.exports = {
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
       },
-      keyframes: {
-        "accordion-down": {
-          from: { height: "0" },
-          to: { height: "var(--radix-accordion-content-height)" },
-        },
-        "accordion-up": {
-          from: { height: "var(--radix-accordion-content-height)" },
-          to: { height: "0" },
-        },
-        "caret-blink": {
-          "0%,70%,100%": { opacity: "1" },
-          "20%,50%": { opacity: "0" },
-        },
+      // One motion curve for the whole app: the ~225 `transition-*`
+      // utilities in TSX now ease on the same tokens the hand-written CSS
+      // uses (index.css :root), instead of Tailwind's own literal curve.
+      // Values are identical to Tailwind's defaults, so nothing moves; the
+      // point is that changing the token changes both systems together.
+      transitionTimingFunction: {
+        DEFAULT: "var(--ease-standard)",
       },
-      animation: {
-        "accordion-down": "accordion-down 0.2s ease-out",
-        "accordion-up": "accordion-up 0.2s ease-out",
-        "caret-blink": "caret-blink 1.25s ease-out infinite",
+      transitionDuration: {
+        DEFAULT: "var(--dur-fast)",
       },
+      // `transition-ui`: the explicit list that replaced 43 `transition-all`
+      // utilities. Everything an interactive surface animates on hover /
+      // focus / press, and nothing that is layout (width, height, padding)
+      // — `all` animated those too whenever a control resized. Progress
+      // fills, whose animated property IS layout, use `transition-[width]`.
+      transitionProperty: {
+        ui: "color, background-color, border-color, outline-color, opacity, transform, box-shadow, filter",
+      },
+      // The accordion-down/up and caret-blink keyframes that shipped with
+      // the shadcn scaffold went with ui/accordion.tsx and ui/input-otp.tsx,
+      // their only consumers. tailwindcss-animate (the plugin below) is what
+      // the live dialog / alert-dialog use for animate-in/out.
     },
   },
   plugins: [require("tailwindcss-animate")],

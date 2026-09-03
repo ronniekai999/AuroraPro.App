@@ -165,7 +165,7 @@ export function CompanionRoom({
           <CompanionPoster poster={state.mediaPoster} className="h-[50px] w-[34px] rounded-md" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-semibold text-white">{state.mediaTitle || 'Now playing'}</p>
-            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#D8B4FE]">
+            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[color:var(--stage-purple-lt)]">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
               {state.isPlaying ? 'In sync with host' : 'Paused by host'}
             </p>
@@ -374,7 +374,7 @@ function MemberChip({ participant, isSelf, speaking }: {
     >
       <span className={`h-[7px] w-[7px] rounded-full ${speaking ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-white/35'}`} />
       {isSelf ? 'You' : participant.username}
-      {participant.is_host && <span className="text-[#D8B4FE]" title="Host" aria-label="Host">★</span>}
+      {participant.is_host && <span className="text-[color:var(--stage-purple-lt)]" title="Host" aria-label="Host">★</span>}
       {participant.companion && <span title="On phone" aria-label="On phone">📱</span>}
       {speaking && (
         <svg viewBox="0 0 24 24" fill="currentColor" className="h-2.5 w-2.5 text-emerald-400" aria-hidden="true">
@@ -388,7 +388,7 @@ function MemberChip({ participant, isSelf, speaking }: {
 function ChatBubble({ msg, mine }: { msg: ChatMessageEvent; mine: boolean }) {
   return (
     <div className={`flex max-w-[82%] flex-col ${mine ? 'self-end items-end' : 'items-start'}`}>
-      <span className={`mb-0.5 text-[10px] ${mine ? 'text-[#D8B4FE]' : 'text-white/45'}`}>
+      <span className={`mb-0.5 text-[10px] ${mine ? 'text-[color:var(--stage-purple-lt)]' : 'text-white/45'}`}>
         {mine ? 'You' : msg.username}
       </span>
       <div

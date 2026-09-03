@@ -62,8 +62,8 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 pt-16" onClick={onClose}>
-      <div className="w-full max-w-xl bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5 max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 pt-16 animate-fade-in" onClick={onClose}>
+      <div className="w-full max-w-xl bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
           <h2 className="text-white text-lg font-semibold">Match "{target.title}"</h2>
           <button onClick={onClose} className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center">×</button>

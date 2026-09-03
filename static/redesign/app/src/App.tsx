@@ -126,29 +126,70 @@ import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefre
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
+import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
+import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
+
+// Chunk loaders, named so the nav can PREFETCH a view's code on hover /
+// focus of its tab (prefetchView, below) ahead of the click that needs it.
+// `lazy()` wraps the same thunk, and a dynamic import() resolves once per
+// module, so a prefetched chunk is simply already there when the view
+// mounts — the Suspense fallback never paints for it. This is the honest
+// version of what `startTransition` cannot do here: each view mounts its
+// own <ViewSuspense>, and React shows a NEWLY mounted boundary's fallback
+// immediately, transition or not.
+const VIEW_LOADERS = {
+  admin: () => import('@/components/admin/AdminView'),
+  collections: () => import('@/components/CollectionsView'),
+  calendar: () => import('@/components/CalendarView'),
+  settings: () => import('@/components/SettingsView'),
+  requests: () => import('@/components/RequestsView'),
+  browse: () => import('@/components/BrowseView'),
+  detail: () => import('@/components/DetailView'),
+  library: () => import('@/components/LibraryView'),
+  search: () => import('@/components/SearchView'),
+  member: () => import('@/components/UserProfileView'),
+  members: () => import('@/components/MembersView'),
+} as const
+// Nav tab id → chunk. Home is eager (no entry); movies and shows share the
+// browse chunk; detail/member are never reached from a tab.
+const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
+  admin: 'admin', collections: 'collections', calendar: 'calendar',
+  settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
+  library: 'library', search: 'search', members: 'members',
+}
+const prefetched = new Set<keyof typeof VIEW_LOADERS>()
+function prefetchView(view: string): void {
+  const key = PREFETCH_BY_VIEW[view]
+  if (!key || prefetched.has(key)) return
+  prefetched.add(key)
+  // A failed prefetch (offline, stale deploy) is not an error to surface:
+  // the real navigation retries the import and ErrorBoundary owns THAT
+  // failure. Forget the attempt so a later hover can try again.
+  void VIEW_LOADERS[key]().catch(() => { prefetched.delete(key) })
+}
 
 // 2026-06-17 (app split) — Admin is the first lazy-loaded view chunk.
 // Non-admins never fetch the ~2,330-line admin bundle; it loads on
 // first /admin nav by an admin, with <ViewFallback> as the Suspense
 // placeholder. ErrorBoundary in main.tsx catches chunk-load failures
 // (offline / stale deploy); ViewSuspense complements it.
-const AdminView = lazy(() => import('@/components/admin/AdminView'))
+const AdminView = lazy(VIEW_LOADERS.admin)
 // 2.1 — Collections & Calendar are already standalone modules; the
 // only change is swapping their static import for a lazy import and
 // wrapping the render site in <ViewSuspense>. First slice to exercise
 // the lazy + ViewSuspense wiring end-to-end.
-const CollectionsView = lazy(() => import('@/components/CollectionsView'))
-const CalendarView = lazy(() => import('@/components/CalendarView'))
+const CollectionsView = lazy(VIEW_LOADERS.collections)
+const CalendarView = lazy(VIEW_LOADERS.calendar)
 // 2.2 — Settings (profile, connected accounts, profiles + watchlists,
 // appearance / content-tone). ConnectedAccountsCard rides along as a
 // module-private helper; the OAuth provider-label helper it shares with
 // App's link-mode toast moved to @/lib/oauth. Loads on first /settings nav.
-const SettingsView = lazy(() => import('@/components/SettingsView'))
+const SettingsView = lazy(VIEW_LOADERS.settings)
 // 2.3 — Requests (submitted-request statuses + inline TMDB search/create).
 // humanizeRequestError rides along as a module-private helper. Loads on
 // first /requests nav.
-const RequestsView = lazy(() => import('@/components/RequestsView'))
+const RequestsView = lazy(VIEW_LOADERS.requests)
 // 2.4 — Movies / TV Shows browse grid (hero, sort, genre filter, paginate,
 // Continue Watching rail). Shares MediaRail + HeroSection with the eager
 // HomeView; Media/Episode moved to @/lib/types and resume helpers to
@@ -156,7 +197,7 @@ const RequestsView = lazy(() => import('@/components/RequestsView'))
 // /movies or /shows nav. App keeps the list === null data gate and wraps
 // the block in <ViewSuspense fallback={<BrowseLoadingState/>}> so the
 // chunk-load + data-load fallbacks are visually identical.
-const BrowseView = lazy(() => import('@/components/BrowseView'))
+const BrowseView = lazy(VIEW_LOADERS.browse)
 // 2.5 — Detail (hero, tabs, episodes, cast, files, recap, trailer). App owns
 // the data + handlers; the inline `resume` IIFE + `onEpisodeUnavailable`
 // closure stay in App's render block (they close over App state) and are
@@ -164,29 +205,29 @@ const BrowseView = lazy(() => import('@/components/BrowseView'))
 // keeps key={selectedMedia.id} so it remounts per title (resets active tab /
 // cast-expand — the one check the build can't catch). Loads on first
 // card→detail nav.
-const DetailView = lazy(() => import('@/components/DetailView'))
+const DetailView = lazy(VIEW_LOADERS.detail)
 // 2.6 — My Library (saved titles + Continue Watching). Shares isResumable,
 // MediaCardCinema, Icon, and the app-side Media type with the other views.
 // App owns the saved `library` state + `continueItems` and passes them as
 // props; the Resume pill resolves the freshest CW record via a ref. Loads
 // on first /library nav.
-const LibraryView = lazy(() => import('@/components/LibraryView'))
+const LibraryView = lazy(VIEW_LOADERS.library)
 // 2.7 — Search (debounced 300ms/keystroke results grid). Shares Icon,
 // MediaCardCinema, searchMedia, and the app-side Media type. App owns the
 // query string + library set and passes them as props; the debounce +
 // searchMedia call live in the view. No dependency on UpdatePanel's
 // ACTIVE_STATES/updateStateMeta/timeAgo (those stay in the admin chunk).
 // Loads on first /search nav.
-const SearchView = lazy(() => import('@/components/SearchView'))
+const SearchView = lazy(VIEW_LOADERS.search)
 // Social phase 1 — member profile page (/user/:username). Self-contained:
 // fetches its own data by username, so App only parses the URL (see
 // memberUsernameFromPath) and threads onSelect for the recent-watches
 // rail. Loads on first profile nav.
-const UserProfileView = lazy(() => import('@/components/UserProfileView'))
+const UserProfileView = lazy(VIEW_LOADERS.member)
 // Social phase 2 — the member directory (/members): find + follow people.
 // Reached from the avatar dropdown, not the tab strip (the strip is curated
 // browse surfaces; this is an occasional destination like Settings).
-const MembersView = lazy(() => import('@/components/MembersView'))
+const MembersView = lazy(VIEW_LOADERS.members)
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -504,7 +545,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-all duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
+            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
             {submitting ? (
               <>
@@ -661,7 +702,7 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
       // from the accessibility tree instead of announcing as unavailable.
       aria-disabled={disabled || undefined}
       onClick={(e) => { if (disabled) e.preventDefault() }}
-      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-all duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
+      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >
       {config.icon}
       {label}
@@ -1250,7 +1291,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           {onRetry && (
             <button
               onClick={onRetry}
-              className="px-4 py-2 bg-white/10 hover:bg-white/15 rounded-lg text-white/90 text-sm transition-colors"
+              className="stage-btn stage-btn-sm stage-btn-ghost"
             >
               Retry
             </button>
@@ -1258,8 +1299,18 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         </div>
       )}
       {loading && !rails && (
-        <div className="mb-6 px-5 py-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-200 text-sm">
-          Loading your library…
+        // Rail-shaped skeletons where the rails will land, in the shapes
+        // the first three usually take (Continue Watching is landscape).
+        // The banner this replaces was one line of purple text; the whole
+        // page then popped in around it. The announcement stays, sr-only.
+        // Plain wrapper: this already sits inside HomeView's .stage-gutter,
+        // and a second gutter made the skeletons 2× the page padding
+        // narrower than the rails that replace them.
+        <div>
+          <p className="sr-only" role="status">Loading your library…</p>
+          <RailSkeleton aspect="landscape" count={5} />
+          <RailSkeleton />
+          <RailSkeleton />
         </div>
       )}
       {effectiveRails.map((rail, i) => {
@@ -1311,6 +1362,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             key={`${rail.title}-${i}`}
             title={rail.title}
             items={rail.items}
+            // First rail's first row sits at the hero fold: fetch it eagerly.
+            eagerCount={i === 0 ? 6 : 0}
             onSelect={onSelect}
             aspect={rail.aspect}
             onCardContext={onCardContext}
@@ -1391,7 +1444,7 @@ function YourWeekBand() {
           </span>
           <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
           <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
-            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
           </span>
           <span className="text-[11px] text-white/40 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
@@ -1589,7 +1642,9 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
     const id = window.setInterval(tick, 5000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [open, isAdmin])
-  if (!open) return null
+  // Stays mounted for the exit fade (is-closing) after `open` flips false.
+  const exit = useExitTransition(open)
+  if (!exit.mounted) return null
   const fmtBytes = (n: number): string => {
     if (n <= 0) return '0 B'
     const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -1655,7 +1710,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1796,7 +1851,9 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     if (diff < 86_400_000) return `${hrs} ${hrs === 1 ? 'hr' : 'hrs'} ago`
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
-  if (!open) return null
+  // Stays mounted for the exit fade (is-closing) after `open` flips false.
+  const exit = useExitTransition(open)
+  if (!exit.mounted) return null
   // QA BUG-006 — anchor near the Notifications trigger rather than the
   // top-left of the content area, where it covered the page heading and
   // looked unrelated to the button that opened it. As with ServerPanel,
@@ -1813,7 +1870,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -1964,14 +2021,12 @@ function BrowseLoadingState({ title }: { title: string }) {
     // skeleton flashed edge-to-edge and then snapped in by 48px.
     <div className="animate-fade-in stage-gutter pt-8">
       <div className="mb-8">
-        <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
-        <p className="text-white/60 text-sm mt-2">Loading your library…</p>
+        {/* PageHeader's title scale, so Movies / TV Shows agree with My
+            Library, Search and Requests instead of a one-off text-4xl. */}
+        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
+        <p className="text-white/60 text-sm mt-2" role="status">Loading your library…</p>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
-        {Array.from({ length: 12 }).map((_, i) => (
-          <div key={i} className="aspect-[2/3] rounded-xl bg-white/[0.02] border border-white/[0.04] animate-pulse" />
-        ))}
-      </div>
+      <GridSkeleton />
     </div>
   )
 }
@@ -2039,7 +2094,7 @@ function mapFollowedToMedia(w: FollowedWatch): Media {
     genre: '',
     type: w.type === 'show' ? 'show' : 'movie',
     poster: posterURL(w.poster_path),
-    backdrop: backdropURL(w.backdrop_path),
+    backdrop: backdropURL(w.backdrop_path, 'w780'),
     description: '',
   }
 }
@@ -2069,6 +2124,21 @@ function pathToView(pathname: string): string {
   // still resolve to the top-level view that contains them.
   const first = pathname.split('/').filter(Boolean)[0]
   return VIEW_BY_PATH['/' + (first ?? '')] ?? 'home'
+}
+
+// Scroll memory — one offset per history entry, keyed by react-router's
+// location.key. `history.scrollRestoration` is 'manual' (main.tsx) because
+// native restoration fires on popstate while the OUTGOING view is still
+// mounted: it clamps to that document's height and the SPA then re-renders
+// under it, which is how Back from a title landed at the top of a Home you
+// had scrolled six rails down. App records the offset when it leaves an
+// entry in-app (handleSelect / handleNavigate) and the layout effect next
+// to the URL-sync effect restores it once the destination VIEW has
+// committed. A Map, not sessionStorage: after a reload every view's data is
+// gone as well, so there is nothing to restore onto until it refetches.
+const scrollMemory = new Map<string, number>()
+function rememberScroll(key: string): void {
+  scrollMemory.set(key, window.scrollY)
 }
 
 export default function App() {
@@ -2435,6 +2505,11 @@ export default function App() {
     try { localStorage.setItem('aurora_my_library', JSON.stringify(library)) }
     catch { /* quota / private mode — non-fatal */ }
   }, [library])
+  // False until the reconcile below has answered once for the active
+  // profile (success OR failure — an offline device keeps its cache and
+  // must not sit on a skeleton). LibraryView uses it to hold a grid
+  // skeleton instead of the empty state on a device whose cache is empty.
+  const [libraryLoaded, setLibraryLoaded] = useState(false)
   // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
   // The reconcile below re-applies these on top of the server snapshot so a
   // save/unsave that completes DURING the fetch isn't clobbered by the
@@ -2448,9 +2523,11 @@ export default function App() {
     if (!user || !activeProfileId) return
     let cancelled = false
     const ac = new AbortController()
+    setLibraryLoaded(false)
     getLibrary(activeProfileId, ac.signal)
       .then(items => {
         if (cancelled) return
+        setLibraryLoaded(true)
         setLibrary(prev => {
           const cachedById = new Map(prev.map(m => [m.id, m]))
           const pending = pendingLibOpsRef.current
@@ -2469,7 +2546,11 @@ export default function App() {
           return merged
         })
       })
-      .catch(() => { /* offline / transient — keep the localStorage cache */ })
+      .catch(() => {
+        // offline / transient — keep the localStorage cache, and stop
+        // showing the skeleton: what is cached is what there is.
+        if (!cancelled) setLibraryLoaded(true)
+      })
     return () => { cancelled = true; ac.abort() }
   }, [user, activeProfileId])
   // Memoized ID set so MediaRail / BrowseView / LibraryView can do
@@ -2770,6 +2851,44 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, closePlayer])
 
+  // Restore (or reset) the scroll offset once the URL's view is the one on
+  // screen. Keyed on `view` as well as the history key on purpose: on
+  // popstate the location changes one render BEFORE the URL-sync effect
+  // above flips `view`, and restoring while the outgoing view is still
+  // mounted is exactly the clamp-to-the-wrong-document failure native
+  // restoration has. useLayoutEffect so the jump happens before paint.
+  const restoredKeyRef = useRef<string | null>(null)
+  const prevViewRef = useRef(view)
+  useLayoutEffect(() => {
+    const viewChanged = prevViewRef.current !== view
+    prevViewRef.current = view
+    if (view !== pathToView(location.pathname)) return
+    if (restoredKeyRef.current === location.key) return
+    restoredKeyRef.current = location.key
+    const saved = scrollMemory.get(location.key)
+    if (saved === undefined) {
+      // A page entered fresh starts at the top. A key change that kept the
+      // same view (a replace navigation, query-string sync) leaves the
+      // viewport where it is.
+      if (viewChanged) window.scrollTo(0, 0)
+      return
+    }
+    // The destination's data lives in App state, so its full height is
+    // normally in this very commit — but a lazy view's chunk or a refetch
+    // can leave the document short for a frame or two. Retry briefly
+    // rather than clamp.
+    let raf = 0
+    let attempts = 0
+    const tryRestore = () => {
+      const max = document.documentElement.scrollHeight - window.innerHeight
+      if (max >= saved || attempts >= 8) { window.scrollTo(0, saved); return }
+      attempts++
+      raf = requestAnimationFrame(tryRestore)
+    }
+    tryRestore()
+    return () => cancelAnimationFrame(raf)
+  }, [location.key, location.pathname, view])
+
 
   // security — bounce a non-admin who lands on /admin (typed URL,
   // bookmark, stale link) back home. Pairs with the role gate on the
@@ -2979,8 +3098,9 @@ export default function App() {
     // swapped <main> view) persists and the receiver keeps playing until the
     // user stops it or the media ends. Mirrors the Escape gate above.
     if (!playerMinimizedRef.current) closePlayer(true)
+    rememberScroll(location.key)
     navigate(`/${v}`)
-  }, [view, navigate, closePlayer])
+  }, [view, navigate, closePlayer, location.key])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -2988,7 +3108,9 @@ export default function App() {
     // Real URL per title: refresh keeps the page, browser Back returns to
     // the grid this was opened from, and the address bar is shareable.
     // selectedMedia is already set above so the deep-link hydration
-    // effect no-ops for in-app opens.
+    // effect no-ops for in-app opens. Record where the grid was first, so
+    // Back lands on the card that was clicked (see scrollMemory).
+    rememberScroll(location.key)
     navigate(`/title/${m.id}`)
     // Issue #261 — clicking into a movie/show must open the detail page
     // at the top; the window otherwise keeps whatever scroll offset the
@@ -2996,7 +3118,7 @@ export default function App() {
     // Instant (not smooth) because the page content is being replaced —
     // a smooth scroll would animate over swapped-in content and look off.
     window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [navigate])
+  }, [navigate, location.key])
 
   // Play resolution. The UI Media type doesn't carry server file
   // IDs, so we resolve them here:
@@ -4378,11 +4500,21 @@ export default function App() {
     setDetailSelectedSeason(null)
     ;(async () => {
       try {
+        // The seasons list depends only on the id, and `selectedMedia.type`
+        // already says whether this is a show — so start both requests
+        // together. They were strictly serialized before (detail → seasons
+        // → episodes), which made a show's episode list wait a whole extra
+        // round trip for nothing. The no-op catch marks the parallel
+        // promise handled so an abort while getMedia is in flight cannot
+        // surface as an unhandled rejection; awaiting it below still
+        // rethrows into the same error path as before.
+        const seasonsPromise = selectedMedia.type === 'show' ? getSeasons(selectedMedia.id, ac.signal) : null
+        void seasonsPromise?.catch(() => undefined)
         const detail = await getMedia(selectedMedia.id, ac.signal)
         if (cancelled) return
         setDetailItem(detail)
         if (detail.type === 'show') {
-          const seasonsRaw = await getSeasons(selectedMedia.id, ac.signal)
+          const seasonsRaw = await (seasonsPromise ?? getSeasons(selectedMedia.id, ac.signal))
           if (cancelled) return
           // Sort by season_number so Detail doesn't show the wrong
           // season at the top.
@@ -5315,7 +5447,12 @@ export default function App() {
   // effect to restart the 9s dwell from the chosen pick without affecting
   // steady-state cadence.
   useEffect(() => {
-    if (heroPool.length < 2 || heroPaused) return
+    // Only while Home is on screen. Without the view gate this interval
+    // kept firing on Settings, Detail, Admin — three setState calls every
+    // 9s → a full re-render of App and every eager child on pages that
+    // never show the hero. Pool and index are untouched while skipped, so
+    // returning to Home resumes from the same pick.
+    if (view !== 'home' || heroPool.length < 2 || heroPaused) return
     // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion (see
     // the BrowseView hero for rationale): skip the 9s auto-rotation so
     // the hero doesn't swap art + text out from under a low-vision
@@ -5327,7 +5464,59 @@ export default function App() {
       setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
     }, 9000)
     return () => window.clearInterval(id)
-  }, [heroPool, heroPaused, rotEpoch])
+  }, [view, heroPool, heroPaused, rotEpoch])
+
+  // Home rails, memoized. This was an inline IIFE in the JSX, so every App
+  // render — each hero tick, toast, poll, keystroke — built new arrays and
+  // every one of the 100–160 cards on Home re-rendered with them. Same
+  // logic and inputs; one array identity until an input changes, which is
+  // what lets React.memo on MediaCardCinema skip the untouched cards.
+  const homeRailsProp = useMemo<HomeViewProps['rails']>(() => {
+    // Phase D — conversational discovery: when a vibe search is
+    // active, pin its results as the first rail.
+    const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
+      ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
+      : []
+    if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
+    const base = homeRails ?? []
+    if (continueItems.length === 0) return [...convoRail, ...base]
+    // Prepend the Continue Watching rail. Dedupe by media_item_id at the
+    // rail level so a show with progress on multiple episodes only
+    // surfaces one card (most-recently-watched) — avoids duplicate-key
+    // warnings and the "click the old card, play the new episode"
+    // confusion. LibraryView keeps every row.
+    const seen = new Set<number>()
+    const deduped = continueItems.filter(c => {
+      if (seen.has(c.media_item_id)) return false
+      seen.add(c.media_item_id)
+      return true
+    })
+    // 2026-06-05 (Home redesign C) — per-card subtitle map
+    // ("S2E4 · 23m left" / "Movie · 1h 12m left") computed
+    // here where the source ContinueWatchingItem is in scope
+    // (Media alone can't reconstruct remaining time). Keyed by
+    // media_item_id to match MediaCardCinema's item.id.
+    const cwSubtitles: Record<number, string> = {}
+    for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
+    return [
+      ...convoRail,
+      {
+        title: 'Continue Watching',
+        items: deduped.map(c => mapContinueToMedia(c)) as Media[],
+        // 2026-06-05 (Home redesign C) — switched to 'landscape'
+        // (16:9 backdrop) per the redesign. The cards now lead
+        // with the backdrop + a "min left" subtitle rather than
+        // poster art; MediaCardCinema renders the landscape
+        // aspect, progress bar, resume pill, and subtitle.
+        aspect: 'landscape' as const,
+        // Stable identifier for HomeView's resume-play
+        // interceptor (title is for display only).
+        kind: 'continue-watching' as const,
+        cardSubtitles: cwSubtitles,
+      },
+      ...base,
+    ]
+  }, [homeRails, continueItems, convoResults, convoQuery])
 
   // Continue Watching rail. Its own fetch (independent of home
   // rails) so retry/failure paths don't couple. Re-fetches on
@@ -5568,6 +5757,7 @@ export default function App() {
             user={user}
             currentView={view}
             onNavigate={handleNavigate}
+            onPrefetch={prefetchView}
             searchQuery={searchQuery}
             onSearchQueryChange={(v) => {
               setSearchQuery(v)
@@ -5639,53 +5829,9 @@ export default function App() {
               onSelect={handleSelect}
               onPlay={handlePlay}
               hero={homeHero ?? undefined}
-              // Prepend the Continue Watching rail. Dedupe by
-              // media_item_id at the rail level so a show with
-              // progress on multiple episodes only surfaces one card
-              // (most-recently-watched) — avoids duplicate-key
-              // warnings and the "click the old card, play the new
-              // episode" confusion. LibraryView keeps every row.
-              rails={(() => {
-                // Phase D — conversational discovery: when a vibe search is
-                // active, pin its results as the first rail.
-                const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
-                  ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
-                  : []
-                if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
-                const base = homeRails ?? []
-                if (continueItems.length === 0) return [...convoRail, ...base]
-                const seen = new Set<number>()
-                const deduped = continueItems.filter(c => {
-                  if (seen.has(c.media_item_id)) return false
-                  seen.add(c.media_item_id)
-                  return true
-                })
-                // 2026-06-05 (Home redesign C) — per-card subtitle map
-                // ("S2E4 · 23m left" / "Movie · 1h 12m left") computed
-                // here where the source ContinueWatchingItem is in scope
-                // (Media alone can't reconstruct remaining time). Keyed by
-                // media_item_id to match MediaCardCinema's item.id.
-                const cwSubtitles: Record<number, string> = {}
-                for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
-                return [
-                  ...convoRail,
-                  {
-                    title: 'Continue Watching',
-                    items: deduped.map(c => mapContinueToMedia(c)) as Media[],
-                    // 2026-06-05 (Home redesign C) — switched to 'landscape'
-                    // (16:9 backdrop) per the redesign. The cards now lead
-                    // with the backdrop + a "min left" subtitle rather than
-                    // poster art; MediaCardCinema renders the landscape
-                    // aspect, progress bar, resume pill, and subtitle.
-                    aspect: 'landscape' as const,
-                    // Stable identifier for HomeView's resume-play
-                    // interceptor (title is for display only).
-                    kind: 'continue-watching' as const,
-                    cardSubtitles: cwSubtitles,
-                  },
-                  ...base,
-                ]
-              })()}
+              // Memoized above (homeRailsProp) — Continue Watching prepended
+              // and deduped, conversational results pinned first.
+              rails={homeRailsProp}
               loading={homeLoading}
               convoLoading={convoLoading}
               error={homeError}
@@ -5846,6 +5992,7 @@ export default function App() {
             <ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
                 library={library}
+                loading={!libraryLoaded}
                 continueItems={continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
@@ -5858,9 +6005,9 @@ export default function App() {
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
               page (or worse, a flash of the home view). */}
-          {view === 'detail' && !selectedMedia && <ViewFallback />}
+          {view === 'detail' && !selectedMedia && <DetailSkeleton />}
           {view === 'detail' && selectedMedia && (
-            <ViewSuspense fallback={<ViewFallback />}>
+            <ViewSuspense fallback={<DetailSkeleton />}>
               <DetailView
                 // Reset internal state (active tab, cast-expand) per title so
                 // detail→detail navigation (e.g. Cmd+K search) never leaves a
@@ -6379,7 +6526,7 @@ export default function App() {
 
       {addToListMedia && activeProfileId && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAddToListMedia(null)}>
-          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
+          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
             {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}

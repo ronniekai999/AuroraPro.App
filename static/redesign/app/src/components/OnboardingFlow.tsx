@@ -520,6 +520,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             <path d="M14 11L26 18L14 25Z" fill="#fff" />
           </svg>
           <span className="font-display text-[1.05rem] font-bold tracking-tight text-white">
+            {/* Literal hex, not the --stage-purple-lt token: Tailwind 3 drops
+                an opacity modifier on a var() colour and emits NOTHING for
+                the class (review finding on the token sweep). */}
             Aurora<span className="font-medium text-[#d8b4fe]/85"> Pro</span>
           </span>
         </div>
@@ -528,7 +531,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             <span
               key={s}
               className={
-                'h-1 rounded-full transition-all duration-500 ' +
+                'h-1 rounded-full transition-[width] duration-500 ' +
                 (i < inputIndex
                   ? 'w-8 bg-gradient-to-r from-[#a981ff] to-[#6ad7ff]'
                   : i === inputIndex
@@ -592,7 +595,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             type="button"
             onClick={next}
             disabled={!canAdvance()}
-            className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-7 py-3 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.45)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.65)] disabled:pointer-events-none disabled:opacity-40 disabled:shadow-none"
+            className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-7 py-3 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.45)] transition-ui hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.65)] disabled:pointer-events-none disabled:opacity-40 disabled:shadow-none"
           >
             {step === 'titles' ? 'Build my Aurora →' : 'Continue →'}
           </button>
@@ -772,7 +775,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
                   applyFont(f.id)
                 }}
                 className={
-                  'glass-card relative rounded-2xl p-4 text-left transition-all ' +
+                  'glass-card relative rounded-2xl p-4 text-left transition-ui ' +
                   (sel ? 'ring-2 ring-[#a855f7]/70' : '')
                 }
               >
@@ -806,7 +809,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
                   applyGlow(g.id)
                 }}
                 className={
-                  'glass-card rounded-2xl p-4 text-center transition-all ' +
+                  'glass-card rounded-2xl p-4 text-center transition-ui ' +
                   (sel ? 'ring-2 ring-[#a855f7]/70' : '')
                 }
               >
@@ -846,12 +849,12 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
           <div className="text-[0.82rem] text-white/55">
             {selected.length >= minPicks ? (
               <>
-                <b className="font-semibold text-[#d8b4fe]">{selected.length}</b> picked · the more you
+                <b className="font-semibold text-[color:var(--stage-purple-lt)]">{selected.length}</b> picked · the more you
                 choose, the sharper your Aurora ✨
               </>
             ) : (
               <>
-                <b className="font-semibold text-[#d8b4fe]">{selected.length}</b> selected · pick {remaining}{' '}
+                <b className="font-semibold text-[color:var(--stage-purple-lt)]">{selected.length}</b> selected · pick {remaining}{' '}
                 more (min {minPicks})
               </>
             )}
@@ -1044,7 +1047,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             // skip — wait for the answer to land before the page goes away.
             void settleReferral().then(onDone)
           }}
-          className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
+          className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-ui hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
         >
           Take me in →
         </button>
@@ -1115,7 +1118,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
           ) : (
             <div className="mx-auto mt-7 h-[5px] max-w-[330px] overflow-hidden rounded-full bg-white/10">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] shadow-[0_0_14px_rgba(168,85,247,0.7)] transition-all duration-500"
+                className="h-full rounded-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] shadow-[0_0_14px_rgba(168,85,247,0.7)] transition-[width] duration-500"
                 style={{ width: `${((phaseMsg + 1) / LOADING_MESSAGES.length) * 100}%` }}
               />
             </div>
@@ -1130,6 +1133,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
 
 function Eyebrow({ children }: { children: ReactNode }) {
   return (
+    // Literal hex with its alpha: `text-[color:var(--stage-purple-lt)]/80`
+    // compiles to no CSS in Tailwind 3 (opacity modifiers need a parseable
+    // colour), which silently turned every eyebrow white.
     <div className="mb-3 flex items-center gap-2 text-[0.72rem] uppercase tracking-[0.22em] text-[#d8b4fe]/80">
       <span className="h-1.5 w-1.5 rounded-full bg-[#a855f7] shadow-[0_0_8px_#a855f7]" />
       {children}
@@ -1152,7 +1158,7 @@ function PosterTile({
       onClick={() => onToggle(m.id)}
       aria-pressed={selected}
       className={
-        'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-all ' +
+        'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-ui ' +
         (selected
           ? 'border-transparent outline outline-2 outline-[#a981ff] shadow-[0_0_0_1px_#a981ff,0_14px_38px_-12px_rgba(169,129,255,0.55)]'
           : 'border-white/[0.08] hover:-translate-y-1 hover:shadow-2xl')
@@ -1166,7 +1172,7 @@ function PosterTile({
       <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
       <span
         className={
-          'absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition-all ' +
+          'absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition-ui ' +
           (selected ? 'border-transparent bg-gradient-to-br from-[#a981ff] to-[#c8a6ff]' : 'border-white/60 bg-black/30 backdrop-blur-sm')
         }
       >

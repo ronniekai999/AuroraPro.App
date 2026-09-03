@@ -61,7 +61,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[520px] bg-[#0a0a0f] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden"
+        className="w-full max-w-[520px] bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -193,7 +193,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             <button
               type="submit"
               disabled={submitting}
-              className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed glow-purple"
+              className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-ui disabled:opacity-50 disabled:cursor-not-allowed glow-purple"
             >
               {submitting
                 ? mode === 'ai'

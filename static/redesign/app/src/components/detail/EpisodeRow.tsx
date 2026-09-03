@@ -56,7 +56,7 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
   return (
     <div
       className={cn(
-        'group/row rounded-2xl border bg-white/[0.02] border-white/[0.05] transition-all overflow-hidden hover:border-purple-500/30',
+        'group/row rounded-2xl border bg-white/[0.02] border-white/[0.05] transition-ui overflow-hidden hover:border-purple-500/30',
         inProgress &&
           'border-purple-400/45 bg-purple-500/[0.06] shadow-[0_0_0_1px_rgba(168,85,247,0.18),0_0_30px_rgba(168,85,247,0.08)]',
         !ep.hasFile && 'opacity-70',
@@ -67,17 +67,21 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
       onClick={() => (ep.hasFile ? onPlay(ep.id) : onUnavailable(ep.id))}
       title={ep.hasFile ? 'Play episode' : 'No file available yet'}
       className={cn(
-        'group flex gap-4 p-[0.7rem] transition-all cursor-pointer text-left w-full hover:bg-white/[0.03] group-hover/row:bg-white/[0.03]',
+        'group flex gap-4 p-[0.7rem] transition-ui cursor-pointer text-left w-full hover:bg-white/[0.03] group-hover/row:bg-white/[0.03]',
       )}
     >
       {/* 212px at lg per the mockup — the still is the row's anchor, and the
           detail main column got wider when the rail moved to 216px. */}
       <div className="relative w-[140px] sm:w-[176px] lg:w-[212px] aspect-video rounded-xl overflow-hidden flex-shrink-0 bg-white/5">
         <img
+          key={ep.still}
           src={ep.still}
           alt=""
           loading="lazy"
+          decoding="async"
           className={cn('w-full h-full object-cover', watched && 'opacity-65')}
+          // A missing still leaves the row's own bg-white/5 box, not a glyph.
+          onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
         />
         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-black/60 backdrop-blur-sm">
           E{ep.number}

@@ -286,7 +286,7 @@ export function PartyComposerModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+      className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
       onClick={onClose}
       role="presentation"
     >
@@ -294,7 +294,7 @@ export function PartyComposerModal({
         role="dialog"
         aria-modal="true"
         aria-label="Plan a watch party"
-        className="w-full max-w-md bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6 max-h-[90vh] overflow-y-auto"
+        className="w-full max-w-md bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6 max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         <h2 className="text-white text-lg font-semibold mb-1">Plan a Watch Party</h2>

@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { HeroSection } from '@/components/HeroSection'
 import { MediaRail } from '@/components/MediaRail'
+import { Spinner } from '@/components/ui/spinner'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { MediaListRow } from '@/components/MediaListRow'
 import { isResumable } from '@/lib/format'
@@ -284,7 +285,9 @@ export default function BrowseView({
           <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-purple-300" />
           <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
         </div>
-        <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
+        {/* PageHeader's title scale (text-3xl → --fs-page at md), so this
+            fallback heading matches My Library / Search / Requests. */}
+        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
         <p className="text-white/60 text-sm mt-2">
           {subtitle}
           <span className="text-white/30 mx-1.5">•</span>
@@ -374,7 +377,10 @@ export default function BrowseView({
           <select
             value={sortBy}
             onChange={(e) => onSortChange(e.target.value as BrowseSort)}
-            className="text-sm py-2 px-3"
+            // Native select, styled to the glass toolbar (.stage-select) —
+            // it sat here as the one platform-chrome form control among
+            // bespoke chips. Still native: iOS keeps its picker.
+            className="stage-select"
             aria-label="Sort titles"
           >
             <option value="rating">Top Rated</option>
@@ -416,10 +422,10 @@ export default function BrowseView({
             <MediaCardCinema
               key={item.id}
               item={item}
-              onSelect={() => onSelect(item)}
-              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
-              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              onToggleLib={onToggleLib}
               showLength
               showBadges
               hoverPreview
@@ -470,13 +476,20 @@ export default function BrowseView({
       {hasMore && (
         <div className="mt-10 flex flex-col items-center gap-2">
           <button
+            type="button"
             onClick={onLoadMore}
             disabled={isLoadingMore}
-            className="px-6 py-3 rounded-full bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-100 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+            // The shared button family (.stage-btn, index.css) rather than
+            // a bespoke pill: same height, radius, hover and disabled
+            // treatment as the other ghost CTAs.
+            className="stage-btn stage-btn-pill stage-btn-ghost"
           >
             {isLoadingMore ? (
               <>
-                <span className="w-3 h-3 rounded-full border-2 border-purple-300 border-t-transparent animate-spin" />
+                {/* The button's own text is the announcement; the glyph
+                    is decorative here, so the Spinner's role="status" is
+                    overridden to keep it out of the accessibility tree. */}
+                <Spinner className="size-3.5 text-purple-200" role="presentation" aria-hidden="true" aria-label={undefined} />
                 Loading…
               </>
             ) : (

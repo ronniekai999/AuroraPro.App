@@ -1119,9 +1119,9 @@ function AdminSessionsTab() {
 
       {/* Diagnose modal — admin-only FFmpeg state view for a session. */}
       {(diag || diagLoading || diagErr) && (
-        <div className="fixed inset-0 z-[80] flex items-start justify-center pt-24 px-4" onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }}>
+        <div className="fixed inset-0 z-[80] flex items-start justify-center pt-24 px-4 animate-fade-in" onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }}>
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-          <div className="relative w-full max-w-3xl bg-[#0a0a0f] border border-white/[0.08] rounded-xl shadow-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="relative w-full max-w-3xl bg-[color:var(--surface-1)] border border-white/[0.08] rounded-xl shadow-2xl p-5 max-h-[80vh] overflow-y-auto overscroll-contain" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-white font-semibold">Session diagnostic</h2>
               <button onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }} className="text-white/40 hover:text-white" aria-label="Close">
@@ -1351,7 +1351,7 @@ function AdminFlaggedTab() {
           </div>
           <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-purple-500 to-purple-400 transition-all"
+              className="h-full bg-gradient-to-r from-purple-500 to-purple-400 transition-[width]"
               style={{ width: `${jobProgress}%` }}
             />
           </div>
