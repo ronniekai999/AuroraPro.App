@@ -1322,10 +1322,18 @@ func applyEnvOverrides(cfg *Config) {
 		// unlike the advisories below, a value that fails here cannot produce
 		// a working attachment link under any circumstances.
 		if complaint := baseURLComplaint(trimmed); complaint != "" {
-			// The systemd hint only rides along when a comment is plausibly
-			// implicated. Attaching it unconditionally told an operator who
-			// deliberately typed a fragment to go move a comment that does not
-			// exist — misdirection on the one line meant to be actionable.
+			// The systemd hint only rides along when a comment was actually
+			// removed, or when the value still LOOKS like one. Attaching it
+			// unconditionally told an operator who deliberately typed a
+			// fragment to go move a comment that does not exist —
+			// misdirection on the one line meant to be actionable.
+			//
+			// cutComment alone is not enough: TrimSpace runs before the cut
+			// loop, so a value that is ONLY a comment (" # unset for now")
+			// has its leading space eaten and is never cut. The two literal
+			// arms exist for exactly that shape. Conversely a `#` with no
+			// whitespace before it gets no hint even though one is arguably
+			// implicated — that is the deliberate cost of not guessing.
 			args := []any{"url", trimmed, "raw", v}
 			if cutComment || strings.Contains(v, " #") || strings.Contains(v, "\t#") {
 				args = append(args, "hint",

@@ -942,6 +942,35 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			wantLevel: slog.LevelError,
 			wantMsg:   "fragment or query",
 		},
+		{
+			// The ONLY input that reaches the hint's true branch through
+			// cutComment: a non-breaking space is unicode.IsSpace, so the cut
+			// fires while neither the " #" nor the "\t#" literal matches. The
+			// value is still broken afterwards, so the ERROR carries the hint.
+			name:      "nbsp-preceded comment errors and still hints",
+			env:       "https://aurora example.com # note",
+			wantLevel: slog.LevelError,
+			wantMsg:   "contains whitespace",
+			wantHint:  true,
+		},
+		{
+			// TrimSpace eats the leading space before the cut loop runs, so
+			// nothing is cut — this is the case the " #" literal arm exists
+			// for, and the only thing keeping the hint off `if cutComment`.
+			name:      "value that is only a comment errors and hints",
+			env:       " # unset for now",
+			wantLevel: slog.LevelError,
+			wantMsg:   "contains whitespace",
+			wantHint:  true,
+		},
+		{
+			// A deliberate fragment implicates no comment; the hint would be
+			// telling the operator to move something they never wrote.
+			name:      "deliberate query gets no hint",
+			env:       "https://aurora.example.com/?a=1",
+			wantLevel: slog.LevelError,
+			wantMsg:   "fragment or query",
+		},
 	}
 
 	for _, tt := range tests {
@@ -949,10 +978,15 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			var buf bytes.Buffer
 			prev := slog.Default()
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			// slog.SetDefault also repoints the stdlib logger, and restoring a
-			// default-handler logger deliberately does NOT undo that — so
-			// without this the package's later tests write into a dead buffer.
-			t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(os.Stderr) })
+			// slog.SetDefault also repoints the stdlib logger AND zeroes its
+			// flags, and restoring a default-handler logger deliberately
+			// undoes neither — so without this the package's later tests write
+			// into a dead buffer with no timestamps.
+			t.Cleanup(func() {
+				slog.SetDefault(prev)
+				log.SetOutput(os.Stderr)
+				log.SetFlags(log.LstdFlags)
+			})
 
 			t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 			t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
@@ -995,7 +1029,11 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 		var buf bytes.Buffer
 		prev := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(os.Stderr) })
+		t.Cleanup(func() {
+			slog.SetDefault(prev)
+			log.SetOutput(os.Stderr)
+			log.SetFlags(log.LstdFlags)
+		})
 
 		t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 		t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")

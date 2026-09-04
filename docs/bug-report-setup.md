@@ -96,7 +96,9 @@ BUG_REPORT_RATE_LIMIT_MAX=5
 # accepted: 168 (1 week).
 BUG_REPORT_RATE_LIMIT_WINDOW_HOURS=1
 
-# Days an attachment lives on disk before the janitor sweeps it.
+# Days an attachment lives on disk before the janitor sweeps it. This is
+# an upper bound, not a guarantee — the byte budget below can evict a
+# file well before its TTL.
 # Default 30. Max accepted: 3650 (10 years). Raise for compliance-
 # heavy deploys that need longer retention; lower to reclaim disk
 # faster. (Upper bound protects against time.Duration overflow.)
@@ -190,6 +192,13 @@ Check before editing an issue: an attachment that survived is still served at
 `/api/feedback/attachments/{name}`, and one that did not returns 404 — repairing
 that link only produces a working URL to a missing file.
 
+### "Attachment storage is temporarily full" (HTTP 507)
+The attachment cache is already at or over
+`BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default 5 GiB), so new uploads are
+refused until the janitor's next sweep brings it back under budget. The
+report itself still files — only the attachment is rejected. Raise the
+budget, shorten `BUG_REPORT_ATTACHMENT_TTL_DAYS`, or wait for the sweep.
+
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)
 and update `BUG_REPORT_GITHUB_TOKEN`.
@@ -217,9 +226,11 @@ use a Cloudflare Tunnel) to fix.
 
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
 The launcher button disappears immediately on the next user session.
-Already-filed issues remain in GitHub; already-uploaded attachments
-remain on disk until the Phase 3 janitor sweeps them (30-day TTL, or
-sooner under the byte budget — see Operational notes).
+Already-filed issues remain in GitHub. Already-uploaded attachments stay
+on disk **indefinitely**: the janitor only runs while
+`BUG_REPORT_ENABLED=true`, so neither the TTL nor the byte budget applies
+once the feature is off. Remove `<ImageDir>/bug-reports/` by hand if you
+want the disk back.
 
 ## Capabilities across phases (all in current build)
 
@@ -233,7 +244,7 @@ sooner under the byte budget — see Operational notes).
 - **Phase 3:** "Record screen" button (MediaRecorder +
   getDisplayMedia, 30s cap, WebM output, floating Stop pill while
   the modal is hidden) + per-user rate limit (5 submits / hour) +
-  30-day automatic attachment janitor.
+  automatic attachment janitor (age + disk budget).
 
 ### Operational notes
 
@@ -254,11 +265,16 @@ in memory (not the DB) — restarting Aurora resets all counters.
    budget. So on a busy instance an attachment can be gone well before its
    TTL, and age alone never tells you whether a link still resolves.
 
-Runs only when `BUG_REPORT_ENABLED=true`. The goroutine exits cleanly via
-the server-lifecycle context on graceful shutdown. Logs the age sweep at
-INFO only for substantive removals (10+ files) and at DEBUG below that;
-the budget eviction logs at WARN, as does an individual file delete
-failure (typically permission issues).
+Runs only when `BUG_REPORT_ENABLED=true` — disabling the feature stops it
+entirely. The goroutine exits cleanly via the server-lifecycle context on
+graceful shutdown.
+
+Logging: one INFO line when the janitor starts; the age sweep logs INFO
+only for substantive removals (10+ files), DEBUG for 1–9, and **nothing
+at all** when it removes none (the common case, so silence is not
+evidence it is not running). A budget eviction logs WARN, as does an
+individual file delete failure (typically permission issues) and an
+unparseable `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES`.
 
 **Screen recording:**
 
