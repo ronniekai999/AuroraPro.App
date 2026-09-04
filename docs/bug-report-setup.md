@@ -117,6 +117,13 @@ BUG_REPORT_JANITOR_INTERVAL_HOURS=1
 BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES=5368709120
 ```
 
+> This last one is the odd man out of the block above: it has no upper
+> bound, and it is read by the janitor rather than at config load — so an
+> invalid value does **not** WARN at startup with the other four. It warns
+> on the first sweep that finds the cache directory, which on a fresh
+> install is after the first upload, and it lands in
+> `/var/log/aurora/aurora.log` and Admin → Logs rather than journald.
+
 Restart Aurora to pick up the env changes.
 
 ## Step 3 — Verify
@@ -286,7 +293,14 @@ evidence it is not running).
 WARN covers a budget eviction, an individual file delete failure, an
 unreadable cache directory, a failed `stat`, and a
 `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` that is unparseable or
-non-positive — the first two are usually permissions.
+non-positive.
+
+Of those, the **budget eviction is a capacity signal, not a fault** — it
+means the cache outgrew its budget and the janitor is doing its job; raise
+the budget or shorten the TTL, do not go auditing file ownership. The
+delete/read-dir/stat failures are the permissions-shaped ones. Note a
+*missing* cache directory is silent by design, so total janitor silence
+does not by itself prove `CACHE_IMAGE_DIR` is right.
 
 The one line that means the janitor really has stopped is
 `feedback janitor: panic recovered — janitor exiting` at **ERROR**. If you
