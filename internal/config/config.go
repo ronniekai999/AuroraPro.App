@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -1293,8 +1294,20 @@ func applyEnvOverrides(cfg *Config) {
 		// Trim space, cut an inline comment systemd would have kept, and strip
 		// the trailing slash — see cleanBaseURL for why the comment cut is not
 		// paranoia.
-		trimmed := cleanBaseURL(v)
+		trimmed, cutComment := cleanBaseURL(v)
 		cfg.BugReport.PublicBaseURL = trimmed
+		// The value is now usable, and that is exactly why this must be said
+		// out loud. Cleaning silently would leave the broken line in
+		// /etc/aurora/aurora.env — where install.sh preserves it verbatim
+		// across every re-install — and make the deployment depend on this
+		// function forever, which is the original silent-acceptance failure
+		// moved one layer down rather than fixed.
+		if cutComment {
+			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL had an inline comment, which was stripped — fix the env file",
+				"used", trimmed,
+				"raw", v,
+				"hint", "systemd EnvironmentFile= does not support inline # comments; put the comment on its own line in /etc/aurora/aurora.env")
+		}
 		// 2026-05-27 (holistic deep-debug M3) — warn on suspicious
 		// values at startup so the operator sees the misconfig
 		// immediately instead of discovering broken issue-body
@@ -1438,18 +1451,28 @@ func (c *Config) DisplayAddr() string {
 // path segment) survives. Trailing-slash stripping is kept here rather than
 // left at the call site: this is now the single normalization for the value,
 // not a second one beside it.
-func cleanBaseURL(raw string) string {
+//
+// The second return reports whether a comment was actually cut, because
+// cleaning silently would only move the original failure down a layer: the bad
+// line stays in /etc/aurora/aurora.env, install.sh carries it forward verbatim
+// on every re-install, and every other reader of that value still sees the
+// comment. The operator has to be told.
+func cleanBaseURL(raw string) (string, bool) {
 	v := strings.TrimSpace(raw)
+	cut := false
+	// Tracked as runes rather than by byte index: U+00A0 and friends are
+	// multi-byte, and a non-breaking space is exactly what a value pasted from
+	// a rendered doc or a browser address bar carries.
+	prev := rune(-1)
 	for i, r := range v {
-		if r != '#' || i == 0 {
-			continue
-		}
-		if prev := rune(v[i-1]); prev == ' ' || prev == '\t' {
+		if r == '#' && prev >= 0 && unicode.IsSpace(prev) {
 			v = v[:i]
+			cut = true
 			break
 		}
+		prev = r
 	}
-	return strings.TrimRight(strings.TrimSpace(v), "/")
+	return strings.TrimRight(strings.TrimSpace(v), "/"), cut
 }
 
 // baseURLComplaint returns a human-readable reason the cleaned base URL is
@@ -1461,7 +1484,7 @@ func cleanBaseURL(raw string) string {
 // something the comment cut did not explain away, which is exactly the shape
 // the systemd/shell mismatch produces.
 func baseURLComplaint(cleaned string) string {
-	if strings.ContainsAny(cleaned, " \t") {
+	if strings.IndexFunc(cleaned, unicode.IsSpace) >= 0 {
 		return "contains whitespace — attachment URLs built from it will be malformed"
 	}
 	u, err := url.Parse(cleaned)
@@ -1470,6 +1493,19 @@ func baseURLComplaint(cleaned string) string {
 	}
 	if u.Host == "" {
 		return "has no host"
+	}
+	// A fragment or query on a BASE url is silently fatal, which is why it is
+	// named here rather than stripped. Composition appends the attachment path,
+	// so `https://host/base#frag` becomes
+	// `https://host/base#frag/api/feedback/attachments/x.png` — everything from
+	// the `#` on is never sent to the server, and GitHub's image proxy fetches
+	// `https://host/base` instead. A dead link, with nothing to show for it.
+	//
+	// Note this deliberately does NOT make cleanBaseURL strip fragments: a `#`
+	// that survives the comment cut is one the operator meant, and truncating
+	// it would be guessing. Saying so is the correct response.
+	if u.Fragment != "" || u.RawQuery != "" {
+		return "carries a fragment or query string — everything after it is dropped from attachment links"
 	}
 	return ""
 }

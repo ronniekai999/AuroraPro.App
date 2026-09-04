@@ -730,6 +730,14 @@ func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
 			want: "https://aurora.example.com/aurora",
 		},
 		{
+			// The `i == 0` / no-previous-rune guard. Without it the cut
+			// indexes before the start of the string and Load() panics, so the
+			// server never boots.
+			name: "value that is entirely a comment does not panic",
+			env:  "#disabled",
+			want: "#disabled",
+		},
+		{
 			name: "clean value is untouched",
 			env:  "https://aurora.example.com",
 			want: "https://aurora.example.com",
@@ -781,6 +789,78 @@ func TestBugReportGitHubCredentials_Trimmed(t *testing.T) {
 	}
 }
 
+// The acceptance criterion is about the COMPOSITION: a value that is still
+// unusable after cleaning has to be surfaced. Testing baseURLComplaint alone
+// cannot show that, because the inputs that motivated it no longer survive the
+// clean — so this drives both together, the way applyEnvOverrides does.
+func TestCleanThenComplain(t *testing.T) {
+	quiet := []string{
+		// The production value: cleaned successfully, so no complaint. The
+		// operator still hears about it — via the cut-comment WARN, not here.
+		"https://aurorapro.app   # no trailing slash",
+		"https://aurora.example.com",
+		"https://aurora.example.com/aurora/",
+		"   https://aurora.example.com   ",
+	}
+	for _, in := range quiet {
+		cleaned, _ := cleanBaseURL(in)
+		if c := baseURLComplaint(cleaned); c != "" {
+			t.Errorf("cleanBaseURL(%q) = %q, then complained %q; want no complaint", in, cleaned, c)
+		}
+	}
+
+	loud := []string{
+		// A `#` with no whitespace before it is not a comment, so it survives
+		// the clean — and a fragment on a BASE url silently swallows the
+		// attachment path, which is the very failure being fixed.
+		"https://aurora.example.com/base#frag",
+		"https://aurora.example.com/base?a=1",
+		// Whitespace the comment cut cannot explain away.
+		"https://aurora example.com",
+		"aurora.example.com",
+		"/api/feedback",
+		// A non-breaking space — how a value pasted from a browser or a
+		// rendered doc arrives. Neither the cut nor a " \t" check sees it.
+		"https://aurora.example.com /x",
+	}
+	for _, in := range loud {
+		cleaned, _ := cleanBaseURL(in)
+		if baseURLComplaint(cleaned) == "" {
+			t.Errorf("cleanBaseURL(%q) = %q, then no complaint; want one", in, cleaned)
+		}
+	}
+}
+
+// The cut-comment signal is what stops this fix from silently masking a broken
+// env file forever, so it is pinned rather than left to the log.
+func TestCleanBaseURLReportsTheCut(t *testing.T) {
+	cut := []string{
+		"https://aurorapro.app   # no trailing slash",
+		"https://aurora.example.com\t# note",
+		"https://aurora.example.com # nbsp-preceded",
+	}
+	for _, in := range cut {
+		if _, didCut := cleanBaseURL(in); !didCut {
+			t.Errorf("cleanBaseURL(%q) did not report cutting a comment", in)
+		}
+	}
+
+	// Nothing was removed that the operator needs to hear about: a bare `#`
+	// belongs to the value, and trailing space or slash is not a misconfig.
+	kept := []string{
+		"https://aurora.example.com#frag",
+		"https://aurora.example.com/a#b",
+		"#disabled",
+		"https://aurora.example.com/  ",
+		"https://aurora.example.com",
+	}
+	for _, in := range kept {
+		if _, didCut := cleanBaseURL(in); didCut {
+			t.Errorf("cleanBaseURL(%q) reported a cut it should not have", in)
+		}
+	}
+}
+
 // baseURLComplaint is what turns the defect above from silent into loud. It is
 // tested directly because the warn switch it feeds only logs.
 func TestBaseURLComplaint(t *testing.T) {
@@ -789,7 +869,6 @@ func TestBaseURLComplaint(t *testing.T) {
 		"http://aurora.example.com",
 		"https://aurora.example.com/aurora",
 		"https://aurora.example.com:8443",
-		"https://aurora.example.com/base#frag",
 	}
 	for _, s := range sound {
 		if c := baseURLComplaint(s); c != "" {
@@ -797,11 +876,13 @@ func TestBaseURLComplaint(t *testing.T) {
 		}
 	}
 
-	// Whitespace surviving the CLEAN is the signature of the systemd/shell
-	// mismatch — something was in the value that the comment cut did not
-	// explain away.
+	// Note these are RAW inputs to the complaint, not post-clean values — the
+	// composed behaviour is TestCleanThenComplain's job. Whitespace here is the
+	// signature of the systemd/shell mismatch.
 	unsound := []string{
 		"https://aurora.example.com   # no trailing slash",
+		"https://aurora.example.com/base#frag",
+		"https://aurora.example.com/base?a=1",
 		"https://aurora example.com",
 		"aurora.example.com",
 		"",

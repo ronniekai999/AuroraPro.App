@@ -71,10 +71,12 @@ BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com
 > ```
 >
 > sets the base URL to `https://aurora.example.com   # no trailing slash`, and
-> every attachment link Aurora writes into an issue is then dead. Aurora now
-> strips such a comment and logs an ERROR at startup naming the value, but the
-> file is still the place to get it right. Note the shell disagrees: sourcing
-> this file to check a value drops the comment, so it looks fine there.
+> every attachment link Aurora writes into an issue is then dead. Aurora strips
+> such a comment before using the value and logs a WARN naming it, so links
+> filed from here on are correct — but **fix the file anyway**: the bad line
+> survives every re-install, and every other reader of it still sees the
+> comment. Note the shell disagrees with systemd here: sourcing this file to
+> check a value drops the comment, so it looks fine there.
 
 ### Optional tunables
 
@@ -151,13 +153,27 @@ You're submitting with an attachment but the public URL isn't set. Set
 ### Filed issues have a dead attachment link
 Look at the URL in the issue body. If it contains anything after the host that
 you did not put there — most likely an inline `# comment` — the env file has it
-on the value line, where systemd keeps it (see the box in step 3). Aurora cuts
-such comments now and logs
-`BUG_REPORT_PUBLIC_BASE_URL contains whitespace …` at ERROR on startup, so
-check the server log first. Fix the line in `/etc/aurora/aurora.env`, move the
-comment to its own line, and restart. Links in issues already filed have to be
-repaired by hand — the attachment files are intact on disk and still served at
-`/api/feedback/attachments/{name}`.
+on the value line, where systemd keeps it (see the box in **step 2**).
+
+Check the startup log:
+
+```bash
+journalctl -u aurora --since today | grep BUG_REPORT_PUBLIC_BASE_URL
+```
+
+`journalctl`, not `/var/log/aurora/aurora.log`: config is parsed before the
+file logger and the in-app **Admin → Logs** viewer are installed, so these
+lines only reach stdout. You are looking for either
+`had an inline comment, which was stripped` (WARN — the value works now, the
+file is still wrong) or a line naming whitespace, an unparseable value, a
+missing host, or a fragment/query (ERROR — the value cannot work at all).
+
+Fix the line in `/etc/aurora/aurora.env`, move the comment to its own line, and
+restart. Links in issues already filed have to be repaired by hand, and only
+where the attachment still exists: the janitor deletes attachments older than
+`BUG_REPORT_ATTACHMENT_TTL_DAYS` (default **30 days**), so anything filed
+before that window is gone and the link cannot be revived. Within it, files are
+intact on disk and still served at `/api/feedback/attachments/{name}`.
 
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)
