@@ -80,9 +80,12 @@ import {
   RECONNECT_SETTLE_MS,
   absoluteUrl,
   assertCastScopedToken,
+  castDirectLoadEligible,
+  castDirectMatches,
   castDirectPlaySupported,
   castSessionIdFromPlaylist,
   useCast,
+  type DirectCastTarget,
 } from '@/lib/cast'
 import { createCastSessionTracker, type CastSessionTracker } from '@/lib/castSession'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
@@ -562,11 +565,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // later and on a different stack, can read the decision that was in force
   // when this target booted. Null whenever the current target is not
   // direct-play, which is what makes it safe to consult unconditionally.
-  const directCastRef = useRef<{
-    fileId: number
-    fileType: 'media' | 'episode'
-    supported: boolean
-  } | null>(null)
+  const directCastRef = useRef<
+    | (DirectCastTarget & {
+        // Where this target should START if the receiver is handed it before
+        // the local element has taken its resume seek. Direct play defers
+        // that seek to a `canplay` listener, so vid.currentTime is still 0
+        // for as long as the file takes to open — and the Cast button is
+        // live throughout. Casting then started a partially-watched movie
+        // from the beginning. Zeroed once the local seek lands, after which
+        // the element's own clock is authoritative.
+        pendingResumeSec: number
+      })
+    | null
+  >(null)
   const startSecRef = useRef<number>(0)
   // Per-play listener cleanup for <video> event handlers registered by ANY
   // delivery path — direct play's error/resume/subtitle listeners AND the
@@ -890,20 +901,29 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // here rather than reusing the AirPlay mint because that one is gated to
       // WebKit, and because a token minted at cast time is a full TTL fresh.
       //
-      // Every condition below fails CLOSED to the old behaviour (return null →
-      // start() tears the session back down). The fileId/fileType match is
-      // what makes a stale ref harmless: it can never cast the wrong file.
+      // Fails CLOSED to the old behaviour (return null → start() tears the
+      // session back down). castDirectLoadEligible carries the target match
+      // that makes a stale ref harmless: it can never cast the wrong file.
       const dc = directCastRef.current
-      if (
-        deliveryModeRef.current !== 'direct' ||
-        !dc ||
-        !dc.supported ||
-        dc.fileId !== target.fileId ||
-        dc.fileType !== target.fileType
-      ) {
+      if (!castDirectLoadEligible(deliveryModeRef.current, dc, target) || !dc) {
         return null
       }
-      const direct = await createDirectCastToken(dc.fileId, dc.fileType)
+      let direct: Awaited<ReturnType<typeof createDirectCastToken>>
+      try {
+        direct = await createDirectCastToken(dc.fileId, dc.fileType)
+      } catch (e) {
+        // Returning null rather than rethrowing is deliberate: start() keys
+        // its "tear the just-opened session back down" cleanup off the
+        // no-media sentinel alone, so any OTHER error escaping here would
+        // strand the receiver on an empty session. The real cause goes to the
+        // console; the user gets the generic sentinel wording.
+        console.warn('[Aurora Cast] direct cast-token mint failed:', e)
+        return null
+      }
+      // Assert BEFORE recording the expiry: if this throws, the receiver is
+      // still on whatever it had, and castTokenExpRef must not be describing
+      // a token that never reached it.
+      assertCastScopedToken(direct.token)
       castTokenExpRef.current = direct.expires_at
       // No transcode session backs this cast. Tell the tracker so explicitly:
       // committing it has to CLEAR the committed slot, or a cast that moves
@@ -911,9 +931,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // auto-advance) leaves the old clone named there — keepalive-pinged and
       // never released for the rest of its 30-minute lease.
       castSessionRef.current?.noteSessionless()
-      // Same defense-in-depth as the HLS branch below: never let a
-      // full-account token reach a receiver.
-      assertCastScopedToken(direct.token)
       return {
         contentUrl: absoluteUrl(direct.url),
         // Gated by castDirectPlaySupported, which admits only MP4.
@@ -922,9 +939,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         subtitle: target.subtitle,
         // Direct play has no resume offset folded into its timeline —
         // start_sec is a transcode concept — so the element's clock IS the
-        // absolute source position. That is the same reading the HLS branch
-        // documents below for its start_sec==0 case.
-        startTime: videoRef.current?.currentTime ?? 0,
+        // absolute source position, the same reading the HLS branch documents
+        // below for its start_sec==0 case. The one moment that clock is NOT
+        // authoritative is before the deferred resume seek has landed, when
+        // it still reads 0 on a partially-watched title; pendingResumeSec
+        // covers exactly that window and is zeroed the moment the seek lands.
+        startTime: (videoRef.current?.currentTime ?? 0) || dc.pendingResumeSec,
       }
     }
     const resp = await createCastToken(sid)
@@ -974,8 +994,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castUnavailableReason = useCallback((): string | null => {
     if (deliveryModeRef.current !== 'direct') return null
     const dc = directCastRef.current
+    // Same target match the load path applies, so the two cannot disagree
+    // about which file is under discussion.
+    if (!castDirectMatches(dc, target)) return null
     return dc && !dc.supported ? CAST_UNSUPPORTED_DIRECT_FORMAT : null
-  }, [])
+  }, [target])
   const cast = useCast(castLoadGetter)
   // Stable-identity access to the latest `cast` for the receiver-driven
   // party-sync effect (below the local guest-mirror/host-broadcast effect).
@@ -1078,12 +1101,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (isCastTokenExpired()) { reloadCastWithFreshToken(targetSec); return }
     castRef.current.seek(targetSec)
   }
-  // Ref mirror of seekCastSafely, for the same reason castRef exists above:
-  // seekToRealSec is a useCallback with a curated dep array, and this is a
-  // plain closure recreated every render. Reaching it through a ref lets the
-  // direct-play cast branch (issue #503) call the LATEST version without
-  // adding a dependency that would change the callback's identity on every
-  // render — the stale-closure-avoidance pattern used throughout this file.
+  // Ref mirror of seekCastSafely for seekToRealSec's use (issue #503).
+  //
+  // NOT a stale-closure fix — seekCastSafely reads only refs, so a captured
+  // copy is exactly as correct as a fresh one (the same reasoning the
+  // keyboard-shortcut effect states above). This is about DEPENDENCY
+  // IDENTITY: seekToRealSec is a useCallback with a curated dep array, and
+  // seekCastSafely is a plain closure recreated every render, so naming it as
+  // a dependency would rebuild the callback — and everything keyed on it — on
+  // every single render. The guest party-sync effect calls seekCastSafely
+  // directly because an effect with a disabled dep array pays no such cost.
   const seekCastSafelyRef = useRef(seekCastSafely)
   seekCastSafelyRef.current = seekCastSafely
   const [airplayActive, setAirplayActive] = useState(false)
@@ -2194,8 +2221,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             supported: castDirectPlaySupported({
               container: stream.container,
               videoCodec: stream.video_codec,
-              audioCodec: stream.audio_codec,
+              // audio_codec_out, NOT audio_codec: the latter is the FIRST
+              // audio stream's codec, while the receiver starts the flagged
+              // default. See DirectCastProbe for the failure that distinction
+              // prevents.
+              audioCodec: stream.audio_codec_out,
+              resolution: stream.resolution,
             }),
+            pendingResumeSec: resumeSec,
           }
           // Wait for canplay so the resume seek lands inside a buffered
           // range — seeking before the metadata is parsed is a no-op on
@@ -2203,6 +2236,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // can always removeEventListener (a no-op if never added).
           const onCanPlayResume = () => {
             vid.currentTime = resumeSec
+            // The element's clock is authoritative from here, including when
+            // the user scrubs back to 0 — so stop offering the resume point
+            // as a cast fallback (issue #503).
+            if (directCastRef.current) directCastRef.current.pendingResumeSec = 0
             vid.removeEventListener('canplay', onCanPlayResume)
           }
           if (resumeSec > 0) {
@@ -4433,7 +4470,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // seekCastSafely so an expired token is renewed first (an expired one
       // 401s every subsequent range request, which the receiver surfaces as
       // an indefinite buffer rather than an error).
-      if (deliveryModeRef.current === 'direct') {
+      //
+      // The delivery mode alone must NOT decide this: it describes the local
+      // <video>, not what the receiver is loaded with, and the two come apart
+      // when the local target moves to a direct-play title while the receiver
+      // is still on the previous one's clone (an epoch bump with no advance
+      // pending). Seeking then scrubs the WRONG title and broadcasts that
+      // position to the whole party. So require both that the eligibility
+      // check the load path uses passes for the CURRENT target, and that the
+      // tracker reports no committed session — which is exactly what a
+      // sessionless (direct) load leaves behind. Anything else falls through
+      // to the rebuild below, which re-points the receiver properly.
+      const castingDirect =
+        castDirectLoadEligible(deliveryModeRef.current, directCastRef.current, target) &&
+        castSessionRef.current?.committed() == null
+      if (castingDirect) {
         broadcastHostPartySeek()
         seekCastSafelyRef.current(targetSec)
         return
