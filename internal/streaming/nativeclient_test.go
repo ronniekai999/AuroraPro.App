@@ -568,6 +568,12 @@ func TestNativeClientStillGetsLosslessAudioOnDirectPlay(t *testing.T) {
 // Direct play hands the ORIGINAL file to the player, so the Content-Type must
 // describe the real container for every extension a native client can now
 // reach. Previously untested: reverting the .m2ts case broke nothing.
+//
+// "The real container" means the container Aurora BELIEVES the file has, which
+// is NormalizeContainer's answer and not the file extension. That distinction
+// is why .mov serves as video/mp4: mov normalizes to mp4, so nothing
+// downstream — the Chromecast gate included — can tell the two apart, and the
+// served type must match the type the sender declares to a receiver.
 func TestServeFileContentTypeForNativeContainers(t *testing.T) {
 	// Resolve symlinks in the root: pathWithinRoot requires an already-resolved
 	// canonicalRoot (it resolves only the target). On macOS, TMPDIR sits under

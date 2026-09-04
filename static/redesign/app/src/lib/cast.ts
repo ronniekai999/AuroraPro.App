@@ -751,7 +751,14 @@ export function useCast(
       // best-effort diagnostics: the master playlist is not what a receiver
       // spends its time fetching, and HLS sessions have their own liveness
       // handling.
-      if (!isPlaylist && !probe.ok) {
+      //
+      // 5xx is excluded, for the same reason a thrown fetch is: a reverse
+      // proxy hiccup is transient and says nothing about whether the
+      // receiver's own independent fetch will succeed. What IS fatal is a
+      // verdict about this URL — the token was rejected or revoked between
+      // mint and load, or the file is gone — because the receiver will get
+      // the identical answer.
+      if (!isPlaylist && !probe.ok && probe.status < 500) {
         fatal = new Error(
           probe.status === 401 || probe.status === 403
             ? 'This cast link is no longer valid. Try casting again.'
@@ -902,7 +909,16 @@ export function useCast(
     try {
       await loadCurrent()
     } catch (e) {
-      try { session.endSession(true) } catch { /* defensive */ }
+      // ...unless the session was already playing something when we joined it.
+      // "This tab is not connected" is not "no session exists": autoJoinPolicy
+      // is tab-and-origin scoped, so a second tab shows a live Cast button and
+      // requestSession() JOINS the running session rather than starting one.
+      // Tearing that down would stop a cast another tab is happily playing.
+      let joinedLiveMedia = false
+      try { joinedLiveMedia = !!session.getMediaSession?.() } catch { /* defensive */ }
+      if (!joinedLiveMedia) {
+        try { session.endSession(true) } catch { /* defensive */ }
+      }
       throw e
     }
   }

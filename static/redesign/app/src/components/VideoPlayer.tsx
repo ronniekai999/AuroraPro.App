@@ -903,6 +903,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // for the title to start playing" — which is untrue and unactionable when
   // the title is plainly already playing.
   const castMintFailedRef = useRef(false)
+  // Did THIS cast session ever actually carry media? Read at the disconnect
+  // edge to decide whether the cast ending should close the player.
+  //
+  // A cast that dies before it ever loaded is not the end of a viewing — it is
+  // a failed attempt, and local playback is still running underneath it. Ending
+  // the session (which start() does on any load failure, so the receiver is not
+  // stranded) reaches the disconnect edge exactly like a finished cast would,
+  // and without this the player unmounted ~4s later and took a half-watched
+  // film with it. Distinct from castLoadedMediaRef, which the disconnect
+  // effect above clears before this one runs.
+  const castEverLoadedRef = useRef(false)
   if (!castSessionRef.current) {
     castSessionRef.current = createCastSessionTracker({
       localSessionId: () => sessionIdRef.current,
@@ -933,11 +944,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         return null
       }
       // Both the mint and the scope assertion live inside this try, and both
-      // return null rather than throwing. start() keys its "tear the
-      // just-opened session back down" cleanup off the no-media sentinel
-      // ALONE, so any other error escaping here strands the receiver on an
-      // empty session — which is what an assertCastScopedToken throw would
-      // have done had it sat outside. The real cause goes to the console.
+      // return null rather than throwing. start() now tears the session down
+      // on ANY load failure, so this is no longer what stops the receiver
+      // being stranded — it is what lets the failure keep its own identity:
+      // returning null routes through the no-media sentinel, which the button
+      // maps to CAST_MINT_FAILED rather than to a raw error string. The real
+      // cause goes to the console.
       let direct: Awaited<ReturnType<typeof createDirectCastToken>>
       try {
         direct = await createDirectCastToken(dc.fileId, dc.fileType)
@@ -1109,6 +1121,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         if (castPendingMediaRef.current) {
           castLoadedMediaRef.current = castPendingMediaRef.current
         }
+        castEverLoadedRef.current = true
       } catch (e) {
         castSessionRef.current?.abandon()
         throw e
@@ -1555,7 +1568,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // <video> (the receiver-driven sync effect's cleanup + the local
     // guest-mirror/host-broadcast effect's re-bind handle that automatically).
     // Closing the player would also kick the user out of the party UI.
-    if (was && !cast.status.connected && !partyControlsMedia) onClose()
+    //
+    // A session that never carried media is a FAILED ATTEMPT, not a finished
+    // viewing: the user clicked Cast, something went wrong (the picker device
+    // was unreachable, the token mint failed, the receiver refused the media),
+    // and start() ended the session so as not to strand it. Local playback has
+    // been running underneath the whole time. Closing the player there threw
+    // away a half-watched film over a cast that never began — and did it four
+    // seconds later, via the disconnect debounce, with the error toast already
+    // expired and invisible behind the minimized-player overlay. The reporter
+    // of issue #503 hit this repeatedly: their network log is the same title
+    // being reopened after every failed attempt.
+    if (was && !cast.status.connected && !partyControlsMedia && castEverLoadedRef.current) {
+      onClose()
+    }
+    if (was && !cast.status.connected) castEverLoadedRef.current = false
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, party, partyControlsMedia])
 
@@ -5732,7 +5759,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                           if (!/cancel|dismiss/i.test(msg)) {
                             // eslint-disable-next-line no-console
                             console.warn('[Aurora Cast] start failed:', raw)
-                            flashCastError(msg)
+                            // onToast, NOT flashCastError. By the time a start
+                            // can fail, requestSession has usually resolved and
+                            // remoteActive has minimized the player — so the
+                            // inline cast banner lives inside a subtree that is
+                            // opacity-0, inert and aria-hidden, and its 4s timer
+                            // expires unseen. Same reasoning, and the same fix,
+                            // as the keepalive-death message below. Keep the
+                            // inline banner for the PRE-FLIGHT refusal above,
+                            // which returns before any session is opened and so
+                            // always runs against a visible player.
+                            onToast?.(`Cast failed: ${msg}`, 'error')
                           }
                         })
                       }}

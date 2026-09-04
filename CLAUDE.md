@@ -328,12 +328,17 @@ Invariants to preserve when touching this area:
   A bare GET of a direct URL pulls the whole movie into the sender before
   `loadMedia` is issued, and the route treats HEAD as an explicit preflight
   that skips activity rows and the direct-play registry. Because that probe is
-  an exact rehearsal of the receiver's fetch (same URL, same token, credentials
-  omitted), a NON-OK status on the direct branch aborts the cast rather than
-  being logged — the receiver would otherwise resolve `loadMedia` and spin. A
-  probe that THROWS does not abort: that is as likely to be a sender-side blip.
-  `start()` tears the session down on any load failure, so aborting never
-  strands an idle receiver.
+  a near-rehearsal of the receiver's fetch — same URL and token, but SAME-ORIGIN
+  and HEAD — a 4xx on the direct branch aborts the cast rather than being
+  logged; the receiver would otherwise resolve `loadMedia` and spin. It proves
+  auth and file existence, NOT CORS: the receiver fetches cross-origin and the
+  probe never does, so a proxy stripping `Access-Control-Allow-Origin` passes
+  the probe and still hangs the TV. 5xx and a THROWN fetch do not abort — both
+  are as likely to be transient as a verdict about this URL. `start()` tears the
+  session down on any load failure (unless it JOINED a session already playing),
+  so aborting never strands an idle receiver; and a session that never carried
+  media does not close the player, or a failed cast would take local playback
+  with it.
 - **`.mov` serves as `video/mp4`.** `NormalizeContainer` aliases mov → mp4 at
   scan time, so a `.mov` reaches this gate indistinguishable from an `.mp4` and
   the sender declares `video/mp4`. `ServeFile` must agree; it used to answer

@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -112,19 +113,28 @@ func TestDirectPlayAudioCodecOutOnOrdinaryAndSilentFiles(t *testing.T) {
 // every Go test in this repo green — so this reads the SPA source, the same way
 // TestSPAProbeEmitsNoNativeOnlyCapabilities does for the caps probe.
 //
-// Deliberately a text assertion rather than a model of how the player builds
-// the probe: it is the field NAME that carries the risk, and a substring check
-// cannot be fooled by a spread, a ternary or a rename of the local.
+// Comments are BLANKED first, via the same blankSourceComments this package
+// already carries. The first version of this test did not, and was green on
+// the exact mutation it exists to catch: the call site's own explanatory
+// comment says "audio_codec_out", so a substring check found it there while
+// the code beneath read `stream.audio_codec`. That is the third time in this
+// package a source scrape has been fooled by a comment (see
+// blankSourceComments' own note) — never scrape source without stripping them.
 const directCastGateCallSite = "../../static/redesign/app/src/components/VideoPlayer.tsx"
 
+// Matches the property as CODE: any object/optional-chain expression ending in
+// .audio_codec_out. `\\b` after the field name is what stops a bare
+// `.audio_codec` from satisfying it.
+var directCastAudioFieldRe = regexp.MustCompile(
+	`audioCodec\s*:\s*[A-Za-z_$][\w$]*\??\.audio_codec_out\b`)
+
 func TestSPADirectCastGateReadsTheDefaultTrackCodec(t *testing.T) {
-	src, err := os.ReadFile(directCastGateCallSite)
+	raw, err := os.ReadFile(directCastGateCallSite)
 	if err != nil {
 		t.Fatalf("read %s: %v", directCastGateCallSite, err)
 	}
-	body := string(src)
+	body := blankSourceComments(string(raw))
 
-	// Locate the gate call and take the object literal it is given.
 	const marker = "castDirectPlaySupported({"
 	i := strings.Index(body, marker)
 	if i < 0 {
@@ -138,15 +148,10 @@ func TestSPADirectCastGateReadsTheDefaultTrackCodec(t *testing.T) {
 	}
 	args := rest[:end]
 
-	if !strings.Contains(args, "audio_codec_out") {
-		t.Errorf("the Chromecast direct-play gate is not fed audio_codec_out.\n"+
+	if !directCastAudioFieldRe.MatchString(args) {
+		t.Errorf("the Chromecast direct-play gate is not fed audio_codec_out as code.\n"+
 			"It must be: audio_codec is the FIRST audio stream's codec, while the "+
 			"receiver starts the flagged default, so an AAC-at-stream-0 / FLAC-default "+
-			"MP4 passes the gate and then hangs the TV.\ngot: %s", args)
-	}
-	// `audio_codec_out` contains `audio_codec`, so check for the bare field as
-	// a whole property value rather than as a substring.
-	if strings.Contains(args, "stream.audio_codec,") || strings.Contains(args, "stream.audio_codec ") {
-		t.Errorf("the gate reads the bare stream.audio_codec — see above.\ngot: %s", args)
+			"MP4 passes the gate and then hangs the TV.\ngot (comments stripped): %s", args)
 	}
 }
