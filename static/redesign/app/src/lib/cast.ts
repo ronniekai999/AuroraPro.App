@@ -31,6 +31,13 @@ const CAST_DISCONNECT_GRACE_MS = 4000
 export const RECONNECT_SETTLE_MS = 1500
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
+// CAST_NO_MEDIA_ERROR is the sentinel loadCurrent throws when the load getter
+// has nothing to hand the receiver. start() keys its session teardown off the
+// exact string, so it lives here rather than as a literal in two places — and
+// callers that surface errors to users should map it to something a human can
+// read rather than showing it verbatim (it leaked into a user-facing toast in
+// issue #503).
+export const CAST_NO_MEDIA_ERROR = 'no media to cast'
 
 // describeCastError turns a Cast SDK rejection into a human-readable
 // message. The CAF Sender is maddeningly inconsistent about its reject
@@ -673,7 +680,7 @@ export function useCast(
     if (!session) throw new Error('cast session not established')
 
     const load = await Promise.resolve(loadRef.current?.())
-    if (!load) throw new Error('no media to cast')
+    if (!load) throw new Error(CAST_NO_MEDIA_ERROR)
     // >= 0, not > 0 (2026-08 review fix, issue #461 follow-up): 0 is a valid
     // explicit resume position (the party/receiver rewound to the very
     // start), and every caller that passes this argument at all means it as
@@ -838,7 +845,7 @@ export function useCast(
     try {
       await loadCurrent()
     } catch (e) {
-      if ((e as Error)?.message === 'no media to cast') {
+      if ((e as Error)?.message === CAST_NO_MEDIA_ERROR) {
         try { session.endSession(true) } catch { /* defensive */ }
       }
       throw e
@@ -910,6 +917,69 @@ export function absoluteUrl(path: string): string {
   const origin = window.location.origin
   return path.startsWith('/') ? `${origin}${path}` : `${origin}/${path}`
 }
+
+// --- Direct-play casting --------------------------------------------------
+
+// Containers/codecs the Default Media Receiver (CC1AD845) can be handed as a
+// PROGRESSIVE file — i.e. with no HLS session in front of it. This is the
+// direct-play twin of the server's CloneForCast doctrine.
+//
+// It is deliberately narrower than what the receiver might actually manage,
+// because the two failure modes are not symmetric. A format the receiver
+// cannot decode does NOT surface as an error the sender can catch: loadMedia
+// RESOLVES and the TV then spins forever with nothing to report — the same
+// silent hang issues #324/#328 document on the HLS side. So a false negative
+// costs one honest "can't cast this format" message, while a false positive
+// costs an indefinite spinner and a support ticket. The gate therefore names
+// only what every Cast device generation decodes.
+//
+// Deliberately excluded, all of which a browser may still direct-play:
+//   - VP8/VP9/AV1/HEVC — support varies by device generation, and the
+//     decision engine tells us the container and codec, never which
+//     Chromecast is on the other end.
+//   - Opus/Vorbis/FLAC — fine for browser direct play, not for the receiver.
+//   - webm — see above; its codecs are the ones that vary.
+// Anything excluded here still casts normally once it has an HLS session
+// (CloneForCast makes that stream receiver-safe). It is only the sessionless
+// direct-play path, which has no such fallback, that this gate guards.
+const CAST_DIRECT_CONTAINERS = new Set(['mp4'])
+const CAST_DIRECT_VIDEO_CODECS = new Set(['h264'])
+// '' covers a video-only file — the receiver is content with no audio track.
+const CAST_DIRECT_AUDIO_CODECS = new Set(['aac', 'mp3', ''])
+
+// The shape of a direct-play decision that matters to the gate. Field names
+// mirror StreamDecision's container / video_codec / audio_codec, which are
+// already normalized server-side (NormalizeContainer at scan time, so 'mov'
+// has become 'mp4' long before it reaches us).
+export interface DirectCastProbe {
+  container?: string
+  videoCodec?: string
+  audioCodec?: string
+}
+
+// castDirectPlaySupported reports whether a direct-play file can be handed to
+// the Default Media Receiver as-is. Absent/unknown fields fail closed: an
+// unrecognized codec is exactly the case that hangs the receiver.
+export function castDirectPlaySupported(probe: DirectCastProbe): boolean {
+  const norm = (s?: string) => (s ?? '').trim().toLowerCase()
+  return (
+    CAST_DIRECT_CONTAINERS.has(norm(probe.container)) &&
+    CAST_DIRECT_VIDEO_CODECS.has(norm(probe.videoCodec)) &&
+    CAST_DIRECT_AUDIO_CODECS.has(norm(probe.audioCodec))
+  )
+}
+
+// Shown when a direct-play title fails the gate above. It says what happened
+// and what still works, and promises nothing about a retry — clicking Cast
+// again will fail identically, which is the whole complaint in issue #503.
+export const CAST_UNSUPPORTED_DIRECT_FORMAT =
+  "This title's format can't be sent to a Chromecast. It will keep playing here in your browser."
+
+// The user-facing reading of CAST_NO_MEDIA_ERROR when nothing more specific
+// is known — the title is still resolving, or its delivery went away between
+// the click and the load.
+export const CAST_NOTHING_TO_CAST =
+  'There is nothing to cast yet. Wait for the title to start playing, then try again.'
 
 // castSessionIdFromPlaylist recovers the transcode-session ID out of the
 // playlist URL the cast-token endpoint hands back
