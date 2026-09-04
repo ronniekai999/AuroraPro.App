@@ -706,39 +706,36 @@ export function useCast(
     // than the SDK's silent hang (receiver-side problem). Best-effort — we
     // don't block casting on this test, just log the result.
     //
-    // ALWAYS range-limited. This was a bare GET while contentUrl could only
-    // ever be a master playlist of a few hundred bytes. Direct-play titles
-    // cast the FILE itself (issue #503), and a bare GET of one pulls the
-    // WHOLE movie into the sender — gigabytes, before loadMedia is even
-    // issued, blocking the cast for minutes and doubling server egress on
-    // every load, renewal and auto-advance — after which `.text()` would try
-    // to build a multi-GB string out of binary MP4 and OOM the tab. The first
-    // kilobyte proves precisely what this test exists to prove: that the URL
-    // is reachable and its token accepted.
+    // The METHOD depends on what contentUrl points at, which since issue #503
+    // is no longer always a playlist.
+    //
+    // A master playlist is a few hundred bytes and its first lines ARE the
+    // diagnostic, so fetch it. A direct-play media file is neither: a bare GET
+    // of one pulls the WHOLE movie into the sender — gigabytes, before
+    // loadMedia is even issued, blocking the cast for minutes and repeating on
+    // every load, renewal and auto-advance — and `.text()` would then try to
+    // build a multi-GB string out of binary MP4. HEAD proves exactly what this
+    // test exists to prove (reachable, token accepted) with no body at all,
+    // and /api/stream/direct/ treats HEAD as an explicit preflight that skips
+    // every side effect, so probing cannot write an activity row, register a
+    // phantom "now streaming" entry, or spawn a heartbeat goroutine for a
+    // response nobody reads.
+    const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
     try {
       const probe = await fetch(load.contentUrl, {
-        method: 'GET',
+        method: isPlaylist ? 'GET' : 'HEAD',
         credentials: 'omit',
-        headers: { Range: 'bytes=0-1023' },
       })
-      // Only a playlist is text worth previewing; a media file's first
-      // kilobyte is binary. Discard that body rather than decoding it — and
-      // discard it explicitly, so a server that ignored the Range header
-      // cannot go on streaming the rest of the file into a response nobody
-      // reads.
-      const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
-      let preview = ''
-      if (probe.ok && isPlaylist) {
-        preview = (await probe.text()).split('\n').slice(0, 3).join(' | ')
-      } else {
-        try { await probe.body?.cancel() } catch { /* already drained */ }
-      }
+      const preview = probe.ok && isPlaylist
+        ? (await probe.text()).split('\n').slice(0, 3).join(' | ')
+        : ''
       // eslint-disable-next-line no-console
       console.info('[Aurora Cast] URL self-test:', {
+        method: isPlaylist ? 'GET' : 'HEAD',
         status: probe.status,
         ok: probe.ok,
         contentType: probe.headers.get('content-type'),
-        contentRange: probe.headers.get('content-range'),
+        contentLength: probe.headers.get('content-length'),
         firstLines: preview,
       })
     } catch (e) {
@@ -1011,10 +1008,20 @@ export interface DirectCastProbe {
 
 // castDirectPlaySupported reports whether a direct-play file can be handed to
 // the Default Media Receiver as-is. Every field fails closed when absent or
-// unrecognized — including audio, because "" reaches us both for a genuinely
-// silent file and for one whose scan recorded no audio codec, and only the
-// second of those hangs the receiver. Refusing to cast a silent video is the
-// cheap half of that ambiguity.
+// unrecognized.
+//
+// What makes the audio side sound is narrower than "we checked the codec", and
+// worth stating because nothing here can enforce it: a `direct_play` decision
+// requires `dpIsDefault`, so the track the engine picked IS the file's
+// effective default — the one the receiver will start. `audio_codec_out`
+// therefore names the codec the receiver actually has to decode. Should
+// DecidePlaybackFor ever admit direct play for a non-default track, this gate
+// would silently start describing the wrong one.
+//
+// Note "" is not reachable from the real data path: OutputAudioCodec falls
+// back to "aac" when a decision carries no audio codec, so a silent file
+// arrives here as "aac" and is admitted — correctly, since a silent MP4 casts
+// fine. The empty case below is defensive only.
 export function castDirectPlaySupported(probe: DirectCastProbe): boolean {
   const norm = (s?: string) => (s ?? '').trim().toLowerCase()
   if (!CAST_DIRECT_CONTAINERS.has(norm(probe.container))) return false
@@ -1030,6 +1037,23 @@ function castDirectHeightOK(resolution?: string): boolean {
   if (!m) return false
   const height = Number(m[2])
   return Number.isFinite(height) && height > 0 && height <= CAST_DIRECT_MAX_HEIGHT
+}
+
+// What the receiver is playing. 'session' is the HLS path (the id is the
+// transcode session behind the playlist); 'direct' is a whole media file.
+export type CastLoadedMedia =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'direct'; fileId: number; fileType: 'media' | 'episode' }
+
+// castLoadedIsDirectFor reports whether the receiver is playing THIS target as
+// a direct file. Used to decide whether a scrub can be an in-window receiver
+// seek: only true when the receiver's own media is known and is this file.
+export function castLoadedIsDirectFor(
+  loaded: CastLoadedMedia | null | undefined,
+  target: { fileId: number; fileType: 'media' | 'episode' } | null | undefined,
+): boolean {
+  if (!loaded || loaded.kind !== 'direct' || !target) return false
+  return loaded.fileId === target.fileId && loaded.fileType === target.fileType
 }
 
 // What the player knows about the current direct-play target.
@@ -1080,6 +1104,12 @@ export const CAST_UNSUPPORTED_DIRECT_FORMAT =
 // the click and the load.
 export const CAST_NOTHING_TO_CAST =
   'There is nothing to cast yet. Wait for the title to start playing, then try again.'
+
+// Distinct from the above because the advice differs: the title IS playing,
+// and the server refused or failed to issue the receiver's access token, so
+// waiting will not help.
+export const CAST_MINT_FAILED =
+  'Could not get permission to cast this title. Please try again.'
 
 // castSessionIdFromPlaylist recovers the transcode-session ID out of the
 // playlist URL the cast-token endpoint hands back

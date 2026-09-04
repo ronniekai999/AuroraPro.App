@@ -11,6 +11,7 @@ import {
   castDirectLoadEligible,
   castDirectMatches,
   castDirectPlaySupported,
+  castLoadedIsDirectFor,
   castSessionIdFromPlaylist,
   describeCastError,
 } from './cast'
@@ -135,11 +136,12 @@ describe('castDirectPlaySupported', () => {
     expect(castDirectPlaySupported({ ...ok, resolution: '0x0' })).toBe(false)
   })
 
-  // "" reaches us both for a genuinely silent file and for one whose scan
-  // recorded no audio codec. Only the second hangs the receiver, and the two
-  // are indistinguishable here — so refuse, which costs at most a silent
-  // video that will not cast.
-  it('refuses an unestablished audio codec rather than guessing it is silent', () => {
+  // Defensive only: "" is not reachable from the real data path, because
+  // OutputAudioCodec falls back to "aac" when a decision carries no audio
+  // codec — so a genuinely silent file arrives as "aac" and is admitted,
+  // which is right (a silent MP4 casts fine). This pins the fail-closed
+  // behaviour for a value only a contract change could produce.
+  it('refuses an audio codec it cannot identify', () => {
     expect(castDirectPlaySupported({ ...ok, audioCodec: '' })).toBe(false)
     expect(castDirectPlaySupported({ ...ok, audioCodec: undefined })).toBe(false)
   })
@@ -180,5 +182,42 @@ describe('castDirectMatches / castDirectLoadEligible', () => {
     expect(castDirectLoadEligible('direct', { ...dc, supported: false }, target)).toBe(false)
     expect(castDirectLoadEligible('direct', dc, { fileId: 43, fileType: 'media' })).toBe(false)
     expect(castDirectLoadEligible('direct', null, target)).toBe(false)
+  })
+})
+
+// What the RECEIVER is playing, which is not the same question as what the
+// local player is doing. Inferring one from the other is how a scrub came to
+// seek the wrong title: the tracker is per-player-mount while the CAF session
+// is not, so a page reload mid-cast re-joins a live session against a fresh
+// player that has committed nothing.
+describe('castLoadedIsDirectFor', () => {
+  const target = { fileId: 42, fileType: 'media' as const }
+
+  it('is true only for a direct load of this exact file', () => {
+    expect(castLoadedIsDirectFor({ kind: 'direct', fileId: 42, fileType: 'media' }, target))
+      .toBe(true)
+  })
+
+  it('is false when the receiver is on an HLS session', () => {
+    expect(castLoadedIsDirectFor({ kind: 'session', sessionId: 'clone-1' }, target)).toBe(false)
+  })
+
+  // The reload case: nothing has been committed by this player instance, so
+  // nothing is known about the receiver and no in-window seek may be assumed.
+  it('is false when nothing is known about the receiver', () => {
+    expect(castLoadedIsDirectFor(null, target)).toBe(false)
+    expect(castLoadedIsDirectFor(undefined, target)).toBe(false)
+  })
+
+  it('is false for a direct load of a different file', () => {
+    expect(castLoadedIsDirectFor({ kind: 'direct', fileId: 43, fileType: 'media' }, target))
+      .toBe(false)
+    expect(castLoadedIsDirectFor({ kind: 'direct', fileId: 42, fileType: 'episode' }, target))
+      .toBe(false)
+  })
+
+  it('is false without a target', () => {
+    expect(castLoadedIsDirectFor({ kind: 'direct', fileId: 42, fileType: 'media' }, null))
+      .toBe(false)
   })
 })

@@ -291,6 +291,79 @@ Invariants to preserve here:
 - Calendar: party chips group by the viewer's **local** date; episode air
   dates stay UTC-keyed. Don't unify them.
 
+## Casting a direct-play title (issue #503)
+
+Direct-play titles cast the FILE itself behind a file-scoped cast token
+(`createDirectCastToken` → `/api/stream/direct/{id}?token=`), because they have
+no transcode session for the session-scoped mint to bind to. Code:
+`internal/api/cors.go` (`receiverAssetPrefixes`), `lib/cast.ts`
+(`castDirectPlaySupported`, `castDirectLoadEligible`, `castLoadedIsDirectFor`),
+`VideoPlayer.tsx` (`directCastRef`, `castLoadedMediaRef`, the `castLoadGetter`
+direct branch), `lib/castSession.ts` (`noteSessionless`).
+
+Invariants to preserve when touching this area:
+
+- **The receiver's failure mode is silence, so the codec gate fails CLOSED.**
+  A format the Default Media Receiver cannot decode does not error: `loadMedia`
+  RESOLVES and the TV spins forever with nothing for the sender to report (the
+  same shape as #324/#328). `castDirectPlaySupported` is therefore a narrow
+  allowlist — H.264 + AAC/MP3 in MP4, height ≤ 1080 — and every absent or
+  unrecognized field refuses. A false negative costs one honest message; a
+  false positive costs a support ticket.
+- **The gate reads `audio_codec_out`, never `audio_codec`.** The latter is the
+  FIRST audio stream's codec; the receiver starts the file's effective default.
+  An AAC-at-stream-0 / FLAC-default MP4 (routine `ffmpeg -c copy` output) reads
+  as castable through the wrong field and then hangs the TV.
+  `TestDirectPlayAudioCodecOutIsTheDefaultTrack` pins the invariant that makes
+  the right field meaningful: direct play requires `dpIsDefault`, so the chosen
+  track IS the effective default.
+- **`/api/stream/direct/` must stay in `receiverAssetPrefixes`.** A Cast
+  receiver fetches from a Google-hosted origin inside a browser sandbox, so
+  without the credential-less wildcard it hits the #181 failure — the title
+  appears, then the TV drops to idle. The route predates casting and was
+  reached only by AirPlay, whose AVPlayer never exercised CORS on it. Note the
+  neighbouring `/api/stream/{fileID}/direct` is the BROWSER's cookie-authed
+  route and must keep the credentialed allowlist.
+- **The sender self-test probes a media file with HEAD, a playlist with GET.**
+  A bare GET of a direct URL pulls the whole movie into the sender before
+  `loadMedia` is issued, and the route treats HEAD as an explicit preflight
+  that skips activity rows and the direct-play registry.
+- **What the RECEIVER is playing is tracked positively** (`castLoadedMediaRef`,
+  promoted only by a resolved `loadMedia`). Do not infer it from
+  `deliveryModeRef` (that describes the local `<video>`) or from
+  `committed() == null` (also true for a tracker that has never committed —
+  reachable after a page reload re-joins a live session). Getting this wrong
+  scrubs the wrong title and broadcasts that position to a watch party.
+- **A sessionless commit CLEARS the tracker's committed slot**
+  (`noteSessionless`, deliberately not `notePending(null)`, which means "no
+  session id in this URL" and leaves the slot alone). Otherwise a cast moving
+  from an HLS title to a direct-play one strands the old clone, keepalive-
+  pinged, for its whole lease.
+
+Known limits, stated plainly:
+
+- **Nothing detects a receiver that rejects the media.** `evaluate()` only
+  inspects `IDLE`/`idleReason` once `castHasPlayedRef` is true, so an
+  `IDLE`+`ERROR` that never reached `PLAYING` is ignored and the sender shows
+  "Casting to <device>" forever. That is pre-existing, but this change makes it
+  the only backstop for every residual the gate cannot see — H.264 level and
+  bitrate (the probe records neither), a `.mov` served as `video/quicktime`
+  while the sender declares `video/mp4`, a 1080p60 High@L4.2 file on a
+  first-generation device. Acting on a pre-play `IDLE`+`ERROR` is the open
+  follow-up; it needs an "awaiting first play" state so a receiver's stale
+  pre-load status cannot stop the cast we just started.
+- **A refusal is final for that viewer** — it is NOT a fallback to HLS. A file
+  the engine chose direct play for never acquires a session to clone
+  (`CloneForCast` makes an EXISTING session receiver-safe). Casting the
+  remainder would need a cast-only transcode session.
+- **None of the receiver behaviour above is measured.** The gate, the CORS
+  requirement and the silent-hang model are reasoned from the CAF contract and
+  this repo's own #181/#324/#328 history, not from a real device. One
+  end-to-end cast of a 1080p H.264/AAC MP4 would settle the first two at once.
+- `VideoPlayer.tsx` has no test file, so the direct branch, `pendingResumeSec`
+  and the message mapping are pinned only through the pure helpers extracted
+  into `lib/cast.ts`.
+
 ## Native-client direct play (Tier 1 of the Mac-app work)
 
 Capability keys that let a NATIVE client (libVLC/mpv/ExoPlayer-backed app)

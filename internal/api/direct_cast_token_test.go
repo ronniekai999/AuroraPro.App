@@ -88,3 +88,42 @@ func TestDirectCastSessionIDShape(t *testing.T) {
 		t.Error("sentinel must not be confusable with a hex session ID")
 	}
 }
+
+// Issue #503 made HEAD a routinely-used method on this route: the sender
+// self-tests a direct cast URL before handing it to the receiver, and uses
+// HEAD so the probe writes no activity row and registers no phantom "now
+// streaming" entry. A method that skips those side effects must not also skip
+// the token binding — otherwise the probe path is a weaker door to the same
+// bytes than the GET beside it.
+func TestServeDirectCastFile_HeadEnforcesTheSameBinding(t *testing.T) {
+	h := &StreamHandler{} // binding checks fire before any queries/transcode use
+
+	bound := &auth.JWTClaims{
+		UserID: 7, Username: "u", Role: "user",
+		Scope:     auth.ScopeCast,
+		SessionID: directCastSessionID("media", 42),
+	}
+
+	for _, tt := range []struct {
+		name     string
+		fileID   string
+		fileType string
+		claims   *auth.JWTClaims
+		want     int
+	}{
+		{"wrong file id", "43", "media", bound, http.StatusForbidden},
+		{"wrong file type", "42", "episode", bound, http.StatusForbidden},
+		{"missing type", "42", "", bound, http.StatusForbidden},
+		{"no claims at all", "42", "media", nil, http.StatusUnauthorized},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := directCastRequest(t, tt.fileID, tt.fileType, tt.claims)
+			req.Method = http.MethodHead
+			rr := httptest.NewRecorder()
+			h.ServeDirectCastFile(rr, req)
+			if rr.Code != tt.want {
+				t.Errorf("HEAD status = %d, want %d (body %q)", rr.Code, tt.want, rr.Body.String())
+			}
+		})
+	}
+}
