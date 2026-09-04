@@ -2,12 +2,14 @@ package config
 
 import (
 	"bytes"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestDefaults(t *testing.T) {
@@ -738,7 +740,7 @@ func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
 			// before it to be whitespace. (The rune-tracking scan cannot index
 			// before the start, so this is a correctness case, not a panic
 			// guard as an earlier byte-indexed version needed.)
-			name: "value that is entirely a comment does not panic",
+			name: "leading # is not a comment delimiter",
 			env:  "#disabled",
 			want: "#disabled",
 		},
@@ -766,7 +768,7 @@ func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
 			// The point of the whole exercise: the URL this config composes
 			// must be one GitHub's image proxy can actually fetch.
 			attachment := cfg.BugReport.PublicBaseURL + "/api/feedback/attachments/x.png"
-			if strings.ContainsAny(attachment, " \t") {
+			if strings.IndexFunc(attachment, unicode.IsSpace) >= 0 {
 				t.Errorf("composed attachment URL contains whitespace: %q", attachment)
 			}
 		})
@@ -913,6 +915,10 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 		env       string
 		wantLevel slog.Level
 		wantMsg   string
+		// The systemd hint rides along only when a comment is plausibly
+		// implicated — telling an operator who typed a fragment to move a
+		// comment they never wrote is misdirection on the one actionable line.
+		wantHint bool
 	}{
 		{
 			// The production value. It CLEANS successfully, so the structural
@@ -922,6 +928,7 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			env:       "https://aurorapro.app   # no trailing slash",
 			wantLevel: slog.LevelWarn,
 			wantMsg:   "had an inline comment",
+			wantHint:  true,
 		},
 		{
 			name:      "unusable value errors",
@@ -942,7 +949,10 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			var buf bytes.Buffer
 			prev := slog.Default()
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			t.Cleanup(func() { slog.SetDefault(prev) })
+			// slog.SetDefault also repoints the stdlib logger, and restoring a
+			// default-handler logger deliberately does NOT undo that — so
+			// without this the package's later tests write into a dead buffer.
+			t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(os.Stderr) })
 
 			t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 			t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
@@ -953,16 +963,29 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 				t.Fatalf("Load() error: %v", err)
 			}
 			out := buf.String()
-			if !strings.Contains(out, tt.wantMsg) {
-				t.Errorf("log does not mention %q for env %q\ngot: %s", tt.wantMsg, tt.env, out)
+			// Level and message asserted on the SAME LINE, not across the
+			// whole buffer. Load() always emits its own
+			// `level=WARN msg="failed to load yaml config …"` here (the test
+			// points AURORA_CONFIG_FILE at a nonexistent path), so a
+			// whole-buffer search for `level=WARN` is satisfied by that line
+			// no matter what the code under test does — it let Warn→Info and
+			// even Warn→Debug pass, and a Debug line never reaches journalctl
+			// at the production log level, which is precisely the signal these
+			// docs tell operators to grep for.
+			var line string
+			for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+				if strings.Contains(l, tt.wantMsg) && strings.Contains(l, "level="+tt.wantLevel.String()) {
+					line = l
+					break
+				}
 			}
-			if !strings.Contains(out, "level="+tt.wantLevel.String()) {
-				t.Errorf("want a %s line for env %q\ngot: %s", tt.wantLevel, tt.env, out)
+			if line == "" {
+				t.Fatalf("want one %s line mentioning %q for env %q\ngot: %s",
+					tt.wantLevel, tt.wantMsg, tt.env, out)
 			}
-			// The hint is what makes the line actionable — it names the systemd
-			// rule the operator has to apply to a file this process cannot fix.
-			if !strings.Contains(out, "EnvironmentFile") {
-				t.Errorf("log omits the systemd hint for env %q\ngot: %s", tt.env, out)
+			if got := strings.Contains(line, "EnvironmentFile"); got != tt.wantHint {
+				t.Errorf("systemd hint present = %v, want %v for env %q\ngot: %s",
+					got, tt.wantHint, tt.env, line)
 			}
 		})
 	}
@@ -972,7 +995,7 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 		var buf bytes.Buffer
 		prev := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		t.Cleanup(func() { slog.SetDefault(prev) })
+		t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(os.Stderr) })
 
 		t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 		t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")

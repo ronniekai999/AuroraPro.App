@@ -106,6 +106,13 @@ BUG_REPORT_ATTACHMENT_TTL_DAYS=30
 # (1 week). Bigger interval = lower CPU/IO cost but stale files
 # sit on disk longer.
 BUG_REPORT_JANITOR_INTERVAL_HOURS=1
+
+# Aggregate disk budget for the attachment cache, in bytes. Default
+# 5368709120 (5 GiB). Once the directory is over this after the TTL
+# sweep, the janitor keeps deleting oldest-first into files that are
+# still inside the TTL — so on a busy instance this, not the TTL,
+# decides how long an attachment link keeps resolving.
+BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES=5368709120
 ```
 
 Restart Aurora to pick up the env changes.
@@ -135,8 +142,9 @@ To smoke-test the full flow:
   The UUID is a 128-bit random hex string — anyone with the URL can
   view the attachment, same security model as Aurora's existing
   party-share-image endpoint. Attachments are automatically swept by
-  the Phase 3 janitor goroutine after 30 days (see Operational notes
-  below); no manual cleanup is required in steady state.
+  the Phase 3 janitor goroutine — after 30 days, and sooner if the cache
+  outgrows its byte budget (see Operational notes below); no manual
+  cleanup is required in steady state.
 
 ## Troubleshooting
 
@@ -210,7 +218,8 @@ use a Cloudflare Tunnel) to fix.
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
 The launcher button disappears immediately on the next user session.
 Already-filed issues remain in GitHub; already-uploaded attachments
-remain on disk until the Phase 3 janitor sweeps them (30-day TTL).
+remain on disk until the Phase 3 janitor sweeps them (30-day TTL, or
+sooner under the byte budget — see Operational notes).
 
 ## Capabilities across phases (all in current build)
 
@@ -235,11 +244,21 @@ message in the modal so the user sees how long to wait. State lives
 in memory (not the DB) — restarting Aurora resets all counters.
 
 **Attachment janitor:** a background goroutine sweeps
-`<ImageDir>/bug-reports/` once per hour and deletes files older than
-30 days. Runs only when `BUG_REPORT_ENABLED=true`. The goroutine
-exits cleanly via the server-lifecycle context on graceful shutdown.
-Logs at INFO when files are removed (count + TTL); WARN on individual
-file delete failures (typically permission issues).
+`<ImageDir>/bug-reports/` once per hour, on **two independent rules**:
+
+1. **Age** — deletes files older than `BUG_REPORT_ATTACHMENT_TTL_DAYS`
+   (default 30 days).
+2. **Budget** — if the directory is still over
+   `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default 5 GiB) afterwards, it
+   continues **oldest-first into still-fresh files** until back under
+   budget. So on a busy instance an attachment can be gone well before its
+   TTL, and age alone never tells you whether a link still resolves.
+
+Runs only when `BUG_REPORT_ENABLED=true`. The goroutine exits cleanly via
+the server-lifecycle context on graceful shutdown. Logs the age sweep at
+INFO only for substantive removals (10+ files) and at DEBUG below that;
+the budget eviction logs at WARN, as does an individual file delete
+failure (typically permission issues).
 
 **Screen recording:**
 

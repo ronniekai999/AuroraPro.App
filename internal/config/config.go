@@ -1322,10 +1322,16 @@ func applyEnvOverrides(cfg *Config) {
 		// unlike the advisories below, a value that fails here cannot produce
 		// a working attachment link under any circumstances.
 		if complaint := baseURLComplaint(trimmed); complaint != "" {
-			slog.Error("BUG_REPORT_PUBLIC_BASE_URL "+complaint,
-				"url", trimmed,
-				"raw", v,
-				"hint", "systemd EnvironmentFile= does not support inline # comments — put comments on their own line")
+			// The systemd hint only rides along when a comment is plausibly
+			// implicated. Attaching it unconditionally told an operator who
+			// deliberately typed a fragment to go move a comment that does not
+			// exist — misdirection on the one line meant to be actionable.
+			args := []any{"url", trimmed, "raw", v}
+			if cutComment || strings.Contains(v, " #") || strings.Contains(v, "\t#") {
+				args = append(args, "hint",
+					"systemd EnvironmentFile= does not support inline # comments — put comments on their own line")
+			}
+			slog.Error("BUG_REPORT_PUBLIC_BASE_URL "+complaint, args...)
 		}
 		lower := strings.ToLower(trimmed)
 		switch {
