@@ -1176,6 +1176,80 @@ export const CAST_NOTHING_TO_CAST =
 export const CAST_MINT_FAILED =
   'Could not get permission to cast this title. Please try again.'
 
+// --- Cast lifecycle decisions -------------------------------------------
+//
+// These two functions exist because the logic they hold was, for three review
+// rounds running, mutable refs read by three effects four hundred lines apart
+// in a component with no test file — where the invariant "this flag describes
+// the CURRENT cast session" was not expressible, only asserted in a comment
+// about effect declaration order. Each round's patch was right for the case it
+// aimed at and opened the next one. Here the same rules are total, pure, and
+// pinned by tests, and the player only applies the outcome.
+
+export interface CastMediaObservation {
+  connected: boolean
+  // useCast does not trust `remote` during the disconnect debounce or the
+  // post-reconnect settle window.
+  settling: boolean
+  isMediaLoaded: boolean
+  // Monotonic counter bumped on every genuine `remote` republish.
+  updateSeq: number
+  // updateSeq sampled at the moment this session connected, or null if no
+  // session is in progress.
+  seqAtConnect: number | null
+}
+
+// castObservationShowsMedia: does this reading prove the receiver holds media
+// FOR THE SESSION NOW IN PROGRESS?
+//
+// The sequence check is the load-bearing part. `remote` is a snapshot that
+// persists across sessions — `stop()` deliberately bypasses the debounce and
+// never forces a republish, so `isMediaLoaded` can still read true from a cast
+// that ended — and VideoPlayer is never unmounted, so nothing resets it. Read
+// naively at a later connect edge, a stale true marks a brand-new session as
+// already loaded, and a failed cast then closes the player over a
+// half-watched film. Requiring an update STRICTLY AFTER the connect edge is
+// the same distrust `seqAtSettleClearRef` applies to the settle window.
+export function castObservationShowsMedia(o: CastMediaObservation): boolean {
+  if (!o.connected || o.settling || !o.isMediaLoaded) return false
+  return o.seqAtConnect === null || o.updateSeq !== o.seqAtConnect
+}
+
+// What should happen to the LOCAL player when a cast session ends.
+export type CastEndAction =
+  // The cast was a real viewing that has finished: close the player rather
+  // than hand a stopped Chromecast back to a phantom full-screen local player
+  // over whatever view the user navigated to.
+  | 'close'
+  // The cast never carried media, so this was a failed ATTEMPT: give the user
+  // back the film that was playing when they pressed Cast. Local playback was
+  // paused on the promise that 'close' would follow, and it will not.
+  | 'resume'
+  | 'none'
+
+export interface CastEndInput {
+  // Did the receiver ever hold media during this session?
+  everLoaded: boolean
+  // Did WE pause the local element for this cast (vs the user pausing it)?
+  pausedByCast: boolean
+  // A party owns this media's play state.
+  partyControlsMedia: boolean
+}
+
+// decideCastEnd is deliberately ONE function for both outcomes, called by both
+// effects, so "close" and "resume" cannot disagree about the same cast. They
+// are a matched pair: the pause is taken on the promise that a close follows,
+// and every time the two were reasoned about separately the pair came apart.
+export function decideCastEnd(i: CastEndInput): CastEndAction {
+  // Under a party, a cast ending is not the end of the viewing: playback falls
+  // back to the party-synced local element, whose play state the party mirror
+  // owns. Closing would kick the user out of the party UI, and resuming would
+  // play against a party that may be paused.
+  if (i.partyControlsMedia) return 'none'
+  if (i.everLoaded) return 'close'
+  return i.pausedByCast ? 'resume' : 'none'
+}
+
 // Probe statuses that are a VERDICT about the URL rather than a transient
 // failure, i.e. ones the receiver's own fetch will meet identically. See the
 // self-test in loadCurrent for why the distinction decides whether a cast

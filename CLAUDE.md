@@ -329,16 +329,28 @@ Invariants to preserve when touching this area:
   `loadMedia` is issued, and the route treats HEAD as an explicit preflight
   that skips activity rows and the direct-play registry. Because that probe is
   a near-rehearsal of the receiver's fetch — same URL and token, but SAME-ORIGIN
-  and HEAD — a 4xx on the direct branch aborts the cast rather than being
-  logged; the receiver would otherwise resolve `loadMedia` and spin. It proves
-  auth and file existence, NOT CORS: the receiver fetches cross-origin and the
-  probe never does, so a proxy stripping `Access-Control-Allow-Origin` passes
-  the probe and still hangs the TV. 5xx and a THROWN fetch do not abort — both
-  are as likely to be transient as a verdict about this URL. `start()` tears the
-  session down on any load failure (unless it JOINED a session already playing),
-  so aborting never strands an idle receiver; and a session that never carried
-  media does not close the player, or a failed cast would take local playback
-  with it.
+  and HEAD — the direct branch aborts on the statuses that are a VERDICT about
+  the URL rather than a transient (`castProbeStatusIsFatal`: 401/403/404/410,
+  and 500 because `ServeFile` answers it deterministically on a stat failure).
+  Everything else proceeds, 405 included: a proxy refusing HEAD must not kill a
+  cast that works. A THROWN fetch never aborts. It proves auth and file
+  existence, NOT CORS: the receiver fetches cross-origin and the probe never
+  does, so a proxy stripping `Access-Control-Allow-Origin` passes the probe and
+  still hangs the TV. `start()` tears the session down on any load failure
+  (unless it JOINED one already playing — keyed on the media session's
+  playerState, since the media object survives going idle).
+- **Ending a cast is one decision, `decideCastEnd`, applied by two effects.**
+  Closing the player and resuming local playback are a matched pair: the local
+  element is paused on the PROMISE that a finished cast closes the player, so a
+  cast that never carried media must instead give playback back. Reasoning
+  about the halves separately came apart on three consecutive review rounds.
+  `castEverLoadedRef` is cleared on the CONNECT edge, which scopes it to a
+  session by construction — a disconnect edge is not always observed (a
+  reconnect inside the 4s debounce produces none) and the player is never
+  unmounted. It is set by our own resolved load OR by
+  `castObservationShowsMedia`, which covers a re-joined session after a reload
+  but distrusts an `isMediaLoaded` carried over from a previous cast (`stop()`
+  bypasses the debounce and never republishes `remote`).
 - **`.mov` serves as `video/mp4`.** `NormalizeContainer` aliases mov → mp4 at
   scan time, so a `.mov` reaches this gate indistinguishable from an `.mp4` and
   the sender declares `video/mp4`. `ServeFile` must agree; it used to answer

@@ -85,7 +85,9 @@ import {
   castDirectMatches,
   castDirectPlaySupported,
   castLoadedIsDirectFor,
+  castObservationShowsMedia,
   castSessionIdFromPlaylist,
+  decideCastEnd,
   useCast,
   type CastLoadedMedia,
   type DirectCastTarget,
@@ -1222,11 +1224,32 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   //
   // Declared ABOVE the pause effect and the cast-end effect, both of which
   // read this ref, so it is already up to date when they run.
+  //
+  // Cleared on the CONNECT edge, not the disconnect one. That makes the flag
+  // session-scoped by construction: it cannot describe a previous cast,
+  // whatever order the disconnect effects run in or whether a disconnect edge
+  // was observed at all (a re-connect inside the 4s debounce cancels the timer
+  // and produces none). VideoPlayer is never unmounted — App renders it
+  // unconditionally and it bails at render time on a null target — so nothing
+  // else resets it.
+  const seqAtCastConnectRef = useRef<number | null>(null)
+  const castWasConnectedRef = useRef(false)
   useEffect(() => {
-    if (cast.status.connected && !cast.status.settling && cast.remote.isMediaLoaded) {
+    if (cast.status.connected && !castWasConnectedRef.current) {
+      castEverLoadedRef.current = false
+      seqAtCastConnectRef.current = cast.remote.updateSeq
+    }
+    castWasConnectedRef.current = cast.status.connected
+    if (castObservationShowsMedia({
+      connected: cast.status.connected,
+      settling: cast.status.settling,
+      isMediaLoaded: cast.remote.isMediaLoaded,
+      updateSeq: cast.remote.updateSeq,
+      seqAtConnect: seqAtCastConnectRef.current,
+    })) {
       castEverLoadedRef.current = true
     }
-  }, [cast.status.connected, cast.status.settling, cast.remote.isMediaLoaded])
+  }, [cast.status.connected, cast.status.settling, cast.remote.isMediaLoaded, cast.remote.updateSeq])
   useEffect(() => {
     const vid = videoRef.current
     if (!vid) return
@@ -1276,10 +1299,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     //
     // AirPlay never sets this ref (its <video> is the live mirrored source and
     // keeps playing on handoff), so it is unaffected either way.
-    if (pausedByCastRef.current && !castEverLoadedRef.current) {
+    //
+    // decideCastEnd is shared with the cast-end effect below so the two halves
+    // of that pair cannot disagree about the same cast; it also owns the party
+    // case, where the party mirror — not this effect — decides play state.
+    if (decideCastEnd({
+      everLoaded: castEverLoadedRef.current,
+      pausedByCast: pausedByCastRef.current,
+      partyControlsMedia,
+    }) === 'resume') {
       void vid.play().catch(() => { /* autoplay policy — leave it paused */ })
     }
     pausedByCastRef.current = false
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected])
 
   // AirPlay active-state detection. Safari fires
@@ -1613,10 +1645,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // expired and invisible behind the minimized-player overlay. The reporter
     // of issue #503 hit this repeatedly: their network log is the same title
     // being reopened after every failed attempt.
-    if (was && !cast.status.connected && !partyControlsMedia && castEverLoadedRef.current) {
+    if (was && !cast.status.connected && decideCastEnd({
+      everLoaded: castEverLoadedRef.current,
+      pausedByCast: pausedByCastRef.current,
+      partyControlsMedia,
+    }) === 'close') {
       onClose()
     }
-    if (was && !cast.status.connected) castEverLoadedRef.current = false
+    // No reset here: the flag is cleared on the CONNECT edge instead, which
+    // scopes it to a session without depending on a disconnect edge ever being
+    // observed (a reconnect inside the debounce produces none) or on this
+    // effect running after the one that reads it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, party, partyControlsMedia])
 
