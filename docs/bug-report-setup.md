@@ -74,9 +74,9 @@ BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com
 > every attachment link Aurora writes into an issue is then dead. Aurora strips
 > such a comment before using the value and logs a WARN naming it, so links
 > filed from here on are correct — but **fix the file anyway**: the bad line
-> survives every re-install, and every other reader of it still sees the
-> comment. Note the shell disagrees with systemd here: sourcing this file to
-> check a value drops the comment, so it looks fine there.
+> survives every re-install, and anything else reading it with systemd's
+> semantics still gets the comment. Note the shell does not: sourcing this file
+> to check a value drops the comment, so it looks fine there.
 
 ### Optional tunables
 
@@ -170,10 +170,17 @@ missing host, or a fragment/query (ERROR — the value cannot work at all).
 
 Fix the line in `/etc/aurora/aurora.env`, move the comment to its own line, and
 restart. Links in issues already filed have to be repaired by hand, and only
-where the attachment still exists: the janitor deletes attachments older than
-`BUG_REPORT_ATTACHMENT_TTL_DAYS` (default **30 days**), so anything filed
-before that window is gone and the link cannot be revived. Within it, files are
-intact on disk and still served at `/api/feedback/attachments/{name}`.
+where the attachment still exists. The janitor evicts on **two** independent
+rules, so age alone does not tell you:
+
+- older than `BUG_REPORT_ATTACHMENT_TTL_DAYS` (default **30 days**); and
+- oldest-first, **regardless of age**, whenever the cache exceeds
+  `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default **5 GiB**) — so on a busy
+  instance a week-old attachment may already be gone.
+
+Check before editing an issue: an attachment that survived is still served at
+`/api/feedback/attachments/{name}`, and one that did not returns 404 — repairing
+that link only produces a working URL to a missing file.
 
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)

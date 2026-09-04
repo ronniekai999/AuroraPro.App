@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -675,7 +677,9 @@ func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
 		want string
 	}{
 		{
-			// The exact production value from issue #503.
+			// The exact production value, as it appeared in the body of the
+			// bug report filed as issue #503 — that issue is about casting;
+			// this defect was found in its rendered attachment link.
 			name: "inline comment systemd would have kept",
 			env:  "https://aurorapro.app   # no trailing slash",
 			want: "https://aurorapro.app",
@@ -730,9 +734,10 @@ func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
 			want: "https://aurora.example.com/aurora",
 		},
 		{
-			// The `i == 0` / no-previous-rune guard. Without it the cut
-			// indexes before the start of the string and Load() panics, so the
-			// server never boots.
+			// A leading `#` is not a comment delimiter — there is nothing
+			// before it to be whitespace. (The rune-tracking scan cannot index
+			// before the start, so this is a correctness case, not a panic
+			// guard as an earlier byte-indexed version needed.)
 			name: "value that is entirely a comment does not panic",
 			env:  "#disabled",
 			want: "#disabled",
@@ -820,7 +825,8 @@ func TestCleanThenComplain(t *testing.T) {
 		"aurora.example.com",
 		"/api/feedback",
 		// A non-breaking space — how a value pasted from a browser or a
-		// rendered doc arrives. Neither the cut nor a " \t" check sees it.
+		// rendered doc arrives. There is no `#` here for the cut to act on, so
+		// it is the complaint that has to notice; a `" \t"` check would not.
 		"https://aurora.example.com /x",
 	}
 	for _, in := range loud {
@@ -893,4 +899,91 @@ func TestBaseURLComplaint(t *testing.T) {
 			t.Errorf("baseURLComplaint(%q) = \"\", want a complaint", s)
 		}
 	}
+}
+
+// The two log lines are the whole point of the fix, and both the operator
+// docs and scripts/aurora.env now tell people to grep for them. An earlier
+// round of this work shipped a documented ERROR that no input could actually
+// produce, so the claim is pinned here rather than left to a reading of the
+// code: without this, deleting either call site leaves the suite green and the
+// docs lying.
+func TestBugReportBaseURLLogging(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       string
+		wantLevel slog.Level
+		wantMsg   string
+	}{
+		{
+			// The production value. It CLEANS successfully, so the structural
+			// complaint stays quiet — the cut itself is the signal, because
+			// the env file is still wrong and survives every re-install.
+			name:      "stripped comment warns",
+			env:       "https://aurorapro.app   # no trailing slash",
+			wantLevel: slog.LevelWarn,
+			wantMsg:   "had an inline comment",
+		},
+		{
+			name:      "unusable value errors",
+			env:       "not a url",
+			wantLevel: slog.LevelError,
+			wantMsg:   "contains whitespace",
+		},
+		{
+			name:      "trailing fragment errors",
+			env:       "https://aurora.example.com/#",
+			wantLevel: slog.LevelError,
+			wantMsg:   "fragment or query",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+			t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+			t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+			t.Setenv("BUG_REPORT_PUBLIC_BASE_URL", tt.env)
+
+			if _, err := Load(); err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, tt.wantMsg) {
+				t.Errorf("log does not mention %q for env %q\ngot: %s", tt.wantMsg, tt.env, out)
+			}
+			if !strings.Contains(out, "level="+tt.wantLevel.String()) {
+				t.Errorf("want a %s line for env %q\ngot: %s", tt.wantLevel, tt.env, out)
+			}
+			// The hint is what makes the line actionable — it names the systemd
+			// rule the operator has to apply to a file this process cannot fix.
+			if !strings.Contains(out, "EnvironmentFile") {
+				t.Errorf("log omits the systemd hint for env %q\ngot: %s", tt.env, out)
+			}
+		})
+	}
+
+	// A clean value must stay silent, or the signal is worthless.
+	t.Run("clean value logs nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+		t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+		t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+		t.Setenv("BUG_REPORT_PUBLIC_BASE_URL", "https://aurora.example.com")
+
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if strings.Contains(buf.String(), "BUG_REPORT_PUBLIC_BASE_URL") {
+			t.Errorf("a clean value produced a complaint:\n%s", buf.String())
+		}
+	})
 }

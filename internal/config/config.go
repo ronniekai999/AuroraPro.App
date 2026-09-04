@@ -1440,9 +1440,10 @@ func (c *Config) DisplayAddr() string {
 //
 //	BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com   # no trailing slash
 //
-// reaches this process with the comment attached. The shell does drop it, and
-// scripts/aurora-update.sh sources the same file with `set -a; . file`, so an
-// operator debugging by sourcing sees a clean value while the server does not.
+// reaches this process with the comment attached. The shell does NOT keep it,
+// and scripts/aurora-update.sh sources the same file with `set -a; . file`, so
+// an operator debugging by sourcing sees a clean value while the server does
+// not.
 // That mismatch produced months of dead attachment links in filed issues
 // before anyone looked at a rendered one.
 //
@@ -1455,8 +1456,8 @@ func (c *Config) DisplayAddr() string {
 // The second return reports whether a comment was actually cut, because
 // cleaning silently would only move the original failure down a layer: the bad
 // line stays in /etc/aurora/aurora.env, install.sh carries it forward verbatim
-// on every re-install, and every other reader of that value still sees the
-// comment. The operator has to be told.
+// on every re-install, and anything else reading it with systemd's semantics
+// still gets the comment. The operator has to be told.
 func cleanBaseURL(raw string) (string, bool) {
 	v := strings.TrimSpace(raw)
 	cut := false
@@ -1494,17 +1495,24 @@ func baseURLComplaint(cleaned string) string {
 	if u.Host == "" {
 		return "has no host"
 	}
-	// A fragment or query on a BASE url is silently fatal, which is why it is
+	// A `#` or `?` anywhere in a BASE url is silently fatal, which is why it is
 	// named here rather than stripped. Composition appends the attachment path,
 	// so `https://host/base#frag` becomes
 	// `https://host/base#frag/api/feedback/attachments/x.png` — everything from
 	// the `#` on is never sent to the server, and GitHub's image proxy fetches
 	// `https://host/base` instead. A dead link, with nothing to show for it.
 	//
-	// Note this deliberately does NOT make cleanBaseURL strip fragments: a `#`
-	// that survives the comment cut is one the operator meant, and truncating
-	// it would be guessing. Saying so is the correct response.
-	if u.Fragment != "" || u.RawQuery != "" {
+	// Scanned as characters, NOT via u.Fragment/u.RawQuery, because those are
+	// empty for a TRAILING delimiter: `https://host/#` parses with Fragment ""
+	// and would pass, while composing to `https://host/#/api/...` — the whole
+	// attachment path swallowed into a fragment, fetching `https://host/`.
+	// Worse, cleanBaseURL's trailing-slash strip can CREATE that state, turning
+	// the detectable `https://host/#/` into the undetectable `https://host/#`.
+	//
+	// This deliberately does NOT make cleanBaseURL strip fragments: a `#` that
+	// survives the comment cut is one the operator meant, and truncating it
+	// would be guessing. Saying so is the correct response.
+	if strings.ContainsAny(cleaned, "#?") {
 		return "carries a fragment or query string — everything after it is dropped from attachment links"
 	}
 	return ""
