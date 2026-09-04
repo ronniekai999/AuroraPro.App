@@ -18,6 +18,7 @@
 // orchestrated.
 
 import { useEffect, useRef, useState } from 'react'
+import type { PlaybackDeliveryMode } from './partyPlayer'
 
 const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
 // How long a connected:false reading must persist before useCast reports it
@@ -721,6 +722,7 @@ export function useCast(
     // phantom "now streaming" entry, or spawn a heartbeat goroutine for a
     // response nobody reads.
     const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
+    let fatal: Error | null = null
     try {
       const probe = await fetch(load.contentUrl, {
         method: isPlaylist ? 'GET' : 'HEAD',
@@ -738,10 +740,34 @@ export function useCast(
         contentLength: probe.headers.get('content-length'),
         firstLines: preview,
       })
+      // For a direct file the probe is an exact rehearsal of the receiver's
+      // own fetch — same URL, same token, credentials omitted — so a rejection
+      // here is near-proof the receiver will be rejected too (token revoked
+      // between mint and load, expired, file gone). Recorded now and thrown
+      // BELOW, outside this try: the catch is deliberately swallowing, and
+      // throwing inside it would feed this straight back into the no-op.
+      //
+      // Only the direct branch draws that inference. A playlist probe stays
+      // best-effort diagnostics: the master playlist is not what a receiver
+      // spends its time fetching, and HLS sessions have their own liveness
+      // handling.
+      if (!isPlaylist && !probe.ok) {
+        fatal = new Error(
+          probe.status === 401 || probe.status === 403
+            ? 'This cast link is no longer valid. Try casting again.'
+            : `The Cast device could not reach this title (the server said ${probe.status}).`,
+        )
+      }
     } catch (e) {
+      // A THROWN fetch is not treated as fatal even on the direct branch: it
+      // is as likely to be a sender-side blip (an offline blink, an extension)
+      // as a real server problem, and the receiver fetches independently of us.
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] URL self-test fetch threw:', e)
     }
+    // Stopping here means the receiver never gets media, so start()'s cleanup
+    // tears the just-opened session down rather than stranding it.
+    if (fatal) throw fatal
 
     const media = new window.chrome.cast.media.MediaInfo(load.contentUrl, load.contentType)
     media.streamType = window.chrome.cast.media.StreamType.BUFFERED
@@ -861,15 +887,22 @@ export function useCast(
     if (!session) throw new Error('cast session not established')
 
     // Hand off to the shared loader (also used by the next-episode
-    // auto-advance). Preserve start()'s original cleanup: when there is
-    // nothing to cast, tear the just-opened session back down rather than
-    // stranding an empty receiver after the user picked a device.
+    // auto-advance). If it fails for ANY reason, tear the just-opened session
+    // back down rather than stranding an empty receiver after the user picked
+    // a device.
+    //
+    // This used to fire only for the no-media sentinel, which made every other
+    // failure mode leave the TV sitting on the Default Media Receiver splash
+    // with no way back except the user finding the Stop button — and it forced
+    // callers to funnel unrelated errors through that one string just to get
+    // cleanup. The condition that matters is simply "the receiver never got
+    // media", and that is exactly what an exception here means. Only start()
+    // does this: a FAILED RELOAD of a live cast (token renewal, auto-advance)
+    // must not kill a session the receiver is still happily playing.
     try {
       await loadCurrent()
     } catch (e) {
-      if ((e as Error)?.message === CAST_NO_MEDIA_ERROR) {
-        try { session.endSession(true) } catch { /* defensive */ }
-      }
+      try { session.endSession(true) } catch { /* defensive */ }
       throw e
     }
   }
@@ -1082,7 +1115,7 @@ export function castDirectMatches(
 // `deliveryMode` is the LOCAL player's mode, so it is necessary but never
 // sufficient — hence the target match beside it.
 export function castDirectLoadEligible(
-  deliveryMode: string,
+  deliveryMode: PlaybackDeliveryMode,
   directCast: DirectCastTarget | null | undefined,
   target: { fileId: number; fileType: 'media' | 'episode' } | null | undefined,
 ): boolean {

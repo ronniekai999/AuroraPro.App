@@ -12,6 +12,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -125,5 +127,34 @@ func TestServeDirectCastFile_HeadEnforcesTheSameBinding(t *testing.T) {
 				t.Errorf("HEAD status = %d, want %d (body %q)", rr.Code, tt.want, rr.Body.String())
 			}
 		})
+	}
+}
+
+// The test above proves HEAD enforces the binding; it cannot prove HEAD is
+// ROUTED, because ServeDirectCastFile has no method branch and a handler-level
+// test never consults the router. That gap matters: the sender's cast self-test
+// uses HEAD specifically (issue #503), so if the registration were dropped the
+// probe would 405 on every direct cast — and, since a non-OK probe now aborts
+// the cast, casting direct-play titles would stop working entirely while every
+// test here stayed green.
+//
+// Asserted against router.go's text rather than by building a router, because
+// the real registration needs the full RouterDeps graph and it is the presence
+// of the line that carries the risk.
+func TestDirectCastRouteRegistersBothGetAndHead(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	body := string(src)
+	for _, want := range []string{
+		`r.Get("/api/stream/direct/{fileID}", streamH.ServeDirectCastFile)`,
+		`r.Head("/api/stream/direct/{fileID}", streamH.ServeDirectCastFile)`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("router.go no longer registers:\n  %s\n"+
+				"Both methods are load-bearing: GET serves the receiver, HEAD is the "+
+				"sender's side-effect-free self-test.", want)
+		}
 	}
 }

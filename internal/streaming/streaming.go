@@ -1362,8 +1362,17 @@ func ServeFile(w http.ResponseWriter, r *http.Request, filePath string, allowedR
 		contentType = "video/x-matroska"
 	case ".webm":
 		contentType = "video/webm"
-	case ".mov":
-		contentType = "video/quicktime"
+	// .mov deliberately has no case: it falls through to video/mp4, which is
+	// both accurate (QuickTime is the ISO base media format MP4 derives from)
+	// and the only value consistent with the rest of the system. NormalizeContainer
+	// aliases mov → mp4 at scan time, so a .mov reaches every decision — the
+	// Chromecast direct-play gate included — indistinguishable from an .mp4,
+	// and the sender therefore declares video/mp4 to the receiver. Answering
+	// its range requests with video/quicktime made the DECLARED and SERVED
+	// types disagree on the one path where a disagreement is unrecoverable: a
+	// receiver that refuses the type does not report an error, it resolves
+	// loadMedia and then spins forever (issue #503; the #324/#328 failure
+	// shape). Browsers sniff and were unaffected either way.
 	case ".avi":
 		contentType = "video/x-msvideo"
 	case ".ts", ".m2ts":

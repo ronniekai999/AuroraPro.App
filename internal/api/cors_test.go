@@ -181,6 +181,9 @@ func TestCORS_DirectCastPreflightAllowsRangeRequests(t *testing.T) {
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("preflight ACAO = %q, want %q", got, "*")
 	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("preflight ACAC = %q, want empty (wildcard must stay credential-less)", got)
+	}
 	if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "range") {
 		t.Errorf("preflight Allow-Headers = %q, want it to include range", got)
 	}

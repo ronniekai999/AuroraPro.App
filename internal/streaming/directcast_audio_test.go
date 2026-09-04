@@ -1,6 +1,8 @@
 package streaming
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/models"
@@ -101,5 +103,50 @@ func TestDirectPlayAudioCodecOutOnOrdinaryAndSilentFiles(t *testing.T) {
 	if got := OutputAudioCodec(silent, caps, 0); got == "" {
 		t.Error("audio_codec_out for a silent file is empty; the cast gate " +
 			"fails closed on that, so a silent MP4 would stop casting")
+	}
+}
+
+// The invariant above is a SERVER fact, and the code that depends on it is one
+// field name in TypeScript. Changing `audio_codec_out` to `audio_codec` at that
+// single call site would hand a FLAC-default MP4 to the receiver and leave
+// every Go test in this repo green — so this reads the SPA source, the same way
+// TestSPAProbeEmitsNoNativeOnlyCapabilities does for the caps probe.
+//
+// Deliberately a text assertion rather than a model of how the player builds
+// the probe: it is the field NAME that carries the risk, and a substring check
+// cannot be fooled by a spread, a ternary or a rename of the local.
+const directCastGateCallSite = "../../static/redesign/app/src/components/VideoPlayer.tsx"
+
+func TestSPADirectCastGateReadsTheDefaultTrackCodec(t *testing.T) {
+	src, err := os.ReadFile(directCastGateCallSite)
+	if err != nil {
+		t.Fatalf("read %s: %v", directCastGateCallSite, err)
+	}
+	body := string(src)
+
+	// Locate the gate call and take the object literal it is given.
+	const marker = "castDirectPlaySupported({"
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("no castDirectPlaySupported({...}) call in %s — if the gate moved, "+
+			"move this test with it rather than deleting it", directCastGateCallSite)
+	}
+	rest := body[i+len(marker):]
+	end := strings.Index(rest, "})")
+	if end < 0 {
+		t.Fatalf("could not find the end of the castDirectPlaySupported call")
+	}
+	args := rest[:end]
+
+	if !strings.Contains(args, "audio_codec_out") {
+		t.Errorf("the Chromecast direct-play gate is not fed audio_codec_out.\n"+
+			"It must be: audio_codec is the FIRST audio stream's codec, while the "+
+			"receiver starts the flagged default, so an AAC-at-stream-0 / FLAC-default "+
+			"MP4 passes the gate and then hangs the TV.\ngot: %s", args)
+	}
+	// `audio_codec_out` contains `audio_codec`, so check for the bare field as
+	// a whole property value rather than as a substring.
+	if strings.Contains(args, "stream.audio_codec,") || strings.Contains(args, "stream.audio_codec ") {
+		t.Errorf("the gate reads the bare stream.audio_codec — see above.\ngot: %s", args)
 	}
 }

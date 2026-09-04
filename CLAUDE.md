@@ -327,7 +327,18 @@ Invariants to preserve when touching this area:
 - **The sender self-test probes a media file with HEAD, a playlist with GET.**
   A bare GET of a direct URL pulls the whole movie into the sender before
   `loadMedia` is issued, and the route treats HEAD as an explicit preflight
-  that skips activity rows and the direct-play registry.
+  that skips activity rows and the direct-play registry. Because that probe is
+  an exact rehearsal of the receiver's fetch (same URL, same token, credentials
+  omitted), a NON-OK status on the direct branch aborts the cast rather than
+  being logged — the receiver would otherwise resolve `loadMedia` and spin. A
+  probe that THROWS does not abort: that is as likely to be a sender-side blip.
+  `start()` tears the session down on any load failure, so aborting never
+  strands an idle receiver.
+- **`.mov` serves as `video/mp4`.** `NormalizeContainer` aliases mov → mp4 at
+  scan time, so a `.mov` reaches this gate indistinguishable from an `.mp4` and
+  the sender declares `video/mp4`. `ServeFile` must agree; it used to answer
+  `video/quicktime`, which put the declared and served types in disagreement on
+  the one path where that is unrecoverable.
 - **What the RECEIVER is playing is tracked positively** (`castLoadedMediaRef`,
   promoted only by a resolved `loadMedia`). Do not infer it from
   `deliveryModeRef` (that describes the local `<video>`) or from
@@ -342,20 +353,27 @@ Invariants to preserve when touching this area:
 
 Known limits, stated plainly:
 
-- **Nothing detects a receiver that rejects the media.** `evaluate()` only
+- **Nothing detects a receiver that rejects the MEDIA.** (Auth and reachability
+  ARE caught: the sender's HEAD self-test is an exact rehearsal of the
+  receiver's own fetch, and a rejected direct URL aborts the cast before
+  `loadMedia`.) But for a format the device cannot decode, `evaluate()` only
   inspects `IDLE`/`idleReason` once `castHasPlayedRef` is true, so an
   `IDLE`+`ERROR` that never reached `PLAYING` is ignored and the sender shows
   "Casting to <device>" forever. That is pre-existing, but this change makes it
   the only backstop for every residual the gate cannot see — H.264 level and
-  bitrate (the probe records neither), a `.mov` served as `video/quicktime`
-  while the sender declares `video/mp4`, a 1080p60 High@L4.2 file on a
-  first-generation device. Acting on a pre-play `IDLE`+`ERROR` is the open
+  bitrate (the probe records neither), a 1080p60 High@L4.2 file on a
+  first-generation device, HE-AAC/xHE-AAC (all of which report `aac`). Acting on a pre-play `IDLE`+`ERROR` is the open
   follow-up; it needs an "awaiting first play" state so a receiver's stale
   pre-load status cannot stop the cast we just started.
+- **Subtitles are dropped**, silently and with no message. This is parity with
+  HLS casting (`CloneForCast` drops subtitle renditions for issue #328), but
+  direct play has no burn-in escape hatch — the raw file is the only thing on
+  offer — and a viewer with a track selected locally gets an unsubtitled cast.
 - **A refusal is final for that viewer** — it is NOT a fallback to HLS. A file
   the engine chose direct play for never acquires a session to clone
-  (`CloneForCast` makes an EXISTING session receiver-safe). Casting the
-  remainder would need a cast-only transcode session.
+  (`CloneForCast` makes an EXISTING session receiver-safe). The nearest
+  existing machinery is `onFallbackToTranscode(resumeAtMs)`, which could force
+  an HLS session for the cast; nothing wires it to this path today.
 - **None of the receiver behaviour above is measured.** The gate, the CORS
   requirement and the silent-hang model are reasoned from the CAF contract and
   this repo's own #181/#324/#328 history, not from a real device. One

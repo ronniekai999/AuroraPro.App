@@ -586,7 +586,13 @@ func TestServeFileContentTypeForNativeContainers(t *testing.T) {
 		{"movie.mp4", "video/mp4"},
 		{"movie.m4v", "video/mp4"},
 		{"clip.webm", "video/webm"},
-		{"clip.mov", "video/quicktime"},
+		// .mov serves as video/mp4, not video/quicktime: NormalizeContainer
+		// aliases mov → mp4 at scan time, so a .mov reaches the Chromecast
+		// direct-play gate as an MP4 and the sender declares video/mp4 to the
+		// receiver. The served type has to agree, because a receiver that
+		// refuses it resolves loadMedia and then spins with nothing for the
+		// sender to report (issue #503).
+		{"clip.mov", "video/mp4"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
