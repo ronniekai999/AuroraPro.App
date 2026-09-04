@@ -1131,6 +1131,21 @@ export const CAST_NOTHING_TO_CAST =
 export const CAST_MINT_FAILED =
   'Could not get permission to cast this title. Please try again.'
 
+// castSessionIdFromPlaylist recovers the transcode-session ID out of the
+// playlist URL the cast-token endpoint hands back
+// (/api/stream/hls/{sessionID}/master.m3u8?token=…).
+//
+// That URL is the only place the sender learns which session the RECEIVER
+// is actually streaming. It is often NOT the session the local <video> is
+// playing: the server clones a cast-safe H.264+AAC session when the local
+// one carries codecs the Default Media Receiver can't handle
+// (CloneForCast), and the clone's ID appears nowhere else in the response.
+// The player needs it for two things — keeping that session alive while
+// it's the one feeding the TV, and not deleting it on teardown when the
+// clone was skipped and both surfaces share one session.
+//
+// Returns null on any shape we don't recognize; every caller treats that as
+// "no separate cast session", which is the safe reading.
 export function castSessionIdFromPlaylist(playlist: string): string | null {
   const m = /\/api\/stream\/hls\/([^/?#]+)\/master\.m3u8/.exec(playlist)
   // No decodeURIComponent: session IDs are hex (hex.EncodeToString server-

@@ -933,11 +933,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         return null
       }
       // Both the mint and the scope assertion live inside this try, and both
-      // return null rather than throwing. start() now tears the session down
-      // on ANY load failure, so this is no longer what stops the receiver
-      // being stranded — it is what lets the failure keep its own identity:
-      // returning null routes through the no-media sentinel, which the button
-      // maps to CAST_MINT_FAILED rather than to a raw error string. The real
+      // return NULL rather than throwing. That is load-bearing twice over:
+      // start() tears the just-opened session down for the no-media sentinel
+      // ALONE, so an error thrown from here would leave the receiver stranded
+      // on the Default Media Receiver splash with no sender-side way back —
+      // and returning null routes through that sentinel, which the button maps
+      // to CAST_MINT_FAILED rather than showing a raw error string. The real
       // cause goes to the console.
       let direct: Awaited<ReturnType<typeof createDirectCastToken>>
       try {
@@ -1530,8 +1531,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
   // the new target). Gated on a pending advance + a still-connected receiver;
-  // any load failure (e.g. the next episode is direct-play and has no castable
-  // HLS session) stops the cast, closing the player rather than leaving an idle
+  // any load failure (e.g. the next episode is direct-play in a format the
+  // receiver cannot decode — see castDirectPlaySupported) stops the cast, closing the player rather than leaving an idle
   // receiver hanging.
   useEffect(() => {
     if (!castAdvancePendingRef.current) return
@@ -1562,16 +1563,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // guest-mirror/host-broadcast effect's re-bind handle that automatically).
     // Closing the player would also kick the user out of the party UI.
     //
-    // A session that never carried media is a FAILED ATTEMPT, not a finished
-    // viewing: the user clicked Cast, something went wrong (the picker device
-    // was unreachable, the token mint failed, the receiver refused the media),
-    // and start() ended the session so as not to strand it. Local playback has
-    // been running underneath the whole time. Closing the player there threw
-    // away a half-watched film over a cast that never began — and did it four
-    // seconds later, via the disconnect debounce, with the error toast already
-    // expired and invisible behind the minimized-player overlay. The reporter
-    // of issue #503 hit this repeatedly: their network log is the same title
-    // being reopened after every failed attempt.
+    // KNOWN LIMIT, and this close is unconditional: a session that never
+    // carried media — a failed attempt whose cleanup ended the session — also
+    // reaches this edge, so a cast that never began still closes the player
+    // four seconds later and takes a half-watched film with it. The reporter
+    // of issue #503 hit exactly that: their network log is the same title
+    // being reopened after every attempt.
+    //
+    // Do NOT add the obvious guard here without reading CLAUDE.md's cast
+    // limits first. Four review rounds were spent on it: the flag saying "this
+    // session never loaded" has to survive a reconnect inside the debounce, a
+    // page reload that re-joins a live session, and a `remote` snapshot that
+    // outlives the cast, and each attempt introduced the next defect. It needs
+    // a jsdom harness over these effects, not another predicate.
     if (was && !cast.status.connected && !partyControlsMedia) onClose()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, party, partyControlsMedia])

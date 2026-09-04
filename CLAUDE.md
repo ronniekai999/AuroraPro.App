@@ -327,7 +327,7 @@ Invariants to preserve when touching this area:
 - **The sender self-test probes a media file with HEAD, a playlist with GET.**
   A bare GET of a direct URL pulls the whole movie into the sender before
   `loadMedia` is issued, and the route treats HEAD as an explicit preflight
-  that skips activity rows and the direct-play registry. Because that probe is
+  that skips activity rows and the direct-play registry. That probe is
   an approximation of the receiver's fetch — same URL and token, but
   SAME-ORIGIN and HEAD — and it is DIAGNOSTICS ONLY: a non-OK probe is logged,
   never acted on. It could not see a CORS failure anyway, being same-origin.

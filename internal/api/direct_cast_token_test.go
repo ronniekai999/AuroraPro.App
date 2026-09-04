@@ -134,9 +134,10 @@ func TestServeDirectCastFile_HeadEnforcesTheSameBinding(t *testing.T) {
 // ROUTED, because ServeDirectCastFile has no method branch and a handler-level
 // test never consults the router. That gap matters: the sender's cast self-test
 // uses HEAD specifically (issue #503), so if the registration were dropped the
-// probe would 405 on every direct cast — and, since a non-OK probe now aborts
-// the cast, casting direct-play titles would stop working entirely while every
-// test here stayed green.
+// probe would 405 on every direct cast. The probe is diagnostics only, so that
+// is noise rather than breakage today — but it would also silently remove the
+// one signal a sender has that the URL it is about to hand a receiver is
+// reachable, and every test here would stay green.
 //
 // Asserted against router.go's text rather than by building a router, because
 // the real registration needs the full RouterDeps graph and it is the presence
