@@ -328,29 +328,23 @@ Invariants to preserve when touching this area:
   A bare GET of a direct URL pulls the whole movie into the sender before
   `loadMedia` is issued, and the route treats HEAD as an explicit preflight
   that skips activity rows and the direct-play registry. Because that probe is
-  a near-rehearsal of the receiver's fetch — same URL and token, but SAME-ORIGIN
-  and HEAD — the direct branch aborts on the statuses that are a VERDICT about
-  the URL rather than a transient (`castProbeStatusIsFatal`: 401/403/404/410,
-  and 500 because `ServeFile` answers it deterministically on a stat failure).
-  Everything else proceeds, 405 included: a proxy refusing HEAD must not kill a
-  cast that works. A THROWN fetch never aborts. It proves auth and file
-  existence, NOT CORS: the receiver fetches cross-origin and the probe never
-  does, so a proxy stripping `Access-Control-Allow-Origin` passes the probe and
-  still hangs the TV. `start()` tears the session down on any load failure
-  (unless it JOINED one already playing — keyed on the media session's
-  playerState, since the media object survives going idle).
-- **Ending a cast is one decision, `decideCastEnd`, applied by two effects.**
-  Closing the player and resuming local playback are a matched pair: the local
-  element is paused on the PROMISE that a finished cast closes the player, so a
-  cast that never carried media must instead give playback back. Reasoning
-  about the halves separately came apart on three consecutive review rounds.
-  `castEverLoadedRef` is cleared on the CONNECT edge, which scopes it to a
-  session by construction — a disconnect edge is not always observed (a
-  reconnect inside the 4s debounce produces none) and the player is never
-  unmounted. It is set by our own resolved load OR by
-  `castObservationShowsMedia`, which covers a re-joined session after a reload
-  but distrusts an `isMediaLoaded` carried over from a previous cast (`stop()`
-  bypasses the debounce and never republishes `remote`).
+  an approximation of the receiver's fetch — same URL and token, but
+  SAME-ORIGIN and HEAD — and it is DIAGNOSTICS ONLY: a non-OK probe is logged,
+  never acted on. It could not see a CORS failure anyway, being same-origin.
+  Aborting the cast on a 401/404 is the obviously better behaviour and is
+  deliberately NOT built, because it can only be done safely once a failed load
+  can tear the session down without closing the player — see the limits below.
+- **`start()` tears the session down on the no-media sentinel ALONE.** The
+  refusal paths (gate refusal, mint failure) return null and route through it
+  deliberately, so they get that cleanup. Widening it to every load failure
+  looks strictly better and is not: ending a session reaches the disconnect
+  edge exactly like a finished cast, so the player closes on the debounce and
+  takes a half-watched film with it. Four review rounds were spent trying to
+  hold that open safely — the flag saying "this session never loaded" has to
+  survive a reconnect inside the 4s debounce, a page reload that re-joins a
+  live session, and a `remote` snapshot that outlives the cast — and each
+  attempt introduced the next defect. Do not reopen it without a jsdom harness
+  over the real effects; `lib/castDisconnectDebounce.test.tsx` is the pattern.
 - **`.mov` serves as `video/mp4`.** `NormalizeContainer` aliases mov → mp4 at
   scan time, so a `.mov` reaches this gate indistinguishable from an `.mp4` and
   the sender declares `video/mp4`. `ServeFile` must agree; it used to answer
@@ -370,23 +364,18 @@ Invariants to preserve when touching this area:
 
 Known limits, stated plainly:
 
-- **Nothing detects a receiver that rejects the MEDIA.** (A URL the SERVER
-  refuses is caught: the HEAD self-test aborts on the statuses that are a
-  verdict rather than a hiccup — see `castProbeStatusIsFatal`. It cannot catch
-  CORS, being same-origin, nor a transient it is right to ignore.) But for a
-  format the device cannot decode, `evaluate()` only
-  inspects `IDLE`/`idleReason` once `castHasPlayedRef` is true, so an
-  `IDLE`+`ERROR` that never reached `PLAYING` is ignored and the sender shows
-  "Casting to <device>" forever. That is pre-existing, but this change makes it
-  the only backstop for every residual the gate cannot see — H.264 level and
-  bitrate (the probe records neither), a 1080p60 High@L4.2 file on a
-  first-generation device, HE-AAC/xHE-AAC (all of which report `aac`). Acting on a pre-play `IDLE`+`ERROR` is the open
-  follow-up; it needs an "awaiting first play" state so a receiver's stale
-  pre-load status cannot stop the cast we just started.
-- **Subtitles are dropped**, silently and with no message. This is parity with
-  HLS casting (`CloneForCast` drops subtitle renditions for issue #328), but
-  direct play has no burn-in escape hatch — the raw file is the only thing on
-  offer — and a viewer with a track selected locally gets an unsubtitled cast.
+- **Nothing detects a receiver that rejects the media, or a URL it cannot
+  fetch.** `evaluate()` only inspects `IDLE`/`idleReason` once
+  `castHasPlayedRef` is true, so an `IDLE`+`ERROR` that never reached
+  `PLAYING` is ignored and the sender shows "Casting to <device>" forever.
+  The self-test above sees a bad URL and only logs it. Both wait on the same
+  prerequisite: a way to end a failed cast without closing the player.
+- **A failed cast attempt closes the player**, four seconds later, via the
+  disconnect debounce — so a half-watched film is lost to a cast that never
+  started. This is unchanged from before this feature (the reporter of #503
+  was living with it; their network log is the same title being reopened after
+  every attempt) and is the single highest-value follow-up here, because the
+  two limits above are both blocked on it.
 - **A refusal is final for that viewer** — it is NOT a fallback to HLS. A file
   the engine chose direct play for never acquires a session to clone
   (`CloneForCast` makes an EXISTING session receiver-safe). The nearest

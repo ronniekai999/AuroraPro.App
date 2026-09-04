@@ -722,7 +722,6 @@ export function useCast(
     // phantom "now streaming" entry, or spawn a heartbeat goroutine for a
     // response nobody reads.
     const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
-    let fatal: Error | null = null
     try {
       const probe = await fetch(load.contentUrl, {
         method: isPlaylist ? 'GET' : 'HEAD',
@@ -740,46 +739,17 @@ export function useCast(
         contentLength: probe.headers.get('content-length'),
         firstLines: preview,
       })
-      // For a direct file the probe is an exact rehearsal of the receiver's
-      // own fetch — same URL, same token, credentials omitted — so a rejection
-      // here is near-proof the receiver will be rejected too (token revoked
-      // between mint and load, expired, file gone). Recorded now and thrown
-      // BELOW, outside this try: the catch is deliberately swallowing, and
-      // throwing inside it would feed this straight back into the no-op.
-      //
-      // Only the direct branch draws that inference. A playlist probe stays
-      // best-effort diagnostics: the master playlist is not what a receiver
-      // spends its time fetching, and HLS sessions have their own liveness
-      // handling.
-      //
-      // Fatal is an explicit LIST, not "everything below 500". The question is
-      // never "did this fail" but "will the receiver get the same answer":
-      //   - 401/403 — the token was rejected or revoked between mint and load.
-      //   - 404/410 — the file is gone.
-      //   - 500 — `ServeFile` answers this deterministically when it cannot
-      //     stat the file, so it is a verdict about this URL, not a hiccup;
-      //     lumping it in with 502/503/504 let exactly that case through to
-      //     the indefinite spinner.
-      // Everything else proceeds, including 405: this route only acquired its
-      // HEAD registration for this probe, and a fronting proxy that refuses
-      // HEAD would otherwise abort a cast that would have worked.
-      if (!isPlaylist && castProbeStatusIsFatal(probe.status)) {
-        fatal = new Error(
-          probe.status === 401 || probe.status === 403
-            ? 'This cast link is no longer valid. Try casting again.'
-            : `The Cast device could not reach this title (the server said ${probe.status}).`,
-        )
-      }
+      // Diagnostics only, deliberately: a non-OK probe does NOT abort the
+      // cast. Aborting is the better behaviour on its face — for a direct
+      // file this is nearly the receiver's own fetch, so a 401/404 predicts
+      // its failure — but it can only be done safely if a failed load can
+      // tear the session down without closing the player, and that is the
+      // lifecycle problem start() above declines to reopen. Left as the
+      // documented follow-up rather than half-built.
     } catch (e) {
-      // A THROWN fetch is not treated as fatal even on the direct branch: it
-      // is as likely to be a sender-side blip (an offline blink, an extension)
-      // as a real server problem, and the receiver fetches independently of us.
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] URL self-test fetch threw:', e)
     }
-    // Stopping here means the receiver never gets media, so start()'s cleanup
-    // tears the just-opened session down rather than stranding it.
-    if (fatal) throw fatal
 
     const media = new window.chrome.cast.media.MediaInfo(load.contentUrl, load.contentType)
     media.streamType = window.chrome.cast.media.StreamType.BUFFERED
@@ -899,40 +869,25 @@ export function useCast(
     if (!session) throw new Error('cast session not established')
 
     // Hand off to the shared loader (also used by the next-episode
-    // auto-advance). If it fails for ANY reason, tear the just-opened session
-    // back down rather than stranding an empty receiver after the user picked
-    // a device.
+    // auto-advance). Preserve start()'s original cleanup: when there is
+    // nothing to cast, tear the just-opened session back down rather than
+    // stranding an empty receiver after the user picked a device.
     //
-    // This used to fire only for the no-media sentinel, which made every other
-    // failure mode leave the TV sitting on the Default Media Receiver splash
-    // with no way back except the user finding the Stop button — and it forced
-    // callers to funnel unrelated errors through that one string just to get
-    // cleanup. The condition that matters is simply "the receiver never got
-    // media", and that is exactly what an exception here means. Only start()
-    // does this: a FAILED RELOAD of a live cast (token renewal, auto-advance)
-    // must not kill a session the receiver is still happily playing.
+    // Keyed on the no-media sentinel ALONE, deliberately. Widening it to every
+    // load failure looks obviously better and is not: ending the session
+    // reaches the disconnect edge exactly like a finished cast, so the player
+    // closes on the debounce four seconds later and takes a half-watched film
+    // with it. Four review rounds were spent trying to hold that open safely —
+    // the flag saying "this session never loaded anything" has to survive a
+    // reconnect inside the debounce, a page reload that re-joins a live
+    // session, and a `remote` snapshot that outlives the cast — and each fix
+    // introduced the next defect. Callers that want teardown route through the
+    // sentinel; anything else leaves the session alone. See CLAUDE.md's
+    // known-limits for the two behaviours this leaves on the table.
     try {
       await loadCurrent()
     } catch (e) {
-      // ...unless the session was already playing something when we joined it.
-      // "This tab is not connected" is not "no session exists": autoJoinPolicy
-      // is tab-and-origin scoped, so a second tab shows a live Cast button and
-      // requestSession() JOINS the running session rather than starting one.
-      // Tearing that down would stop a cast another tab is happily playing.
-      //
-      // The predicate is the media session's PLAYER STATE, not its mere
-      // existence. CAF does not null the media object when playback goes idle
-      // — that is exactly why idleReason is read off it — so `getMediaSession()
-      // != null` is also true for a session of OUR own whose media has
-      // finished or errored, and suppressing the teardown there would strand
-      // the receiver on the splash screen with no sender-side way back, which
-      // is the thing this whole branch exists to prevent.
-      let joinedLiveMedia = false
-      try {
-        const state = session.getMediaSession?.()?.playerState
-        joinedLiveMedia = state === 'PLAYING' || state === 'PAUSED' || state === 'BUFFERING'
-      } catch { /* defensive */ }
-      if (!joinedLiveMedia) {
+      if ((e as Error)?.message === CAST_NO_MEDIA_ERROR) {
         try { session.endSession(true) } catch { /* defensive */ }
       }
       throw e
@@ -1176,104 +1131,6 @@ export const CAST_NOTHING_TO_CAST =
 export const CAST_MINT_FAILED =
   'Could not get permission to cast this title. Please try again.'
 
-// --- Cast lifecycle decisions -------------------------------------------
-//
-// These two functions exist because the logic they hold was, for three review
-// rounds running, mutable refs read by three effects four hundred lines apart
-// in a component with no test file — where the invariant "this flag describes
-// the CURRENT cast session" was not expressible, only asserted in a comment
-// about effect declaration order. Each round's patch was right for the case it
-// aimed at and opened the next one. Here the same rules are total, pure, and
-// pinned by tests, and the player only applies the outcome.
-
-export interface CastMediaObservation {
-  connected: boolean
-  // useCast does not trust `remote` during the disconnect debounce or the
-  // post-reconnect settle window.
-  settling: boolean
-  isMediaLoaded: boolean
-  // Monotonic counter bumped on every genuine `remote` republish.
-  updateSeq: number
-  // updateSeq sampled at the moment this session connected, or null if no
-  // session is in progress.
-  seqAtConnect: number | null
-}
-
-// castObservationShowsMedia: does this reading prove the receiver holds media
-// FOR THE SESSION NOW IN PROGRESS?
-//
-// The sequence check is the load-bearing part. `remote` is a snapshot that
-// persists across sessions — `stop()` deliberately bypasses the debounce and
-// never forces a republish, so `isMediaLoaded` can still read true from a cast
-// that ended — and VideoPlayer is never unmounted, so nothing resets it. Read
-// naively at a later connect edge, a stale true marks a brand-new session as
-// already loaded, and a failed cast then closes the player over a
-// half-watched film. Requiring an update STRICTLY AFTER the connect edge is
-// the same distrust `seqAtSettleClearRef` applies to the settle window.
-export function castObservationShowsMedia(o: CastMediaObservation): boolean {
-  if (!o.connected || o.settling || !o.isMediaLoaded) return false
-  return o.seqAtConnect === null || o.updateSeq !== o.seqAtConnect
-}
-
-// What should happen to the LOCAL player when a cast session ends.
-export type CastEndAction =
-  // The cast was a real viewing that has finished: close the player rather
-  // than hand a stopped Chromecast back to a phantom full-screen local player
-  // over whatever view the user navigated to.
-  | 'close'
-  // The cast never carried media, so this was a failed ATTEMPT: give the user
-  // back the film that was playing when they pressed Cast. Local playback was
-  // paused on the promise that 'close' would follow, and it will not.
-  | 'resume'
-  | 'none'
-
-export interface CastEndInput {
-  // Did the receiver ever hold media during this session?
-  everLoaded: boolean
-  // Did WE pause the local element for this cast (vs the user pausing it)?
-  pausedByCast: boolean
-  // A party owns this media's play state.
-  partyControlsMedia: boolean
-}
-
-// decideCastEnd is deliberately ONE function for both outcomes, called by both
-// effects, so "close" and "resume" cannot disagree about the same cast. They
-// are a matched pair: the pause is taken on the promise that a close follows,
-// and every time the two were reasoned about separately the pair came apart.
-export function decideCastEnd(i: CastEndInput): CastEndAction {
-  // Under a party, a cast ending is not the end of the viewing: playback falls
-  // back to the party-synced local element, whose play state the party mirror
-  // owns. Closing would kick the user out of the party UI, and resuming would
-  // play against a party that may be paused.
-  if (i.partyControlsMedia) return 'none'
-  if (i.everLoaded) return 'close'
-  return i.pausedByCast ? 'resume' : 'none'
-}
-
-// Probe statuses that are a VERDICT about the URL rather than a transient
-// failure, i.e. ones the receiver's own fetch will meet identically. See the
-// self-test in loadCurrent for why the distinction decides whether a cast
-// aborts. Exported for the tests; the set is deliberately small and explicit.
-export function castProbeStatusIsFatal(status: number): boolean {
-  return status === 401 || status === 403 || status === 404 ||
-    status === 410 || status === 500
-}
-
-// castSessionIdFromPlaylist recovers the transcode-session ID out of the
-// playlist URL the cast-token endpoint hands back
-// (/api/stream/hls/{sessionID}/master.m3u8?token=…).
-//
-// That URL is the only place the sender learns which session the RECEIVER
-// is actually streaming. It is often NOT the session the local <video> is
-// playing: the server clones a cast-safe H.264+AAC session when the local
-// one carries codecs the Default Media Receiver can't handle
-// (CloneForCast), and the clone's ID appears nowhere else in the response.
-// The player needs it for two things — keeping that session alive while
-// it's the one feeding the TV, and not deleting it on teardown when the
-// clone was skipped and both surfaces share one session.
-//
-// Returns null on any shape we don't recognize; every caller treats that as
-// "no separate cast session", which is the safe reading.
 export function castSessionIdFromPlaylist(playlist: string): string | null {
   const m = /\/api\/stream\/hls\/([^/?#]+)\/master\.m3u8/.exec(playlist)
   // No decodeURIComponent: session IDs are hex (hex.EncodeToString server-

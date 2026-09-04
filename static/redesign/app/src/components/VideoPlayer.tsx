@@ -85,9 +85,7 @@ import {
   castDirectMatches,
   castDirectPlaySupported,
   castLoadedIsDirectFor,
-  castObservationShowsMedia,
   castSessionIdFromPlaylist,
-  decideCastEnd,
   useCast,
   type CastLoadedMedia,
   type DirectCastTarget,
@@ -905,17 +903,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // for the title to start playing" — which is untrue and unactionable when
   // the title is plainly already playing.
   const castMintFailedRef = useRef(false)
-  // Did THIS cast session ever actually carry media? Read at the disconnect
-  // edge to decide whether the cast ending should close the player.
-  //
-  // A cast that dies before it ever loaded is not the end of a viewing — it is
-  // a failed attempt, and local playback is still running underneath it. Ending
-  // the session (which start() does on any load failure, so the receiver is not
-  // stranded) reaches the disconnect edge exactly like a finished cast would,
-  // and without this the player unmounted ~4s later and took a half-watched
-  // film with it. Distinct from castLoadedMediaRef, which the disconnect
-  // effect above clears before this one runs.
-  const castEverLoadedRef = useRef(false)
   if (!castSessionRef.current) {
     castSessionRef.current = createCastSessionTracker({
       localSessionId: () => sessionIdRef.current,
@@ -1123,7 +1110,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         if (castPendingMediaRef.current) {
           castLoadedMediaRef.current = castPendingMediaRef.current
         }
-        castEverLoadedRef.current = true
       } catch (e) {
         castSessionRef.current?.abandon()
         throw e
@@ -1211,45 +1197,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // (buffering on a paused-then-disconnected receiver). Either way,
   // on cast end we no longer override their state.
   const pausedByCastRef = useRef(false)
-  // castEverLoadedRef, observed rather than caused. A resolved loadMedia in
-  // THIS player instance is not the only way a receiver comes to be playing:
-  // the CAF session outlives the page, and with the SDK's default
-  // resumeSavedSession a reload mid-cast re-joins a live one against a fresh
-  // player that has loaded nothing itself. Keying the close decision on our
-  // own load alone would then leave the full-screen player slamming over
-  // whatever view the user was browsing when that cast ended — precisely the
-  // outcome the cast-end effect exists to prevent. isMediaLoaded reports what
-  // the RECEIVER has, so it covers the re-join. `settling` is excluded
-  // because `remote` is explicitly not trusted during that window.
-  //
-  // Declared ABOVE the pause effect and the cast-end effect, both of which
-  // read this ref, so it is already up to date when they run.
-  //
-  // Cleared on the CONNECT edge, not the disconnect one. That makes the flag
-  // session-scoped by construction: it cannot describe a previous cast,
-  // whatever order the disconnect effects run in or whether a disconnect edge
-  // was observed at all (a re-connect inside the 4s debounce cancels the timer
-  // and produces none). VideoPlayer is never unmounted — App renders it
-  // unconditionally and it bails at render time on a null target — so nothing
-  // else resets it.
-  const seqAtCastConnectRef = useRef<number | null>(null)
-  const castWasConnectedRef = useRef(false)
-  useEffect(() => {
-    if (cast.status.connected && !castWasConnectedRef.current) {
-      castEverLoadedRef.current = false
-      seqAtCastConnectRef.current = cast.remote.updateSeq
-    }
-    castWasConnectedRef.current = cast.status.connected
-    if (castObservationShowsMedia({
-      connected: cast.status.connected,
-      settling: cast.status.settling,
-      isMediaLoaded: cast.remote.isMediaLoaded,
-      updateSeq: cast.remote.updateSeq,
-      seqAtConnect: seqAtCastConnectRef.current,
-    })) {
-      castEverLoadedRef.current = true
-    }
-  }, [cast.status.connected, cast.status.settling, cast.remote.isMediaLoaded, cast.remote.updateSeq])
   useEffect(() => {
     const vid = videoRef.current
     if (!vid) return
@@ -1280,38 +1227,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         vid.removeEventListener('play', onLocalPlay)
       }
     }
-    // Cast ended.
+    // Cast ended. Do NOT auto-resume LOCAL playback — the cast-end effect
+    // below closes the player rather than handing a finished/stopped
+    // Chromecast back to a phantom full-screen local player over whatever
+    // view the user navigated to (which would also briefly double the audio).
+    // Just clear the flag. AirPlay never sets this ref (its <video> is the
+    // live mirrored source and keeps playing on handoff), so it's unaffected.
     //
-    // A cast that CARRIED media: do NOT auto-resume local playback — the
-    // cast-end effect below closes the player rather than handing a
-    // finished/stopped Chromecast back to a phantom full-screen local player
-    // over whatever view the user navigated to (which would also briefly
-    // double the audio). Just clear the flag.
-    //
-    // A cast that never loaded anything: resume. These two effects are a
-    // matched pair — the pause above is taken on the PROMISE that the
-    // cast-end effect will close the player, and for a failed attempt that
-    // effect now deliberately does not (see castEverLoadedRef there). Without
-    // this arm the film comes back full-screen and silently PAUSED at its
-    // pre-cast position, with nothing on screen saying why: the toast that
-    // explained it expires before the 4s disconnect debounce even fires. The
-    // user pressed Cast, not Pause.
-    //
-    // AirPlay never sets this ref (its <video> is the live mirrored source and
-    // keeps playing on handoff), so it is unaffected either way.
-    //
-    // decideCastEnd is shared with the cast-end effect below so the two halves
-    // of that pair cannot disagree about the same cast; it also owns the party
-    // case, where the party mirror — not this effect — decides play state.
-    if (decideCastEnd({
-      everLoaded: castEverLoadedRef.current,
-      pausedByCast: pausedByCastRef.current,
-      partyControlsMedia,
-    }) === 'resume') {
-      void vid.play().catch(() => { /* autoplay policy — leave it paused */ })
-    }
+    // This pairs with start()'s sentinel-only teardown in lib/cast.ts: a
+    // failed cast attempt closes the player too, which is unchanged from
+    // before this feature and is recorded as a known limit rather than fixed
+    // here — four review rounds of trying produced a new defect each time.
     pausedByCastRef.current = false
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected])
 
   // AirPlay active-state detection. Safari fires
@@ -1645,17 +1572,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // expired and invisible behind the minimized-player overlay. The reporter
     // of issue #503 hit this repeatedly: their network log is the same title
     // being reopened after every failed attempt.
-    if (was && !cast.status.connected && decideCastEnd({
-      everLoaded: castEverLoadedRef.current,
-      pausedByCast: pausedByCastRef.current,
-      partyControlsMedia,
-    }) === 'close') {
-      onClose()
-    }
-    // No reset here: the flag is cleared on the CONNECT edge instead, which
-    // scopes it to a session without depending on a disconnect edge ever being
-    // observed (a reconnect inside the debounce produces none) or on this
-    // effect running after the one that reads it.
+    if (was && !cast.status.connected && !partyControlsMedia) onClose()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, party, partyControlsMedia])
 
