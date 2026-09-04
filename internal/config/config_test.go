@@ -653,3 +653,163 @@ func TestValidate_PortWildcardAndExplicitOK(t *testing.T) {
 		})
 	}
 }
+
+// The value that produced this test filed months of GitHub issues whose
+// attachment link was dead, and logged nothing at all while doing it:
+//
+//	BUG_REPORT_PUBLIC_BASE_URL=https://aurorapro.app   # no trailing slash
+//
+// systemd's EnvironmentFile= has no inline-comment support, so the whole
+// string after the `=` reached the process and was concatenated straight into
+// the issue body. The old normalization was TrimRight(v, "/"), a no-op here,
+// and the startup checks only looked at the scheme prefix — which this value
+// has — so it took the happy path in silence.
+//
+// The shell disagrees, which is what hid it: scripts/aurora-update.sh sources
+// the same file with `set -a; . file`, so an operator debugging by sourcing
+// saw a clean value.
+func TestBugReportPublicBaseURL_Sanitizes(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want string
+	}{
+		{
+			// The exact production value from issue #503.
+			name: "inline comment systemd would have kept",
+			env:  "https://aurorapro.app   # no trailing slash",
+			want: "https://aurorapro.app",
+		},
+		{
+			name: "tab-preceded comment",
+			env:  "https://aurora.example.com\t# note",
+			want: "https://aurora.example.com",
+		},
+		{
+			name: "comment plus the trailing slash it warns about",
+			env:  "https://aurora.example.com/  # no trailing slash",
+			want: "https://aurora.example.com",
+		},
+		{
+			name: "trailing spaces alone",
+			env:  "https://aurora.example.com   ",
+			want: "https://aurora.example.com",
+		},
+		{
+			name: "leading spaces alone",
+			env:  "   https://aurora.example.com",
+			want: "https://aurora.example.com",
+		},
+		{
+			name: "trailing slash alone — the original rule still applies",
+			env:  "https://aurora.example.com/",
+			want: "https://aurora.example.com",
+		},
+		{
+			name: "several trailing slashes",
+			env:  "https://aurora.example.com///",
+			want: "https://aurora.example.com",
+		},
+		{
+			// A `#` NOT preceded by whitespace is part of the value. Cutting
+			// at every `#` would silently truncate a legitimate URL, which is
+			// a worse failure than the one being fixed: it would break a
+			// working config rather than repair a broken one.
+			name: "bare # inside the value survives",
+			env:  "https://aurora.example.com/base#frag",
+			want: "https://aurora.example.com/base#frag",
+		},
+		{
+			name: "# immediately after the host survives",
+			env:  "https://aurora.example.com#anchor",
+			want: "https://aurora.example.com#anchor",
+		},
+		{
+			name: "a path is preserved, only the trailing slash goes",
+			env:  "https://aurora.example.com/aurora/",
+			want: "https://aurora.example.com/aurora",
+		},
+		{
+			name: "clean value is untouched",
+			env:  "https://aurora.example.com",
+			want: "https://aurora.example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+			t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+			t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+			t.Setenv("BUG_REPORT_PUBLIC_BASE_URL", tt.env)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if got := cfg.BugReport.PublicBaseURL; got != tt.want {
+				t.Errorf("PublicBaseURL = %q, want %q (from env %q)", got, tt.want, tt.env)
+			}
+			// The point of the whole exercise: the URL this config composes
+			// must be one GitHub's image proxy can actually fetch.
+			attachment := cfg.BugReport.PublicBaseURL + "/api/feedback/attachments/x.png"
+			if strings.ContainsAny(attachment, " \t") {
+				t.Errorf("composed attachment URL contains whitespace: %q", attachment)
+			}
+		})
+	}
+}
+
+// The token and repo take the same route through systemd and fail the same
+// way, with a symptom that names nothing: an opaque 401 or 404 from GitHub.
+func TestBugReportGitHubCredentials_Trimmed(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("BUG_REPORT_GITHUB_TOKEN", "  ghp_exampletoken  ")
+	t.Setenv("BUG_REPORT_GITHUB_REPO", "  owner/repo  ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := cfg.BugReport.GitHubToken; got != "ghp_exampletoken" {
+		t.Errorf("GitHubToken = %q, want it trimmed", got)
+	}
+	if got := cfg.BugReport.GitHubRepo; got != "owner/repo" {
+		t.Errorf("GitHubRepo = %q, want it trimmed", got)
+	}
+}
+
+// baseURLComplaint is what turns the defect above from silent into loud. It is
+// tested directly because the warn switch it feeds only logs.
+func TestBaseURLComplaint(t *testing.T) {
+	sound := []string{
+		"https://aurora.example.com",
+		"http://aurora.example.com",
+		"https://aurora.example.com/aurora",
+		"https://aurora.example.com:8443",
+		"https://aurora.example.com/base#frag",
+	}
+	for _, s := range sound {
+		if c := baseURLComplaint(s); c != "" {
+			t.Errorf("baseURLComplaint(%q) = %q, want no complaint", s, c)
+		}
+	}
+
+	// Whitespace surviving the CLEAN is the signature of the systemd/shell
+	// mismatch — something was in the value that the comment cut did not
+	// explain away.
+	unsound := []string{
+		"https://aurora.example.com   # no trailing slash",
+		"https://aurora example.com",
+		"aurora.example.com",
+		"",
+		"/api/feedback",
+	}
+	for _, s := range unsound {
+		if baseURLComplaint(s) == "" {
+			t.Errorf("baseURLComplaint(%q) = \"\", want a complaint", s)
+		}
+	}
+}

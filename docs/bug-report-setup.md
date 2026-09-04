@@ -62,6 +62,20 @@ BUG_REPORT_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com
 ```
 
+> **Keep comments on their own line.** systemd's `EnvironmentFile=` has no
+> inline-comment support — it keeps everything after the `=`. Condensing the
+> note above onto the value line:
+>
+> ```
+> BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com   # no trailing slash
+> ```
+>
+> sets the base URL to `https://aurora.example.com   # no trailing slash`, and
+> every attachment link Aurora writes into an issue is then dead. Aurora now
+> strips such a comment and logs an ERROR at startup naming the value, but the
+> file is still the place to get it right. Note the shell disagrees: sourcing
+> this file to check a value drops the comment, so it looks fine there.
+
 ### Optional tunables
 
 Override any of these if the defaults don't fit your deployment.
@@ -133,6 +147,17 @@ Aurora logs the missing var at startup — check the server log for the
 You're submitting with an attachment but the public URL isn't set. Set
 `BUG_REPORT_PUBLIC_BASE_URL` to your externally-reachable Aurora URL
 (no trailing slash) and restart.
+
+### Filed issues have a dead attachment link
+Look at the URL in the issue body. If it contains anything after the host that
+you did not put there — most likely an inline `# comment` — the env file has it
+on the value line, where systemd keeps it (see the box in step 3). Aurora cuts
+such comments now and logs
+`BUG_REPORT_PUBLIC_BASE_URL contains whitespace …` at ERROR on startup, so
+check the server log first. Fix the line in `/etc/aurora/aurora.env`, move the
+comment to its own line, and restart. Links in issues already filed have to be
+repaired by hand — the attachment files are intact on disk and still served at
+`/api/feedback/attachments/{name}`.
 
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)
