@@ -147,14 +147,21 @@ declare global {
     endSession(stopCasting: boolean): void
   }
 
-  // The receiver's current media session (chrome.cast.media.Media). We only
-  // read idleReason: the RemotePlayer exposes playerState ('IDLE') but NOT why
-  // it went idle, and that distinction lives here.
+  // The receiver's current media session (chrome.cast.media.Media). We read
+  // idleReason — the RemotePlayer exposes playerState ('IDLE') but NOT why it
+  // went idle, and that distinction lives here — and this object's OWN
+  // playerState, which answers a different question than the RemotePlayer's:
+  // "is the session I just joined already playing something?".
   interface CastMediaSession {
     // Why playback went IDLE: 'FINISHED' on natural end-of-media,
     // 'CANCELLED'/'INTERRUPTED' on a user stop or media switch, 'ERROR' on
     // failure. Null/undefined until the media has gone idle at least once.
     idleReason?: string | null
+    // 'IDLE' | 'PLAYING' | 'PAUSED' | 'BUFFERING'. Load-bearing because the
+    // media object SURVIVES going idle (that is how idleReason above is
+    // readable at all), so its mere existence cannot distinguish "a cast
+    // another tab is playing" from "our own cast that already finished".
+    playerState?: string | null
   }
 
   // ---- WebKit-prefixed Fullscreen API ----

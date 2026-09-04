@@ -358,10 +358,11 @@ Invariants to preserve when touching this area:
 
 Known limits, stated plainly:
 
-- **Nothing detects a receiver that rejects the MEDIA.** (Auth and reachability
-  ARE caught: the sender's HEAD self-test is an exact rehearsal of the
-  receiver's own fetch, and a rejected direct URL aborts the cast before
-  `loadMedia`.) But for a format the device cannot decode, `evaluate()` only
+- **Nothing detects a receiver that rejects the MEDIA.** (A URL the SERVER
+  refuses is caught: the HEAD self-test aborts on the statuses that are a
+  verdict rather than a hiccup — see `castProbeStatusIsFatal`. It cannot catch
+  CORS, being same-origin, nor a transient it is right to ignore.) But for a
+  format the device cannot decode, `evaluate()` only
   inspects `IDLE`/`idleReason` once `castHasPlayedRef` is true, so an
   `IDLE`+`ERROR` that never reached `PLAYING` is ignored and the sender shows
   "Casting to <device>" forever. That is pre-existing, but this change makes it

@@ -752,13 +752,18 @@ export function useCast(
       // spends its time fetching, and HLS sessions have their own liveness
       // handling.
       //
-      // 5xx is excluded, for the same reason a thrown fetch is: a reverse
-      // proxy hiccup is transient and says nothing about whether the
-      // receiver's own independent fetch will succeed. What IS fatal is a
-      // verdict about this URL — the token was rejected or revoked between
-      // mint and load, or the file is gone — because the receiver will get
-      // the identical answer.
-      if (!isPlaylist && !probe.ok && probe.status < 500) {
+      // Fatal is an explicit LIST, not "everything below 500". The question is
+      // never "did this fail" but "will the receiver get the same answer":
+      //   - 401/403 — the token was rejected or revoked between mint and load.
+      //   - 404/410 — the file is gone.
+      //   - 500 — `ServeFile` answers this deterministically when it cannot
+      //     stat the file, so it is a verdict about this URL, not a hiccup;
+      //     lumping it in with 502/503/504 let exactly that case through to
+      //     the indefinite spinner.
+      // Everything else proceeds, including 405: this route only acquired its
+      // HEAD registration for this probe, and a fronting proxy that refuses
+      // HEAD would otherwise abort a cast that would have worked.
+      if (!isPlaylist && castProbeStatusIsFatal(probe.status)) {
         fatal = new Error(
           probe.status === 401 || probe.status === 403
             ? 'This cast link is no longer valid. Try casting again.'
@@ -914,8 +919,19 @@ export function useCast(
       // is tab-and-origin scoped, so a second tab shows a live Cast button and
       // requestSession() JOINS the running session rather than starting one.
       // Tearing that down would stop a cast another tab is happily playing.
+      //
+      // The predicate is the media session's PLAYER STATE, not its mere
+      // existence. CAF does not null the media object when playback goes idle
+      // — that is exactly why idleReason is read off it — so `getMediaSession()
+      // != null` is also true for a session of OUR own whose media has
+      // finished or errored, and suppressing the teardown there would strand
+      // the receiver on the splash screen with no sender-side way back, which
+      // is the thing this whole branch exists to prevent.
       let joinedLiveMedia = false
-      try { joinedLiveMedia = !!session.getMediaSession?.() } catch { /* defensive */ }
+      try {
+        const state = session.getMediaSession?.()?.playerState
+        joinedLiveMedia = state === 'PLAYING' || state === 'PAUSED' || state === 'BUFFERING'
+      } catch { /* defensive */ }
       if (!joinedLiveMedia) {
         try { session.endSession(true) } catch { /* defensive */ }
       }
@@ -1159,6 +1175,15 @@ export const CAST_NOTHING_TO_CAST =
 // waiting will not help.
 export const CAST_MINT_FAILED =
   'Could not get permission to cast this title. Please try again.'
+
+// Probe statuses that are a VERDICT about the URL rather than a transient
+// failure, i.e. ones the receiver's own fetch will meet identically. See the
+// self-test in loadCurrent for why the distinction decides whether a cast
+// aborts. Exported for the tests; the set is deliberately small and explicit.
+export function castProbeStatusIsFatal(status: number): boolean {
+  return status === 401 || status === 403 || status === 404 ||
+    status === 410 || status === 500
+}
 
 // castSessionIdFromPlaylist recovers the transcode-session ID out of the
 // playlist URL the cast-token endpoint hands back

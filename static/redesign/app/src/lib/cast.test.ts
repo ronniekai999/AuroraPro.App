@@ -12,6 +12,7 @@ import {
   castDirectMatches,
   castDirectPlaySupported,
   castLoadedIsDirectFor,
+  castProbeStatusIsFatal,
   castSessionIdFromPlaylist,
   describeCastError,
 } from './cast'
@@ -219,5 +220,45 @@ describe('castLoadedIsDirectFor', () => {
   it('is false without a target', () => {
     expect(castLoadedIsDirectFor({ kind: 'direct', fileId: 42, fileType: 'media' }, null))
       .toBe(false)
+  })
+})
+
+// Whether a failed self-test aborts the cast. The question is never "did the
+// probe fail" but "will the receiver's own fetch meet the same answer": abort
+// on a verdict, proceed on a hiccup. Getting it wrong costs a silent spinner
+// in one direction and a refused-but-workable cast in the other.
+describe('castProbeStatusIsFatal', () => {
+  it('aborts on a verdict about this URL', () => {
+    // Token rejected or revoked between mint and load.
+    expect(castProbeStatusIsFatal(401)).toBe(true)
+    expect(castProbeStatusIsFatal(403)).toBe(true)
+    // File gone.
+    expect(castProbeStatusIsFatal(404)).toBe(true)
+    expect(castProbeStatusIsFatal(410)).toBe(true)
+    // ServeFile answers 500 deterministically when it cannot stat the file,
+    // so this one is a verdict despite being 5xx — the case a bare
+    // "status < 500" test let through to the indefinite spinner.
+    expect(castProbeStatusIsFatal(500)).toBe(true)
+  })
+
+  it('proceeds on a transient, which says nothing about the receiver', () => {
+    expect(castProbeStatusIsFatal(502)).toBe(false)
+    expect(castProbeStatusIsFatal(503)).toBe(false)
+    expect(castProbeStatusIsFatal(504)).toBe(false)
+    expect(castProbeStatusIsFatal(429)).toBe(false)
+    expect(castProbeStatusIsFatal(408)).toBe(false)
+  })
+
+  // This route only acquired its HEAD registration for the probe, so a proxy
+  // that refuses HEAD must not abort a cast that would have worked.
+  it('proceeds when the probe METHOD is what was refused', () => {
+    expect(castProbeStatusIsFatal(405)).toBe(false)
+    expect(castProbeStatusIsFatal(501)).toBe(false)
+  })
+
+  it('never aborts on success', () => {
+    for (const ok of [200, 204, 206, 304]) {
+      expect(castProbeStatusIsFatal(ok)).toBe(false)
+    }
   })
 })

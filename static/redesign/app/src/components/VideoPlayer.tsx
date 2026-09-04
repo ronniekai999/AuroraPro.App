@@ -1209,6 +1209,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // (buffering on a paused-then-disconnected receiver). Either way,
   // on cast end we no longer override their state.
   const pausedByCastRef = useRef(false)
+  // castEverLoadedRef, observed rather than caused. A resolved loadMedia in
+  // THIS player instance is not the only way a receiver comes to be playing:
+  // the CAF session outlives the page, and with the SDK's default
+  // resumeSavedSession a reload mid-cast re-joins a live one against a fresh
+  // player that has loaded nothing itself. Keying the close decision on our
+  // own load alone would then leave the full-screen player slamming over
+  // whatever view the user was browsing when that cast ended — precisely the
+  // outcome the cast-end effect exists to prevent. isMediaLoaded reports what
+  // the RECEIVER has, so it covers the re-join. `settling` is excluded
+  // because `remote` is explicitly not trusted during that window.
+  //
+  // Declared ABOVE the pause effect and the cast-end effect, both of which
+  // read this ref, so it is already up to date when they run.
+  useEffect(() => {
+    if (cast.status.connected && !cast.status.settling && cast.remote.isMediaLoaded) {
+      castEverLoadedRef.current = true
+    }
+  }, [cast.status.connected, cast.status.settling, cast.remote.isMediaLoaded])
   useEffect(() => {
     const vid = videoRef.current
     if (!vid) return
@@ -1239,12 +1257,28 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         vid.removeEventListener('play', onLocalPlay)
       }
     }
-    // Cast ended. Do NOT auto-resume LOCAL playback — the cast-end effect
-    // below closes the player rather than handing a finished/stopped
-    // Chromecast back to a phantom full-screen local player over whatever
-    // view the user navigated to (which would also briefly double the audio).
-    // Just clear the flag. AirPlay never sets this ref (its <video> is the
-    // live mirrored source and keeps playing on handoff), so it's unaffected.
+    // Cast ended.
+    //
+    // A cast that CARRIED media: do NOT auto-resume local playback — the
+    // cast-end effect below closes the player rather than handing a
+    // finished/stopped Chromecast back to a phantom full-screen local player
+    // over whatever view the user navigated to (which would also briefly
+    // double the audio). Just clear the flag.
+    //
+    // A cast that never loaded anything: resume. These two effects are a
+    // matched pair — the pause above is taken on the PROMISE that the
+    // cast-end effect will close the player, and for a failed attempt that
+    // effect now deliberately does not (see castEverLoadedRef there). Without
+    // this arm the film comes back full-screen and silently PAUSED at its
+    // pre-cast position, with nothing on screen saying why: the toast that
+    // explained it expires before the 4s disconnect debounce even fires. The
+    // user pressed Cast, not Pause.
+    //
+    // AirPlay never sets this ref (its <video> is the live mirrored source and
+    // keeps playing on handoff), so it is unaffected either way.
+    if (pausedByCastRef.current && !castEverLoadedRef.current) {
+      void vid.play().catch(() => { /* autoplay policy — leave it paused */ })
+    }
     pausedByCastRef.current = false
   }, [cast.status.connected])
 
