@@ -8,22 +8,45 @@ import (
 	"github.com/go-chi/cors"
 )
 
-// hlsAssetPrefix is the route subtree whose responses must be fetchable
-// cross-origin by Chromecast / AirPlay receivers. Everything under it
-// (master/variant playlists, .ts segments, inline subtitle playlists and
-// segments) is authenticated by an unguessable per-session ?token= in the URL
-// (see RequireStreamAuth), so it can safely use a wildcard, credential-LESS
-// CORS policy. Note this is deliberately narrower than "/api/stream/": the
-// sibling cookie-authed endpoints (e.g. POST /api/stream/sessions/{id}/cast-token)
-// must keep the credentialed allowlist.
-const hlsAssetPrefix = "/api/stream/hls/"
+// receiverAssetPrefixes are the route subtrees whose responses must be
+// fetchable cross-origin by Chromecast / AirPlay receivers:
+//
+//   - "/api/stream/hls/" — master/variant playlists, .ts segments, inline
+//     subtitle playlists and segments.
+//   - "/api/stream/direct/" — a whole media file served by byte range, which
+//     is what a DIRECT-PLAY title casts (issue #503). Before that it was
+//     reached only by AirPlay, whose AVPlayer is not a browser sandbox and so
+//     never exercised CORS on it; a Chromecast is the first consumer that
+//     does, and without this it hits exactly the #181 failure below.
+//
+// Everything under these is authenticated by an unguessable ?token= in the URL
+// (both live in the same RequireStreamAuth group), so they can safely use a
+// wildcard, credential-LESS CORS policy. Note this is deliberately narrower
+// than "/api/stream/": the sibling cookie-authed endpoints (e.g. POST
+// /api/stream/sessions/{id}/cast-token, and the browser's own cookie-authed
+// /api/stream/{fileID}/direct) must keep the credentialed allowlist.
+var receiverAssetPrefixes = []string{
+	"/api/stream/hls/",
+	"/api/stream/direct/",
+}
+
+// isReceiverAsset reports whether a CLEANED request path is in one of those
+// subtrees. See the dispatch below for why the path must already be cleaned.
+func isReceiverAsset(cleanedPath string) bool {
+	for _, prefix := range receiverAssetPrefixes {
+		if strings.HasPrefix(cleanedPath, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // corsMiddleware builds the HTTP CORS policy, dispatched by request path.
 //
 // Two policies, because a single go-chi/cors handler can't mix them
 // (AllowCredentials is one bool, and `*`+credentials is rejected by browsers):
 //
-//   - HLS streaming assets (under hlsAssetPrefix) get
+//   - Receiver-fetchable stream assets (under receiverAssetPrefixes) get
 //     `Access-Control-Allow-Origin: *` WITHOUT credentials. A Cast Default
 //     Media Receiver runs in a sandboxed web page on a Google-hosted origin
 //     (e.g. https://www.gstatic.com) and fetches fragments via cross-origin
@@ -72,7 +95,7 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 			// the boundary robust if CleanPath is ever added — the same hardening
 			// posture the codebase took for the highlight-reel / token-promotion
 			// paths (audit H11).
-			if strings.HasPrefix(path.Clean(r.URL.Path), hlsAssetPrefix) {
+			if isReceiverAsset(path.Clean(r.URL.Path)) {
 				streamChain.ServeHTTP(w, r)
 				return
 			}

@@ -18,6 +18,7 @@
 // orchestrated.
 
 import { useEffect, useRef, useState } from 'react'
+import type { PlaybackDeliveryMode } from './partyPlayer'
 
 const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
 // How long a connected:false reading must persist before useCast reports it
@@ -31,6 +32,13 @@ const CAST_DISCONNECT_GRACE_MS = 4000
 export const RECONNECT_SETTLE_MS = 1500
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
+// CAST_NO_MEDIA_ERROR is the sentinel loadCurrent throws when the load getter
+// has nothing to hand the receiver. start() keys its session teardown off the
+// exact string, so it lives here rather than as a literal in two places — and
+// callers that surface errors to users should map it to something a human can
+// read rather than showing it verbatim (it leaked into a user-facing toast in
+// issue #503).
+export const CAST_NO_MEDIA_ERROR = 'no media to cast'
 
 // describeCastError turns a Cast SDK rejection into a human-readable
 // message. The CAF Sender is maddeningly inconsistent about its reject
@@ -673,7 +681,7 @@ export function useCast(
     if (!session) throw new Error('cast session not established')
 
     const load = await Promise.resolve(loadRef.current?.())
-    if (!load) throw new Error('no media to cast')
+    if (!load) throw new Error(CAST_NO_MEDIA_ERROR)
     // >= 0, not > 0 (2026-08 review fix, issue #461 follow-up): 0 is a valid
     // explicit resume position (the party/receiver rewound to the very
     // start), and every caller that passes this argument at all means it as
@@ -693,22 +701,51 @@ export function useCast(
       device: session.getCastDevice().friendlyName,
     })
 
-    // Self-test: try to fetch the master playlist ourselves before
-    // handing it to the receiver. If Chrome can't fetch it, the
-    // receiver definitely won't either, and we can surface a much
-    // clearer error (auth/server problem) than the SDK's silent hang
-    // (receiver-side problem). Best-effort — we don't block casting
-    // on this test, just log the result.
+    // Self-test: try to fetch the media URL ourselves before handing it to
+    // the receiver. If Chrome can't fetch it, the receiver definitely won't
+    // either, and we can surface a much clearer error (auth/server problem)
+    // than the SDK's silent hang (receiver-side problem). Best-effort — we
+    // don't block casting on this test, just log the result.
+    //
+    // The METHOD depends on what contentUrl points at, which since issue #503
+    // is no longer always a playlist.
+    //
+    // A master playlist is a few hundred bytes and its first lines ARE the
+    // diagnostic, so fetch it. A direct-play media file is neither: a bare GET
+    // of one pulls the WHOLE movie into the sender — gigabytes, before
+    // loadMedia is even issued, blocking the cast for minutes and repeating on
+    // every load, renewal and auto-advance — and `.text()` would then try to
+    // build a multi-GB string out of binary MP4. HEAD proves exactly what this
+    // test exists to prove (reachable, token accepted) with no body at all,
+    // and /api/stream/direct/ treats HEAD as an explicit preflight that skips
+    // every side effect, so probing cannot write an activity row, register a
+    // phantom "now streaming" entry, or spawn a heartbeat goroutine for a
+    // response nobody reads.
+    const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
     try {
-      const probe = await fetch(load.contentUrl, { method: 'GET', credentials: 'omit' })
-      const preview = probe.ok ? (await probe.text()).split('\n').slice(0, 3).join(' | ') : ''
+      const probe = await fetch(load.contentUrl, {
+        method: isPlaylist ? 'GET' : 'HEAD',
+        credentials: 'omit',
+      })
+      const preview = probe.ok && isPlaylist
+        ? (await probe.text()).split('\n').slice(0, 3).join(' | ')
+        : ''
       // eslint-disable-next-line no-console
       console.info('[Aurora Cast] URL self-test:', {
+        method: isPlaylist ? 'GET' : 'HEAD',
         status: probe.status,
         ok: probe.ok,
         contentType: probe.headers.get('content-type'),
+        contentLength: probe.headers.get('content-length'),
         firstLines: preview,
       })
+      // Diagnostics only, deliberately: a non-OK probe does NOT abort the
+      // cast. Aborting is the better behaviour on its face — for a direct
+      // file this is nearly the receiver's own fetch, so a 401/404 predicts
+      // its failure — but it can only be done safely if a failed load can
+      // tear the session down without closing the player, and that is the
+      // lifecycle problem start() above declines to reopen. Left as the
+      // documented follow-up rather than half-built.
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] URL self-test fetch threw:', e)
@@ -835,10 +872,22 @@ export function useCast(
     // auto-advance). Preserve start()'s original cleanup: when there is
     // nothing to cast, tear the just-opened session back down rather than
     // stranding an empty receiver after the user picked a device.
+    //
+    // Keyed on the no-media sentinel ALONE, deliberately. Widening it to every
+    // load failure looks obviously better and is not: ending the session
+    // reaches the disconnect edge exactly like a finished cast, so the player
+    // closes on the debounce four seconds later and takes a half-watched film
+    // with it. Four review rounds were spent trying to hold that open safely —
+    // the flag saying "this session never loaded anything" has to survive a
+    // reconnect inside the debounce, a page reload that re-joins a live
+    // session, and a `remote` snapshot that outlives the cast — and each fix
+    // introduced the next defect. Callers that want teardown route through the
+    // sentinel; anything else leaves the session alone. See CLAUDE.md's
+    // known-limits for the two behaviours this leaves on the table.
     try {
       await loadCurrent()
     } catch (e) {
-      if ((e as Error)?.message === 'no media to cast') {
+      if ((e as Error)?.message === CAST_NO_MEDIA_ERROR) {
         try { session.endSession(true) } catch { /* defensive */ }
       }
       throw e
@@ -910,6 +959,177 @@ export function absoluteUrl(path: string): string {
   const origin = window.location.origin
   return path.startsWith('/') ? `${origin}${path}` : `${origin}/${path}`
 }
+
+// --- Direct-play casting --------------------------------------------------
+
+// Containers/codecs the Default Media Receiver (CC1AD845) can be handed as a
+// PROGRESSIVE file — i.e. with no HLS session in front of it. This is the
+// direct-play twin of the server's CloneForCast doctrine.
+//
+// It is deliberately narrower than what the receiver might actually manage,
+// because the two failure modes are not symmetric. A format the receiver
+// cannot decode does NOT surface as an error the sender can catch: loadMedia
+// RESOLVES and the TV then spins forever with nothing to report — the same
+// silent hang issues #324/#328 document on the HLS side. So a false negative
+// costs one honest "can't cast this format" message, while a false positive
+// costs an indefinite spinner and a support ticket. The gate therefore names
+// only what every Cast device generation decodes.
+//
+// Deliberately excluded, all of which a browser may still direct-play:
+//   - VP8/VP9/AV1/HEVC — support varies by device generation, and the
+//     decision engine tells us the container and codec, never which
+//     Chromecast is on the other end.
+//   - Opus/Vorbis/FLAC — fine for browser direct play, not for the receiver.
+//   - webm — see above; its codecs are the ones that vary.
+//
+// A refusal here is final for that viewer, so do not read it as "falls back
+// to HLS": a file the decision engine chose direct play for never acquires a
+// session to clone (CloneForCast makes an EXISTING session receiver-safe, and
+// there is none). Casting it would require minting a cast-only transcode
+// session, which is the open follow-up.
+const CAST_DIRECT_CONTAINERS = new Set(['mp4'])
+const CAST_DIRECT_VIDEO_CODECS = new Set(['h264'])
+const CAST_DIRECT_AUDIO_CODECS = new Set(['aac', 'mp3'])
+// Height ceiling. Codec identity is not the receiver's only limit: the first
+// three Chromecast generations top out at 1080p (and at H.264 L4.1, i.e.
+// 1080p30/720p60), and only Ultra/Google TV decode 4K. The sender is never
+// told which device is on the other end — the picker reports a friendly name,
+// not a model — so a 4K H.264 file admitted on codec identity alone is an
+// indefinite spinner on most of the installed base. 1080p is the height every
+// generation handles.
+//
+// Residual, and deliberately not guessed at: this still cannot see H.264
+// LEVEL or bitrate, so a 1080p60 High@L4.2 file or a 40 Mbps remux is
+// admitted and may still defeat a first-generation device. The probe records
+// neither, and inferring level from resolution alone would be fiction.
+const CAST_DIRECT_MAX_HEIGHT = 1080
+
+// The shape of a direct-play decision that matters to the gate. Field names
+// mirror StreamDecision's, and the values are already normalized server-side
+// (NormalizeContainer runs at scan time, so 'mov' has become 'mp4' long
+// before it reaches us).
+export interface DirectCastProbe {
+  container?: string
+  videoCodec?: string
+  // The codec of the track the receiver will actually START — stream-info's
+  // `audio_codec_out`, NOT `audio_codec`.
+  //
+  // Those differ, and the difference is a trap. `audio_codec` is the FIRST
+  // audio stream's codec ("backward compat" in the scanner); the track a
+  // player starts is the first FLAGGED DEFAULT, which is what the decision
+  // engine reports through audio_codec_out. An MP4 whose stream 0 is AAC and
+  // whose flagged default is FLAC — a shape `ffmpeg -c copy` produces
+  // routinely — direct-plays in Chrome and would pass a gate reading
+  // `audio_codec`, then hand the receiver a default track it cannot decode.
+  audioCodec?: string
+  // "WIDTHxHEIGHT" as the scanner records it, e.g. "1920x1080".
+  resolution?: string
+}
+
+// castDirectPlaySupported reports whether a direct-play file can be handed to
+// the Default Media Receiver as-is. Every field fails closed when absent or
+// unrecognized.
+//
+// What makes the audio side sound is narrower than "we checked the codec", and
+// worth stating because nothing here can enforce it: a `direct_play` decision
+// requires `dpIsDefault`, so the track the engine picked IS the file's
+// effective default — the one the receiver will start. `audio_codec_out`
+// therefore names the codec the receiver actually has to decode. Should
+// DecidePlaybackFor ever admit direct play for a non-default track, this gate
+// would silently start describing the wrong one.
+//
+// Note "" is not reachable from the real data path: OutputAudioCodec falls
+// back to "aac" when a decision carries no audio codec, so a silent file
+// arrives here as "aac" and is admitted — correctly, since a silent MP4 casts
+// fine. The empty case below is defensive only.
+export function castDirectPlaySupported(probe: DirectCastProbe): boolean {
+  const norm = (s?: string) => (s ?? '').trim().toLowerCase()
+  if (!CAST_DIRECT_CONTAINERS.has(norm(probe.container))) return false
+  if (!CAST_DIRECT_VIDEO_CODECS.has(norm(probe.videoCodec))) return false
+  if (!CAST_DIRECT_AUDIO_CODECS.has(norm(probe.audioCodec))) return false
+  return castDirectHeightOK(probe.resolution)
+}
+
+// A missing or unparseable resolution fails closed, for the same reason an
+// unknown codec does.
+function castDirectHeightOK(resolution?: string): boolean {
+  const m = /^\s*(\d+)\s*x\s*(\d+)\s*$/.exec(resolution ?? '')
+  if (!m) return false
+  const height = Number(m[2])
+  return Number.isFinite(height) && height > 0 && height <= CAST_DIRECT_MAX_HEIGHT
+}
+
+// What the receiver is playing. 'session' is the HLS path (the id is the
+// transcode session behind the playlist); 'direct' is a whole media file.
+export type CastLoadedMedia =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'direct'; fileId: number; fileType: 'media' | 'episode' }
+
+// castLoadedIsDirectFor reports whether the receiver is playing THIS target as
+// a direct file. Used to decide whether a scrub can be an in-window receiver
+// seek: only true when the receiver's own media is known and is this file.
+export function castLoadedIsDirectFor(
+  loaded: CastLoadedMedia | null | undefined,
+  target: { fileId: number; fileType: 'media' | 'episode' } | null | undefined,
+): boolean {
+  if (!loaded || loaded.kind !== 'direct' || !target) return false
+  return loaded.fileId === target.fileId && loaded.fileType === target.fileType
+}
+
+// What the player knows about the current direct-play target.
+export interface DirectCastTarget {
+  fileId: number
+  fileType: 'media' | 'episode'
+  supported: boolean
+}
+
+// castDirectMatches reports whether `directCast` describes THIS target.
+//
+// Shared rather than re-derived at each call site: the load path, the
+// pre-flight check and the seek path each need it, and an adversarial review
+// caught them having already drifted apart — the seek path keyed on delivery
+// mode alone, which describes the local <video>, not what the receiver is
+// loaded with.
+export function castDirectMatches(
+  directCast: DirectCastTarget | null | undefined,
+  target: { fileId: number; fileType: 'media' | 'episode' } | null | undefined,
+): boolean {
+  if (!directCast || !target) return false
+  return directCast.fileId === target.fileId && directCast.fileType === target.fileType
+}
+
+// castDirectLoadEligible: may the direct-play cast path be used right now?
+// `deliveryMode` is the LOCAL player's mode, so it is necessary but never
+// sufficient — hence the target match beside it.
+export function castDirectLoadEligible(
+  deliveryMode: PlaybackDeliveryMode,
+  directCast: DirectCastTarget | null | undefined,
+  target: { fileId: number; fileType: 'media' | 'episode' } | null | undefined,
+): boolean {
+  return (
+    deliveryMode === 'direct' &&
+    castDirectMatches(directCast, target) &&
+    !!directCast?.supported
+  )
+}
+
+// Shown when a direct-play title fails the gate above. It says what happened
+// and what still works, and promises nothing about a retry — clicking Cast
+// again will fail identically, which is the whole complaint in issue #503.
+export const CAST_UNSUPPORTED_DIRECT_FORMAT =
+  "This title's format can't be sent to a Chromecast. It will keep playing here in your browser."
+
+// The user-facing reading of CAST_NO_MEDIA_ERROR when nothing more specific
+// is known — the title is still resolving, or its delivery went away between
+// the click and the load.
+export const CAST_NOTHING_TO_CAST =
+  'There is nothing to cast yet. Wait for the title to start playing, then try again.'
+
+// Distinct from the above because the advice differs: the title IS playing,
+// and the server refused or failed to issue the receiver's access token, so
+// waiting will not help.
+export const CAST_MINT_FAILED =
+  'Could not get permission to cast this title. Please try again.'
 
 // castSessionIdFromPlaylist recovers the transcode-session ID out of the
 // playlist URL the cast-token endpoint hands back

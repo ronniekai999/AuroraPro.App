@@ -140,3 +140,75 @@ func TestCORS_APIKeepsCredentialedAllowlist(t *testing.T) {
 		}
 	})
 }
+
+// Issue #503 — a DIRECT-PLAY title casts the media file itself (served by byte
+// range at /api/stream/direct/{fileID}) rather than an HLS playlist. That
+// route predates casting: it was reached only by AirPlay, whose AVPlayer is
+// not a browser sandbox and therefore never exercised CORS on it. A Chromecast
+// is the first consumer that does, so without the wildcard it hits precisely
+// the #181 failure above — loadMedia resolves, then the receiver's own fetch
+// is blocked and the TV drops to idle with nothing for the sender to report.
+func TestCORS_DirectCastAssetsAreWildcardAndCredentialless(t *testing.T) {
+	h := newCORSHandler(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stream/direct/839?type=media&token=t", nil)
+	req.Header.Set("Origin", "https://www.gstatic.com")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("ACAO = %q, want %q (Cast receiver origin must be allowed)", got, "*")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("ACAC = %q, want empty (wildcard must stay credential-less)", got)
+	}
+}
+
+// A whole-file cast is nothing but range requests, so the preflight matters
+// more here than it does for a segment.
+func TestCORS_DirectCastPreflightAllowsRangeRequests(t *testing.T) {
+	h := newCORSHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("preflight must be answered by CORS, not forwarded to the handler")
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/stream/direct/839", nil)
+	req.Header.Set("Origin", "https://www.gstatic.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "range")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("preflight ACAO = %q, want %q", got, "*")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("preflight ACAC = %q, want empty (wildcard must stay credential-less)", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "range") {
+		t.Errorf("preflight Allow-Headers = %q, want it to include range", got)
+	}
+}
+
+// The wildcard subtree must stay narrow. /api/stream/{fileID}/direct is the
+// BROWSER's cookie-authed direct-play route — a different path from
+// /api/stream/direct/{fileID} — and it must keep the credentialed allowlist.
+func TestCORS_CookieAuthedStreamRoutesKeepAllowlist(t *testing.T) {
+	h := newCORSHandler(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	for _, p := range []string{
+		"/api/stream/839/direct?type=media",
+		"/api/stream/sessions/abc123/cast-token",
+		"/api/stream/839/cast-token?type=media",
+		"/api/stream/info/839",
+	} {
+		t.Run(p, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("Origin", "https://www.gstatic.com")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if got := rr.Header().Get("Access-Control-Allow-Origin"); got == "*" {
+				t.Errorf("%s got wildcard ACAO; cookie-authed routes must keep the allowlist", p)
+			}
+		})
+	}
+}

@@ -48,6 +48,18 @@ export interface CastSessionTracker {
   // A cast token was just minted for `id` (null = the playlist URL was not a
   // shape we recognize; treated as "no separate cast session").
   notePending: (id: string | null) => void
+  // A cast load is pending that NO transcode session backs: a direct-play
+  // title, cast as the file itself behind a file-scoped token (issue #503).
+  //
+  // Deliberately not spelled notePending(null). That one means "we could not
+  // read a session id out of this URL" and leaves the live slot alone, which
+  // is the right defensive reading of an unrecognized shape but the wrong
+  // one here: this caller KNOWS there is no session. Committing it must
+  // therefore clear `committed`, or the slot would go on naming the session
+  // the receiver just moved OFF — stranding it for the rest of its lease and
+  // having the keepalive ping renew it, which is the very leak this file
+  // exists to close, reached from the other direction.
+  noteSessionless: () => void
   // loadMedia resolved: the receiver is now on the pending session.
   commit: () => void
   // The load failed. The receiver never touched the pending session, so
@@ -62,13 +74,28 @@ export interface CastSessionTracker {
 }
 
 export function createCastSessionTracker(deps: CastSessionTrackerDeps): CastSessionTracker {
-  let pending: string | null = null
+  // The pending slot carries a THIRD state, so keep it as one value rather
+  // than a string plus a flag that could drift out of sync with it:
+  //   null            — nothing pending
+  //   {session, id}   — a cast token was minted for that session
+  //   {sessionless}   — a load is pending that no session backs at all
+  type Pending = { kind: 'session'; id: string } | { kind: 'sessionless' } | null
+  let pending: Pending = null
   let committed: string | null = null
 
   const release = (id: string | null) => {
     // Nothing to do for the empty case, and never the local session.
     if (!id || id === deps.localSessionId()) return
     deps.release(id)
+  }
+  // Release whatever is in the pending slot, unless it is the session that is
+  // already committed (the receiver is still on it) or `keep` (a re-mint that
+  // resolved to the same session). Only a 'session' pending names anything
+  // releasable; 'sessionless' names nothing.
+  const releasePending = (keep?: string) => {
+    if (pending?.kind !== 'session') return
+    if (pending.id === keep || pending.id === committed) return
+    release(pending.id)
   }
 
   return {
@@ -79,34 +106,51 @@ export function createCastSessionTracker(deps: CastSessionTrackerDeps): CastSess
       // which makes this the defensive branch — but silently dropping the
       // reference is how the leak this file exists to close got in, so
       // release it rather than trust the caller.
-      if (pending && pending !== id && pending !== committed) release(pending)
-      pending = id
+      releasePending(id ?? undefined)
+      // A null id keeps its documented meaning — "no session id could be read
+      // out of this URL" — which commit() then treats as "leave the live slot
+      // alone". Callers that KNOW there is no session say so via
+      // noteSessionless() instead.
+      pending = id === null ? null : { kind: 'session', id }
+    },
+    noteSessionless() {
+      releasePending()
+      pending = { kind: 'sessionless' }
     },
     commit() {
       const next = pending
       pending = null
+      // The receiver is now on media no session backs. Whatever it moved off
+      // is finished: clear the slot so the keepalive ping stops renewing it,
+      // and release it.
+      if (next?.kind === 'sessionless') {
+        const previous = committed
+        committed = null
+        release(previous)
+        return
+      }
       // A re-mint that resolved to the same session (the shared-session case,
       // or a server that handed back the original) replaces nothing.
-      if (!next || next === committed) return
+      if (!next || next.id === committed) return
       const previous = committed
       // Advance FIRST. A release is asynchronous and an in-flight keepalive
       // may be settling against the old id; anything reading `committed`
       // mid-flight must already see the new one, or it will read our own
       // DELETE as a server-side death and tear down a healthy cast.
-      committed = next
+      committed = next.id
       release(previous)
     },
     abandon() {
-      const stillborn = pending
+      releasePending()
       pending = null
-      if (stillborn !== committed) release(stillborn)
     },
     end() {
-      const wasPending = pending
       const finished = committed
+      // Order matters: releasePending reads `committed` to avoid releasing
+      // the live session twice, so clear it only afterwards.
+      releasePending()
       pending = null
       committed = null
-      if (wasPending !== finished) release(wasPending)
       release(finished)
     },
     committed: () => committed,

@@ -210,3 +210,76 @@ describe('createCastSessionTracker', () => {
     })
   })
 })
+
+// A direct-play title is cast as the FILE, behind a file-scoped token, with
+// no transcode session anywhere (issue #503). That is a routine load, not the
+// defensive unrecognized-URL case, and the two must not be conflated: this
+// one knows there is no session, so it has to clear the live slot.
+describe('sessionless cast (direct play)', () => {
+  it('commits as "no session" so the keepalive ping has nothing to renew', () => {
+    const { t, released } = tracker()
+    t.noteSessionless()
+    t.commit()
+    expect(t.committed()).toBeNull()
+    expect(released).toEqual([])
+  })
+
+  // The leak this guards: an HLS title auto-advancing into a direct-play one.
+  it('releases the clone the receiver moved off', () => {
+    const { t, released } = tracker()
+    t.notePending('clone-1'); t.commit()
+
+    t.noteSessionless(); t.commit()
+
+    expect(t.committed()).toBeNull()
+    expect(released).toEqual(['clone-1'])
+  })
+
+  it('never releases the local session when moving off a shared one', () => {
+    const { t, released } = tracker('local-1')
+    t.notePending('local-1'); t.commit()
+
+    t.noteSessionless(); t.commit()
+
+    expect(t.committed()).toBeNull()
+    expect(released).toEqual([])
+  })
+
+  it('keeps the live session when a sessionless load never lands', () => {
+    const { t, released } = tracker()
+    t.notePending('clone-1'); t.commit()
+
+    t.noteSessionless()
+    t.abandon()
+
+    expect(t.committed()).toBe('clone-1')
+    expect(released).toEqual([])
+  })
+
+  it('releases a superseded clone mint rather than dropping it', () => {
+    const { t, released } = tracker()
+    t.notePending('clone-1')
+    // Never loaded: the next load is a direct-play title.
+    t.noteSessionless()
+    t.commit()
+    expect(t.committed()).toBeNull()
+    expect(released).toEqual(['clone-1'])
+  })
+
+  it('releases the committed session when the cast ends sessionless', () => {
+    const { t, released } = tracker()
+    t.notePending('clone-1'); t.commit()
+    t.noteSessionless(); t.commit()
+    t.end()
+    // clone-1 went at the re-point; end() has nothing left to release.
+    expect(released).toEqual(['clone-1'])
+  })
+
+  it('re-points from a direct-play title back onto a clone', () => {
+    const { t, released } = tracker()
+    t.noteSessionless(); t.commit()
+    t.notePending('clone-2'); t.commit()
+    expect(t.committed()).toBe('clone-2')
+    expect(released).toEqual([])
+  })
+})

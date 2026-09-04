@@ -73,7 +73,23 @@ import {
   viewingTerminal,
   type FailureKind,
 } from '@/lib/playbackQoESession'
-import { RECONNECT_SETTLE_MS, absoluteUrl, assertCastScopedToken, castSessionIdFromPlaylist, useCast } from '@/lib/cast'
+import {
+  CAST_MINT_FAILED,
+  CAST_NOTHING_TO_CAST,
+  CAST_NO_MEDIA_ERROR,
+  CAST_UNSUPPORTED_DIRECT_FORMAT,
+  RECONNECT_SETTLE_MS,
+  absoluteUrl,
+  assertCastScopedToken,
+  castDirectLoadEligible,
+  castDirectMatches,
+  castDirectPlaySupported,
+  castLoadedIsDirectFor,
+  castSessionIdFromPlaylist,
+  useCast,
+  type CastLoadedMedia,
+  type DirectCastTarget,
+} from '@/lib/cast'
 import { createCastSessionTracker, type CastSessionTracker } from '@/lib/castSession'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
@@ -541,6 +557,30 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // still resolving". Keep the delivery state explicit so a second rapid seek
   // replaces the pending HLS target instead of touching a detached video node.
   const deliveryModeRef = useRef<PlaybackDeliveryMode>('idle')
+  // What the CAST path needs to know about a direct-play target (issue #503).
+  //
+  // A direct-play title never creates a transcode session, so sessionIdRef
+  // stays null and the session-scoped cast-token mint has nothing to bind to.
+  // Casting one instead means minting a FILE-scoped token and handing the
+  // receiver the file itself — but only when the receiver can actually decode
+  // it, which is a property of the stream-info decision that is otherwise
+  // scoped to the boot effect. Parked here so castLoadGetter, which runs much
+  // later and on a different stack, can read the decision that was in force
+  // when this target booted. Null whenever the current target is not
+  // direct-play, which is what makes it safe to consult unconditionally.
+  const directCastRef = useRef<
+    | (DirectCastTarget & {
+        // Where this target should START if the receiver is handed it before
+        // the local element has taken its resume seek. Direct play defers
+        // that seek to a `canplay` listener, so vid.currentTime is still 0
+        // for as long as the file takes to open — and the Cast button is
+        // live throughout. Casting then started a partially-watched movie
+        // from the beginning. Zeroed once the local seek lands, after which
+        // the element's own clock is authoritative.
+        pendingResumeSec: number
+      })
+    | null
+  >(null)
   const startSecRef = useRef<number>(0)
   // Per-play listener cleanup for <video> event handlers registered by ANY
   // delivery path — direct play's error/resume/subtitle listeners AND the
@@ -842,6 +882,27 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // (created once, lazily) because the callbacks that drive it must keep a
   // stable identity across renders.
   const castSessionRef = useRef<CastSessionTracker | null>(null)
+  // WHICH MEDIA the receiver is actually playing — tracked positively, in the
+  // same pending/committed shape castSessionRef uses and for the same reason:
+  // only a resolved loadMedia proves the receiver took it.
+  //
+  // The absence of a cast session is NOT evidence of this. `committed()` is
+  // null in three different states, and only one of them means "the receiver
+  // is on a direct-play file": it is also null after an unrecognized playlist
+  // URL, and — the reachable one — for a tracker that has simply never
+  // committed anything, because the tracker is per-VideoPlayer-mount while the
+  // CAF session is not. Reload the page mid-cast (the box auto-deploys, so
+  // this is routine) and the SDK's resumeSavedSession re-joins the live
+  // session against a brand-new tracker; inferring "on a direct file" there
+  // would scrub the WRONG title and, for a party host, broadcast that position
+  // to every guest.
+  const castPendingMediaRef = useRef<CastLoadedMedia | null>(null)
+  const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
+  // The last direct-cast attempt failed to mint its token. Without this the
+  // failure fell through to the no-media sentinel's generic wording — "wait
+  // for the title to start playing" — which is untrue and unactionable when
+  // the title is plainly already playing.
+  const castMintFailedRef = useRef(false)
   if (!castSessionRef.current) {
     castSessionRef.current = createCastSessionTracker({
       localSessionId: () => sessionIdRef.current,
@@ -849,11 +910,81 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     })
   }
   const castLoadGetter = useCallback(async () => {
+    if (!target) return null
     const sid = sessionIdRef.current
-    if (!sid || !target) return null
+    if (!sid) {
+      // DIRECT PLAY (issue #503). There is no transcode session to mint a
+      // session-scoped token against — sessionIdRef is only ever assigned on
+      // the HLS branch — so casting one means handing the receiver the FILE
+      // instead of a playlist, behind a file-scoped cast token.
+      //
+      // The token is not optional: this is the same constraint the AirPlay
+      // branch in the boot effect already works around. An external receiver
+      // cannot send our httpOnly auth cookie, so a ?token= URL is the only
+      // one whose range requests won't 401 (#317's direct-play twin). We mint
+      // here rather than reusing the AirPlay mint because that one is gated to
+      // WebKit, and because a token minted at cast time is a full TTL fresh.
+      //
+      // Fails CLOSED to the old behaviour (return null → start() tears the
+      // session back down). castDirectLoadEligible carries the target match
+      // that makes a stale ref harmless: it can never cast the wrong file.
+      const dc = directCastRef.current
+      if (!castDirectLoadEligible(deliveryModeRef.current, dc, target) || !dc) {
+        return null
+      }
+      // Both the mint and the scope assertion live inside this try, and both
+      // return NULL rather than throwing. That is load-bearing twice over:
+      // start() tears the just-opened session down for the no-media sentinel
+      // ALONE, so an error thrown from here would leave the receiver stranded
+      // on the Default Media Receiver splash with no sender-side way back —
+      // and returning null routes through that sentinel, which the button maps
+      // to CAST_MINT_FAILED rather than showing a raw error string. The real
+      // cause goes to the console.
+      let direct: Awaited<ReturnType<typeof createDirectCastToken>>
+      try {
+        direct = await createDirectCastToken(dc.fileId, dc.fileType)
+        // Defense-in-depth, and asserted BEFORE the expiry is recorded: if
+        // this throws, the receiver is still on whatever it had, and
+        // castTokenExpRef must not describe a token that never reached it.
+        assertCastScopedToken(direct.token)
+      } catch (e) {
+        console.warn('[Aurora Cast] direct cast-token mint failed:', e)
+        castMintFailedRef.current = true
+        return null
+      }
+      castMintFailedRef.current = false
+      castTokenExpRef.current = direct.expires_at
+      // No transcode session backs this cast. Tell the tracker so explicitly:
+      // committing it has to CLEAR the committed slot, or a cast that moves
+      // from an HLS title to a direct-play one (a binge crossing an
+      // auto-advance) leaves the old clone named there — keepalive-pinged and
+      // never released for the rest of its 30-minute lease.
+      castSessionRef.current?.noteSessionless()
+      castPendingMediaRef.current = {
+        kind: 'direct',
+        fileId: dc.fileId,
+        fileType: dc.fileType,
+      }
+      return {
+        contentUrl: absoluteUrl(direct.url),
+        // Gated by castDirectPlaySupported, which admits only MP4.
+        contentType: 'video/mp4',
+        title: target.title,
+        subtitle: target.subtitle,
+        // Direct play has no resume offset folded into its timeline —
+        // start_sec is a transcode concept — so the element's clock IS the
+        // absolute source position, the same reading the HLS branch documents
+        // below for its start_sec==0 case. The one moment that clock is NOT
+        // authoritative is before the deferred resume seek has landed, when
+        // it still reads 0 on a partially-watched title; pendingResumeSec
+        // covers exactly that window and is zeroed the moment the seek lands.
+        startTime: (videoRef.current?.currentTime ?? 0) || dc.pendingResumeSec,
+      }
+    }
     const resp = await createCastToken(sid)
     castTokenExpRef.current = resp.expires_at
     castSessionRef.current?.notePending(castSessionIdFromPlaylist(resp.playlist))
+    castPendingMediaRef.current = { kind: 'session', sessionId: sid }
     // Defense-in-depth: confirm the server actually gave us a
     // cast-scoped JWT before we hand its URL to a receiver. A future
     // bug that wired this path to a different token-mint endpoint
@@ -887,6 +1018,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // source position, so this expression is still correct there.
       startTime: videoRef.current?.currentTime ?? 0,
     }
+  }, [target])
+  // Why the current target cannot be cast, or null if it can (issue #503).
+  //
+  // Consulted BEFORE the picker opens. Without it, an unsupported title costs
+  // the user a full device connection that start() tears straight back down —
+  // which is precisely why the original report read as "the Chromecast is
+  // broken" rather than "this file's format cannot be cast": the device had
+  // connected successfully every time.
+  const castUnavailableReason = useCallback((): string | null => {
+    if (deliveryModeRef.current !== 'direct') return null
+    const dc = directCastRef.current
+    // Same target match the load path applies, so the two cannot disagree
+    // about which file is under discussion.
+    if (!castDirectMatches(dc, target)) return null
+    return dc && !dc.supported ? CAST_UNSUPPORTED_DIRECT_FORMAT : null
   }, [target])
   const cast = useCast(castLoadGetter)
   // Stable-identity access to the latest `cast` for the receiver-driven
@@ -958,9 +1104,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       try {
         await op()
         castSessionRef.current?.commit()
+        // Promote alongside the session slot, and only here: op() resolving
+        // IS loadMedia resolving, which is the only proof the receiver took
+        // this media. A getter that ran but whose load then failed must not
+        // move it.
+        if (castPendingMediaRef.current) {
+          castLoadedMediaRef.current = castPendingMediaRef.current
+        }
       } catch (e) {
         castSessionRef.current?.abandon()
         throw e
+      } finally {
+        castPendingMediaRef.current = null
       }
     })
     castLoadGateRef.current = run.catch(() => { /* keep the chain alive */ })
@@ -990,6 +1145,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (isCastTokenExpired()) { reloadCastWithFreshToken(targetSec); return }
     castRef.current.seek(targetSec)
   }
+  // Ref mirror of seekCastSafely for seekToRealSec's use (issue #503).
+  //
+  // NOT a stale-closure fix — seekCastSafely reads only refs, so a captured
+  // copy is exactly as correct as a fresh one (the same reasoning the
+  // keyboard-shortcut effect states above). This is about DEPENDENCY
+  // IDENTITY: seekToRealSec is a useCallback with a curated dep array, and
+  // seekCastSafely is a plain closure recreated every render, so naming it as
+  // a dependency would rebuild the callback — and everything keyed on it — on
+  // every single render. The guest party-sync effect calls seekCastSafely
+  // directly because an effect with a disabled dep array pays no such cost.
+  const seekCastSafelyRef = useRef(seekCastSafely)
+  seekCastSafelyRef.current = seekCastSafely
   const [airplayActive, setAirplayActive] = useState(false)
   const [airplayAvailable, setAirplayAvailable] = useState(false)
   const [minimized, setMinimized] = useState(false)
@@ -1067,6 +1234,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // view the user navigated to (which would also briefly double the audio).
     // Just clear the flag. AirPlay never sets this ref (its <video> is the
     // live mirrored source and keeps playing on handoff), so it's unaffected.
+    //
+    // This pairs with start()'s sentinel-only teardown in lib/cast.ts: a
+    // failed cast attempt closes the player too, which is unchanged from
+    // before this feature and is recorded as a known limit rather than fixed
+    // here — four review rounds of trying produced a new defect each time.
     pausedByCastRef.current = false
   }, [cast.status.connected])
 
@@ -1305,6 +1477,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // three session slots for the full 30-minute lease. The tracker no-ops
       // when the receiver was sharing the local player's session.
       castSessionRef.current?.end()
+      // The receiver is playing nothing now, so no later scrub may assume it
+      // is still on our direct file.
+      castPendingMediaRef.current = null
+      castLoadedMediaRef.current = null
       return
     }
     // settling: a disconnect debounce just resolved and remote hasn't been
@@ -1355,8 +1531,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
   // the new target). Gated on a pending advance + a still-connected receiver;
-  // any load failure (e.g. the next episode is direct-play and has no castable
-  // HLS session) stops the cast, closing the player rather than leaving an idle
+  // any load failure (e.g. the next episode is direct-play in a format the
+  // receiver cannot decode — see castDirectPlaySupported) stops the cast, closing the player rather than leaving an idle
   // receiver hanging.
   useEffect(() => {
     if (!castAdvancePendingRef.current) return
@@ -1386,6 +1562,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // <video> (the receiver-driven sync effect's cleanup + the local
     // guest-mirror/host-broadcast effect's re-bind handle that automatically).
     // Closing the player would also kick the user out of the party UI.
+    //
+    // KNOWN LIMIT, and this close is unconditional: a session that never
+    // carried media — a failed attempt whose cleanup ended the session — also
+    // reaches this edge, so a cast that never began still closes the player
+    // four seconds later and takes a half-watched film with it. The reporter
+    // of issue #503 hit exactly that: their network log is the same title
+    // being reopened after every attempt.
+    //
+    // Do NOT add the obvious guard here without reading CLAUDE.md's cast
+    // limits first. Four review rounds were spent on it: the flag saying "this
+    // session never loaded" has to survive a reconnect inside the debounce, a
+    // page reload that re-joins a live session, and a `remote` snapshot that
+    // outlives the cast, and each attempt introduced the next defect. It needs
+    // a jsdom harness over these effects, not another predicate.
     if (was && !cast.status.connected && !partyControlsMedia) onClose()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, party, partyControlsMedia])
@@ -1787,6 +1977,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // terminal events.
     const sid = sessionIdRef.current
     sessionIdRef.current = null
+    directCastRef.current = null
     deliveryModeRef.current = 'idle'
     // Never delete the session a Chromecast is streaming. When the server
     // decides no cast-safe clone is needed (already H.264 + AAC, no subtitle
@@ -1870,6 +2061,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     setStatus('Loading…')
     setErrorMsg(null)
     sessionIdRef.current = null
+    directCastRef.current = null
     deliveryModeRef.current = 'resolving'
     startSecRef.current = 0
     // Suppress host party-broadcasts until this session has (re)booted —
@@ -2086,12 +2278,35 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           vid.src = directSrc
           vid.load()
           deliveryModeRef.current = 'direct'
+          // Record what a Chromecast would need to know about this target
+          // (issue #503). The codec gate is evaluated HERE, against the
+          // decision that actually chose direct play, rather than at cast
+          // time when `stream` is long out of scope.
+          directCastRef.current = {
+            fileId: target.fileId,
+            fileType: target.fileType,
+            supported: castDirectPlaySupported({
+              container: stream.container,
+              videoCodec: stream.video_codec,
+              // audio_codec_out, NOT audio_codec: the latter is the FIRST
+              // audio stream's codec, while the receiver starts the flagged
+              // default. See DirectCastProbe for the failure that distinction
+              // prevents.
+              audioCodec: stream.audio_codec_out,
+              resolution: stream.resolution,
+            }),
+            pendingResumeSec: resumeSec,
+          }
           // Wait for canplay so the resume seek lands inside a buffered
           // range — seeking before the metadata is parsed is a no-op on
           // most browsers. Declared unconditionally so the cleanup below
           // can always removeEventListener (a no-op if never added).
           const onCanPlayResume = () => {
             vid.currentTime = resumeSec
+            // The element's clock is authoritative from here, including when
+            // the user scrubs back to 0 — so stop offering the resume point
+            // as a cast fallback (issue #503).
+            if (directCastRef.current) directCastRef.current.pendingResumeSec = 0
             vid.removeEventListener('canplay', onCanPlayResume)
           }
           if (resumeSec > 0) {
@@ -2178,9 +2393,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // Booted: either preserve a seek-rebuild pause or re-enable host
           // broadcasts immediately before the intended play.
           await completeTargetPlaybackBoot(vid)
-          // A direct-play target has no castable HLS session; bump anyway so a
-          // pending cast auto-advance resolves (loadCurrent finds no media and
-          // stops the cast — direct-play can't be cast to Chromecast).
+          // A direct-play target has no HLS session, but since issue #503 it
+          // is still castable when the receiver can decode the file itself
+          // (castLoadGetter's direct branch mints a file-scoped token). Bump
+          // so a pending cast auto-advance re-points at it — or, when the
+          // format fails the gate, so loadCurrent finds no media and stops the
+          // cast rather than leaving the receiver on the previous title.
           setCastReloadEpoch(n => n + 1)
           return
         }
@@ -3036,6 +3254,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // moment later. Routing it here is the difference between an
         // explanation and the player simply vanishing.
         castSessionRef.current?.end()
+        castPendingMediaRef.current = null
+        castLoadedMediaRef.current = null
         onToast?.('Casting stopped — the stream expired on the server. Press Cast to start again.', 'error')
         castRef.current.stop()
       })
@@ -4310,13 +4530,37 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // castReloadEpoch reload effect — the same machinery next-episode
     // auto-advance already uses to re-point a live receiver.
     if (cast.status.connected) {
+      // DIRECT PLAY (issue #503, which made this reachable at all). The
+      // receiver holds the whole file and seeks it natively over byte ranges,
+      // so — unlike the HLS case below — there is no session anchor to move
+      // and no produced edge to outrun: an in-window receiver seek is both
+      // sufficient and exact. Still broadcast from the intent for a party
+      // host, exactly as rebuildAtTarget would, and still route through
+      // seekCastSafely so an expired token is renewed first (an expired one
+      // 401s every subsequent range request, which the receiver surfaces as
+      // an indefinite buffer rather than an error).
+      //
+      // The delivery mode alone must NOT decide this: it describes the local
+      // <video>, not what the receiver is loaded with, and the two come apart
+      // whenever the local target moves on while the receiver stays put — an
+      // epoch bump with no advance pending, or a page reload that re-joins a
+      // live session against a fresh player. Seeking then scrubs the WRONG
+      // title and broadcasts that position to the whole party. So ask what the
+      // receiver actually took (castLoadedMediaRef, promoted only by a
+      // resolved loadMedia) rather than inferring it. Anything else falls
+      // through to the rebuild below, which re-points the receiver properly.
+      if (castLoadedIsDirectFor(castLoadedMediaRef.current, target)) {
+        broadcastHostPartySeek()
+        seekCastSafelyRef.current(targetSec)
+        return
+      }
       castAdvancePendingRef.current = true
       if (rebuildAtTarget()) return
-      // Defensive — shouldn't happen for any delivery mode that supports
-      // casting at all (direct-play has no castable HLS session, so
-      // cast.status.connected implies onSeekRebuild is wired). Undo the arm
-      // and fall through to the ordinary paths below so the seek at least
-      // does SOMETHING rather than silently no-op.
+      // rebuildAtTarget succeeding is the NORMAL outcome here, for an HLS
+      // delivery and equally for a 'resolving'/'idle' one with a target
+      // replacement in flight. Reaching past it means onSeekRebuild was not
+      // wired: undo the arm and fall through to the ordinary paths below so
+      // the seek at least does SOMETHING rather than silently no-op.
       castAdvancePendingRef.current = false
     }
 
@@ -5469,6 +5713,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     <button
                       type="button"
                       onClick={() => {
+                        // Issue #503: refuse a title the receiver cannot play
+                        // BEFORE opening the picker, so an unsupported format
+                        // never masquerades as a device fault.
+                        const blocked = castUnavailableReason()
+                        if (blocked) {
+                          flashCastError(blocked)
+                          return
+                        }
+                        // A new attempt: a mint failure recorded by the last
+                        // one must not label this one's outcome. Deliberately
+                        // NOT consulted by the pre-flight above — a mint
+                        // failure is transient, and refusing to retry it
+                        // would strand the user on a stale error.
+                        castMintFailedRef.current = false
                         // runCastLoad releases the mint when the receiver
                         // never takes it (dismissed picker, load_failed,
                         // receiver stall) rather than leaving a stillborn
@@ -5481,11 +5739,31 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                           // killing the in-progress local playback over
                           // a transient cast hiccup. The user can just
                           // click Cast again to retry.
-                          const msg = err instanceof Error ? err.message : String(err)
+                          const raw = err instanceof Error ? err.message : String(err)
+                          // CAST_NO_MEDIA_ERROR is an internal sentinel, not
+                          // a sentence — it reached a user's screen verbatim
+                          // in issue #503. Prefer the specific reason when we
+                          // have one; otherwise say the honest general thing.
+                          const msg =
+                            raw === CAST_NO_MEDIA_ERROR
+                              ? castMintFailedRef.current
+                                ? CAST_MINT_FAILED
+                                : castUnavailableReason() ?? CAST_NOTHING_TO_CAST
+                              : raw
                           if (!/cancel|dismiss/i.test(msg)) {
                             // eslint-disable-next-line no-console
-                            console.warn('[Aurora Cast] start failed:', msg)
-                            flashCastError(msg)
+                            console.warn('[Aurora Cast] start failed:', raw)
+                            // onToast, NOT flashCastError. By the time a start
+                            // can fail, requestSession has usually resolved and
+                            // remoteActive has minimized the player — so the
+                            // inline cast banner lives inside a subtree that is
+                            // opacity-0, inert and aria-hidden, and its 4s timer
+                            // expires unseen. Same reasoning, and the same fix,
+                            // as the keepalive-death message below. Keep the
+                            // inline banner for the PRE-FLIGHT refusal above,
+                            // which returns before any session is opened and so
+                            // always runs against a visible player.
+                            onToast?.(`Cast failed: ${msg}`, 'error')
                           }
                         })
                       }}
