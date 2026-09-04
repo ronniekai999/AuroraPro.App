@@ -3,11 +3,13 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -1276,22 +1278,69 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("BUG_REPORT_ENABLED"); v != "" {
 		cfg.BugReport.Enabled = v == "true" || v == "1" || v == "yes"
 	}
+	// TrimSpace, not cleanBaseURL: these fail the same way (systemd keeps
+	// whatever follows the `=`) with a worse symptom — an opaque 401 or 404
+	// from GitHub that says nothing about the config — but a `#` is legal
+	// inside neither a token nor an owner/repo, so cutting at one would be
+	// inventing a rule where trimming is enough. A stray space is the shape
+	// this actually takes, and it is what the shell would have dropped.
 	if v := os.Getenv("BUG_REPORT_GITHUB_TOKEN"); v != "" {
-		cfg.BugReport.GitHubToken = v
+		cfg.BugReport.GitHubToken = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("BUG_REPORT_GITHUB_REPO"); v != "" {
-		cfg.BugReport.GitHubRepo = v
+		cfg.BugReport.GitHubRepo = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("BUG_REPORT_PUBLIC_BASE_URL"); v != "" {
-		// Strip trailing slash to keep attachment URL composition simple.
-		trimmed := strings.TrimRight(v, "/")
+		// Trim space, cut an inline comment systemd would have kept, and strip
+		// the trailing slash — see cleanBaseURL for why the comment cut is not
+		// paranoia.
+		trimmed, cutComment := cleanBaseURL(v)
 		cfg.BugReport.PublicBaseURL = trimmed
+		// The value is now usable, and that is exactly why this must be said
+		// out loud. Cleaning silently would leave the broken line in
+		// /etc/aurora/aurora.env — where install.sh preserves it verbatim
+		// across every re-install — and make the deployment depend on this
+		// function forever, which is the original silent-acceptance failure
+		// moved one layer down rather than fixed.
+		if cutComment {
+			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL had an inline comment, which was stripped — fix the env file",
+				"used", trimmed,
+				"raw", v,
+				"hint", "systemd EnvironmentFile= does not support inline # comments; put the comment on its own line in /etc/aurora/aurora.env")
+		}
 		// 2026-05-27 (holistic deep-debug M3) — warn on suspicious
 		// values at startup so the operator sees the misconfig
 		// immediately instead of discovering broken issue-body
 		// image previews later. Scheme must be http or https; host
 		// must not be loopback because GitHub's image proxy can't
 		// reach those.
+		// Structural check FIRST, because the scheme switch below cannot see
+		// this class of problem: `https://aurora.example.com   # comment`
+		// starts with https:// and so took the happy path in silence, which is
+		// how a malformed value survived months of filed issues without
+		// logging anything at all. Reported as an error rather than a warning:
+		// unlike the advisories below, a value that fails here cannot produce
+		// a working attachment link under any circumstances.
+		if complaint := baseURLComplaint(trimmed); complaint != "" {
+			// The systemd hint only rides along when a comment was actually
+			// removed, or when the value still LOOKS like one. Attaching it
+			// unconditionally told an operator who deliberately typed a
+			// fragment to go move a comment that does not exist —
+			// misdirection on the one line meant to be actionable.
+			//
+			// cutComment alone is not enough: TrimSpace runs before the cut
+			// loop, so a value that is ONLY a comment (" # unset for now")
+			// has its leading space eaten and is never cut. The two literal
+			// arms exist for exactly that shape. Conversely a `#` with no
+			// whitespace before it gets no hint even though one is arguably
+			// implicated — that is the deliberate cost of not guessing.
+			args := []any{"url", trimmed, "raw", v}
+			if cutComment || strings.Contains(v, " #") || strings.Contains(v, "\t#") {
+				args = append(args, "hint",
+					"systemd EnvironmentFile= does not support inline # comments — put comments on their own line")
+			}
+			slog.Error("BUG_REPORT_PUBLIC_BASE_URL "+complaint, args...)
+		}
 		lower := strings.ToLower(trimmed)
 		switch {
 		case strings.HasPrefix(lower, "http://"):
@@ -1394,6 +1443,93 @@ func (c *Config) DisplayHost() string {
 // composing user-facing URLs printed at startup.
 func (c *Config) DisplayAddr() string {
 	return fmt.Sprintf("%s:%d", c.DisplayHost(), c.Server.Port)
+}
+
+// cleanBaseURL normalizes an operator-supplied base URL from the environment.
+//
+// The comment cut is the load-bearing part, and it exists because the readers
+// of /etc/aurora/aurora.env disagree about what a value IS. systemd's
+// EnvironmentFile= (scripts/aurora.service) has NO inline-comment support: it
+// strips trailing whitespace and keeps everything else, so
+//
+//	BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com   # no trailing slash
+//
+// reaches this process with the comment attached. The shell does NOT keep it,
+// and scripts/aurora-update.sh sources the same file with `set -a; . file`, so
+// an operator debugging by sourcing sees a clean value while the server does
+// not.
+// That mismatch produced months of dead attachment links in filed issues
+// before anyone looked at a rendered one.
+//
+// The `#` must be preceded by whitespace to count as a comment — the same rule
+// dotenv parsers use — so a bare `#` inside a legitimate value (a fragment, a
+// path segment) survives. Trailing-slash stripping is kept here rather than
+// left at the call site: this is now the single normalization for the value,
+// not a second one beside it.
+//
+// The second return reports whether a comment was actually cut, because
+// cleaning silently would only move the original failure down a layer: the bad
+// line stays in /etc/aurora/aurora.env, install.sh carries it forward verbatim
+// on every re-install, and anything else reading it with systemd's semantics
+// still gets the comment. The operator has to be told.
+func cleanBaseURL(raw string) (string, bool) {
+	v := strings.TrimSpace(raw)
+	cut := false
+	// Tracked as runes rather than by byte index: U+00A0 and friends are
+	// multi-byte, and a non-breaking space is exactly what a value pasted from
+	// a rendered doc or a browser address bar carries.
+	prev := rune(-1)
+	for i, r := range v {
+		if r == '#' && prev >= 0 && unicode.IsSpace(prev) {
+			v = v[:i]
+			cut = true
+			break
+		}
+		prev = r
+	}
+	return strings.TrimRight(strings.TrimSpace(v), "/"), cut
+}
+
+// baseURLComplaint returns a human-readable reason the cleaned base URL is
+// unusable, or "" when it looks sound. Split out from the warn switch so the
+// structural checks (parseable, has a host, no embedded whitespace) are
+// testable without capturing log output.
+//
+// Whitespace AFTER cleaning is the interesting case: it means the value held
+// something the comment cut did not explain away, which is exactly the shape
+// the systemd/shell mismatch produces.
+func baseURLComplaint(cleaned string) string {
+	if strings.IndexFunc(cleaned, unicode.IsSpace) >= 0 {
+		return "contains whitespace — attachment URLs built from it will be malformed"
+	}
+	u, err := url.Parse(cleaned)
+	if err != nil {
+		return "is not a parseable URL: " + err.Error()
+	}
+	if u.Host == "" {
+		return "has no host"
+	}
+	// A `#` or `?` anywhere in a BASE url is silently fatal, which is why it is
+	// named here rather than stripped. Composition appends the attachment path,
+	// so `https://host/base#frag` becomes
+	// `https://host/base#frag/api/feedback/attachments/x.png` — everything from
+	// the `#` on is never sent to the server, and GitHub's image proxy fetches
+	// `https://host/base` instead. A dead link, with nothing to show for it.
+	//
+	// Scanned as characters, NOT via u.Fragment/u.RawQuery, because those are
+	// empty for a TRAILING delimiter: `https://host/#` parses with Fragment ""
+	// and would pass, while composing to `https://host/#/api/...` — the whole
+	// attachment path swallowed into a fragment, fetching `https://host/`.
+	// Worse, cleanBaseURL's trailing-slash strip can CREATE that state, turning
+	// the detectable `https://host/#/` into the undetectable `https://host/#`.
+	//
+	// This deliberately does NOT make cleanBaseURL strip fragments: a `#` that
+	// survives the comment cut is one the operator meant, and truncating it
+	// would be guessing. Saying so is the correct response.
+	if strings.ContainsAny(cleaned, "#?") {
+		return "carries a fragment or query string — everything after it is dropped from attachment links"
+	}
+	return ""
 }
 
 func parseOrigins(raw string) []string {

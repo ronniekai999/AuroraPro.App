@@ -62,6 +62,22 @@ BUG_REPORT_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com
 ```
 
+> **Keep comments on their own line.** systemd's `EnvironmentFile=` has no
+> inline-comment support — it keeps everything after the `=`. Condensing the
+> note above onto the value line:
+>
+> ```
+> BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com   # no trailing slash
+> ```
+>
+> sets the base URL to `https://aurora.example.com   # no trailing slash`, and
+> every attachment link Aurora writes into an issue is then dead. Aurora strips
+> such a comment before using the value and logs a WARN naming it, so links
+> filed from here on are correct — but **fix the file anyway**: the bad line
+> survives every re-install, and anything else reading it with systemd's
+> semantics still gets the comment. Note the shell does not: sourcing this file
+> to check a value drops the comment, so it looks fine there.
+
 ### Optional tunables
 
 Override any of these if the defaults don't fit your deployment.
@@ -80,7 +96,9 @@ BUG_REPORT_RATE_LIMIT_MAX=5
 # accepted: 168 (1 week).
 BUG_REPORT_RATE_LIMIT_WINDOW_HOURS=1
 
-# Days an attachment lives on disk before the janitor sweeps it.
+# Days an attachment lives on disk before the janitor sweeps it. This is
+# an upper bound, not a guarantee — the byte budget below can evict a
+# file well before its TTL.
 # Default 30. Max accepted: 3650 (10 years). Raise for compliance-
 # heavy deploys that need longer retention; lower to reclaim disk
 # faster. (Upper bound protects against time.Duration overflow.)
@@ -90,7 +108,21 @@ BUG_REPORT_ATTACHMENT_TTL_DAYS=30
 # (1 week). Bigger interval = lower CPU/IO cost but stale files
 # sit on disk longer.
 BUG_REPORT_JANITOR_INTERVAL_HOURS=1
+
+# Aggregate disk budget for the attachment cache, in bytes. Default
+# 5368709120 (5 GiB). Once the directory is over this after the TTL
+# sweep, the janitor keeps deleting oldest-first into files that are
+# still inside the TTL — so on a busy instance this, not the TTL,
+# decides how long an attachment link keeps resolving.
+BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES=5368709120
 ```
+
+> This last one is the odd man out of the block above: it has no upper
+> bound, and it is read by the janitor rather than at config load — so an
+> invalid value does **not** WARN at startup with the other four. It warns
+> on the first sweep that finds the cache directory, which on a fresh
+> install is after the first upload, and it lands in
+> `/var/log/aurora/aurora.log` and Admin → Logs rather than journald.
 
 Restart Aurora to pick up the env changes.
 
@@ -119,8 +151,9 @@ To smoke-test the full flow:
   The UUID is a 128-bit random hex string — anyone with the URL can
   view the attachment, same security model as Aurora's existing
   party-share-image endpoint. Attachments are automatically swept by
-  the Phase 3 janitor goroutine after 30 days (see Operational notes
-  below); no manual cleanup is required in steady state.
+  the Phase 3 janitor goroutine — after 30 days, and sooner if the cache
+  outgrows its byte budget (see Operational notes below); no manual
+  cleanup is required in steady state.
 
 ## Troubleshooting
 
@@ -133,6 +166,54 @@ Aurora logs the missing var at startup — check the server log for the
 You're submitting with an attachment but the public URL isn't set. Set
 `BUG_REPORT_PUBLIC_BASE_URL` to your externally-reachable Aurora URL
 (no trailing slash) and restart.
+
+### Filed issues have a dead attachment link
+Look at the URL in the issue body. If it contains anything after the host that
+you did not put there — most likely an inline `# comment` — the env file has it
+on the value line, where systemd keeps it (see the box in **step 2**).
+
+Check the startup log:
+
+```bash
+journalctl -u aurora --since today | grep BUG_REPORT_PUBLIC_BASE_URL
+```
+
+`journalctl`, not `/var/log/aurora/aurora.log`: config is parsed before the
+file logger and the in-app **Admin → Logs** viewer are installed, so these
+lines only reach stdout. You are looking for either
+`had an inline comment, which was stripped` (WARN — the value works now, the
+file is still wrong) or a line naming whitespace, an unparseable value, a
+missing host, or a fragment/query (ERROR — the value cannot work at all).
+
+Fix the line in `/etc/aurora/aurora.env`, move the comment to its own line, and
+restart. Links in issues already filed have to be repaired by hand, and only
+where the attachment still exists. The janitor evicts on **two** independent
+rules, so age alone does not tell you:
+
+- older than `BUG_REPORT_ATTACHMENT_TTL_DAYS` (default **30 days**); and
+- oldest-first, **regardless of age**, whenever the cache exceeds
+  `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default **5 GiB**) — so on a busy
+  instance a week-old attachment may already be gone.
+
+Check before editing an issue: an attachment that survived is still served at
+`/api/feedback/attachments/{name}`, and one that did not returns 404 — repairing
+that link only produces a working URL to a missing file.
+
+### "attachment storage is temporarily full" (HTTP 507)
+The attachment cache is at or over `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES`
+(default 5 GiB), so an upload is refused.
+
+**The whole submission is refused, not just the attachment** — no GitHub
+issue is created, and the user has to resubmit without their screenshot
+(which the error message tells them). Reports carrying an attachment are
+being lost until this clears, so treat a run of 507s as an outage rather
+than as degraded operation.
+
+Raise the budget or shorten `BUG_REPORT_ATTACHMENT_TTL_DAYS` and restart.
+The next janitor sweep may not be enough on its own: it stops as soon as
+usage is at-or-under budget, while the upload gate refuses at
+at-or-over — so if a sweep lands exactly on the budget, uploads stay
+refused until something else frees a byte.
 
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)
@@ -161,8 +242,11 @@ use a Cloudflare Tunnel) to fix.
 
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
 The launcher button disappears immediately on the next user session.
-Already-filed issues remain in GitHub; already-uploaded attachments
-remain on disk until the Phase 3 janitor sweeps them (30-day TTL).
+Already-filed issues remain in GitHub. Already-uploaded attachments stay
+on disk **indefinitely**: the janitor only runs while
+`BUG_REPORT_ENABLED=true`, so neither the TTL nor the byte budget applies
+once the feature is off. Remove `<ImageDir>/bug-reports/` by hand if you
+want the disk back.
 
 ## Capabilities across phases (all in current build)
 
@@ -176,7 +260,7 @@ remain on disk until the Phase 3 janitor sweeps them (30-day TTL).
 - **Phase 3:** "Record screen" button (MediaRecorder +
   getDisplayMedia, 30s cap, WebM output, floating Stop pill while
   the modal is hidden) + per-user rate limit (5 submits / hour) +
-  30-day automatic attachment janitor.
+  automatic attachment janitor (age + disk budget).
 
 ### Operational notes
 
@@ -187,11 +271,40 @@ message in the modal so the user sees how long to wait. State lives
 in memory (not the DB) — restarting Aurora resets all counters.
 
 **Attachment janitor:** a background goroutine sweeps
-`<ImageDir>/bug-reports/` once per hour and deletes files older than
-30 days. Runs only when `BUG_REPORT_ENABLED=true`. The goroutine
-exits cleanly via the server-lifecycle context on graceful shutdown.
-Logs at INFO when files are removed (count + TTL); WARN on individual
-file delete failures (typically permission issues).
+`<ImageDir>/bug-reports/` once per hour, on **two independent rules**:
+
+1. **Age** — deletes files older than `BUG_REPORT_ATTACHMENT_TTL_DAYS`
+   (default 30 days).
+2. **Budget** — if the directory is still over
+   `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default 5 GiB) afterwards, it
+   continues **oldest-first into still-fresh files** until back under
+   budget. So on a busy instance an attachment can be gone well before its
+   TTL, and age alone never tells you whether a link still resolves.
+
+Runs only when `BUG_REPORT_ENABLED=true` — disabling the feature stops it
+entirely. The goroutine exits cleanly via the server-lifecycle context on
+graceful shutdown.
+
+Logging: one INFO line when the janitor starts; the age sweep logs INFO
+only for substantive removals (10+ files), DEBUG for 1–9, and **nothing
+at all** when it removes none (the common case, so silence is not
+evidence it is not running).
+
+WARN covers a budget eviction, an individual file delete failure, an
+unreadable cache directory, a failed `stat`, and a
+`BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` that is unparseable or
+non-positive.
+
+Of those, the **budget eviction is a capacity signal, not a fault** — it
+means the cache outgrew its budget and the janitor is doing its job; raise
+the budget or shorten the TTL, do not go auditing file ownership. The
+delete/read-dir/stat failures are the permissions-shaped ones. Note a
+*missing* cache directory is silent by design, so total janitor silence
+does not by itself prove `CACHE_IMAGE_DIR` is right.
+
+The one line that means the janitor really has stopped is
+`feedback janitor: panic recovered — janitor exiting` at **ERROR**. If you
+are trying to tell "quiet" from "dead", that is what to grep for.
 
 **Screen recording:**
 
