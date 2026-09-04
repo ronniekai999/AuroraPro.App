@@ -943,10 +943,12 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			wantMsg:   "fragment or query",
 		},
 		{
-			// The ONLY input that reaches the hint's true branch through
-			// cutComment: a non-breaking space is unicode.IsSpace, so the cut
-			// fires while neither the " #" nor the "\t#" literal matches. The
-			// value is still broken afterwards, so the ERROR carries the hint.
+			// An input that reaches the hint's true branch through cutComment
+			// rather than the literal arms: a non-breaking space is
+			// unicode.IsSpace, so the cut fires while neither " #" nor "\t#"
+			// matches. (Any non-ASCII Unicode space does this; NBSP is just
+			// the one an operator actually pastes.) The value is still broken
+			// afterwards, so the ERROR carries the hint.
 			name:      "nbsp-preceded comment errors and still hints",
 			env:       "https://aurora example.com # note",
 			wantLevel: slog.LevelError,
@@ -959,6 +961,17 @@ func TestBugReportBaseURLLogging(t *testing.T) {
 			// for, and the only thing keeping the hint off `if cutComment`.
 			name:      "value that is only a comment errors and hints",
 			env:       " # unset for now",
+			wantLevel: slog.LevelError,
+			wantMsg:   "contains whitespace",
+			wantHint:  true,
+		},
+		{
+			// The "\t#" arm. A tab-preceded comment on a value that is still
+			// broken afterwards is the shape that needs it: nothing is cut
+			// (TrimSpace already removed the tab), so cutComment is false and
+			// the " #" literal does not match either.
+			name:      "tab-preceded comment errors and still hints",
+			env:       "\t# note",
 			wantLevel: slog.LevelError,
 			wantMsg:   "contains whitespace",
 			wantHint:  true,

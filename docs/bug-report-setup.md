@@ -192,12 +192,21 @@ Check before editing an issue: an attachment that survived is still served at
 `/api/feedback/attachments/{name}`, and one that did not returns 404 — repairing
 that link only produces a working URL to a missing file.
 
-### "Attachment storage is temporarily full" (HTTP 507)
-The attachment cache is already at or over
-`BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` (default 5 GiB), so new uploads are
-refused until the janitor's next sweep brings it back under budget. The
-report itself still files — only the attachment is rejected. Raise the
-budget, shorten `BUG_REPORT_ATTACHMENT_TTL_DAYS`, or wait for the sweep.
+### "attachment storage is temporarily full" (HTTP 507)
+The attachment cache is at or over `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES`
+(default 5 GiB), so an upload is refused.
+
+**The whole submission is refused, not just the attachment** — no GitHub
+issue is created, and the user has to resubmit without their screenshot
+(which the error message tells them). Reports carrying an attachment are
+being lost until this clears, so treat a run of 507s as an outage rather
+than as degraded operation.
+
+Raise the budget or shorten `BUG_REPORT_ATTACHMENT_TTL_DAYS` and restart.
+The next janitor sweep may not be enough on its own: it stops as soon as
+usage is at-or-under budget, while the upload gate refuses at
+at-or-over — so if a sweep lands exactly on the budget, uploads stay
+refused until something else frees a byte.
 
 ### "GitHub rejected the configured token"
 The PAT is invalid, expired, or revoked. Generate a fresh PAT (step 1)
@@ -272,9 +281,16 @@ graceful shutdown.
 Logging: one INFO line when the janitor starts; the age sweep logs INFO
 only for substantive removals (10+ files), DEBUG for 1–9, and **nothing
 at all** when it removes none (the common case, so silence is not
-evidence it is not running). A budget eviction logs WARN, as does an
-individual file delete failure (typically permission issues) and an
-unparseable `BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES`.
+evidence it is not running).
+
+WARN covers a budget eviction, an individual file delete failure, an
+unreadable cache directory, a failed `stat`, and a
+`BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES` that is unparseable or
+non-positive — the first two are usually permissions.
+
+The one line that means the janitor really has stopped is
+`feedback janitor: panic recovered — janitor exiting` at **ERROR**. If you
+are trying to tell "quiet" from "dead", that is what to grep for.
 
 **Screen recording:**
 
