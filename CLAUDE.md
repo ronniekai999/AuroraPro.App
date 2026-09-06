@@ -401,21 +401,32 @@ anyone else. Code: `CloneForCast`/`castCloneAnchorSec`/`castAnchorPadSec`
 
 Invariants to preserve when touching this area:
 
-- **Every deliberate load de-arms the end-of-media flag.** A load onto a LIVE
-  receiver replaces its media session, and CAF reports that as `IDLE` with
-  `idleReason` INTERRUPTED — "a sender requested playing different media using
-  the LOAD command". The end-of-media evaluator reads an armed `IDLE` as the
-  title finishing, so an undisarmed re-anchor kills the cast (INTERRUPTED →
-  `stop()`) or starts the wrong episode (a momentarily-null reason → `onEnded`).
-  `runCastLoad` de-arms for every path, because this change turned a rare
-  user-initiated reload into an automatic poll-driven one.
+- **A load in flight suppresses every receiver transition it causes**
+  (`castLoadIsSettling`). A load onto a LIVE receiver replaces its media
+  session, and CAF reports that as `IDLE` with `idleReason` INTERRUPTED — "a
+  sender requested playing different media using the LOAD command" — and then
+  as a PLAYING when the new media autoplays. Both are OURS and both are
+  indistinguishable from a user's: an armed `IDLE` reads as the title finishing
+  (INTERRUPTED kills the cast; a momentarily-null reason starts the wrong
+  episode), and the autoplay reads as the host pressing play on the TV, which
+  can resume a room the host deliberately left paused.
+  **De-arming a flag before the load does not work**, and was tried: the getter
+  awaits a token mint that spawns a server-side FFmpeg, and the receiver keeps
+  publishing PLAYING updates throughout, re-arming it long before `loadMedia`
+  is issued. The gate has to be the load itself, held until shortly after it
+  resolves, because the receiver's own state changes lag the resolved promise.
+  This matters far more than it used to: the change turns a rare user-initiated
+  reload into an automatic poll-driven one.
 - **No correction crosses a load boundary.** The anchor is promoted only when a
   load RESOLVES, so while one is in flight `castStartSecRef` still describes the
   session the receiver is LEAVING while its reported position may already
   describe the one it is joining. Correcting across that computes a target on
   the wrong timeline — for a re-anchor from 0 to ~40 minutes, a seek 40 minutes
   past the new clone's produced edge, i.e. #172 produced by the machinery built
-  to close it. `castLoadsInFlightRef` covers every load path.
+  to close it. `castLoadsInFlightRef` covers every load path. Note the scope:
+  this gates the CORRECTION paths and the transition arms; the authoritative
+  host's position broadcasts read `castStartSecRef` directly and rely on the
+  anchor being promoted before the receiver reports playing again.
 - **A cast clone's `-ss` anchor follows the SENDER, not the source session.**
   It used to inherit `src.StartSec`, which is correct arithmetic and useless
   readiness: a viewer 40 minutes into a session anchored at 0 got a clone also

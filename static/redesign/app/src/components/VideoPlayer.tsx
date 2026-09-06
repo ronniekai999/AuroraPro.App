@@ -1008,6 +1008,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     hostSawMediaUnloadedRef.current = false
     hostCorrectionUntilMsRef.current = 0
     hostIntentEchoUntilMsRef.current = 0
+    castLoadSettleUntilMsRef.current = 0
   }
   // Where a cast should START, in absolute source seconds.
   //
@@ -1290,23 +1291,30 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // (the picker, the episode advance, token renewal, a re-anchor), unlike
   // castReloadInFlightRef which guards only the renewal path against itself.
   const castLoadsInFlightRef = useRef(0)
+  const castLoadSettleUntilMsRef = useRef(0)
+  // How long after a load resolves its own receiver-state changes are still
+  // arriving. Comfortably over a 1s poll and the CAF ack turnaround.
+  const CAST_LOAD_SETTLE_MS = 2500
+  // True from the moment a load is queued until shortly after it resolves.
+  //
+  // A load onto a LIVE receiver replaces its media session, and CAF reports
+  // that as IDLE with idleReason INTERRUPTED — documented as "a sender
+  // requested playing different media using the LOAD command", i.e. exactly
+  // this — and then as a PLAYING once the new media starts. Both are OUR
+  // doing, and both are indistinguishable from a user's: an armed IDLE reads
+  // as the title finishing (INTERRUPTED stops the cast; a momentarily-null
+  // reason starts the wrong episode), and the autoplay reads as the host
+  // pressing play on the TV.
+  //
+  // Gating on the LOAD rather than de-arming a flag before it is what makes
+  // this work. De-arming first is defeated by the load's own latency: the
+  // getter awaits a token mint that spawns a server-side FFmpeg, and the
+  // receiver keeps publishing PLAYING updates throughout, re-arming the flag
+  // long before loadMedia is issued.
+  const castLoadIsSettling = () =>
+    castLoadsInFlightRef.current > 0 || Date.now() < castLoadSettleUntilMsRef.current
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
-      // A load onto a LIVE receiver replaces its media session, and CAF
-      // reports that replacement as IDLE with idleReason INTERRUPTED — which
-      // is documented as "a sender requested playing different media using the
-      // LOAD command", i.e. exactly this. The end-of-media evaluator treats an
-      // IDLE seen while castHasPlayedRef is armed as the title finishing:
-      // INTERRUPTED routes to c.stop() (the cast dies mid-party, silently),
-      // and a momentarily-null idleReason routes to onEnded (the wrong episode
-      // starts, or the player closes over a half-watched film).
-      //
-      // The next-episode advance already de-arms the flag before its own
-      // reload for this reason; every deliberate load needs the same
-      // treatment, and putting it here means a future load path cannot forget.
-      // The flag re-arms on its own the moment the receiver reports PLAYING
-      // again, so a genuine end-of-media after this load is still caught.
-      castHasPlayedRef.current = false
       castLoadsInFlightRef.current += 1
       try {
         await op()
@@ -1328,6 +1336,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         throw e
       } finally {
         castLoadsInFlightRef.current = Math.max(0, castLoadsInFlightRef.current - 1)
+        // The receiver's own state changes lag the resolved promise: the IDLE
+        // that ends the OLD media and the PLAYING that starts the new one both
+        // arrive afterwards. Keep the load "settling" briefly so neither is
+        // mistaken for something the user did.
+        castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castPendingMediaRef.current = null
         // null, not 0 — see castStartSecRef. Unreachable today (the only
         // reader is guarded by castPendingMediaRef), but 0 here would mean
@@ -1689,7 +1702,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const evaluate = () => {
       const c = castRef.current
       if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
-      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE') {
+      // Our own load ends the old media session; that IDLE is not the title
+      // finishing. See castLoadIsSettling.
+      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE' && !castLoadIsSettling()) {
         // De-arm synchronously so a re-render mid-advance can't re-enter here.
         castHasPlayedRef.current = false
         // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
@@ -1821,6 +1836,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     hostSawMediaUnloadedRef.current = false
     hostCorrectionUntilMsRef.current = 0
     hostIntentEchoUntilMsRef.current = 0
+    castLoadSettleUntilMsRef.current = 0
   }, [target?.fileId, target?.fileType, target?.episodeId])
 
   // Re-point a live receiver at a freshly-booted local session after a cast
@@ -4405,9 +4421,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // The reload cycles isMediaLoaded, which re-arms the gate below; the
         // suppression window keeps the host's scrub detector quiet across the
         // reload's own position change on top of that.
-        hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
         const charged = reloadCastAtAbsSec(targetAbsSec, () => foldBudget('reanchor-failed'))
         if (charged) {
+          hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
           castLastReanchorAtMsRef.current = Date.now()
           // Charged only when a reload really started — see reloadCastAtAbsSec.
           foldBudget('reanchored')
@@ -4530,10 +4546,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // the PARTY's position, not the TV's: we have not converged, so the
           // TV's position is exactly the thing not to broadcast. Freezing the
           // room where it already is moves nobody.
-          if (prev && prev.paused !== nowPaused) {
+          if (prev && prev.paused !== nowPaused && !castLoadIsSettling()) {
             snapshotNow()
             if (nowPaused) {
-              party.requestPause(Math.round(targetAbsSec * 1000))
+              // Already paused rooms need no pause: HandleRequestPause is not
+              // a no-op — it rewrites the anchor, bumps the revision and
+              // broadcasts to every sync peer, so casting into a paused party
+              // would emit a party event nobody asked for.
+              if (party.isPlaying) party.requestPause(Math.round(targetAbsSec * 1000))
             } else {
               // The mirror below would otherwise re-pause a host who pressed
               // play on the TV while the party is paused — reachable whenever
@@ -4551,11 +4571,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             return
           }
           snapshotNow()
-          if (Date.now() < hostIntentEchoUntilMsRef.current) return
           // Mirror the party's run state onto the receiver exactly as the
           // guest branch does. A receiver still paused after its load has
           // nothing to converge on otherwise.
-          if (castPlayPauseMismatch(party.isPlaying, nowPaused)) {
+          if (Date.now() >= hostIntentEchoUntilMsRef.current &&
+              castPlayPauseMismatch(party.isPlaying, nowPaused)) {
             if (nowPaused && isCastTokenExpired()) {
               reloadCastAtAbsSec(targetAbsSec)
             } else {
@@ -4604,9 +4624,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // warm-up would otherwise have it dropped unread, and the room would
           // play on with no later transition to detect (a paused receiver does
           // not move, so the position arm never fires either).
-          if (prev && !prev.paused && nowPaused) {
+          if (prev && prev.paused !== nowPaused && !castLoadIsSettling()) {
             snapshotNow()
-            party.requestPause(castSecToAbsMs(nowSec))
+            if (nowPaused) {
+              party.requestPause(castSecToAbsMs(nowSec))
+            } else {
+              // The mirror image, and just as permanent: with the warm-up over
+              // there is no later transition to find, and the position arm
+              // sees only natural progression, so a play dropped here leaves
+              // the room paused and the host's TV running until they pause and
+              // unpause the TV by hand.
+              party.requestPlay()
+            }
             return
           }
           hostLastSnapshotRef.current = null
@@ -4630,7 +4659,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // the TV within the settle window, room plays on).
         const correctionSettling = Date.now() < hostCorrectionUntilMsRef.current
 
-        if (nowPaused !== prev.paused) {
+        if (nowPaused !== prev.paused && !castLoadIsSettling()) {
           snapshotNow()
           if (nowPaused) {
             party.requestPause(castSecToAbsMs(nowSec))
