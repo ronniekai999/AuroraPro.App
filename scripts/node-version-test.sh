@@ -150,8 +150,11 @@ done
 # script's real call site, run it against a stubbed node_vite_verdict, and
 # assert what it does.
 #
-# Extraction is by marker comment rather than by guessing line ranges, so a
-# refactor that moves the block is a failure here rather than a silent pass.
+# Extraction is by marker comment rather than by guessing line ranges. Note
+# what that does and does NOT pin: it pins the block's BEHAVIOUR in isolation,
+# not where the block sits. Position is checked separately below, because
+# "before the fetch" is the whole point of the updater's gate and moving the
+# block past it would otherwise pass every behavioural assertion.
 extract_callsite() {  # $1 = script, prints the guarded block
     awk '/# AURORA-NODE-GATE-BEGIN/ {grab=1; next} /# AURORA-NODE-GATE-END/ {exit} grab {print}' "$1"
 }
@@ -293,6 +296,42 @@ for s in "${SCRIPTS[@]}"; do
         ok "scripts/$s still gates on verdict 1 under $other_mode (not its own condition)"
     fi
 done
+
+# ── Position: the updater's gate must precede the fetch ───────────
+#
+# Behaviour in isolation is not enough. The gate exists so an operator learns
+# their Node is too old BEFORE an update is attempted; a refactor that moved
+# the marked block after `git fetch` would keep every assertion above green
+# while restoring exactly the failure this was written to remove. Verified by
+# line order rather than by running the script, which needs a real source
+# mirror, a lock and a network.
+gate_line="$(grep -n '# AURORA-NODE-GATE-BEGIN' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
+fetch_line="$(grep -n '^if ! git fetch' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
+status_line="$(grep -n 'write_status checking' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
+echo
+echo "node gate: position"
+if [ -z "$gate_line" ] || [ -z "$fetch_line" ] || [ -z "$status_line" ]; then
+    bad "could not locate the gate ($gate_line), the fetch ($fetch_line) or the checking status ($status_line) in aurora-update.sh"
+else
+    if [ "$gate_line" -lt "$fetch_line" ]; then
+        ok "aurora-update.sh gates on Node (line $gate_line) before it fetches (line $fetch_line)"
+    else
+        bad "aurora-update.sh fetches (line $fetch_line) BEFORE its Node gate (line $gate_line) — the operator would learn about Node only after an update was attempted"
+    fi
+    if [ "$gate_line" -lt "$status_line" ]; then
+        ok "aurora-update.sh gates on Node before it reports 'checking'"
+    else
+        bad "aurora-update.sh reports 'checking' (line $status_line) before its Node gate (line $gate_line)"
+    fi
+fi
+
+# The gate must be at top level, not tucked inside a function nobody calls —
+# another shape that keeps the behavioural assertions green.
+if awk -v n="$gate_line" 'NR==n {exit} /^[a-z_]+\(\) \{$/ {f=1} /^\}$/ {f=0} END {exit !f}' "$REPO_ROOT/scripts/aurora-update.sh"; then
+    bad "aurora-update.sh's Node gate sits inside a function — it may never run"
+else
+    ok "aurora-update.sh's Node gate is at top level"
+fi
 
 echo
 echo "passed: $PASS   failed: $FAIL"

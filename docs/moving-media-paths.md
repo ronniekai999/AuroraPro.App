@@ -66,12 +66,27 @@ from the old location, matches nothing, and prunes the lot.
 ```bash
 sudo -u postgres pg_dump aurora > ~/aurora-before-move.sql
 ls -lh ~/aurora-before-move.sql
-tail -1 ~/aurora-before-move.sql   # must read: -- PostgreSQL database dump complete
+grep -c 'PostgreSQL database dump complete' ~/aurora-before-move.sql   # must be 1
 ```
 
 Everything below is irreversible without this, and a redirect leaves a
-truncated file behind on failure with nothing to tell you — hence the two
-checks rather than one command.
+truncated file behind on failure with nothing to tell you — hence the check
+rather than trusting the exit code. (`grep -c`, not `tail -1`: since the
+August 2025 security releases `pg_dump` writes a `\unrestrict` line and blank
+lines after that marker, so the last line of a perfectly good dump is empty.)
+
+**To restore it**, if any check below fails:
+
+```bash
+sudo systemctl stop aurora
+sudo -u postgres dropdb aurora
+sudo -u postgres createdb -O aurora aurora
+sudo -u postgres psql -v ON_ERROR_STOP=1 aurora < ~/aurora-before-move.sql
+```
+
+The `dropdb`/`createdb` is not optional. A plain `pg_dump` has no `--clean`, so
+replaying it over the live database leaves every existing row in place, fails
+several hundred statements — and still exits 0.
 
 ### 2. Look at what you have
 
@@ -102,7 +117,8 @@ SELECT wp.id, dup.title, dup.id AS from_item, orig.id AS to_item
   JOIN media_items orig ON orig.tmdb_id = dup.tmdb_id AND orig.type = dup.type
  WHERE dup.library_id  IN (5, 6, 7, 8)
    AND orig.library_id NOT IN (5, 6, 7, 8)
-   AND dup.tmdb_id IS NOT NULL;
+   AND dup.tmdb_id IS NOT NULL
+   AND wp.episode_id IS NULL;   -- match the UPDATE below, which skips episodes
 ```
 
 Since migration 029 the uniqueness key is per profile
@@ -156,8 +172,27 @@ through `tv_episodes` and `tv_seasons` (the season number lives on
 **Check the list from step 2 first.** These ids are from one example install;
 on yours, 5–8 may be real libraries with real history.
 
+Look at exactly what you are about to remove, and what it will take with it:
+
 ```sql
+SELECT l.id, l.name, l.paths,
+       (SELECT count(*) FROM media_items mi WHERE mi.library_id = l.id) AS items,
+       (SELECT count(*) FROM watch_progress wp
+          JOIN media_items mi ON mi.id = wp.media_item_id
+         WHERE mi.library_id = l.id) AS progress_rows
+  FROM libraries l WHERE l.id IN (5, 6, 7, 8);
+```
+
+A duplicate created hours ago has a catalog and almost no progress. If
+`progress_rows` is large, these are not the duplicates — stop and re-read
+step 2.
+
+```sql
+BEGIN;
 DELETE FROM libraries WHERE id IN (5, 6, 7, 8);
+-- Confirm the survivors are the ones you meant to keep, then:
+SELECT id, name, paths FROM libraries ORDER BY id;
+COMMIT;   -- or ROLLBACK; if that list is wrong
 ```
 
 ### 5. Move the file rows, scoped to the libraries you are moving
@@ -217,27 +252,43 @@ COMMIT;
 
 ### 6. Verify before starting the server
 
-Both of these must return 0. If either does not, **restore the backup** rather
-than starting Aurora — a scan against a half-moved catalog is what the whole
-procedure exists to avoid.
+Three checks. All of them must pass; if any does not, **restore the backup**
+(see step 1) rather than starting Aurora — a scan against a half-moved catalog
+is what this whole procedure exists to avoid.
 
-They are deliberately **data-derived**: each row is compared against its own
-library's actual `paths`, not against the prefix you typed. A check phrased in
-terms of your prefix passes when you mistype it, when you miss a library, and
-when you drop a root — and the first two checks this page carried did exactly
-that. The second query is not optional: movie libraries store rows in
-`media_files` and show libraries store them in `episode_files`, so a check
-against only the first is blind to every TV library you just moved, and returns
-0 on a shows-only install no matter what state it is in.
+**6a — no library still points at the old location.** This is the check for the
+one mistake the others structurally cannot see: a library you left out of
+step 5 entirely is internally consistent (old rows, old root), so nothing about
+it looks wrong. Only its *root* gives it away.
 
 ```sql
--- Movie rows that no longer live under any root of their own library.
+SELECT id, name, paths FROM libraries
+ WHERE EXISTS (SELECT 1 FROM unnest(paths) p
+                WHERE p LIKE '/home/rontavious999/media/%');
+```
+
+Must return no rows. Compare the full `SELECT id, name, paths FROM libraries`
+against the list you wrote down in step 2 as well — this query only catches a
+library still under the prefix you happened to type.
+
+**6b — no file row has been left outside its own library's roots.** These are
+data-derived: each row is compared against its own library's actual `paths`,
+so they catch a dropped root of a multi-root library, a prefix mistyped in one
+statement but not another, and a partially-applied step 5. The second query is
+not optional — movie libraries store rows in `media_files` and show libraries
+in `episode_files`, so a check against only the first is blind to every TV
+library you just moved, and returns 0 on a shows-only install whatever state it
+is in.
+
+```sql
+-- Movie rows no longer under any root of their own library.
 SELECT count(*)
   FROM media_files mf
   JOIN media_items mi ON mi.id = mf.media_item_id
   JOIN libraries   l  ON l.id  = mi.library_id
- WHERE NOT EXISTS (SELECT 1 FROM unnest(l.paths) p
-                    WHERE mf.path LIKE rtrim(p, '/') || '/%');
+ WHERE NOT EXISTS (
+         SELECT 1 FROM unnest(l.paths) p
+          WHERE left(mf.path, length(rtrim(p, '/')) + 1) = rtrim(p, '/') || '/');
 
 -- The same for episodes. Show libraries have no media_files rows at all.
 SELECT count(*)
@@ -245,33 +296,58 @@ SELECT count(*)
   JOIN tv_episodes te ON te.id = ef.episode_id
   JOIN media_items mi ON mi.id = te.media_item_id
   JOIN libraries   l  ON l.id  = mi.library_id
- WHERE NOT EXISTS (SELECT 1 FROM unnest(l.paths) p
-                    WHERE ef.path LIKE rtrim(p, '/') || '/%');
+ WHERE NOT EXISTS (
+         SELECT 1 FROM unnest(l.paths) p
+          WHERE left(ef.path, length(rtrim(p, '/')) + 1) = rtrim(p, '/') || '/');
 ```
 
-A non-zero count lists itself — swap `count(*)` for `mf.path, l.name` (or
-`ef.path, l.name`) to see which rows are stranded and under which library.
+Both must return 0. (`left(...) =` rather than `LIKE`: the pattern would be
+built from the library's own path, where `_` and `%` are wildcards you cannot
+escape — and the error is one-directional, so a root like `/mnt/media_2024`
+could only ever produce a false *clean*.) To see the offenders, swap `count(*)`
+for `mf.path, l.name`.
 
-Then spot-check that a rewritten path is real, as the `aurora` user — the
-service runs unprivileged, and home directories are 0700/0750 on modern
-distros, so a path you can see in your own shell is often unreadable to it.
-Check a library you actually moved, and use whichever table it stores rows in:
+**6c — every recorded path exists on disk, and the service can read it.**
+
+This is the check that matters most, and it is the one people skip. A row
+rewritten to a path with nothing at it is **not** a title that waits for the
+file to turn up: the next scan finds it missing, prunes the row, and the
+empty-item sweep then deletes the whole `media_items` row and cascades every
+table in the list at the top of this page. Permanently. 6a and 6b cannot see
+it — the row is under its library's root, it just is not on disk.
 
 ```bash
-# Substitute a library id you moved. Use episode_files for a show library:
-#   SELECT ef.path FROM episode_files ef
-#     JOIN tv_episodes te ON te.id=ef.episode_id
-#     JOIN media_items mi ON mi.id=te.media_item_id WHERE mi.library_id=3 LIMIT 1
 sudo -u postgres psql aurora -tAc \
-  "SELECT mf.path FROM media_files mf JOIN media_items mi ON mi.id=mf.media_item_id
-    WHERE mi.library_id = 1 LIMIT 1" \
-  | xargs -r -d'\n' sudo -u aurora ls -l
+  "SELECT path FROM media_files
+   UNION ALL
+   SELECT path FROM episode_files" \
+| while IFS= read -r p; do
+    [ -e "$p" ] || echo "MISSING: $p"
+  done
 ```
 
-`-r` matters: without it, an empty result runs `ls -l` on the current directory
-and reads as success. If it fails with permission denied:
-`sudo setfacl -m u:aurora:x` on each parent directory, then
-`sudo setfacl -R -m u:aurora:rX` on the media root.
+Must print nothing. If it prints anything, the file did not arrive — finish the
+copy and re-run this before going any further.
+
+Then confirm the service user can actually READ one, not merely list it. Aurora
+runs unprivileged, and home directories are 0700/0750 on modern distros, so a
+path you can see in your own shell is often unreachable for it:
+
+```bash
+sudo -u postgres psql aurora -tAc \
+  "SELECT mf.path FROM media_files mf
+     JOIN media_items mi ON mi.id = mf.media_item_id
+    WHERE mi.library_id = 1 LIMIT 1" \
+| xargs -r -d'\n' -I{} sudo -u aurora head -c1 "{}" > /dev/null \
+  && echo "aurora can read it" || echo "aurora CANNOT read it"
+```
+
+`head -c1`, not `ls` — `ls` succeeds with only search permission on the parent
+and would pass on a file the service cannot open. `-r` matters too: without it
+an empty result runs the command with no arguments and reads as success. Repeat
+for one library of each type you moved (use the `episode_files` join for a show
+library). If it fails: `sudo setfacl -m u:aurora:x` on each parent directory,
+then `sudo setfacl -R -m u:aurora:rX` on the media root.
 
 ### 7. Start the server
 
@@ -286,10 +362,13 @@ nothing pruned. Open a title and press play.
 
 - **Cached transcode segments and subtitle extractions** keyed by the old
   path (`/var/cache/aurora`). They regenerate on demand.
-- **Titles whose files did not come with the move.** The rewrite touches
-  every row under the old prefix whether or not the file arrived, so finish the
-  copy BEFORE running it. A row rewritten to a path with nothing at it is a
-  title that will not play until the file turns up.
+- **Titles whose files did not come with the move — these are DELETED, not
+  merely broken.** The rewrite touches every row under the old prefix whether
+  or not the file arrived. A row pointing at a path with nothing at it is
+  pruned on the next scan, and the empty-item sweep then deletes its
+  `media_items` row and cascades everything in the table at the top of this
+  page. Finish the copy before running step 5, and run check 6c before starting
+  the server.
 
 - **Anything whose FILENAME changed.** The rewrite is a prefix substitution, so
   a file that was also renamed is not covered: its row points at a path that no
