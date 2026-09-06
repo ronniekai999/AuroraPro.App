@@ -464,17 +464,24 @@ Invariants to preserve when touching this area:
   started never reaches the receiver, and refused outright when the receiver
   is SHARING the local session — `CloneForCast` returns that session
   unchanged, so a re-anchor there mints a new token for the same anchor and
-  the visible reload accomplishes nothing. The cap bounds ONE episode of
-  divergence, not the whole title: a SUSTAINED run of in-tolerance polls
-  replenishes it (`castReanchorBudgetAfter`), because a guest has no other
-  replenishment path (`seekToRealSec` refuses guests and their local session
-  is never rebuilt during a cast), so without it three host rewinds past the
-  anchor would strand every guest's TV for the rest of the film with nothing
-  surfaced. The run length is load-bearing: a re-anchor loads the receiver AT
-  the party position, so the FIRST poll after it lands is in tolerance almost
-  by construction, and refunding on that one poll would let a receiver that
-  stalls a few seconds after every load re-anchor every 6-8s for the whole
-  title — against the very server whose slowness caused the stall.
+  the visible reload accomplishes nothing. The two escalation causes are
+  budgeted SEPARATELY, and that split is load-bearing. The INFERRED one (a
+  receiver judged stuck from repeated nowhere-near polls) is capped by COUNT,
+  because inference can misjudge a merely-slow receiver and a wrong diagnosis
+  must not reload the TV indefinitely; a sustained run of in-tolerance polls
+  earns one back (`castReanchorBudgetAfter`), and the run length matters
+  because a re-anchor loads the receiver AT the party position, so the FIRST
+  poll after it lands is in tolerance almost by construction — refunding on
+  that one poll let a receiver stalling a few seconds after every load
+  re-anchor every 6-8s for a whole title, against the very server whose
+  slowness caused the stall. The PROVEN one (a target before the session's own
+  anchor) is rate-limited by TIME instead: it is arithmetic, it cannot
+  misdiagnose anything, and a count cap on it strands the receiver — three
+  host rewinds inside one settled-run window spend it, and every later rewind
+  is then unanswerable while the TV plays on ahead of the room. A guest has no
+  other recovery path at all (`seekToRealSec` refuses guests and their local
+  session is never rebuilt during a cast), so "unanswerable" means exactly
+  that.
 - **Per-title cast state is reset on TARGET IDENTITY, not on the auto-advance
   path.** `castAdvancePendingRef` is set only by end-of-media and by a
   seek-while-casting, so a PARTY media-change bumps `castReloadEpoch` and the
@@ -482,6 +489,13 @@ Invariants to preserve when touching this area:
   published while the party's clock has moved to the next one. Every
   conversion then reads the new episode against the old anchor, and a host
   would broadcast the old episode's position into the new episode's party.
+  The reset clears BOTH halves of the pending pair as well as the committed
+  anchor. Clearing only the pending anchor leaves a load in flight across the
+  change able to promote the OLD title's anchor when it resolves — which every
+  consumer then reads as a fresh anchor for the NEW title, the same defect one
+  step removed. Clearing both makes that load promote nothing (the guard keys
+  on the media half), leaving the anchor unknown, which is what makes both
+  branches decline instead of converting wrongly.
 - **`'blocked'` is not `'none'`.** Both mean "this poll takes no action", and
   they are opposite states: one is "the receiver arrived", the other "it
   cannot be got there and I am out of budget". The host warm-up promotes only
@@ -523,7 +537,16 @@ Known limits, stated plainly:
   rare, versus the alternative of a host who can never drive their own party.
 - **A guest casting is untouched by the warm-up**, which is correct (they never
   broadcast) but means a guest whose receiver cannot converge simply watches a
-  TV that is out of step; nothing tells them so.
+  TV that is out of step; nothing tells them so. The guest-only "⟳ Sync"
+  button is NOT the remedy it looks like: it assigns `vid.currentTime` on the
+  local `<video>`, which `pausedByCastRef` holds frozen for the whole cast, so
+  while casting it does nothing at all. Pre-existing, and the one position
+  control this pass did not convert.
+- **Shared-session casts cannot escalate at all.** `castCanReanchor*` refuses
+  them because `CloneForCast` returns that session unchanged, so a party seek
+  before a RESUMED local session's anchor leaves the guest blocked until the
+  party clock walks back up to it — minutes, potentially. The cloned case
+  self-heals far faster because its anchor is only the pad behind the sender.
 - **The pad is only free on FFmpeg ≥ 6.1.** `-readrate_initial_burst` rides on
   `readrateBurstOK`; without it the 15s pad is paced at `readRateFactor` and
   costs ~3.75s of extra wall time before the receiver's `startTime` exists.

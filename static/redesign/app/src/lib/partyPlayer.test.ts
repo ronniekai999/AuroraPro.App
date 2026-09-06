@@ -522,6 +522,7 @@ describe('castResyncAction (closing the cast correction dead ends)', () => {
     stuckPolls: 0,
     reanchorAfterPolls: 5,
     reanchorAllowed: true,
+    unreachableReanchorAllowed: true,
   }
 
   it('does nothing while the receiver is within tolerance', () => {
@@ -550,7 +551,8 @@ describe('castResyncAction (closing the cast correction dead ends)', () => {
     const before = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385 })
     expect(before.stuck).toBe(false)
     const blocked = castResyncAction({
-      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385, reanchorAllowed: false,
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385,
+      unreachableReanchorAllowed: false,
     })
     expect(blocked.stuck).toBe(false)
   })
@@ -564,7 +566,8 @@ describe('castResyncAction (closing the cast correction dead ends)', () => {
 
   it('reports BLOCKED, not none, when an unreachable target has no re-anchor left', () => {
     const d = castResyncAction({
-      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385, reanchorAllowed: false,
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385,
+      unreachableReanchorAllowed: false,
     })
     // A seek to the floored target would just re-pin the receiver at the
     // anchor it is already stuck on, so the poll takes no action either way —
@@ -744,5 +747,43 @@ describe('castReanchorBudgetAfter (the re-anchor budget)', () => {
     let b = fresh
     for (let i = 0; i < SETTLED * 3; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
     expect(b.used).toBe(0)
+  })
+})
+
+describe('castResyncAction: the two escalations are budgeted separately', () => {
+  const base = {
+    receiverSec: 0,
+    targetAbsSec: 60,
+    castStartSec: 2385,
+    toleranceSec: 2,
+    stuckToleranceSec: 6,
+    stuckPolls: 0,
+    reanchorAfterPolls: 5,
+    reanchorAllowed: true,
+    unreachableReanchorAllowed: true,
+  }
+
+  it('answers a target before the anchor even when the INFERRED budget is spent', () => {
+    // The count cap exists because inference can misjudge a slow receiver. A
+    // target before the anchor is arithmetic — it cannot be a misdiagnosis —
+    // so spending the count on earlier stuck-inference escalations must not
+    // leave a host's rewind permanently unanswerable.
+    const d = castResyncAction({ ...base, reanchorAllowed: false })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('blocks a target before the anchor only when ITS own allowance is spent', () => {
+    const d = castResyncAction({ ...base, unreachableReanchorAllowed: false })
+    expect(d.action).toBe('blocked')
+  })
+
+  it('does not let the unreachable allowance answer an inferred stuck receiver', () => {
+    // Target is reachable (after the anchor); the receiver is just nowhere
+    // near it. That is the inference path, and only its own budget applies.
+    const d = castResyncAction({
+      ...base, targetAbsSec: 2500, receiverSec: 0, stuckPolls: 9,
+      reanchorAllowed: false, unreachableReanchorAllowed: true,
+    })
+    expect(d.action).toBe('seek')
   })
 })

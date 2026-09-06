@@ -546,11 +546,25 @@ export function castResyncAction(args: {
   stuckToleranceSec: number
   stuckPolls: number
   reanchorAfterPolls: number
+  /**
+   * Whether the INFERRED escalation may fire — a receiver judged unable to
+   * reach a target it can address, from repeated nowhere-near polls. Inference
+   * can be wrong about a merely-slow receiver, so its caller caps it by count.
+   */
   reanchorAllowed: boolean
+  /**
+   * Whether the PROVEN escalation may fire — a target before the session's own
+   * anchor, which no seek can reach. Separate because a count cap is the wrong
+   * bound for it: it cannot misdiagnose anything, it fires only when the party
+   * genuinely moved behind the anchor, and exhausting a count leaves every
+   * later host rewind unanswerable. Callers rate-limit this one by time.
+   */
+  unreachableReanchorAllowed: boolean
 }): CastResyncDecision {
   const {
     receiverSec, targetAbsSec, castStartSec,
-    toleranceSec, stuckToleranceSec, stuckPolls, reanchorAfterPolls, reanchorAllowed,
+    toleranceSec, stuckToleranceSec, stuckPolls, reanchorAfterPolls,
+    reanchorAllowed, unreachableReanchorAllowed,
   } = args
   const targetRecvSec = castAbsToReceiverSec(targetAbsSec, castStartSec)
 
@@ -558,7 +572,11 @@ export function castResyncAction(args: {
   // target just below the anchor can floor to a value that LOOKS in-tolerance
   // while the party is genuinely elsewhere.
   if (castTargetBeforeAnchor(targetAbsSec, castStartSec)) {
-    return { action: reanchorAllowed ? 'reanchor' : 'blocked', targetRecvSec, stuck: false }
+    return {
+      action: unreachableReanchorAllowed ? 'reanchor' : 'blocked',
+      targetRecvSec,
+      stuck: false,
+    }
   }
 
   if (!shouldResyncCastReceiver(receiverSec, targetRecvSec, toleranceSec)) {
