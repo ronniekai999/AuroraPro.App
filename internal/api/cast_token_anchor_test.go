@@ -88,13 +88,18 @@ func TestCreateCastToken_AtAnchorsTheCloneNearTheSender(t *testing.T) {
 	if !ok {
 		t.Fatalf("start_sec missing from response: %+v", resp)
 	}
-	// Near the sender, and never past it — the sender must always be able to
-	// seek the receiver backwards toward a party that moved.
-	if startSec <= 0 || startSec > 2400 {
-		t.Fatalf("start_sec = %v, want an anchor in (0, 2400]; inheriting the "+
-			"source's 0 is the bug this closes", startSec)
+	// The exact arithmetic, not just "somewhere plausible": a band like
+	// (0, 2400] is satisfied by an anchor of 1, which would be the bug.
+	if want := float64(2400 - castAnchorPadForTest); startSec != want {
+		t.Fatalf("start_sec = %v, want %v (the sender's position less the pad); "+
+			"inheriting the source's 0 is the bug this closes", startSec, want)
 	}
 }
+
+// Mirrors streaming.castAnchorPadSec, which is unexported. Pinned here so a
+// change to the pad has to be made deliberately on both sides rather than
+// silently loosening this assertion.
+const castAnchorPadForTest = 15
 
 // Omitting ?at= must keep the pre-2026-09 behaviour exactly: a sender that has
 // not been updated still gets a working (if badly anchored) cast.
@@ -116,7 +121,11 @@ func TestCreateCastToken_WithoutAtInheritsTheSourceAnchor(t *testing.T) {
 // A garbage ?at= is a hint that failed to parse, not a reason to fail the mint
 // — casting must not break because a query parameter was mangled.
 func TestCreateCastToken_UnusableAtIsIgnoredNotFatal(t *testing.T) {
-	for _, raw := range []string{"banana", "-5", "", "12.5", "9e9"} {
+	// "" is deliberately absent: an empty ?at= never reaches the parser (the
+	// handler tests the raw string first), so including it would duplicate
+	// TestCreateCastToken_WithoutAtInheritsTheSourceAnchor under a name that
+	// claims to test parsing.
+	for _, raw := range []string{"banana", "-5", "12.5", "9e9", "2400x"} {
 		t.Run("at="+raw, func(t *testing.T) {
 			h, tm := castAnchorHandler(t)
 			src := castAnchorSource(t, tm, 300)

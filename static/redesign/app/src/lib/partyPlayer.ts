@@ -480,7 +480,22 @@ export function castTargetBeforeAnchor(
   return targetAbsSec < Math.max(0, castStartSec) - toleranceSec
 }
 
-export type CastResyncAction = 'none' | 'seek' | 'reanchor'
+export type CastResyncAction =
+  /** The receiver is where it should be. */
+  | 'none'
+  /** Ordinary drift; a seek closes it. */
+  | 'seek'
+  /** Only a cast session anchored somewhere else can reach the target. */
+  | 'reanchor'
+  /**
+   * The target is unreachable AND no re-anchor is available. Deliberately not
+   * folded into 'none': the two are opposite states that happen to share the
+   * same immediate move (do nothing this poll). A caller waiting for the
+   * receiver to arrive — the host warm-up — must not read "I have given up" as
+   * "it arrived", which is how a host ends up speaking for a party its TV is
+   * nowhere near.
+   */
+  | 'blocked'
 
 export interface CastResyncDecision {
   action: CastResyncAction
@@ -543,7 +558,7 @@ export function castResyncAction(args: {
   // target just below the anchor can floor to a value that LOOKS in-tolerance
   // while the party is genuinely elsewhere.
   if (castTargetBeforeAnchor(targetAbsSec, castStartSec)) {
-    return { action: reanchorAllowed ? 'reanchor' : 'none', targetRecvSec, stuck: false }
+    return { action: reanchorAllowed ? 'reanchor' : 'blocked', targetRecvSec, stuck: false }
   }
 
   if (!shouldResyncCastReceiver(receiverSec, targetRecvSec, toleranceSec)) {
@@ -633,6 +648,13 @@ export function castHostPhase(
   budgetMs: number,
 ): CastHostPhase {
   if (converged) return 'authoritative'
+  // An unarmed clock (0, the ref's initial value) is "the warm-up has not
+  // started", never "its budget expired in 1970". Getting that backwards
+  // skips the warm-up entirely on any path that reaches the first poll
+  // without passing through the arming branch — a host already casting solo
+  // who then joins a party, or a first poll that finds the media already
+  // loaded — which is exactly when a host is least caught up.
+  if (warmupStartedAtMs <= 0) return 'warmup'
   if (nowMs - warmupStartedAtMs >= budgetMs) return 'authoritative'
   return 'warmup'
 }

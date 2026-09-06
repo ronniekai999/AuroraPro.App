@@ -909,37 +909,58 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // the title is plainly already playing.
   const castMintFailedRef = useRef(false)
   // The `-ss` anchor of the session the RECEIVER is on, in absolute source
-  // seconds — the subtrahend for every abs→receiver conversion below.
+  // seconds — the subtrahend for every receiver↔absolute conversion below —
+  // or NULL when this mount has not seen a load resolve and therefore does
+  // not know.
   //
   // It is not startSecRef. Since cast clones are anchored near the sender
   // rather than inheriting the local session's anchor, the two diverge on the
   // ordinary path: the local player may still be anchored at 0 forty minutes
   // in while the receiver's clone starts at 40 minutes. Using the local one
-  // would map every party position onto the wrong timeline.
+  // maps every position onto the wrong timeline.
   //
-  // Pending/committed for the same reason castLoadedMediaRef is: a mint that
-  // never became a resolved loadMedia describes a session the receiver never
-  // touched, and adopting its anchor would misread the position of the media
-  // still playing. 0 is also the correct value for direct play, where the
-  // element's clock IS the absolute source position.
-  const castPendingStartSecRef = useRef(0)
-  const castStartSecRef = useRef(0)
+  // Pending/committed for the same reason castLoadedMediaRef is, and NULLABLE
+  // for the same reason too — read that ref's comment above, because this one
+  // fails the same way. A mint that never became a resolved loadMedia
+  // describes a session the receiver never touched. And 0 cannot be the
+  // "don't know" value: it is a real, common anchor (direct play always, and
+  // any unresumed session), so a default of 0 would silently claim the
+  // receiver's clock IS absolute — which after a page reload re-joins a live
+  // cast (routine here; the box auto-deploys) understates the position by the
+  // clone's whole anchor, and for a host broadcasts that to every guest.
+  const castPendingStartSecRef = useRef<number | null>(null)
+  const castStartSecRef = useRef<number | null>(null)
   if (!castSessionRef.current) {
     castSessionRef.current = createCastSessionTracker({
       localSessionId: () => sessionIdRef.current,
       release: id => { void deleteSession(id) },
     })
   }
-  // Absolute source seconds → the receiver's own timeline, and back. Thin
-  // wrappers over the tested helper so no call site has to remember which
-  // anchor applies.
-  const recvToAbsSec = (recvSec: number) => Math.max(0, recvSec) + castStartSecRef.current
+  // The receiver's own timeline → absolute source seconds, or null when the
+  // anchor is unknown. Callers that ACT on the result must treat null as
+  // "don't"; the two display sites fall back to the raw receiver reading with
+  // an explicit `??` so the guess is visible where it is made.
+  const recvToAbsSec = (recvSec: number): number | null =>
+    castStartSecRef.current === null ? null : Math.max(0, recvSec) + castStartSecRef.current
   // How many times this cast has been re-anchored (see castResyncAction), and
   // how many consecutive polls a correction has failed to land. Per-cast, not
   // per-load: a re-anchor is itself a load, so resetting on load would hand
   // the budget straight back to the loop that just spent it.
   const castStuckPollsRef = useRef(0)
   const castReanchorsUsedRef = useRef(0)
+  // Host warm-up state (see castHostPhase). Refs rather than effect-scoped
+  // state for the same reason the confirmation tracking below is: this
+  // effect re-runs on party.isPlaying, and a warm-up recreated on every
+  // play/pause would keep handing the host a fresh budget instead of letting
+  // it expire. 0 means "not armed yet", which castHostPhase reads as warm-up
+  // — never as an expired budget.
+  const hostConvergedRef = useRef(false)
+  const hostWarmupStartedAtMsRef = useRef(0)
+  // Our OWN corrective seeks move the receiver, and the host branch reads a
+  // moved receiver as a scrub the user performed on the TV. Suppress the jump
+  // detector across the window one takes to land, the same shape (and for the
+  // same reason) as the local loop's applyingRemoteUntilRef.
+  const hostCorrectionUntilMsRef = useRef(0)
   // Everything that describes "what the receiver is on" goes back to unknown
   // together. Two call sites already had to keep three refs in step; a fourth
   // and fifth would eventually have gone out of step.
@@ -947,10 +968,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castSessionRef.current?.end()
     castPendingMediaRef.current = null
     castLoadedMediaRef.current = null
-    castPendingStartSecRef.current = 0
-    castStartSecRef.current = 0
+    castPendingStartSecRef.current = null
+    castStartSecRef.current = null
     castStuckPollsRef.current = 0
     castReanchorsUsedRef.current = 0
+    hostConvergedRef.current = false
+    hostWarmupStartedAtMsRef.current = 0
+    hostCorrectionUntilMsRef.current = 0
   }
   // Where a cast should START, in absolute source seconds.
   //
@@ -964,14 +988,27 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // everyone else.
   //
   // Falls back to the local element whenever the party can't say (solo
-  // playback, a party watching something else, a tick too stale to trust),
+  // playback, a party watching something else, a tick too stale to trust, or
+  // a party that has moved to an episode this player has not caught up to),
   // which is exactly the pre-2026-09 behaviour.
-  const castStartAbsSec = (explicitAbsSec: number | undefined, localAbsSec: number): number => {
+  const castStartAbsSec = (
+    explicitAbsSec: number | undefined,
+    localAbsSec: number,
+    targetEpisodeId: number | undefined,
+  ): number => {
     if (typeof explicitAbsSec === 'number' && Number.isFinite(explicitAbsSec) && explicitAbsSec >= 0) {
       return explicitAbsSec
     }
     const p = partySyncRef.current
-    if (p && partyControlsMediaRef.current) {
+    // partyControlsMedia is SERIES-level for a TV show — the party's
+    // mediaItemId is unchanged by an episode advance — so it reads true
+    // during the seconds between a media-change and App resolving the new
+    // target. Anchoring a clone from the WRONG episode's clock puts its -ss
+    // somewhere arbitrary in the new file, and past EOF if the new episode is
+    // shorter: the receiver then connects and never plays, which is the exact
+    // failure this change exists to close.
+    if (p && partyControlsMediaRef.current &&
+        !isPartyEpisodeMismatch(p.partyEpisodeId, targetEpisodeId)) {
       const fromParty = partyTargetAbsSec(
         p.tickRef.current,
         p.isPlaying,
@@ -1062,6 +1099,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         startTime: castStartAbsSec(
           atAbsSec,
           (videoRef.current?.currentTime ?? 0) || dc.pendingResumeSec,
+          target.episodeId,
         ),
       }
     }
@@ -1069,7 +1107,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // is relative to the LOCAL session's `-ss` anchor, which is not the cast
     // session's.
     const localAbsSec = (videoRef.current?.currentTime ?? 0) + (startSecRef.current ?? 0)
-    const desiredAbsSec = castStartAbsSec(atAbsSec, localAbsSec)
+    const desiredAbsSec = castStartAbsSec(atAbsSec, localAbsSec, target.episodeId)
     // Tell the server where we are so it can anchor a cast-safe clone near
     // this position instead of inheriting the local session's anchor. Without
     // it a clone starts wherever local playback started and the seek below
@@ -1150,10 +1188,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Media Receiver surfaces that as an indefinite buffer, not an error.
   // So: resuming a paused cast whose token has expired re-loads the media
   // with a freshly-minted token instead of issuing a bare play command.
-  // The resume position is the RECEIVER's timeline (cast.remote.currentTime)
-  // — the local <video> froze when the cast began, so its currentTime would
-  // jump the receiver backwards. loadCurrent re-mints via castLoadGetter,
-  // which also refreshes castTokenExpRef.
+  // The resume position is where the RECEIVER is — read as
+  // cast.remote.currentTime and converted to absolute source seconds through
+  // the cast session's own anchor (recvToAbsSec), because loadCurrent takes
+  // absolute seconds and the reload may come back anchored elsewhere. The
+  // local <video> froze when the cast began, so its currentTime would jump
+  // the receiver backwards. loadCurrent re-mints via castLoadGetter, which
+  // also refreshes castTokenExpRef.
   const isCastTokenExpired = () => {
     const exp = castTokenExpRef.current
     return exp > 0 && Date.now() / 1000 >= exp
@@ -1244,8 +1285,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   }
   const resumeCast = () => {
     if (cast.remote.isPaused && isCastTokenExpired()) {
-      reloadCastAtAbsSec(recvToAbsSec(cast.remote.currentTime))
-      return
+      // Unknown anchor: a reload would have to guess where to resume, and
+      // guessing wrong on a renewal restarts the film somewhere else. Fall
+      // through to a plain resume, which at worst 401s the way it did before
+      // the renewal path existed.
+      const atAbsSec = recvToAbsSec(cast.remote.currentTime)
+      if (atAbsSec !== null) {
+        reloadCastAtAbsSec(atAbsSec)
+        return
+      }
     }
     cast.playOrPause()
   }
@@ -1258,7 +1306,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // `targetRecvSec` is on the RECEIVER's clock, like everything that reads
   // cast.remote.currentTime; the renewal path converts before delegating.
   const seekCastSafely = (targetRecvSec: number) => {
-    if (isCastTokenExpired()) { reloadCastAtAbsSec(recvToAbsSec(targetRecvSec)); return }
+    if (isCastTokenExpired()) {
+      const atAbsSec = recvToAbsSec(targetRecvSec)
+      // Same reasoning as resumeCast: with no anchor there is no correct
+      // position to re-mint at, so issue the raw seek rather than reload
+      // somewhere invented.
+      if (atAbsSec !== null) { reloadCastAtAbsSec(atAbsSec); return }
+    }
     castRef.current.seek(targetRecvSec)
   }
   // Ref mirror of seekCastSafely for seekToRealSec's use (issue #503).
@@ -1653,6 +1707,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!castAdvancePendingRef.current) return
     castAdvancePendingRef.current = false
     if (!cast.status.connected) return
+    // A new episode is a new convergence problem: give it a fresh correction
+    // budget and warm-up rather than the remains of the previous episode's.
+    // Otherwise a binge that spent both re-anchors on episode 1 has none left
+    // for the rest of the season, and a host converged on episode 1 would be
+    // authoritative from episode 2's very first poll.
+    castStuckPollsRef.current = 0
+    castReanchorsUsedRef.current = 0
+    hostConvergedRef.current = false
+    hostWarmupStartedAtMsRef.current = 0
     void runCastLoad(() => cast.loadCurrent()).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] auto-advance load failed; stopping cast', err)
@@ -4062,17 +4125,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const guestWasGatedRef = useRef(false)
   const guestSeqAwaitingConfirmRef = useRef<number | null>(null)
   const guestAwaitStartedAtMsRef = useRef(0)
-  // Host warm-up (see castHostPhase). Both live in refs for the same reason
-  // the confirmation state above does — this effect re-runs on party.isPlaying,
-  // and a warm-up that restarted on every play/pause would keep handing the
-  // host a fresh budget instead of letting it expire.
-  const hostConvergedRef = useRef(false)
-  const hostWarmupStartedAtMsRef = useRef(0)
-  // Our OWN corrective seeks move the receiver, and the host branch reads a
-  // moved receiver as a scrub the user performed on the TV. Suppress the jump
-  // detector across the window one takes to land, the same shape (and for the
-  // same reason) as the local loop's applyingRemoteUntilRef.
-  const hostCorrectionUntilMsRef = useRef(0)
   useEffect(() => {
     if (!target || !party || !partyControlsMedia || !cast.status.connected) return
 
@@ -4109,32 +4161,64 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // sender is routinely not the local <video>'s. Using startSecRef here —
     // as this effect did before clones could be re-anchored — maps every
     // party position onto the wrong timeline.
-    const castSecToAbsMs = (sec: number) => Math.round(recvToAbsSec(sec) * 1000)
     // The party's position in absolute source seconds, or null when the tick
-    // cannot say (no tick yet, or a running party's tick gone stale).
-    const partyAbsSec = (): number | null => partyTargetAbsSec(
-      party.tickRef.current,
-      party.isPlaying,
-      party.clockOffsetRef?.current ?? 0,
-      Date.now(),
-    )
+    // cannot say (no tick yet, a running party's tick gone stale, or the party
+    // on an episode this player has not caught up to yet).
+    const partyAbsSec = (): number | null => {
+      // partyControlsMedia is SERIES-level for a TV show: the party's
+      // mediaItemId doesn't change across an episode advance, so during the
+      // seconds between a media-change and App re-resolving `target` it reads
+      // true while the two sides are on different episodes. Seeding or
+      // correcting a cast from the wrong episode's clock anchors a clone
+      // somewhere arbitrary in the new file — possibly past its end, which is
+      // the silent-hang shape this whole change exists to close. Same guard,
+      // same reason, as the local drift loop's rebuild check.
+      if (isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId)) return null
+      return partyTargetAbsSec(
+        party.tickRef.current,
+        party.isPlaying,
+        party.clockOffsetRef?.current ?? 0,
+        Date.now(),
+      )
+    }
+    // Re-anchoring means asking the server for a cast session anchored
+    // somewhere else — which it can only honour by CLONING. When the receiver
+    // is sharing the local player's own session (no clone was needed: H.264 +
+    // AAC, no subtitle tracks), CloneForCast returns it unchanged and a
+    // re-anchor mints a fresh token for the same session at the same anchor.
+    // The reload is visible on the TV, changes nothing, and would repeat until
+    // the budget ran out.
+    const castCanReanchor = () => {
+      const committed = castSessionRef.current?.committed() ?? null
+      return committed !== null &&
+        committed !== sessionIdRef.current &&
+        castReanchorsUsedRef.current < CAST_MAX_REANCHORS
+    }
     // One correction step shared by the guest branch and the host's warm-up:
     // seek the receiver toward the party, or re-anchor the whole cast when
-    // seeking provably (or evidently) cannot get there. Returns whether the
-    // receiver is already where it should be.
-    const correctReceiverToward = (targetAbsSec: number, receiverSec: number): boolean => {
+    // seeking provably (or evidently) cannot get there.
+    //
+    // 'converged' means the receiver is where the party is. 'blocked' means it
+    // cannot be got there — NOT the same thing, however similar they look from
+    // a poll that takes no action.
+    const correctReceiverToward = (
+      targetAbsSec: number,
+      receiverSec: number,
+      castStartSec: number,
+    ): 'converged' | 'correcting' | 'blocked' => {
       const decision = castResyncAction({
         receiverSec,
         targetAbsSec,
-        castStartSec: castStartSecRef.current,
+        castStartSec,
         toleranceSec: GUEST_DRIFT_RESYNC_SEC,
         stuckToleranceSec: CAST_STUCK_SEC,
         stuckPolls: castStuckPollsRef.current,
         reanchorAfterPolls: CAST_REANCHOR_AFTER_POLLS,
-        reanchorAllowed: castReanchorsUsedRef.current < CAST_MAX_REANCHORS,
+        reanchorAllowed: castCanReanchor(),
       })
       castStuckPollsRef.current = decision.stuck ? castStuckPollsRef.current + 1 : 0
-      if (decision.action === 'none') return true
+      if (decision.action === 'none') return 'converged'
+      if (decision.action === 'blocked') return 'blocked'
       if (decision.action === 'reanchor') {
         // The reload cycles isMediaLoaded, which re-arms the gate below; the
         // suppression window keeps the host's scrub detector quiet across the
@@ -4145,11 +4229,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           castReanchorsUsedRef.current += 1
           castStuckPollsRef.current = 0
         }
-        return false
+        return 'correcting'
       }
       hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
       seekCastSafely(decision.targetRecvSec)
-      return false
+      return 'correcting'
     }
 
     if (party.isHost) {
@@ -4191,11 +4275,29 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         const nowSec = c.remote.currentTime
         const prev = hostLastSnapshotRef.current
         hostLastSnapshotRef.current = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        // With no known anchor there is no honest conversion between the
+        // receiver's clock and the party's — see castStartSecRef. Reachable
+        // when a page reload re-joins a live cast session this mount never
+        // loaded. Broadcasting a receiver reading as if it were absolute
+        // would rewind the room by the clone's whole anchor.
+        const castStartSec = castStartSecRef.current
+        if (castStartSec === null) return
+        // Receiver clock → the party's absolute milliseconds, against the
+        // anchor just narrowed above.
+        const castSecToAbsMs = (sec: number) => Math.round((Math.max(0, sec) + castStartSec) * 1000)
 
         // ── Warm-up ────────────────────────────────────────────────────
         // Until the receiver has reached the party, the host is not the
         // party's position — it is a peer catching up, and it says nothing
         // outward. See castHostPhase.
+        //
+        // The clock is armed HERE, not only where the gate lifts. A host who
+        // was already casting solo and then joins a party — or whose first
+        // poll finds the media already loaded — never passes through the gate
+        // branch, and an unarmed 0 would read as a budget spent long ago.
+        if (hostWarmupStartedAtMsRef.current === 0 && !hostConvergedRef.current) {
+          hostWarmupStartedAtMsRef.current = Date.now()
+        }
         if (castHostPhase(
           hostConvergedRef.current, hostWarmupStartedAtMsRef.current, Date.now(), HOST_WARMUP_BUDGET_MS,
         ) === 'warmup') {
@@ -4218,7 +4320,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             }
             return
           }
-          if (correctReceiverToward(targetAbsSec, nowSec)) {
+          // Only a genuine arrival promotes the host. 'blocked' — the target
+          // is unreachable and no re-anchor is left — looks identical from
+          // here (neither takes an action) and means the opposite: reading it
+          // as convergence would hand authority to a TV that is nowhere near
+          // the room. Let the budget expire on it instead.
+          if (correctReceiverToward(targetAbsSec, nowSec, castStartSec) === 'converged') {
             // Arrived. From the next poll on, the TV speaks for the party.
             hostConvergedRef.current = true
             // The position it arrived at is the party's own, so there is
@@ -4334,8 +4441,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // playOrPause() against an already-expired cast token just 401s on
           // every segment fetch, which the receiver reports as an
           // indefinite buffer rather than an error.
-          if (isCastTokenExpired()) {
-            reloadCastAtAbsSec(partyAbsSec() ?? recvToAbsSec(c.remote.currentTime))
+          const atAbsSec = partyAbsSec() ?? recvToAbsSec(c.remote.currentTime)
+          if (isCastTokenExpired() && atAbsSec !== null) {
+            reloadCastAtAbsSec(atAbsSec)
           } else {
             castRef.current.playOrPause()
           }
@@ -4351,7 +4459,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // have moved on, so free-run rather than chase a frozen target.
       const targetAbsSec = partyAbsSec()
       if (targetAbsSec === null) return
-      correctReceiverToward(targetAbsSec, c.remote.currentTime)
+      // No known anchor (a page reload re-joined a live cast this mount never
+      // loaded) means no honest conversion, so no correction. Seeking against
+      // a guessed anchor moves the TV somewhere arbitrary.
+      const castStartSec = castStartSecRef.current
+      if (castStartSec === null) return
+      correctReceiverToward(targetAbsSec, c.remote.currentTime, castStartSec)
     }, GUEST_POLL_MS)
     return () => window.clearInterval(id)
   // Same coarse-dependency reasoning as the local-video sync effect above:
@@ -4987,8 +5100,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         case 'k':
           e.preventDefault()
           if (castConnectedNow) {
-            if (c.remote.isPaused && isCastTokenExpired()) {
-              reloadCastAtAbsSec(recvToAbsSec(c.remote.currentTime))
+            const atAbsSec = recvToAbsSec(c.remote.currentTime)
+            if (c.remote.isPaused && isCastTokenExpired() && atAbsSec !== null) {
+              reloadCastAtAbsSec(atAbsSec)
             } else {
               c.playOrPause()
             }
@@ -5006,9 +5120,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // rebuild when they land past the buffered head, matching the
           // scrub bar — was a raw `vid.currentTime +=` that stalled hls.js
           // on a sequential transcode.
-          const baseSec = castConnectedNow ? c.remote.currentTime : vid.currentTime
+          // The receiver's clock is anchored at the CAST session's -ss, which
+          // since cast clones are anchored near the sender is routinely not
+          // the local one; adding startSecRef here seeked to a position tens
+          // of minutes off, and on a host broadcast it to the whole party.
+          // With no known anchor there is no correct target, so do nothing
+          // rather than scrub somewhere invented.
           const delta = e.key === 'ArrowLeft' ? -10 : 10
-          seekToRealSecRef.current((baseSec + (startSecRef.current ?? 0)) + delta)
+          if (castConnectedNow) {
+            const baseAbsSec = recvToAbsSec(c.remote.currentTime)
+            if (baseAbsSec !== null) seekToRealSecRef.current(baseAbsSec + delta)
+            break
+          }
+          seekToRealSecRef.current(vid.currentTime + (startSecRef.current ?? 0) + delta)
           break
         }
         case 'ArrowUp':
@@ -5394,8 +5518,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Chromecast receiver (via cast.remote / cast.playOrPause) or, for AirPlay,
   // the local <video> element that Safari is mirroring to the TV.
   const widgetPaused = cast.status.connected ? cast.remote.isPaused : !playing
-  const widgetCurSec = cast.status.connected ? cast.remote.currentTime : currentSec
-  const widgetDurSec = cast.status.connected ? cast.remote.duration : realDurationSec
+  // Both halves of the widget's progress bar must be on the SAME clock. The
+  // receiver reports its own: currentTime is anchor-relative and duration is
+  // what remains of the file from that anchor, so a cast started 40 minutes
+  // in used to snap the bar back to ~0% and then fill over the remaining
+  // running time. realDurationSec is the absolute source duration (the same
+  // file), which is the right denominator for an absolute playhead.
+  const widgetCurSec = cast.status.connected
+    ? (recvToAbsSec(cast.remote.currentTime) ?? cast.remote.currentTime)
+    : currentSec
+  const widgetDurSec = cast.status.connected
+    ? (realDurationSec > 0 ? realDurationSec : (recvToAbsSec(cast.remote.duration) ?? cast.remote.duration))
+    : realDurationSec
   const widgetToggle = () => {
     if (cast.status.connected) { resumeCast(); return }
     const v = videoRef.current
@@ -6214,9 +6348,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   fabricated one. */}
               <PlayerControls
                 playing={cast.status.connected ? !cast.remote.isPaused : playing}
-                currentSec={cast.status.connected ? cast.remote.currentTime + (startSecRef.current ?? 0) : currentSec}
+                currentSec={cast.status.connected
+                  ? (recvToAbsSec(cast.remote.currentTime) ?? cast.remote.currentTime)
+                  : currentSec}
                 durationSec={realDurationSec}
-                bufferedSec={cast.status.connected ? cast.remote.currentTime + (startSecRef.current ?? 0) : bufferedSec}
+                bufferedSec={cast.status.connected
+                  ? (recvToAbsSec(cast.remote.currentTime) ?? cast.remote.currentTime)
+                  : bufferedSec}
                 volume={volume}
                 muted={muted}
                 fullscreen={fullscreen}
@@ -6253,11 +6391,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   // relative skip off it would compute a target completely
                   // disconnected from where the receiver's TV actually is.
                   // Use the receiver's own live position instead.
-                  const baseSec = cast.status.connected
-                    ? cast.remote.currentTime
-                    : videoRef.current?.currentTime
-                  if (baseSec === undefined) return
-                  seekToRealSec((baseSec + (startSecRef.current ?? 0)) + delta)
+                  // Receiver seconds carry the CAST anchor, local seconds the
+                  // local one — see the keyboard handler above for what mixing
+                  // them costs. A cast whose anchor we don't know has no
+                  // correct target, so the control no-ops rather than guess.
+                  if (cast.status.connected) {
+                    const baseAbsSec = recvToAbsSec(cast.remote.currentTime)
+                    if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
+                    return
+                  }
+                  const localSec = videoRef.current?.currentTime
+                  if (localSec === undefined) return
+                  seekToRealSec(localSec + (startSecRef.current ?? 0) + delta)
                 }}
                 onVolumeChange={(v) => {
                   const vid = videoRef.current

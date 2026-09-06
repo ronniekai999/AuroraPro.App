@@ -548,13 +548,16 @@ describe('castResyncAction (closing the cast correction dead ends)', () => {
     expect(d.action).toBe('reanchor')
   })
 
-  it('does nothing rather than seek uselessly when the budget is spent', () => {
+  it('reports BLOCKED, not none, when an unreachable target has no re-anchor left', () => {
     const d = castResyncAction({
       ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385, reanchorAllowed: false,
     })
     // A seek to the floored target would just re-pin the receiver at the
-    // anchor it is already stuck on.
-    expect(d.action).toBe('none')
+    // anchor it is already stuck on, so the poll takes no action either way —
+    // but this is the opposite of 'none'. A host warm-up waiting to converge
+    // must not read "I have given up" as "it arrived" and start speaking for
+    // a party its TV is nowhere near.
+    expect(d.action).toBe('blocked')
   })
 
   it('does not count an ordinary correction as stuck', () => {
@@ -608,6 +611,14 @@ describe('castHostPhase (a casting host does not start out authoritative)', () =
   })
   it('a converged host is never sent back to warm-up by the clock', () => {
     expect(castHostPhase(true, 1_000, 1_001, 12_000)).toBe('authoritative')
+  })
+  it('treats an unarmed clock as not-yet-started, not as long-expired', () => {
+    // 0 is the ref's initial value. Reading `now - 0 >= budget` as an expired
+    // budget skips the warm-up on every path that reaches the first poll
+    // without arming it — a host already casting solo who then joins a party,
+    // or a first poll that finds the media already loaded.
+    expect(castHostPhase(false, 0, Date.now(), 12_000)).toBe('warmup')
+    expect(castHostPhase(false, -1, Date.now(), 12_000)).toBe('warmup')
   })
 })
 

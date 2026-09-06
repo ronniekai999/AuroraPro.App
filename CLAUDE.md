@@ -419,9 +419,20 @@ Invariants to preserve when touching this area:
   shared-session path (no clone needed) reports the LOCAL session's anchor and
   the cloned path reports the clone's; they differ, and the sender cannot infer
   which it got. `castStartSecRef` — never `startSecRef` — is what every
-  abs↔receiver conversion subtracts, and it is promoted on a resolved
-  `loadMedia` like `castLoadedMediaRef`, because a mint that never loaded
-  describes a session the receiver is not on.
+  receiver↔absolute conversion subtracts, **including the ones outside the
+  sync effects**: the expanded transport bar's readout, its ±10s control, the
+  keyboard arrows, and the minimized widget's progress bar all read
+  `cast.remote.currentTime`. They were correct while clones inherited
+  `src.StartSec` and became wrong the moment anchors could diverge; a host's
+  ±10s button in particular reached `broadcastHostPartySeek`, so the unit slip
+  moved the whole room.
+- **`castStartSecRef` is NULLABLE, and 0 is not the unknown value.** 0 is a
+  real, common anchor (direct play always; any unresumed session), so
+  defaulting to it silently claims the receiver's clock is absolute. After a
+  page reload re-joins a live cast — routine, the box auto-deploys — that
+  understates by the clone's whole anchor and, for a host, broadcasts it.
+  Both sync branches bail on null; the two display sites fall back to the raw
+  receiver reading with an explicit `??` so the guess is visible.
 - **`?at=` is a hint, not a contract.** An absent or unparseable value means
   "no preference" and restores the inherit-the-source behaviour; it never fails
   the mint. `for_airplay=true` still skips cloning entirely (#326).
@@ -447,8 +458,23 @@ Invariants to preserve when touching this area:
   coarser than the seek test — the party's target advances while a seek takes
   ~a second to reach a TV, so a WORKING correction reads out-of-tolerance for a
   poll or two and counting those would re-anchor healthy casts on a loop.
-  Re-anchors are capped per cast and charged only when a reload actually
-  starts (`reloadCastAtAbsSec` returns whether it did).
+  Re-anchors are capped per cast, charged only when a reload actually starts
+  (`reloadCastAtAbsSec` returns whether it did), and refused outright when the
+  receiver is SHARING the local session — `CloneForCast` returns that session
+  unchanged, so a re-anchor there mints a new token for the same anchor and
+  the visible reload accomplishes nothing.
+- **`'blocked'` is not `'none'`.** Both mean "this poll takes no action", and
+  they are opposite states: one is "the receiver arrived", the other "it
+  cannot be got there and I am out of budget". The host warm-up promotes only
+  on a genuine arrival — conflating them hands authority to a TV that is
+  nowhere near the room, at exactly the moment the warm-up exists to prevent
+  that.
+- **The party clock is read through `isPartyEpisodeMismatch`, not just
+  `partyControlsMedia`.** The latter is SERIES-level for a TV show, so during
+  the seconds between a `media-change` and App resolving the new target it
+  reads true across two different episodes. Anchoring a clone from the wrong
+  episode's clock puts its `-ss` somewhere arbitrary in the new file — past
+  EOF if the new episode is shorter, which is the silent hang again.
 - **`loadCurrent`/`castLoadGetter` take ABSOLUTE source seconds.** The old
   receiver-relative `startTimeSec` override only worked while every cast
   session shared the local player's anchor. Keep the one conversion in the
@@ -471,6 +497,23 @@ Known limits, stated plainly:
 - **A guest casting is untouched by the warm-up**, which is correct (they never
   broadcast) but means a guest whose receiver cannot converge simply watches a
   TV that is out of step; nothing tells them so.
+- **The pad is only free on FFmpeg ≥ 6.1.** `-readrate_initial_burst` rides on
+  `readrateBurstOK`; without it the 15s pad is paced at `readRateFactor` and
+  costs ~3.75s of extra wall time before the receiver's `startTime` exists.
+  `TestCastAnchorPadFitsInsideTheInitialBurst` compares two constants and
+  cannot see this.
+- **`?at=` is not bounded by the file's duration** — `castCloneAnchorSec` caps
+  at 24h only, because the session carries no duration to check against. A
+  sender that asks for a position past EOF gets an FFmpeg that produces
+  nothing, i.e. the silent hang. Self-limiting (it costs that caller their own
+  cast), and the episode-mismatch guard closes the one path that reached it by
+  accident, but it is a guard the server does not have.
+- **The unknown-anchor state stops corrections rather than recovering them.**
+  A page reload that re-joins a live cast leaves `castStartSecRef` null, and
+  both sync branches (plus the ±10s controls) then decline to act rather than
+  convert through a guessed anchor. Correct, but it means a re-joined cast in
+  a party no longer drift-corrects at all until the receiver is re-pointed.
+  Reading the anchor back off a re-joined session is the fix, and is not built.
 
 ## Native-client direct play (Tier 1 of the Mac-app work)
 
