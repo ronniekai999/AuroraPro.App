@@ -122,12 +122,6 @@ type Scanner struct {
 	// The Smart Skip worker hooks this to sweep for unanalyzed files.
 	// Must be cheap/non-blocking — it runs on the scan goroutine.
 	OnScanComplete func(lib *models.Library)
-
-	// repointed records libraries whose paths were just changed by an admin,
-	// keyed by library ID and holding the paths they were changed TO. See
-	// NoteRepointed.
-	repointedMu sync.Mutex
-	repointed   map[int64][]string
 }
 
 // prunePlan is what a scan does about files recorded in the DB but absent
@@ -135,70 +129,36 @@ type Scanner struct {
 type prunePlan int
 
 const (
-	prunePlanNow       prunePlan = iota // ordinary scan: absence means deletion
-	prunePlanRelocated                  // the library moved: delete nothing
-	prunePlanSkip                       // no usable evidence either way
+	prunePlanNow  prunePlan = iota // ordinary scan: absence means deletion
+	prunePlanSkip                  // no usable evidence either way
 )
 
 func (p prunePlan) String() string {
 	switch p {
 	case prunePlanNow:
 		return "prune-now"
-	case prunePlanRelocated:
-		return "relocated"
 	default:
 		return "skip"
 	}
 }
 
-// planPrune chooses between those three from what is known BEFORE the walk's
-// rows are read. The data-derived relocation check cannot be an input here —
-// it needs the recorded paths, which only pruneDeletedFiles fetches — so a
-// prunePlanNow can still be turned into prunePlanRelocated by that check.
+// planPrune decides from what is known BEFORE the recorded rows are read.
 //
-// Extracted so the branch is pinned by a table rather than mirrored in a test:
-// ScanLibrary needs a live Postgres and a real directory tree, so a mutation
-// that dropped the relocation arm entirely would otherwise pass the suite.
-func planPrune(walkFailed, markedRepointed bool) prunePlan {
-	switch {
-	case walkFailed:
-		// An unwalkable root says nothing about any row under it. This
-		// predates the relocation work (deep-debug H9) and outranks it.
+// Relocation is deliberately NOT an input. Three designs in a row tried to
+// detect a move and then suppress the whole scan's prune, and each one lost
+// data — the last of them by leaving the suppression latched on forever, so a
+// repointed library never pruned or swept again. Relocation is now handled
+// per-ROW inside pruneDeletedFiles, where a row outside the library's current
+// roots is simply not a candidate. That needs no detection, no marker, and
+// nothing to clear afterwards, and it is exact for a partial move in a way a
+// whole-scan verdict never was.
+func planPrune(walkFailed bool) prunePlan {
+	if walkFailed {
+		// An unwalkable root says nothing about any row under it
+		// (deep-debug H9).
 		return prunePlanSkip
-	case markedRepointed:
-		return prunePlanRelocated
-	default:
-		return prunePlanNow
 	}
-}
-
-// noteRelocationSkip logs a relocation the scan will not act on, and says what
-// the operator has to do about it.
-//
-// A relocated library DELETES NOTHING — not the file rows, not the items. An
-// earlier design pruned the stale rows after phase 2 had attached the new
-// ones, which is correct only if the rescan re-matches each file to the SAME
-// media_items row. It does not, routinely: UpsertMediaItem keys on
-// (library_id, type, title, year) parsed from the FILENAME, while the stored
-// row carries whatever TMDB enrichment last wrote. A row saying
-// title="Seven", year=1995 whose folder reads "Se7en (1995)" re-keys to a NEW
-// item, and the old one — holding the watch progress, ratings, feedback,
-// taste seeds and embedding — is then swept as empty. A show with a NULL
-// stored year does the same with no enrichment drift at all. Both were
-// reproduced against a real database.
-//
-// So the rows move with the LIBRARY instead, in the same transaction as the
-// path change (see the API's planPathRewrites / RepointLibrary). By the time
-// a scan runs, a supported repoint has nothing stale left. Reaching here means
-// something changed the paths WITHOUT moving the rows — a bare psql UPDATE, a
-// restored database — and the honest answer is to stop rather than guess. The
-// library is stuck, visibly, until its rows describe where it points; nothing
-// is lost, and docs/moving-media-paths.md says how to finish the job.
-func noteRelocationSkip(lib *models.Library, why string) {
-	slog.Warn("skipping prune: "+why+" — this library's recorded files describe somewhere else, so nothing here is evidence of a deletion. "+
-		"Nothing was removed. Its titles will not play until the file rows are moved to the new location too: "+
-		"repoint it from Admin > Libraries, or see docs/moving-media-paths.md",
-		"library", lib.Name, "paths", lib.Paths)
+	return prunePlanNow
 }
 
 // allPathsOutsideRoots reports whether EVERY recorded path lies outside all of
@@ -252,68 +212,6 @@ func allPathsOutsideRoots(dbPaths map[string]int64, roots []string) bool {
 	}
 	return true
 }
-
-// NoteRepointed records that a library's paths were changed to newPaths, so a
-// scan that runs with exactly those paths treats absence from the walk as the
-// move rather than as deletions.
-//
-// This is a BACKSTOP, not the mechanism. The supported repoint moves the file
-// rows in the same transaction as the path change (see the API's
-// planPathRewrites / RepointLibrary), so a scan afterwards has nothing stale
-// to reason about. The marker covers what that could not move: a PARTIAL move
-// ([A B] to [A C]), where rows still under A stop the data-derived check from
-// firing, and rows whose target was not on disk yet when the admin saved.
-//
-// Keyed on the paths, not a bare flag, because a periodic scan can start
-// between the admin's save and the handler's own rescan. Such a scan is still
-// running against the OLD paths, and a bare flag would be matched by it.
-func (s *Scanner) NoteRepointed(libraryID int64, newPaths []string) {
-	s.repointedMu.Lock()
-	defer s.repointedMu.Unlock()
-	if s.repointed == nil {
-		s.repointed = make(map[int64][]string)
-	}
-	s.repointed[libraryID] = append([]string(nil), newPaths...)
-}
-
-// isRepointed reports whether lib has a pending repoint marker for exactly the
-// paths it is about to scan. It PEEKS — the marker is cleared by clearRepoint
-// only once a scan has actually finished the deferred prune.
-//
-// Peeking rather than consuming is the whole point. A marker consumed at the
-// top of a scan is spent before the work it protects is durable: a walk that
-// finds nothing (repointed at a mount still being populated), a scan cancelled
-// by the 5-minute auto-deploy, or an error in phase 2 would all burn it and
-// hand the NEXT scan an unguarded shot at the catalog. The asymmetry runs one
-// way — a marker held too long costs one deferred prune, a marker lost costs
-// every user's history — so it is released only on success.
-func (s *Scanner) isRepointed(lib *models.Library) bool {
-	s.repointedMu.Lock()
-	defer s.repointedMu.Unlock()
-	want, ok := s.repointed[lib.ID]
-	if !ok || len(want) != len(lib.Paths) {
-		return false
-	}
-	for i := range want {
-		if want[i] != lib.Paths[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// clearRepoint releases a library's marker. Called after a scan completes the
-// relocation is resolved, and by ForgetRepoint.
-func (s *Scanner) clearRepoint(libraryID int64) {
-	s.repointedMu.Lock()
-	defer s.repointedMu.Unlock()
-	delete(s.repointed, libraryID)
-}
-
-// ForgetRepoint drops any pending repoint marker for a library. Called when a
-// library is deleted so its ID cannot hand a stale deferral to a future
-// library that happens to reuse it.
-func (s *Scanner) ForgetRepoint(libraryID int64) { s.clearRepoint(libraryID) }
 
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
 	s := &Scanner{
@@ -457,10 +355,8 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Does this library carry a marker saying its paths were just changed?
 	// PEEKED, never consumed here — see isRepointed. The data-derived
 	// relocation check inside pruneDeletedFiles is the primary guard; this
-	// only adds the partial-move case it cannot see.
-	markedRepointed := s.isRepointed(lib)
 	progress.WalkErrors = len(unreadablePaths)
-	progress.PruneSkipped = walkFailed || markedRepointed
+	progress.PruneSkipped = walkFailed
 	// ...and WHICH paths, bounded for display. A log line being the only
 	// evidence is how one folder went unnoticed for three days.
 	progress.UnreadablePaths = boundedPaths(unreadablePaths, 10)
@@ -469,46 +365,29 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 
 	slog.Info("files discovered", "library", lib.Name, "count", len(allFiles))
 
-	// Phase 1b/1c: prune files that vanished from disk, then sweep away the
-	// catalog entries their disappearance emptied. Both are DEFERRED when
-	// this scan looks like a relocation.
+	// Phase 1b: prune files recorded in the DB but absent from this walk, and
+	// then sweep any catalog entry left with no files at all.
 	//
-	// deep-debug H9 — only prune when EVERY path walked cleanly. A transient
-	// mount/permission failure (NFS/SMB unmounted, removable drive absent)
-	// makes collectVideoFiles error for that path, leaving allFiles missing
-	// its entries; pruning then would delete every DB file row under it. Skip
-	// pruning entirely on any walk error rather than risk wiping the catalog.
-	//
-	// The relocation case is why the prune can also run AFTER phase 2 rather
-	// than before it. Running it here, on a library whose files just moved,
-	// deletes every row (none of them are in this walk) and then the sweep
-	// cascades away each media item — the watch history, ratings, feedback,
-	// taste seeds and embedding that repointing exists to preserve — moments
-	// before phase 2 recreates the same titles under new ids. Deferring until
-	// the new rows are attached gets the same stale rows deleted with the
-	// items intact, in ONE scan: leaving them for the next scan would mean
-	// every title in the library holding a dead path that sorts FIRST in
-	// GetMediaFiles (lower id, same version_tag), so nothing would play until
-	// that scan ran.
-	plan := planPrune(walkFailed, markedRepointed)
-	switch plan {
-	case prunePlanSkip:
+	// Relocation is handled inside pruneDeletedFiles, per row: a row outside
+	// the library's current roots was never walked, so it is not a candidate.
+	// Nothing here needs to know whether a move happened.
+	if plan := planPrune(walkFailed); plan == prunePlanSkip {
 		slog.Warn("skipping prune: one or more library paths failed to walk (transient mount/permission issue?) — leaving DB file rows intact",
 			"library", lib.Name)
-	case prunePlanRelocated:
-		noteRelocationSkip(lib, "this library's paths were just changed")
-	default:
+	} else {
 		pruned, relocated, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles, unreadablePaths)
 		switch {
 		case pruneErr != nil:
 			slog.Error("prune deleted files failed", "library", lib.Name, "error", pruneErr)
 		case relocated:
-			// Every recorded row sits outside the paths we just walked, so
-			// this library moved rather than lost its files — reached without
-			// anyone having to tell us, which is what covers a psql edit of
-			// libraries.paths, a restored database, and a marker lost to the
-			// restart that deploys.
-			noteRelocationSkip(lib, "every recorded file lies outside this library's current paths")
+			// Not one recorded row lies under a path we walked, so this
+			// library moved rather than lost its files. Nothing was deleted.
+			// It stays this way until its rows describe where it points —
+			// which the supported repoint does in the same transaction as the
+			// path change (see the API's planPathRewrites / RepointLibrary).
+			slog.Warn("prune skipped: every recorded file lies outside this library's current paths, so nothing here is evidence of a deletion. "+
+				"Nothing was removed. If the media moved, repoint the library from Admin > Libraries — see docs/moving-media-paths.md",
+				"library", lib.Name, "paths", lib.Paths)
 			s.mu.Lock()
 			progress.PruneSkipped = true
 			s.mu.Unlock()
@@ -516,8 +395,6 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 			if pruned > 0 {
 				slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
 			}
-			// The sweep runs ONLY here — on a scan that pruned with real
-			// evidence. See sweepEmptyMediaItems.
 			s.sweepEmptyMediaItems(ctx, lib, allFiles)
 		}
 	}

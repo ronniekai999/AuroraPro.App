@@ -8,18 +8,16 @@ package library
 // recreated under new ids — cascading away the watch progress, ratings, item
 // feedback, taste seeds and embeddings that repointing exists to preserve.
 //
-// Two guards prevent it, and the split matters:
+// One rule prevents it, applied per ROW rather than per scan: a recorded path
+// that lies outside the library's current roots was never covered by the walk,
+// so its absence from the results is not evidence of anything. After a move,
+// every old row sits outside the roots and is simply not a candidate.
 //
-//   - allPathsOutsideRoots is derived from the DATA and re-derived every scan.
-//     It is the one that holds when nobody told us anything: a psql edit of
-//     libraries.paths, a restored database, or a marker lost to the restart
-//     that deploys.
-//   - the repoint marker is set by the API handler and covers the partial move
-//     (one root of several changed) that the data check cannot see.
-//
-// Either one defers the prune to after phase 2 rather than skipping it, so the
-// stale rows still go — in the same scan, before anyone tries to play a title
-// whose only recorded path is dead.
+// Three earlier designs tried to DETECT a relocation and suppress the scan's
+// prune — skip it, defer it, gate the deferral — and each lost data, the last
+// by latching the suppression on forever so a repointed library never pruned
+// or swept again. Detection is gone; there is nothing to arm and nothing to
+// clear.
 
 import (
 	"context"
@@ -104,173 +102,40 @@ func TestAllPathsOutsideRootsIsFalseWhenThereIsNothingToJudge(t *testing.T) {
 	}
 }
 
-// ── The handler's marker ──────────────────────────────────────────
-
-func TestIsRepointedIsFalseWithoutAMarker(t *testing.T) {
-	s := repointScanner()
-	if s.isRepointed(libAt(1, "/srv/media/movies")) {
-		t.Fatal("a library nobody repointed must prune normally")
-	}
-}
-
-// The marker must SURVIVE the scan that reads it. Consuming it at the top of
-// the scan spends it before the deferred prune has run, so a walk that finds
-// nothing, a cancelled scan, or an error in phase 2 would all burn it and hand
-// the next scan an unguarded shot at the catalog.
-func TestIsRepointedSurvivesUntilExplicitlyCleared(t *testing.T) {
-	s := repointScanner()
-	lib := libAt(1, "/srv/storage/media/movies")
-	s.NoteRepointed(lib.ID, lib.Paths)
-
-	for i := 0; i < 3; i++ {
-		if !s.isRepointed(lib) {
-			t.Fatalf("marker gone after %d peek(s) — it must not be consumed by reading", i)
-		}
-	}
-	s.clearRepoint(lib.ID)
-	if s.isRepointed(lib) {
-		t.Fatal("marker must be gone once the deferred prune has run")
-	}
-}
-
-// The race the paths key exists for: a periodic scan can start between the
-// admin's save and the handler's own rescan, and it is still on the OLD paths.
-func TestIsRepointedIgnoresAScanStillOnTheOldPaths(t *testing.T) {
-	s := repointScanner()
-	const id = 1
-	old := libAt(id, "/home/u/media/movies")
-	moved := libAt(id, "/srv/storage/media/movies")
-
-	s.NoteRepointed(id, moved.Paths)
-
-	if s.isRepointed(old) {
-		t.Fatal("a scan on the old paths must not match the marker")
-	}
-	if !s.isRepointed(moved) {
-		t.Fatal("the marker must still be there for the scan that actually moved")
-	}
-}
-
-func TestIsRepointedIsPerLibrary(t *testing.T) {
-	s := repointScanner()
-	s.NoteRepointed(7, []string{"/srv/storage/media/movies"})
-
-	if s.isRepointed(libAt(8, "/srv/storage/media/movies")) {
-		t.Fatal("a different library must not match another's marker, same paths or not")
-	}
-	if !s.isRepointed(libAt(7, "/srv/storage/media/movies")) {
-		t.Fatal("library 7's own marker must survive library 8's scan")
-	}
-}
-
-func TestIsRepointedRequiresEveryPathToMatch(t *testing.T) {
-	s := repointScanner()
-	const id = 3
-	s.NoteRepointed(id, []string{"/srv/a", "/srv/b"})
-
-	if s.isRepointed(libAt(id, "/srv/a")) {
-		t.Fatal("a subset of the recorded paths must not match")
-	}
-	if s.isRepointed(libAt(id, "/srv/a", "/srv/c")) {
-		t.Fatal("a differing path must not match")
-	}
-	if !s.isRepointed(libAt(id, "/srv/a", "/srv/b")) {
-		t.Fatal("the exact recorded paths must match")
-	}
-}
-
-// NoteRepointed must copy: the handler passes the same slice it hands to the
-// UPDATE and then to the rescan goroutine.
-func TestNoteRepointedCopiesThePaths(t *testing.T) {
-	s := repointScanner()
-	paths := []string{"/srv/storage/media/movies"}
-	s.NoteRepointed(1, paths)
-	paths[0] = "/somewhere/else"
-
-	if !s.isRepointed(libAt(1, "/srv/storage/media/movies")) {
-		t.Fatal("the marker must hold its own copy of the paths")
-	}
-}
-
-func TestForgetRepointClearsAPendingMarker(t *testing.T) {
-	s := repointScanner()
-	s.NoteRepointed(1, []string{"/srv/storage/media/movies"})
-	s.ForgetRepoint(1)
-
-	if s.isRepointed(libAt(1, "/srv/storage/media/movies")) {
-		t.Fatal("a forgotten marker must not match")
-	}
-	// Forgetting one nobody set, or one already cleared, is a no-op rather
-	// than a panic — Delete calls it unconditionally.
-	s.ForgetRepoint(99)
-	s.clearRepoint(99)
-}
-
-// The marker is read and cleared from the scan goroutine while the API
-// handler writes it. CI runs `go test` WITHOUT -race, so what this relies on
-// there is Go's built-in concurrent-map-access detector, which fires on an
-// unguarded map either way; run it with -race locally for the stronger check.
-func TestRepointMarkerIsConcurrencySafe(t *testing.T) {
-	s := repointScanner()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 500; i++ {
-			s.NoteRepointed(int64(i%8), []string{"/srv/media"})
-		}
-	}()
-	for i := 0; i < 500; i++ {
-		lib := libAt(int64(i%8), "/srv/media")
-		_ = s.isRepointed(lib)
-		s.clearRepoint(lib.ID)
-	}
-	<-done
-}
-
-// ── The decision ScanLibrary makes ────────────────────────────────
-
-// planPrune is the real branch ScanLibrary runs, not a mirror of it — a
-// mirror drifts silently, and this decision is the single thing standing
-// between a relocation and the empty-item sweep. ScanLibrary itself needs a
-// live Postgres and a real directory tree to exercise, which is why the
-// decision was extracted rather than tested through it.
+// planPrune is now only the walk-failure decision — relocation is handled per
+// row inside pruneDeletedFiles, not as a whole-scan verdict. Pinned anyway,
+// because the H9 guard it carries is the oldest thing standing between a
+// dropped NFS mount and the catalog.
 func TestPlanPruneTable(t *testing.T) {
-	cases := []struct {
-		name            string
-		walkFailed      bool
-		markedRepointed bool
-		want            prunePlan
-	}{
-		{"ordinary scan", false, false, prunePlanNow},
-		// An unwalkable root says nothing about any row under it; this
-		// predates the relocation work (deep-debug H9) and outranks it.
-		{"walk failed", true, false, prunePlanSkip},
-		{"walk failed outranks the marker", true, true, prunePlanSkip},
-		// The handler told us. Covers the partial move the data check
-		// cannot see.
-		{"marked by the handler", false, true, prunePlanRelocated},
+	if got := planPrune(false); got != prunePlanNow {
+		t.Errorf("an ordinary scan must prune, got %v", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := planPrune(tc.walkFailed, tc.markedRepointed)
-			if got != tc.want {
-				t.Errorf("planPrune(walkFailed=%v, marked=%v) = %v, want %v",
-					tc.walkFailed, tc.markedRepointed, got, tc.want)
-			}
-		})
+	// An unwalkable root says nothing about any row under it (deep-debug H9).
+	if got := planPrune(true); got != prunePlanSkip {
+		t.Errorf("an unwalkable root must skip the prune, got %v", got)
 	}
 }
 
-// The marker and a walk failure are DIFFERENT verdicts, and both refuse to
-// delete. Collapsing them would be harmless today but hides the distinction
-// the logs need: a walk failure is transient and self-heals, a relocation is a
-// standing state an operator has to finish resolving.
-func TestMarkedRelocationIsItsOwnVerdict(t *testing.T) {
-	if got := planPrune(false, true); got != prunePlanRelocated {
-		t.Fatalf("a marked repoint must report a relocation, got %v", got)
+// The relocation rule is per ROW, and it is the whole safety story now. A row
+// under the library's roots is prunable; one outside never is, whoever moved
+// the library and whether or not anything told the scanner about it.
+func TestRelocationIsDecidedPerRowNotPerScan(t *testing.T) {
+	roots := []string{"/srv/storage/media/movies"}
+	if !underAnyPrefix("/srv/storage/media/movies/A.mkv", roots) {
+		t.Error("a row under the root must be a prune candidate")
 	}
-	if got := planPrune(true, true); got != prunePlanSkip {
-		t.Fatalf("an unwalkable root outranks the marker, got %v", got)
+	if underAnyPrefix("/home/u/media/movies/A.mkv", roots) {
+		t.Error("a row outside the roots must never be a prune candidate")
+	}
+	// The partial move the deleted marker existed for: [A B] -> [A C]. Rows
+	// under the surviving root stay prunable; rows under the dropped one do
+	// not. A whole-scan verdict could not express this.
+	partial := []string{"/mnt/a", "/mnt/c"}
+	if !underAnyPrefix("/mnt/a/kept.mkv", partial) {
+		t.Error("the unchanged root must still prune normally")
+	}
+	if underAnyPrefix("/mnt/b/moved.mkv", partial) {
+		t.Error("the dropped root's rows must not be pruned")
 	}
 }
 

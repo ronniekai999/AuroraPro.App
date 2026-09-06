@@ -884,7 +884,7 @@ Two unrelated production failures with the same shape — a real problem reporte
 as something else. Code: `validateLibraryPaths` / `samePaths` /
 `planPathRewrites` / `Update` / `rescanMovedLibrary`
 (`internal/api/media_handlers.go`), `RepointLibrary` (`internal/db/queries.go`),
-`planPrune` / `pruneDeletedFiles` / `NoteRepointed`
+`planPrune` / `pruneDeletedFiles` / `underAnyPrefix`
 (`internal/library/scanner.go`), `node_vite_verdict` in
 `scripts/{install,redeploy,aurora-update}.sh`, SPA `LibraryEditRow` +
 `updateLibrary`. Operator runbook: `docs/moving-media-paths.md`.
@@ -905,15 +905,26 @@ Invariants to preserve when touching this area:
   year, so the pre-check errors and the upsert re-keys). Both were reproduced
   against a real database. `TestRepointSurvivesATitleTheRescanWouldReKey` pins
   it.
-- **The prune only considers rows UNDER the library's current roots.** A row
-  outside them was never covered by the walk, so its absence from the results
-  is not evidence of anything. This is the generalisation of the `walkFailed`
-  and zero-discovered guards, and it is what makes a relocation safe *without
-  detecting one* — after a move every old row sits outside the roots and is
-  simply not a candidate. Three designs in a row tried to detect the
-  relocation and act on it instead, and all three deleted history; this one
-  cannot, because it never has the rows in hand. `TestBarePathEditDeletesNothing`
-  drives two full scans over a real database to pin it.
+- **The prune only considers rows UNDER the library's current roots, and that
+  decision is PER ROW.** A row outside them was never covered by the walk, so
+  its absence is not evidence of anything — the generalisation of the
+  `walkFailed` and zero-discovered guards. It is what makes a relocation safe
+  *without detecting one*: after a move every old row sits outside the roots
+  and is simply not a candidate, and for a partial move ([A B] → [A C]) the
+  surviving root keeps pruning normally while the dropped one does not.
+  `TestBarePathEditDeletesNothing` drives two full scans over a real database
+  to pin it.
+- **There is no relocation MARKER, and adding one back is a mistake.** Four
+  designs tried to detect a move and suppress the scan's prune wholesale —
+  skip, defer, gate the deferral, then skip again — and every one of them lost
+  something. The last did the most damage while looking the safest: deleting
+  the deferred prune removed the only caller that RELEASED the marker, so a
+  repointed library latched into "delete nothing" permanently and never pruned
+  a deleted file or swept an emptied entry again, silently, until a restart.
+  A per-scan verdict cannot express a partial move and always needs clearing
+  by someone; the per-row rule needs neither. `TestPruneStillWorksAfterARepoint`
+  repoints, deletes a film, rescans, and asserts the ordinary cleanup still
+  happens.
 - **Only rows whose target actually EXISTS are moved.** A partial move, or a
   repoint saved before the copy finished, leaves the rest pointing where they
   still are. Rewriting a row to a path with nothing at it would trade a
@@ -956,11 +967,17 @@ Known limits, stated plainly:
   library leaves its rows behind forever, showing as titles that will not play.
   The prune cannot distinguish that from a move without re-matching. Deleting
   the library is the only cleanup.
-- **The repoint marker (`NoteRepointed`) is now a backstop with little left to
-  do**, since the rows move with the library. It still covers the rows
-  `planPathRewrites` declined — a partial move, or a target not yet on disk —
-  and it still lives in memory, so a restart between the PUT and the first scan
-  loses it. Harmless now that the prune ignores out-of-root rows regardless.
+- **A library left "stuck" cannot be un-stuck from the UI.** The rewrite runs
+  only when the paths actually change, so re-saving the same value is a no-op
+  that returns 200. The remedy is the runbook's SQL (or repointing elsewhere
+  and back). Detecting the stuck state and repairing it would mean inferring
+  the old prefix from the stranded rows, which is guesswork of exactly the kind
+  that produced the earlier failures.
+- **Changing the NUMBER of roots moves nothing.** `planPathRewrites` maps
+  positionally and declines on a count mismatch, but the handler still commits
+  the path change — so a removed root leaves its rows stranded and those titles
+  stop playing. The SPA warns about this in the edit row; the API does not
+  refuse it.
 - **`Update` is a whole-row read-modify-write with no concurrency control.**
   Two admin tabs can have the second silently revert the first's repoint. An
   `updated_at` precondition is the fix and is not built.

@@ -602,8 +602,9 @@ function LibraryEditRow({ lib, onCancel, onSaved }: {
       </div>
       {moved && (
         <p className="text-white/50 text-xs">
-          Repointing keeps this library's watch history, ratings and recommendations — the catalog
-          is re-matched onto the same entries. Saving starts a rescan.
+          {nextPaths.length === lib.paths.length
+            ? "Repointing keeps this library's watch history, ratings and recommendations — its files are moved to the new location, not re-matched. Saving starts a rescan."
+            : "Adding or removing a path does NOT move this library's existing files to it — they keep pointing where they are, and titles under a removed path will stop playing. To relocate media, replace each path with its new location, keeping the same number of lines."}
         </p>
       )}
       <div className="flex gap-2">

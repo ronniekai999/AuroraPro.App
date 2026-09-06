@@ -186,8 +186,24 @@ func planPathRewrites(oldRoots, newRoots []string, recorded map[string]int64, ex
 	if len(oldRoots) == 0 || len(oldRoots) != len(newRoots) || len(recorded) == 0 {
 		return nil
 	}
+	// Clean both sides. A root stored with a trailing slash — reachable
+	// through the psql edit the runbook documents, where nothing normalises
+	// what the operator typed — would otherwise match nothing, move no rows,
+	// and leave the library pointing at the new location with every row still
+	// describing the old one. The scanner's own consumers of lib.Paths all
+	// clean first; this must agree with them.
+	clean := func(in []string) []string {
+		out := make([]string, len(in))
+		for i, p := range in {
+			out[i] = filepath.Clean(p)
+		}
+		return out
+	}
+	oldRoots, newRoots = clean(oldRoots), clean(newRoots)
+
 	out := make(map[int64]string)
 	for path, id := range recorded {
+		path = filepath.Clean(path)
 		for i, oldRoot := range oldRoots {
 			// Path-boundary match, so /media/Show 2 is not read as living
 			// under /media/Show.
@@ -195,7 +211,10 @@ func planPathRewrites(oldRoots, newRoots []string, recorded map[string]int64, ex
 				continue
 			}
 			candidate := newRoots[i] + strings.TrimPrefix(path, oldRoot)
-			if exists(candidate) {
+			// An unchanged root (the A of [A B] -> [A C]) maps every row onto
+			// itself. Skipping those keeps the transaction to the rows that
+			// actually move, and keeps the "moved N file rows" log honest.
+			if candidate != path && exists(candidate) {
 				out[id] = candidate
 			}
 			break // first matching root wins; roots do not overlap
@@ -323,13 +342,6 @@ func (h *LibraryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if h.watcher != nil {
 		h.watcher.UnwatchLibrary(id)
 	}
-	// Drop any pending repoint skip. libraries.id is a BIGSERIAL so reuse is
-	// not realistic, but a record keyed to a library that no longer exists is
-	// state with no owner, and the one thing it can do is suppress a prune.
-	if h.scanner != nil {
-		h.scanner.ForgetRepoint(id)
-	}
-
 	deleted, err := h.queries.DeleteLibrary(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete library")
@@ -387,14 +399,9 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Repointing a library at a new location on disk. This is the supported
-	// way to handle moved media, and the distinction from delete-and-recreate
-	// is not cosmetic: media_items is upserted on (library_id, type, title,
-	// year), so a rescan under a new path REUSES the existing rows and every
-	// row that hangs off media_item_id — watch progress, ratings, item
-	// feedback, taste seeds, collections, and the embedding column itself —
-	// stays attached. A new library gets new ids and orphans all of it.
-	// docs/moving-media-paths.md is the operator-facing version of this.
+	// Repointing a library at a new location on disk. The recorded file rows
+	// are moved with it, in the same transaction — see planPathRewrites for
+	// why this does not rely on the rescan re-finding each title.
 	paths := existing.Paths
 	pathsMoved := false
 	if req.Paths != nil {
@@ -435,24 +442,9 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The marker still goes up BEFORE the row changes, and it is now a
-	// backstop rather than the mechanism: it covers the rows this could not
-	// move (a partial move, a target that is not there yet, a read that
-	// failed above), which the scanner then treats as a relocation rather
-	// than as deletions.
-	if pathsMoved && h.scanner != nil {
-		h.scanner.NoteRepointed(id, paths)
-	}
-
 	updated, err := h.queries.RepointLibrary(r.Context(), id, name, paths, movieMoves, episodeMoves)
 	if err != nil || updated == nil {
-		// Nothing landed — RepointLibrary is one transaction. Drop the
-		// marker: it cannot fire while the library still has its old paths,
-		// but leaving it means a repoint to these same paths days later
-		// would find a marker nobody set for it.
-		if pathsMoved && h.scanner != nil {
-			h.scanner.ForgetRepoint(id)
-		}
+		// Nothing landed — RepointLibrary is one transaction.
 		if err != nil {
 			// A UNIQUE violation here is the duplicate-library case: another
 			// library already owns a path this one is moving onto. Say so,

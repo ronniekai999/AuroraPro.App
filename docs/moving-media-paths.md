@@ -45,6 +45,12 @@ tables above notice anything happened, and there is no rescan to get it wrong.
 Repeat per library. If you have already created duplicate libraries at the
 new paths, delete those **first** — see the ordering note below.
 
+**Keep the same number of lines.** Paths are matched up in order, so replacing
+one root with one new root works; adding or removing a line does not move
+anything. A library whose root is removed keeps its rows pointing at the old
+location, and those titles stop playing. To relocate, replace each path with
+its new location.
+
 ### By hand, on a server that cannot update yet
 
 The Edit button ships in the release that also fixes the frontend build, so on
@@ -249,23 +255,36 @@ noisy in the log.
 
 ## What the first rescan does
 
-Nothing, which is the point. The rows were moved with the library, so the scan
-finds exactly the paths already on record: no new files, nothing stale, nothing
-pruned, nothing swept. Titles play immediately.
+Almost nothing, which is the point. The rows were moved with the library, so
+the scan finds exactly the paths already on record — no new files, nothing
+stale to prune. Titles play immediately, without waiting for it.
+
+One caveat if you copied rather than moved (`cp`, `rsync`): a copy changes each
+file's mtime, and Aurora's quick file hash is size + mtime, so every file looks
+changed and is re-read. That is slower, and for any title whose stored name was
+rewritten by TMDB it can add one empty duplicate entry, which the same scan's
+sweep then removes. `mv` avoids it entirely.
 
 If you see this in the log instead:
 
 ```
-prune: kept rows that lie outside this library's current paths — they were
-never walked, so their absence proves nothing.
+prune skipped: every recorded file lies outside this library's current paths,
+so nothing here is evidence of a deletion. Nothing was removed.
 ```
+
+(or, once some rows are under the new root, `prune: kept rows that lie outside
+this library's current paths`)
 
 then something changed `libraries.paths` without moving the rows — a bare psql
 `UPDATE`, or a restored database. Nothing has been deleted, and nothing will
 be: a row outside the library's roots was never covered by the walk, so the
 scanner treats its absence as no evidence at all. But the library is stuck
-until its rows describe where it points. Finish the job with the SQL above, or
-press **Edit** and save the same paths again.
+until its rows describe where it points.
+
+**Pressing Edit and saving the same paths does not fix it.** The rewrite only
+runs when the paths actually change, so re-saving the value already stored is a
+no-op that returns success. Use the SQL above — it rewrites the rows, which is
+the part that is missing.
 
 ## What is not preserved
 

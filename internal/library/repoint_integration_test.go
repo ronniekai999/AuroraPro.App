@@ -14,6 +14,8 @@ package library
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,6 +47,35 @@ func repointTestPool(t *testing.T) (*pgxpool.Pool, *db.Queries) {
 	return pool, db.NewQueries(pool)
 }
 
+// seedOwner creates a user + default profile for one test.
+//
+// The username is randomised and the failure is FATAL, both deliberately. A
+// fixed name plus t.Skipf meant a row left behind by an aborted run — a CI
+// cancellation, a -timeout kill, two concurrent runs against one
+// TEST_DATABASE_URL — turned the only end-to-end coverage of this feature into
+// a silent skip that still reported ok.
+func seedOwner(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tag string) (userID, profileID int64) {
+	t.Helper()
+	name := fmt.Sprintf("%s_%d", tag, rand.Int63())
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO users (username, email, password_hash, role)
+		 VALUES ($1, $2, 'x', 'admin') RETURNING id`, name, name+"@test.local").Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, userID) })
+
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC, id ASC LIMIT 1`,
+		userID).Scan(&profileID); err != nil {
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
+			 VALUES ($1, $2, TRUE, 'en', 'off') RETURNING id`, userID, name).Scan(&profileID); err != nil {
+			t.Fatalf("seed profile: %v", err)
+		}
+	}
+	return userID, profileID
+}
+
 // seedMovie writes a media_item + media_file directly, standing in for a scan
 // that ran before the move.
 func seedMovie(t *testing.T, ctx context.Context, pool *pgxpool.Pool, libID int64, title string, path string) int64 {
@@ -56,9 +87,14 @@ func seedMovie(t *testing.T, ctx context.Context, pool *pgxpool.Pool, libID int6
 	if err != nil {
 		t.Fatalf("seed media_item: %v", err)
 	}
+	// Every column GetMediaFileByPath scans into a non-nullable Go type must
+	// be present, or processFile fails with "cannot scan NULL into *string",
+	// ScanLibrary logs and swallows it, and the whole of phase 2 silently does
+	// nothing — which is exactly how these tests used to pass.
 	_, err = pool.Exec(ctx,
-		`INSERT INTO media_files (media_item_id, path, file_hash, container, size_bytes)
-		 VALUES ($1, $2, 'seedhash', 'mkv', 1)`, itemID, path)
+		`INSERT INTO media_files (media_item_id, path, file_hash, container, size_bytes,
+		                          video_codec, audio_codec, resolution, bitrate, duration_ms)
+		 VALUES ($1, $2, 'seedhash', 'mkv', 1, 'h264', 'aac', '1080p', 5000000, 7200000)`, itemID, path)
 	if err != nil {
 		t.Fatalf("seed media_file: %v", err)
 	}
@@ -89,13 +125,7 @@ func TestRepointPreservesWatchHistoryAndClearsTheOldRows(t *testing.T) {
 	oldPath := "/nonexistent/old-root/Some Film (2011)/Some Film (2011).mkv"
 
 	// Owner + library.
-	var ownerID int64
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ('repoint_owner', 'repoint@test.local', 'x', 'admin') RETURNING id`).Scan(&ownerID); err != nil {
-		t.Skipf("could not seed a user (schema drift?): %v", err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID) })
+	ownerID, profileID := seedOwner(t, ctx, pool, "repoint")
 
 	lib := &models.Library{
 		Name: "Repoint Test", Type: models.LibraryMovies,
@@ -108,19 +138,7 @@ func TestRepointPreservesWatchHistoryAndClearsTheOldRows(t *testing.T) {
 
 	itemID := seedMovie(t, ctx, pool, lib.ID, "Some Film", oldPath)
 
-	// The thing that must survive. profile_id is NOT NULL since migration
-	// 029, so resolve the owner's default profile the same way the app does.
-	var profileID int64
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC, id ASC LIMIT 1`,
-		ownerID).Scan(&profileID); err != nil {
-		// The app creates a default profile on first login; do it here.
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
-			 VALUES ($1, 'repoint_owner', TRUE, 'en', 'off') RETURNING id`, ownerID).Scan(&profileID); err != nil {
-			t.Fatalf("seed profile: %v", err)
-		}
-	}
+	// The thing that must survive.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO watch_progress (user_id, profile_id, media_item_id, position_ms, duration_ms, completed)
 		 VALUES ($1, $2, $3, 1234567, 7200000, FALSE)`, ownerID, profileID, itemID); err != nil {
@@ -221,13 +239,7 @@ func TestOrdinaryDeletionIsStillPrunedAfterTheRelocationGuards(t *testing.T) {
 	// from disk, so it is a genuine deletion.
 	gonePath := filepath.Join(root, "Gone Film (2011)", "Gone Film (2011).mkv")
 
-	var ownerID int64
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ('prune_owner', 'prune@test.local', 'x', 'admin') RETURNING id`).Scan(&ownerID); err != nil {
-		t.Skipf("could not seed a user (schema drift?): %v", err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID) })
+	ownerID, _ := seedOwner(t, ctx, pool, "prune")
 
 	lib := &models.Library{
 		Name: "Prune Test", Type: models.LibraryMovies,

@@ -41,13 +41,7 @@ func TestRepointSurvivesATitleTheRescanWouldReKey(t *testing.T) {
 	}
 	oldPath := "/nonexistent/old/Se7en (1995)/Se7en (1995).mkv"
 
-	var ownerID int64
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ('rekey_owner', 'rekey@test.local', 'x', 'admin') RETURNING id`).Scan(&ownerID); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID) })
+	ownerID, profileID := seedOwner(t, ctx, pool, "rekey")
 
 	lib := &models.Library{
 		Name: "ReKey Test", Type: models.LibraryMovies,
@@ -66,19 +60,11 @@ func TestRepointSurvivesATitleTheRescanWouldReKey(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO media_files (media_item_id, path, file_hash) VALUES ($1, $2, 'h')`,
+		`INSERT INTO media_files (media_item_id, path, file_hash, container, size_bytes,
+		                          video_codec, audio_codec, resolution, bitrate, duration_ms)
+		 VALUES ($1, $2, 'h', 'mkv', 1, 'h264', 'aac', '1080p', 5000000, 7200000)`,
 		itemID, oldPath); err != nil {
 		t.Fatalf("seed file: %v", err)
-	}
-	var profileID int64
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC, id ASC LIMIT 1`,
-		ownerID).Scan(&profileID); err != nil {
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
-			 VALUES ($1, 'rekey', TRUE, 'en', 'off') RETURNING id`, ownerID).Scan(&profileID); err != nil {
-			t.Fatalf("seed profile: %v", err)
-		}
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO watch_progress (user_id, profile_id, media_item_id, position_ms, duration_ms, completed)
@@ -146,13 +132,7 @@ func TestBarePathEditDeletesNothing(t *testing.T) {
 	}
 	oldPath := "/nonexistent/bare/Se7en (1995)/Se7en (1995).mkv"
 
-	var ownerID int64
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ('bare_owner', 'bare@test.local', 'x', 'admin') RETURNING id`).Scan(&ownerID); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID) })
+	ownerID, profileID := seedOwner(t, ctx, pool, "bare")
 
 	lib := &models.Library{
 		Name: "Bare Edit", Type: models.LibraryMovies,
@@ -170,19 +150,11 @@ func TestBarePathEditDeletesNothing(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO media_files (media_item_id, path, file_hash) VALUES ($1, $2, 'h')`,
+		`INSERT INTO media_files (media_item_id, path, file_hash, container, size_bytes,
+		                          video_codec, audio_codec, resolution, bitrate, duration_ms)
+		 VALUES ($1, $2, 'h', 'mkv', 1, 'h264', 'aac', '1080p', 5000000, 7200000)`,
 		itemID, oldPath); err != nil {
 		t.Fatalf("seed file: %v", err)
-	}
-	var profileID int64
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC, id ASC LIMIT 1`,
-		ownerID).Scan(&profileID); err != nil {
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
-			 VALUES ($1, 'bare', TRUE, 'en', 'off') RETURNING id`, ownerID).Scan(&profileID); err != nil {
-			t.Fatalf("seed profile: %v", err)
-		}
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO watch_progress (user_id, profile_id, media_item_id, position_ms, duration_ms, completed)
