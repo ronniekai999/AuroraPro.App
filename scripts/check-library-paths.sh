@@ -29,9 +29,16 @@
 #
 # Both were demonstrated to wipe an entire catalog while the string check
 # reported clean. So this reproduces the walk instead of modelling it: `find`
-# without -L declines directory symlinks exactly as WalkDir does, and both
-# sides are lexically normalised (realpath -ms — no symlink resolution, which
-# is filepath.Clean's exact behaviour) before they are compared.
+# without -L declines directory symlinks exactly as WalkDir does.
+#
+# The RECORDED side is deliberately NOT normalised — see the comment above
+# db_list. Normalising it would make the second case above compare equal and
+# vanish, which is the catalog-wiping false all-clear this script exists to
+# catch. Only the ROOT is normalised, and it is normalised TWICE, because the
+# scanner uses two different forms of it: `realpath -ms` (lexical, filepath.
+# Clean's behaviour) for the prefix the walk labels children with, and
+# `realpath -e` (symlink-resolving, EvalSymlinks' behaviour) for the root the
+# symlink-escape guard tests containment against.
 #
 # Usage:
 #   sudo ./scripts/check-library-paths.sh            # all libraries
@@ -56,6 +63,11 @@ VIDEO_RE='\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)$'
 # GNU sort also aborts on invalid UTF-8, which would silently truncate the
 # disk side.
 export LC_ALL=C
+
+# A literal newline, for the disk-side filename check. Written once so the
+# `case` pattern below cannot be mistaken for a two-character escape.
+NL='
+'
 
 info() { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
 warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
@@ -194,8 +206,20 @@ while IFS= read -r LIB; do
     rootopaque=""
     unreadable=0
     : > "$WORK/disk"
+    : > "$WORK/badnames"
     while IFS= read -r r; do
         [ -n "$r" ] || continue
+        # A `..` component after a symlinked one resolves differently in the
+        # three places that matter: `realpath -ms` collapses `..` lexically
+        # BEFORE resolving symlinks, EvalSymlinks resolves it against the
+        # already-resolved prefix, and WalkDir hands the raw path to the
+        # kernel. For a root like /srv/link/../media those are three different
+        # directories, so this check would walk a tree the scan does not.
+        # Only a hand-written UPDATE can produce it (the app stores
+        # EvalSymlinks output, which has no `..`), and refusing is cheap.
+        case "/$r/" in
+            */../*) die "library $LIB ($name): the root $r contains a '..' component. Its meaning depends on whether the preceding components are symlinks, and this check, the scanner's containment guard and the kernel would each resolve it differently — so no answer here would be trustworthy. Replace it with the path 'readlink -f' prints." ;;
+        esac
         rc="$(canon "$r")"
         # EvalSymlinks-equivalent: follows symlinks and fails if the target
         # does not exist. This is the root the scanner tests CONTAINMENT
@@ -226,8 +250,22 @@ while IFS= read -r LIB; do
         # them as about to be pruned, and requiring the target be a regular
         # file dropped the symlink-to-directory and the FIFO that the scanner
         # does accept.
-        find "$rc" ! -type d -print 2>"$WORK/finderr" \
-        | while IFS= read -r f; do
+        # -print0. `find -print` splits a filename containing a newline across
+        # two lines, and the truncated FIRST half can collide with a recorded
+        # path whose file is genuinely gone — reporting it found. That is the
+        # DB-side newline hazard (closed by the n_bad query above) mirrored on
+        # the disk side, and leaving it open while the comments claimed
+        # newlines were handled was worse than not claiming it.
+        find "$rc" ! -type d -print0 2>"$WORK/finderr" \
+        | while IFS= read -r -d '' f; do
+            case "$f" in
+                *"$NL"*)
+                    # Only a video-extension name can affect the comparison;
+                    # anything else is filtered out below regardless.
+                    printf '%s' "$f" | grep -qEi "$VIDEO_RE" \
+                        && printf '%s\n' "$f" >> "$WORK/badnames"
+                    continue ;;
+            esac
             if [ -L "$f" ]; then
                 # The scanner's symlink-escape guard, on ITS roots: resolve the
                 # link and require the result at or under the RESOLVED root.
@@ -239,7 +277,19 @@ while IFS= read -r LIB; do
         [ -s "$WORK/finderr" ] && unreadable=1
     done <<< "$roots"
 
-    if [ -n "$rootopaque" ]; then
+    # rootmissing DOMINATES rootopaque, and is therefore tested first (below,
+    # after the disk list is built). In Go, ANY root failing EvalSymlinks makes
+    # collectVideoFiles error, which sets walkFailed for the WHOLE library and
+    # skips both the prune and the sweep — so a library with one absent root
+    # and one unreadable root is not going to be pruned whatever we can or
+    # cannot read. Dying here would be an over-report the operator cannot
+    # drive to zero, under an instruction not to start the server until they do.
+    if [ -s "$WORK/badnames" ] && [ "$rootmissing" -eq 0 ]; then
+        die "library $LIB ($name): $(wc -l < "$WORK/badnames") file(s) on disk have a newline in their name. This check is line-oriented and would compare a truncated half of each, which can read as a match for a recorded path whose file is gone. Rename them, or check this library by hand:
+$(sed 's/^/        /' "$WORK/badnames" | head -10)"
+    fi
+
+    if [ -n "$rootopaque" ] && [ "$rootmissing" -eq 0 ]; then
         die "library $LIB ($name): cannot inspect the root $rootopaque. Aurora may well be able to read it, in which case the next scan WILL walk it and prune against what it finds — so this check cannot tell you it is safe. Re-run as the user Aurora runs as."
     fi
 
@@ -273,6 +323,24 @@ while IFS= read -r LIB; do
         continue
     fi
     if [ -z "$disk_list" ]; then
+        # The unreadable latch has to be consulted HERE, not only where missing
+        # rows are counted. "I found nothing" and "I could not look" produce the
+        # same empty disk list and mean opposite things: the first is
+        # pruneDeletedFiles' zero-discovered guard and really does prune
+        # nothing; the second is our own blindness, and if the SERVICE user can
+        # read what we could not, the scan discovers files, walkFailed stays
+        # false, and the prune runs against every recorded row — with nothing
+        # shielding them, because underAnyPrefix is passed the SCAN's empty
+        # unreadable list, not ours.
+        #
+        # This is the root-level defect one directory deeper, and it was left
+        # open when that one was fixed. Reproduced as an unprivileged user with
+        # a 0000 subdirectory holding the library's only media: exit 0,
+        # "the scan will prune nothing", while the scan pruned a missing row
+        # and swept its title.
+        if [ "$unreadable" -eq 1 ]; then
+            die "library $LIB ($name): found no media, but part of this library was unreadable by $(id -un) — so 'no media' may be this check's blindness rather than the truth. If Aurora can read what this could not, the next scan WILL discover files and prune every recorded row it does not find. Re-run as the user Aurora runs as."
+        fi
         # pruneDeletedFiles' zero-discovered guard: a walk that finds nothing
         # is treated as suspect (the classic present-but-empty NFS mount) and
         # prunes nothing. Common mid-move, when the new root exists but the

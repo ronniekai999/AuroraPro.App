@@ -367,6 +367,31 @@ next scan deletes, and any title left with no files goes with it, along with
 everything in the table at the top of this page. Fix the paths — or restore the
 backup from step 1 — and run it again.
 
+**Run it as the user Aurora runs as** (`sudo -u aurora ./scripts/check-library-paths.sh`
+if `postgres` access allows it, otherwise as root). The script predicts what
+*the service* will walk, so if it can see less than the service can, it says so
+and exits 2 rather than guessing — but if it can see MORE, it quietly
+over-reports rows the scan would leave alone. Exit 2 is never "probably fine";
+it means the answer is unknown.
+
+**What exit 0 does and does not promise.** It means: every path recorded for
+these libraries will be found by the next walk, so `pruneDeletedFiles` deletes
+no file rows. It does **not** cover three things, all of which are in
+`CLAUDE.md`'s known-limits list and none of which this script models:
+
+- **The empty-item sweep runs anyway.** `DeleteEmptyMediaItems` fires on every
+  scan that walks cleanly and finds anything — not only when the prune removed
+  something. A `media_items` row that ALREADY has no file rows (a title whose
+  files were deleted in some earlier scan) is deleted with its history even on
+  a clean exit 0. Step 2's `items` count against your own expectation is the
+  check for that, not this script.
+- **An empty-string element in `libraries.paths`** makes the scan's
+  `EvalSymlinks("")` fail, which skips its prune entirely — so a FAIL here can
+  be reported for a library that is not going to be touched.
+- **A thousand or more unreadable entries** trips the scanner's own
+  `maxTrackedUnreadable` into skipping the prune, which this script does not
+  count either.
+
 The same script is worth running any time you want to know what a scan is about
 to do: after restoring a backup, after a disk goes missing, or before an
 upgrade.

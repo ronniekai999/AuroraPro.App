@@ -111,7 +111,7 @@ TABLE=(
     "v9.11.2             1     ancient"
     "vBOGUS              2     unparseable — warn, never block"
     "v20.x               2     unparseable minor"
-    ""                 # sentinel row handled below
+    ""                 # sentinel: "no node on PATH", driven separately below
 )
 
 echo
@@ -356,6 +356,43 @@ for s in "${SCRIPTS[@]}"; do
         ok "scripts/$s defines node_vite_verdict (line $d) before calling it (line $g)"
     else
         bad "scripts/$s calls node_vite_verdict at line $g but defines it at line $d — the call returns 127 and the gate does nothing"
+    fi
+done
+
+# ...and so must every VARIABLE the gate interpolates. verdict_action supplies
+# these itself, so the behavioural assertions above cannot see their ordering
+# at all. All three scripts run under `set -u`, so a message built from one
+# that is not yet assigned aborts the script with "unbound variable" — a
+# generic failure in place of the Node-specific one this gate exists to
+# produce, and in aurora-update.sh that means no write_status at all.
+gate_vars() {  # $1 = script; the variables its gate block interpolates
+    awk '/# AURORA-NODE-GATE-BEGIN/,/# AURORA-NODE-GATE-END/' "$1" \
+    | grep -oE '\$\{?[A-Z][A-Z0-9_]+\}?' | tr -d '${}' | sort -u
+}
+gate_assigns() {  # $1 = script; variables the gate block assigns for itself
+    awk '/# AURORA-NODE-GATE-BEGIN/,/# AURORA-NODE-GATE-END/' "$1" \
+    | grep -oE '^[[:space:]]*[A-Z][A-Z0-9_]+=' | tr -d ' =' | sort -u
+}
+for s in "${SCRIPTS[@]}"; do
+    f="$REPO_ROOT/scripts/$s"
+    g="$(gate_line_of "$f")"
+    own="$(gate_assigns "$f")"
+    late=""
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        # A variable the block sets for itself (NODE_VERDICT and friends) is
+        # assigned at the top of the block and used below — not a prerequisite.
+        printf '%s\n' "$own" | grep -qx "$v" && continue
+        # Only variables this script assigns itself; the rest come from the
+        # environment or from arguments and have no line number to compare.
+        a="$(grep -nE "^[[:space:]]*(readonly[[:space:]]+|declare[[:space:]]+-[a-zA-Z]+[[:space:]]+)?$v=" "$f" | head -1 | cut -d: -f1)"
+        [ -n "$a" ] || continue
+        [ "$a" -lt "$g" ] || late="$late $v(line $a)"
+    done <<< "$(gate_vars "$f")"
+    if [ -z "$late" ]; then
+        ok "scripts/$s assigns every variable its gate uses before the gate"
+    else
+        bad "scripts/$s's gate (line $g) interpolates variables assigned later —$late. Under set -u this aborts with 'unbound variable' instead of the Node message"
     fi
 done
 

@@ -319,8 +319,6 @@ R="$TMP/qfail_late"; mkdir -p "$R"
 echo "$R" > "$FIX/roots"
 printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
 cp "$TMP/psql.good" "$TMP/bin/psql"
-cat >> "$TMP/bin/psql" <<'STUB'
-STUB
 python3 - "$TMP/bin/psql" <<'PY'
 import sys
 p = sys.argv[1]
@@ -334,6 +332,203 @@ chmod +x "$TMP/bin/psql"
 run
 expect_rc 2 "the recorded-paths query failing → exit 2, not 'no files recorded'"
 cp "$TMP/psql.good" "$TMP/bin/psql"
+
+# ── 15. A SHOW library uses the episode_files join ────────────────
+# fixture() defaults to `movie`, so without this every case above exercises
+# only the media_files half — and the episode side is half the reason the
+# script exists. pruneDeletedFiles branches on lib.Type and reads one table or
+# the other, never both, so a library type that silently fell through to the
+# movie query would report "all 0 recorded file(s) will be found" for a show
+# library whose every row was about to be pruned.
+fixture show
+R="$TMP/show"; mkdir -p "$R/Show/Season 01"
+: > "$R/Show/Season 01/S01E01.mkv"
+echo show > "$FIX/lib_type"
+echo Shows > "$FIX/lib_name"
+echo "$R" > "$FIX/roots"
+printf '%s\n' "$R/Show/Season 01/S01E01.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "a show library resolves through episode_files → exit 0"
+expect_out "all 1 recorded file(s) will be found" "…and compares its rows"
+
+fixture show_missing
+R="$TMP/show_missing"; mkdir -p "$R/Show/Season 01"
+: > "$R/Show/Season 01/S01E01.mkv"
+echo show > "$FIX/lib_type"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/Show/Season 01/S01E01.mkv" "$R/Show/Season 01/S01E02.mkv" > "$FIX/recorded"
+run
+expect_rc 1 "a show library with a missing episode file → exit 1"
+
+# The query the script sends for a show must be the episode one. Asserting on
+# the exit code alone cannot tell a correct branch from one that read the wrong
+# lib_type and got lucky, because the stub answers both from one fixture file.
+fixture show_query
+R="$TMP/show_query"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo show > "$FIX/lib_type"
+echo "$R" > "$FIX/roots"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+cp "$TMP/bin/psql" "$TMP/psql.save"
+python3 - "$TMP/bin/psql" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace(
+    '    *"FROM episode_files"*|*"FROM media_files"*) cat "$FIX/recorded" ;;',
+    '    *"FROM episode_files"*) cat "$FIX/recorded" ;;\n'
+    '    *"FROM media_files"*) echo "STUB-SAW-MEDIA-FILES-QUERY" ;;')
+open(p, 'w').write(s)
+PY
+chmod +x "$TMP/bin/psql"
+run
+if [ "$RC" = 0 ]; then ok "a show library sends the episode_files query, not media_files"
+else bad "a show library sent the media_files query (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
+cp "$TMP/psql.save" "$TMP/bin/psql"
+
+# ── 16. Every query needs its own `|| die` ────────────────────────
+# Losing one leaves its variable EMPTY, and empty reads downstream as a benign
+# fact rather than a failure: no paths configured, no files recorded, a movie
+# library. All three exit 0. The recorded-paths case above pins one of these;
+# these pin the two that turn a transient psql failure into an all-clear.
+qfail_on() {  # $1 = query fragment to fail, $2 = label
+    cp "$TMP/psql.save" "$TMP/bin/psql" 2>/dev/null || true
+    python3 - "$TMP/bin/psql" "$1" <<'PY'
+import sys
+p, frag = sys.argv[1], sys.argv[2]
+s = open(p).read()
+marker = '    *"%s"*)' % frag
+i = s.index(marker)
+j = s.index(';;', i) + 2
+s = s[:i] + '    *"%s"*) exit 1 ;;' % frag + s[j:]
+open(p, 'w').write(s)
+PY
+    chmod +x "$TMP/bin/psql"
+    run
+    expect_rc 2 "$2"
+}
+
+fixture qfail_roots
+R="$TMP/qfail_roots"; mkdir -p "$R"; : > "$R/A.mkv"
+echo "$R" > "$FIX/roots"; printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+cp "$TMP/bin/psql" "$TMP/psql.save"
+qfail_on 'unnest(paths)' "the roots query failing → exit 2, not 'has no paths'"
+
+fixture qfail_type
+R="$TMP/qfail_type"; mkdir -p "$R"; : > "$R/A.mkv"
+echo show > "$FIX/lib_type"
+echo "$R" > "$FIX/roots"; printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+qfail_on 'SELECT type FROM libraries' "the library-type query failing → exit 2, not a movie-branch guess"
+cp "$TMP/psql.save" "$TMP/bin/psql"
+
+# ── 17. HIGH (round 2): an unreadable SUBTREE, not the root ───────
+# The root-level guard stops one directory short. `find` errors inside the
+# tree, the disk list comes back empty, and the zero-discovered branch claims
+# the scan will prune nothing — but that branch cannot tell "there is nothing
+# here" from "I am the only one who cannot see it". If the service user reads
+# what we could not, the scan discovers files, walkFailed stays false, and the
+# prune runs against every recorded row with NOTHING shielding it: underAnyPrefix
+# is passed the SCAN's unreadable list, which is empty, not ours.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "unreadable subtree: running as root and setpriv is unavailable — cannot test"
+else
+    fixture subtree
+    R="$TMP/subtree"; mkdir -p "$R/sub"
+    : > "$R/sub/A.mkv"
+    echo "$R" > "$FIX/roots"
+    printf '%s\n%s\n' "$R/sub/A.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+    chmod 000 "$R/sub"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$R"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod -R 755 "$R/sub"
+    expect_rc 2 "media only under an unreadable SUBTREE → exit 2, never 'prunes nothing'"
+    expect_out "may be this check's blindness" "…and says why it will not answer"
+fi
+
+# ── 18. A `..` component in a root ────────────────────────────────
+# realpath -ms collapses it lexically before resolving symlinks; EvalSymlinks
+# resolves it against the already-resolved prefix; WalkDir hands the raw path
+# to the kernel. Three different directories once a symlink precedes it.
+fixture dotdot
+mkdir -p "$TMP/dotdot/real" "$TMP/dotdot/other"
+: > "$TMP/dotdot/other/A.mkv"
+echo "$TMP/dotdot/real/../other" > "$FIX/roots"
+printf '%s\n' "$TMP/dotdot/other/A.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "a '..' component in a library root → exit 2"
+
+# ── 19. A newline in an on-disk FILENAME ──────────────────────────
+# The mirror of case 12: `find -print` splits it across two lines and the
+# truncated first half can match a recorded path whose file is gone.
+fixture disknewline
+R="$TMP/disknewline"; mkdir -p "$R"
+touch "$R/$(printf 'A.mkv\njunk.mkv')" 2>/dev/null || true
+if [ -e "$R/$(printf 'A.mkv\njunk.mkv')" ]; then
+    echo "$R" > "$FIX/roots"
+    printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+    run
+    expect_rc 2 "a newline in an on-disk filename → exit 2, not a false match"
+else
+    ok "newline in an on-disk filename: SKIPPED (filesystem refused the name)"
+fi
+
+# ── 20. Root readability needs BOTH -r and -x ─────────────────────
+# A directory with r but not x can be listed and not traversed: `find` errors
+# on every child, so the disk list is empty or partial while the root itself
+# looks fine. Dropping the -x half left that reading as "no media found".
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "root without +x: running as root and setpriv is unavailable — cannot test"
+else
+    fixture noexec
+    R="$TMP/noexec"; mkdir -p "$R"
+    : > "$R/A.mkv"
+    echo "$R" > "$FIX/roots"
+    printf '%s\n%s\n' "$R/A.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+    chmod 444 "$R"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$R"
+    expect_rc 2 "a root that is readable but not traversable → exit 2"
+fi
+
+# ── 21. A missing root dominates an unreadable one ────────────────
+# Any root failing EvalSymlinks sets walkFailed for the WHOLE library in Go,
+# skipping prune and sweep — so this must not be the exit 2 that an operator
+# cannot drive to zero.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "missing + unreadable roots: running as root and setpriv is unavailable"
+else
+    fixture bothroots
+    R="$TMP/bothroots"; mkdir -p "$R"
+    : > "$R/A.mkv"; chmod 000 "$R"
+    printf '%s\n%s\n' "$TMP/bothroots-absent" "$R" > "$FIX/roots"
+    printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$R"
+    expect_rc 0 "one absent root + one unreadable root → exit 0 (walkFailed skips the prune)"
+fi
+
+# ── 22. A library root that is not a directory ────────────────────
+# Deliberately a refusal rather than a comparison. WalkDir on a file visits it
+# as a single entry, so the scan discovers exactly one file and prunes every
+# other row in the library against it — measured, not assumed. `find ! -type d`
+# would actually agree with that, so this exit 2 is an over-report; it is kept
+# because "your library root is a file" is a misconfiguration worth stopping
+# on, and exit 2 never reads as safe. The root must be mode 755, or the -r/-x
+# test catches it first and the -d branch is never reached.
+fixture filederoot
+printf 'x' > "$TMP/filederoot.mkv"; chmod 755 "$TMP/filederoot.mkv"
+echo "$TMP/filederoot.mkv" > "$FIX/roots"
+printf '%s\n' "$TMP/filederoot.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "a library root that is a regular file → exit 2"
+expect_out "not a directory" "…and says which shape it is"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
