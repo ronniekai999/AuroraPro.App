@@ -1539,19 +1539,17 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// rather than let it assume (assuming is what made a midstream cast seek
 	// 40 minutes into a playlist that had produced seconds).
 	//
-	// A session that vanished between the mint and here is not worth failing
-	// the request over — the token is already valid — but 0 is the wrong
-	// fallback now that senders convert through this number: it would have the
-	// sender ask a clone anchored near its playhead to seek to that playhead
-	// again, i.e. far past the clone's produced edge, which is the #172 hang
-	// this field exists to prevent. The SOURCE session's anchor degrades
-	// safely instead: it is what a sender assumed before the field existed,
-	// and it is exactly right whenever no clone was made.
+	// The lookup can only miss if the session vanished between being created
+	// (microseconds ago, by CloneForCast) and here, in which case the token
+	// names a session no receiver can fetch and the cast is already dead — so
+	// there is no anchor that helps and none worth inventing. Note in
+	// particular that the SOURCE's anchor would be actively wrong here: a miss
+	// means a CLONE existed, and reporting the source's anchor for a clone's
+	// playlist is the #172 hang (the sender subtracts too little and seeks
+	// past the produced edge). Report 0 and let the cast fail honestly.
 	castStartSec := 0
 	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
 		castStartSec = cs.StartSec
-	} else if src, ok := h.transcode.GetSession(sessionID); ok && src != nil {
-		castStartSec = src.StartSec
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      tokenStr,

@@ -185,38 +185,6 @@ func TestCreateCastToken_SharedSessionReportsItsOwnAnchor(t *testing.T) {
 	}
 }
 
-// A cast session that vanished between the mint and the response must report
-// the SOURCE's anchor, not 0. 0 would have the sender ask a clone anchored
-// near its playhead to seek to that playhead again — far past the clone's
-// produced edge, which is the #172 hang this field exists to prevent.
-func TestCreateCastToken_MissingCastSessionFallsBackToTheSourceAnchor(t *testing.T) {
-	h, tm := castAnchorHandler(t)
-	// Cast-safe as-is, so the cast session IS the source; stopping it after
-	// the mint reproduces "the session is gone by the time we look it up"
-	// without needing to race the clone path.
-	src, err := tm.CreateSession(7, "testuser", "/library/scooby.mkv", 1920, 1080,
-		streaming.SessionOpts{
-			Remux:            false,
-			SourceVideoCodec: "h264",
-			VideoCodecOut:    "h264",
-			AudioCodecOut:    "aac",
-			AudioTrackIndex:  -1,
-			StartSec:         600,
-		},
-	)
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	resp := castTokenJSON(t, h, src.ID, "at=2400")
-	startSec, ok := resp["start_sec"].(float64)
-	if !ok {
-		t.Fatalf("start_sec missing from response: %+v", resp)
-	}
-	if startSec != 600 {
-		t.Fatalf("start_sec = %v, want the source's 600", startSec)
-	}
-}
-
 // for_airplay skips cloning entirely (#326); its start_sec is the source's.
 func TestCreateCastToken_ForAirplayReportsTheSourceAnchor(t *testing.T) {
 	h, tm := castAnchorHandler(t)

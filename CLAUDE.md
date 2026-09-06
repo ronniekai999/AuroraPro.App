@@ -447,11 +447,21 @@ Invariants to preserve when touching this area:
   stays silent rather than falling through to broadcasting — `useParty` buffers
   a pending intent across a socket outage and delivers it on reconnect, so a
   position read during one would land on every guest afterwards.
-- **The host's own corrective seeks are not scrubs.** `hostCorrectionUntilMsRef`
-  suppresses the jump detector across the window one takes to land, and the
-  warm-up→authoritative transition drops `hostLastSnapshotRef` so the first
-  authoritative poll has no pre-correction baseline to compare against. Same
-  shape as the local loop's `applyingRemoteUntilRef`, same reason.
+- **The host's own corrective seeks are not scrubs, but they are not pauses
+  either.** `hostCorrectionUntilMsRef` suppresses the POSITION comparisons
+  across the window one takes to land (and is armed by the renewal reloads
+  too, which re-anchor and so also move the receiver's clock); pause/play
+  transitions are read normally, because a seek cannot change whether the
+  receiver is paused and suppressing them lost a host's pause outright.
+- **`hostLastSnapshotRef` is written where it is CONSUMED, never before the
+  guards.** A snapshot taken at the top of the poll becomes the baseline the
+  next poll compares against even when this one returned early — so a host who
+  pauses the TV inside the correction or episode-mismatch window has the pause
+  folded into `prev`, finds no transition afterwards, and never pauses the
+  room at all (the paused-position arm only re-broadcasts on movement, and a
+  paused receiver does not move). The pause is lost, not delayed. Guards leave
+  the pre-window baseline standing; `isCastHostSeekJump` takes elapsed time as
+  an input, so an older baseline still compares correctly.
 - **A correction that cannot land escalates** (`castResyncAction`). A target
   before the cast anchor is unreachable by arithmetic and re-anchors at once;
   one past the receiver's produced edge is invisible to the sender and is
@@ -476,9 +486,12 @@ Invariants to preserve when touching this area:
   re-anchor every 6-8s for a whole title, against the very server whose
   slowness caused the stall. The PROVEN one (a target before the session's own
   anchor) is rate-limited by TIME instead: it is arithmetic, it cannot
-  misdiagnose anything, and a count cap on it strands the receiver — three
-  host rewinds inside one settled-run window spend it, and every later rewind
-  is then unanswerable while the TV plays on ahead of the room. A guest has no
+  misdiagnose anything, and a count cap on it strands the receiver — two host
+  rewinds inside one settled-run window spend the count, and every later
+  rewind is then unanswerable while the TV plays on ahead of the room. The
+  interval applies to BOTH causes, because a refund for a reload that keeps
+  failing (a mint 429ing on the per-user session cap) otherwise defeats the
+  count entirely and re-fires every few polls for the whole title. A guest has no
   other recovery path at all (`seekToRealSec` refuses guests and their local
   session is never rebuilt during a cast), so "unanswerable" means exactly
   that.
@@ -489,13 +502,16 @@ Invariants to preserve when touching this area:
   published while the party's clock has moved to the next one. Every
   conversion then reads the new episode against the old anchor, and a host
   would broadcast the old episode's position into the new episode's party.
-  The reset clears BOTH halves of the pending pair as well as the committed
-  anchor. Clearing only the pending anchor leaves a load in flight across the
-  change able to promote the OLD title's anchor when it resolves — which every
-  consumer then reads as a fresh anchor for the NEW title, the same defect one
-  step removed. Clearing both makes that load promote nothing (the guard keys
-  on the media half), leaving the anchor unknown, which is what makes both
-  branches decline instead of converting wrongly.
+  The reset clears BOTH halves of the pending pair, bumps
+  `castTargetEpochRef`, and nulls the committed anchor. All three are needed.
+  Clearing only the pending anchor leaves a load in flight able to promote the
+  OLD title's anchor, which every consumer reads as a fresh anchor for the NEW
+  title — the same defect one step removed. Clearing both covers a load past
+  its getter; the EPOCH covers one that has not reached it, because the getter
+  writes those refs only after awaiting the token mint (which spawns an FFmpeg
+  server-side) and is therefore invisible to the reset until then. A load that
+  fails the epoch check promotes nothing, leaving the anchor unknown, which is
+  what makes both branches decline instead of converting wrongly.
 - **`'blocked'` is not `'none'`.** Both mean "this poll takes no action", and
   they are opposite states: one is "the receiver arrived", the other "it
   cannot be got there and I am out of budget". The host warm-up promotes only

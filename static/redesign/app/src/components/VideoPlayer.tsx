@@ -934,6 +934,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // clone's whole anchor, and for a host broadcasts that to every guest.
   const castPendingStartSecRef = useRef<number | null>(null)
   const castStartSecRef = useRef<number | null>(null)
+  // Which title the pending load belongs to. Bumped whenever the player's
+  // target identity changes; captured by the load getter on entry and checked
+  // again at promotion.
+  //
+  // Clearing the pending refs on a target change is not enough on its own:
+  // the getter writes them only AFTER awaiting the token mint (which on the
+  // server spawns an FFmpeg), so a load still inside that await is invisible
+  // to the reset and writes the OLD title's anchor afterwards — which every
+  // consumer then reads as a fresh anchor for the NEW title.
+  const castTargetEpochRef = useRef(0)
+  const castPendingEpochRef = useRef(0)
   if (!castSessionRef.current) {
     castSessionRef.current = createCastSessionTracker({
       localSessionId: () => sessionIdRef.current,
@@ -973,6 +984,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // detector across the window one takes to land, the same shape (and for the
   // same reason) as the local loop's applyingRemoteUntilRef.
   const hostCorrectionUntilMsRef = useRef(0)
+  // Arms that window from outside the sync effect (the renewal reload paths,
+  // which also re-anchor and therefore also move the receiver's clock). A ref
+  // so those call sites need no knowledge of the effect's constants.
+  const hostCorrectionSuppressRef = useRef(() => {})
   // Everything that describes "what the receiver is on" goes back to unknown
   // together. Two call sites already had to keep three refs in step; a fourth
   // and fifth would eventually have gone out of step.
@@ -1035,6 +1050,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   }
   const castLoadGetter = useCallback(async (atAbsSec?: number) => {
     if (!target) return null
+    // Captured BEFORE any await, so a target change during the mint is
+    // detectable at promotion time.
+    const loadEpoch = castTargetEpochRef.current
     const sid = sessionIdRef.current
     if (!sid) {
       // DIRECT PLAY (issue #503). There is no transcode session to mint a
@@ -1084,6 +1102,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // clone with a large anchor (a binge crossing an auto-advance), and a
       // carried-over value would offset every later conversion.
       castPendingStartSecRef.current = 0
+      castPendingEpochRef.current = loadEpoch
       // No transcode session backs this cast. Tell the tracker so explicitly:
       // committing it has to CLEAR the committed slot, or a cast that moves
       // from an HLS title to a direct-play one (a binge crossing an
@@ -1144,8 +1163,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // LOCAL session's only when the server decided no clone was needed; a
     // clone gets its own, near desiredAbsSec. A server that predates the field
     // always shared the local session's domain, so that is the fallback.
-    const castStartSec = Math.max(0, resp.start_sec ?? (startSecRef.current ?? 0))
+    const rawStartSec = resp.start_sec ?? (startSecRef.current ?? 0)
+    // Number.isFinite for the same reason partyTargetAbsSec carries one: NaN
+    // reads as in-tolerance to every downstream comparison, so a malformed
+    // anchor would silently report a converged receiver and let a host
+    // broadcast NaN as the party's position. Fall back to the local anchor,
+    // which is what a sender assumed before this field existed.
+    const castStartSec = Number.isFinite(rawStartSec)
+      ? Math.max(0, rawStartSec)
+      : Math.max(0, startSecRef.current ?? 0)
     castPendingStartSecRef.current = castStartSec
+    castPendingEpochRef.current = loadEpoch
     return {
       contentUrl: absoluteUrl(resp.playlist),
       contentType: 'application/x-mpegURL',
@@ -1259,7 +1287,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // IS loadMedia resolving, which is the only proof the receiver took
         // this media. A getter that ran but whose load then failed must not
         // move it.
-        if (castPendingMediaRef.current) {
+        if (castPendingMediaRef.current && castPendingEpochRef.current === castTargetEpochRef.current) {
           castLoadedMediaRef.current = castPendingMediaRef.current
           // Same proof, same moment: the anchor belongs to the media the
           // receiver just took. Promoting it at mint time instead would have
@@ -1313,6 +1341,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // the renewal path existed.
       const atAbsSec = recvToAbsSec(cast.remote.currentTime)
       if (atAbsSec !== null) {
+        // A renewal re-mints, and the server re-anchors the clone near the
+        // requested position — so the receiver's own clock jumps for the same
+        // absolute spot. Suppress the host's scrub detector across it, as the
+        // re-anchor path does.
+        hostCorrectionSuppressRef.current()
         reloadCastAtAbsSec(atAbsSec)
         return
       }
@@ -1747,6 +1780,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // from a fresh anchor for the new one — a host would converge on it and
     // broadcast the old episode's timestamps into the new episode's room.
     // Leaving the anchor unknown is what makes both branches decline instead.
+    castTargetEpochRef.current += 1
     castPendingMediaRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
@@ -4218,6 +4252,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // converges in a poll or two) because its only job is to stop a receiver
     // that never arrives from muting the host permanently.
     const HOST_WARMUP_BUDGET_MS = 12000
+    hostCorrectionSuppressRef.current = () => {
+      hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
+    }
 
     // Absolute source seconds ⇄ the RECEIVER's clock. Note the anchor: this
     // is the CAST session's, which since cast clones are anchored near the
@@ -4264,8 +4301,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // The INFERRED escalation is capped by count: inference can be wrong about
     // a receiver that is merely slow, so a wrong diagnosis must not be able to
     // reload the TV indefinitely.
+    const castReanchorIntervalElapsed = () =>
+      Date.now() - castLastReanchorAtMsRef.current >= CAST_REANCHOR_MIN_INTERVAL_MS
     const castCanReanchor = () =>
-      castReanchorSurfaceAllows() && castReanchorBudgetRef.current.used < CAST_MAX_REANCHORS
+      castReanchorSurfaceAllows() &&
+      // The interval applies to BOTH causes. Without it the refund defeats
+      // the count cap whenever the reload itself keeps failing — a mint that
+      // 429s on the per-user session cap is charged and refunded on every
+      // attempt, so the inferred path would re-fire every ~5 stuck polls for
+      // the whole title, hammering the server that is already refusing it.
+      castReanchorIntervalElapsed() &&
+      castReanchorBudgetRef.current.used < CAST_MAX_REANCHORS
     // The PROVEN escalation — a target before the session's own anchor — is
     // rate-limited by TIME instead. A count is the wrong bound for it: it
     // cannot misdiagnose anything, and spending the count (three host rewinds
@@ -4274,8 +4320,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // longer be brought back to. An interval bounds the cost without ever
     // making the answer unavailable.
     const castCanReanchorUnreachable = () =>
-      castReanchorSurfaceAllows() &&
-      Date.now() - castLastReanchorAtMsRef.current >= CAST_REANCHOR_MIN_INTERVAL_MS
+      castReanchorSurfaceAllows() && castReanchorIntervalElapsed()
     // One correction step shared by the guest branch and the host's warm-up:
     // seek the receiver toward the party, or re-anchor the whole cast when
     // seeking provably (or evidently) cannot get there.
@@ -4383,7 +4428,20 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         const nowPaused = c.remote.isPaused
         const nowSec = c.remote.currentTime
         const prev = hostLastSnapshotRef.current
-        hostLastSnapshotRef.current = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        // Deliberately NOT written here. Every guard below can return past
+        // this point, and a snapshot taken before them silently becomes the
+        // baseline the next poll compares against — so a host who pauses the
+        // TV inside one of those windows has the pause folded into `prev`,
+        // finds no transition on the poll after, and never pauses the room at
+        // all (the paused-position arm only re-broadcasts on movement, and a
+        // paused receiver does not move). The pause is lost, not delayed.
+        // Each path that actually USES `prev` records the next baseline
+        // itself; the guards leave the pre-window one standing, and
+        // isCastHostSeekJump already takes elapsed time as an input, so a
+        // baseline a few seconds old compares correctly.
+        const snapshotNow = () => {
+          hostLastSnapshotRef.current = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        }
         // With no known anchor there is no honest conversion between the
         // receiver's clock and the party's — see castStartSecRef. Reachable
         // when a page reload re-joins a live cast session this mount never
@@ -4426,9 +4484,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // TV's position is exactly the thing not to broadcast. Freezing the
           // room where it already is moves nobody.
           if (prev && !prev.paused && nowPaused) {
+            snapshotNow()
             party.requestPause(Math.round(targetAbsSec * 1000))
             return
           }
+          snapshotNow()
           // Mirror the party's run state onto the receiver exactly as the
           // guest branch does. A receiver still paused after its load has
           // nothing to converge on otherwise.
@@ -4463,13 +4523,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // ~21:40 into episode 2's room and jumps every guest. The per-title
         // reset effect closes this only from the moment `target` resolves,
         // and the window is the seconds BEFORE that.
-        if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) {
-          // Drop the baseline: a pause the host makes on the TV during this
-          // window would otherwise be folded silently into `prev` and only its
-          // eventual UN-pause broadcast. Same reasoning as the gate-lift path.
-          hostLastSnapshotRef.current = null
-          return
-        }
+        // Leaves the baseline standing: whatever the host does to the TV while
+        // the two sides disagree about the episode is still compared once they
+        // agree again.
+        if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
 
         // Authoritative. When we got here by spending the budget rather than
         // by converging, latch it (so the phase check above stops re-deciding
@@ -4485,17 +4542,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Avoids broadcasting a spurious event off the transient state
         // between loadMedia() resolving and the receiver reaching the
         // requested startTime.
-        if (!prev) return
-        // A correction we issued is still landing. Its position change is
-        // ours, not the user's, and reading it as a scrub would broadcast a
-        // seek to the position we just chose — harmless when it matches the
-        // party, wrong the moment it doesn't quite.
-        if (Date.now() < hostCorrectionUntilMsRef.current) {
-          hostLastSnapshotRef.current = null
-          return
-        }
+        if (!prev) { snapshotNow(); return }
+        // A correction we issued is still landing, so its POSITION change is
+        // ours, not the user's; reading it as a scrub would broadcast a seek
+        // to the position we just chose — harmless when it matches the party,
+        // wrong the moment it doesn't quite.
+        //
+        // A corrective seek cannot change whether the receiver is PAUSED, so
+        // the suppression applies to position comparisons only. Pause/play
+        // transitions are read normally — swallowing them here is what lost a
+        // host's pause on the headline path (cast mid-party, converge, pause
+        // the TV within the settle window, room plays on).
+        const correctionSettling = Date.now() < hostCorrectionUntilMsRef.current
 
         if (nowPaused !== prev.paused) {
+          snapshotNow()
           if (nowPaused) {
             party.requestPause(castSecToAbsMs(nowSec))
           } else {
@@ -4510,6 +4571,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           }
           return
         }
+        if (correctionSettling) return
+        snapshotNow()
         if (nowPaused) {
           // Still paused. A position change here is, again, only possible via
           // a direct scrub — re-broadcast the pause with the corrected
@@ -5246,6 +5309,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           if (castConnectedNow) {
             const atAbsSec = recvToAbsSec(c.remote.currentTime)
             if (c.remote.isPaused && isCastTokenExpired() && atAbsSec !== null) {
+              hostCorrectionSuppressRef.current()
               reloadCastAtAbsSec(atAbsSec)
             } else {
               c.playOrPause()
