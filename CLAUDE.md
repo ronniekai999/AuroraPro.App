@@ -455,6 +455,13 @@ Invariants to preserve when touching this area:
   and late creates an unreachable region on purpose. The pad must stay inside
   `readRateInitialBurstSec` or it stops being free —
   `TestCastAnchorPadFitsInsideTheInitialBurst` is the guard.
+- **A missing `start_sec` is omitted, never sent as 0.** 0 is a real, common
+  anchor, so a sender that adopts it converts every receiver reading as if the
+  clock were absolute — for a host on a clone anchored 40 minutes in, the first
+  pause broadcast rewinds the whole room by 40 minutes. Omitting leaves the
+  client on its own local anchor, which is what it assumed before the field
+  existed. The source's anchor is no better a guess: on the cloned path it
+  describes a different session's timeline.
 - **`start_sec` in the cast-token response is the ONLY conversion key.** The
   shared-session path (no clone needed) reports the LOCAL session's anchor and
   the cloned path reports the clone's; they differ, and the sender cannot infer
@@ -500,6 +507,18 @@ Invariants to preserve when touching this area:
   host just did, one poll later. Both directions matter: a cast starting into a
   PAUSED room autoplays and gets mirror-paused, so a host pressing play needs
   the same honouring a host pressing pause does.
+- **The authoritative host's broadcast is `decideHostBroadcast`, in
+  `lib/partyPlayer.ts`, not inline.** It was inline, and the same defect was
+  found in it four rounds running — a guard added to stop a broadcast, placed
+  where control still fell through to the code recording the next baseline.
+  That is a data decision, so it is now data in and data out, with a table
+  that walks every guard: pause the TV during it, lift it, assert the pause is
+  still there. Warm-up is deliberately NOT in the function (it broadcasts no
+  position; it mirrors and corrects, which is effects), so the caller runs
+  warm-up inline and returns on every path — reaching the function means that
+  phase is over, which is why `authoritative` is not an input. Do not add one
+  back without moving warm-up in too: an input the call site can only set one
+  way is how the latch poll's semantics got pinned wrong by a passing test.
 - **`hostLastSnapshotRef` is written where it is CONSUMED, never before the
   guards.** A snapshot taken at the top of the poll becomes the baseline the
   next poll compares against even when this one returned early — so a host who

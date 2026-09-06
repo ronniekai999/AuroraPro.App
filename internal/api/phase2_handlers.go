@@ -1540,24 +1540,29 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// 40 minutes into a playlist that had produced seconds).
 	//
 	// A miss means the session named by the token we just minted is gone: the
-	// clone that was created microseconds ago, or — on the for_airplay and
-	// clone-failure paths, where castSessionID IS sessionID — the source. The
-	// playlist names a dead session either way, so the cast cannot work and no
-	// anchor helps. Report 0 rather than invent one; in particular do NOT fall
-	// back to the source's anchor, which on the cloned path would describe a
-	// different session's timeline and produce the #172 hang (the sender
-	// subtracts too little and seeks past the produced edge) on the one path
-	// where the cast might otherwise have recovered.
-	castStartSec := 0
-	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
-		castStartSec = cs.StartSec
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	// clone created microseconds ago, or — on the for_airplay and clone-failure
+	// paths, where castSessionID IS sessionID — the source.
+	//
+	// OMIT the field rather than guess. 0 is the worst available answer,
+	// because it is not a neutral "unknown": it is a real, common anchor, and a
+	// sender that adopts it converts every receiver reading as if the clock
+	// were absolute. For a host on a clone anchored 40 minutes in, the first
+	// pause broadcast would rewind the entire room by 40 minutes. The source's
+	// anchor is no better on the cloned path — it describes a different
+	// session's timeline. Omitting leaves the client on its own local anchor,
+	// which is what it assumed before this field existed.
+	resp := map[string]interface{}{
 		"token":      tokenStr,
 		"expires_at": expiresAt.Unix(),
 		"playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8?token=%s", castSessionID, tokenStr),
-		"start_sec":  castStartSec,
-	})
+	}
+	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
+		resp["start_sec"] = cs.StartSec
+	} else {
+		slog.Warn("cast: session vanished before start_sec could be read; omitting it",
+			"cast_session", castSessionID, "user_id", claims.UserID)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // CreateSession explicitly creates a new transcode session (Phase 3 API).

@@ -797,15 +797,11 @@ describe('decideHostBroadcast', () => {
   const base = {
     prev: playing,
     now,
-    authoritative: true,
     latchingAuthority: false,
-    partyIsPlaying: true,
-    partyTargetAbsSec: 100,
     loadInFlight: false,
     episodeMismatch: false,
     anchorUnknown: false,
     correctionSettling: false,
-    intentEchoPending: false,
     pausedScrubToleranceSec: 1,
     seekJumpToleranceSec: 3,
   }
@@ -825,7 +821,6 @@ describe('decideHostBroadcast', () => {
       ['unknown anchor', { anchorUnknown: true }],
       ['load in flight', { loadInFlight: true }],
       ['episode mismatch', { episodeMismatch: true }],
-      ['warm-up with no usable party clock', { authoritative: false, partyTargetAbsSec: null }],
     ]
     for (const [name, patch] of guards) {
       it(`${name}: a host pause made during it survives to be broadcast later`, () => {
@@ -899,40 +894,12 @@ describe('decideHostBroadcast', () => {
     expect(jump.baseline).toBe('keep')
   })
 
-  describe('warm-up', () => {
-    const warm = { ...base, authoritative: false }
-
-    it('broadcasts nothing about position', () => {
-      // The whole point of the phase: the TV is behind the room and must not
-      // say where the room is.
-      const d = decideHostBroadcast({ ...warm, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 } })
-      expect(d.broadcast.kind).toBe('none')
-    })
-
-    it('honours a pause the host makes on the TV, at the PARTY position', () => {
-      const d = decideHostBroadcast({ ...warm, prev: playing, now: { paused: true, sec: 40, atMs: 10_000 } })
-      expect(d.broadcast.kind).toBe('pause-at-party')
-    })
-
-    it('does not pause a room that is already paused', () => {
-      // The server's pause handler is not a no-op — it rewrites the anchor,
-      // bumps the revision and broadcasts to every peer.
-      const d = decideHostBroadcast({
-        ...warm, partyIsPlaying: false, prev: playing, now: { paused: true, sec: 40, atMs: 10_000 },
-      })
-      expect(d.broadcast.kind).toBe('none')
-    })
-
-    it('honours a play the host makes on the TV', () => {
-      // Reachable whenever a cast starts into a paused room: the receiver
-      // autoplays, the mirror pauses it, and the host presses play.
-      const d = decideHostBroadcast({ ...warm, prev: paused, now: { paused: false, sec: 40, atMs: 10_000 } })
-      expect(d.broadcast.kind).toBe('play')
-    })
-  })
-
   describe('taking authority on an expired warm-up budget', () => {
-    const latch = { ...base, authoritative: true, latchingAuthority: true }
+    // Exactly what the call site passes on that poll. The earlier version of
+    // this block set an `authoritative` flag alongside it that the component
+    // could never produce, so all three cases passed while pinning a branch no
+    // user reached — and the real latch path had no test at all.
+    const latch = { ...base, latchingAuthority: true }
 
     it('reads a pause from the last warm-up poll before dropping the baseline', () => {
       const d = decideHostBroadcast({ ...latch, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 } })
@@ -962,5 +929,40 @@ describe('decideHostBroadcast', () => {
     })
     expect(d.broadcast.kind).toBe('none')
     expect(d.baseline).toBe('keep')
+  })
+})
+
+describe('decideHostBroadcast: the latch poll as the component actually calls it', () => {
+  // Regression cover for a wiring bug the earlier tests hid. They passed an
+  // `authoritative` flag alongside `latchingAuthority`, a combination the call
+  // site cannot produce, so three cases passed while pinning an unreachable
+  // branch — and the poll that really does hand a host authority on an expired
+  // warm-up budget had no test at all.
+  const now = { paused: true, sec: 100, atMs: 10_000 }
+  const playingBefore = { paused: false, sec: 99, atMs: 9_000 }
+  const latch = {
+    prev: playingBefore,
+    now,
+    latchingAuthority: true,
+    loadInFlight: false,
+    episodeMismatch: false,
+    anchorUnknown: false,
+    correctionSettling: false,
+    pausedScrubToleranceSec: 1,
+    seekJumpToleranceSec: 3,
+  }
+
+  it('broadcasts the RECEIVER position, not the party position', () => {
+    // The room and the TV are apart — that is why the budget expired — and the
+    // latch is where the TV becomes the truth. Broadcasting the party's own
+    // position here would leave them apart permanently, since an authoritative
+    // host never corrects itself.
+    expect(decideHostBroadcast(latch).broadcast).toEqual({ kind: 'pause-at-receiver' })
+  })
+
+  it('broadcasts it regardless of whether the room is already paused', () => {
+    // There is no partyIsPlaying input on this path by design: the TV's
+    // position has to reach the room even when the room is already stopped.
+    expect(decideHostBroadcast(latch).broadcast.kind).toBe('pause-at-receiver')
   })
 })

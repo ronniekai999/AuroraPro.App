@@ -808,8 +808,6 @@ export type HostBroadcast =
   | { kind: 'none' }
   /** Pause the party at the receiver's position. */
   | { kind: 'pause-at-receiver' }
-  /** Pause the party where the PARTY already is (warm-up: our TV is not truth yet). */
-  | { kind: 'pause-at-party' }
   | { kind: 'play' }
   /** Correct the party's position to the receiver's, then resume. */
   | { kind: 'seek-then-play' }
@@ -835,13 +833,13 @@ export interface HostBroadcastDecision {
 export interface HostBroadcastInput {
   prev: CastReceiverSample | null
   now: CastReceiverSample
-  /** False until the receiver has reached the party (castHostPhase). */
-  authoritative: boolean
-  /** True on the poll that takes authority by spending the warm-up budget. */
+  /**
+   * True on the poll that takes authority by spending the warm-up budget
+   * without the receiver ever arriving — the one poll where the warm-up's own
+   * play/pause arm no longer runs, so a transition sitting in `prev` has to be
+   * read here or it is lost for good.
+   */
   latchingAuthority: boolean
-  partyIsPlaying: boolean
-  /** Null when the party's position cannot be trusted (stale tick, no tick). */
-  partyTargetAbsSec: number | null
   /** One of our own loads is between issued and resolved. */
   loadInFlight: boolean
   /** The party has moved to an episode this player has not caught up to. */
@@ -850,15 +848,22 @@ export interface HostBroadcastInput {
   anchorUnknown: boolean
   /** A corrective seek we issued is still landing. */
   correctionSettling: boolean
-  /** A play/pause we just sent has not been echoed by the server yet. */
-  intentEchoPending: boolean
   pausedScrubToleranceSec: number
   seekJumpToleranceSec: number
 }
 
 /**
- * Decide what a casting host tells the party this poll, and what happens to
- * the baseline.
+ * Decide what an AUTHORITATIVE casting host tells the party this poll, and
+ * what happens to the baseline.
+ *
+ * Scope is deliberate: the warm-up phase is NOT here. Warm-up broadcasts no
+ * position at all — it mirrors the party onto the receiver and corrects it,
+ * which is effects rather than a decision — so folding it in would mean
+ * inventing action variants for playOrPause, reloadCastAtAbsSec and
+ * correctReceiverToward and routing them through this type. The caller runs
+ * warm-up inline and returns on every one of its paths, so reaching this
+ * function at all means that phase is already over. `latchingAuthority` marks
+ * the single poll where it just ended without convergence.
  *
  * Order is load-bearing. The guards come first and all `keep`; the arms that
  * consume `prev` come after and all `record`. Anything that returns without
@@ -866,8 +871,8 @@ export interface HostBroadcastInput {
  */
 export function decideHostBroadcast(input: HostBroadcastInput): HostBroadcastDecision {
   const {
-    prev, now, authoritative, latchingAuthority, partyIsPlaying, partyTargetAbsSec,
-    loadInFlight, episodeMismatch, anchorUnknown, correctionSettling, intentEchoPending,
+    prev, now, latchingAuthority,
+    loadInFlight, episodeMismatch, anchorUnknown, correctionSettling,
     pausedScrubToleranceSec, seekJumpToleranceSec,
   } = input
 
@@ -880,31 +885,6 @@ export function decideHostBroadcast(input: HostBroadcastInput): HostBroadcastDec
   // The two sides are on different episodes; a position means nothing across
   // that boundary.
   if (episodeMismatch) return { broadcast: { kind: 'none' }, baseline: 'keep' }
-
-  // ── Warm-up: the TV is not the party's position yet. ──
-  if (!authoritative) {
-    // Nothing to converge on and nothing that makes the TV more trustworthy
-    // than the party.
-    if (partyTargetAbsSec === null) return { broadcast: { kind: 'none' }, baseline: 'keep' }
-    // A deliberate play/pause on the TV is honoured even here — the mirror
-    // would otherwise undo the host's own button — but at the PARTY's
-    // position, never the TV's, because we have not converged.
-    if (prev && prev.paused !== now.paused) {
-      if (now.paused) {
-        // An already-paused room needs no pause: the server's handler is not
-        // a no-op (it rewrites the anchor, bumps the revision, broadcasts).
-        return {
-          broadcast: partyIsPlaying ? { kind: 'pause-at-party' } : { kind: 'none' },
-          baseline: 'record',
-        }
-      }
-      return { broadcast: { kind: 'play' }, baseline: 'record' }
-    }
-    // Our own request has not round-tripped, so the mirror would read stale
-    // party state as a disagreement and undo it.
-    if (intentEchoPending) return { broadcast: { kind: 'none' }, baseline: 'record' }
-    return { broadcast: { kind: 'none' }, baseline: 'record' }
-  }
 
   // ── Taking authority by spending the budget. ──
   // Read the transition BEFORE discarding the warm-up baseline: past this

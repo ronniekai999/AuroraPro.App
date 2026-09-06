@@ -1767,7 +1767,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // reason.
         clearLoadSettleRecheck()
         loadSettleRecheckTimerRef.current = window.setTimeout(
-          () => { loadSettleRecheckTimerRef.current = null; evaluate() },
+          () => {
+            loadSettleRecheckTimerRef.current = null
+            // The same re-check its sibling makes below. evaluate() is the
+            // most destructive consumer in this file (advances the episode,
+            // stops the cast), it is now reachable from a timer, and its
+            // safety should not rest on an invariant in another module: a blip
+            // pins remote.playerState at whatever it held when the freeze
+            // started, and acting on that is exactly what `settling` prevents.
+            const live = castRef.current
+            if (!live.status.connected || live.status.settling) return
+            evaluate()
+          },
           // While the load is still in flight the window has not been armed
           // yet (that happens in runCastLoad's finally), so the remaining time
           // computes to zero and this would re-arm every 50ms for as long as
@@ -1924,7 +1935,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     hostSawMediaUnloadedRef.current = false
     hostCorrectionUntilMsRef.current = 0
     hostIntentEchoUntilMsRef.current = 0
-    castLoadSettleUntilMsRef.current = 0
+    // castLoadSettleUntilMsRef is deliberately NOT cleared here. It describes
+    // a receiver event stream that does not respect title boundaries — a
+    // just-resolved load's IDLE can still be in flight across this reset — so
+    // clearing it would remove a suppression whose cause this reset does not
+    // own. endCastTracking does clear it, correctly: there the receiver is
+    // gone and no event of ours is outstanding.
     // Written from outside the effect since the load seeds it, so it is no
     // longer the effect's own to keep in step — a snapshot from a finished
     // cast (or a previous title) read as a transition on the next one.
@@ -4715,17 +4731,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         const decision = decideHostBroadcast({
           prev,
           now: { paused: nowPaused, sec: nowSec, atMs: Date.now() },
-          authoritative: hostConvergedRef.current,
+          // Reaching this line means the warm-up block above did not run —
+          // it returns on every one of its paths — so the phase is over by
+          // construction. `latchingAuthority` marks the single poll where it
+          // ended by spending the budget rather than by the receiver arriving,
+          // which is the one poll that must still read a transition out of
+          // `prev` before the baseline is dropped.
           latchingAuthority: !hostConvergedRef.current,
-          partyIsPlaying: party.isPlaying,
-          partyTargetAbsSec: partyAbsSec(),
           loadInFlight: castLoadsInFlightRef.current > 0,
           episodeMismatch: isPartyEpisodeMismatch(
             partySyncRef.current?.partyEpisodeId, target.episodeId,
           ),
           anchorUnknown: false, // narrowed above; castStartSec is non-null here
           correctionSettling: Date.now() < hostCorrectionUntilMsRef.current,
-          intentEchoPending: Date.now() < hostIntentEchoUntilMsRef.current,
           pausedScrubToleranceSec: HOST_PAUSED_SCRUB_TOLERANCE_SEC,
           seekJumpToleranceSec: HOST_SEEK_JUMP_TOLERANCE_SEC,
         })
@@ -4739,17 +4757,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           case 'pause-at-receiver':
             party.requestPause(castSecToAbsMs(nowSec))
             break
-          case 'pause-at-party': {
-            const t = partyAbsSec()
-            if (t !== null) party.requestPause(Math.round(t * 1000))
-            hostIntentEchoUntilMsRef.current = Date.now() + HOST_INTENT_ECHO_MS
-            break
-          }
           case 'play':
             party.requestPlay()
-            if (!hostConvergedRef.current) {
-              hostIntentEchoUntilMsRef.current = Date.now() + HOST_INTENT_ECHO_MS
-            }
             break
           case 'seek-then-play':
             party.requestSeek(castSecToAbsMs(nowSec))
@@ -4763,34 +4772,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             break
         }
 
-        // Warm-up bookkeeping the decision does not own: convergence, and the
-        // party→receiver mirror that pulls the TV toward the room.
-        if (!hostConvergedRef.current) {
-          if (castHostPhase(
-            false, hostWarmupStartedAtMsRef.current, Date.now(), HOST_WARMUP_BUDGET_MS,
-          ) !== 'warmup') {
-            // Budget spent. The decision already read any transition off the
-            // final warm-up baseline above.
-            hostConvergedRef.current = true
-            return
-          }
-          if (decision.broadcast.kind !== 'none') return
-          const targetAbsSec = partyAbsSec()
-          if (targetAbsSec === null || castLoadsInFlightRef.current > 0) return
-          if (Date.now() >= hostIntentEchoUntilMsRef.current &&
-              castPlayPauseMismatch(party.isPlaying, nowPaused)) {
-            if (nowPaused && isCastTokenExpired()) {
-              reloadCastAtAbsSec(targetAbsSec)
-            } else {
-              castRef.current.playOrPause()
-            }
-            return
-          }
-          if (correctReceiverToward(targetAbsSec, nowSec, castStartSec) === 'converged') {
-            hostConvergedRef.current = true
-            hostLastSnapshotRef.current = null
-          }
-        }
+        // Latching authority when the budget expired unconverged. The
+        // decision above has already read any transition off the final
+        // warm-up baseline, so this only records the phase change.
+        //
+        // Nothing else belongs here: the warm-up mirror and the convergence
+        // promotion live inline above, and a second copy beside the state
+        // machine that has broken repeatedly would be a place for a future
+        // fix to land with no effect and full test coverage.
+        hostConvergedRef.current = true
       }, HOST_POLL_MS)
       return () => window.clearInterval(id)
     }
