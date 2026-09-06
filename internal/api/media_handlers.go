@@ -80,152 +80,6 @@ func pathAccessError(p string, err error) string {
 		" (library paths refer to the server's filesystem)"
 }
 
-// libraryPathBlocklist is the set of prefixes a library may never point at.
-//
-// 2026-05-19 audit (API-H6) — /var/lib/aurora is Aurora's own state dir
-// (source mirror, update-status.json, trigger-update). An admin pointing a
-// library at it would expose Aurora's internal files via direct-play
-// streaming.
-var libraryPathBlocklist = []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
-
-// validateLibraryPaths resolves and checks a set of library paths, returning
-// the symlink-resolved forms to store. Symlinks are resolved BEFORE the
-// blocklist is applied so a symlink-to-/etc cannot bypass it, and the
-// resolved path — not the admin's input — is what gets persisted.
-//
-// Shared by Create and Update. It lived inline in Create until repointing a
-// library became possible; a second copy in Update is how one of the two ends
-// up without the blocklist.
-func validateLibraryPaths(paths []string) ([]string, string) {
-	resolved := make([]string, 0, len(paths))
-	for _, p := range paths {
-		// Require an absolute path before anything else. filepath.Clean("")
-		// is ".", which EvalSymlinks happily resolves to Aurora's working
-		// directory — an absolute-prefix blocklist never matches it and
-		// Lstat calls it a directory, so `{"paths":[""]}` would point a
-		// library at the server's CWD. Harmless-looking on Create; on
-		// Update it repoints an existing library there and the next scan
-		// takes its catalog with it.
-		if strings.TrimSpace(p) == "" {
-			return nil, "path must not be empty"
-		}
-		if !filepath.IsAbs(p) {
-			return nil, "path must be absolute (start with /): " + p
-		}
-		cleanPath := filepath.Clean(p)
-
-		real, err := filepath.EvalSymlinks(cleanPath)
-		if err != nil {
-			return nil, pathAccessError(p, err)
-		}
-
-		for _, blocked := range libraryPathBlocklist {
-			if real == blocked || strings.HasPrefix(real, blocked+"/") {
-				return nil, "path not allowed: " + p
-			}
-		}
-		info, err := os.Lstat(real) // Lstat on resolved path (symlinks already resolved)
-		if err != nil {
-			return nil, pathAccessError(p, err)
-		}
-		if !info.IsDir() {
-			return nil, "path is not a directory: " + p
-		}
-		resolved = append(resolved, real)
-	}
-	return resolved, ""
-}
-
-// samePaths reports whether two resolved path lists are equal element by
-// element. A reorder therefore reads as a change and costs one redundant
-// rescan — cheap, since the scan finds no new files, and not worth an
-// order-insensitive comparison that would then have to reason about
-// duplicates to stay correct.
-func samePaths(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// planPathRewrites maps a library's recorded file paths from its old roots to
-// its new ones, keeping only those that actually exist at the new location.
-//
-// This is what makes repointing safe, and it replaces an assumption that three
-// review rounds showed to be false. The previous design changed
-// libraries.paths and let the rescan rediscover the files, trusting
-// UpsertMediaItem to land on the SAME media_items row via
-// (library_id, type, title, year). It does not, routinely: that key is parsed
-// from the FILENAME, while the stored row carries whatever TMDB enrichment
-// last wrote. A library row saying title="Seven", year=1995 whose folder is
-// "Se7en (1995)" re-keys to a NEW item; the old one is left with no files and
-// the empty-item sweep cascades away its watch progress, ratings, feedback,
-// taste seeds and embedding. A show whose stored year is NULL does the same
-// thing without any enrichment drift at all.
-//
-// Rewriting the rows sidesteps the question. The paths follow the library, so
-// after the update the recorded paths and the walk agree: nothing is stale,
-// nothing is pruned, nothing is swept, and there is no re-match to get wrong.
-// Titles are playable immediately rather than after a second scan.
-//
-// Roots map POSITIONALLY, so this only runs when the counts match; anything
-// else (adding a root, removing one, reordering) is not a relocation we can
-// read unambiguously, and the caller falls back to leaving the rows alone.
-//
-// exists is injected so the decision is testable without a filesystem. A
-// candidate that is NOT present is deliberately left behind rather than
-// rewritten to a path with nothing at it: the move may have been partial, and
-// a row pointing somewhere real is worth more than a tidy one pointing
-// nowhere.
-func planPathRewrites(oldRoots, newRoots []string, recorded map[string]int64, exists func(string) bool) map[int64]string {
-	if len(oldRoots) == 0 || len(oldRoots) != len(newRoots) || len(recorded) == 0 {
-		return nil
-	}
-	// Clean both sides. A root stored with a trailing slash — reachable
-	// through the psql edit the runbook documents, where nothing normalises
-	// what the operator typed — would otherwise match nothing, move no rows,
-	// and leave the library pointing at the new location with every row still
-	// describing the old one. The scanner's own consumers of lib.Paths all
-	// clean first; this must agree with them.
-	clean := func(in []string) []string {
-		out := make([]string, len(in))
-		for i, p := range in {
-			out[i] = filepath.Clean(p)
-		}
-		return out
-	}
-	oldRoots, newRoots = clean(oldRoots), clean(newRoots)
-
-	out := make(map[int64]string)
-	for path, id := range recorded {
-		path = filepath.Clean(path)
-		for i, oldRoot := range oldRoots {
-			// Path-boundary match, so /media/Show 2 is not read as living
-			// under /media/Show.
-			if path != oldRoot && !strings.HasPrefix(path, oldRoot+string(filepath.Separator)) {
-				continue
-			}
-			candidate := newRoots[i] + strings.TrimPrefix(path, oldRoot)
-			// An unchanged root (the A of [A B] -> [A C]) maps every row onto
-			// itself. Skipping those keeps the transaction to the rows that
-			// actually move, and keeps the "moved N file rows" log honest.
-			if candidate != path && exists(candidate) {
-				out[id] = candidate
-			}
-			break // first matching root wins; roots do not overlap
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 
@@ -252,12 +106,42 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate library paths exist and are directories, resolving symlinks so
-	// the blocklist catches the real target. See validateLibraryPaths.
-	resolvedPaths, pathErr := validateLibraryPaths(req.Paths)
-	if pathErr != "" {
-		writeError(w, http.StatusBadRequest, pathErr)
-		return
+	// Validate library paths exist and are directories.
+	// Resolve symlinks so the blocklist catches the real target.
+	//
+	// 2026-05-19 audit (API-H6) — added /var/lib/aurora to the blocklist.
+	// That's Aurora's own state dir (source mirror, update-status.json,
+	// trigger-update). An admin pointing a library at it would expose
+	// Aurora's internal files via direct-play streaming.
+	blockedPrefixes := []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
+	resolvedPaths := make([]string, 0, len(req.Paths))
+	for _, p := range req.Paths {
+		cleanPath := filepath.Clean(p)
+
+		// Resolve symlinks to get the real filesystem path.
+		// This prevents symlink-to-/etc from bypassing the blocklist.
+		resolved, err := filepath.EvalSymlinks(cleanPath)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
+			return
+		}
+
+		for _, blocked := range blockedPrefixes {
+			if resolved == blocked || strings.HasPrefix(resolved, blocked+"/") {
+				writeError(w, http.StatusBadRequest, "path not allowed: "+p)
+				return
+			}
+		}
+		info, err := os.Lstat(resolved) // Lstat on resolved path (symlinks already resolved)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
+			return
+		}
+		if !info.IsDir() {
+			writeError(w, http.StatusBadRequest, "path is not a directory: "+p)
+			return
+		}
+		resolvedPaths = append(resolvedPaths, resolved)
 	}
 
 	lib := &models.Library{
@@ -342,6 +226,7 @@ func (h *LibraryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if h.watcher != nil {
 		h.watcher.UnwatchLibrary(id)
 	}
+
 	deleted, err := h.queries.DeleteLibrary(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete library")
@@ -373,172 +258,28 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == nil && req.Paths == nil {
-		writeError(w, http.StatusBadRequest, "name or paths is required")
+	if req.Name == nil {
+		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 
-	// The library as it stands, so an omitted field keeps its current value
-	// and so we can tell whether the paths actually moved.
-	existing, err := h.queries.GetLibrary(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load library")
+	name := strings.TrimSpace(*req.Name)
+	if name == "" || len(name) > 200 {
+		writeError(w, http.StatusBadRequest, "name must be 1-200 characters")
 		return
 	}
-	if existing == nil {
+
+	updated, err := h.queries.UpdateLibrary(r.Context(), id, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update library")
+		return
+	}
+	if updated == nil {
 		writeError(w, http.StatusNotFound, "library not found")
 		return
 	}
 
-	name := existing.Name
-	if req.Name != nil {
-		name = strings.TrimSpace(*req.Name)
-		if name == "" || len(name) > 200 {
-			writeError(w, http.StatusBadRequest, "name must be 1-200 characters")
-			return
-		}
-	}
-
-	// Repointing a library at a new location on disk. The recorded file rows
-	// are moved with it, in the same transaction — see planPathRewrites for
-	// why this does not rely on the rescan re-finding each title.
-	paths := existing.Paths
-	pathsMoved := false
-	if req.Paths != nil {
-		if len(*req.Paths) == 0 {
-			writeError(w, http.StatusBadRequest, "paths must not be empty")
-			return
-		}
-		resolved, pathErr := validateLibraryPaths(*req.Paths)
-		if pathErr != "" {
-			writeError(w, http.StatusBadRequest, pathErr)
-			return
-		}
-		paths = resolved
-		pathsMoved = !samePaths(existing.Paths, resolved)
-	}
-
-	// Move the recorded file rows along with the library, so the rows and the
-	// next walk agree and there is nothing for the prune to find stale. See
-	// planPathRewrites for why this replaces "repoint and let the rescan
-	// rediscover it".
-	//
-	// Only rows whose target actually exists on disk are moved. A partial move
-	// therefore leaves the rest pointing where they still are, and the
-	// scanner's own relocation guard covers whatever this could not.
-	var movieMoves, episodeMoves map[int64]string
-	if pathsMoved {
-		if recorded, mfErr := h.queries.GetMediaFilePathsForLibrary(r.Context(), id); mfErr == nil {
-			movieMoves = planPathRewrites(existing.Paths, paths, recorded, pathExists)
-		} else {
-			slog.Warn("could not read media file paths before repointing — the scan will fall back to its relocation guard",
-				"library", existing.Name, "error", mfErr)
-		}
-		if recorded, efErr := h.queries.GetEpisodeFilePathsForLibrary(r.Context(), id); efErr == nil {
-			episodeMoves = planPathRewrites(existing.Paths, paths, recorded, pathExists)
-		} else {
-			slog.Warn("could not read episode file paths before repointing — the scan will fall back to its relocation guard",
-				"library", existing.Name, "error", efErr)
-		}
-	}
-
-	updated, err := h.queries.RepointLibrary(r.Context(), id, name, paths, movieMoves, episodeMoves)
-	if err != nil || updated == nil {
-		// Nothing landed — RepointLibrary is one transaction.
-		if err != nil {
-			// A UNIQUE violation here is the duplicate-library case: another
-			// library already owns a path this one is moving onto. Say so,
-			// because "failed to update library" sends an admin looking in
-			// entirely the wrong place.
-			slog.Error("repoint failed", "library", existing.Name, "error", err)
-			writeError(w, http.StatusInternalServerError,
-				"failed to repoint library — if another library already points at the new path, delete it first, then retry")
-		} else {
-			writeError(w, http.StatusNotFound, "library not found")
-		}
-		return
-	}
-	if n := len(movieMoves) + len(episodeMoves); n > 0 {
-		slog.Info("repointed library and moved its file rows to the new location",
-			"library", updated.Name, "files", n, "paths", updated.Paths)
-	}
-
-	if h.activity != nil {
-		claims := auth.GetClaims(r.Context())
-		h.activity.LogLibraryUpdated(r.Context(), claims.UserID, updated.Name)
-	}
-
-	// Re-point the fsnotify watcher and rescan, in the background — the
-	// watcher's directory walk takes minutes on a large library, which is why
-	// Create does the same rather than blocking the response.
-	//
-	// The watcher is re-attached even though the scan below would find the
-	// files anyway: without it, fsnotify is still watching the OLD directory
-	// tree, so new files under the new root go unnoticed until the periodic
-	// timer fires.
-	if pathsMoved {
-		go h.rescanMovedLibrary(updated)
-	}
-
 	writeJSON(w, http.StatusOK, updated)
-}
-
-// rescanMovedLibrary re-attaches the watcher to a library's new paths and
-// scans it. Split out of Update so the goroutine's body is testable and so
-// the handler reads as one decision.
-func (h *LibraryHandler) rescanMovedLibrary(lib *models.Library) {
-	// Nil scanner/hub only happens in tests that construct the handler
-	// directly, but this runs in a goroutine, where a nil dereference takes
-	// the whole process down rather than failing one request.
-	if h.scanner == nil {
-		return
-	}
-	// Scan FIRST, watcher second. WatchLibrary walks the new tree
-	// recursively, which the Create path documents as taking minutes on a
-	// large library — and the scan does not depend on the watcher, so
-	// re-attaching first only delays getting the files back and widens the
-	// window in which a restart loses the repoint marker.
-	if h.scanner.TryStartScan(lib.ID) {
-		if h.watcher != nil {
-			h.watcher.NoteExternalScan(lib.ID)
-		}
-		scanCtx := h.scanContext()
-		h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
-			if h.hub != nil {
-				h.hub.Broadcast(ws.EventScanProgress, p)
-			}
-			if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
-				h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
-			}
-		})
-	} else {
-		// A scan is already in flight, almost certainly on the OLD paths (the
-		// watcher-driven entry points hold a captured library). The marker
-		// survives it — isRepointed matches on paths, and it is released only
-		// by a scan that completes its deferred prune — so the guard is still
-		// there for the scan that does run on the new paths. That is either
-		// the periodic one after the re-attach below, or the next.
-		slog.Info("library paths changed while a scan was in flight — the new paths will be scanned once it finishes",
-			"library", lib.Name)
-	}
-
-	// Re-attach the file watcher last: its recursive walk takes minutes on a
-	// large library and nothing above depends on it.
-	//
-	// WatchLibrary alone, with no UnwatchLibrary first. It already evicts and
-	// cancels any existing entry under its own lock, so the swap is atomic —
-	// whereas unwatching first opens a window where the library is in the
-	// watcher's map not at all, and if the re-attach then fails it stays that
-	// way: out of fsnotify AND out of the periodic scan loop, until a restart.
-	// Failing with the OLD watch still installed is strictly better; it points
-	// at the old directories, which the periodic scan will simply find empty.
-	if h.watcher == nil {
-		return
-	}
-	if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
-		slog.Error("failed to re-attach the file watcher after a path change — the previous watch is still installed, so this library keeps being scanned but against its OLD paths until Aurora restarts",
-			"library", lib.Name, "library_id", lib.ID, "error", err)
-	}
 }
 
 func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
@@ -1154,12 +895,4 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, deduped)
-}
-
-// pathExists is planPathRewrites' real-filesystem probe. Lstat, not Stat, so a
-// dangling symlink at the target counts as absent rather than as a file we
-// could move a row onto.
-func pathExists(p string) bool {
-	_, err := os.Lstat(p)
-	return err == nil
 }

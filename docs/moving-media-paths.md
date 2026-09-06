@@ -30,31 +30,23 @@ there, but the server has never seen you watch any of them — which is why
 recommendations go cold and you have to start watching things again to get
 AI content back.
 
-**Repointing** changes `libraries.paths` and moves the recorded file rows to
-the new location in the same transaction, leaving the ids alone. None of the
-tables above notice anything happened, and there is no rescan to get it wrong.
+**Repointing** changes `libraries.paths` AND rewrites the recorded file paths
+to match, leaving the ids alone. None of the tables above notice anything
+happened.
+
+Rewriting the file rows is the part people skip, and it is the part that
+matters. Changing `libraries.paths` alone and letting the next scan rediscover
+everything looks equivalent and is not: the scan walks the new root, finds not
+one of the library's recorded paths among what it discovered, prunes every row,
+and the empty-item sweep then deletes every `media_items` row in that library —
+cascading away exactly the table above, unattended, within a scan interval.
 
 ## Doing it
 
-### In the admin UI (Aurora 2026.09 and later)
+### The procedure
 
-1. **Admin → Libraries**, press **Edit** on the library.
-2. Replace the path with the new one. **One path per line** for multiple roots.
-3. **Save.** Aurora re-attaches its file watcher and starts a rescan.
-
-Repeat per library. If you have already created duplicate libraries at the
-new paths, delete those **first** — see the ordering note below.
-
-**Keep the same number of lines.** Paths are matched up in order, so replacing
-one root with one new root works; adding or removing a line does not move
-anything. A library whose root is removed keeps its rows pointing at the old
-location, and those titles stop playing. To relocate, replace each path with
-its new location.
-
-### By hand, on a server that cannot update yet
-
-The Edit button ships in the release that also fixes the frontend build, so on
-a box stuck on an older binary you have to do it in SQL.
+Aurora has no UI for this yet, so it is done in SQL. Take a backup first; this
+is not reversible.
 
 **Rewrite the file rows, not just the library paths.** Updating
 `libraries.paths` alone and letting the rescan rediscover everything is the
@@ -253,58 +245,44 @@ unreachable (unmounted, deleted), the walk *errors*, which trips a different
 guard (`walkFailed`) and also skips the prune — that state is safe, just
 noisy in the log.
 
-## What the first rescan does
-
-Almost nothing, which is the point. The rows were moved with the library, so
-the scan finds exactly the paths already on record — no new files, nothing
-stale to prune. Titles play immediately, without waiting for it.
-
-One caveat if you copied rather than moved (`cp`, `rsync`): a copy changes each
-file's mtime, and Aurora's quick file hash is size + mtime, so every file looks
-changed and is re-read. That is slower, and for any title whose stored name was
-rewritten by TMDB it can add one empty duplicate entry, which the same scan's
-sweep then removes. `mv` avoids it entirely.
-
-If you see this in the log instead:
-
-```
-prune skipped: every recorded file lies outside this library's current paths,
-so nothing here is evidence of a deletion. Nothing was removed.
-```
-
-(or, once some rows are under the new root, `prune: kept rows that lie outside
-this library's current paths`)
-
-then something changed `libraries.paths` without moving the rows — a bare psql
-`UPDATE`, or a restored database. Nothing has been deleted, and nothing will
-be: a row outside the library's roots was never covered by the walk, so the
-scanner treats its absence as no evidence at all. But the library is stuck
-until its rows describe where it points.
-
-**Pressing Edit and saving the same paths does not fix it.** The rewrite only
-runs when the paths actually change, so re-saving the value already stored is a
-no-op that returns success. Use the SQL above — it rewrites the rows, which is
-the part that is missing.
-
 ## What is not preserved
 
 - **Cached transcode segments and subtitle extractions** keyed by the old
   path (`/var/cache/aurora`). They regenerate on demand.
-- **Titles whose files did not come with the move.** Only rows whose file is
-  actually present at the new location are moved; the rest keep pointing where
-  they were. That is deliberate — a partial move must not rewrite rows to paths
-  with nothing at them — but it means a half-finished copy leaves half the
-  library behind. Finish the copy and repoint again; it is idempotent.
+- **Titles whose files did not come with the move.** The `replace()` rewrites
+  every row under the old prefix whether or not the file arrived, so finish the
+  copy BEFORE running it. A row rewritten to a path with nothing at it is a
+  title that will not play until the file turns up.
 
-- **Nothing else.** The catalog rows are not re-matched at all: their paths are
-  rewritten in place, in the same transaction as the library update. An earlier
-  version of this page said a renamed title "gets a new row and its history
-  stays behind" — that was true of a design that relied on the rescan
-  re-finding each title, and it is no longer how this works.
+- **Anything whose FILENAME changed.** The rewrite is a prefix substitution, so
+  a file that was also renamed is not covered: its row points at a path that no
+  longer exists, and the next scan adds the renamed file as a new title with no
+  history. Move without renaming.
+- **TV episodes whose files were COPIED rather than moved.** `cp` and `rsync`
+  without `-a`/`-t` change each file's mtime, and Aurora's quick file hash is
+  size + mtime, so every episode is re-read. If TMDB enrichment stored a show
+  title that differs from the folder name (`Marvel's Daredevil` vs
+  `Daredevil`), the re-read creates a new show and — because the
+  `episode_files` upsert re-parents on path conflict — moves the episode files
+  onto it, leaving the original show empty for the sweep to delete along with
+  its history. **Use `mv`**, or a copy that preserves mtimes (`cp -a`,
+  `rsync -a`). This is pre-existing behaviour, not specific to moving paths: it
+  fires for any episode file whose mtime changes.
 
 ## Related
 
-- `internal/api/media_handlers.go` — `validateLibraryPaths`, `Update`
-- `internal/library/scanner.go` — `NoteRepointed`, `pruneDeletedFiles`,
-  and the `DeleteEmptyMediaItems` sweep
+- `internal/library/scanner.go` — `pruneDeletedFiles` and the
+  `DeleteEmptyMediaItems` sweep, which are what this procedure exists to
+  avoid triggering
+- `internal/db/queries.go` — `UpsertMediaItem`'s
+  `(library_id, type, title, year)` key, which is why a new library gets new
+  ids
 - `docs/server-testing.md` — verifying against the running instance
+
+## Not yet built
+
+An **Edit** button that does all of this from Admin → Libraries. It was
+attempted alongside this document and withdrawn: five independent review
+rounds each found a way it destroyed catalog history, the last of them in the
+TV path described above. Until it exists, the SQL here is the supported
+route.

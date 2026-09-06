@@ -146,18 +146,6 @@ func (a *ActivityLogger) LogLibraryCreated(ctx context.Context, userID int64, li
 	})
 }
 
-// LogLibraryUpdated records a rename or a repoint. Details carries the library
-// name only, matching LogLibraryCreated — the feed answers "who changed this
-// and when", and a server's filesystem layout is not what it is for. (The feed
-// itself is admin-only, so this is a scope choice, not a privacy control.)
-func (a *ActivityLogger) LogLibraryUpdated(ctx context.Context, userID int64, libraryName string) {
-	a.log(ctx, &models.ActivityEntry{
-		UserID:    &userID,
-		EventType: "library_updated",
-		Details:   map[string]interface{}{"library_name": libraryName},
-	})
-}
-
 func (a *ActivityLogger) LogLibraryDeleted(ctx context.Context, userID int64, libraryID int64) {
 	a.log(ctx, &models.ActivityEntry{
 		UserID:    &userID,

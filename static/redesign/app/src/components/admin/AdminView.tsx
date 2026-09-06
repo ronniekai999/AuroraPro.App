@@ -66,7 +66,6 @@ import {
   testARRConnection,
   tmdbPosterURL,
   triggerUpdate,
-  updateLibrary,
   updateAdminLLM,
   updateAdminOAuth,
   updateSettings,
@@ -561,78 +560,9 @@ function UpdatePanel() {
   )
 }
 
-// One library's inline edit form. Its own component so the draft name/paths
-// reset naturally when a different row is opened — holding them in the tab's
-// state carried the previous row's text into the next one.
-function LibraryEditRow({ lib, onCancel, onSaved }: {
-  lib: Library
-  onCancel: () => void
-  onSaved: () => void | Promise<void>
-}) {
-  const [name, setName] = useState(lib.name)
-  // One path per LINE, not comma-separated. A media root may legitimately
-  // contain a comma, and round-tripping join(', ') through split(',')
-  // silently splits one such path into two invalid ones the moment Edit is
-  // opened and saved.
-  const [paths, setPaths] = useState(lib.paths.join('\n'))
-  const [saving, setSaving] = useState(false)
-  const nextPaths = paths.split('\n').map(s => s.trim()).filter(Boolean)
-  // Element-wise, so no join character can make two different lists compare
-  // equal and suppress the rescan notice.
-  const moved = nextPaths.length !== lib.paths.length ||
-    nextPaths.some((p, i) => p !== lib.paths[i])
-  return (
-    <div className="py-3 border-b border-white/[0.04] last:border-0 space-y-2">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        <input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          aria-label="Library name"
-          placeholder="Name"
-          className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
-        />
-        <textarea
-          value={paths}
-          onChange={e => setPaths(e.target.value)}
-          aria-label="Library paths"
-          rows={Math.max(1, nextPaths.length)}
-          placeholder="/path/to/library (one per line)"
-          className="md:col-span-2 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm resize-y"
-        />
-      </div>
-      {moved && (
-        <p className="text-white/50 text-xs">
-          {nextPaths.length === lib.paths.length
-            ? "Repointing keeps this library's watch history, ratings and recommendations — its files are moved to the new location, not re-matched. Saving starts a rescan."
-            : "Adding or removing a path does NOT move this library's existing files to it — they keep pointing where they are, and titles under a removed path will stop playing. To relocate media, replace each path with its new location, keeping the same number of lines."}
-        </p>
-      )}
-      <div className="flex gap-2">
-        <button
-          disabled={!name.trim() || nextPaths.length === 0 || saving}
-          onClick={async () => {
-            setSaving(true)
-            try {
-              await updateLibrary(lib.id, { name: name.trim(), paths: nextPaths })
-              await onSaved()
-            } catch (e) {
-              window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown'))
-            } finally { setSaving(false) }
-          }}
-          className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-        <button onClick={onCancel} disabled={saving} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50">Cancel</button>
-      </div>
-    </div>
-  )
-}
-
 function AdminLibrariesTab() {
   const [items, setItems] = useState<Library[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [editingId, setEditingId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [newType, setNewType] = useState<'movie' | 'show'>('movie')
@@ -677,24 +607,14 @@ function AdminLibrariesTab() {
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
         {items && items.map(lib => (
-          editingId === lib.id ? (
-            <LibraryEditRow
-              key={lib.id}
-              lib={lib}
-              onCancel={() => setEditingId(null)}
-              onSaved={async () => { setEditingId(null); await reload() }}
-            />
-          ) : (
-            <div key={lib.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
-                <p className="text-white/40 text-xs truncate">{lib.type} · {lib.paths.join(', ')}</p>
-              </div>
-              <button onClick={() => setEditingId(lib.id)} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Edit</button>
-              <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Scan</button>
-              <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?\n\nThis also deletes watch history, ratings and recommendations for everything in it. If the files have simply MOVED, use Edit to point this library at the new path instead — that keeps all of it.`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
+          <div key={lib.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
+              <p className="text-white/40 text-xs truncate">{lib.type} · {lib.paths.join(', ')}</p>
             </div>
-          )
+            <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Scan</button>
+            <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
+          </div>
         ))}
       </div>
     </div>

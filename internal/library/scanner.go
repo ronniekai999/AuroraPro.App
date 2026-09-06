@@ -124,95 +124,6 @@ type Scanner struct {
 	OnScanComplete func(lib *models.Library)
 }
 
-// prunePlan is what a scan does about files recorded in the DB but absent
-// from this walk.
-type prunePlan int
-
-const (
-	prunePlanNow  prunePlan = iota // ordinary scan: absence means deletion
-	prunePlanSkip                  // no usable evidence either way
-)
-
-func (p prunePlan) String() string {
-	switch p {
-	case prunePlanNow:
-		return "prune-now"
-	default:
-		return "skip"
-	}
-}
-
-// planPrune decides from what is known BEFORE the recorded rows are read.
-//
-// Relocation is deliberately NOT an input. Three designs in a row tried to
-// detect a move and then suppress the whole scan's prune, and each one lost
-// data — the last of them by leaving the suppression latched on forever, so a
-// repointed library never pruned or swept again. Relocation is now handled
-// per-ROW inside pruneDeletedFiles, where a row outside the library's current
-// roots is simply not a candidate. That needs no detection, no marker, and
-// nothing to clear afterwards, and it is exact for a partial move in a way a
-// whole-scan verdict never was.
-func planPrune(walkFailed bool) prunePlan {
-	if walkFailed {
-		// An unwalkable root says nothing about any row under it
-		// (deep-debug H9).
-		return prunePlanSkip
-	}
-	return prunePlanNow
-}
-
-// allPathsOutsideRoots reports whether EVERY recorded path lies outside all of
-// the library's current roots — the signature of media that moved rather than
-// media that was deleted.
-//
-// This is the primary relocation guard, and it is derived from the data rather
-// than signalled by whoever changed the paths. That matters because the paths
-// can change without the API handler: an operator editing `libraries.paths` in
-// psql (which the runbook documents for boxes that cannot take a new binary
-// yet), a restored database, or a handler-set marker lost to the restart that
-// deploys move the library just as effectively as the Edit button, and an
-// in-memory signal covers none of those. Re-derived on every scan, so it also
-// survives a restart mid-move and cannot be spent by a scan that then fails.
-//
-// The reasoning is the same one the walkFailed and zero-discovered guards
-// already apply: absence from the walk is evidence of deletion only when the
-// walk covered where the file was supposed to be. If not one recorded row is
-// under a path we actually walked, the walk had nothing to say about any of
-// them.
-//
-// Deliberately ALL and not "most": a library whose media genuinely was deleted
-// wholesale should still prune, and one row still under a root is enough to
-// show the roots are where this library's files live. That leaves the partial
-// move — one root of several changed — to the explicit marker below.
-//
-// An empty set returns false: there is nothing to prune and nothing to infer.
-func allPathsOutsideRoots(dbPaths map[string]int64, roots []string) bool {
-	if len(dbPaths) == 0 || len(roots) == 0 {
-		return false
-	}
-	// Clean the roots first. underAnyPrefix compares against root+"/"
-	// verbatim, so a root stored with a trailing slash matches nothing and
-	// every row reads as "outside" — which disables this library's prune
-	// permanently and silently. Reachable through the psql edit the runbook
-	// documents, where nothing normalizes what the operator typed.
-	clean := make([]string, 0, len(roots))
-	for _, r := range roots {
-		if r == "" {
-			continue
-		}
-		clean = append(clean, filepath.Clean(r))
-	}
-	if len(clean) == 0 {
-		return false
-	}
-	for path := range dbPaths {
-		if underAnyPrefix(path, clean) {
-			return false
-		}
-	}
-	return true
-}
-
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
 	s := &Scanner{
 		cfg:      cfg,
@@ -352,9 +263,6 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// PruneSkipped false is the normal, healthy case. PruneSkipped means the
 	// prune was abandoned wholesale: an unwalkable root, or so many unreadable
 	// entries that scoping stopped being trustworthy.
-	// Does this library carry a marker saying its paths were just changed?
-	// PEEKED, never consumed here — see isRepointed. The data-derived
-	// relocation check inside pruneDeletedFiles is the primary guard; this
 	progress.WalkErrors = len(unreadablePaths)
 	progress.PruneSkipped = walkFailed
 	// ...and WHICH paths, bounded for display. A log line being the only
@@ -365,37 +273,47 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 
 	slog.Info("files discovered", "library", lib.Name, "count", len(allFiles))
 
-	// Phase 1b: prune files recorded in the DB but absent from this walk, and
-	// then sweep any catalog entry left with no files at all.
+	// Phase 1b: Prune files that exist in the DB but are no longer on disk.
+	// This handles the case where a user deletes a file between scans —
+	// without this step, the stale DB row would persist indefinitely.
 	//
-	// Relocation is handled inside pruneDeletedFiles, per row: a row outside
-	// the library's current roots was never walked, so it is not a candidate.
-	// Nothing here needs to know whether a move happened.
-	if plan := planPrune(walkFailed); plan == prunePlanSkip {
+	// deep-debug H9 — only prune when EVERY path walked cleanly. A transient
+	// mount/permission failure (NFS/SMB unmounted, removable drive absent)
+	// makes collectVideoFiles error for that path, leaving allFiles missing
+	// its entries; pruning then would delete every DB file row under it. Skip
+	// pruning entirely on any walk error rather than risk wiping the catalog.
+	if walkFailed {
 		slog.Warn("skipping prune: one or more library paths failed to walk (transient mount/permission issue?) — leaving DB file rows intact",
 			"library", lib.Name)
 	} else {
-		pruned, relocated, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles, unreadablePaths)
-		switch {
-		case pruneErr != nil:
+		pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles, unreadablePaths)
+		if pruneErr != nil {
 			slog.Error("prune deleted files failed", "library", lib.Name, "error", pruneErr)
-		case relocated:
-			// Not one recorded row lies under a path we walked, so this
-			// library moved rather than lost its files. Nothing was deleted.
-			// It stays this way until its rows describe where it points —
-			// which the supported repoint does in the same transaction as the
-			// path change (see the API's planPathRewrites / RepointLibrary).
-			slog.Warn("prune skipped: every recorded file lies outside this library's current paths, so nothing here is evidence of a deletion. "+
-				"Nothing was removed. If the media moved, repoint the library from Admin > Libraries — see docs/moving-media-paths.md",
-				"library", lib.Name, "paths", lib.Paths)
-			s.mu.Lock()
-			progress.PruneSkipped = true
-			s.mu.Unlock()
-		default:
-			if pruned > 0 {
-				slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
+		} else if pruned > 0 {
+			slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
+		}
+
+		// Phase 1c: Sweep away catalog entries whose last file just
+		// disappeared. After the file prune above, a movie/show with zero
+		// remaining files is the "no files available" ghost the UI would
+		// otherwise show indefinitely (the user deleted the title from disk,
+		// but its metadata shell lingers). Remove the shell too.
+		//
+		// Gated by the SAME safety conditions as the prune: we're already in
+		// the !walkFailed branch, and we additionally require a non-empty walk
+		// (len(allFiles) > 0) — mirroring pruneDeletedFiles' zero-discovered
+		// guard — so a transient empty mount can never trigger a catalog wipe.
+		if len(allFiles) > 0 {
+			removed, cleanErr := s.queries.DeleteEmptyMediaItems(ctx, lib.ID)
+			if cleanErr != nil {
+				slog.Error("prune empty media items failed", "library", lib.Name, "error", cleanErr)
+			} else if len(removed) > 0 {
+				for _, it := range removed {
+					slog.Info("removed media item with no remaining files",
+						"id", it.ID, "title", it.Title, "library", lib.Name)
+				}
+				slog.Info("pruned empty media items", "library", lib.Name, "count", len(removed))
 			}
-			s.sweepEmptyMediaItems(ctx, lib, allFiles)
 		}
 	}
 
@@ -522,12 +440,6 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		}
 	}
 
-	// Phase 3: the prune deferred above, now that phase 2 has attached the
-	// files at their new location. The same call that would have emptied every
-	// media item before now finds each one holding its new row, so the stale
-	// old-location rows go and the items — with their watch history, ratings
-	// and embeddings — stay.
-	//
 	s.mu.Lock()
 	progress.ScannedFiles = len(allFiles)
 	progress.NewFiles = int(newCount.Load())
@@ -841,30 +753,6 @@ func boundedPaths(paths []string, n int) []string {
 	return paths[:n]
 }
 
-// sweepEmptyMediaItems removes catalog entries whose last file just
-// disappeared — the "no files available" ghost the UI would otherwise show
-// forever. Only ever called immediately after a prune that actually ran, and
-// only with a non-empty walk behind it, mirroring pruneDeletedFiles'
-// zero-discovered guard: a transient empty mount must never reach this.
-func (s *Scanner) sweepEmptyMediaItems(ctx context.Context, lib *models.Library, allFiles []string) {
-	if len(allFiles) == 0 {
-		return
-	}
-	removed, err := s.queries.DeleteEmptyMediaItems(ctx, lib.ID)
-	if err != nil {
-		slog.Error("prune empty media items failed", "library", lib.Name, "error", err)
-		return
-	}
-	if len(removed) == 0 {
-		return
-	}
-	for _, it := range removed {
-		slog.Info("removed media item with no remaining files",
-			"id", it.ID, "title", it.Title, "library", lib.Name)
-	}
-	slog.Info("pruned empty media items", "library", lib.Name, "count", len(removed))
-}
-
 // pruneDeletedFiles removes DB rows for files no longer on disk.
 //
 // unreadablePaths lists subtrees the walk could not read. Rows under those
@@ -873,11 +761,7 @@ func (s *Scanner) sweepEmptyMediaItems(ctx context.Context, lib *models.Library,
 // permission error. Everything outside those subtrees walked cleanly and is
 // pruned normally — which is the difference between one bad folder disabling
 // cleanup for a whole library and it disabling cleanup only for itself.
-//
-// The second return value means RELOCATED: every recorded path lies outside
-// this library's current roots, so it moved rather than lost its files.
-// Nothing is pruned in that case — see allPathsOutsideRoots.
-func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, discoveredFiles []string, unreadablePaths []string) (int64, bool, error) {
+func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, discoveredFiles []string, unreadablePaths []string) (int64, error) {
 	// deep-debug H9 — refuse to prune when zero files were discovered. The
 	// canonical NFS/SMB failure leaves the mountpoint present-but-EMPTY, so
 	// collectVideoFiles returns ([], nil) — no error, so the walkFailed guard
@@ -888,7 +772,7 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 	// removes it) — acceptable versus catastrophic, unattended data loss.
 	if len(discoveredFiles) == 0 {
 		slog.Warn("prune skipped: zero files discovered for library — refusing to delete all file rows (transient mount failure?)", "library", lib.Name)
-		return 0, false, nil
+		return 0, nil
 	}
 	// Build a set of discovered paths for O(1) lookup
 	discovered := make(map[string]struct{}, len(discoveredFiles))
@@ -896,48 +780,18 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 		discovered[fp] = struct{}{}
 	}
 
-	// The library's roots, cleaned. underAnyPrefix compares against root+"/"
-	// verbatim, so a trailing slash — reachable through a psql edit, where
-	// nothing normalises what the operator typed — would make every row read
-	// as outside and silently disable this library's prune for good.
-	cleanRoots := make([]string, 0, len(lib.Paths))
-	for _, r := range lib.Paths {
-		if r != "" {
-			cleanRoots = append(cleanRoots, filepath.Clean(r))
-		}
-	}
-	outside := 0
-
 	isTV := lib.Type == models.LibraryShows
 	var pruned int64
 
 	if isTV {
 		dbPaths, err := s.queries.GetEpisodeFilePathsForLibrary(ctx, lib.ID)
 		if err != nil {
-			return 0, false, err
-		}
-		if allPathsOutsideRoots(dbPaths, lib.Paths) {
-			slog.Warn("prune skipped: every recorded episode file lies outside this library's current paths — treating it as a relocation, not deletions",
-				"library", lib.Name, "paths", lib.Paths, "rows", len(dbPaths))
-			return 0, true, nil
+			return 0, err
 		}
 		var staleIDs []int64
 		shielded := 0
 		for path, id := range dbPaths {
 			if _, exists := discovered[path]; exists {
-				continue
-			}
-			// A row OUTSIDE the library's current roots was never covered by
-			// this walk, so its absence from the results is not evidence of
-			// anything. This is the generalisation of the walkFailed and
-			// zero-discovered guards, and it is what makes a relocation safe
-			// without having to detect one: after a move, every old row sits
-			// outside the roots and is simply not a candidate. Deleting them
-			// empties their items, and the sweep then cascades away the watch
-			// progress, ratings, feedback, taste seeds and embedding — which
-			// is what happened, reproducibly, in three consecutive designs.
-			if !underAnyPrefix(path, cleanRoots) {
-				outside++
 				continue
 			}
 			if underAnyPrefix(path, unreadablePaths) {
@@ -953,45 +807,22 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 			slog.Warn("prune: kept rows under unreadable paths", "library", lib.Name,
 				"kept", shielded, "unreadable", boundedPaths(unreadablePaths, 5))
 		}
-		if outside > 0 {
-			slog.Warn("prune: kept rows that lie outside this library's current paths — they were never walked, so their absence proves nothing. "+
-				"If the media moved, repoint the library from Admin > Libraries (see docs/moving-media-paths.md); nothing has been deleted",
-				"library", lib.Name, "kept", outside, "paths", lib.Paths)
-		}
 		if len(staleIDs) > 0 {
 			n, err := s.queries.DeleteEpisodeFilesByIDs(ctx, staleIDs)
 			if err != nil {
-				return 0, false, err
+				return 0, err
 			}
 			pruned = n
 		}
 	} else {
 		dbPaths, err := s.queries.GetMediaFilePathsForLibrary(ctx, lib.ID)
 		if err != nil {
-			return 0, false, err
-		}
-		if allPathsOutsideRoots(dbPaths, lib.Paths) {
-			slog.Warn("prune skipped: every recorded media file lies outside this library's current paths — treating it as a relocation, not deletions",
-				"library", lib.Name, "paths", lib.Paths, "rows", len(dbPaths))
-			return 0, true, nil
+			return 0, err
 		}
 		var staleIDs []int64
 		shielded := 0
 		for path, id := range dbPaths {
 			if _, exists := discovered[path]; exists {
-				continue
-			}
-			// A row OUTSIDE the library's current roots was never covered by
-			// this walk, so its absence from the results is not evidence of
-			// anything. This is the generalisation of the walkFailed and
-			// zero-discovered guards, and it is what makes a relocation safe
-			// without having to detect one: after a move, every old row sits
-			// outside the roots and is simply not a candidate. Deleting them
-			// empties their items, and the sweep then cascades away the watch
-			// progress, ratings, feedback, taste seeds and embedding — which
-			// is what happened, reproducibly, in three consecutive designs.
-			if !underAnyPrefix(path, cleanRoots) {
-				outside++
 				continue
 			}
 			if underAnyPrefix(path, unreadablePaths) {
@@ -1005,21 +836,16 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 			slog.Warn("prune: kept rows under unreadable paths", "library", lib.Name,
 				"kept", shielded, "unreadable", boundedPaths(unreadablePaths, 5))
 		}
-		if outside > 0 {
-			slog.Warn("prune: kept rows that lie outside this library's current paths — they were never walked, so their absence proves nothing. "+
-				"If the media moved, repoint the library from Admin > Libraries (see docs/moving-media-paths.md); nothing has been deleted",
-				"library", lib.Name, "kept", outside, "paths", lib.Paths)
-		}
 		if len(staleIDs) > 0 {
 			n, err := s.queries.DeleteMediaFilesByIDs(ctx, staleIDs)
 			if err != nil {
-				return 0, false, err
+				return 0, err
 			}
 			pruned = n
 		}
 	}
 
-	return pruned, false, nil
+	return pruned, nil
 }
 
 // maxTrackedUnreadable bounds how many unreadable paths we remember for

@@ -878,120 +878,88 @@ to a transcode until a DV-aware tonemap (libplacebo) is probed in. The
 limiter policies carry a fixed 5 ms audio delay (alimiter's uncompensated
 look-ahead; see `downmixLimiter`).
 
-## Repointing a library, and the Node build floor (September 2026)
+## The Node build floor, and why library repointing was withdrawn (September 2026)
 
-Two unrelated production failures with the same shape — a real problem reported
-as something else. Code: `validateLibraryPaths` / `samePaths` /
-`planPathRewrites` / `Update` / `rescanMovedLibrary`
-(`internal/api/media_handlers.go`), `RepointLibrary` (`internal/db/queries.go`),
-`planPrune` / `pruneDeletedFiles` / `underAnyPrefix`
-(`internal/library/scanner.go`), `node_vite_verdict` in
-`scripts/{install,redeploy,aurora-update}.sh`, SPA `LibraryEditRow` +
-`updateLibrary`. Operator runbook: `docs/moving-media-paths.md`.
+Two production failures reported as something else. Code: `node_vite_verdict`
+in `scripts/{install,redeploy,aurora-update}.sh`, pinned by
+`scripts/node-version-test.sh` (CI). Operator runbook for moved media:
+`docs/moving-media-paths.md`.
 
-Invariants to preserve when touching this area:
+### The Node build floor
 
-- **A repoint moves the FILE ROWS, in the same transaction as the path
-  change** (`planPathRewrites` → `RepointLibrary`). It does NOT change the
-  paths and let the rescan rediscover the files. That was the first design, and
-  three review rounds killed it: it assumes `UpsertMediaItem` lands on the same
-  `media_items` row, but that key is `(library_id, type, title, year)` parsed
-  from the FILENAME while the stored row carries whatever TMDB enrichment last
-  wrote. A row saying `title='Seven', year=1995` whose folder reads
-  `Se7en (1995)` re-keys to a NEW item; the old one is left with no files and
-  the empty-item sweep cascades away its watch progress, ratings, feedback,
-  taste seeds and embedding. A show with a NULL stored year does the same with
-  no enrichment drift at all (`FindMediaItemByTitle` cannot scan NULL into the
-  year, so the pre-check errors and the upsert re-keys). Both were reproduced
-  against a real database. `TestRepointSurvivesATitleTheRescanWouldReKey` pins
-  it.
-- **The prune only considers rows UNDER the library's current roots, and that
-  decision is PER ROW.** A row outside them was never covered by the walk, so
-  its absence is not evidence of anything — the generalisation of the
-  `walkFailed` and zero-discovered guards. It is what makes a relocation safe
-  *without detecting one*: after a move every old row sits outside the roots
-  and is simply not a candidate, and for a partial move ([A B] → [A C]) the
-  surviving root keeps pruning normally while the dropped one does not.
-  `TestBarePathEditDeletesNothing` drives two full scans over a real database
-  to pin it.
-- **There is no relocation MARKER, and adding one back is a mistake.** Four
-  designs tried to detect a move and suppress the scan's prune wholesale —
-  skip, defer, gate the deferral, then skip again — and every one of them lost
-  something. The last did the most damage while looking the safest: deleting
-  the deferred prune removed the only caller that RELEASED the marker, so a
-  repointed library latched into "delete nothing" permanently and never pruned
-  a deleted file or swept an emptied entry again, silently, until a restart.
-  A per-scan verdict cannot express a partial move and always needs clearing
-  by someone; the per-row rule needs neither. `TestPruneStillWorksAfterARepoint`
-  repoints, deletes a film, rescans, and asserts the ordinary cleanup still
-  happens.
-- **Only rows whose target actually EXISTS are moved.** A partial move, or a
-  repoint saved before the copy finished, leaves the rest pointing where they
-  still are. Rewriting a row to a path with nothing at it would trade a
-  recoverable state for an unplayable one.
-- **Roots map POSITIONALLY, and only when the counts match.** Adding or
-  removing a root is not a relocation that can be read unambiguously, so
-  `planPathRewrites` declines entirely and the rows are left alone.
-- **`RepointLibrary` is one transaction.** A `libraries.paths` update that
-  lands without its row moves leaves every title on a dead path; row moves
-  without the path update point the rows outside the library's own roots.
-  Neither half is allowed alone. A UNIQUE violation here IS the
-  duplicate-library case, and the handler says so rather than reporting a
-  generic failure.
-- **`validateLibraryPaths` is one helper with two call sites** (Create and
-  Update). It resolves symlinks BEFORE applying the blocklist, stores the
-  RESOLVED path, and requires an ABSOLUTE one — `filepath.Clean("")` is `"."`,
-  which resolves to Aurora's working directory and matches no absolute-prefix
-  blocklist entry.
-- **The Node gate distinguishes "cannot build" from "unsupported".** Vite 7
-  calls `crypto.hash()`, added in Node 20.12/21.7, so below that the build
-  provably dies; the declared engines (`^20.19 || >=22.12`) are stricter, and
-  vite merely warns and carries on inside the gap. Only the provable case is
-  fatal — refusing every Node below the engines would strand a box on 20.15
-  whose build succeeds. `scripts/node-version-test.sh` pins the table and
-  asserts the three duplicated copies have not drifted.
-- **The updater reports it as `misconfigured`, in preflight, before the
-  fetch.** As a build failure it read "frontend build failed — old
-  binary/static assets are still running", named neither Node nor a version,
-  and sat several hundred lines into npm's output. A box ran eight consecutive
-  failed updates over a fortnight on that message.
+Invariants to preserve:
 
-Known limits, stated plainly:
+- **The gate distinguishes "cannot build" from "unsupported".** Vite 7 calls
+  `crypto.hash()`, added in Node 20.12/21.7, so below that the build provably
+  dies; the declared engines (`^20.19 || >=22.12`) are stricter, and vite
+  merely warns and carries on inside the gap. Only the provable case is fatal —
+  refusing every Node below the engines would strand a box on 20.15 whose build
+  succeeds.
+- **The updater reports it as `misconfigured`, in preflight, before the fetch.**
+  As a build failure it read "frontend build failed — old binary/static assets
+  are still running", named neither Node nor a version, and sat several hundred
+  lines into npm's output. A box ran eight consecutive failed updates over a
+  fortnight on that message.
+- **The check only fires when the SPA is built from source.** `install.sh` and
+  `aurora-update.sh` both fall back to the committed `static/v2` bundle when
+  the source tree is absent, and that path needs no Node at all.
+- **`scripts/node-version-test.sh` tests the call sites by RUNNING them**
+  against a fake `node` on PATH, and asserts the three duplicated copies of
+  `node_vite_verdict` have not drifted. The copies are duplicated rather than
+  sourced on purpose: `aurora-update.sh` runs as root out of a source mirror
+  that may be mid-checkout, and a fourth file to `source` is a new failure mode
+  in exactly the path that must not acquire one.
 
-- **A bare `libraries.paths` edit leaves the library stuck.** Safe — nothing is
-  deleted — but its rows still describe the old location, so nothing plays
-  until they are rewritten. The scanner logs what to do. Detecting this and
-  repairing it automatically would mean re-matching files to items, which is
-  the thing that kept going wrong; it is deliberately not attempted.
-- **Stale rows outside the roots are never cleaned up.** Removing a root from a
-  library leaves its rows behind forever, showing as titles that will not play.
-  The prune cannot distinguish that from a move without re-matching. Deleting
-  the library is the only cleanup.
-- **A library left "stuck" cannot be un-stuck from the UI.** The rewrite runs
-  only when the paths actually change, so re-saving the same value is a no-op
-  that returns 200. The remedy is the runbook's SQL (or repointing elsewhere
-  and back). Detecting the stuck state and repairing it would mean inferring
-  the old prefix from the stranded rows, which is guesswork of exactly the kind
-  that produced the earlier failures.
-- **Changing the NUMBER of roots moves nothing.** `planPathRewrites` maps
-  positionally and declines on a count mismatch, but the handler still commits
-  the path change — so a removed root leaves its rows stranded and those titles
-  stop playing. The SPA warns about this in the edit row; the API does not
-  refuse it.
-- **`Update` is a whole-row read-modify-write with no concurrency control.**
-  Two admin tabs can have the second silently revert the first's repoint. An
-  `updated_at` precondition is the fix and is not built.
-- **Nothing stops an admin repointing a library at a path another library
-  already owns.** The transaction fails on the UNIQUE constraint and the
-  handler explains it, but a cross-library overlap check at save time would be
-  better and is not built.
-- **A move that RENAMES files is still a rename.** The rows are moved by
-  prefix, so a file whose basename changed is not found at the computed target
-  and is left behind; the next scan then adds it as a new title. "Move without
-  renaming" is a documented precondition, not an enforced one.
-- **None of the Node verdicts are exercised against a real install.** The
-  crypto.hash floors are from Node's changelog and the engines from the
-  toolchain's `package.json`; the test drives a fake `node` on PATH.
-- **`progress.PruneSkipped` is set for a relocation as well as a walk failure**
-  and `models.ScanProgress` still documents it as "the prune was abandoned
-  wholesale". Display-only today.
+Known limit: none of the verdicts are exercised against a real install. The
+crypto.hash floors come from Node's changelog and the engines from the
+toolchain's `package.json`; the test drives a fake `node`.
+
+### Library repointing — attempted and WITHDRAWN. Read this before retrying.
+
+Moving media to a new path orphans everything keyed to `media_item_id`, because
+`media_items` is scoped per library and keyed on
+`(library_id, type, title, year)`. An admin whose files move has no UI for it
+and creates a new library, which builds a parallel catalog with fresh ids. That
+is a real gap and `docs/moving-media-paths.md` documents the SQL that closes
+it.
+
+An **Edit** button to do the same thing was built and removed. Five independent
+adversarial reviews each found a distinct way it destroyed catalog history, and
+each defect was introduced by the previous round's fix:
+
+1. Repoint + rescan pruned the old rows before phase 2 attached the new ones,
+   so the empty-item sweep cascaded every title's history away.
+2. The fix — defer the prune to after phase 2 — was MORE destructive: with a
+   duplicate library owning the new paths, phase 2 attaches nothing, and one
+   unowned file was enough to make the prune run against rows that were still
+   the only ones their titles had.
+3. The premise itself was false. `UpsertMediaItem` keys on the FILENAME while
+   the stored row carries what TMDB enrichment wrote, so a repoint re-keys
+   `title='Seven'` / folder `Se7en (1995)` to a NEW item and sweeps the old.
+   A NULL stored year does it with no enrichment drift at all.
+4. Moving the file rows instead fixed that — and deleting the deferred prune
+   removed the only caller that released the relocation marker, so a repointed
+   library latched into "delete nothing" and never pruned or swept again.
+5. TV was still broken: `episode_files`' `ON CONFLICT (path) DO UPDATE SET
+   episode_id = EXCLUDED.episode_id` re-parents a file onto a newly created
+   show whenever the quick hash changes (any `cp`/`rsync` without `-a`), which
+   empties the original show for the sweep.
+
+What to take from it, if this is picked up again:
+
+- **The catalog-delete path is the most dangerous code in this repo**, and
+  every one of those defects was invisible to a green test suite. Four of the
+  five were found by RUNNING code against a real Postgres, not by reading it.
+  CI already provides one (`TEST_DATABASE_URL`); use it from the first commit.
+- **Do not detect a relocation and suppress the scan's prune.** Four variants
+  were tried (skip, defer, gate the deferral, skip again) and each lost
+  something. The per-ROW rule — a recorded path outside the library's current
+  roots was never walked, so its absence is not evidence — is the only one that
+  needed nothing armed and nothing cleared. It is not in the tree; it is worth
+  starting from.
+- **Fix `episode_id = EXCLUDED.episode_id` FIRST, on its own, with its own
+  review.** It is pre-existing, it fires with no repoint involved, and it makes
+  any relocation work unsound until it is addressed.
+- **`FindMediaItemByTitle` errors on a NULL year** (it scans into a
+  non-nullable field), so the TV pre-check fails unconditionally for those
+  rows and the upsert re-keys. Also pre-existing, also worth fixing alone.
