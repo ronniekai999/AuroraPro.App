@@ -458,11 +458,24 @@ Invariants to preserve when touching this area:
   coarser than the seek test — the party's target advances while a seek takes
   ~a second to reach a TV, so a WORKING correction reads out-of-tolerance for a
   poll or two and counting those would re-anchor healthy casts on a loop.
-  Re-anchors are capped per cast, charged only when a reload actually starts
-  (`reloadCastAtAbsSec` returns whether it did), and refused outright when the
-  receiver is SHARING the local session — `CloneForCast` returns that session
+  Re-anchors are capped, charged only when a reload actually starts
+  (`reloadCastAtAbsSec` returns whether it did) and REFUNDED when the one it
+  started never reaches the receiver, and refused outright when the receiver
+  is SHARING the local session — `CloneForCast` returns that session
   unchanged, so a re-anchor there mints a new token for the same anchor and
-  the visible reload accomplishes nothing.
+  the visible reload accomplishes nothing. The cap bounds ONE episode of
+  divergence, not the whole title: a genuine arrival replenishes it, because
+  a guest has no other replenishment path (`seekToRealSec` refuses guests and
+  their local session is never rebuilt during a cast), so without it three
+  host rewinds past the anchor would strand every guest's TV for the rest of
+  the film with nothing surfaced.
+- **Per-title cast state is reset on TARGET IDENTITY, not on the auto-advance
+  path.** `castAdvancePendingRef` is set only by end-of-media and by a
+  seek-while-casting, so a PARTY media-change bumps `castReloadEpoch` and the
+  reload effect returns immediately — leaving the previous episode's anchor
+  published while the party's clock has moved to the next one. Every
+  conversion then reads the new episode against the old anchor, and a host
+  would broadcast the old episode's position into the new episode's party.
 - **`'blocked'` is not `'none'`.** Both mean "this poll takes no action", and
   they are opposite states: one is "the receiver arrived", the other "it
   cannot be got there and I am out of budget". The host warm-up promotes only
@@ -514,6 +527,17 @@ Known limits, stated plainly:
   convert through a guessed anchor. Correct, but it means a re-joined cast in
   a party no longer drift-corrects at all until the receiver is re-pointed.
   Reading the anchor back off a re-joined session is the fix, and is not built.
+- **A party media-change still strands the receiver on the old episode.**
+  Pre-existing — nothing re-points a cast on that path — and this change only
+  makes it safe rather than fixing it: the anchor goes to unknown, so both
+  branches stop converting instead of converting wrongly. The escalation is
+  the first machinery that COULD recover it; wiring the two together is the
+  open follow-up.
+- **An AUTHORITATIVE host never escalates.** `correctReceiverToward` is
+  reachable from the host branch only during warm-up, so a host whose receiver
+  falls behind after converging broadcasts the lagging TV outward rather than
+  correcting itself. Consistent with "the host is ground truth", but it means
+  the escalation covers guests and host warm-up only.
 
 ## Native-client direct play (Tier 1 of the Mac-app work)
 

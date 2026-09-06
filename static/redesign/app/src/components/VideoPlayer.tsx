@@ -938,8 +938,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   }
   // The receiver's own timeline → absolute source seconds, or null when the
   // anchor is unknown. Callers that ACT on the result must treat null as
-  // "don't"; the two display sites fall back to the raw receiver reading with
-  // an explicit `??` so the guess is visible where it is made.
+  // "don't"; the display surfaces (the expanded transport bar and the
+  // minimized widget) fall back to the raw receiver reading with an explicit
+  // `??` so the guess is visible where it is made.
   const recvToAbsSec = (recvSec: number): number | null =>
     castStartSecRef.current === null ? null : Math.max(0, recvSec) + castStartSecRef.current
   // How many times this cast has been re-anchored (see castResyncAction), and
@@ -1258,7 +1259,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         throw e
       } finally {
         castPendingMediaRef.current = null
-        castPendingStartSecRef.current = 0
+        // null, not 0 — see castStartSecRef. Unreachable today (the only
+        // reader is guarded by castPendingMediaRef), but 0 here would mean
+        // "the receiver's clock is absolute" to any future path that promotes
+        // pending media the getter did not anchor, which is the exact failure
+        // the nullable design exists to prevent.
+        castPendingStartSecRef.current = null
       }
     })
     castLoadGateRef.current = run.catch(() => { /* keep the chain alive */ })
@@ -1270,16 +1276,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // anchored somewhere else entirely (that is the point of the re-anchor
   // path), so a receiver-relative argument would name a different position
   // after the load than it did before it.
-  // Returns whether a reload was actually started. Callers that SPEND
-  // something on it (the re-anchor budget) need to know the difference: a
-  // reload dropped because another is already in flight has done nothing, and
-  // charging it would let a slow network exhaust the budget without a single
-  // re-anchor ever reaching the receiver.
-  const reloadCastAtAbsSec = (atAbsSec: number): boolean => {
+  // Returns whether a reload was actually STARTED, and calls onFailed if the
+  // one it started never reached the receiver. Callers that SPEND something on
+  // it (the re-anchor budget) need both: a reload dropped because another is
+  // in flight has done nothing, and one that threw — a mint that 429'd on the
+  // per-user session cap, a getter that found no media because the local
+  // session was mid-reboot — has done nothing either. Charging for those
+  // exhausts a 2-per-cast budget without a single re-anchor ever landing, and
+  // the escalation is then permanently unavailable for the rest of the cast.
+  const reloadCastAtAbsSec = (atAbsSec: number, onFailed?: () => void): boolean => {
     if (castReloadInFlightRef.current) return false // already refreshing — next poll retries if still needed
     castReloadInFlightRef.current = true
     void runCastLoad(() => castRef.current.loadCurrent(Math.max(0, atAbsSec)))
-      .catch(() => { /* best-effort — next poll retries */ })
+      .catch(() => { onFailed?.() /* best-effort — next poll retries */ })
       .finally(() => { castReloadInFlightRef.current = false })
     return true
   }
@@ -1697,6 +1706,32 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     evaluate()
   }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
 
+  // A new title is a new convergence problem, and the state describing the old
+  // one must not outlive it.
+  //
+  // Keyed on target identity rather than hung off the auto-advance path,
+  // because that path does not cover every way the media changes underneath a
+  // live receiver: castAdvancePendingRef is set only by end-of-media and by a
+  // seek-while-casting, so a PARTY media-change bumps castReloadEpoch and the
+  // reload effect below returns immediately. The receiver is left on the old
+  // episode either way (re-pointing it is a separate, unbuilt fix), but with
+  // the old episode's anchor still published every conversion would read the
+  // new episode's party clock against it — and for a host, broadcast the old
+  // episode's position into the new episode's party.
+  //
+  // Nulling the anchor is deliberately the conservative move: both sync
+  // branches bail on null, which is right, because until the receiver is
+  // re-pointed there is no correct conversion to make.
+  useEffect(() => {
+    castPendingStartSecRef.current = null
+    castStartSecRef.current = null
+    castStuckPollsRef.current = 0
+    castReanchorsUsedRef.current = 0
+    hostConvergedRef.current = false
+    hostWarmupStartedAtMsRef.current = 0
+    hostCorrectionUntilMsRef.current = 0
+  }, [target?.fileId, target?.fileType, target?.episodeId])
+
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
   // the new target). Gated on a pending advance + a still-connected receiver;
@@ -1707,15 +1742,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!castAdvancePendingRef.current) return
     castAdvancePendingRef.current = false
     if (!cast.status.connected) return
-    // A new episode is a new convergence problem: give it a fresh correction
-    // budget and warm-up rather than the remains of the previous episode's.
-    // Otherwise a binge that spent both re-anchors on episode 1 has none left
-    // for the rest of the season, and a host converged on episode 1 would be
-    // authoritative from episode 2's very first poll.
-    castStuckPollsRef.current = 0
-    castReanchorsUsedRef.current = 0
-    hostConvergedRef.current = false
-    hostWarmupStartedAtMsRef.current = 0
     void runCastLoad(() => cast.loadCurrent()).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] auto-advance load failed; stopping cast', err)
@@ -4217,14 +4243,29 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         reanchorAllowed: castCanReanchor(),
       })
       castStuckPollsRef.current = decision.stuck ? castStuckPollsRef.current + 1 : 0
-      if (decision.action === 'none') return 'converged'
+      if (decision.action === 'none') {
+        // Arrived. Replenish the re-anchor budget: it is meant to bound one
+        // episode of divergence, not to be a per-title lifetime allowance.
+        // Without this a host who rewinds the party past the receiver's anchor
+        // three times in a long film leaves every guest's TV permanently ahead
+        // of the room after the third, silently — 'blocked' takes no action and
+        // surfaces nothing. Re-arming only on a GENUINE arrival is what stops
+        // that from becoming a loop: the streak has to rebuild from scratch,
+        // and rebuilding it requires the receiver to diverge for real again.
+        castReanchorsUsedRef.current = 0
+        return 'converged'
+      }
       if (decision.action === 'blocked') return 'blocked'
       if (decision.action === 'reanchor') {
         // The reload cycles isMediaLoaded, which re-arms the gate below; the
         // suppression window keeps the host's scrub detector quiet across the
         // reload's own position change on top of that.
         hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
-        if (reloadCastAtAbsSec(targetAbsSec)) {
+        const charged = reloadCastAtAbsSec(targetAbsSec, () => {
+          // The load never reached the receiver, so it re-anchored nothing.
+          castReanchorsUsedRef.current = Math.max(0, castReanchorsUsedRef.current - 1)
+        })
+        if (charged) {
           // Charged only when a reload really started — see reloadCastAtAbsSec.
           castReanchorsUsedRef.current += 1
           castStuckPollsRef.current = 0
@@ -4921,7 +4962,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // through to the rebuild below, which re-points the receiver properly.
       if (castLoadedIsDirectFor(castLoadedMediaRef.current, target)) {
         broadcastHostPartySeek()
-        seekCastSafelyRef.current(targetSec)
+        // targetSec is ABSOLUTE and seekCastSafely takes RECEIVER seconds; the
+      // two coincide here and only here. castLoadedIsDirectFor is true only
+      // for a direct-play cast, and the getter's direct branch is the one that
+      // publishes an anchor of 0 — the media ref and the anchor are promoted
+      // together in runCastLoad, so "the receiver is on our direct file"
+      // implies castStartSecRef === 0. Do not reuse this shape elsewhere.
+      seekCastSafelyRef.current(targetSec)
         return
       }
       castAdvancePendingRef.current = true
@@ -5520,10 +5567,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const widgetPaused = cast.status.connected ? cast.remote.isPaused : !playing
   // Both halves of the widget's progress bar must be on the SAME clock. The
   // receiver reports its own: currentTime is anchor-relative and duration is
-  // what remains of the file from that anchor, so a cast started 40 minutes
-  // in used to snap the bar back to ~0% and then fill over the remaining
-  // running time. realDurationSec is the absolute source duration (the same
-  // file), which is the right denominator for an absolute playhead.
+  // what remains of the file from that anchor. Now that a clone is anchored
+  // near the sender rather than inheriting the local session's anchor, mixing
+  // those with an absolute playhead would snap the bar back to ~0% on a cast
+  // started 40 minutes in and then fill it over the remaining running time.
+  // realDurationSec is the absolute source duration (the same file), which is
+  // the right denominator for an absolute playhead.
   const widgetCurSec = cast.status.connected
     ? (recvToAbsSec(cast.remote.currentTime) ?? cast.remote.currentTime)
     : currentSec
