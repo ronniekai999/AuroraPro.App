@@ -146,6 +146,18 @@ func (a *ActivityLogger) LogLibraryCreated(ctx context.Context, userID int64, li
 	})
 }
 
+// LogLibraryUpdated records a rename or a repoint. The paths themselves are
+// deliberately not in Details: the activity feed is member-visible in places,
+// and a server filesystem layout is not something to publish there. The
+// library name is enough to answer "who moved this and when".
+func (a *ActivityLogger) LogLibraryUpdated(ctx context.Context, userID int64, libraryName string) {
+	a.log(ctx, &models.ActivityEntry{
+		UserID:    &userID,
+		EventType: "library_updated",
+		Details:   map[string]interface{}{"library_name": libraryName},
+	})
+}
+
 func (a *ActivityLogger) LogLibraryDeleted(ctx context.Context, userID int64, libraryID int64) {
 	a.log(ctx, &models.ActivityEntry{
 		UserID:    &userID,

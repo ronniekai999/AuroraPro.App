@@ -1663,6 +1663,20 @@ export async function createLibrary(
 ): Promise<Library> {
   return apiFetch<Library>('/api/libraries', { method: 'POST', body })
 }
+// Rename a library and/or repoint it at new paths. Both fields are optional
+// server-side; an omitted one keeps its current value.
+//
+// Repointing is how moved media is meant to be handled. It preserves watch
+// progress, ratings and recommendations, because the catalog rows are keyed
+// on (library, type, title, year) and the rescan upserts onto the same ones.
+// Deleting the library and adding it back at the new path throws all of that
+// away — see docs/moving-media-paths.md.
+export async function updateLibrary(
+  id: number,
+  body: { name?: string; paths?: string[] },
+): Promise<Library> {
+  return apiFetch<Library>(`/api/libraries/${id}`, { method: 'PUT', body })
+}
 export async function deleteLibrary(id: number): Promise<void> {
   await apiFetch(`/api/libraries/${id}`, { method: 'DELETE' })
 }

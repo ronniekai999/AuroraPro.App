@@ -122,6 +122,71 @@ type Scanner struct {
 	// The Smart Skip worker hooks this to sweep for unanalyzed files.
 	// Must be cheap/non-blocking — it runs on the scan goroutine.
 	OnScanComplete func(lib *models.Library)
+
+	// repointed records libraries whose paths were just changed by an admin,
+	// keyed by library ID and holding the paths they were changed TO. See
+	// NoteRepointed.
+	repointedMu sync.Mutex
+	repointed   map[int64][]string
+}
+
+// NoteRepointed tells the scanner that a library's paths were changed to
+// newPaths, so the FIRST scan that runs with exactly those paths skips the
+// deleted-file prune and the empty-item sweep.
+//
+// This is load-bearing, not an optimization. The prune and the sweep run in
+// phases 1b/1c, BEFORE phase 2 attaches the files it just found — so on the
+// first scan after a move, every DB row still describes the old location,
+// nothing under the old location is in the walk, and the sweep would delete
+// each media item a moment before the same title was re-created from the new
+// path. That is precisely the watch history, ratings, feedback, taste seeds
+// and embeddings that repointing exists to preserve; the whole feature would
+// destroy what it advertises. On the NEXT scan the rows are under the new
+// roots, the stale ones are gone, and pruning resumes with real evidence.
+//
+// It is the same rule the walkFailed guard already applies: absence from the
+// walk is only evidence of deletion when the walk covered where the file was
+// supposed to be.
+//
+// Keyed on the paths, not a bare flag, because a periodic scan can start
+// between the admin's save and the handler's own rescan. Such a scan is still
+// running against the OLD paths, and a bare flag would be consumed by it,
+// leaving the real post-move scan unguarded.
+func (s *Scanner) NoteRepointed(libraryID int64, newPaths []string) {
+	s.repointedMu.Lock()
+	defer s.repointedMu.Unlock()
+	if s.repointed == nil {
+		s.repointed = make(map[int64][]string)
+	}
+	s.repointed[libraryID] = append([]string(nil), newPaths...)
+}
+
+// consumeRepoint reports whether lib is running its first scan since a
+// repoint, clearing the record when it is. A scan whose paths do not match
+// the recorded ones leaves the record in place for the scan that does.
+func (s *Scanner) consumeRepoint(lib *models.Library) bool {
+	s.repointedMu.Lock()
+	defer s.repointedMu.Unlock()
+	want, ok := s.repointed[lib.ID]
+	if !ok || len(want) != len(lib.Paths) {
+		return false
+	}
+	for i := range want {
+		if want[i] != lib.Paths[i] {
+			return false
+		}
+	}
+	delete(s.repointed, lib.ID)
+	return true
+}
+
+// ForgetRepoint drops any pending repoint record for a library. Called when a
+// library is deleted so its ID cannot hand a stale skip to a future library
+// that happens to reuse it.
+func (s *Scanner) ForgetRepoint(libraryID int64) {
+	s.repointedMu.Lock()
+	defer s.repointedMu.Unlock()
+	delete(s.repointed, libraryID)
 }
 
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
@@ -263,8 +328,14 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// PruneSkipped false is the normal, healthy case. PruneSkipped means the
 	// prune was abandoned wholesale: an unwalkable root, or so many unreadable
 	// entries that scoping stopped being trustworthy.
+	// First scan after an admin moved this library's paths? Then every DB
+	// row points at the old location and none of it can be pruned on this
+	// pass — see NoteRepointed. Consumed here, once, whether or not the
+	// prune would otherwise have run, so the skip cannot leak into a later
+	// scan.
+	justRepointed := s.consumeRepoint(lib)
 	progress.WalkErrors = len(unreadablePaths)
-	progress.PruneSkipped = walkFailed
+	progress.PruneSkipped = walkFailed || justRepointed
 	// ...and WHICH paths, bounded for display. A log line being the only
 	// evidence is how one folder went unnoticed for three days.
 	progress.UnreadablePaths = boundedPaths(unreadablePaths, 10)
@@ -285,6 +356,16 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	if walkFailed {
 		slog.Warn("skipping prune: one or more library paths failed to walk (transient mount/permission issue?) — leaving DB file rows intact",
 			"library", lib.Name)
+	} else if justRepointed {
+		// The rows describe where the media USED to be, so their absence
+		// from this walk is the move itself, not a deletion. Pruning here
+		// would empty every media item a moment before phase 2 re-created
+		// the same titles from the new paths — and the empty-item sweep
+		// would cascade away the watch history, ratings and embeddings that
+		// repointing exists to keep. The stale rows are pruned on the next
+		// scan, once the new files are attached to those same items.
+		slog.Info("skipping prune: library paths just changed — the existing file rows describe the previous location and will be pruned on the next scan",
+			"library", lib.Name, "paths", lib.Paths)
 	} else {
 		pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles, unreadablePaths)
 		if pruneErr != nil {

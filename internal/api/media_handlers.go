@@ -80,6 +80,66 @@ func pathAccessError(p string, err error) string {
 		" (library paths refer to the server's filesystem)"
 }
 
+// libraryPathBlocklist is the set of prefixes a library may never point at.
+//
+// 2026-05-19 audit (API-H6) — /var/lib/aurora is Aurora's own state dir
+// (source mirror, update-status.json, trigger-update). An admin pointing a
+// library at it would expose Aurora's internal files via direct-play
+// streaming.
+var libraryPathBlocklist = []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
+
+// validateLibraryPaths resolves and checks a set of library paths, returning
+// the symlink-resolved forms to store. Symlinks are resolved BEFORE the
+// blocklist is applied so a symlink-to-/etc cannot bypass it, and the
+// resolved path — not the admin's input — is what gets persisted.
+//
+// Shared by Create and Update. It lived inline in Create until repointing a
+// library became possible; a second copy in Update is how one of the two ends
+// up without the blocklist.
+func validateLibraryPaths(paths []string) ([]string, string) {
+	resolved := make([]string, 0, len(paths))
+	for _, p := range paths {
+		cleanPath := filepath.Clean(p)
+
+		real, err := filepath.EvalSymlinks(cleanPath)
+		if err != nil {
+			return nil, pathAccessError(p, err)
+		}
+
+		for _, blocked := range libraryPathBlocklist {
+			if real == blocked || strings.HasPrefix(real, blocked+"/") {
+				return nil, "path not allowed: " + p
+			}
+		}
+		info, err := os.Lstat(real) // Lstat on resolved path (symlinks already resolved)
+		if err != nil {
+			return nil, pathAccessError(p, err)
+		}
+		if !info.IsDir() {
+			return nil, "path is not a directory: " + p
+		}
+		resolved = append(resolved, real)
+	}
+	return resolved, ""
+}
+
+// samePaths reports whether two resolved path lists are equal element by
+// element. A reorder therefore reads as a change and costs one redundant
+// rescan — cheap, since the scan finds no new files, and not worth an
+// order-insensitive comparison that would then have to reason about
+// duplicates to stay correct.
+func samePaths(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 
@@ -106,42 +166,12 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate library paths exist and are directories.
-	// Resolve symlinks so the blocklist catches the real target.
-	//
-	// 2026-05-19 audit (API-H6) — added /var/lib/aurora to the blocklist.
-	// That's Aurora's own state dir (source mirror, update-status.json,
-	// trigger-update). An admin pointing a library at it would expose
-	// Aurora's internal files via direct-play streaming.
-	blockedPrefixes := []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
-	resolvedPaths := make([]string, 0, len(req.Paths))
-	for _, p := range req.Paths {
-		cleanPath := filepath.Clean(p)
-
-		// Resolve symlinks to get the real filesystem path.
-		// This prevents symlink-to-/etc from bypassing the blocklist.
-		resolved, err := filepath.EvalSymlinks(cleanPath)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
-			return
-		}
-
-		for _, blocked := range blockedPrefixes {
-			if resolved == blocked || strings.HasPrefix(resolved, blocked+"/") {
-				writeError(w, http.StatusBadRequest, "path not allowed: "+p)
-				return
-			}
-		}
-		info, err := os.Lstat(resolved) // Lstat on resolved path (symlinks already resolved)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
-			return
-		}
-		if !info.IsDir() {
-			writeError(w, http.StatusBadRequest, "path is not a directory: "+p)
-			return
-		}
-		resolvedPaths = append(resolvedPaths, resolved)
+	// Validate library paths exist and are directories, resolving symlinks so
+	// the blocklist catches the real target. See validateLibraryPaths.
+	resolvedPaths, pathErr := validateLibraryPaths(req.Paths)
+	if pathErr != "" {
+		writeError(w, http.StatusBadRequest, pathErr)
+		return
 	}
 
 	lib := &models.Library{
@@ -226,6 +256,12 @@ func (h *LibraryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if h.watcher != nil {
 		h.watcher.UnwatchLibrary(id)
 	}
+	// Drop any pending repoint skip. libraries.id is a BIGSERIAL so reuse is
+	// not realistic, but a record keyed to a library that no longer exists is
+	// state with no owner, and the one thing it can do is suppress a prune.
+	if h.scanner != nil {
+		h.scanner.ForgetRepoint(id)
+	}
 
 	deleted, err := h.queries.DeleteLibrary(r.Context(), id)
 	if err != nil {
@@ -258,28 +294,143 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == nil {
-		writeError(w, http.StatusBadRequest, "name is required")
+	if req.Name == nil && req.Paths == nil {
+		writeError(w, http.StatusBadRequest, "name or paths is required")
 		return
 	}
 
-	name := strings.TrimSpace(*req.Name)
-	if name == "" || len(name) > 200 {
-		writeError(w, http.StatusBadRequest, "name must be 1-200 characters")
-		return
-	}
-
-	updated, err := h.queries.UpdateLibrary(r.Context(), id, name)
+	// The library as it stands, so an omitted field keeps its current value
+	// and so we can tell whether the paths actually moved.
+	existing, err := h.queries.GetLibrary(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update library")
+		writeError(w, http.StatusInternalServerError, "failed to load library")
 		return
 	}
-	if updated == nil {
+	if existing == nil {
 		writeError(w, http.StatusNotFound, "library not found")
 		return
 	}
 
+	name := existing.Name
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+		if name == "" || len(name) > 200 {
+			writeError(w, http.StatusBadRequest, "name must be 1-200 characters")
+			return
+		}
+	}
+
+	// Repointing a library at a new location on disk. This is the supported
+	// way to handle moved media, and the distinction from delete-and-recreate
+	// is not cosmetic: media_items is upserted on (library_id, type, title,
+	// year), so a rescan under a new path REUSES the existing rows and every
+	// row that hangs off media_item_id — watch progress, ratings, item
+	// feedback, taste seeds, collections, and the embedding column itself —
+	// stays attached. A new library gets new ids and orphans all of it.
+	// docs/moving-media-paths.md is the operator-facing version of this.
+	paths := existing.Paths
+	pathsMoved := false
+	if req.Paths != nil {
+		if len(*req.Paths) == 0 {
+			writeError(w, http.StatusBadRequest, "paths must not be empty")
+			return
+		}
+		resolved, pathErr := validateLibraryPaths(*req.Paths)
+		if pathErr != "" {
+			writeError(w, http.StatusBadRequest, pathErr)
+			return
+		}
+		paths = resolved
+		pathsMoved = !samePaths(existing.Paths, resolved)
+	}
+
+	// Tell the scanner BEFORE the row changes. Once the UPDATE commits, any
+	// scan that starts — the periodic timer, the watcher's debounce, another
+	// admin's Scan button — reads the new paths, finds none of the library's
+	// existing file rows beneath them, and prunes the lot; the empty-item
+	// sweep then cascades away the watch history this whole operation exists
+	// to preserve. Recording first means whichever scan gets there first is
+	// the one that skips. Recorded even when the paths turn out to be
+	// unchanged is not a risk: consumeRepoint matches on the paths, and a
+	// record for the CURRENT paths is exactly the no-op case.
+	if pathsMoved && h.scanner != nil {
+		h.scanner.NoteRepointed(id, paths)
+	}
+
+	updated, err := h.queries.UpdateLibrary(r.Context(), id, name, paths)
+	if err != nil || updated == nil {
+		// The move did not land. The record cannot fire as things stand —
+		// consumeRepoint matches on paths, and the library still has its old
+		// ones — but leaving it means a repoint to these same paths days
+		// later would consume a skip nobody set for it. Drop it.
+		if pathsMoved && h.scanner != nil {
+			h.scanner.ForgetRepoint(id)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update library")
+		} else {
+			writeError(w, http.StatusNotFound, "library not found")
+		}
+		return
+	}
+
+	if h.activity != nil {
+		claims := auth.GetClaims(r.Context())
+		h.activity.LogLibraryUpdated(r.Context(), claims.UserID, updated.Name)
+	}
+
+	// Re-point the fsnotify watcher and rescan, in the background — the
+	// watcher's directory walk takes minutes on a large library, which is why
+	// Create does the same rather than blocking the response.
+	//
+	// The watcher is re-attached even though the scan below would find the
+	// files anyway: without it, fsnotify is still watching the OLD directory
+	// tree, so new files under the new root go unnoticed until the periodic
+	// timer fires.
+	if pathsMoved {
+		go h.rescanMovedLibrary(updated)
+	}
+
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// rescanMovedLibrary re-attaches the watcher to a library's new paths and
+// scans it. Split out of Update so the goroutine's body is testable and so
+// the handler reads as one decision.
+func (h *LibraryHandler) rescanMovedLibrary(lib *models.Library) {
+	if h.watcher != nil {
+		h.watcher.UnwatchLibrary(lib.ID)
+		if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
+			slog.Warn("failed to re-attach watcher after library paths changed",
+				"library", lib.Name, "error", err)
+		}
+	}
+	// Nil scanner/hub only happens in tests that construct the handler
+	// directly, but this runs in a goroutine, where a nil dereference takes
+	// the whole process down rather than failing one request.
+	if h.scanner == nil {
+		return
+	}
+	if !h.scanner.TryStartScan(lib.ID) {
+		// A scan is already running — on the OLD paths, since it started
+		// before this update landed. Nothing to do but let it finish; the
+		// periodic timer picks up the new paths within the scan interval.
+		slog.Info("library paths changed while a scan was in flight — the new paths will be scanned on the next pass",
+			"library", lib.Name)
+		return
+	}
+	if h.watcher != nil {
+		h.watcher.NoteExternalScan(lib.ID)
+	}
+	scanCtx := h.scanContext()
+	h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
+		if h.hub != nil {
+			h.hub.Broadcast(ws.EventScanProgress, p)
+		}
+		if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
+			h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
+		}
+	})
 }
 
 func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {

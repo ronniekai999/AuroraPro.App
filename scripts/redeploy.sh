@@ -180,6 +180,48 @@ fi
 if ! $SKIP_FRONTEND && ! command -v npm &>/dev/null; then
     error "npm is not on PATH (or use --skip-npm to reuse existing static/v2/)" 4
 fi
+# Node version, not just presence. Vite 7 calls crypto.hash(), absent before
+# Node 20.12, so an old Node fails the build ~200 lines into npm's output
+# rather than up here. Same floor and same helper as scripts/install.sh and
+# scripts/aurora-update.sh — TestNodeVersionFloorsAgreeAcrossScripts pins the
+# three copies.
+NODE_BUILD_MIN_TEXT="20.19+ or 22.12+"
+# See scripts/install.sh for the full note on the two floors and why only the
+# provable one (no crypto.hash) is fatal.
+node_vite_verdict() {
+    local ver major minor rest
+    command -v node &>/dev/null || return 2
+    ver="$(node --version 2>/dev/null)" || return 2
+    ver="${ver#v}"
+    major="${ver%%.*}"
+    case "$ver" in
+        *.*) rest="${ver#*.}"; minor="${rest%%.*}" ;;
+        *)   minor=0 ;;
+    esac
+    case "$major" in ''|*[!0-9]*) return 2 ;; esac
+    case "$minor" in ''|*[!0-9]*) return 2 ;; esac
+    if [ "$major" -lt 20 ] \
+        || { [ "$major" -eq 20 ] && [ "$minor" -lt 12 ]; } \
+        || { [ "$major" -eq 21 ] && [ "$minor" -lt 7 ]; }; then
+        return 1
+    fi
+    if { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; } \
+        || { [ "$major" -eq 22 ] && [ "$minor" -ge 12 ]; } \
+        || [ "$major" -ge 23 ]; then
+        return 0
+    fi
+    return 3
+}
+if ! $SKIP_FRONTEND; then
+    NODE_BUILD_VERDICT=0
+    node_vite_verdict || NODE_BUILD_VERDICT=$?
+    case "$NODE_BUILD_VERDICT" in
+        1) error "Node.js $(node --version 2>/dev/null || echo unknown) cannot build the frontend — Vite calls crypto.hash(), which needs Node 20.12+, and the toolchain asks for ${NODE_BUILD_MIN_TEXT}. Install a newer Node, or pass --skip-npm to reuse the existing $SPA_OUTPUT_DIR/ build." 4 ;;
+        # Unparseable is not evidence of a problem; the build is the real check.
+        2) warn "Could not determine the Node.js version (the frontend build wants ${NODE_BUILD_MIN_TEXT}) — continuing." ;;
+        3) warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}) — the build should still succeed." ;;
+    esac
+fi
 if $RESTART && ! command -v systemctl &>/dev/null; then
     warn "systemctl not available — service restart will be skipped; pass --no-restart to silence this"
 fi

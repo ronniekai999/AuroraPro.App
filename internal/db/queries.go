@@ -705,13 +705,25 @@ func (q *Queries) GetLibrary(ctx context.Context, id int64) (*models.Library, er
 	return l, nil
 }
 
-func (q *Queries) UpdateLibrary(ctx context.Context, id int64, name string) (*models.Library, error) {
+// UpdateLibrary renames a library and/or repoints it at new paths. Callers
+// pass the FULL desired value of both — the handler resolves an omitted field
+// against the current row — because a partial UPDATE here would need a
+// second round trip to report the merged result.
+//
+// Repointing is the supported way to handle media that moved on disk, and it
+// is deliberately a cheap operation: media_items is keyed on (library_id,
+// type, title, year), so the next scan under the new paths upserts onto the
+// SAME rows and everything referencing media_item_id — watch progress,
+// ratings, feedback, taste seeds, collections, the embedding column — comes
+// along untouched. Deleting the library and creating a new one at the new
+// path looks equivalent and is not: it cascades all of that away.
+func (q *Queries) UpdateLibrary(ctx context.Context, id int64, name string, paths []string) (*models.Library, error) {
 	l := &models.Library{}
 	err := q.pool.QueryRow(ctx,
-		`UPDATE libraries SET name = $2, updated_at = NOW()
+		`UPDATE libraries SET name = $2, paths = $3, updated_at = NOW()
 		 WHERE id = $1
 		 RETURNING id, name, type, paths, scan_interval_min, owner_id, created_at, updated_at`,
-		id, name,
+		id, name, paths,
 	).Scan(&l.ID, &l.Name, &l.Type, &l.Paths, &l.ScanInterval, &l.OwnerID, &l.CreatedAt, &l.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {

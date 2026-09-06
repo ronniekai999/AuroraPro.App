@@ -147,6 +147,14 @@ jobs:
       - name: Review gate mutation tests
         run: bash scripts/review-gate-mutation-test.sh
 
+      # The deploy scripts' Node gate. Three scripts carry their own copy of
+      # node_vite_verdict(); this asserts they have not drifted and that all
+      # three agree on a table of real version strings. A box ran Node 18 for
+      # two weeks of failed updates because nothing checked the version before
+      # npm did.
+      - name: Node version gate tests
+        run: bash scripts/node-version-test.sh
+
   review-record:
     name: Review record present
     runs-on: ubuntu-latest

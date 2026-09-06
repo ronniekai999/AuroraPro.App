@@ -487,8 +487,15 @@ type CreateLibraryRequest struct {
 	Paths []string    `json:"paths"`
 }
 
+// UpdateLibraryRequest patches a library. Both fields are optional and a nil
+// one keeps its current value; at least one must be present.
+//
+// Paths is a pointer to a slice so "not supplied" (nil) is distinguishable
+// from "supplied as empty" ([]) — the latter is rejected, because a library
+// with no paths scans nothing and would look like a total media loss.
 type UpdateLibraryRequest struct {
-	Name *string `json:"name,omitempty"`
+	Name  *string   `json:"name,omitempty"`
+	Paths *[]string `json:"paths,omitempty"`
 }
 
 type InviteRequest struct {

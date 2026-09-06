@@ -571,23 +571,73 @@ for tool in curl tar git python3; do
         pkg_install "$tool"
     fi
 done
-# Node. The frontend's dependency tree needs Node >= 22 (jsdom 30, undici 8,
-# whatwg-url 17, @testing-library/jest-dom 7 all declare it), and distro
-# packages lag badly — Ubuntu 24.04 ships 18.x, and the production box was
-# running v20.20.2, which emitted 90 EBADENGINE warnings on every single
-# deploy. The production BUILD works anyway (vite/tsc are fine on 20), so this
-# is not urgent; it is unsupported-configuration drift that gets worse over
-# time and buries real npm output in noise.
+# Node. Two different floors, and conflating them cost a production box two
+# weeks of failed updates:
 #
-# NODE_MIN is the floor the package.json engines actually ask for. On apt we
-# add NodeSource, which is the vendor-supported way to get a current LTS;
-# elsewhere we fall back to the distro package and warn if it's too old rather
-# than fighting each distro's packaging.
+#   NODE_BUILD_MIN (20.19 / 22.12) — what the BUILD needs. Vite 7 calls
+#   crypto.hash(), absent before Node 20.12, so below this the build does not
+#   degrade, it dies: "crypto.hash is not a function", after npm ci, reported
+#   as a generic frontend build failure. Ubuntu 24.04 ships 18.19.1, which is
+#   below it. This is hard-fatal.
+#
+#   NODE_MIN (22) — what the full dependency TREE asks for (jsdom 30, undici 8,
+#   whatwg-url 17, @testing-library/jest-dom 7). Below it the build still works
+#   but npm emits ~90 EBADENGINE warnings per deploy, which is how a real error
+#   goes unread. This stays a warning.
+#
+# An earlier version of this comment said an older Node "will still work" and
+# the gate below only warned. That was true when the SPA was on Vite 5; it has
+# been false since Vite 7, and the stale reassurance is exactly what let a box
+# run for a fortnight on Node 18 believing its updates were merely noisy.
+#
+# On apt we add NodeSource, which is the vendor-supported way to get a current
+# LTS; elsewhere we fall back to the distro package.
+#
+# NODE_BUILD_MIN_* is kept in sync with scripts/aurora-update.sh and
+# scripts/redeploy.sh — TestNodeVersionFloorsAgreeAcrossScripts pins the three.
 NODE_MIN=22
+NODE_BUILD_MIN_TEXT="20.19+ or 22.12+"
 
 node_major() {
     command -v node &>/dev/null || { echo 0; return; }
     node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/' || echo 0
+}
+
+# node_vite_verdict — how usable is this box's Node for the SPA build?
+#   0  meets vite/@vitejs-plugin-react's declared engines (^20.19 || >=22.12)
+#   1  CANNOT build: no crypto.hash(), which vite 7 calls unconditionally
+#      (added in Node 20.12 and 21.7). This is the provable failure.
+#   2  no node, or a version string we could not parse
+#   3  has crypto.hash but sits outside the declared engines — vite prints
+#      its "please upgrade" notice and carries on, so the build works
+#
+# 1 and 3 are deliberately distinct: only the provable case is fatal, so a
+# box on e.g. 20.15 whose build succeeds is not refused an install over a
+# tidier rule. Kept in sync with scripts/aurora-update.sh and
+# scripts/redeploy.sh — TestNodeVersionFloorsAgreeAcrossScripts pins them.
+node_vite_verdict() {
+    local ver major minor rest
+    command -v node &>/dev/null || return 2
+    ver="$(node --version 2>/dev/null)" || return 2
+    ver="${ver#v}"
+    major="${ver%%.*}"
+    case "$ver" in
+        *.*) rest="${ver#*.}"; minor="${rest%%.*}" ;;
+        *)   minor=0 ;;
+    esac
+    case "$major" in ''|*[!0-9]*) return 2 ;; esac
+    case "$minor" in ''|*[!0-9]*) return 2 ;; esac
+    if [ "$major" -lt 20 ] \
+        || { [ "$major" -eq 20 ] && [ "$minor" -lt 12 ]; } \
+        || { [ "$major" -eq 21 ] && [ "$minor" -lt 7 ]; }; then
+        return 1
+    fi
+    if { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; } \
+        || { [ "$major" -eq 22 ] && [ "$minor" -ge 12 ]; } \
+        || [ "$major" -ge 23 ]; then
+        return 0
+    fi
+    return 3
 }
 
 install_node() {
@@ -623,11 +673,33 @@ if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
     install_node
     CURRENT_NODE_MAJOR="$(node_major)"
     if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
-        # Non-fatal: the production build genuinely works on older Node, so
-        # refusing to install over this would be worse than the warning.
-        warn "Node.js is v${CURRENT_NODE_MAJOR}, below the frontend's requirement (>= ${NODE_MIN}). The build will still work, but npm will warn on every deploy. Upgrade manually to silence it."
+        warn "Node.js is v${CURRENT_NODE_MAJOR}, below the frontend's declared requirement (>= ${NODE_MIN}). npm will warn on every deploy. Upgrade to silence it."
     fi
 fi
+
+# The build floor, separately and fatally. install_node may have fallen back to
+# the distro package (NodeSource unreachable, an apt pin, a non-apt distro), and
+# on Ubuntu 24.04 that is Node 18.19.1 — which cannot build the SPA at all. A
+# warning here would install a server whose every future update fails at the
+# build step with a message that names neither Node nor a version, which is the
+# failure this check exists to prevent. Better to stop now, while an operator is
+# watching the terminal.
+NODE_BUILD_VERDICT=0
+node_vite_verdict || NODE_BUILD_VERDICT=$?
+case "$NODE_BUILD_VERDICT" in
+    1)
+        error "Node.js $(node --version 2>/dev/null || echo unknown) cannot build Aurora's frontend — Vite calls crypto.hash(), which needs Node 20.12+, and the toolchain asks for ${NODE_BUILD_MIN_TEXT}. Install Node.js ${NODE_MIN}.x and re-run this script: curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN}.x | sudo -E bash - && sudo apt-get install -y nodejs"
+        ;;
+    2)
+        # Absent or unparseable is not evidence of a problem — the build below
+        # is the real check and reports it plainly. Do not stop the install on
+        # a version string we merely failed to recognize.
+        warn "Could not determine the Node.js version (the frontend build wants ${NODE_BUILD_MIN_TEXT}) — continuing."
+        ;;
+    3)
+        warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}). The build should still succeed; upgrade to Node ${NODE_MIN}.x before it stops working."
+        ;;
+esac
 if ! command -v npm &>/dev/null; then
     info "Installing npm..."
     pkg_install npm
