@@ -948,13 +948,20 @@ reproducing the walk rather than modelling it. Invariants:
   exits 0 while the scan prunes. The runbook is what makes that state
   reachable: the app only ever stores resolved paths, a hand-written `UPDATE`
   does not.
-- **`walkFailed` is narrower than "I could not look".** `collectVideoFiles`
-  errors on exactly one condition — `EvalSymlinks(root)` failing — because its
-  walk callback returns nil on every error. A root that EXISTS but this user
-  cannot read is NOT walkFailed: the scan walks it as `aurora` and prunes
-  against it. Under `sudo` on a root_squashed NFS export, or run
-  unprivileged, this script can see less than the service does, so it must
-  refuse to answer rather than infer safety from its own blindness.
+- **`walkFailed` is narrower than "I could not look", and every adjacent
+  branch has to be checked separately.** `collectVideoFiles` errors on exactly
+  one condition — `EvalSymlinks(root)` failing — because its walk callback
+  returns nil on every error. Anything else this check cannot see is its own
+  blindness, and answering "nothing will be deleted" from it is a wiped
+  catalog. Three review rounds each found one more branch where that happened,
+  each adjacent to the last: the ROOT unreadable (round 1), a SUBTREE
+  unreadable with the empty disk list read as "no media" (round 2), and an
+  ANCESTOR of the root unreadable — where `realpath -e` fails with EACCES
+  exactly as it does with ENOENT, so a present root was reported as "does not
+  exist, nothing will be deleted" (round 3). `first_untraversable` walks the
+  root's components from `/` down and must run BEFORE `realpath -e`, which
+  cannot tell the two apart. If a fourth branch of this shape turns up, expect
+  it to be adjacent again rather than novel.
 - **Line-oriented comparison cannot represent every path.** A recorded path
   containing a newline arrives from `psql -qtA` as two lines; an empty one
   vanishes into the blank-line filter. Ask SQL for the count of those rows —
@@ -967,13 +974,25 @@ reproducing the walk rather than modelling it. Invariants:
 
 Known limits:
 
-- **The script's own logic was untested for its first two rounds**, and an
-  independent review found two false all-clears in it that the Go contract
-  tests could not see — those pin the extension list and two properties of
-  `WalkDir`, but never run the script. `scripts/check-library-paths-test.sh`
-  runs it against real trees with a stubbed `psql`; its unreadable-root case
-  drops privileges, because as root `chmod 000` is not a barrier and skipping
-  under root let a revert of that very fix pass the whole suite.
+- **The script's own logic was untested when it shipped**, and three review
+  rounds then found four false all-clears in it that the Go contract tests
+  could not see — those pin the extension list and two properties of
+  `WalkDir`, but never run the script.
+  `scripts/check-library-paths-test.sh` runs it against real trees with a
+  stubbed `psql`, and every fix in it is mutation-tested: revert the fix, the
+  suite must go red. Two lessons are baked into that file. The
+  privilege-dependent cases DROP PRIVILEGES rather than skipping under root —
+  `chmod 000` is no barrier to root, and skipping there let a revert of the
+  round-1 fix pass all 22 other cases. And a case must fail for the RIGHT
+  reason: the case-insensitivity case originally had one uppercase file, so
+  losing `grep -i` emptied the disk list and exited 0 through the
+  zero-discovered branch — the same exit code, the opposite meaning, and the
+  case passed either way.
+- **One property is pinned structurally, not behaviourally.** `LC_ALL=C` is
+  asserted by grepping the script for it, because demonstrating a collation
+  collision needs a non-C UTF-8 locale generated on the machine and this
+  repo's container has only `C.utf8` — where a behavioural case passes
+  whatever the script does, which is worse than no case.
 - **`underAnyPrefix` shielding is deliberately not reproduced.** Rows under a
   subtree the scan cannot read are shielded, not pruned; the script counts
   them as missing because it cannot know what the SERVICE user reads. That is

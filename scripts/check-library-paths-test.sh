@@ -48,6 +48,11 @@ done
 case "$sql" in
     "SELECT 1")                 exit 0 ;;
     *"FROM libraries ORDER BY id"*) cat "$FIX/lib_ids" ;;
+    # BEFORE both the count arm and the plain unnest arm: the bad-root query is
+    # ALSO a `count(*) FROM libraries` AND contains `unnest(paths)`, so placed
+    # after either one it never matches and the library-exists answer (1) is
+    # returned as a bad-root count, failing every case in the file.
+    *"unnest(paths) AS p"*)         cat "$FIX/n_badroot" ;;
     *"count(*) FROM libraries"*)    cat "$FIX/lib_exists" ;;
     *"SELECT name FROM libraries"*) cat "$FIX/lib_name" ;;
     *"SELECT type FROM libraries"*) cat "$FIX/lib_type" ;;
@@ -86,6 +91,7 @@ fixture() {
     echo Movies   > "$FIX/lib_name"
     echo movie    > "$FIX/lib_type"
     echo 0        > "$FIX/n_bad"
+    echo 0        > "$FIX/n_badroot"
     : > "$FIX/roots"
     : > "$FIX/recorded"
     export FIX
@@ -529,6 +535,154 @@ printf '%s\n' "$TMP/filederoot.mkv" > "$FIX/recorded"
 run
 expect_rc 2 "a library root that is a regular file → exit 2"
 expect_out "not a directory" "…and says which shape it is"
+
+# ── 23. HIGH (round 3): EACCES on an ANCESTOR of the root ─────────
+# `realpath -e` fails identically for ENOENT and for EACCES on a parent, and
+# only the first is walkFailed. Reading the second as the first reported "the
+# path does not exist, nothing will be deleted" and exited 0 — while the scan,
+# as a user who CAN traverse the parent, walks the root and prunes. The shape
+# is the ordinary one: media owned by the service user under a 0750 parent,
+# checked by an operator who is not in its group.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "ancestor EACCES: running as root and setpriv is unavailable — cannot test"
+else
+    fixture ancestor
+    mkdir -p "$TMP/ancestor/parent/media"
+    : > "$TMP/ancestor/parent/media/A.mkv"
+    echo "$TMP/ancestor/parent/media" > "$FIX/roots"
+    printf '%s\n%s\n' "$TMP/ancestor/parent/media/A.mkv" "$TMP/ancestor/parent/media/GONE.mkv" > "$FIX/recorded"
+    chmod 750 "$TMP/ancestor/parent"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/ancestor"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$TMP/ancestor/parent"
+    expect_rc 2 "an untraversable ANCESTOR of the root → exit 2, not 'does not exist'"
+    expect_out "cannot traverse" "…and names the component that blocked it"
+fi
+
+# The same code path must still call a genuinely absent root walkFailed, or the
+# fix trades one wrong answer for another: an over-report on every library
+# whose disk is simply not mounted.
+fixture stillmissing
+echo "$TMP/stillmissing-absent/media" > "$FIX/roots"
+printf '%s\n' "$TMP/stillmissing-absent/media/A.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "a genuinely absent root is still walkFailed → exit 0"
+expect_out "does not exist" "…and still says so"
+
+# ── 24. The show query must use the tv_seasons join ───────────────
+# Case 15 pins only the TABLE NAME, so swapping the join to
+# tv_episodes.media_item_id — the exact drift the script's own comment warns
+# against — passed every case. Match the join text itself.
+fixture show_join
+R="$TMP/show_join"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo show > "$FIX/lib_type"
+echo "$R" > "$FIX/roots"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+cp "$TMP/bin/psql" "$TMP/psql.save2"
+python3 - "$TMP/bin/psql" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace(
+    '    *"FROM episode_files"*) cat "$FIX/recorded" ;;',
+    '    *"FROM episode_files"*)\n'
+    '        case "$sql" in\n'
+    '            *"tv_seasons"*"ts.media_item_id"*) cat "$FIX/recorded" ;;\n'
+    '            *) echo "STUB: episode query does not join through tv_seasons" >&2; exit 1 ;;\n'
+    '        esac ;;')
+open(p, 'w').write(s)
+PY
+chmod +x "$TMP/bin/psql"
+run
+if [ "$RC" = 0 ]; then ok "the show query joins episode → season → item, as the scanner does"
+else bad "the show query does not reach the library through tv_seasons (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
+cp "$TMP/psql.save2" "$TMP/bin/psql"
+
+# ── 25. Byte collation ──────────────────────────────────────────
+# `comm` and `sort` honour LC_COLLATE, and under a UTF-8 locale two
+# byte-distinct paths that strcoll ranks EQUAL are treated as common by comm —
+# dropping a genuinely missing row and reading the library clean. GNU sort also
+# aborts on invalid UTF-8, which would truncate the disk side silently.
+#
+# STRUCTURAL, not behavioural, and deliberately so. Demonstrating a collation
+# collision needs a particular non-C UTF-8 locale to be GENERATED on the
+# machine; this repo's container has only C.utf8, where every candidate pair I
+# tried compares unequal, so a behavioural case here passes whatever the script
+# does — worse than no case, because it reads as coverage. This asserts the
+# setting is present and says plainly that it is a structural pin.
+if grep -qx 'export LC_ALL=C' "$SCRIPT"; then
+    ok "the script forces byte collation (LC_ALL=C) before any sort/comm"
+else
+    bad "the script no longer forces LC_ALL=C — under a UTF-8 locale comm treats two byte-distinct paths that collate equal as common, and a missing row is silently dropped"
+fi
+
+# ── 26. Extension matching is case-insensitive ────────────────────
+# IsVideoFile lowercases before comparing, so MOVIE.MKV is a video file to the
+# scanner. Dropping grep's -i drops such files from the DISK side and reports
+# their recorded rows as about to be pruned.
+#
+# The lowercase companion file is load-bearing. With MOVIE.MKV alone, losing -i
+# empties the disk list, which lands on the zero-discovered branch and also
+# exits 0 — so the case passed with and without the flag. It did exactly that;
+# that is why the second file is here.
+fixture upper
+R="$TMP/upper"; mkdir -p "$R"
+: > "$R/MOVIE.MKV"; : > "$R/lower.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/MOVIE.MKV" "$R/lower.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "an uppercase extension is a video file here too → exit 0"
+
+# ── 27. A newline or empty string in a library ROOT ───────────────
+# The third newline vector. It CANNOT be checked inside the roots loop: the
+# roots arrive through `while IFS= read -r r`, so a newline has already split
+# one element into two roots before the loop body sees it. Written that way
+# first; it was dead code and this case is what caught it. An empty element is
+# grouped in because it makes the SCAN's own EvalSymlinks fail, which skips
+# its prune — so anything reported for that library would be wrong too.
+fixture rootnewline
+R="$TMP/rootnewline"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+echo 1 > "$FIX/n_badroot"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "a newline or empty entry in libraries.paths → exit 2"
+expect_out "read here as two separate roots" "…and says why it will not answer"
+
+# ── 28. A relative path in libraries.paths ────────────────────────
+# It resolves against the CHECKER's working directory and the SERVICE's
+# separately, so the two would examine different trees.
+fixture relroot
+echo "some/relative/path" > "$FIX/roots"
+printf '%s\n' "some/relative/path/A.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "a relative library root → exit 2"
+
+# ── 29. A root that can be traversed but not LISTED ───────────────
+# Mode 111: first_untraversable passes it (it IS -x), so this is the one shape
+# that still reaches the -r half of the root check. Without that half the root
+# is walked, `find` errors on every entry, the disk list comes back empty and
+# the zero-discovered branch answers — correctly only by way of the unreadable
+# latch, which is a different guard. Pin the -r half directly.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "execute-only root: running as root and setpriv is unavailable — cannot test"
+else
+    fixture execonly
+    R="$TMP/execonly"; mkdir -p "$R"
+    : > "$R/A.mkv"
+    echo "$R" > "$FIX/roots"
+    printf '%s\n%s\n' "$R/A.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+    chmod 111 "$R"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$R"
+    expect_rc 2 "a root that can be entered but not listed → exit 2"
+fi
 
 echo
 echo "passed: $PASS   failed: $FAIL"

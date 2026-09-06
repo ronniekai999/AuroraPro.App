@@ -4,9 +4,16 @@
 #
 # Compares every path Aurora has RECORDED against what its scanner will
 # actually FIND on disk, per library. Anything recorded but not found is
-# pruned on the next scan, and if that empties a title, the empty-item sweep
-# deletes the catalog row and cascades its watch progress, ratings, feedback,
+# pruned on the next scan, and a title left with no files is then deleted by
+# the empty-item sweep, cascading its watch progress, ratings, feedback,
 # taste seeds, collections and embedding.
+#
+# NOTE the sweep is NOT conditional on the prune having removed anything.
+# DeleteEmptyMediaItems runs on every scan that walks cleanly and discovers a
+# file, so a media_items row that ALREADY has no file rows is deleted with its
+# cascade even on a run this script calls clean. That is outside what this can
+# predict — it compares recorded paths against the disk, and such a row has no
+# recorded path left to compare.
 #
 # Run it after moving media (see docs/moving-media-paths.md), after restoring a
 # backup, or any time you want to know what a scan is about to do. It only
@@ -92,6 +99,37 @@ q() { "${PSQL[@]}" -c "$1"; }
 # this script exists to catch.
 canon() { realpath -ms -- "$1"; }
 
+# first_untraversable PATH — prints the first component of PATH, walking down
+# from /, that EXISTS but this user cannot traverse; returns 1 if there is none.
+#
+# This exists because `realpath -e` collapses two states the scanner treats as
+# OPPOSITES. It fails with ENOENT for a root that is genuinely gone — which is
+# EvalSymlinks failing, hence walkFailed, hence no prune at all — and it fails
+# identically with EACCES when a PARENT of the root is not traversable by us,
+# which the service user may well traverse fine. Reading the second as the
+# first reports "the path does not exist, nothing will be deleted" and exits 0
+# while the scan walks the root, discovers files, and prunes every recorded row
+# it does not find. Reproduced with a 0750 parent owned by the service user —
+# the ordinary way media is set up — run by an operator not in its group.
+#
+# Component-at-a-time with parameter expansion rather than IFS splitting: no
+# globbing, no IFS to restore, and `..` is already refused before we get here.
+first_untraversable() {
+    local acc="" rest="${1#/}" seg
+    while [ -n "$rest" ]; do
+        seg="${rest%%/*}"
+        acc="$acc/$seg"
+        # A component that cannot be stat'd ends the walk. Its parent WAS
+        # traversable (or we would have returned above), so this is a genuine
+        # ENOENT — the caller's realpath -e will agree, and that is walkFailed.
+        [ -e "$acc" ] || return 1
+        [ -x "$acc" ] || { printf '%s\n' "$acc"; return 0; }
+        [ "$rest" = "$seg" ] && break
+        rest="${rest#*/}"
+    done
+    return 1
+}
+
 # ── Which libraries ───────────────────────────────────────────────
 if [ "$#" -gt 0 ]; then
     for arg in "$@"; do
@@ -131,6 +169,17 @@ while IFS= read -r LIB; do
 
     ltype="$(q "SELECT type FROM libraries WHERE id = $LIB")" || die "query failed for library $LIB"
     roots="$(q "SELECT unnest(paths) FROM libraries WHERE id = $LIB")" || die "query failed for library $LIB"
+    # The third newline vector, after recorded paths and on-disk filenames.
+    # It has to be asked of SQL: `roots` is consumed by `while IFS= read -r r`,
+    # so by the time a root is in hand it has ALREADY been split into two and
+    # both halves would be walked as separate roots. A check on $r inside that
+    # loop cannot fire — it was written that way first, and was dead code.
+    n_badroot="$(q "SELECT count(*) FROM libraries, unnest(paths) AS p WHERE id = $LIB AND (p = '' OR p LIKE E'%\\n%')")" \
+        || die "query failed for library $LIB"
+    if [ "$n_badroot" != "0" ]; then
+        die "library $LIB ($name): $n_badroot entry in libraries.paths is empty or contains a newline. A newline is read here as two separate roots and an empty entry makes the SCAN's own EvalSymlinks fail (skipping its prune entirely), so nothing this check reported about this library would be meaningful. Inspect it with:
+        SELECT id, name, paths FROM libraries WHERE id = $LIB;"
+    fi
     if [ -z "$roots" ]; then
         warn "library $LIB ($name) has no paths — it is not scanned at all"
         continue
@@ -217,6 +266,13 @@ while IFS= read -r LIB; do
         # directories, so this check would walk a tree the scan does not.
         # Only a hand-written UPDATE can produce it (the app stores
         # EvalSymlinks output, which has no `..`), and refusing is cheap.
+        # A relative root resolves against whoever is running — this check's
+        # working directory, not the service's. Same provenance as `..`
+        # (only a hand-written UPDATE makes one), same answer.
+        case "$r" in
+            /*) ;;
+            *) die "library $LIB ($name): the root $r is not absolute. It would resolve against this check's working directory and against Aurora's separately, so the two would examine different trees." ;;
+        esac
         case "/$r/" in
             */../*) die "library $LIB ($name): the root $r contains a '..' component. Its meaning depends on whether the preceding components are symlinks, and this check, the scanner's containment guard and the kernel would each resolve it differently — so no answer here would be trustworthy. Replace it with the path 'readlink -f' prints." ;;
         esac
@@ -226,6 +282,11 @@ while IFS= read -r LIB; do
         # against; $rc is the one it PREFIXES walk output with. They differ
         # whenever a root has a symlinked component, and conflating them is
         # what let a symlinked library read as empty.
+        # BEFORE realpath -e, which cannot tell "gone" from "not mine to see".
+        if blocked="$(first_untraversable "$rc")"; then
+            rootopaque="$r (cannot traverse $blocked as $(id -un))"
+            continue
+        fi
         if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
             rootmissing=1
             continue
@@ -394,6 +455,10 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
     exit 1
 fi
 ok "nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
+# Said on the all-clear, not only in the header, because the exit code is what
+# the runbook tells the operator to act on and this is the one deletion it does
+# not cover.
+info "This does not cover the empty-item sweep: a title whose file rows were ALREADY gone is deleted on the next clean scan regardless. See docs/moving-media-paths.md, step 6b."
 if [ "$CHECKED_FULLY" -ne "$CHECKED" ]; then
     # Exit 0 is still correct — every skipped library was skipped because the
     # SCAN will not prune it either (no paths, a missing root, or a walk that

@@ -57,12 +57,13 @@ kept open from step 2 to step 6:
 sudo -u postgres psql aurora
 ```
 
-Not `psql -c '…'` per statement. Steps 3, 4 and 5 open a transaction, show you
+Not `psql -c '…'` per statement. Steps 4 and 5 open a transaction, show you
 what it is about to do, and wait for you to type `COMMIT;` yourself — and a
 `-c` string is its own session, so the transaction ends the instant the command
 does. Under `-c` the `BEGIN` is decorative, the review step reviews something
 already decided, and a `ROLLBACK` you typed afterwards has nothing left to roll
-back. The `\set ON_ERROR_STOP on` below is worth setting first, so a typo
+back. (Step 3 has no transaction of its own: its one `UPDATE` is all-or-nothing
+by itself, and step 4 is the destructive step that follows it.) The `\set ON_ERROR_STOP on` below is worth setting first, so a typo
 inside a transaction aborts it rather than leaving you typing `COMMIT` at a
 failed block:
 
@@ -142,9 +143,13 @@ and step 4 deletes every one of them for the duplicate libraries. Progress is
 covered here because it is the one people notice and the one with an awkward
 unique index; the rest are not, and stopping after step 3 believing otherwise
 is how the loss goes unnoticed. Each follows the same shape as the statement
-below (re-point `media_item_id` from `dup.id` to `orig.id`, skipping rows the
-original already has), so adapt it per table if any of them matter to you.
-Ratings are usually the ones that do.
+below — re-point `media_item_id` from `dup.id` to `orig.id`, skipping rows the
+original already has — but the KEY DIFFERS, so it is not a copy-paste.
+`user_ratings`, `item_feedback`, `taste_seeds` and `recently_surfaced_items`
+are keyed `(profile_id, media_item_id)` (migrations 048, 039, 035, 038), not
+`(user_id, profile_id, media_item_id)`; drop the `user_id` term from the
+`NOT EXISTS` for those or the statement aborts on the first duplicate.
+Ratings are usually the ones that matter.
 
 `media_files.path` is globally UNIQUE, so a duplicate library holding the new
 paths blocks the original from taking them; the duplicates have to go. Anything
@@ -320,7 +325,20 @@ UPDATE libraries SET paths = ARRAY['/srv/storage/media/4kmovies']  WHERE id = 2;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/tvshows']   WHERE id = 3;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/4ktvshows'] WHERE id = 4;
 
-COMMIT;
+-- Review before committing. Each count must be 0, and the paths must read the
+-- way you expect. regexp_replace reports `UPDATE n` even when it matched
+-- nothing and quietly became `SET path = path`, so the row counts above are
+-- not evidence — these are.
+SELECT (SELECT count(*) FROM media_files   WHERE path LIKE '/home/rontavious999/media/%') AS movie_rows_left,
+       (SELECT count(*) FROM episode_files WHERE path LIKE '/home/rontavious999/media/%') AS episode_rows_left;
+SELECT id, name, paths FROM libraries ORDER BY id;
+```
+
+Only when both counts are 0 and the paths are right, commit — as its own
+line, like step 4, so a paste cannot do it for you:
+
+```sql
+COMMIT;   -- or ROLLBACK; if either count is non-zero
 ```
 
 ### 6. Verify before starting the server
