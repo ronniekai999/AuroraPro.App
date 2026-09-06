@@ -929,13 +929,24 @@ Invariants to preserve when touching this area:
 - **`walkFailed` outranks the relocation guards** (`planPrune`). An unwalkable
   root says nothing about any row under it, so there is nothing to defer TO —
   deferring would schedule a prune we still have no evidence for.
-- **Duplicate libraries at the new path must be deleted BEFORE the original is
-  repointed.** `media_files.path` and `episode_files.path` are globally
-  UNIQUE, and the movie-side `ON CONFLICT (path) DO UPDATE` does NOT re-parent
-  `media_item_id` (the episode-side one does). While the duplicate owns the
-  row, the repointed library attaches nothing, its items keep only their old
-  rows, and the NEXT scan prunes those as genuinely absent and sweeps the
-  history away — the same total loss, one scan later.
+- **The deferred prune runs only when phase 2 attached EVERY discovered file
+  to this library** (`unattachedCount`). Without that check the deferral is
+  strictly more destructive than the skip it replaced. `media_files.path` is
+  globally UNIQUE and `GetMediaFileByPath` is not library-scoped, so when a
+  DUPLICATE library already owns the new paths — the state that started this
+  whole incident — phase 2 attaches nothing for the files it owns, and ONE
+  file the duplicate happens not to own is enough to make
+  `allPathsOutsideRoots` false. The prune would then delete every old row in
+  the repointed library and the sweep would cascade its entire history. The
+  same shape covers a transient per-file failure in phase 2, which is logged
+  and discarded. Declining is all-or-nothing: pruning "just the attached
+  ones" needs the unattached titles to be exactly the ones left alone, which
+  is the bookkeeping this check exists to avoid trusting.
+- **Duplicate libraries at the new path must still be deleted BEFORE the
+  original is repointed.** The attach check makes ignoring it non-destructive,
+  not harmless: the repointed library declines its prune on every scan and
+  sits with every item holding only its dead old path, so nothing plays until
+  the duplicate is gone.
 - **`validateLibraryPaths` is one helper with two call sites** (Create and
   Update), it resolves symlinks BEFORE applying the blocklist, stores the
   RESOLVED path, and requires an ABSOLUTE one. `filepath.Clean("")` is `"."`,
@@ -991,10 +1002,28 @@ Known limits, stated plainly:
   survives (only a completed deferred prune clears it), so the guard still
   fires, but the rescan waits up to the scan interval with nothing in the UI
   saying so.
+- **A PARTIAL move whose marker is lost prunes and sweeps.** For [A B] → [A
+  C], rows still under A keep `allPathsOutsideRoots` from firing, so the
+  marker genuinely IS the only guard — and it lives in memory, so a restart
+  between the PUT and the first completed scan (the box auto-deploys every 5
+  minutes) leaves B's rows pruned before phase 2 and every item that lived
+  only under B swept. The whole-library move, which is the common case and
+  the one the runbook documents, is unaffected. Persisting the marker, or
+  deriving the partial case from the data too, is the open follow-up.
+- **`progress.PruneSkipped` now also means "deferred"**, and is never cleared
+  when the deferred prune later succeeds — so a scan can report "prune
+  skipped" after pruning. `models.ScanProgress` still documents it as "the
+  prune was abandoned wholesale". Display-only today (nothing branches on
+  it), which is why it was left rather than split into two fields.
 - **None of the Node verdicts are exercised against a real install.** The
   crypto.hash floors are from Node's changelog and the engines from the
   toolchain's `package.json`; the test drives a fake `node` on PATH.
-- **`ScanLibrary` itself is untested** — it needs a live Postgres and a real
-  tree. `planPrune` and `allPathsOutsideRoots` are extracted and pinned, but
-  the wiring between them, the deferred call after phase 2, and the
-  `clearRepoint` that follows it are covered by no test.
+- **`ScanLibrary` itself is untested.** `planPrune`, `allPathsOutsideRoots`
+  and `unattachedCount` are extracted and pinned by tables, but the wiring
+  between them — the deferred call after phase 2, its `ctx.Err()` gate, and
+  the `clearRepoint` that follows — is covered by no test. This is NOT for
+  want of a database: CI runs a pgvector Postgres and exports
+  `TEST_DATABASE_URL`, and ~25 files already use it. An end-to-end test
+  (create library, attach files, repoint, scan, assert `watch_progress`
+  survives and the old rows are gone) is the highest-value thing missing
+  here, and every finding of the second review lived in this gap.

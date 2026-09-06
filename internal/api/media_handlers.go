@@ -357,10 +357,12 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		pathsMoved = !samePaths(existing.Paths, resolved)
 	}
 
-	// Mark the scanner BEFORE the row changes, so whichever scan reaches the
-	// new paths first is the one that defers its prune — the periodic timer
-	// and the watcher's debounce both read the library fresh from the DB, so
-	// after the commit either of them can be that scan.
+	// Mark the scanner BEFORE the row changes. The Scan endpoint re-reads the
+	// library from the DB, so once the UPDATE commits an admin pressing Scan
+	// is already on the new paths; marking first means that scan is the one
+	// that defers. (The periodic timer and fsnotify debounce hold a captured
+	// *models.Library and keep the OLD paths until the re-attach below, so
+	// they are not the race — the Scan button is.)
 	//
 	// This marker is a supplement, not the safety net. The scanner's own
 	// data-derived check (allPathsOutsideRoots) catches a whole-library move
@@ -438,35 +440,32 @@ func (h *LibraryHandler) rescanMovedLibrary(lib *models.Library) {
 			}
 		})
 	} else {
-		// A scan is already in flight. It may be on either set of paths —
-		// the periodic timer and the Scan button both read the library fresh
-		// from the DB, so one that started after the commit is already on the
-		// new ones. Either way the repoint marker survives (it is released
-		// only by a scan that completes its deferred prune), so nothing is
-		// lost; the new paths are picked up by that scan or the next.
-		slog.Info("library paths changed while a scan was in flight — the new paths will be picked up by that scan or the next",
+		// A scan is already in flight, almost certainly on the OLD paths (the
+		// watcher-driven entry points hold a captured library). The marker
+		// survives it — isRepointed matches on paths, and it is released only
+		// by a scan that completes its deferred prune — so the guard is still
+		// there for the scan that does run on the new paths. That is either
+		// the periodic one after the re-attach below, or the next.
+		slog.Info("library paths changed while a scan was in flight — the new paths will be scanned once it finishes",
 			"library", lib.Name)
 	}
 
 	// Re-attach the file watcher last: its recursive walk takes minutes on a
 	// large library and nothing above depends on it.
 	//
-	// UnwatchLibrary + WatchLibrary is not atomic, and a failed re-attach
-	// leaves the library out of the watcher's map entirely — so it would drop
-	// out of the PERIODIC scan loop too, not just fsnotify, and nothing would
-	// bring it back before a restart. Retry once rather than log and leave it
-	// there.
+	// WatchLibrary alone, with no UnwatchLibrary first. It already evicts and
+	// cancels any existing entry under its own lock, so the swap is atomic —
+	// whereas unwatching first opens a window where the library is in the
+	// watcher's map not at all, and if the re-attach then fails it stays that
+	// way: out of fsnotify AND out of the periodic scan loop, until a restart.
+	// Failing with the OLD watch still installed is strictly better; it points
+	// at the old directories, which the periodic scan will simply find empty.
 	if h.watcher == nil {
 		return
 	}
-	h.watcher.UnwatchLibrary(lib.ID)
 	if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
-		slog.Warn("failed to re-attach watcher after library paths changed — retrying",
-			"library", lib.Name, "error", err)
-		if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
-			slog.Error("library is no longer watched after a path change — it will not be scanned again until Aurora restarts or an admin presses Scan",
-				"library", lib.Name, "library_id", lib.ID, "error", err)
-		}
+		slog.Error("failed to re-attach the file watcher after a path change — the previous watch is still installed, so this library keeps being scanned but against its OLD paths until Aurora restarts",
+			"library", lib.Name, "library_id", lib.ID, "error", err)
 	}
 }
 

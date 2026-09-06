@@ -570,10 +570,17 @@ function LibraryEditRow({ lib, onCancel, onSaved }: {
   onSaved: () => void | Promise<void>
 }) {
   const [name, setName] = useState(lib.name)
-  const [paths, setPaths] = useState(lib.paths.join(', '))
+  // One path per LINE, not comma-separated. A media root may legitimately
+  // contain a comma, and round-tripping join(', ') through split(',')
+  // silently splits one such path into two invalid ones the moment Edit is
+  // opened and saved.
+  const [paths, setPaths] = useState(lib.paths.join('\n'))
   const [saving, setSaving] = useState(false)
-  const nextPaths = paths.split(',').map(s => s.trim()).filter(Boolean)
-  const moved = nextPaths.join(' ') !== lib.paths.join(' ')
+  const nextPaths = paths.split('\n').map(s => s.trim()).filter(Boolean)
+  // Element-wise, so no join character can make two different lists compare
+  // equal and suppress the rescan notice.
+  const moved = nextPaths.length !== lib.paths.length ||
+    nextPaths.some((p, i) => p !== lib.paths[i])
   return (
     <div className="py-3 border-b border-white/[0.04] last:border-0 space-y-2">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
@@ -584,12 +591,13 @@ function LibraryEditRow({ lib, onCancel, onSaved }: {
           placeholder="Name"
           className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
         />
-        <input
+        <textarea
           value={paths}
           onChange={e => setPaths(e.target.value)}
           aria-label="Library paths"
-          placeholder="/path/to/library (comma-separated for multi)"
-          className="md:col-span-2 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+          rows={Math.max(1, nextPaths.length)}
+          placeholder="/path/to/library (one per line)"
+          className="md:col-span-2 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm resize-y"
         />
       </div>
       {moved && (

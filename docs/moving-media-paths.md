@@ -157,16 +157,28 @@ Deleting them through the admin UI (or `DELETE FROM libraries WHERE id IN
 `media_items` are new, so cascading them away costs nothing you had before
 the move.
 
-Ignoring this ordering is not a cosmetic mistake. With the duplicate still
-holding the new paths, the repointed library's first scan attaches nothing
-(its inserts hit `ON CONFLICT (path)` and the movie-side clause does not
-re-parent `media_item_id`), so its items are left with only their old rows.
-On the **next** scan those are pruned as genuinely absent, the items are
-empty, and the sweep cascades the whole history away — the total loss this
-page exists to prevent, one scan later than it would have happened without
-the guard. The TV side is different but no better: `episode_files`' conflict
-clause *does* re-parent, so two libraries on one path take files from each
-other and each sweeps the other's shows on alternating scans.
+Ignoring this ordering does not lose data — the scanner refuses to prune a
+library whose files it could not attach — but it does leave you stuck. With
+the duplicate still holding the new paths, the repointed library's scan
+attaches nothing (its inserts hit `ON CONFLICT (path)`, and the movie-side
+clause does not re-parent `media_item_id`), so its items keep only their
+old-location rows. The scan then declines the prune every time, logging:
+
+```
+deferred prune declined: not every discovered file is attached to this
+library — keeping the existing rows and retrying on the next scan
+```
+
+The library stays in that state — history intact, but nothing playable,
+because every item's only recorded path is the dead one — until you delete
+the duplicate. Then the next scan attaches everything, prunes the old rows,
+and it is done.
+
+The TV side reaches the same place by a different route: `episode_files`'
+conflict clause *does* re-parent `episode_id`, so two libraries pointed at
+one path take files from each other on alternating scans. Neither ends up
+consistently owning its episodes, and the same attach check keeps both from
+pruning. Delete the duplicate.
 
 ### Keeping what you watched in the meantime
 
