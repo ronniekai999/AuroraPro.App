@@ -5,8 +5,8 @@ mount, a reorganised home directory. This is how to tell Aurora, without
 losing everything it has learned about what you watch.
 
 **The short version: repoint the existing library. Do not delete it and add a
-new one at the new path.** The two look equivalent in the admin UI and are
-not.
+new one at the new path.** Aurora has no UI for repointing yet, so it is done
+in SQL, below.
 
 ## Why it matters
 
@@ -35,169 +35,83 @@ to match, leaving the ids alone. None of the tables above notice anything
 happened.
 
 Rewriting the file rows is the part people skip, and it is the part that
-matters. Changing `libraries.paths` alone and letting the next scan rediscover
-everything looks equivalent and is not: the scan walks the new root, finds not
-one of the library's recorded paths among what it discovered, prunes every row,
-and the empty-item sweep then deletes every `media_items` row in that library —
-cascading away exactly the table above, unattended, within a scan interval.
+matters.
+
+> **Never update `libraries.paths` on its own.** The next scan walks the new
+> root, finds not one of the library's recorded paths among what it
+> discovered, prunes every row, and the empty-item sweep then deletes every
+> `media_items` row in that library — cascading away the whole table above.
+> Unattended, within one scan interval. There is no guard against this in any
+> release; the rows and the library must move together.
 
 ## Doing it
 
-### The procedure
+Aurora has no UI for this. The procedure is below; read it through before
+running any of it, and note that the steps are deliberately **separate** —
+there is no single block to paste.
 
-Aurora has no UI for this yet, so it is done in SQL. Take a backup first; this
-is not reversible.
-
-**Rewrite the file rows, not just the library paths.** Updating
-`libraries.paths` alone and letting the rescan rediscover everything is the
-obvious move and it is wrong on an older binary: the relocation guard that
-makes that safe is part of the same release. Without it, the next scan walks
-the new root, finds not one of the library's recorded paths among what it
-discovered, prunes every row, and the empty-item sweep then deletes every
-`media_items` row in that library — cascading away exactly the history in the
-table above, unattended, up to a scan interval later. Rewriting the paths in
-place sidesteps the question: the rows and the walk agree, so nothing is
-stale, nothing is pruned, and playback works immediately rather than after a
-second scan.
-
-Open a shell on the database. The `postgres` superuser connects over the local
-socket without a password:
+### 0. Stop the server
 
 ```bash
-sudo -u postgres psql aurora
+sudo systemctl stop aurora
 ```
 
-(Aurora's own credentials are in `/etc/aurora/aurora.env` as `DATABASE_URL` if
-you would rather use those: `psql "$(sudo grep -oP '(?<=^DATABASE_URL=).*' /etc/aurora/aurora.env)"`.)
+Not optional. Moving files fires filesystem-watch events, which schedule a
+rescan; a scan whose walk finishes before your changes land and whose prune
+runs after them compares the new database paths against a file list gathered
+from the old location, matches nothing, and prunes the lot.
 
-**Back up first — this is not reversible.**
+### 1. Back up
 
 ```bash
 sudo -u postgres pg_dump aurora > ~/aurora-before-move.sql
 ```
 
-Then, in one transaction so a mistake rolls back:
+Everything below is irreversible without this.
 
-```sql
-BEGIN;
-
--- 1. Look. Confirm which ids are the originals and which are duplicates.
-SELECT id, name, type, paths FROM libraries ORDER BY id;
-
--- 2. Remove the duplicate libraries created at the new paths, if any.
---    Must come first: media_files.path is globally UNIQUE, so while a
---    duplicate owns a row for the new path, the original cannot take it.
-DELETE FROM libraries WHERE id IN (5, 6, 7, 8);
-
--- 3. Move the file rows to where the files actually are.
-UPDATE media_files
-   SET path = replace(path, '/home/rontavious999/media/', '/srv/storage/media/')
- WHERE path LIKE '/home/rontavious999/media/%';
-UPDATE episode_files
-   SET path = replace(path, '/home/rontavious999/media/', '/srv/storage/media/')
- WHERE path LIKE '/home/rontavious999/media/%';
-
--- 4. Repoint the libraries themselves. paths is a TEXT[].
-UPDATE libraries SET paths = ARRAY['/srv/storage/media/movies'],    updated_at = NOW() WHERE id = 1;
-UPDATE libraries SET paths = ARRAY['/srv/storage/media/4kmovies'],  updated_at = NOW() WHERE id = 2;
-UPDATE libraries SET paths = ARRAY['/srv/storage/media/tvshows'],   updated_at = NOW() WHERE id = 3;
-UPDATE libraries SET paths = ARRAY['/srv/storage/media/4ktvshows'], updated_at = NOW() WHERE id = 4;
-
--- 5. Check before committing: this must return 0.
-SELECT count(*) FROM media_files   WHERE path LIKE '/home/rontavious999/media/%';
-SELECT count(*) FROM episode_files WHERE path LIKE '/home/rontavious999/media/%';
-
-COMMIT;
-```
-
-Then restart so the file watcher attaches to the new directories:
+### 2. Look at what you have
 
 ```bash
-sudo systemctl restart aurora
+sudo -u postgres psql aurora -c 'SELECT id, name, type, paths FROM libraries ORDER BY id;'
 ```
 
-Substitute your own prefixes in steps 3 and 4, and keep them identical between
-the two — a `replace()` whose search string does not match simply changes
-nothing, which looks like success and leaves every row pointing at the old
-location.
+Write down which ids are the **originals** (the ones with your history) and
+which, if any, are **duplicates** you created at the new location. You will
+refer to both lists by number below. Everything after this point depends on
+getting that right.
 
-> **Check the service can read the new location first.** Aurora runs as the
-> unprivileged `aurora` user, and home directories are 0700/0750 on modern
-> distros — a path you can plainly see in your own shell is often unreadable
-> to the service. `sudo -u aurora ls /srv/storage/media/movies` is the test.
-> If it fails: `sudo setfacl -m u:aurora:x` on each parent directory, then
-> `sudo setfacl -R -m u:aurora:rX` on the media root.
+### 3. If you created duplicate libraries, salvage anything watched through them
 
-On a box running this release or later, the Edit button does all of the above
-for you, including the row rewrite. A plain `libraries.paths` update is *safe*
-there too — the scanner will not delete rows it never walked — but it is not
-sufficient: the library is left pointing at the new location with all its rows
-still describing the old one, so nothing plays until you rewrite them. Safe and
-stuck, not safe and finished.
+Skip this if you did not create any. Otherwise do it **now** — step 4 deletes
+those rows.
 
-## Ordering: delete the duplicates first
-
-If you already created new libraries at the new paths, **delete those before
-repointing the originals.** `media_files.path` and `episode_files.path` are
-globally `UNIQUE`, so while the duplicate library owns a row for
-`/srv/storage/media/movies/Some Film (2011)/Some Film (2011).mkv`, the
-original library cannot take it: the insert hits `ON CONFLICT (path)`, and on
-the movie path that conflict clause does not re-parent `media_item_id`. The
-file silently stays attached to the duplicate's catalog entry and the
-repointed library ends up owning nothing.
-
-```sql
--- The duplicates, if you made any. CHECK THIS LIST before deleting.
-SELECT id, name, paths FROM libraries WHERE id IN (5, 6, 7, 8);
-```
-
-Deleting them through the admin UI (or `DELETE FROM libraries WHERE id IN
-(...)`) is safe *provided* they are the recent duplicates: their
-`media_items` are new, so cascading them away costs nothing you had before
-the move.
-
-Ignoring this ordering does not lose data — a repoint whose file rows collide
-with a duplicate's fails as one transaction and changes nothing — but it does
-stop you. The admin UI reports it and names the cause:
-
-```
-failed to repoint library — if another library already points at the new
-path, delete it first, then retry
-```
-
-Delete the duplicate and repoint again.
-
-### Keeping what you watched in the meantime
-
-If people watched things through the duplicate libraries before you noticed,
-that progress is on the duplicate rows and will go with them. To carry it
-back to the originals first, match on TMDB id:
+`media_files.path` is globally UNIQUE, so a duplicate library holding the new
+paths blocks the original from taking them; the duplicates have to go. Anything
+watched through them goes too, unless you move it across first, matching on
+TMDB id. Substitute your own duplicate ids for `5,6,7,8`:
 
 ```sql
 -- Dry run: what would move, and onto what.
 SELECT wp.id, dup.title, dup.id AS from_item, orig.id AS to_item
   FROM watch_progress wp
   JOIN media_items dup  ON dup.id = wp.media_item_id
-  JOIN media_items orig ON orig.tmdb_id = dup.tmdb_id
-                       AND orig.type    = dup.type
+  JOIN media_items orig ON orig.tmdb_id = dup.tmdb_id AND orig.type = dup.type
  WHERE dup.library_id  IN (5, 6, 7, 8)
    AND orig.library_id NOT IN (5, 6, 7, 8)
    AND dup.tmdb_id IS NOT NULL;
 ```
 
-Only re-point rows that do not collide with progress the original already
-has. Since migration 029 the key is **per profile** —
-`idx_watch_progress_user_profile_media` on
-`(user_id, profile_id, media_item_id) WHERE episode_id IS NULL` — so the
-`NOT EXISTS` must match on the profile too, or the UPDATE aborts on the first
-account whose default profile already has that film:
+Since migration 029 the uniqueness key is per profile
+(`idx_watch_progress_user_profile_media` on
+`(user_id, profile_id, media_item_id) WHERE episode_id IS NULL`), so the
+`NOT EXISTS` below must match on the profile too or the statement aborts on the
+first account that already has that film:
 
 ```sql
 UPDATE watch_progress wp
    SET media_item_id = orig.id
   FROM media_items dup
-  JOIN media_items orig ON orig.tmdb_id = dup.tmdb_id
-                       AND orig.type    = dup.type
+  JOIN media_items orig ON orig.tmdb_id = dup.tmdb_id AND orig.type = dup.type
  WHERE wp.media_item_id = dup.id
    AND dup.library_id  IN (5, 6, 7, 8)
    AND orig.library_id NOT IN (5, 6, 7, 8)
@@ -211,39 +125,99 @@ UPDATE watch_progress wp
             AND w2.episode_id IS NULL);
 ```
 
-If several duplicate libraries share a TMDB id (a film in both "Movies" and
-"4K Movies"), `orig` matches more than one row and Postgres picks one
-arbitrarily. Add `AND orig.library_id = <the one you want>` when that
-matters, or run the dry-run query first and check for duplicate `to_item`
-values.
+If a film sits in two of your libraries (`Movies` and `4K Movies`), `orig`
+matches more than one row and Postgres picks one arbitrarily — add
+`AND orig.library_id = <the one you want>`, or check the dry run for repeated
+`to_item` values first.
 
-Episode-level progress keys on `episode_id`, not `media_item_id`, so it needs
-the equivalent join through `tv_episodes` (season number + episode number).
-For a few hours of viewing it is usually not worth it — re-watch position on
-one or two episodes against the risk of a hand-written UPDATE.
+For a few hours of viewing this is usually not worth it. Episode-level progress
+keys on `episode_id`, not `media_item_id`, so carrying it over needs a join
+through `tv_episodes` and `tv_seasons` (the season number lives on
+`tv_seasons`, not `tv_episodes`) — rarely worth hand-writing.
 
-**Back up first**: `sudo -u postgres pg_dump aurora > ~/aurora-before-move.sql`.
-Aurora also has Admin → Backup → Download database snapshot.
+### 4. Delete the duplicate libraries
 
-## The hazard of leaving old roots in place
+**Check the list from step 2 first.** These ids are from one example install;
+on yours, 5–8 may be real libraries with real history.
 
-If the old directories still exist and are **empty**, Aurora is currently
-holding your catalog by one guard: `pruneDeletedFiles` refuses to prune when
-a walk discovers zero files (the NFS/SMB "mountpoint present but empty"
-case), and the empty-item sweep requires `len(allFiles) > 0`. Both no-op, so
-nothing is deleted.
+```sql
+DELETE FROM libraries WHERE id IN (5, 6, 7, 8);
+```
 
-That protection ends the moment **one** video file appears under an old root.
-A stray download, an incomplete rsync, a test file — the walk is then
-non-empty, every one of that library's file rows is missing from it, and the
-prune plus the sweep delete the library's whole catalog and cascade the watch
-history with it. Unattended, on the next scan.
+### 5. Move the file rows, scoped to the libraries you are moving
 
-So after repointing, either remove the old empty directories, or confirm they
-are what the libraries now point *away* from. If a root is genuinely
-unreachable (unmounted, deleted), the walk *errors*, which trips a different
-guard (`walkFailed`) and also skips the prune — that state is safe, just
-noisy in the log.
+The rewrite must be **scoped by library**, or it silently moves rows belonging
+to any other library that happens to store media under the same prefix — and
+step 6's verification cannot see it, because that library's rows are now
+rewritten too.
+
+`regexp_replace` with a `^` anchor, not `replace`: `replace` substitutes every
+occurrence, so a prefix that recurs inside a path (`/media/tv/Show/media/…`)
+gets mangled.
+
+Substitute your own library ids and prefixes. The two prefixes must match each
+other exactly, including the trailing slash:
+
+```sql
+BEGIN;
+
+UPDATE media_files mf
+   SET path = regexp_replace(mf.path, '^/home/rontavious999/media/', '/srv/storage/media/')
+  FROM media_items mi
+ WHERE mi.id = mf.media_item_id
+   AND mi.library_id IN (1, 2, 3, 4)
+   AND mf.path LIKE '/home/rontavious999/media/%';
+
+UPDATE episode_files ef
+   SET path = regexp_replace(ef.path, '^/home/rontavious999/media/', '/srv/storage/media/')
+  FROM tv_episodes te
+  JOIN media_items mi ON mi.id = te.media_item_id
+ WHERE te.id = ef.episode_id
+   AND mi.library_id IN (1, 2, 3, 4)
+   AND ef.path LIKE '/home/rontavious999/media/%';
+
+-- Repoint the libraries themselves. paths is a TEXT[].
+UPDATE libraries SET paths = ARRAY['/srv/storage/media/movies']    WHERE id = 1;
+UPDATE libraries SET paths = ARRAY['/srv/storage/media/4kmovies']  WHERE id = 2;
+UPDATE libraries SET paths = ARRAY['/srv/storage/media/tvshows']   WHERE id = 3;
+UPDATE libraries SET paths = ARRAY['/srv/storage/media/4ktvshows'] WHERE id = 4;
+
+COMMIT;
+```
+
+### 6. Verify before starting the server
+
+Both of these must return 0. If either does not, **restore the backup** rather
+than starting Aurora — a scan against a half-moved catalog is what the whole
+procedure exists to avoid.
+
+```sql
+SELECT count(*) FROM media_files mf JOIN media_items mi ON mi.id = mf.media_item_id
+ WHERE mi.library_id IN (1, 2, 3, 4) AND mf.path LIKE '/home/rontavious999/media/%';
+
+SELECT count(*) FROM libraries
+ WHERE id IN (1, 2, 3, 4) AND array_to_string(paths, ',') LIKE '/home/rontavious999/media/%';
+```
+
+Then spot-check that a rewritten path is real, as the `aurora` user — the
+service runs unprivileged, and home directories are 0700/0750 on modern
+distros, so a path you can see in your own shell is often unreadable to it:
+
+```bash
+sudo -u postgres psql aurora -tAc 'SELECT path FROM media_files LIMIT 1' | xargs -d'\n' sudo -u aurora ls -l
+```
+
+If that fails with permission denied: `sudo setfacl -m u:aurora:x` on each
+parent directory, then `sudo setfacl -R -m u:aurora:rX` on the media root.
+
+### 7. Start the server
+
+```bash
+sudo systemctl start aurora
+```
+
+The next scan should find exactly the paths already on record: no new files,
+nothing pruned. Open a title and press play.
 
 ## What is not preserved
 

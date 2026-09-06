@@ -574,7 +574,7 @@ done
 # Node. Two different floors, and conflating them cost a production box two
 # weeks of failed updates:
 #
-#   NODE_BUILD_MIN (20.19 / 22.12) — what the BUILD needs. Vite 7 calls
+#   NODE_BUILD_MIN_TEXT (20.19 / 22.12) — what the BUILD needs. Vite 7 calls
 #   crypto.hash(), absent before Node 20.12, so below this the build does not
 #   degrade, it dies: "crypto.hash is not a function", after npm ci, reported
 #   as a generic frontend build failure. Ubuntu 24.04 ships 18.19.1, which is

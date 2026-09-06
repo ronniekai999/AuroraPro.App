@@ -157,12 +157,30 @@ extract_callsite() {  # $1 = script, prints the guarded block
 }
 
 # verdict_action: run one script's call site with node_vite_verdict stubbed to
-# return $2, and report what happened as one of exit:<code> / warn / silent.
-verdict_action() {  # $1 = fn file, $2 = stubbed verdict
-    local block="$1" verdict="$2" out rc=0
+# return $2, and report what happened as "<exit code>|<output>".
+#
+# $3 selects whether this box builds the SPA from source: "src" (the normal
+# case) or "nosrc" (no source tree / --skip-npm, where the build falls back to
+# the committed bundle and Node is not needed at all). Each script expresses
+# that differently, so both variables are set and each gate reads its own.
+#
+# The subshell runs under `set -e` WITH an ERR trap, matching the real scripts.
+# Without them the suite could not see its most important regression: a call
+# site refactored from `node_vite_verdict || NODE_VERDICT=$?` to a bare call
+# plus `$?` aborts the updater into its generic "Update script aborted at line
+# N" — the anonymous message this whole gate exists to replace — while every
+# assertion below still passed.
+verdict_action() {  # $1 = call-site file, $2 = stubbed verdict, $3 = src|nosrc
+    local block="$1" verdict="$2" mode="${3:-src}" out rc=0
+    local spa_src=. skip_frontend=false
+    if [ "$mode" = "nosrc" ]; then
+        spa_src="definitely/not/here"
+        skip_frontend=true
+    fi
     out="$(PATH="$WORK/bin:/usr/bin:/bin" "${BASH:-/bin/bash}" -c "
-        set -uo pipefail
-        SPA_SRC_DIR=. ; PROJECT_DIR=. ; SKIP_FRONTEND=false ; SPA_OUTPUT_DIR=static/v2
+        set -euo pipefail
+        trap 'echo TRAPPED-BY-ERR' ERR
+        SPA_SRC_DIR='$spa_src' ; PROJECT_DIR=. ; SKIP_FRONTEND=$skip_frontend ; SPA_OUTPUT_DIR=static/v2
         NODE_BUILD_MIN_TEXT='20.19+ or 22.12+'
         NODE_ENGINES_TEXT='20.19+ or 22.12+'
         NODE_MIN=22 ; NODE_TARGET_MAJOR=22
@@ -200,6 +218,19 @@ for s in "${SCRIPTS[@]}"; do
         *"Node.js"*) ok "scripts/$s names Node.js in its verdict-1 message" ;;
         *)           bad "scripts/$s's verdict-1 message does not mention Node.js: $out" ;;
     esac
+    case "$out" in
+        *TRAPPED-BY-ERR*)
+            bad "scripts/$s's call site trips the ERR trap — under the real set -e this aborts with a generic message instead of the Node one: $out" ;;
+    esac
+    # The updater must report this as `misconfigured`, not `failed`. "Failed"
+    # means an update was attempted and broke, and sends the operator looking
+    # for a revert; this is a configuration problem with its own remedy.
+    if [ "$s" = "aurora-update.sh" ]; then
+        case "$out" in
+            *"STATUS: misconfigured"*) ok "aurora-update.sh reports verdict 1 as misconfigured" ;;
+            *) bad "aurora-update.sh must report verdict 1 as misconfigured, got: $out" ;;
+        esac
+    fi
 
     # Verdict 0 — fine — must be silent and must NOT stop.
     res="$(verdict_action "$WORK/$s.site" 0)"
@@ -226,6 +257,19 @@ for s in "${SCRIPTS[@]}"; do
             ok "scripts/$s warns and continues on verdict $v"
         fi
     done
+
+    # A box that does not build the SPA from source needs no Node at all —
+    # install.sh and aurora-update.sh fall back to the committed bundle, and
+    # redeploy.sh has --skip-npm. Even the fatal verdict must not stop them.
+    res="$(verdict_action "$WORK/$s.site" 1 nosrc)"
+    rc="${res%%|*}"; out="${res#*|}"
+    if [ "$rc" != "0" ]; then
+        bad "scripts/$s stops on verdict 1 even with no SPA source — that box never invokes node: $out"
+    elif [ -n "$out" ]; then
+        bad "scripts/$s complains about Node with no SPA source to build: $out"
+    else
+        ok "scripts/$s ignores the Node verdict when it will not build the SPA"
+    fi
 done
 
 echo
