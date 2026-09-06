@@ -1539,14 +1539,15 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// rather than let it assume (assuming is what made a midstream cast seek
 	// 40 minutes into a playlist that had produced seconds).
 	//
-	// The lookup can only miss if the session vanished between being created
-	// (microseconds ago, by CloneForCast) and here, in which case the token
-	// names a session no receiver can fetch and the cast is already dead — so
-	// there is no anchor that helps and none worth inventing. Note in
-	// particular that the SOURCE's anchor would be actively wrong here: a miss
-	// means a CLONE existed, and reporting the source's anchor for a clone's
-	// playlist is the #172 hang (the sender subtracts too little and seeks
-	// past the produced edge). Report 0 and let the cast fail honestly.
+	// A miss means the session named by the token we just minted is gone: the
+	// clone that was created microseconds ago, or — on the for_airplay and
+	// clone-failure paths, where castSessionID IS sessionID — the source. The
+	// playlist names a dead session either way, so the cast cannot work and no
+	// anchor helps. Report 0 rather than invent one; in particular do NOT fall
+	// back to the source's anchor, which on the cloned path would describe a
+	// different session's timeline and produce the #172 hang (the sender
+	// subtracts too little and seeks past the produced edge) on the one path
+	// where the cast might otherwise have recovered.
 	castStartSec := 0
 	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
 		castStartSec = cs.StartSec

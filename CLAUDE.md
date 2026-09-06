@@ -401,6 +401,21 @@ anyone else. Code: `CloneForCast`/`castCloneAnchorSec`/`castAnchorPadSec`
 
 Invariants to preserve when touching this area:
 
+- **Every deliberate load de-arms the end-of-media flag.** A load onto a LIVE
+  receiver replaces its media session, and CAF reports that as `IDLE` with
+  `idleReason` INTERRUPTED — "a sender requested playing different media using
+  the LOAD command". The end-of-media evaluator reads an armed `IDLE` as the
+  title finishing, so an undisarmed re-anchor kills the cast (INTERRUPTED →
+  `stop()`) or starts the wrong episode (a momentarily-null reason → `onEnded`).
+  `runCastLoad` de-arms for every path, because this change turned a rare
+  user-initiated reload into an automatic poll-driven one.
+- **No correction crosses a load boundary.** The anchor is promoted only when a
+  load RESOLVES, so while one is in flight `castStartSecRef` still describes the
+  session the receiver is LEAVING while its reported position may already
+  describe the one it is joining. Correcting across that computes a target on
+  the wrong timeline — for a re-anchor from 0 to ~40 minutes, a seek 40 minutes
+  past the new clone's produced edge, i.e. #172 produced by the machinery built
+  to close it. `castLoadsInFlightRef` covers every load path.
 - **A cast clone's `-ss` anchor follows the SENDER, not the source session.**
   It used to inherit `src.StartSec`, which is correct arithmetic and useless
   readiness: a viewer 40 minutes into a session anchored at 0 got a clone also
@@ -453,6 +468,13 @@ Invariants to preserve when touching this area:
   too, which re-anchor and so also move the receiver's clock); pause/play
   transitions are read normally, because a seek cannot change whether the
   receiver is paused and suppressing them lost a host's pause outright.
+- **The warm-up honours a play/pause the host makes on the TV**, and stops
+  mirroring until its own request round-trips. `requestPause`/`requestPlay` do
+  not update `party.isPlaying` optimistically, so without that pause the mirror
+  reads the not-yet-updated party state as a disagreement and undoes what the
+  host just did, one poll later. Both directions matter: a cast starting into a
+  PAUSED room autoplays and gets mirror-paused, so a host pressing play needs
+  the same honouring a host pressing pause does.
 - **`hostLastSnapshotRef` is written where it is CONSUMED, never before the
   guards.** A snapshot taken at the top of the poll becomes the baseline the
   next poll compares against even when this one returned early — so a host who

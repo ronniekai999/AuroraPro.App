@@ -269,10 +269,13 @@ export function levelLagsPlayhead(
  *    forward arm (e.g. sustained across several ticks) so it doesn't
  *    reintroduce the storm this function exists to avoid.
  *  - The Chromecast-connected-guest path had the identical clamp and no
- *    rebuild path either. CLOSED (2026-09): `castResyncAction` detects a
- *    target before the cast session's anchor and escalates to a re-anchored
- *    cast load, the receiver-side equivalent of this rebuild. This function
- *    still covers only the local-<video> guest loop.
+ *    rebuild path either. MOSTLY CLOSED (2026-09): `castResyncAction` detects
+ *    a target before the cast session's anchor and escalates to a re-anchored
+ *    cast load, the receiver-side equivalent of this rebuild. It cannot help
+ *    when the receiver is SHARING the local session (no clone was needed):
+ *    the server returns that session unchanged, so there is no other anchor
+ *    to move to, and the guest waits for the party clock to walk back up to
+ *    it. This function still covers only the local-<video> guest loop.
  *  - The explicit-seek branch (VideoPlayer.tsx, a few dozen lines above
  *    this function's call site) has no equivalent isPartyEpisodeMismatch
  *    guard and runs BEFORE the drift-loop check in the same tick, so on a
