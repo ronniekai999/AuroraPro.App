@@ -880,150 +880,101 @@ look-ahead; see `downmixLimiter`).
 
 ## Repointing a library, and the Node build floor (September 2026)
 
-Two unrelated production failures with the same shape — a real problem
-reported as something else. Code: `validateLibraryPaths` / `samePaths` /
-`Update` / `rescanMovedLibrary` (`internal/api/media_handlers.go`),
-`allPathsOutsideRoots` / `planPrune` / `NoteRepointed` / `isRepointed` /
-`clearRepoint` / `sweepEmptyMediaItems` (`internal/library/scanner.go`),
-`UpdateLibrary` (`internal/db/queries.go`), `node_vite_verdict` in
+Two unrelated production failures with the same shape — a real problem reported
+as something else. Code: `validateLibraryPaths` / `samePaths` /
+`planPathRewrites` / `Update` / `rescanMovedLibrary`
+(`internal/api/media_handlers.go`), `RepointLibrary` (`internal/db/queries.go`),
+`planPrune` / `pruneDeletedFiles` / `NoteRepointed`
+(`internal/library/scanner.go`), `node_vite_verdict` in
 `scripts/{install,redeploy,aurora-update}.sh`, SPA `LibraryEditRow` +
 `updateLibrary`. Operator runbook: `docs/moving-media-paths.md`.
 
 Invariants to preserve when touching this area:
 
-- **A relocation DEFERS the prune to after phase 2; it never skips it.**
-  `ScanLibrary` prunes deleted files and sweeps empty media items BEFORE
-  phase 2 attaches what the walk found. Run at the top on a library whose
-  media just moved, that deletes every media item moments before the same
-  titles are recreated under new ids, cascading away the watch progress,
-  ratings, feedback, taste seeds and embeddings repointing exists to keep.
-  Skipping instead was the first fix and is not enough: it leaves every title
-  holding a dead path that sorts FIRST in `GetMediaFiles` (lower id, same
-  `version_tag`), so `pickFile` takes it and nothing plays until the next
-  scan — and an operator seeing that reasonably deletes and recreates the
-  library, which is the loss this all exists to prevent. Deferring deletes
-  the same stale rows in the SAME scan, with the items intact.
-- **The primary guard is derived from the data, not signalled by the
-  caller.** `allPathsOutsideRoots` asks whether EVERY recorded row lies
-  outside all of the library's current roots. Paths change without the
-  handler — a `psql` edit (which the runbook documents for boxes that cannot
-  take a new binary), a restored database, a marker lost to the restart that
-  deploys — and an in-memory signal covers none of those. It is re-derived
-  every scan, so it cannot be spent by a scan that then fails. It is
-  deliberately ALL and not "most": one row still under a root shows the roots
-  are live, and a wholesale deletion must still prune.
-- **The handler's marker is a supplement for the PARTIAL move**, [A B] → [A
-  C], where rows still under A stop the data check from firing. Never the
-  only thing between a move and the sweep.
-- **The marker is PEEKED, never consumed at the top of a scan**
-  (`isRepointed` reads; only a completed deferred prune calls
-  `clearRepoint`). A marker consumed up front is spent before the work it
-  protects is durable: a walk that finds nothing (repointed at a mount still
-  being populated), a scan cancelled by the 5-minute auto-deploy, or an error
-  in phase 2 would each burn it and hand the NEXT scan an unguarded shot at
-  the catalog. The asymmetry runs one way — a marker held too long costs one
-  deferred prune, a marker lost costs every user's history.
-- **The deferred prune is gated on the scan having finished.** A cancelled
-  context means some titles never got their new rows, and pruning then empties
-  exactly those. It keeps the rows AND the marker so the next scan retries.
-- **`walkFailed` outranks the relocation guards** (`planPrune`). An unwalkable
-  root says nothing about any row under it, so there is nothing to defer TO —
-  deferring would schedule a prune we still have no evidence for.
-- **The deferred prune runs only when phase 2 attached EVERY discovered file
-  to this library** (`unattachedCount`). Without that check the deferral is
-  strictly more destructive than the skip it replaced. `media_files.path` is
-  globally UNIQUE and `GetMediaFileByPath` is not library-scoped, so when a
-  DUPLICATE library already owns the new paths — the state that started this
-  whole incident — phase 2 attaches nothing for the files it owns, and ONE
-  file the duplicate happens not to own is enough to make
-  `allPathsOutsideRoots` false. The prune would then delete every old row in
-  the repointed library and the sweep would cascade its entire history. The
-  same shape covers a transient per-file failure in phase 2, which is logged
-  and discarded. Declining is all-or-nothing: pruning "just the attached
-  ones" needs the unattached titles to be exactly the ones left alone, which
-  is the bookkeeping this check exists to avoid trusting.
-- **Duplicate libraries at the new path must still be deleted BEFORE the
-  original is repointed.** The attach check makes ignoring it non-destructive,
-  not harmless: the repointed library declines its prune on every scan and
-  sits with every item holding only its dead old path, so nothing plays until
-  the duplicate is gone.
+- **A repoint moves the FILE ROWS, in the same transaction as the path
+  change** (`planPathRewrites` → `RepointLibrary`). It does NOT change the
+  paths and let the rescan rediscover the files. That was the first design, and
+  three review rounds killed it: it assumes `UpsertMediaItem` lands on the same
+  `media_items` row, but that key is `(library_id, type, title, year)` parsed
+  from the FILENAME while the stored row carries whatever TMDB enrichment last
+  wrote. A row saying `title='Seven', year=1995` whose folder reads
+  `Se7en (1995)` re-keys to a NEW item; the old one is left with no files and
+  the empty-item sweep cascades away its watch progress, ratings, feedback,
+  taste seeds and embedding. A show with a NULL stored year does the same with
+  no enrichment drift at all (`FindMediaItemByTitle` cannot scan NULL into the
+  year, so the pre-check errors and the upsert re-keys). Both were reproduced
+  against a real database. `TestRepointSurvivesATitleTheRescanWouldReKey` pins
+  it.
+- **The prune only considers rows UNDER the library's current roots.** A row
+  outside them was never covered by the walk, so its absence from the results
+  is not evidence of anything. This is the generalisation of the `walkFailed`
+  and zero-discovered guards, and it is what makes a relocation safe *without
+  detecting one* — after a move every old row sits outside the roots and is
+  simply not a candidate. Three designs in a row tried to detect the
+  relocation and act on it instead, and all three deleted history; this one
+  cannot, because it never has the rows in hand. `TestBarePathEditDeletesNothing`
+  drives two full scans over a real database to pin it.
+- **Only rows whose target actually EXISTS are moved.** A partial move, or a
+  repoint saved before the copy finished, leaves the rest pointing where they
+  still are. Rewriting a row to a path with nothing at it would trade a
+  recoverable state for an unplayable one.
+- **Roots map POSITIONALLY, and only when the counts match.** Adding or
+  removing a root is not a relocation that can be read unambiguously, so
+  `planPathRewrites` declines entirely and the rows are left alone.
+- **`RepointLibrary` is one transaction.** A `libraries.paths` update that
+  lands without its row moves leaves every title on a dead path; row moves
+  without the path update point the rows outside the library's own roots.
+  Neither half is allowed alone. A UNIQUE violation here IS the
+  duplicate-library case, and the handler says so rather than reporting a
+  generic failure.
 - **`validateLibraryPaths` is one helper with two call sites** (Create and
-  Update), it resolves symlinks BEFORE applying the blocklist, stores the
-  RESOLVED path, and requires an ABSOLUTE one. `filepath.Clean("")` is `"."`,
+  Update). It resolves symlinks BEFORE applying the blocklist, stores the
+  RESOLVED path, and requires an ABSOLUTE one — `filepath.Clean("")` is `"."`,
   which resolves to Aurora's working directory and matches no absolute-prefix
-  blocklist entry; on Update that would repoint a live library there.
+  blocklist entry.
 - **The Node gate distinguishes "cannot build" from "unsupported".** Vite 7
   calls `crypto.hash()`, added in Node 20.12/21.7, so below that the build
   provably dies; the declared engines (`^20.19 || >=22.12`) are stricter, and
   vite merely warns and carries on inside the gap. Only the provable case is
   fatal — refusing every Node below the engines would strand a box on 20.15
-  whose build succeeds. All three call sites are wrapped in the same
-  "will we actually build the SPA?" guard, because every one of them falls
-  back to the committed `static/v2` bundle when the source tree is absent.
+  whose build succeeds. `scripts/node-version-test.sh` pins the table and
+  asserts the three duplicated copies have not drifted.
 - **The updater reports it as `misconfigured`, in preflight, before the
   fetch.** As a build failure it read "frontend build failed — old
   binary/static assets are still running", named neither Node nor a version,
-  and sat several hundred lines into npm's output. A box ran eight
-  consecutive failed updates over a fortnight on that message.
-- **`scripts/node-version-test.sh` tests the call sites by RUNNING them**
-  against a stubbed verdict, not by grepping for the error string. The grep
-  version passed with the `case` arms swapped, with `exit 1` removed, and
-  with the message surviving only in a comment.
+  and sat several hundred lines into npm's output. A box ran eight consecutive
+  failed updates over a fortnight on that message.
 
 Known limits, stated plainly:
 
-- **The upsert re-matches on `(library_id, type, title, year)`, parsed from
-  the filename.** A move that also RENAMES files such that Aurora parses a
-  different title or year gives that title a new row and leaves its history
-  behind. Nothing detects or warns about this; "move without renaming" is a
-  documented precondition, not an enforced one.
-- **Nothing stops an admin repointing a library at a path another library
-  already owns**, which is the ordering hazard above. A cross-library overlap
-  check at save time is the obvious guard and is not built.
+- **A bare `libraries.paths` edit leaves the library stuck.** Safe — nothing is
+  deleted — but its rows still describe the old location, so nothing plays
+  until they are rewritten. The scanner logs what to do. Detecting this and
+  repairing it automatically would mean re-matching files to items, which is
+  the thing that kept going wrong; it is deliberately not attempted.
+- **Stale rows outside the roots are never cleaned up.** Removing a root from a
+  library leaves its rows behind forever, showing as titles that will not play.
+  The prune cannot distinguish that from a move without re-matching. Deleting
+  the library is the only cleanup.
+- **The repoint marker (`NoteRepointed`) is now a backstop with little left to
+  do**, since the rows move with the library. It still covers the rows
+  `planPathRewrites` declined — a partial move, or a target not yet on disk —
+  and it still lives in memory, so a restart between the PUT and the first scan
+  loses it. Harmless now that the prune ignores out-of-root rows regardless.
 - **`Update` is a whole-row read-modify-write with no concurrency control.**
-  `UpdateLibrary` writes both columns unconditionally, and the SPA always
-  sends both, so two admin tabs can have the second silently revert the
-  first's repoint — and set a fresh marker back to the old paths. Previously
-  `SET name = $2` could not touch `paths` at all. An `updated_at` precondition
-  is the fix and is not built.
-- **`ForgetRepoint` on the failure path is not owner-scoped.** Two PUTs
-  repointing one library to the same paths, where the first one's UPDATE
-  fails and its `ForgetRepoint` lands after the second one's `NoteRepointed`,
-  leave the successful repoint without a marker. The data-derived check still
-  covers the whole-library case; only a concurrent PARTIAL move is exposed.
-- **Empty old roots left in place remain a hazard**, and this change does not
-  remove it. `pruneDeletedFiles`' zero-discovered guard and the sweep's
-  `len(allFiles) > 0` are all that hold the catalog while an abandoned root
-  sits empty; ONE stray video file under it makes the walk non-empty. The
-  relocation check then usually saves it — the rows are all outside the
-  library's current roots — but only while the library has been repointed
-  away. A library still POINTED at that root gets no such help.
-- **`rescanMovedLibrary` gives up if a scan is already running.** The marker
-  survives (only a completed deferred prune clears it), so the guard still
-  fires, but the rescan waits up to the scan interval with nothing in the UI
-  saying so.
-- **A PARTIAL move whose marker is lost prunes and sweeps.** For [A B] → [A
-  C], rows still under A keep `allPathsOutsideRoots` from firing, so the
-  marker genuinely IS the only guard — and it lives in memory, so a restart
-  between the PUT and the first completed scan (the box auto-deploys every 5
-  minutes) leaves B's rows pruned before phase 2 and every item that lived
-  only under B swept. The whole-library move, which is the common case and
-  the one the runbook documents, is unaffected. Persisting the marker, or
-  deriving the partial case from the data too, is the open follow-up.
-- **`progress.PruneSkipped` now also means "deferred"**, and is never cleared
-  when the deferred prune later succeeds — so a scan can report "prune
-  skipped" after pruning. `models.ScanProgress` still documents it as "the
-  prune was abandoned wholesale". Display-only today (nothing branches on
-  it), which is why it was left rather than split into two fields.
+  Two admin tabs can have the second silently revert the first's repoint. An
+  `updated_at` precondition is the fix and is not built.
+- **Nothing stops an admin repointing a library at a path another library
+  already owns.** The transaction fails on the UNIQUE constraint and the
+  handler explains it, but a cross-library overlap check at save time would be
+  better and is not built.
+- **A move that RENAMES files is still a rename.** The rows are moved by
+  prefix, so a file whose basename changed is not found at the computed target
+  and is left behind; the next scan then adds it as a new title. "Move without
+  renaming" is a documented precondition, not an enforced one.
 - **None of the Node verdicts are exercised against a real install.** The
   crypto.hash floors are from Node's changelog and the engines from the
   toolchain's `package.json`; the test drives a fake `node` on PATH.
-- **`ScanLibrary` itself is untested.** `planPrune`, `allPathsOutsideRoots`
-  and `unattachedCount` are extracted and pinned by tables, but the wiring
-  between them — the deferred call after phase 2, its `ctx.Err()` gate, and
-  the `clearRepoint` that follows — is covered by no test. This is NOT for
-  want of a database: CI runs a pgvector Postgres and exports
-  `TEST_DATABASE_URL`, and ~25 files already use it. An end-to-end test
-  (create library, attach files, repoint, scan, assert `watch_progress`
-  survives and the old rows are gone) is the highest-value thing missing
-  here, and every finding of the second review lived in this gap.
+- **`progress.PruneSkipped` is set for a relocation as well as a walk failure**
+  and `models.ScanProgress` still documents it as "the prune was abandoned
+  wholesale". Display-only today.

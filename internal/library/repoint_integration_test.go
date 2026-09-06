@@ -128,7 +128,24 @@ func TestRepointPreservesWatchHistoryAndClearsTheOldRows(t *testing.T) {
 	}
 
 	// ── The repoint ───────────────────────────────────────────────
-	updated, err := queries.UpdateLibrary(ctx, lib.ID, lib.Name, []string{newRoot})
+	// The supported path: move the recorded rows WITH the library, in one
+	// transaction. Not UpdateLibrary + rescan — that relies on the rescan
+	// re-matching each file to the same media_items row, which it does not do
+	// when enrichment has rewritten the stored title or year.
+	recorded, err := queries.GetMediaFilePathsForLibrary(ctx, lib.ID)
+	if err != nil {
+		t.Fatalf("read recorded paths: %v", err)
+	}
+	moves := map[int64]string{}
+	for p, id := range recorded {
+		if p == oldPath {
+			moves[id] = newPath
+		}
+	}
+	if len(moves) != 1 {
+		t.Fatalf("expected exactly the seeded row to move, got %v", moves)
+	}
+	updated, err := queries.RepointLibrary(ctx, lib.ID, lib.Name, []string{newRoot}, moves, nil)
 	if err != nil {
 		t.Fatalf("repoint: %v", err)
 	}
@@ -136,9 +153,9 @@ func TestRepointPreservesWatchHistoryAndClearsTheOldRows(t *testing.T) {
 		t.Fatalf("paths not persisted: %v", updated.Paths)
 	}
 
+	// The scan afterwards must find nothing to do: the rows and the walk
+	// already agree. This is the property the whole design now rests on.
 	s := NewScanner(config.ScannerConfig{Workers: 2}, queries)
-	// Deliberately NO NoteRepointed: this is the psql-edit path, and the
-	// data-derived guard is what has to carry it.
 	if err := s.ScanLibrary(ctx, updated, nil); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -172,15 +189,15 @@ func TestRepointPreservesWatchHistoryAndClearsTheOldRows(t *testing.T) {
 		t.Errorf("the moved file was attached to a NEW item %d, not the original %d — history is orphaned", attachedTo, itemID)
 	}
 
-	// And the dead row must be gone, or nothing plays: GetMediaFiles orders
-	// by id, so the older (dead) row would sort first and be the one the
-	// player picks.
+	// And no dead row may remain, or nothing plays: GetMediaFiles orders by
+	// id, so an older row pointing at the previous location would sort first
+	// and be the one the player picks.
 	var deadRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM media_files WHERE path=$1`, oldPath).Scan(&deadRows); err != nil {
 		t.Fatal(err)
 	}
 	if deadRows != 0 {
-		t.Errorf("the old-location row survived the scan (%d rows) — the title's first file is a dead path and will not play", deadRows)
+		t.Errorf("a row still points at the old location (%d rows) — the title's first file is a dead path and will not play", deadRows)
 	}
 }
 

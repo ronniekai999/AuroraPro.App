@@ -248,7 +248,7 @@ func TestPlanPruneTable(t *testing.T) {
 		{"walk failed outranks the marker", true, true, prunePlanSkip},
 		// The handler told us. Covers the partial move the data check
 		// cannot see.
-		{"marked by the handler", false, true, prunePlanDeferred},
+		{"marked by the handler", false, true, prunePlanRelocated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,14 +261,16 @@ func TestPlanPruneTable(t *testing.T) {
 	}
 }
 
-// A relocation must DEFER, never SKIP. Skipping leaves every title in the
-// library holding a dead path that sorts first in GetMediaFiles (lower id,
-// same version_tag), so nothing plays until the next scan — and an operator
-// seeing that reasonably deletes and recreates the library, which is the
-// data-loss path all of this exists to prevent.
-func TestMarkedRelocationDefersRatherThanSkipping(t *testing.T) {
-	if got := planPrune(false, true); got != prunePlanDeferred {
-		t.Fatalf("a marked relocation must defer, got %v", got)
+// The marker and a walk failure are DIFFERENT verdicts, and both refuse to
+// delete. Collapsing them would be harmless today but hides the distinction
+// the logs need: a walk failure is transient and self-heals, a relocation is a
+// standing state an operator has to finish resolving.
+func TestMarkedRelocationIsItsOwnVerdict(t *testing.T) {
+	if got := planPrune(false, true); got != prunePlanRelocated {
+		t.Fatalf("a marked repoint must report a relocation, got %v", got)
+	}
+	if got := planPrune(true, true); got != prunePlanSkip {
+		t.Fatalf("an unwalkable root outranks the marker, got %v", got)
 	}
 }
 
@@ -286,7 +288,7 @@ func TestZeroDiscoveredStillBailsBeforeTouchingTheDatabase(t *testing.T) {
 	s := &Scanner{} // nil queries: the guard must return before they are used
 	lib := libAt(1, "/srv/storage/media/movies")
 
-	pruned, relocated, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil, false)
+	pruned, relocated, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -295,70 +297,6 @@ func TestZeroDiscoveredStillBailsBeforeTouchingTheDatabase(t *testing.T) {
 	}
 	if relocated {
 		t.Fatal("an empty walk is not a relocation")
-	}
-}
-
-// ── The deferred prune's fully-attached precondition ──────────────
-
-// unattachedCount is what makes the DEFERRAL safe. Deferring without it is
-// strictly more destructive than the skip it replaced: media_files.path is
-// globally UNIQUE and GetMediaFileByPath is not library-scoped, so when a
-// DUPLICATE library already owns the new paths, phase 2 attaches nothing for
-// the files it owns — and a single file the duplicate happens not to own is
-// enough to make allPathsOutsideRoots false, at which point the prune would
-// delete every old row in the repointed library and the sweep would cascade
-// its whole history.
-func TestUnattachedCountSeesFilesPhase2DidNotAttach(t *testing.T) {
-	discovered := map[string]struct{}{
-		"/srv/media/movies/A.mkv": {},
-		"/srv/media/movies/B.mkv": {},
-		"/srv/media/movies/C.mkv": {},
-	}
-	// A duplicate library owns A and B, so only C landed in this library —
-	// alongside the old-location rows that are still all A and B have.
-	rows := map[string]int64{
-		"/srv/media/movies/C.mkv":    3,
-		"/home/u/media/movies/A.mkv": 1,
-		"/home/u/media/movies/B.mkv": 2,
-	}
-	if got := unattachedCount(discovered, rows); got != 2 {
-		t.Fatalf("want 2 unattached, got %d — a nonzero count is what refuses the prune", got)
-	}
-}
-
-func TestUnattachedCountIsZeroWhenPhase2AttachedEverything(t *testing.T) {
-	discovered := map[string]struct{}{
-		"/srv/media/movies/A.mkv": {},
-		"/srv/media/movies/B.mkv": {},
-	}
-	// The healthy relocation: both new rows exist beside the two old ones,
-	// which is exactly what the deferred prune is there to delete.
-	rows := map[string]int64{
-		"/srv/media/movies/A.mkv":    3,
-		"/srv/media/movies/B.mkv":    4,
-		"/home/u/media/movies/A.mkv": 1,
-		"/home/u/media/movies/B.mkv": 2,
-	}
-	if got := unattachedCount(discovered, rows); got != 0 {
-		t.Fatalf("want 0 unattached on a complete phase 2, got %d — a false positive blocks the prune forever", got)
-	}
-}
-
-// One unattached file refuses the WHOLE prune, not just that file's row.
-// Pruning "just the attached ones" needs the unattached titles to be exactly
-// the ones left alone, which is the bookkeeping the check exists to avoid
-// having to trust.
-func TestUnattachedCountRefusesOnASingleGap(t *testing.T) {
-	discovered := map[string]struct{}{}
-	rows := map[string]int64{}
-	for _, n := range []string{"A", "B", "C", "D", "E"} {
-		discovered["/srv/media/movies/"+n+".mkv"] = struct{}{}
-		if n != "E" {
-			rows["/srv/media/movies/"+n+".mkv"] = int64(len(rows) + 1)
-		}
-	}
-	if got := unattachedCount(discovered, rows); got != 1 {
-		t.Fatalf("want 1 unattached, got %d", got)
 	}
 }
 

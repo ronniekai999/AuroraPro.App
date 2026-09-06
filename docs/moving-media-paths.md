@@ -30,16 +30,16 @@ there, but the server has never seen you watch any of them — which is why
 recommendations go cold and you have to start watching things again to get
 AI content back.
 
-**Repointing** changes `libraries.paths` and leaves the ids alone. The rescan
-upserts onto the *same* rows, and none of the tables above notice anything
-happened.
+**Repointing** changes `libraries.paths` and moves the recorded file rows to
+the new location in the same transaction, leaving the ids alone. None of the
+tables above notice anything happened, and there is no rescan to get it wrong.
 
 ## Doing it
 
 ### In the admin UI (Aurora 2026.09 and later)
 
 1. **Admin → Libraries**, press **Edit** on the library.
-2. Replace the path with the new one. Comma-separate multiple roots.
+2. Replace the path with the new one. **One path per line** for multiple roots.
 3. **Save.** Aurora re-attaches its file watcher and starts a rescan.
 
 Repeat per library. If you have already created duplicate libraries at the
@@ -130,11 +130,12 @@ location.
 > If it fails: `sudo setfacl -m u:aurora:x` on each parent directory, then
 > `sudo setfacl -R -m u:aurora:rX` on the media root.
 
-On a box running this release or later, none of the above is needed — the
-relocation guard makes a plain `libraries.paths` update safe too, because the
-scanner detects the move from the data (see "What the first rescan does").
-The path rewrite is still the better option when you have it, since it leaves
-no dead rows at all.
+On a box running this release or later, the Edit button does all of the above
+for you, including the row rewrite. A plain `libraries.paths` update is *safe*
+there too — the scanner will not delete rows it never walked — but it is not
+sufficient: the library is left pointing at the new location with all its rows
+still describing the old one, so nothing plays until you rewrite them. Safe and
+stuck, not safe and finished.
 
 ## Ordering: delete the duplicates first
 
@@ -157,28 +158,16 @@ Deleting them through the admin UI (or `DELETE FROM libraries WHERE id IN
 `media_items` are new, so cascading them away costs nothing you had before
 the move.
 
-Ignoring this ordering does not lose data — the scanner refuses to prune a
-library whose files it could not attach — but it does leave you stuck. With
-the duplicate still holding the new paths, the repointed library's scan
-attaches nothing (its inserts hit `ON CONFLICT (path)`, and the movie-side
-clause does not re-parent `media_item_id`), so its items keep only their
-old-location rows. The scan then declines the prune every time, logging:
+Ignoring this ordering does not lose data — a repoint whose file rows collide
+with a duplicate's fails as one transaction and changes nothing — but it does
+stop you. The admin UI reports it and names the cause:
 
 ```
-deferred prune declined: not every discovered file is attached to this
-library — keeping the existing rows and retrying on the next scan
+failed to repoint library — if another library already points at the new
+path, delete it first, then retry
 ```
 
-The library stays in that state — history intact, but nothing playable,
-because every item's only recorded path is the dead one — until you delete
-the duplicate. Then the next scan attaches everything, prunes the old rows,
-and it is done.
-
-The TV side reaches the same place by a different route: `episode_files`'
-conflict clause *does* re-parent `episode_id`, so two libraries pointed at
-one path take files from each other on alternating scans. Neither ends up
-consistently owning its episodes, and the same attach check keeps both from
-pruning. Delete the duplicate.
+Delete the duplicate and repoint again.
 
 ### Keeping what you watched in the meantime
 
@@ -260,47 +249,39 @@ noisy in the log.
 
 ## What the first rescan does
 
-The scan after a repoint **defers** the deleted-file prune and the empty-item
-sweep to the end of the same scan, instead of running them at the start, and
-says so in the log:
+Nothing, which is the point. The rows were moved with the library, so the scan
+finds exactly the paths already on record: no new files, nothing stale, nothing
+pruned, nothing swept. Titles play immediately.
+
+If you see this in the log instead:
 
 ```
-deferring prune: every recorded file lies outside this library's current
-paths — pruning after the new files are attached
+prune: kept rows that lie outside this library's current paths — they were
+never walked, so their absence proves nothing.
 ```
 
-That is not a bug. The prune normally runs *before* the scan attaches the
-files it found, so on the first pass after a move every row still describes
-the old location: pruning there would empty each media item moments before
-the same title was re-created from the new path, and the sweep would cascade
-away exactly the history this procedure exists to keep. Deferring gets the
-same stale rows deleted once the new ones are attached — in one scan, so no
-title is left holding only a dead path.
-
-Aurora reaches that conclusion two ways, and the first needs nobody to tell
-it anything: if **every** file row for a library lies outside all of its
-current paths, the library moved rather than lost its files. That is what
-makes a `psql` edit, a restored database, or a server restart mid-move as
-safe as pressing Edit. The second is a marker the Edit button sets, which
-additionally covers a *partial* move — one root of several changed — where
-rows still under an unchanged root stop the first check from firing.
-
-If the deferred prune cannot run (the scan is cancelled by a restart, or
-nothing was found under the new paths) the stale rows and the marker are both
-kept, and the next scan tries again. Nothing is deleted on a guess.
+then something changed `libraries.paths` without moving the rows — a bare psql
+`UPDATE`, or a restored database. Nothing has been deleted, and nothing will
+be: a row outside the library's roots was never covered by the walk, so the
+scanner treats its absence as no evidence at all. But the library is stuck
+until its rows describe where it points. Finish the job with the SQL above, or
+press **Edit** and save the same paths again.
 
 ## What is not preserved
 
 - **Cached transcode segments and subtitle extractions** keyed by the old
   path (`/var/cache/aurora`). They regenerate on demand.
-- **Anything the rescan cannot re-match to the same title.** The upsert keys
-  on `(library_id, type, title, year)`, which is derived from the filename
-  and any `.nfo` beside it. If the move also *renamed* files such that Aurora
-  parses a different title or year, that title gets a new row and its history
-  stays behind — the same outcome as a new library, for that one title.
-  Moving files without renaming them is what makes this safe.
-- **Episode-level history when a show's episode numbering is parsed
-  differently** after the move, for the same reason.
+- **Titles whose files did not come with the move.** Only rows whose file is
+  actually present at the new location are moved; the rest keep pointing where
+  they were. That is deliberate — a partial move must not rewrite rows to paths
+  with nothing at them — but it means a half-finished copy leaves half the
+  library behind. Finish the copy and repoint again; it is idempotent.
+
+- **Nothing else.** The catalog rows are not re-matched at all: their paths are
+  rewritten in place, in the same transaction as the library update. An earlier
+  version of this page said a renamed title "gets a new row and its history
+  stays behind" — that was true of a design that relied on the rescan
+  re-finding each title, and it is no longer how this works.
 
 ## Related
 

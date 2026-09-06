@@ -717,6 +717,71 @@ func (q *Queries) GetLibrary(ctx context.Context, id int64) (*models.Library, er
 // ratings, feedback, taste seeds, collections, the embedding column — comes
 // along untouched. Deleting the library and creating a new one at the new
 // path looks equivalent and is not: it cascades all of that away.
+// RepointLibrary renames and/or repoints a library AND moves its recorded file
+// paths to the new location, in one transaction.
+//
+// Moving the rows is the whole point. The alternative — change libraries.paths
+// and let the next scan rediscover the files — depends on UpsertMediaItem
+// landing on the same media_items row, which it does not do reliably: its key
+// is parsed from the filename while the stored row carries whatever TMDB
+// enrichment last wrote, so a title the enricher renamed (or a show with a
+// NULL year) re-keys to a NEW item, leaves the old one with no files, and the
+// empty-item sweep cascades away its watch progress, ratings, feedback, taste
+// seeds and embedding. Rewriting the paths means there is no re-match to get
+// wrong: the rows follow the library.
+//
+// movieMoves and episodeMoves are file-row id -> new path, from
+// planPathRewrites, which has already confirmed each target exists on disk.
+// Either may be empty.
+//
+// Atomicity matters in both directions. A libraries.paths update that lands
+// without its row moves leaves every title pointing at a dead path; row moves
+// that land without the library update point the rows outside the library's
+// own roots. Both are recoverable, but only one of them is a state anybody
+// has reasoned about, so neither is allowed to happen alone.
+func (q *Queries) RepointLibrary(ctx context.Context, id int64, name string, paths []string, movieMoves, episodeMoves map[int64]string) (*models.Library, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("repoint library: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	l := &models.Library{}
+	err = tx.QueryRow(ctx,
+		`UPDATE libraries SET name = $2, paths = $3, updated_at = NOW()
+		 WHERE id = $1
+		 RETURNING id, name, type, paths, scan_interval_min, owner_id, created_at, updated_at`,
+		id, name, paths,
+	).Scan(&l.ID, &l.Name, &l.Type, &l.Paths, &l.ScanInterval, &l.OwnerID, &l.CreatedAt, &l.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("repoint library: %w", err)
+	}
+
+	// media_files.path and episode_files.path are globally UNIQUE, so a move
+	// onto a path another library already owns fails here — and takes the
+	// whole transaction with it rather than half-moving the library. That is
+	// the duplicate-library case, and refusing it loudly beats landing in a
+	// state where some titles moved and some did not.
+	for fileID, newPath := range movieMoves {
+		if _, err := tx.Exec(ctx, `UPDATE media_files SET path = $2 WHERE id = $1`, fileID, newPath); err != nil {
+			return nil, fmt.Errorf("repoint library: move media file %d: %w", fileID, err)
+		}
+	}
+	for fileID, newPath := range episodeMoves {
+		if _, err := tx.Exec(ctx, `UPDATE episode_files SET path = $2 WHERE id = $1`, fileID, newPath); err != nil {
+			return nil, fmt.Errorf("repoint library: move episode file %d: %w", fileID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("repoint library: commit: %w", err)
+	}
+	return l, nil
+}
+
 func (q *Queries) UpdateLibrary(ctx context.Context, id int64, name string, paths []string) (*models.Library, error) {
 	l := &models.Library{}
 	err := q.pool.QueryRow(ctx,

@@ -153,6 +153,60 @@ func samePaths(a, b []string) bool {
 	return true
 }
 
+// planPathRewrites maps a library's recorded file paths from its old roots to
+// its new ones, keeping only those that actually exist at the new location.
+//
+// This is what makes repointing safe, and it replaces an assumption that three
+// review rounds showed to be false. The previous design changed
+// libraries.paths and let the rescan rediscover the files, trusting
+// UpsertMediaItem to land on the SAME media_items row via
+// (library_id, type, title, year). It does not, routinely: that key is parsed
+// from the FILENAME, while the stored row carries whatever TMDB enrichment
+// last wrote. A library row saying title="Seven", year=1995 whose folder is
+// "Se7en (1995)" re-keys to a NEW item; the old one is left with no files and
+// the empty-item sweep cascades away its watch progress, ratings, feedback,
+// taste seeds and embedding. A show whose stored year is NULL does the same
+// thing without any enrichment drift at all.
+//
+// Rewriting the rows sidesteps the question. The paths follow the library, so
+// after the update the recorded paths and the walk agree: nothing is stale,
+// nothing is pruned, nothing is swept, and there is no re-match to get wrong.
+// Titles are playable immediately rather than after a second scan.
+//
+// Roots map POSITIONALLY, so this only runs when the counts match; anything
+// else (adding a root, removing one, reordering) is not a relocation we can
+// read unambiguously, and the caller falls back to leaving the rows alone.
+//
+// exists is injected so the decision is testable without a filesystem. A
+// candidate that is NOT present is deliberately left behind rather than
+// rewritten to a path with nothing at it: the move may have been partial, and
+// a row pointing somewhere real is worth more than a tidy one pointing
+// nowhere.
+func planPathRewrites(oldRoots, newRoots []string, recorded map[string]int64, exists func(string) bool) map[int64]string {
+	if len(oldRoots) == 0 || len(oldRoots) != len(newRoots) || len(recorded) == 0 {
+		return nil
+	}
+	out := make(map[int64]string)
+	for path, id := range recorded {
+		for i, oldRoot := range oldRoots {
+			// Path-boundary match, so /media/Show 2 is not read as living
+			// under /media/Show.
+			if path != oldRoot && !strings.HasPrefix(path, oldRoot+string(filepath.Separator)) {
+				continue
+			}
+			candidate := newRoots[i] + strings.TrimPrefix(path, oldRoot)
+			if exists(candidate) {
+				out[id] = candidate
+			}
+			break // first matching root wins; roots do not overlap
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 
@@ -357,38 +411,64 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		pathsMoved = !samePaths(existing.Paths, resolved)
 	}
 
-	// Mark the scanner BEFORE the row changes. The Scan endpoint re-reads the
-	// library from the DB, so once the UPDATE commits an admin pressing Scan
-	// is already on the new paths; marking first means that scan is the one
-	// that defers. (The periodic timer and fsnotify debounce hold a captured
-	// *models.Library and keep the OLD paths until the re-attach below, so
-	// they are not the race — the Scan button is.)
+	// Move the recorded file rows along with the library, so the rows and the
+	// next walk agree and there is nothing for the prune to find stale. See
+	// planPathRewrites for why this replaces "repoint and let the rescan
+	// rediscover it".
 	//
-	// This marker is a supplement, not the safety net. The scanner's own
-	// data-derived check (allPathsOutsideRoots) catches a whole-library move
-	// with nobody having said anything, which is what covers a psql edit, a
-	// restored database, and this marker being lost to the restart that
-	// deploys. What the marker adds is the PARTIAL move — [A B] to [A C] —
-	// where rows still under A stop the data check from firing.
+	// Only rows whose target actually exists on disk are moved. A partial move
+	// therefore leaves the rest pointing where they still are, and the
+	// scanner's own relocation guard covers whatever this could not.
+	var movieMoves, episodeMoves map[int64]string
+	if pathsMoved {
+		if recorded, mfErr := h.queries.GetMediaFilePathsForLibrary(r.Context(), id); mfErr == nil {
+			movieMoves = planPathRewrites(existing.Paths, paths, recorded, pathExists)
+		} else {
+			slog.Warn("could not read media file paths before repointing — the scan will fall back to its relocation guard",
+				"library", existing.Name, "error", mfErr)
+		}
+		if recorded, efErr := h.queries.GetEpisodeFilePathsForLibrary(r.Context(), id); efErr == nil {
+			episodeMoves = planPathRewrites(existing.Paths, paths, recorded, pathExists)
+		} else {
+			slog.Warn("could not read episode file paths before repointing — the scan will fall back to its relocation guard",
+				"library", existing.Name, "error", efErr)
+		}
+	}
+
+	// The marker still goes up BEFORE the row changes, and it is now a
+	// backstop rather than the mechanism: it covers the rows this could not
+	// move (a partial move, a target that is not there yet, a read that
+	// failed above), which the scanner then treats as a relocation rather
+	// than as deletions.
 	if pathsMoved && h.scanner != nil {
 		h.scanner.NoteRepointed(id, paths)
 	}
 
-	updated, err := h.queries.UpdateLibrary(r.Context(), id, name, paths)
+	updated, err := h.queries.RepointLibrary(r.Context(), id, name, paths, movieMoves, episodeMoves)
 	if err != nil || updated == nil {
-		// The move did not land. The marker cannot fire as things stand —
-		// isRepointed matches on paths, and the library still has its old
-		// ones — but leaving it means a repoint to these same paths days
-		// later would find a marker nobody set for it. Drop it.
+		// Nothing landed — RepointLibrary is one transaction. Drop the
+		// marker: it cannot fire while the library still has its old paths,
+		// but leaving it means a repoint to these same paths days later
+		// would find a marker nobody set for it.
 		if pathsMoved && h.scanner != nil {
 			h.scanner.ForgetRepoint(id)
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update library")
+			// A UNIQUE violation here is the duplicate-library case: another
+			// library already owns a path this one is moving onto. Say so,
+			// because "failed to update library" sends an admin looking in
+			// entirely the wrong place.
+			slog.Error("repoint failed", "library", existing.Name, "error", err)
+			writeError(w, http.StatusInternalServerError,
+				"failed to repoint library — if another library already points at the new path, delete it first, then retry")
 		} else {
 			writeError(w, http.StatusNotFound, "library not found")
 		}
 		return
+	}
+	if n := len(movieMoves) + len(episodeMoves); n > 0 {
+		slog.Info("repointed library and moved its file rows to the new location",
+			"library", updated.Name, "files", n, "paths", updated.Paths)
 	}
 
 	if h.activity != nil {
@@ -1082,4 +1162,12 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, deduped)
+}
+
+// pathExists is planPathRewrites' real-filesystem probe. Lstat, not Stat, so a
+// dangling symlink at the target counts as absent rather than as a file we
+// could move a row onto.
+func pathExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
 }

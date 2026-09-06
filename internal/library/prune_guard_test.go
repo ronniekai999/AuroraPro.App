@@ -15,7 +15,7 @@ func TestPruneDeletedFilesRefusesZeroDiscovered(t *testing.T) {
 	s := &Scanner{} // queries is nil on purpose: the guard must return before it is used
 	lib := &models.Library{Name: "Movies"}
 
-	pruned, relocated, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil, false)
+	pruned, relocated, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil error from zero-discovered prune, got %v", err)
 	}
