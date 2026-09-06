@@ -159,10 +159,16 @@ extract_callsite() {  # $1 = script, prints the guarded block
 # verdict_action: run one script's call site with node_vite_verdict stubbed to
 # return $2, and report what happened as "<exit code>|<output>".
 #
-# $3 selects whether this box builds the SPA from source: "src" (the normal
-# case) or "nosrc" (no source tree / --skip-npm, where the build falls back to
-# the committed bundle and Node is not needed at all). Each script expresses
-# that differently, so both variables are set and each gate reads its own.
+# $3 selects the environment: "src" (the normal case), "nodir" (no SPA source
+# tree — install.sh and aurora-update.sh fall back to the committed bundle),
+# or "skipfe" (--skip-npm, redeploy.sh's equivalent).
+#
+# nodir and skipfe are kept SEPARATE, and each sets only its own variable. An
+# earlier version set both at once, which made the two conditions
+# indistinguishable: swapping redeploy.sh's `! $SKIP_FRONTEND` guard for
+# `[ -d "$SPA_SRC_DIR" ]` passed the whole suite, while in reality it would
+# abort `redeploy.sh --skip-npm` on any box that still had the source tree and
+# an old Node — the exact case the guard exists for.
 #
 # The subshell runs under `set -e` WITH an ERR trap, matching the real scripts.
 # Without them the suite could not see its most important regression: a call
@@ -173,10 +179,10 @@ extract_callsite() {  # $1 = script, prints the guarded block
 verdict_action() {  # $1 = call-site file, $2 = stubbed verdict, $3 = src|nosrc
     local block="$1" verdict="$2" mode="${3:-src}" out rc=0
     local spa_src=. skip_frontend=false
-    if [ "$mode" = "nosrc" ]; then
-        spa_src="definitely/not/here"
-        skip_frontend=true
-    fi
+    case "$mode" in
+        nodir)  spa_src="definitely/not/here" ;;
+        skipfe) skip_frontend=true ;;
+    esac
     out="$(PATH="$WORK/bin:/usr/bin:/bin" "${BASH:-/bin/bash}" -c "
         set -euo pipefail
         trap 'echo TRAPPED-BY-ERR' ERR
@@ -258,17 +264,33 @@ for s in "${SCRIPTS[@]}"; do
         fi
     done
 
-    # A box that does not build the SPA from source needs no Node at all —
-    # install.sh and aurora-update.sh fall back to the committed bundle, and
-    # redeploy.sh has --skip-npm. Even the fatal verdict must not stop them.
-    res="$(verdict_action "$WORK/$s.site" 1 nosrc)"
+    # A box that will not build the SPA needs no Node at all, and even the
+    # fatal verdict must not stop it. Each script has its own way of not
+    # building, and must respond to THAT one and not the other — checking both
+    # at once cannot tell a correct guard from one reading the wrong variable.
+    case "$s" in
+        redeploy.sh) skip_mode=skipfe; other_mode=nodir;  why="--skip-npm" ;;
+        *)           skip_mode=nodir;  other_mode=skipfe; why="no SPA source tree" ;;
+    esac
+
+    res="$(verdict_action "$WORK/$s.site" 1 "$skip_mode")"
     rc="${res%%|*}"; out="${res#*|}"
     if [ "$rc" != "0" ]; then
-        bad "scripts/$s stops on verdict 1 even with no SPA source — that box never invokes node: $out"
+        bad "scripts/$s stops on verdict 1 with $why — that box never invokes node: $out"
     elif [ -n "$out" ]; then
-        bad "scripts/$s complains about Node with no SPA source to build: $out"
+        bad "scripts/$s complains about Node with $why: $out"
     else
-        ok "scripts/$s ignores the Node verdict when it will not build the SPA"
+        ok "scripts/$s ignores the Node verdict with $why"
+    fi
+
+    # ...and must NOT be quieted by the other script's condition, which it does
+    # not read. This is what catches a guard wired to the wrong variable.
+    res="$(verdict_action "$WORK/$s.site" 1 "$other_mode")"
+    rc="${res%%|*}"; out="${res#*|}"
+    if [ "$rc" = "0" ] && [ -z "$out" ]; then
+        bad "scripts/$s skipped the Node gate under the OTHER script's skip condition ($other_mode) — its guard reads a variable it should not"
+    else
+        ok "scripts/$s still gates on verdict 1 under $other_mode (not its own condition)"
     fi
 done
 
