@@ -934,6 +934,20 @@ Known limits:
 `scripts/check-library-paths.sh` predicts what the next scan would prune, by
 reproducing the walk rather than modelling it. Invariants:
 
+- **It is documented as a second opinion, not a gate, and the runbook must
+  keep saying so.** Five review rounds each found a false all-clear in it. That
+  is the honest summary of its reliability, and softening it in the runbook
+  would be the most consequential edit anyone could make to this feature.
+- **`classify_root` is the load-bearing function, and it must never be phrased
+  as "did that call succeed".** `test -e` and `realpath -e` BOTH collapse
+  ENOENT and EACCES, and only ENOENT matches `walkFailed`. Four of the five
+  false all-clears were that conflation at successively greater distance —
+  the root, a subtree, an ancestor, then an ancestor behind a symlink, which
+  `test -e` reaches because it follows links. So it requires POSITIVE PROOF of
+  absence (search permission on the lexical parent plus no entry there),
+  classifies an unresolvable symlink by recursing on its target rather than
+  guessing, and treats everything else — unreadable parent, symlink loop,
+  chain past the depth cap — as blocked. Unknown is never absent.
 - **A false ALL-CLEAR is the only unrecoverable outcome, and every ambiguity
   resolves against it.** The operator is told not to start Aurora until it
   exits 0, so an over-report costs an afternoon and an all-clear costs the

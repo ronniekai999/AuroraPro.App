@@ -378,14 +378,27 @@ Also compare the full `SELECT id, name, paths FROM libraries` against the list
 you wrote down in step 2; this query only catches a library still under the
 prefix you happened to type.
 
-**6b — nothing will be pruned.**
+**6b — an advisory check on what the next scan would prune.**
+
+> **Read this before you rely on it.** This check is a second opinion, not a
+> gate. Five independent adversarial reviews of it each found a state in which
+> it reported "nothing would be pruned" while the scan would have deleted rows
+> and cascaded the watch history away — four of them in the same class (a
+> permission failure it could not distinguish from "the path is gone", which is
+> the one state it treats as safe). All five are fixed and each has a test that
+> fails if the fix is reverted. But five for five is a track record, and the
+> useful inference is not "it is correct now".
+>
+> So: **exit 0 is evidence, not permission.** It can tell you something IS
+> wrong. It cannot tell you nothing is. Do not skip the backup in step 1 on the
+> strength of it, and if you are choosing between trusting this and taking
+> five minutes to spot-check a few paths by hand, do both.
 
 ```bash
 sudo ./scripts/check-library-paths.sh
 ```
 
-Must exit 0. This is the check that matters, and it is a script rather than a
-query for a reason: the scanner decides what to prune by comparing its
+Aim for exit 0. It is a script rather than a query for a reason: the scanner decides what to prune by comparing its
 directory walk against the recorded paths as **exact strings**, so no amount of
 SQL about prefixes and `EXISTS` can predict it. Two states in particular pass
 every plausible SQL check and then delete the catalog — a directory symlink
@@ -406,10 +419,10 @@ and exits 2 rather than guessing — but if it can see MORE, it quietly
 over-reports rows the scan would leave alone. Exit 2 is never "probably fine";
 it means the answer is unknown.
 
-**What exit 0 does and does not promise.** It means: every path recorded for
-these libraries will be found by the next walk, so `pruneDeletedFiles` deletes
-no file rows. It does **not** cover three things, all of which are in
-`CLAUDE.md`'s known-limits list and none of which this script models:
+**What exit 0 does and does not promise.** At best it means: every path
+recorded for these libraries was found by *this* walk, run as *this* user. It
+does **not** cover three things, all in `CLAUDE.md`'s known-limits list and
+none of them modelled here:
 
 - **The empty-item sweep runs anyway.** `DeleteEmptyMediaItems` fires on every
   scan that walks cleanly and finds anything — not only when the prune removed

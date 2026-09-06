@@ -53,6 +53,14 @@
 #   AURORA_DB=aurora ./scripts/check-library-paths.sh
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
+#
+# THIS IS A SECOND OPINION, NOT A GATE. Five independent adversarial reviews of
+# this file each found a state where it reported "nothing would be pruned"
+# while the scan would have deleted rows — four of them in one class, a
+# permission failure it could not tell apart from "the path is gone", which is
+# the one state it treats as safe. All five are fixed and each is pinned by a
+# test that fails if the fix is reverted. Five for five is still a track
+# record: exit 0 is evidence, not permission. Take the backup regardless.
 set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
@@ -106,35 +114,104 @@ q() { "${PSQL[@]}" -c "$1"; }
 # this script exists to catch.
 canon() { realpath -ms -- "$1"; }
 
-# first_untraversable PATH — prints the first component of PATH, walking down
-# from /, that EXISTS but this user cannot traverse; returns 1 if there is none.
+# classify_root PATH — decides why a path could not be resolved, and is the
+# single most dangerous function in this file.
 #
-# This exists because `realpath -e` collapses two states the scanner treats as
-# OPPOSITES. It fails with ENOENT for a root that is genuinely gone — which is
-# EvalSymlinks failing, hence walkFailed, hence no prune at all — and it fails
-# identically with EACCES when a PARENT of the root is not traversable by us,
-# which the service user may well traverse fine. Reading the second as the
-# first reports "the path does not exist, nothing will be deleted" and exits 0
-# while the scan walks the root, discovers files, and prunes every recorded row
-# it does not find. Reproduced with a 0750 parent owned by the service user —
-# the ordinary way media is set up — run by an operator not in its group.
+# Prints one of:
+#   absent          the path provably does not exist  → matches walkFailed,
+#                   so the scan skips its prune and NOTHING is deleted
+#   blocked <what>  we could not determine that       → exit 2, cannot answer
 #
-# Component-at-a-time with parameter expansion rather than IFS splitting: no
-# globbing, no IFS to restore, and `..` is already refused before we get here.
-first_untraversable() {
-    local acc="" rest="${1#/}" seg
+# WHY THIS IS NOT `test -e` OR `realpath -e`. Four consecutive review rounds
+# each found a false all-clear here, and after the third the reviewer named the
+# cause: BOTH of those collapse ENOENT and EACCES into one "it failed", and
+# only ENOENT is walkFailed. Any classification phrased as "did that call
+# succeed" therefore inherits the bug, which is why the fourth round found it
+# again one indirection further out — `test -e` FOLLOWS symlinks, so a
+# symlinked component whose target chain contains an untraversable directory
+# fails with EACCES while the lexical parent was perfectly traversable.
+#
+# So this never asks "did it fail". It requires POSITIVE PROOF of absence and
+# treats everything else as blocked:
+#
+#   - A component is proven absent only when we can read AND traverse its
+#     lexical parent (so we would have seen the entry had it existed) and
+#     lstat finds no entry there. `-e || -L` is the lstat test: a dangling
+#     symlink is an entry that exists, and `-e` alone says it does not.
+#   - A symlink whose target will not resolve is NOT decided here. Its target
+#     is read one level and classified recursively, because "dangling" (absent)
+#     and "target behind a wall" (blocked) are the two states `-e` conflates.
+#   - Anything else — a parent we cannot read, a symlink loop, a chain deeper
+#     than the cap — is blocked. Unknown is never absent.
+classify_root() {
+    local path="$1" depth="${2:-0}"
+    # ELOOP guard. Linux gives up at 40; well under that is fine, and a chain
+    # this deep is not something to answer confidently about anyway.
+    if [ "$depth" -gt 16 ]; then
+        printf 'blocked %s (symlink chain too deep to follow)\n' "$path"
+        return
+    fi
+    local acc="" rest="${path#/}" seg parent
     while [ -n "$rest" ]; do
         seg="${rest%%/*}"
+        parent="${acc:-/}"
         acc="$acc/$seg"
-        # A component that cannot be stat'd ends the walk. Its parent WAS
-        # traversable (or we would have returned above), so this is a genuine
-        # ENOENT — the caller's realpath -e will agree, and that is walkFailed.
-        [ -e "$acc" ] || return 1
-        [ -x "$acc" ] || { printf '%s\n' "$acc"; return 0; }
+
+        if [ -e "$acc" ] || [ -L "$acc" ]; then
+            # The entry exists. A symlink that does not resolve is the one
+            # case `-e` cannot decide; hand its target to a fresh walk.
+            if [ -L "$acc" ] && [ ! -e "$acc" ]; then
+                local tgt
+                tgt="$(readlink -- "$acc" 2>/dev/null)" \
+                    || { printf 'blocked %s (symlink unreadable)\n' "$acc"; return; }
+                case "$tgt" in
+                    /*) ;;
+                    *)  tgt="$(dirname -- "$acc")/$tgt" ;;
+                esac
+                # realpath -m is lexical and never fails, so it cannot
+                # reintroduce the conflation this function exists to avoid.
+                classify_root "$(realpath -m -- "$tgt")" "$((depth + 1))"
+                return
+            fi
+            # Resolvable. Every component but the last must be traversable.
+            if [ "$rest" != "$seg" ] && [ ! -x "$acc" ]; then
+                printf 'blocked %s (cannot traverse, as %s)\n' "$acc" "$(id -un)"
+                return
+            fi
+        else
+            # No entry. That is proof of absence only if the lookup itself was
+            # conclusive, which needs SEARCH permission on the parent — `x`,
+            # not `r`. `r` grants enumeration, and we are not enumerating: we
+            # asked for one named path, and with `x` the kernel answers ENOENT
+            # authoritatively. Requiring `r` here looked more careful and was
+            # simply wrong: 0711 is the ordinary mode of /home/<user> on Debian
+            # and Ubuntu, so it turned every genuinely-absent root under a home
+            # directory into an exit 2 the operator could not clear.
+            # BELT AND BRACES, not the primary rule: the loop above already
+            # refuses to advance past a non-final component that is not -x, so
+            # by construction the parent is searchable here and this test
+            # cannot currently decide anything (mutating it to `true` is an
+            # equivalent mutant, and no test can kill it — recorded rather than
+            # chased). It stays because the invariant it depends on lives in a
+            # different branch of the same loop, and if that branch is ever
+            # relaxed this is what stops an unproven absence reading as safe.
+            if [ -x "$parent" ]; then
+                printf 'absent\n'
+            else
+                printf 'blocked %s (cannot search, as %s)\n' "$parent" "$(id -un)"
+            fi
+            return
+        fi
+
         [ "$rest" = "$seg" ] && break
         rest="${rest#*/}"
     done
-    return 1
+    # Every component resolved and was traversable.
+    #
+    # Note the caller's `case` lists absent) and blocked*) BEFORE resolved), so
+    # widening the resolved) arm to also match absent is an equivalent mutant —
+    # unreachable, and no test can kill it. Recorded rather than chased.
+    printf 'resolved\n'
 }
 
 # ── Which libraries ───────────────────────────────────────────────
@@ -289,14 +366,31 @@ while IFS= read -r LIB; do
         # against; $rc is the one it PREFIXES walk output with. They differ
         # whenever a root has a symlinked component, and conflating them is
         # what let a symlinked library read as empty.
-        # BEFORE realpath -e, which cannot tell "gone" from "not mine to see".
-        if blocked="$(first_untraversable "$rc")"; then
-            rootopaque="$rootopaque
-        $r (cannot traverse $blocked as $(id -un))"
-            continue
-        fi
+        # classify_root decides absent-vs-blocked; `realpath -e` is used ONLY
+        # after it has said the path resolves, where it can no longer conflate
+        # the two. Doing it the other way round is how four rounds of false
+        # all-clears happened.
+        verdict="$(classify_root "$rc")"
+        case "$verdict" in
+            absent)
+                rootmissing=1
+                continue ;;
+            blocked*)
+                rootopaque="$rootopaque
+        $r — ${verdict#blocked }"
+                continue ;;
+            resolved) ;;
+            *)  # classify_root returns exactly three words. Anything else is a
+                # bug in it, and a bug here must not resolve to "safe".
+                rootopaque="$rootopaque
+        $r (could not be classified: $verdict)"
+                continue ;;
+        esac
         if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
-            rootmissing=1
+            # classify_root said resolved, so this should be unreachable. If it
+            # ever fires, the two disagree and we do not know which is right.
+            rootopaque="$rootopaque
+        $r (resolves component by component but not as a whole)"
             continue
         fi
         if [ ! -d "$rc" ]; then

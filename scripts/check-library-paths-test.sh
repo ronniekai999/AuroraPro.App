@@ -799,6 +799,80 @@ RC=$?
 rm -f "$TMP/nobin/sort"
 expect_rc 2 "a sort that fails → exit 2, not 'no media found'"
 
+# ── 33. classify_root, directly ───────────────────────────────────
+# The absent-vs-blocked decision is where four of the five false all-clears
+# lived, so it is unit-tested as well as driven end to end. `absent` is the
+# ONLY verdict that leads to exit 0; every ambiguity must land on `blocked`.
+echo
+echo "classify_root: absent must mean provably absent"
+CR="$TMP/cr"
+mkdir -p "$CR/real/deep" "$CR/blocked/inner"
+ln -s "$CR/nothing-here" "$CR/dangling"
+ln -s "$CR/blocked/inner" "$CR/via-blocked"
+ln -s "$CR/loopb" "$CR/loopa"; ln -s "$CR/loopa" "$CR/loopb"
+cat > "$TMP/probe.sh" <<'PROBE'
+source /dev/stdin <<< "$(sed -n '/^classify_root() {/,/^}/p' "$1")"
+classify_root "$2"
+PROBE
+cr_is() {  # $1 = path, $2 = expected first word, $3 = label
+    local got
+    got="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$1" 2>&1)"
+    case "$got" in
+        "$2"*) ok "$3" ;;
+        *) bad "$3 (got: $got)" ;;
+    esac
+}
+chmod 000 "$CR/blocked"
+[ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" 2>/dev/null; chmod a+rx "$TMP" "$CR"; chmod a+r "$TMP/probe.sh" "$SCRIPT"; }
+cr_is "$CR/real/deep"       resolved "a fully resolvable path is resolved"
+cr_is "$CR/real/deep/nope"  absent   "a missing entry under a READABLE parent is provably absent"
+# A dangling symlink must stay `absent`, or an unplugged disk becomes an
+# exit 2 the operator cannot clear — the over-report the class fix must not
+# introduce while closing the under-report.
+cr_is "$CR/dangling"        absent   "a dangling symlink root is absent, not blocked"
+cr_is "$CR/dangling/child"  absent   "a path under a dangling symlink is absent"
+cr_is "$CR/via-blocked"     blocked  "a symlink INTO an untraversable directory is blocked"
+cr_is "$CR/blocked/inner"   blocked  "a direct path into an untraversable directory is blocked"
+cr_is "$CR/loopa"           blocked  "a symlink loop is blocked, never absent"
+# Search permission, not read, is what makes an absence conclusive. 0711 is the
+# ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
+# absent root under a home directory into an exit 2 nobody could clear.
+mkdir -p "$CR/x_only"; chmod 711 "$CR/x_only"
+cr_is "$CR/x_only/gone"     absent   "a missing entry under a SEARCHABLE but unlistable parent is absent"
+chmod 600 "$CR/x_only"
+cr_is "$CR/x_only/gone"     blocked  "…but with no search permission at all it is blocked"
+chmod 755 "$CR/x_only"
+chmod 755 "$CR/blocked"
+
+# ── 34. The round-4 HIGH, end to end ──────────────────────────────
+# An untraversable ancestor reached THROUGH a symlinked component. `test -e`
+# follows symlinks, so it failed with EACCES while the lexical parent was
+# traversable — and the old premise ("its parent was traversable, so this is
+# ENOENT") turned that into "does not exist, nothing will be deleted", exit 0.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "symlinked-ancestor EACCES: running as root and setpriv is unavailable"
+else
+    echo
+    fixture symanc
+    mkdir -p "$TMP/symanc/pool0/storage/movies"
+    : > "$TMP/symanc/pool0/storage/movies/A.mkv"
+    ln -s "$TMP/symanc/pool0/storage" "$TMP/symanc/srv"
+    echo "$TMP/symanc/srv/movies" > "$FIX/roots"
+    printf '%s\n%s\n' "$TMP/symanc/srv/movies/A.mkv" "$TMP/symanc/srv/movies/GONE.mkv" > "$FIX/recorded"
+    chmod 750 "$TMP/symanc/pool0"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/symanc"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$TMP/symanc/pool0"
+    expect_rc 2 "an untraversable ancestor BEHIND a symlink → exit 2, not 'does not exist'"
+    expect_out "cannot traverse" "…and names the component that actually blocked it"
+
+    # Control: the same tree, traversable — the orphan must be reported.
+    run
+    expect_rc 1 "…and once traversable, the orphan is found → exit 1"
+fi
+
 echo
 echo "passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ]
