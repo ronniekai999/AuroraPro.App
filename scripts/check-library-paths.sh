@@ -87,20 +87,38 @@ NL='
 info() { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
 warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
 ok()   { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
-die()  { printf '\033[1;31m[FAIL]\033[0m %s\n' "$1" >&2; exit 2; }
+die()  {
+    printf '\033[1;31m[FAIL]\033[0m %s\n' "$1" >&2
+    # A die aborts the whole run, so every library after this one is
+    # unexamined. Exit 2 is never an all-clear, but silence about the
+    # remainder invites "it only complained about library 3, so the rest
+    # are fine".
+    [ -n "${LIB:-}" ] && printf '\033[1;31m[FAIL]\033[0m %s\n' \
+        "Stopped at library $LIB. Any library after it was NOT examined." >&2
+    exit 2
+}
 
 # Every external this script's ANSWER depends on. A missing one is not a
 # degraded check, it is a wrong one: `comm` failing leaves `missing` empty,
 # which reads as "nothing is missing" and prints the all-clear. There is no
 # `set -e` here (deliberately — the per-library loop must survive one library
 # failing), so nothing else catches it.
-for tool in realpath psql comm sort find grep sed wc; do
+# NOTE this loop and the grep-status check below are EQUIVALENT MUTANTS in any
+# environment where the tools work — removing either leaves the suite green,
+# because the suite cannot un-install coreutils. They are kept because the
+# states they cover (a stripped container, a shadowed binary on PATH) are real
+# and produce the all-clear rather than an error. Recorded so the next review
+# does not spend a round rediscovering that they survive mutation.
+for tool in realpath psql comm sort find grep sed wc readlink; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
 done
 
 # ── Database access ───────────────────────────────────────────────
-PSQL=(sudo -u postgres psql -qtA -v ON_ERROR_STOP=1 "$DB_NAME")
+# -n: never prompt. The runbook suggests running this as the service user,
+# and a nested sudo password prompt whose text went to /dev/null reads as a
+# hang. Failing fast falls through to the DATABASE_URL path below.
+PSQL=(sudo -n -u postgres psql -qtA -v ON_ERROR_STOP=1 "$DB_NAME")
 if ! "${PSQL[@]}" -c 'SELECT 1' >/dev/null 2>&1; then
     DB_URL="$(grep -oP '(?<=^DATABASE_URL=).*' /etc/aurora/aurora.env 2>/dev/null || true)"
     [ -n "$DB_URL" ] || die "cannot reach the database as the postgres user, and no DATABASE_URL in /etc/aurora/aurora.env"
@@ -144,7 +162,7 @@ canon() { realpath -ms -- "$1"; }
 #   - Anything else — a parent we cannot read, a symlink loop, a chain deeper
 #     than the cap — is blocked. Unknown is never absent.
 classify_root() {
-    local path="$1" depth="${2:-0}"
+    local path="$1" depth="${2:-0}" parentdir
     # ELOOP guard. Linux gives up at 40; well under that is fine, and a chain
     # this deep is not something to answer confidently about anyway.
     if [ "$depth" -gt 16 ]; then
@@ -166,7 +184,16 @@ classify_root() {
                     || { printf 'blocked %s (symlink unreadable)\n' "$acc"; return; }
                 case "$tgt" in
                     /*) ;;
-                    *)  tgt="$(dirname -- "$acc")/$tgt" ;;
+                    # Parameter expansion, not `dirname`. A dirname that is
+                    # merely BROKEN rather than absent — shadowed on PATH, a
+                    # bad coreutils build — returns empty here, the recursion
+                    # runs on the wrong path, and a blocked target comes back
+                    # `absent`: the whole class this function closes,
+                    # reintroduced through an external binary. `command -v`
+                    # cannot see that, so the dependency goes instead.
+                    # $acc is always absolute, so it always contains a slash.
+                    *)  parentdir="${acc%/*}"
+                        tgt="${parentdir:-}/$tgt" ;;
                 esac
                 # realpath -m is lexical and never fails, so it cannot
                 # reintroduce the conflation this function exists to avoid.
@@ -316,8 +343,8 @@ while IFS= read -r LIB; do
     # nothing — that distinction decides whether a prune happens at all.
     #
     # The three states below are NOT interchangeable, and collapsing them was a
-    # false all-clear. collectVideoFiles returns an error — the only thing that
-    # sets walkFailed and skips the prune wholesale — on EXACTLY ONE condition:
+    # false all-clear. collectVideoFiles returns an error on EXACTLY ONE
+    # condition:
     # EvalSymlinks(root) failing, i.e. the root is absent or dangling. Its walk
     # callback returns nil on every error, so `walkErr` is always nil. A root
     # that EXISTS but this user cannot read is therefore NOT walkFailed: the
@@ -327,6 +354,13 @@ while IFS= read -r LIB; do
     # walks the root cleanly and prunes against it. Predicting "nothing will be
     # deleted" from our own inability to look is how that becomes a wiped
     # catalog.
+    #
+    # NOTE returning an error is not the ONLY thing that sets walkFailed:
+    # ScanLibrary also sets it when len(unreadablePaths) >= maxTrackedUnreadable
+    # (1000). This check does not model that, so a library with a thousand or
+    # more unreadable entries is over-reported — it exits 1 while the scan skips
+    # its prune entirely. Documented in the runbook and CLAUDE.md; stated here
+    # too, because this comment used to say "the only thing" and that was wrong.
     #
     # rootmissing  → matches walkFailed. The prune really is skipped. Safe.
     # rootopaque   → we cannot see what Aurora will see. UNDECIDABLE, exit 2.
@@ -584,7 +618,11 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
         "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
     exit 1
 fi
-ok "nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
+ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
+# The hedge goes HERE, on the line the operator actually reads, not only in
+# the file header they will never open. Five reviews found five states where
+# this line appeared while the scan would have deleted rows.
+info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
 # the runbook tells the operator to act on and this is the one deletion it does
 # not cover.

@@ -54,6 +54,12 @@ lib_answer() {
 }
 case "$sql" in
     "SELECT 1")                 exit 0 ;;
+    # fail_all: every query after the connectivity probe fails, i.e. the
+    # cluster going away mid-run. A flag rather than a replacement stub —
+    # the replacement had to be undone by a later `cp`, and deleting that
+    # `cp` as dead scaffolding left every subsequent case running against
+    # a stub that answered nothing.
+    *) [ -f "$FIX/fail_all" ] && exit 1 ;;&
     *"FROM libraries ORDER BY id"*) cat "$FIX/lib_ids" ;;
     # BEFORE both the count arm and the plain unnest arm: the bad-root query is
     # ALSO a `count(*) FROM libraries` AND contains `unnest(paths)`, so placed
@@ -79,15 +85,43 @@ case "$sql" in
     # whole file could only ever drive ONE library, leaving every per-library
     # state reset and every cross-root latch unexercised.
     *"SELECT name FROM libraries"*) lib_answer lib_name ;;
-    *"SELECT type FROM libraries"*) lib_answer lib_type ;;
-    *"unnest(paths)"*)              lib_answer roots ;;
+    *"SELECT type FROM libraries"*)
+        [ -f "$FIX/fail_type" ] && exit 1
+        lib_answer lib_type ;;
+    *"unnest(paths)"*)
+        [ -f "$FIX/fail_roots" ] && exit 1
+        lib_answer roots ;;
     *"WHERE path = ''"*)
         case "$sql" in
             *"path LIKE E'%\\n%'"*) ;;
             *) echo "STUB: recorded-path query lost its newline arm" >&2; exit 1 ;;
         esac
         cat "$FIX/n_bad" ;;
-    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;
+    *"FROM episode_files"*|*"FROM media_files"*)
+        # With strict_show set, the episode query must reach the library the
+        # way pruneDeletedFiles does — through tv_seasons, not through
+        # tv_episodes.media_item_id. Same row today; a rewrite keyed on a
+        # column the scanner does not read is how the two come to disagree.
+        if [ -f "$FIX/strict_show" ]; then
+            case "$sql" in
+                *"FROM episode_files"*)
+                    case "$sql" in
+                        *"tv_seasons"*"ts.media_item_id"*) ;;
+                        *) echo "STUB: episode query does not join through tv_seasons" >&2; exit 1 ;;
+                    esac ;;
+            esac
+        fi
+        # fail_recorded: this query fails while everything before it succeeds.
+        # A lost `|| die` here leaves `recorded` EMPTY, which reads downstream
+        # as "this library records no files" — nothing missing, exit 0.
+        [ -f "$FIX/fail_recorded" ] && exit 1
+        # saw_media_files: prove a SHOW library did not take the movie branch.
+        if [ -f "$FIX/saw_media_files" ]; then
+            case "$sql" in
+                *"FROM media_files"*) echo "STUB-SAW-MEDIA-FILES-QUERY"; exit 0 ;;
+            esac
+        fi
+        lib_answer recorded ;;
     *) echo "psql stub: unhandled query: $sql" >&2; exit 1 ;;
 esac
 STUB
@@ -330,16 +364,9 @@ echo 0 > "$FIX/lib_exists"
 run
 expect_rc 2 "a library id that does not exist → exit 2"
 
-cp "$TMP/bin/psql" "$TMP/psql.good"
 
 fixture qfail
-cat > "$TMP/bin/psql" <<'STUB'
-#!/usr/bin/env bash
-sql=""
-while [ $# -gt 0 ]; do case "$1" in -c) sql="$2"; shift 2 ;; *) shift ;; esac; done
-case "$sql" in "SELECT 1") exit 0 ;; *) exit 1 ;; esac
-STUB
-chmod +x "$TMP/bin/psql"
+: > "$FIX/fail_all"
 run
 expect_rc 2 "a query that fails mid-run → exit 2, not a green summary"
 
@@ -353,24 +380,14 @@ R="$TMP/qfail_late"; mkdir -p "$R"
 : > "$R/A.mkv"
 echo "$R" > "$FIX/roots"
 printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
-cp "$TMP/psql.good" "$TMP/bin/psql"
-python3 - "$TMP/bin/psql" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-old = '    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;'
-# assert, do not silently no-op: an edit to the stub above once made this
-# replacement match nothing, and the case then asserted only that the script
-# works normally — the "passes for the wrong reason" failure this file has
-# already hit twice.
-assert old in s, "qfail_late: stub arm not found; this case would test nothing"
-s = s.replace(old, '    *"FROM episode_files"*|*"FROM media_files"*) exit 1 ;;')
-open(p, 'w').write(s)
-PY
-chmod +x "$TMP/bin/psql"
+# Driven by a FIXTURE FLAG, not by patching the stub from in here. Both
+# earlier stub-patching cases died silently: the arm text moved under them,
+# and — the part that made it invisible — a failing python heredoc does not
+# fail the shell case around it, so the case ran the unmodified stub and
+# asserted only that the script works normally.
+: > "$FIX/fail_recorded"
 run
 expect_rc 2 "the recorded-paths query failing → exit 2, not 'no files recorded'"
-cp "$TMP/psql.good" "$TMP/bin/psql"
 
 # ── 15. A SHOW library uses the episode_files join ────────────────
 # fixture() defaults to `movie`, so without this every case above exercises
@@ -408,57 +425,34 @@ R="$TMP/show_query"; mkdir -p "$R"
 echo show > "$FIX/lib_type"
 echo "$R" > "$FIX/roots"
 printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
-cp "$TMP/bin/psql" "$TMP/psql.save"
-python3 - "$TMP/bin/psql" <<'PY'
-import sys
-p = sys.argv[1]; s = open(p).read()
-old = '    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;'
-assert old in s, "show_query: stub arm not found; this case would test nothing"
-s = s.replace(old,
-    '    *"FROM episode_files"*) lib_answer recorded ;;\n'
-    '    *"FROM media_files"*) echo "STUB-SAW-MEDIA-FILES-QUERY" ;;')
-open(p, 'w').write(s)
-PY
-chmod +x "$TMP/bin/psql"
+: > "$FIX/saw_media_files"
 run
 if [ "$RC" = 0 ]; then ok "a show library sends the episode_files query, not media_files"
 else bad "a show library sent the media_files query (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
-cp "$TMP/psql.save" "$TMP/bin/psql"
 
 # ── 16. Every query needs its own `|| die` ────────────────────────
 # Losing one leaves its variable EMPTY, and empty reads downstream as a benign
 # fact rather than a failure: no paths configured, no files recorded, a movie
 # library. All three exit 0. The recorded-paths case above pins one of these;
 # these pin the two that turn a transient psql failure into an all-clear.
-qfail_on() {  # $1 = query fragment to fail, $2 = label
-    cp "$TMP/psql.save" "$TMP/bin/psql" 2>/dev/null || true
-    python3 - "$TMP/bin/psql" "$1" <<'PY'
-import sys
-p, frag = sys.argv[1], sys.argv[2]
-s = open(p).read()
-marker = '    *"%s"*)' % frag
-i = s.index(marker)
-j = s.index(';;', i) + 2
-s = s[:i] + '    *"%s"*) exit 1 ;;' % frag + s[j:]
-open(p, 'w').write(s)
-PY
-    chmod +x "$TMP/bin/psql"
-    run
-    expect_rc 2 "$2"
-}
-
+# Each query has its own `|| die`, and the case above only reaches the first.
+# A lost one further down leaves its variable EMPTY, and empty reads downstream
+# as a benign fact rather than a failure: no paths configured, a movie library.
+# Both exit 0.
 fixture qfail_roots
 R="$TMP/qfail_roots"; mkdir -p "$R"; : > "$R/A.mkv"
 echo "$R" > "$FIX/roots"; printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
-cp "$TMP/bin/psql" "$TMP/psql.save"
-qfail_on 'unnest(paths)' "the roots query failing → exit 2, not 'has no paths'"
+: > "$FIX/fail_roots"
+run
+expect_rc 2 "the roots query failing → exit 2, not 'has no paths'"
 
 fixture qfail_type
 R="$TMP/qfail_type"; mkdir -p "$R"; : > "$R/A.mkv"
 echo show > "$FIX/lib_type"
 echo "$R" > "$FIX/roots"; printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
-qfail_on 'SELECT type FROM libraries' "the library-type query failing → exit 2, not a movie-branch guess"
-cp "$TMP/psql.save" "$TMP/bin/psql"
+: > "$FIX/fail_type"
+run
+expect_rc 2 "the library-type query failing → exit 2, not a movie-branch guess"
 
 # ── 17. HIGH (round 2): an unreadable SUBTREE, not the root ───────
 # The root-level guard stops one directory short. `find` errors inside the
@@ -607,32 +601,23 @@ expect_out "does not exist" "…and still says so"
 
 # ── 24. The show query must use the tv_seasons join ───────────────
 # Case 15 pins only the TABLE NAME, so swapping the join to
-# tv_episodes.media_item_id — the exact drift the script's own comment warns
-# against — passed every case. Match the join text itself.
+# tv_episodes.media_item_id — the drift the script's own comment warns
+# against — passed every case. This checks the join text itself.
+#
+# Via a fixture flag, NOT by patching the stub from in here. Two earlier
+# versions of this case did that, and both died silently: the arm text moved
+# under them, the replacement matched nothing, and — the part that made it
+# invisible — a failing python heredoc does not fail the shell case around it,
+# so the case ran the unmodified stub and asserted only that the script works.
 fixture show_join
 R="$TMP/show_join"; mkdir -p "$R"
 : > "$R/A.mkv"
 echo show > "$FIX/lib_type"
+: > "$FIX/strict_show"
 echo "$R" > "$FIX/roots"
 printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
-cp "$TMP/bin/psql" "$TMP/psql.save2"
-python3 - "$TMP/bin/psql" <<'PY'
-import sys
-p = sys.argv[1]; s = open(p).read()
-s = s.replace(
-    '    *"FROM episode_files"*) cat "$FIX/recorded" ;;',
-    '    *"FROM episode_files"*)\n'
-    '        case "$sql" in\n'
-    '            *"tv_seasons"*"ts.media_item_id"*) cat "$FIX/recorded" ;;\n'
-    '            *) echo "STUB: episode query does not join through tv_seasons" >&2; exit 1 ;;\n'
-    '        esac ;;')
-open(p, 'w').write(s)
-PY
-chmod +x "$TMP/bin/psql"
 run
-if [ "$RC" = 0 ]; then ok "the show query joins episode → season → item, as the scanner does"
-else bad "the show query does not reach the library through tv_seasons (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
-cp "$TMP/psql.save2" "$TMP/bin/psql"
+expect_rc 0 "the show query joins episode → season → item, as the scanner does"
 
 # ── 25. Byte collation ──────────────────────────────────────────
 # `comm` and `sort` honour LC_COLLATE, and under a UTF-8 locale two
@@ -696,7 +681,7 @@ run
 expect_rc 2 "a relative library root → exit 2"
 
 # ── 29. A root that can be traversed but not LISTED ───────────────
-# Mode 111: first_untraversable passes it (it IS -x), so this is the one shape
+# Mode 111: classify_root passes it (it IS -x), so this is the one shape
 # that still reaches the -r half of the root check. Without that half the root
 # is walked, `find` errors on every entry, the disk list comes back empty and
 # the zero-discovered branch answers — correctly only by way of the unreadable
@@ -871,6 +856,48 @@ else
     # Control: the same tree, traversable — the orphan must be reported.
     run
     expect_rc 1 "…and once traversable, the orphan is found → exit 1"
+fi
+
+# ── 35. The per-library rootmissing reset ─────────────────────────
+# rootmissing is the one per-library latch whose LEAK produces exit 0 rather
+# than exit 2: library 1 has an absent root (correctly "the scan skips its
+# prune"), and if that latch survives into library 2 it suppresses the exit-2
+# path there too, so library 2's real orphans are reported under a heading
+# that says nothing will be deleted. Case 30 pins the $WORK/disk reset; this
+# pins the one that matters more.
+fixture rmreset
+printf '1\n2\n' > "$FIX/lib_ids"
+L2="$TMP/rmreset2"; mkdir -p "$L2"; : > "$L2/B.mkv"
+echo "$TMP/rmreset-absent" > "$FIX/roots.1"
+printf '%s\n' "$TMP/rmreset-absent/A.mkv" > "$FIX/recorded.1"
+echo "$L2" > "$FIX/roots.2"
+printf '%s\n%s\n' "$L2/B.mkv" "$L2/DELETED.mkv" > "$FIX/recorded.2"
+run
+expect_rc 1 "an absent root in library 1 does not suppress library 2's orphans"
+expect_out "DELETED.mkv" "…and library 2's missing row is named"
+
+# ── 36. dirname is required to resolve a RELATIVE symlink target ──
+# classify_root recurses on an unresolvable symlink's target, and a relative
+# target is made absolute with dirname. Without it the recursion runs on the
+# wrong path and can return `absent` for one that is merely blocked — which is
+# the whole class this function exists to close, reintroduced through a
+# missing coreutils binary.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "relative symlink target: running as root and setpriv is unavailable"
+else
+    fixture relsym
+    mkdir -p "$TMP/relsym/base/wall/inner"
+    : > "$TMP/relsym/base/wall/inner/A.mkv"
+    ln -s wall/inner "$TMP/relsym/base/link"
+    echo "$TMP/relsym/base/link" > "$FIX/roots"
+    printf '%s\n%s\n' "$TMP/relsym/base/link/A.mkv" "$TMP/relsym/base/link/GONE.mkv" > "$FIX/recorded"
+    chmod 750 "$TMP/relsym/base/wall"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/relsym" "$TMP/relsym/base"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$TMP/relsym/base/wall"
+    expect_rc 2 "a RELATIVE symlink into an untraversable directory → exit 2"
 fi
 
 echo

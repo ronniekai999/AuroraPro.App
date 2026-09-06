@@ -942,7 +942,7 @@ reproducing the walk rather than modelling it. Invariants:
   as "did that call succeed".** `test -e` and `realpath -e` BOTH collapse
   ENOENT and EACCES, and only ENOENT matches `walkFailed`. Four of the five
   false all-clears were that conflation at successively greater distance —
-  the root, a subtree, an ancestor, then an ancestor behind a symlink, which
+  the root, a subtree, an ancestor, then an ancestor behind a SYMLINK, which
   `test -e` reaches because it follows links. So it requires POSITIVE PROOF of
   absence (search permission on the lexical parent plus no entry there),
   classifies an unresolvable symlink by recursing on its target rather than
@@ -963,19 +963,17 @@ reproducing the walk rather than modelling it. Invariants:
   reachable: the app only ever stores resolved paths, a hand-written `UPDATE`
   does not.
 - **`walkFailed` is narrower than "I could not look", and every adjacent
-  branch has to be checked separately.** `collectVideoFiles` errors on exactly
-  one condition — `EvalSymlinks(root)` failing — because its walk callback
-  returns nil on every error. Anything else this check cannot see is its own
+  branch had to be found the hard way.** `collectVideoFiles` returns an error
+  on exactly one condition — `EvalSymlinks(root)` failing — because its walk
+  callback returns nil on every error. (`ScanLibrary` sets `walkFailed` a
+  second way, at `maxTrackedUnreadable`; the script does not model that and
+  over-reports there.) Anything else the check cannot see is its own
   blindness, and answering "nothing will be deleted" from it is a wiped
-  catalog. Three review rounds each found one more branch where that happened,
-  each adjacent to the last: the ROOT unreadable (round 1), a SUBTREE
-  unreadable with the empty disk list read as "no media" (round 2), and an
-  ANCESTOR of the root unreadable — where `realpath -e` fails with EACCES
-  exactly as it does with ENOENT, so a present root was reported as "does not
-  exist, nothing will be deleted" (round 3). `first_untraversable` walks the
-  root's components from `/` down and must run BEFORE `realpath -e`, which
-  cannot tell the two apart. If a fourth branch of this shape turns up, expect
-  it to be adjacent again rather than novel.
+  catalog. Four rounds each found one more branch, each adjacent to the last:
+  the ROOT unreadable, a SUBTREE unreadable with the empty disk list read as
+  "no media", an ANCESTOR unreadable, and an ancestor behind a SYMLINK. The
+  fix is `classify_root`, above — not another ordering tweak. Anything of this
+  shape that turns up next should be assumed adjacent again rather than novel.
 - **Line-oriented comparison cannot represent every path.** A recorded path
   containing a newline arrives from `psql -qtA` as two lines; an empty one
   vanishes into the blank-line filter. Ask SQL for the count of those rows —
@@ -988,16 +986,18 @@ reproducing the walk rather than modelling it. Invariants:
 
 Known limits:
 
-- **The script's own logic was untested when it shipped**, and three review
-  rounds then found four false all-clears in it that the Go contract tests
-  could not see — those pin the extension list and two properties of
+- **The script's own logic was untested when it shipped**, and five review
+  rounds then found seven false all-clears in it that the Go contract tests
+  could not see — five permission/absence conflations, plus a failing `comm`
+  and a failing `sort`, each of which produced the all-clear by leaving a
+  variable empty — those pin the extension list and two properties of
   `WalkDir`, but never run the script.
   `scripts/check-library-paths-test.sh` runs it against real trees with a
   stubbed `psql`, and every fix in it is mutation-tested: revert the fix, the
   suite must go red. Two lessons are baked into that file. The
   privilege-dependent cases DROP PRIVILEGES rather than skipping under root —
   `chmod 000` is no barrier to root, and skipping there let a revert of the
-  round-1 fix pass all 22 other cases. And a case must fail for the RIGHT
+  round-1 fix pass every other case in the file. And a case must fail for the RIGHT
   reason: the case-insensitivity case originally had one uppercase file, so
   losing `grep -i` emptied the disk list and exited 0 through the
   zero-discovered branch — the same exit code, the opposite meaning, and the

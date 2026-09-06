@@ -151,7 +151,12 @@ original already has — but the KEY DIFFERS, so it is not a copy-paste.
 `NOT EXISTS` for those or the statement aborts on the first duplicate.
 `recently_surfaced_items` is keyed `(profile_id, media_item_id, surface)`
 (migration 038) — match on `surface` too, or the guard over-skips and silently
-salvages one row per title instead of one per surface.
+salvages one row per title instead of one per surface. The last two are not
+that shape at all: `collection_items` is `UNIQUE (collection_id, media_item_id)`
+(migration 022), keyed by COLLECTION rather than profile, so the guard is on
+the collection; and `recommendation_impressions` is `UNIQUE (slate_id,
+position)` (migration 053), which cannot collide on a re-point and needs no
+`NOT EXISTS` at all.
 Ratings are usually the ones that matter.
 
 `media_files.path` is globally UNIQUE, so a duplicate library holding the new
@@ -436,6 +441,10 @@ none of them modelled here:
 - **A thousand or more unreadable entries** trips the scanner's own
   `maxTrackedUnreadable` into skipping the prune, which this script does not
   count either.
+- **A symlink loop, or a non-directory partway down a root**, both give exit 2
+  here while the scan sets `walkFailed` and prunes nothing. The check refuses
+  to answer rather than guess, which is the right default and still an exit
+  you cannot clear except by fixing the path.
 
 The same script is worth running any time you want to know what a scan is about
 to do: after restoring a backup, after a disk goes missing, or before an
