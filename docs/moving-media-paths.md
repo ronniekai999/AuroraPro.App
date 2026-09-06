@@ -145,10 +145,13 @@ unique index; the rest are not, and stopping after step 3 believing otherwise
 is how the loss goes unnoticed. Each follows the same shape as the statement
 below — re-point `media_item_id` from `dup.id` to `orig.id`, skipping rows the
 original already has — but the KEY DIFFERS, so it is not a copy-paste.
-`user_ratings`, `item_feedback`, `taste_seeds` and `recently_surfaced_items`
-are keyed `(profile_id, media_item_id)` (migrations 048, 039, 035, 038), not
+`user_ratings`, `item_feedback` and `taste_seeds` are keyed
+`(profile_id, media_item_id)` (migrations 048, 039, 035), not
 `(user_id, profile_id, media_item_id)`; drop the `user_id` term from the
 `NOT EXISTS` for those or the statement aborts on the first duplicate.
+`recently_surfaced_items` is keyed `(profile_id, media_item_id, surface)`
+(migration 038) — match on `surface` too, or the guard over-skips and silently
+salvages one row per title instead of one per surface.
 Ratings are usually the ones that matter.
 
 `media_files.path` is globally UNIQUE, so a duplicate library holding the new
@@ -329,8 +332,19 @@ UPDATE libraries SET paths = ARRAY['/srv/storage/media/4ktvshows'] WHERE id = 4;
 -- way you expect. regexp_replace reports `UPDATE n` even when it matched
 -- nothing and quietly became `SET path = path`, so the row counts above are
 -- not evidence — these are.
-SELECT (SELECT count(*) FROM media_files   WHERE path LIKE '/home/rontavious999/media/%') AS movie_rows_left,
-       (SELECT count(*) FROM episode_files WHERE path LIKE '/home/rontavious999/media/%') AS episode_rows_left;
+-- Scoped to the libraries you are moving, exactly like the UPDATEs above. An
+-- unscoped count can never reach 0 if you deliberately left a library behind,
+-- and would send you into a ROLLBACK you do not want.
+SELECT (SELECT count(*) FROM media_files mf
+          JOIN media_items mi ON mi.id = mf.media_item_id
+         WHERE mi.library_id IN (1, 2, 3, 4)
+           AND mf.path LIKE '/home/rontavious999/media/%') AS movie_rows_left,
+       (SELECT count(*) FROM episode_files ef
+          JOIN tv_episodes te ON te.id = ef.episode_id
+          JOIN tv_seasons  ts ON ts.id = te.season_id
+          JOIN media_items mi ON mi.id = ts.media_item_id
+         WHERE mi.library_id IN (1, 2, 3, 4)
+           AND ef.path LIKE '/home/rontavious999/media/%') AS episode_rows_left;
 SELECT id, name, paths FROM libraries ORDER BY id;
 ```
 

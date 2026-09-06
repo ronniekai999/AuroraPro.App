@@ -81,8 +81,15 @@ warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
 ok()   { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
 die()  { printf '\033[1;31m[FAIL]\033[0m %s\n' "$1" >&2; exit 2; }
 
-command -v realpath >/dev/null 2>&1 || die "realpath not found (coreutils)"
-command -v psql     >/dev/null 2>&1 || die "psql not found"
+# Every external this script's ANSWER depends on. A missing one is not a
+# degraded check, it is a wrong one: `comm` failing leaves `missing` empty,
+# which reads as "nothing is missing" and prints the all-clear. There is no
+# `set -e` here (deliberately — the per-library loop must survive one library
+# failing), so nothing else catches it.
+for tool in realpath psql comm sort find grep sed wc; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
+done
 
 # ── Database access ───────────────────────────────────────────────
 PSQL=(sudo -u postgres psql -qtA -v ON_ERROR_STOP=1 "$DB_NAME")
@@ -284,7 +291,8 @@ while IFS= read -r LIB; do
         # what let a symlinked library read as empty.
         # BEFORE realpath -e, which cannot tell "gone" from "not mine to see".
         if blocked="$(first_untraversable "$rc")"; then
-            rootopaque="$r (cannot traverse $blocked as $(id -un))"
+            rootopaque="$rootopaque
+        $r (cannot traverse $blocked as $(id -un))"
             continue
         fi
         if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
@@ -296,11 +304,13 @@ while IFS= read -r LIB; do
             # visits it as a single entry, so if it happens to carry a video
             # extension the scan discovers exactly one file and prunes the
             # whole library against it. Too strange to model; refuse to answer.
-            rootopaque="$r (not a directory)"
+            rootopaque="$rootopaque
+        $r (not a directory)"
             continue
         fi
         if [ ! -r "$rc" ] || [ ! -x "$rc" ]; then
-            rootopaque="$r (unreadable by $(id -un))"
+            rootopaque="$rootopaque
+        $r (unreadable by $(id -un))"
             continue
         fi
         # `! -type d` is exactly the scanner's `!d.IsDir()`, on the same lstat
@@ -351,10 +361,23 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     fi
 
     if [ -n "$rootopaque" ] && [ "$rootmissing" -eq 0 ]; then
-        die "library $LIB ($name): cannot inspect the root $rootopaque. Aurora may well be able to read it, in which case the next scan WILL walk it and prune against what it finds — so this check cannot tell you it is safe. Re-run as the user Aurora runs as."
+        die "library $LIB ($name): cannot inspect these roots:$rootopaque
+    Aurora may well be able to read it, in which case the next scan WILL walk it and prune against what it finds — so this check cannot tell you it is safe. Re-run as the user Aurora runs as."
     fi
 
-    disk_list="$(grep -Ei "$VIDEO_RE" "$WORK/disk" | sort -u)"
+    # Status-checked, both stages. An empty disk_list is the input to the
+    # zero-discovered branch, which answers "the scan will prune nothing" and
+    # exits 0 — so a `sort` that exists and FAILS (a full /tmp, a corrupt
+    # binary, an aborted collation) produces the one answer that must never be
+    # produced by accident. `command -v` does not see that; only the status
+    # does. grep's status is deliberately NOT fatal on 1, which just means no
+    # video files matched.
+    grep -Ei "$VIDEO_RE" "$WORK/disk" > "$WORK/disk.video"
+    gs=$?
+    [ "$gs" -le 1 ] || die "library $LIB ($name): grep failed while filtering the discovered files (status $gs). No answer was produced, and an empty result here reads as 'no media found, nothing will be pruned'."
+    if ! disk_list="$(sort -u "$WORK/disk.video")"; then
+        die "library $LIB ($name): sort failed while ordering the discovered files. No answer was produced, and an empty result here reads as 'no media found, nothing will be pruned'."
+    fi
 
     # NOT canonicalised. The scanner compares its walk output against the RAW
     # recorded string by exact equality, so normalising this side would hide
@@ -363,7 +386,9 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     # however equivalent they look. The ROOT is canonicalised above instead,
     # because filepath.Join cleans as it builds each child — which is what
     # makes the walk output canonical in the first place.
-    db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"
+    if ! db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"; then
+        die "library $LIB ($name): sort or sed failed while ordering the recorded paths. An empty result here reads as 'this library records no files'."
+    fi
     n_db=0; [ -n "$db_list" ] && n_db="$(printf '%s\n' "$db_list" | wc -l)"
 
     # ── The scanner's own two escape hatches, before any diff ──────
@@ -410,8 +435,19 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
         continue
     fi
 
-    missing="$(comm -23 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list") | sed '/^$/d')"
-    unknown="$(comm -13 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list") | sed '/^$/d')"
+    # comm's exit status is checked. An empty `missing` is the ALL-CLEAR, so a
+    # comm that dies for any reason (a corrupt binary, a full /tmp, an
+    # unexpected locale abort) silently produces the one answer that must
+    # never be produced by accident. The process substitutions are not part of
+    # the pipeline's status, so this is the only place it can be caught.
+    if ! missing="$(comm -23 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list"))"; then
+        die "library $LIB ($name): comm failed while comparing the recorded paths against the disk. No answer was produced, and an empty result here would have read as an all-clear."
+    fi
+    if ! unknown="$(comm -13 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list"))"; then
+        die "library $LIB ($name): comm failed while comparing the disk against the recorded paths."
+    fi
+    missing="$(printf '%s\n' "$missing" | sed '/^$/d')"
+    unknown="$(printf '%s\n' "$unknown" | sed '/^$/d')"
 
     n_missing=0; [ -n "$missing" ] && n_missing="$(printf '%s\n' "$missing" | wc -l)"
     n_unknown=0; [ -n "$unknown" ] && n_unknown="$(printf '%s\n' "$unknown" | wc -l)"

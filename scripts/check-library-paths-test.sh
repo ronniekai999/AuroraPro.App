@@ -45,6 +45,13 @@ sql=""
 while [ $# -gt 0 ]; do
     case "$1" in -c) sql="$2"; shift 2 ;; *) shift ;; esac
 done
+# lib_answer <fixture> — print "<fixture>.<id>" if the case supplied one for
+# the library this query names, else the plain fixture.
+lib_answer() {
+    local id
+    id="$(printf '%s' "$sql" | grep -oE 'library_id = [0-9]+|id = [0-9]+' | head -1 | grep -oE '[0-9]+')"
+    if [ -n "$id" ] && [ -f "$FIX/$1.$id" ]; then cat "$FIX/$1.$id"; else cat "$FIX/$1"; fi
+}
 case "$sql" in
     "SELECT 1")                 exit 0 ;;
     *"FROM libraries ORDER BY id"*) cat "$FIX/lib_ids" ;;
@@ -52,13 +59,35 @@ case "$sql" in
     # ALSO a `count(*) FROM libraries` AND contains `unnest(paths)`, so placed
     # after either one it never matches and the library-exists answer (1) is
     # returned as a bad-root count, failing every case in the file.
-    *"unnest(paths) AS p"*)         cat "$FIX/n_badroot" ;;
+    # The PREDICATE is checked, not just that a bad-root query was sent.
+    # Routing on a substring and answering from a fixture leaves the WHERE
+    # clause entirely unexercised: dropping the newline arm restores the
+    # false all-clear the count exists to close, and the suite stayed green.
+    *"unnest(paths) AS p"*)
+        case "$sql" in
+            *"p = ''"*) ;;
+            *) echo "STUB: bad-root query lost its empty-string arm" >&2; exit 1 ;;
+        esac
+        case "$sql" in
+            *"p LIKE E'%\\n%'"*) ;;
+            *) echo "STUB: bad-root query lost its newline arm" >&2; exit 1 ;;
+        esac
+        cat "$FIX/n_badroot" ;;
     *"count(*) FROM libraries"*)    cat "$FIX/lib_exists" ;;
-    *"SELECT name FROM libraries"*) cat "$FIX/lib_name" ;;
-    *"SELECT type FROM libraries"*) cat "$FIX/lib_type" ;;
-    *"unnest(paths)"*)              cat "$FIX/roots" ;;
-    *"WHERE path = ''"*)            cat "$FIX/n_bad" ;;
-    *"FROM episode_files"*|*"FROM media_files"*) cat "$FIX/recorded" ;;
+    # Per-library answers when a case supplies them (roots.2, recorded.3, …),
+    # falling back to the single-library fixture otherwise. Without this the
+    # whole file could only ever drive ONE library, leaving every per-library
+    # state reset and every cross-root latch unexercised.
+    *"SELECT name FROM libraries"*) lib_answer lib_name ;;
+    *"SELECT type FROM libraries"*) lib_answer lib_type ;;
+    *"unnest(paths)"*)              lib_answer roots ;;
+    *"WHERE path = ''"*)
+        case "$sql" in
+            *"path LIKE E'%\\n%'"*) ;;
+            *) echo "STUB: recorded-path query lost its newline arm" >&2; exit 1 ;;
+        esac
+        cat "$FIX/n_bad" ;;
+    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;
     *) echo "psql stub: unhandled query: $sql" >&2; exit 1 ;;
 esac
 STUB
@@ -238,7 +267,7 @@ else
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
     RC=$?
     expect_rc 2 "a root this user cannot read → exit 2 (cannot check), never 0"
-    expect_out "cannot inspect the root" "…and says why"
+    expect_out "cannot inspect these roots" "…and says why"
 fi
 chmod 755 "$R"
 
@@ -329,9 +358,13 @@ python3 - "$TMP/bin/psql" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
-s = s.replace(
-    '    *"FROM episode_files"*|*"FROM media_files"*) cat "$FIX/recorded" ;;',
-    '    *"FROM episode_files"*|*"FROM media_files"*) exit 1 ;;')
+old = '    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;'
+# assert, do not silently no-op: an edit to the stub above once made this
+# replacement match nothing, and the case then asserted only that the script
+# works normally — the "passes for the wrong reason" failure this file has
+# already hit twice.
+assert old in s, "qfail_late: stub arm not found; this case would test nothing"
+s = s.replace(old, '    *"FROM episode_files"*|*"FROM media_files"*) exit 1 ;;')
 open(p, 'w').write(s)
 PY
 chmod +x "$TMP/bin/psql"
@@ -379,9 +412,10 @@ cp "$TMP/bin/psql" "$TMP/psql.save"
 python3 - "$TMP/bin/psql" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-s = s.replace(
-    '    *"FROM episode_files"*|*"FROM media_files"*) cat "$FIX/recorded" ;;',
-    '    *"FROM episode_files"*) cat "$FIX/recorded" ;;\n'
+old = '    *"FROM episode_files"*|*"FROM media_files"*) lib_answer recorded ;;'
+assert old in s, "show_query: stub arm not found; this case would test nothing"
+s = s.replace(old,
+    '    *"FROM episode_files"*) lib_answer recorded ;;\n'
     '    *"FROM media_files"*) echo "STUB-SAW-MEDIA-FILES-QUERY" ;;')
 open(p, 'w').write(s)
 PY
@@ -683,6 +717,87 @@ else
     chmod 755 "$R"
     expect_rc 2 "a root that can be entered but not listed → exit 2"
 fi
+
+# ── 30. Several libraries in one run ──────────────────────────────
+# Every case above drives ONE library, so no per-library state reset and no
+# cross-root latch was exercised at all. Two mutations passed the whole suite
+# because of it: dropping the per-library `: > "$WORK/disk"` reset (library 2
+# then compares against library 1's files, so a row naming a file under
+# library 1's root reads as "will be found"), and making the `unreadable`
+# latch per-root instead of latching.
+fixture multi
+printf '1\n2\n3\n' > "$FIX/lib_ids"
+L1="$TMP/multi1"; L2="$TMP/multi2"; L3="$TMP/multi3"
+mkdir -p "$L1" "$L2" "$L3"
+: > "$L1/A.mkv"; : > "$L2/B.mkv"; : > "$L3/C.mkv"
+echo "$L1" > "$FIX/roots.1";  printf '%s\n' "$L1/A.mkv" > "$FIX/recorded.1"
+echo "$L2" > "$FIX/roots.2"
+# Library 2 records a file that lives under LIBRARY 1's root. Its own walk
+# cannot find it, so it must be reported — unless library 1's disk list has
+# leaked into library 2's comparison.
+printf '%s\n%s\n' "$L2/B.mkv" "$L1/A.mkv" > "$FIX/recorded.2"
+echo "$L3" > "$FIX/roots.3";  printf '%s\n' "$L3/C.mkv" > "$FIX/recorded.3"
+echo Movies > "$FIX/lib_name"; echo movie > "$FIX/lib_type"
+run
+expect_rc 1 "three libraries, one dirty → exit 1"
+expect_out "$L1/A.mkv" "…and the leaked-across row is reported, not absorbed"
+case "$OUT" in
+    *"library 3"*"all 1 recorded"*) ok "…and the clean library after it is still compared" ;;
+    *) bad "library 3 was not compared — per-library state did not survive library 2"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+esac
+
+# ── 31. One library, two roots, one with an unreadable subtree ─────
+# The `unreadable` latch must survive a LATER clean root. Made per-root
+# instead of latching, this library ends the loop with unreadable=0, finds an
+# empty disk list and prints "the scan will prune nothing" — the round-2
+# defect, restored.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "two-root latch: running as root and setpriv is unavailable — cannot test"
+else
+    fixture latch
+    A="$TMP/latchA"; B="$TMP/latchB"
+    mkdir -p "$A/sub" "$B"
+    : > "$A/sub/A.mkv"          # the library's only media, behind a 0000 dir
+    printf '%s\n%s\n' "$A" "$B" > "$FIX/roots"
+    printf '%s\n%s\n' "$A/sub/A.mkv" "$A/GONE.mkv" > "$FIX/recorded"
+    chmod 000 "$A/sub"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$A" "$B"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$A/sub"
+    expect_rc 2 "an unreadable subtree in the FIRST of two roots → exit 2"
+fi
+
+# ── 32. A missing external is fatal, not a quiet all-clear ────────
+# `comm` failing leaves `missing` empty, which is the all-clear. There is no
+# set -e here, so nothing else catches it.
+fixture nocomm
+R="$TMP/nocomm"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+# Shadow `comm` with one that always fails, rather than emptying PATH — an
+# empty PATH cannot even find bash, so the case exits 127 without ever
+# reaching the script and asserts nothing. (It did; hence the note.)
+mkdir -p "$TMP/nobin"
+printf '#!/bin/sh\nexit 127\n' > "$TMP/nobin/comm"
+chmod +x "$TMP/nobin/comm"
+OUT="$(PATH="$TMP/nobin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+RC=$?
+expect_rc 2 "a comm that fails → exit 2, never an all-clear"
+
+# A `sort` that EXISTS and fails is a different hole, and `command -v` cannot
+# see it: the empty disk list it produces feeds the zero-discovered branch,
+# which answers "the scan will prune nothing" and exits 0. That was live until
+# the pipeline's status was checked.
+rm -f "$TMP/nobin/comm"
+printf '#!/bin/sh\nexit 127\n' > "$TMP/nobin/sort"
+chmod +x "$TMP/nobin/sort"
+OUT="$(PATH="$TMP/nobin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -f "$TMP/nobin/sort"
+expect_rc 2 "a sort that fails → exit 2, not 'no media found'"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
