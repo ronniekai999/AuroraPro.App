@@ -145,6 +145,47 @@ exec "$@"
 STUB
 chmod +x "$TMP/bin/sudo"
 
+
+# assert_denied PATH LABEL — fail the suite unless PATH is genuinely
+# inaccessible TO THE USER THE SCRIPT WILL RUN AS. Modes are the one thing in
+# this file that behaves differently under root and non-root, and a mode that
+# grants the owner the bit under test makes its case silently vacuous on a
+# non-root runner while passing under root. That shipped once and was red on CI
+# for four commits. Prose did not prevent it; this does.
+assert_denied() {
+    local path="$1" label="$2" mode probe
+    # 1. The MODE. Accessibility alone cannot catch the defect this exists for:
+    #    under root the suite drops to a non-owner, so 750 genuinely denies and
+    #    the case looks fine — while on a non-root runner the script runs AS the
+    #    owner and 750 grants everything. The owner digit is the invariant, and
+    #    it is the same in both invocations.
+    # stat -c %a drops leading zeros — a 000 directory prints "0", not "000" —
+    # and prints four digits when setuid/setgid/sticky is set. Normalise to the
+    # last three before looking at the owner digit.
+    mode="$(stat -c '%a' "$path" 2>/dev/null)"
+    case "$mode" in
+        ''|*[!0-7]*) bad "$label: could not read the mode of $path"; return ;;
+    esac
+    while [ "${#mode}" -lt 3 ]; do mode="0$mode"; done
+    mode="${mode#"${mode%???}"}"
+    # The owner must lack READ or EXECUTE. For a directory those are the two
+    # bits that make it inspectable, so an owner digit of 5 (r-x) or 7 (rwx)
+    # leaves it fully usable — and on a non-root runner the script runs AS the
+    # owner. Other digits are fine and are used deliberately: 4 tests
+    # readable-but-not-traversable, 1 tests traversable-but-not-listable, 6
+    # tests neither-traversable. 750 was the defect, and its owner digit is 7.
+    case "${mode%??}" in
+        5|7) bad "$label: $path is mode $mode — the OWNER digit $((${mode%??})) grants both read and execute, so on a non-root runner (no setpriv drop) the script runs as the owner and this case is vacuous." ;;
+    esac
+    # 2. And then confirm it empirically for the user that will actually run.
+    if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -gt 0 ]; then
+        probe="$("${DROP[@]}" env sh -c 'ls "$1" >/dev/null 2>&1 && echo readable || echo denied' _ "$path")"
+    else
+        probe="$(ls "$path" >/dev/null 2>&1 && echo readable || echo denied)"
+    fi
+    [ "$probe" = denied ] || bad "$label: $path is READABLE by the user the script runs as — this case is vacuous"
+}
+
 # fixture <name> — start a fresh fixture directory with sane defaults.
 fixture() {
     FIX="$TMP/fix.$1"
@@ -479,6 +520,7 @@ else
     echo "$R" > "$FIX/roots"
     printf '%s\n%s\n' "$R/sub/A.mkv" "$R/GONE.mkv" > "$FIX/recorded"
     chmod 000 "$R/sub"
+    assert_denied "$R/sub" "unreadable subtree"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$R"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -546,6 +588,7 @@ else
     fixture bothroots
     R="$TMP/bothroots"; mkdir -p "$R"
     : > "$R/A.mkv"; chmod 000 "$R"
+    assert_denied "$R" "missing + unreadable roots"
     printf '%s\n%s\n' "$TMP/bothroots-absent" "$R" > "$FIX/roots"
     printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
@@ -588,6 +631,7 @@ else
     echo "$TMP/ancestor/parent/media" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/ancestor/parent/media/A.mkv" "$TMP/ancestor/parent/media/GONE.mkv" > "$FIX/recorded"
     chmod 000 "$TMP/ancestor/parent"
+    assert_denied "$TMP/ancestor/parent" "untraversable ancestor"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/ancestor"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -754,6 +798,7 @@ else
     printf '%s\n%s\n' "$A" "$B" > "$FIX/roots"
     printf '%s\n%s\n' "$A/sub/A.mkv" "$A/GONE.mkv" > "$FIX/recorded"
     chmod 000 "$A/sub"
+    assert_denied "$A/sub" "two-root latch"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$A" "$B"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -853,6 +898,7 @@ else
     echo "$TMP/symanc/srv/movies" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/symanc/srv/movies/A.mkv" "$TMP/symanc/srv/movies/GONE.mkv" > "$FIX/recorded"
     chmod 000 "$TMP/symanc/pool0"
+    assert_denied "$TMP/symanc/pool0" "ancestor behind a symlink"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/symanc"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -900,6 +946,7 @@ else
     echo "$TMP/relsym/base/link" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/relsym/base/link/A.mkv" "$TMP/relsym/base/link/GONE.mkv" > "$FIX/recorded"
     chmod 000 "$TMP/relsym/base/wall"
+    assert_denied "$TMP/relsym/base/wall" "relative symlink target"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/relsym" "$TMP/relsym/base"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -923,9 +970,10 @@ guard_case() {  # $1 = stub body, $2 = expected message fragment, $3 = label
     mkdir -p "$TMP/guardbin"
     printf '%s\n' "$1" > "$TMP/guardbin/$tool"
     chmod +x "$TMP/guardbin/$tool"
-    OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+    OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+           TMP_SEDCOUNT="$TMP/sedcount" bash "$SCRIPT" 2>&1)"
     RC=$?
-    rm -f "$TMP/guardbin/$tool"
+    rm -f "$TMP/guardbin/$tool" "$TMP/sedcount"
     if [ "$RC" = 2 ] && case "$OUT" in *"$2"*) true ;; *) false ;; esac; then
         ok "$3"
     else
@@ -962,6 +1010,27 @@ guard_case '#!/bin/sh
 case "$*" in *-23*) exit 2 ;; esac
 exec /usr/bin/comm "$@"'   "comm failed while comparing the recorded paths" "the missing-side comm guard fires on its own" comm
 
+# sed, second invocation: the `missing` filter. This one produced the
+# all-clear with NO diagnostic on stdout or stderr at all — the worst shape in
+# the file. An always-failing sed is caught upstream by the db_list pipeline,
+# which is why shadowing the tool globally could not see it.
+# A counter FILE, not a variable: each invocation is its own process, so an
+# env var cannot carry "this is the second call". The db_list filter is call 1
+# and is guarded upstream; the `missing` filter is call 2, which was not.
+rm -f "$TMP/sedcount"
+guard_case '#!/bin/sh
+n=0
+[ -f "$TMP_SEDCOUNT" ] && n=$(cat "$TMP_SEDCOUNT")
+n=$((n + 1)); echo "$n" > "$TMP_SEDCOUNT"
+[ "$n" -ge 2 ] && exit 2
+exec /bin/sed "$@"' \
+  "sed failed" "the sed guard fires on its own" sed
+
+# wc: an empty count falls through the `-gt 0` test into the all-clear arm.
+guard_case '#!/bin/sh
+exit 2' \
+  "wc failed" "the wc guard fires on its own" wc
+
 # find: a silent non-zero exit. Gated on finderr being EMPTY, because GNU find
 # also exits 1 on an ordinary permission error — which the unreadable latch
 # already handles and must NOT be turned into a die.
@@ -988,7 +1057,7 @@ chmod +x "$TMP/guardbin/find"
 OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
 RC=$?
 rm -f "$TMP/guardbin/find"
-if [ "$RC" != 2 ]; then ok "a find that fails NOISILY is the unreadable latch, not a die"
+if [ "$RC" = 0 ]; then ok "a find that fails NOISILY is the unreadable latch, not a die"
 else bad "a noisy find was treated as an unexplained failure (exit 2)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
 
 # ── 38. The missing-root REPORT names the right root ──────────────
@@ -1010,11 +1079,24 @@ else
     printf '%s\n%s\n' "$TMP/reportlabel-absent" "$B" > "$FIX/roots"
     printf '%s\n' "$B/A.mkv" > "$FIX/recorded"
     chmod 000 "$W"
+    assert_denied "$W" "missing-root report label"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
     RC=$?
+    # Probed BEFORE the restore below, or it reports on a wall that is already
+    # down — which is what it did first, and the mode police caught it.
+    wallverdict="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$B" 2>&1)"
     chmod 755 "$W"
+    # The negative half alone is not enough: a root that is merely RESOLVED is
+    # also not labelled, so the assertion holds identically when the wall was
+    # never built. On a non-root runner that made this case unable to detect
+    # the regression it exists for. assert_denied above proves the state, and
+    # the classify_root probe proves the script sees it as blocked.
+    case "$wallverdict" in
+        blocked*) ;;
+        *) bad "missing-root report: the wall was not blocked (classify_root said '$wallverdict') — this case would pass vacuously" ;;
+    esac
     if printf '%s\n' "$OUT" | grep -q "missing root: $TMP/reportlabel-absent" \
        && ! printf '%s\n' "$OUT" | grep -q "missing root: $B"; then
         ok "only the genuinely absent root is labelled 'missing root'"
@@ -1022,6 +1104,26 @@ else
         bad "the blocked root was labelled missing (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'
     fi
 fi
+
+# ── 39. The WRITER half of the find pipeline ──────────────────────
+# PIPESTATUS has two entries and only the first was checked. The reader — the
+# loop that writes $WORK/disk — empties the disk list just as thoroughly when
+# its write fails, and every downstream guard is satisfied: grep exits 1 on an
+# empty file, sort succeeds on it, and the run reports "no media found, so the
+# scan will prune nothing", exit 0.
+#
+# `ulimit -f 0` reproduces it portably (no mount, no root). It was originally
+# found on a real full tmpfs, where `mktemp -d` and `: > disk` both still
+# succeed, so nothing earlier notices.
+fixture writerfail
+R="$TMP/writerfail"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+       bash -c 'ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>/dev/null)"
+RC=$?
+expect_rc 2 "a failing WRITE of the discovered-file list → exit 2, not 'no media found'"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

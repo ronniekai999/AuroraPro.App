@@ -54,15 +54,16 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Six independent adversarial reviews of
-# this file found EIGHT states where it reported "nothing would be pruned"
+# THIS IS A SECOND OPINION, NOT A GATE. Seven independent adversarial reviews
+# of this file found TEN states where it reported "nothing would be pruned"
 # while the scan would have deleted rows. Five were one class — a permission
 # failure it could not tell apart from "the path is gone", which is the one
-# state it treats as safe — and three were a tool failing quietly (comm, sort,
-# find), each leaving a variable empty, which reads the same way. All are fixed
-# and each is pinned by a test that fails if the fix is reverted. That record
-# is why the wording here is what it is: exit 0 is evidence, not permission.
-# Take the backup regardless.
+# state it treats as safe — and five were something failing quietly (comm,
+# sort, find, the pipeline that RECORDS what find found, and sed), each
+# leaving a variable empty, which reads the same way. All are fixed and each
+# is pinned by a test that fails if the fix is reverted. That record is why
+# the wording here is what it is: exit 0 is evidence, not permission. Take the
+# backup regardless.
 set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
@@ -373,6 +374,7 @@ while IFS= read -r LIB; do
     # dead code that had never once run.
     rootmissing=0
     rootopaque=""
+    findfail=""
     unreadable=0
     : > "$WORK/disk"
     : > "$WORK/badnames"
@@ -488,7 +490,19 @@ while IFS= read -r LIB; do
         fs=("${PIPESTATUS[@]}")
         [ -s "$WORK/finderr" ] && unreadable=1
         if [ "${fs[0]}" -ne 0 ] && [ ! -s "$WORK/finderr" ]; then
-            die "library $LIB ($name): find failed on $r with status ${fs[0]} and no error output. Nothing was discovered and nothing said why, which would read here as 'no media found, so the scan will prune nothing'."
+            findfail="find failed on $r with status ${fs[0]} and no error output"
+        fi
+        # BOTH halves. fs[1] is the reader — the loop that writes $WORK/disk —
+        # and a write failure there empties the disk list just as thoroughly as
+        # a failed find, with every downstream guard satisfied: grep exits 1 on
+        # an empty file, sort succeeds on it, and the run reports "no media
+        # found, so the scan will prune nothing", exit 0. Reproduced on a full
+        # tmpfs with no stubbing at all — mktemp -d and `: > disk` both still
+        # succeed there, so nothing earlier notices. Unlike find, this half has
+        # no legitimate non-zero: it is 0 on every case in the suite, including
+        # the four where find itself exits 1 on permission errors.
+        if [ "${fs[1]}" -ne 0 ]; then
+            findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem"
         fi
     done <<< "$roots"
 
@@ -499,6 +513,13 @@ while IFS= read -r LIB; do
     # and one unreadable root is not going to be pruned whatever we can or
     # cannot read. Dying here would be an over-report the operator cannot
     # drive to zero, under an instruction not to start the server until they do.
+    # Deferred behind rootmissing like the other two dies: any root failing
+    # EvalSymlinks sets walkFailed for the WHOLE library, so the scan prunes
+    # nothing and exit 2 would be an over-report nobody can clear.
+    if [ -n "$findfail" ] && [ "$rootmissing" -eq 0 ]; then
+        die "library $LIB ($name): $findfail. Nothing was discovered and nothing said why, which would read here as 'no media found, so the scan will prune nothing'."
+    fi
+
     if [ -s "$WORK/badnames" ] && [ "$rootmissing" -eq 0 ]; then
         die "library $LIB ($name): $(wc -l < "$WORK/badnames") file(s) on disk have a newline in their name. This check is line-oriented and would compare a truncated half of each, which can read as a match for a recorded path whose file is gone. Rename them, or check this library by hand:
 $(sed 's/^/        /' "$WORK/badnames" | head -10)"
@@ -595,11 +616,27 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     if ! unknown="$(comm -13 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list"))"; then
         die "library $LIB ($name): comm failed while comparing the disk against the recorded paths."
     fi
-    missing="$(printf '%s\n' "$missing" | sed '/^$/d')"
-    unknown="$(printf '%s\n' "$unknown" | sed '/^$/d')"
+    # sed and wc are status-checked too. Both leave a variable EMPTY on
+    # failure, which is the all-clear — and the sed one produced it with no
+    # diagnostic on stdout or stderr at all, the worst shape in this file. An
+    # always-failing sed is caught upstream by the db_list pipeline, which is
+    # why shadowing the tool globally could not see this; it needs the
+    # per-invocation shape.
+    if ! missing="$(printf '%s\n' "$missing" | sed '/^$/d')"; then
+        die "library $LIB ($name): sed failed while trimming the missing-file list. An empty result here is the all-clear."
+    fi
+    if ! unknown="$(printf '%s\n' "$unknown" | sed '/^$/d')"; then
+        die "library $LIB ($name): sed failed while trimming the unknown-file list."
+    fi
 
-    n_missing=0; [ -n "$missing" ] && n_missing="$(printf '%s\n' "$missing" | wc -l)"
-    n_unknown=0; [ -n "$unknown" ] && n_unknown="$(printf '%s\n' "$unknown" | wc -l)"
+    n_missing=0
+    if [ -n "$missing" ] && ! n_missing="$(printf '%s\n' "$missing" | wc -l)"; then
+        die "library $LIB ($name): wc failed while counting the missing files. An empty count here falls through to the all-clear."
+    fi
+    n_unknown=0
+    if [ -n "$unknown" ] && ! n_unknown="$(printf '%s\n' "$unknown" | wc -l)"; then
+        die "library $LIB ($name): wc failed while counting the new files."
+    fi
 
     if [ "$n_missing" -gt 0 ]; then
         TOTAL_MISSING=$((TOTAL_MISSING + n_missing))
@@ -641,7 +678,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Six reviews found eight states where
+# the file header they will never open. Seven reviews found ten states where
 # this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
