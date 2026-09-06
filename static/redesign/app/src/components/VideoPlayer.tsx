@@ -98,7 +98,7 @@ import {
   castPlayPauseMismatch,
   castReanchorBudgetAfter,
   castResyncAction,
-  isCastHostSeekJump,
+  decideHostBroadcast,
   isPartyEpisodeMismatch,
   levelLagsPlayhead,
   needsBackwardSessionRebuild,
@@ -4702,101 +4702,94 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // ~21:40 into episode 2's room and jumps every guest. The per-title
         // reset effect closes this only from the moment `target` resolves,
         // and the window is the seconds BEFORE that.
-        // Leaves the baseline standing: whatever the host does to the TV while
-        // the two sides disagree about the episode is still compared once they
-        // agree again.
-        if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
-        // Likewise while one of our own loads is in flight. The seeded
-        // baseline is written at PROMOTION, so a poll that catches the new
-        // media already autoplaying before the LOAD ack resolves would still
-        // read the pre-load baseline and call the autoplay a transition —
-        // resuming a room the host deliberately paused. Returning here rather
-        // than gating the arm further down is the difference between deferring
-        // the comparison and destroying it (see the snapshotNow comment).
-        if (castLoadsInFlightRef.current > 0) return
+        // Everything from here is decideHostBroadcast's, in lib/partyPlayer.
+        //
+        // It was inline, and four consecutive review rounds found the same
+        // defect in it: a guard added to stop the host broadcasting something
+        // it should not, placed where control still fell through to the code
+        // that records the next baseline — destroying the transition it was
+        // protecting instead of deferring it. That is a data decision and is
+        // mechanically checkable; it was never going to be caught by reading
+        // this file. The poll's job is now to gather the inputs and perform
+        // the answer.
+        const decision = decideHostBroadcast({
+          prev,
+          now: { paused: nowPaused, sec: nowSec, atMs: Date.now() },
+          authoritative: hostConvergedRef.current,
+          latchingAuthority: !hostConvergedRef.current,
+          partyIsPlaying: party.isPlaying,
+          partyTargetAbsSec: partyAbsSec(),
+          loadInFlight: castLoadsInFlightRef.current > 0,
+          episodeMismatch: isPartyEpisodeMismatch(
+            partySyncRef.current?.partyEpisodeId, target.episodeId,
+          ),
+          anchorUnknown: false, // narrowed above; castStartSec is non-null here
+          correctionSettling: Date.now() < hostCorrectionUntilMsRef.current,
+          intentEchoPending: Date.now() < hostIntentEchoUntilMsRef.current,
+          pausedScrubToleranceSec: HOST_PAUSED_SCRUB_TOLERANCE_SEC,
+          seekJumpToleranceSec: HOST_SEEK_JUMP_TOLERANCE_SEC,
+        })
 
-        // Authoritative. When we got here by spending the budget rather than
-        // by converging, latch it (so the phase check above stops re-deciding
-        // every poll) and drop the warm-up-era snapshot, whose position the
-        // comparisons below would otherwise read as a scrub.
+        if (decision.baseline === 'record') snapshotNow()
+        else if (decision.baseline === 'clear') hostLastSnapshotRef.current = null
+
+        switch (decision.broadcast.kind) {
+          case 'none':
+            break
+          case 'pause-at-receiver':
+            party.requestPause(castSecToAbsMs(nowSec))
+            break
+          case 'pause-at-party': {
+            const t = partyAbsSec()
+            if (t !== null) party.requestPause(Math.round(t * 1000))
+            hostIntentEchoUntilMsRef.current = Date.now() + HOST_INTENT_ECHO_MS
+            break
+          }
+          case 'play':
+            party.requestPlay()
+            if (!hostConvergedRef.current) {
+              hostIntentEchoUntilMsRef.current = Date.now() + HOST_INTENT_ECHO_MS
+            }
+            break
+          case 'seek-then-play':
+            party.requestSeek(castSecToAbsMs(nowSec))
+            party.requestPlay()
+            break
+          case 'pause-rescrub':
+            party.requestPause(castSecToAbsMs(nowSec))
+            break
+          case 'seek':
+            party.requestSeek(castSecToAbsMs(nowSec))
+            break
+        }
+
+        // Warm-up bookkeeping the decision does not own: convergence, and the
+        // party→receiver mirror that pulls the TV toward the room.
         if (!hostConvergedRef.current) {
-          hostConvergedRef.current = true
-          // Read the transition BEFORE discarding the baseline. This is the
-          // poll where an expired budget hands authority to a receiver that
-          // never arrived, and the warm-up's own pause arm no longer runs — so
-          // a host who pressed pause on the TV in the last second of the
-          // warm-up would otherwise have it dropped unread, and the room would
-          // play on with no later transition to detect (a paused receiver does
-          // not move, so the position arm never fires either).
-          if (prev && prev.paused !== nowPaused) {
-            snapshotNow()
-            if (nowPaused) {
-              party.requestPause(castSecToAbsMs(nowSec))
+          if (castHostPhase(
+            false, hostWarmupStartedAtMsRef.current, Date.now(), HOST_WARMUP_BUDGET_MS,
+          ) !== 'warmup') {
+            // Budget spent. The decision already read any transition off the
+            // final warm-up baseline above.
+            hostConvergedRef.current = true
+            return
+          }
+          if (decision.broadcast.kind !== 'none') return
+          const targetAbsSec = partyAbsSec()
+          if (targetAbsSec === null || castLoadsInFlightRef.current > 0) return
+          if (Date.now() >= hostIntentEchoUntilMsRef.current &&
+              castPlayPauseMismatch(party.isPlaying, nowPaused)) {
+            if (nowPaused && isCastTokenExpired()) {
+              reloadCastAtAbsSec(targetAbsSec)
             } else {
-              // The mirror image, and just as permanent: with the warm-up over
-              // there is no later transition to find, and the position arm
-              // sees only natural progression, so a play dropped here leaves
-              // the room paused and the host's TV running until they pause and
-              // unpause the TV by hand.
-              party.requestPlay()
+              castRef.current.playOrPause()
             }
             return
           }
-          hostLastSnapshotRef.current = null
-          return
-        }
-
-        // First sample after (re)connect — nothing to compare against yet.
-        // Avoids broadcasting a spurious event off the transient state
-        // between loadMedia() resolving and the receiver reaching the
-        // requested startTime.
-        if (!prev) { snapshotNow(); return }
-        // A correction we issued is still landing, so its POSITION change is
-        // ours, not the user's; reading it as a scrub would broadcast a seek
-        // to the position we just chose — harmless when it matches the party,
-        // wrong the moment it doesn't quite.
-        //
-        // A corrective seek cannot change whether the receiver is PAUSED, so
-        // the suppression applies to position comparisons only. Pause/play
-        // transitions are read normally — swallowing them here is what lost a
-        // host's pause on the headline path (cast mid-party, converge, pause
-        // the TV within the settle window, room plays on).
-        const correctionSettling = Date.now() < hostCorrectionUntilMsRef.current
-
-        if (nowPaused !== prev.paused) {
-          snapshotNow()
-          if (nowPaused) {
-            party.requestPause(castSecToAbsMs(nowSec))
-          } else {
-            // 2026-08 review fix — the receiver may have been scrubbed WHILE
-            // paused (TV remote, another Cast app): correct the server's
-            // position before resuming, or the party resumes from the old
-            // pre-scrub spot instead of where the host's TV actually is.
-            if (Math.abs(nowSec - prev.sec) > HOST_PAUSED_SCRUB_TOLERANCE_SEC) {
-              party.requestSeek(castSecToAbsMs(nowSec))
-            }
-            party.requestPlay()
+          if (correctReceiverToward(targetAbsSec, nowSec, castStartSec) === 'converged') {
+            hostConvergedRef.current = true
+            hostLastSnapshotRef.current = null
           }
-          return
-        }
-        if (correctionSettling) return
-        snapshotNow()
-        if (nowPaused) {
-          // Still paused. A position change here is, again, only possible via
-          // a direct scrub — re-broadcast the pause with the corrected
-          // position so a later resume starts from the right spot even if
-          // the user never presses play again before checking back in.
-          if (Math.abs(nowSec - prev.sec) > HOST_PAUSED_SCRUB_TOLERANCE_SEC) {
-            party.requestPause(castSecToAbsMs(nowSec))
-          }
-          return
-        }
-        // A jump bigger than natural playback progression over this poll
-        // window means the user (via our widget) or the TV remote scrubbed
-        // the receiver directly.
-        const elapsedSec = (Date.now() - prev.atMs) / 1000
-        if (isCastHostSeekJump(nowSec, prev.sec, elapsedSec, HOST_SEEK_JUMP_TOLERANCE_SEC)) {
-          party.requestSeek(castSecToAbsMs(nowSec))
         }
       }, HOST_POLL_MS)
       return () => window.clearInterval(id)

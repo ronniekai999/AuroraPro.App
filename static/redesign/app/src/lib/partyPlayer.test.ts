@@ -5,6 +5,8 @@ import {
   castPlayPauseMismatch,
   castReanchorBudgetAfter,
   castResyncAction,
+  decideHostBroadcast,
+  type HostBroadcastInput,
   castTargetBeforeAnchor,
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
@@ -785,5 +787,180 @@ describe('castResyncAction: the two escalations are budgeted separately', () => 
       reanchorAllowed: false, unreachableReanchorAllowed: true,
     })
     expect(d.action).toBe('seek')
+  })
+})
+
+describe('decideHostBroadcast', () => {
+  const now = { paused: false, sec: 100, atMs: 10_000 }
+  const playing = { paused: false, sec: 99, atMs: 9_000 }
+  const paused = { paused: true, sec: 99, atMs: 9_000 }
+  const base = {
+    prev: playing,
+    now,
+    authoritative: true,
+    latchingAuthority: false,
+    partyIsPlaying: true,
+    partyTargetAbsSec: 100,
+    loadInFlight: false,
+    episodeMismatch: false,
+    anchorUnknown: false,
+    correctionSettling: false,
+    intentEchoPending: false,
+    pausedScrubToleranceSec: 1,
+    seekJumpToleranceSec: 3,
+  }
+
+  // THE invariant. Four review rounds broke it in four different places: a
+  // guard that declines to act must leave the pre-guard baseline standing, or
+  // the transition it was protecting is destroyed rather than deferred.
+  //
+  // Note which guards are TOTAL and which are not. `correctionSettling` is
+  // deliberately absent: it suppresses POSITION comparisons only, because a
+  // corrective seek cannot change whether the receiver is paused — extending
+  // it over pause/play is what lost a host's pause on the headline path, and
+  // it has its own test below. Stating that difference here rather than
+  // assuming it uniform is the point of the table.
+  describe('every TOTAL guard keeps the baseline', () => {
+    const guards: Array<[string, Partial<HostBroadcastInput>]> = [
+      ['unknown anchor', { anchorUnknown: true }],
+      ['load in flight', { loadInFlight: true }],
+      ['episode mismatch', { episodeMismatch: true }],
+      ['warm-up with no usable party clock', { authoritative: false, partyTargetAbsSec: null }],
+    ]
+    for (const [name, patch] of guards) {
+      it(`${name}: a host pause made during it survives to be broadcast later`, () => {
+        // The host pauses the TV while the guard is up.
+        const guarded = decideHostBroadcast({
+          ...base, ...patch, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 },
+        })
+        expect(guarded.broadcast.kind).toBe('none')
+        expect(guarded.baseline).toBe('keep')
+
+        // The guard lifts on the next poll. Because the baseline was KEPT, the
+        // transition is still there to find.
+        const after = decideHostBroadcast({
+          ...base, prev: playing, now: { paused: true, sec: 100, atMs: 11_000 },
+        })
+        expect(after.broadcast.kind).toBe('pause-at-receiver')
+      })
+    }
+  })
+
+  it('is silent on the first sample after a (re)connect', () => {
+    const d = decideHostBroadcast({ ...base, prev: null })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('broadcasts a pause the host makes on the TV', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('pause-at-receiver')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('corrects the position first when the TV was scrubbed while paused', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: false, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('seek-then-play')
+  })
+
+  it('just resumes when a paused TV was not scrubbed', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: false, sec: 99.2, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('play')
+  })
+
+  it('re-states a paused party position after a scrub on the TV', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: true, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('pause-rescrub')
+  })
+
+  it('reads a jump bigger than playback progression as a scrub', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('seek')
+  })
+
+  it('does not read natural progression as a scrub', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: false, sec: 100, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('reads pause/play through the correction window, but not position', () => {
+    // A corrective seek cannot change whether the receiver is paused, so
+    // suppressing pause/play there is what lost a host's pause on the
+    // headline path.
+    const pause = decideHostBroadcast({
+      ...base, correctionSettling: true, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 },
+    })
+    expect(pause.broadcast.kind).toBe('pause-at-receiver')
+    const jump = decideHostBroadcast({
+      ...base, correctionSettling: true, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 },
+    })
+    expect(jump.broadcast.kind).toBe('none')
+    expect(jump.baseline).toBe('keep')
+  })
+
+  describe('warm-up', () => {
+    const warm = { ...base, authoritative: false }
+
+    it('broadcasts nothing about position', () => {
+      // The whole point of the phase: the TV is behind the room and must not
+      // say where the room is.
+      const d = decideHostBroadcast({ ...warm, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('none')
+    })
+
+    it('honours a pause the host makes on the TV, at the PARTY position', () => {
+      const d = decideHostBroadcast({ ...warm, prev: playing, now: { paused: true, sec: 40, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('pause-at-party')
+    })
+
+    it('does not pause a room that is already paused', () => {
+      // The server's pause handler is not a no-op — it rewrites the anchor,
+      // bumps the revision and broadcasts to every peer.
+      const d = decideHostBroadcast({
+        ...warm, partyIsPlaying: false, prev: playing, now: { paused: true, sec: 40, atMs: 10_000 },
+      })
+      expect(d.broadcast.kind).toBe('none')
+    })
+
+    it('honours a play the host makes on the TV', () => {
+      // Reachable whenever a cast starts into a paused room: the receiver
+      // autoplays, the mirror pauses it, and the host presses play.
+      const d = decideHostBroadcast({ ...warm, prev: paused, now: { paused: false, sec: 40, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('play')
+    })
+  })
+
+  describe('taking authority on an expired warm-up budget', () => {
+    const latch = { ...base, authoritative: true, latchingAuthority: true }
+
+    it('reads a pause from the last warm-up poll before dropping the baseline', () => {
+      const d = decideHostBroadcast({ ...latch, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('pause-at-receiver')
+      expect(d.baseline).toBe('record')
+    })
+
+    it('reads a play the same way — the mirror image is just as permanent', () => {
+      const d = decideHostBroadcast({ ...latch, prev: paused, now: { paused: false, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('play')
+    })
+
+    it('otherwise starts clean, with no pre-correction baseline', () => {
+      const d = decideHostBroadcast({ ...latch, prev: playing, now: { paused: false, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('none')
+      expect(d.baseline).toBe('clear')
+    })
+  })
+
+  it('guards win over the arms, in order', () => {
+    // A load in flight during an episode mismatch on an unknown anchor is
+    // still just "do nothing, keep the baseline" — no arm can fire past a
+    // guard however the flags combine.
+    const d = decideHostBroadcast({
+      ...base, anchorUnknown: true, loadInFlight: true, episodeMismatch: true,
+      prev: playing, now: { paused: true, sec: 300, atMs: 10_000 },
+    })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('keep')
   })
 })

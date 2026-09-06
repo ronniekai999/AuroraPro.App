@@ -780,3 +780,173 @@ export function resolvePlaybackBootPause(
   }
   return capturedPreservePause
 }
+
+// ──────────────────────────────────────────────────────────────────
+// The casting host's broadcast decision (2026-09, ninth review).
+//
+// This is the one decision in the cast path that has been got wrong in four
+// consecutive review rounds, always the same way: a guard added to stop the
+// host broadcasting something it should not, placed where control still fell
+// through to the code that records the next comparison baseline — which
+// destroys the very transition the guard was protecting instead of deferring
+// it. A host's pause is then lost rather than delayed, and a paused receiver
+// never moves, so no later poll finds anything to broadcast.
+//
+// It lives here, as data in and data out, because that failure is mechanically
+// checkable and was never going to be caught by reading a 6,975-line
+// component. Every guard's effect on the baseline is now stated in one place
+// and pinned by a table.
+
+/** One poll's reading of the receiver, on the RECEIVER's clock. */
+export interface CastReceiverSample {
+  paused: boolean
+  sec: number
+  atMs: number
+}
+
+export type HostBroadcast =
+  | { kind: 'none' }
+  /** Pause the party at the receiver's position. */
+  | { kind: 'pause-at-receiver' }
+  /** Pause the party where the PARTY already is (warm-up: our TV is not truth yet). */
+  | { kind: 'pause-at-party' }
+  | { kind: 'play' }
+  /** Correct the party's position to the receiver's, then resume. */
+  | { kind: 'seek-then-play' }
+  /** Re-state a paused party's position after a scrub on the TV. */
+  | { kind: 'pause-rescrub' }
+  /** The receiver was scrubbed while playing. */
+  | { kind: 'seek' }
+
+/**
+ * What to do with `hostLastSnapshotRef` after this poll.
+ *
+ * `keep` is the one that matters: a guard that declines to act must leave the
+ * PRE-guard baseline standing, so the comparison happens once the guard lifts.
+ * `record` belongs only to paths that consumed the reading.
+ */
+export type HostBaselineDisposition = 'keep' | 'record' | 'clear'
+
+export interface HostBroadcastDecision {
+  broadcast: HostBroadcast
+  baseline: HostBaselineDisposition
+}
+
+export interface HostBroadcastInput {
+  prev: CastReceiverSample | null
+  now: CastReceiverSample
+  /** False until the receiver has reached the party (castHostPhase). */
+  authoritative: boolean
+  /** True on the poll that takes authority by spending the warm-up budget. */
+  latchingAuthority: boolean
+  partyIsPlaying: boolean
+  /** Null when the party's position cannot be trusted (stale tick, no tick). */
+  partyTargetAbsSec: number | null
+  /** One of our own loads is between issued and resolved. */
+  loadInFlight: boolean
+  /** The party has moved to an episode this player has not caught up to. */
+  episodeMismatch: boolean
+  /** The cast session's anchor is unknown, so no conversion is honest. */
+  anchorUnknown: boolean
+  /** A corrective seek we issued is still landing. */
+  correctionSettling: boolean
+  /** A play/pause we just sent has not been echoed by the server yet. */
+  intentEchoPending: boolean
+  pausedScrubToleranceSec: number
+  seekJumpToleranceSec: number
+}
+
+/**
+ * Decide what a casting host tells the party this poll, and what happens to
+ * the baseline.
+ *
+ * Order is load-bearing. The guards come first and all `keep`; the arms that
+ * consume `prev` come after and all `record`. Anything that returns without
+ * looking at `prev` must not touch it.
+ */
+export function decideHostBroadcast(input: HostBroadcastInput): HostBroadcastDecision {
+  const {
+    prev, now, authoritative, latchingAuthority, partyIsPlaying, partyTargetAbsSec,
+    loadInFlight, episodeMismatch, anchorUnknown, correctionSettling, intentEchoPending,
+    pausedScrubToleranceSec, seekJumpToleranceSec,
+  } = input
+
+  // ── Guards. Every one keeps the baseline. ──
+  // No honest conversion between the two clocks exists.
+  if (anchorUnknown) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+  // The receiver's state is ours, not the user's, and the seed that says so
+  // does not land until the load resolves.
+  if (loadInFlight) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+  // The two sides are on different episodes; a position means nothing across
+  // that boundary.
+  if (episodeMismatch) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+
+  // ── Warm-up: the TV is not the party's position yet. ──
+  if (!authoritative) {
+    // Nothing to converge on and nothing that makes the TV more trustworthy
+    // than the party.
+    if (partyTargetAbsSec === null) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+    // A deliberate play/pause on the TV is honoured even here — the mirror
+    // would otherwise undo the host's own button — but at the PARTY's
+    // position, never the TV's, because we have not converged.
+    if (prev && prev.paused !== now.paused) {
+      if (now.paused) {
+        // An already-paused room needs no pause: the server's handler is not
+        // a no-op (it rewrites the anchor, bumps the revision, broadcasts).
+        return {
+          broadcast: partyIsPlaying ? { kind: 'pause-at-party' } : { kind: 'none' },
+          baseline: 'record',
+        }
+      }
+      return { broadcast: { kind: 'play' }, baseline: 'record' }
+    }
+    // Our own request has not round-tripped, so the mirror would read stale
+    // party state as a disagreement and undo it.
+    if (intentEchoPending) return { broadcast: { kind: 'none' }, baseline: 'record' }
+    return { broadcast: { kind: 'none' }, baseline: 'record' }
+  }
+
+  // ── Taking authority by spending the budget. ──
+  // Read the transition BEFORE discarding the warm-up baseline: past this
+  // poll the warm-up arm no longer runs and no later transition exists.
+  if (latchingAuthority) {
+    if (prev && prev.paused !== now.paused) {
+      return {
+        broadcast: now.paused ? { kind: 'pause-at-receiver' } : { kind: 'play' },
+        baseline: 'record',
+      }
+    }
+    return { broadcast: { kind: 'none' }, baseline: 'clear' }
+  }
+
+  // ── Authoritative: the TV speaks for the party. ──
+  if (!prev) return { broadcast: { kind: 'none' }, baseline: 'record' }
+
+  // A corrective seek cannot change whether the receiver is PAUSED, so the
+  // suppression below applies to POSITION only and this arm runs regardless.
+  if (prev.paused !== now.paused) {
+    if (now.paused) return { broadcast: { kind: 'pause-at-receiver' }, baseline: 'record' }
+    // Scrubbed while paused (TV remote, another Cast app): correct the party's
+    // position before resuming, or it resumes from the pre-scrub spot.
+    const scrubbed = Math.abs(now.sec - prev.sec) > pausedScrubToleranceSec
+    return {
+      broadcast: scrubbed ? { kind: 'seek-then-play' } : { kind: 'play' },
+      baseline: 'record',
+    }
+  }
+
+  if (correctionSettling) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+
+  if (now.paused) {
+    // Still paused, so any movement is a direct scrub.
+    const scrubbed = Math.abs(now.sec - prev.sec) > pausedScrubToleranceSec
+    return {
+      broadcast: scrubbed ? { kind: 'pause-rescrub' } : { kind: 'none' },
+      baseline: 'record',
+    }
+  }
+
+  const elapsedSec = (now.atMs - prev.atMs) / 1000
+  const jumped = isCastHostSeekJump(now.sec, prev.sec, elapsedSec, seekJumpToleranceSec)
+  return { broadcast: jumped ? { kind: 'seek' } : { kind: 'none' }, baseline: 'record' }
+}
