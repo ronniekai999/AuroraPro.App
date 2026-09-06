@@ -431,8 +431,9 @@ Invariants to preserve when touching this area:
   defaulting to it silently claims the receiver's clock is absolute. After a
   page reload re-joins a live cast — routine, the box auto-deploys — that
   understates by the clone's whole anchor and, for a host, broadcasts it.
-  Both sync branches bail on null; the two display sites fall back to the raw
-  receiver reading with an explicit `??` so the guess is visible.
+  Both sync branches bail on null; the display surfaces (the expanded
+  transport bar and the minimized widget) fall back to the raw receiver
+  reading with an explicit `??` so the guess is visible.
 - **`?at=` is a hint, not a contract.** An absent or unparseable value means
   "no preference" and restores the inherit-the-source behaviour; it never fails
   the mint. `for_airplay=true` still skips cloning entirely (#326).
@@ -464,11 +465,16 @@ Invariants to preserve when touching this area:
   is SHARING the local session — `CloneForCast` returns that session
   unchanged, so a re-anchor there mints a new token for the same anchor and
   the visible reload accomplishes nothing. The cap bounds ONE episode of
-  divergence, not the whole title: a genuine arrival replenishes it, because
-  a guest has no other replenishment path (`seekToRealSec` refuses guests and
-  their local session is never rebuilt during a cast), so without it three
-  host rewinds past the anchor would strand every guest's TV for the rest of
-  the film with nothing surfaced.
+  divergence, not the whole title: a SUSTAINED run of in-tolerance polls
+  replenishes it (`castReanchorBudgetAfter`), because a guest has no other
+  replenishment path (`seekToRealSec` refuses guests and their local session
+  is never rebuilt during a cast), so without it three host rewinds past the
+  anchor would strand every guest's TV for the rest of the film with nothing
+  surfaced. The run length is load-bearing: a re-anchor loads the receiver AT
+  the party position, so the FIRST poll after it lands is in tolerance almost
+  by construction, and refunding on that one poll would let a receiver that
+  stalls a few seconds after every load re-anchor every 6-8s for the whole
+  title — against the very server whose slowness caused the stall.
 - **Per-title cast state is reset on TARGET IDENTITY, not on the auto-advance
   path.** `castAdvancePendingRef` is set only by end-of-media and by a
   seek-while-casting, so a PARTY media-change bumps `castReloadEpoch` and the
@@ -483,11 +489,19 @@ Invariants to preserve when touching this area:
   nowhere near the room, at exactly the moment the warm-up exists to prevent
   that.
 - **The party clock is read through `isPartyEpisodeMismatch`, not just
-  `partyControlsMedia`.** The latter is SERIES-level for a TV show, so during
-  the seconds between a `media-change` and App resolving the new target it
-  reads true across two different episodes. Anchoring a clone from the wrong
+  `partyControlsMedia`, and through `partySyncRef` rather than the captured
+  `party` prop.** The former is SERIES-level for a TV show, so during the
+  seconds between a `media-change` and App resolving the new target it reads
+  true across two different episodes; anchoring a clone from the wrong
   episode's clock puts its `-ss` somewhere arbitrary in the new file — past
-  EOF if the new episode is shorter, which is the silent hang again.
+  EOF if the new episode is shorter, which is the silent hang again. The
+  latter is the trap the local drift loop already documents: `partyEpisodeId`
+  is deliberately NOT in the sync effect's dep array, so a room-socket
+  reconnect that patches it without moving isHost/isPlaying/partyMediaItemId
+  leaves a captured value stale and the guard silently fails. The
+  AUTHORITATIVE host needs its own copy of this check — it never calls
+  `partyAbsSec`, so nothing else would stop it broadcasting the old episode's
+  position into the new episode's room.
 - **`loadCurrent`/`castLoadGetter` take ABSOLUTE source seconds.** The old
   receiver-relative `startTimeSec` override only worked while every cast
   session shared the local player's anchor. Keep the one conversion in the
