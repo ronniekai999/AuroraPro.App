@@ -4772,15 +4772,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             break
         }
 
-        // Latching authority when the budget expired unconverged. The
-        // decision above has already read any transition off the final
-        // warm-up baseline, so this only records the phase change.
+        // Latching authority when the budget expired unconverged — but only
+        // on a poll the decision actually EVALUATED. A guard ('keep') means it
+        // declined to look at `prev` at all, and before the extraction those
+        // guards returned above this point. Latching on one spends
+        // `latchingAuthority` without ever performing the transition read and
+        // baseline clear that make it meaningful, leaving a pre-correction
+        // snapshot standing for the authoritative arms to read as a scrub.
         //
         // Nothing else belongs here: the warm-up mirror and the convergence
         // promotion live inline above, and a second copy beside the state
         // machine that has broken repeatedly would be a place for a future
         // fix to land with no effect and full test coverage.
-        hostConvergedRef.current = true
+        if (decision.baseline !== 'keep') hostConvergedRef.current = true
       }, HOST_POLL_MS)
       return () => window.clearInterval(id)
     }

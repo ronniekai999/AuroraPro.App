@@ -654,6 +654,29 @@ Known limits, stated plainly:
   nothing, i.e. the silent hang. Self-limiting (it costs that caller their own
   cast), and the episode-mismatch guard closes the one path that reached it by
   accident, but it is a guard the server does not have.
+- **An OMITTED `start_sec` is the one place the sender still guesses an
+  anchor.** It falls back to the local session's, which was right when the
+  server always inherited `src.StartSec` and is wrong now that every clone is
+  re-anchored near the sender: a host would then compute `startTime` as the
+  whole playhead against a clone anchored a pad behind it (the #172 hang) and
+  broadcast ~0 as the party's position. Reachable only if the just-created
+  clone vanishes before the handler reads it back. Treating a missing field as
+  UNKNOWN — the discipline `castStartSecRef` applies everywhere else — is the
+  consistent fix and is not built.
+- **`anchorUnknown` is an input `decideHostBroadcast`'s only caller can set
+  just one way** (the poll narrows the anchor to non-null before calling). Its
+  guard is therefore unreachable from production while two tests pin it — the
+  same shape as the `authoritative` input whose removal this section warns
+  about. Inert, because the caller's own early return covers it, but it should
+  go the same way.
+- **The warm-up mirror's own command reads as the user's one poll later.**
+  The baseline is recorded before `playOrPause()` is issued, so the next poll
+  sees a transition. Harmless in the common case (`HandleRequestPlay`
+  short-circuits on an already-running party), but if the party transitions to
+  playing inside that ~1s window — a scheduled auto-start — our own mirror
+  pause is read as the host pausing the TV and stops a room that just began.
+  Arming the intent-echo suppression from the mirror itself would close it;
+  today only the transition arm arms it, which is the wrong half.
 - **The unknown-anchor state stops corrections rather than recovering them.**
   A page reload that re-joins a live cast leaves `castStartSecRef` null, and
   both sync branches (plus the ±10s controls) then decline to act rather than

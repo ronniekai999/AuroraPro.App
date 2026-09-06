@@ -952,17 +952,13 @@ describe('decideHostBroadcast: the latch poll as the component actually calls it
     seekJumpToleranceSec: 3,
   }
 
+  // Note there is no partyIsPlaying input on this path by design: the TV's
+  // position has to reach the room even when the room is already stopped.
   it('broadcasts the RECEIVER position, not the party position', () => {
     // The room and the TV are apart — that is why the budget expired — and the
     // latch is where the TV becomes the truth. Broadcasting the party's own
     // position here would leave them apart permanently, since an authoritative
     // host never corrects itself.
     expect(decideHostBroadcast(latch).broadcast).toEqual({ kind: 'pause-at-receiver' })
-  })
-
-  it('broadcasts it regardless of whether the room is already paused', () => {
-    // There is no partyIsPlaying input on this path by design: the TV's
-    // position has to reach the room even when the room is already stopped.
-    expect(decideHostBroadcast(latch).broadcast.kind).toBe('pause-at-receiver')
   })
 })
