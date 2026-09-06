@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
+  castAbsToReceiverSec,
+  castHostPhase,
   castPlayPauseMismatch,
+  castResyncAction,
+  castTargetBeforeAnchor,
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
   levelLagsPlayhead,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
+  partyTargetAbsSec,
   pauseIntentForReplacementSeek,
   partyPlayerAutoOpenKey,
   partyPlayerDismissalKeyOnClose,
@@ -459,5 +464,196 @@ describe('Chromecast receiver-driven party sync (issue #461)', () => {
     it('resyncs when the receiver is far behind', () => {
       expect(shouldResyncCastReceiver(90, 100, 2)).toBe(true)
     })
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────
+// Casting mid-party (2026-09).
+//
+// Three things had to change for "someone casts, nobody else notices, the
+// cast joins the timeline" to hold: cast sessions can now be anchored
+// independently of the local player's, a host does not speak for the party
+// until its receiver has actually arrived, and a correction that cannot land
+// escalates past a seek instead of repeating forever.
+
+describe('cast session anchoring', () => {
+  describe('castAbsToReceiverSec', () => {
+    it('subtracts the CAST anchor, not the local one', () => {
+      // A clone anchored at 2385 while the local session still starts at 0:
+      // 40 minutes in, the receiver is 15s into its own timeline.
+      expect(castAbsToReceiverSec(2400, 2385)).toBe(15)
+    })
+    it('is the identity for an unanchored session', () => {
+      expect(castAbsToReceiverSec(2400, 0)).toBe(2400)
+    })
+    it('floors below the anchor rather than going negative', () => {
+      expect(castAbsToReceiverSec(100, 2385)).toBe(0)
+    })
+    it('treats a nonsense negative anchor as zero', () => {
+      expect(castAbsToReceiverSec(100, -50)).toBe(100)
+    })
+  })
+
+  describe('castTargetBeforeAnchor', () => {
+    it('is false for a target inside the session', () => {
+      expect(castTargetBeforeAnchor(2400, 2385)).toBe(false)
+    })
+    it('is true for a target the session can never reach', () => {
+      expect(castTargetBeforeAnchor(100, 2385)).toBe(true)
+    })
+    it('tolerates sub-second noise at the boundary', () => {
+      // Not worth re-anchoring a whole cast session over rounding.
+      expect(castTargetBeforeAnchor(2384.5, 2385)).toBe(false)
+    })
+    it('is false for any target when the session is unanchored', () => {
+      expect(castTargetBeforeAnchor(0, 0)).toBe(false)
+    })
+  })
+})
+
+describe('castResyncAction (closing the cast correction dead ends)', () => {
+  const base = {
+    receiverSec: 100,
+    targetAbsSec: 100,
+    castStartSec: 0,
+    toleranceSec: 2,
+    stuckToleranceSec: 6,
+    stuckPolls: 0,
+    reanchorAfterPolls: 5,
+    reanchorAllowed: true,
+  }
+
+  it('does nothing while the receiver is within tolerance', () => {
+    const d = castResyncAction({ ...base, receiverSec: 101 })
+    expect(d.action).toBe('none')
+    expect(d.stuck).toBe(false)
+  })
+
+  it('seeks for ordinary drift', () => {
+    const d = castResyncAction({ ...base, receiverSec: 97 })
+    expect(d.action).toBe('seek')
+    expect(d.targetRecvSec).toBe(100)
+  })
+
+  it('targets the RECEIVER clock, not the absolute one', () => {
+    const d = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 2400, castStartSec: 2385 })
+    expect(d.action).toBe('seek')
+    expect(d.targetRecvSec).toBe(15)
+  })
+
+  it('re-anchors immediately for a target before the session anchor', () => {
+    // The dead end: absMsToCastSec floors here, so the correction ladder
+    // would aim at the anchor forever while the party sits earlier.
+    const d = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385 })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('does nothing rather than seek uselessly when the budget is spent', () => {
+    const d = castResyncAction({
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385, reanchorAllowed: false,
+    })
+    // A seek to the floored target would just re-pin the receiver at the
+    // anchor it is already stuck on.
+    expect(d.action).toBe('none')
+  })
+
+  it('does not count an ordinary correction as stuck', () => {
+    // Command latency plus a target that keeps advancing leaves a WORKING
+    // correction out of tolerance for a poll or two. Counting those would
+    // re-anchor healthy casts every few seconds.
+    const d = castResyncAction({ ...base, receiverSec: 97 })
+    expect(d.stuck).toBe(false)
+  })
+
+  it('counts a receiver nowhere near the target as stuck', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40 })
+    expect(d.stuck).toBe(true)
+    expect(d.action).toBe('seek') // not yet — the streak has to build
+  })
+
+  it('escalates to a re-anchor once the stuck streak completes', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40, stuckPolls: 4 })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('never escalates on a streak of merely-drifting polls', () => {
+    // stuckPolls can only have been raised by genuinely stuck readings, but
+    // pin the pairing: a poll inside stuckToleranceSec stays a seek however
+    // long the streak.
+    const d = castResyncAction({ ...base, receiverSec: 97, stuckPolls: 99 })
+    expect(d.action).toBe('seek')
+    expect(d.stuck).toBe(false)
+  })
+
+  it('falls back to seeking when the re-anchor budget is spent', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40, stuckPolls: 9, reanchorAllowed: false })
+    expect(d.action).toBe('seek')
+  })
+})
+
+describe('castHostPhase (a casting host does not start out authoritative)', () => {
+  it('starts in warm-up', () => {
+    expect(castHostPhase(false, 1_000, 1_000, 12_000)).toBe('warmup')
+  })
+  it('becomes authoritative the moment the receiver converges', () => {
+    expect(castHostPhase(true, 1_000, 1_100, 12_000)).toBe('authoritative')
+  })
+  it('stays in warm-up while the budget has time left', () => {
+    expect(castHostPhase(false, 1_000, 12_999, 12_000)).toBe('warmup')
+  })
+  it('takes authority anyway once the budget is spent', () => {
+    // A receiver that never arrives must not leave the host permanently
+    // unable to pause the room from their own TV.
+    expect(castHostPhase(false, 1_000, 13_000, 12_000)).toBe('authoritative')
+  })
+  it('a converged host is never sent back to warm-up by the clock', () => {
+    expect(castHostPhase(true, 1_000, 1_001, 12_000)).toBe('authoritative')
+  })
+})
+
+describe('partyTargetAbsSec', () => {
+  // Emitted and received at the same instant on a shared clock, so elapsed
+  // time is simply `now - 5_000`.
+  const running = { abs_ms: 600_000, server_now_ms: 5_000, running: true, receivedAtMs: 5_000 }
+
+  it('projects a running party forward by elapsed time', () => {
+    // 2s since the tick was emitted and received.
+    expect(partyTargetAbsSec(running, true, 0, 7_000)).toBe((600_000 + 2_000) / 1000)
+  })
+
+  it('returns null when a running party tick has gone stale', () => {
+    // Free-run rather than seed a cast from a server that may have moved on.
+    expect(partyTargetAbsSec(running, true, 0, 9_001)).toBeNull()
+  })
+
+  it('reports a paused party exactly, however old the tick', () => {
+    // No tick loop runs while paused, so receivedAtMs ages without bound
+    // while abs_ms stays exactly right. Ageing this out would reject every
+    // paused party's true position.
+    const paused = { abs_ms: 600_000, server_now_ms: 5_000, running: false, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(paused, false, 0, 10_000_000)).toBe(600)
+  })
+
+  it('treats a party the client believes is paused as frozen too', () => {
+    // isPlaying is the client's own view of the canonical flag; a tick that
+    // still says running while the party has paused must not be projected.
+    expect(partyTargetAbsSec(running, false, 0, 10_000_000)).toBe(600)
+  })
+
+  it('returns null with no tick at all', () => {
+    expect(partyTargetAbsSec(null, true, 0, 1_000)).toBeNull()
+    expect(partyTargetAbsSec(undefined, true, 0, 1_000)).toBeNull()
+  })
+
+  it('applies the clock offset like the local drift loop does', () => {
+    // A client 500ms behind the server sees a correspondingly larger elapsed.
+    const withOffset = partyTargetAbsSec(running, true, 500, 7_000)
+    const withNone = partyTargetAbsSec(running, true, 0, 7_000)
+    expect(withOffset).toBeGreaterThan(withNone as number)
+  })
+
+  it('never returns a negative position', () => {
+    const weird = { abs_ms: -1, server_now_ms: 5_000, running: false, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(weird, false, 0, 6_000)).toBe(0)
   })
 })

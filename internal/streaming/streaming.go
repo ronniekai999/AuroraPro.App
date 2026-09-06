@@ -1012,7 +1012,8 @@ func CastRemuxNeedsTranscode(remux bool) bool {
 // (source video is non-H.264 remux, or the source session's output is
 // HEVC), Remux is disabled AND VideoCodecOut is forced to "h264" so FFmpeg
 // transcodes the video to H.264 — the only codec the Default Media
-// Receiver reliably supports over HLS.
+// Receiver reliably supports over HLS. StartSec is left zero for the caller
+// to fill in — see castCloneAnchorSec.
 func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode bool) SessionOpts {
 	opts := SessionOpts{
 		// A source session that already fell back to software decode reads
@@ -1036,7 +1037,10 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 		SourceVideoCodec:  src.SourceVideoCodec,
 		SourceVideoPixFmt: src.SourceVideoPixFmt,
 		SourceFPS:         src.SourceFPS,
-		StartSec:          src.StartSec,
+		// StartSec intentionally omitted: the clone's -ss anchor is the
+		// CALLER's decision (castCloneAnchorSec), because it depends on where
+		// the sender is rather than on anything about cast-safety. Setting a
+		// default here too would give the anchor two owners.
 		// SubtitleTracks intentionally omitted: the Chromecast Default Media
 		// Receiver (Shaka) stalls after loadMedia resolves when the master
 		// playlist declares a SUBTITLES rendition group (issue #328). The
@@ -1083,9 +1087,28 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 //     decoding (issue #328). A subtitle-free clone avoids this; castCloneOpts
 //     intentionally omits SubtitleTracks.
 //
-// The clone is owned by userID so cast-token access checks pass; it inherits
-// StartSec so the receiver's playlist-time domain matches the local player's.
-func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID string) (*TranscodeSession, error) {
+// The clone is owned by userID so cast-token access checks pass.
+//
+// atSec is where the SENDER is: the absolute source position the receiver is
+// about to be asked to play from, or a negative value for "no preference".
+// It exists because a clone is a brand-new FFmpeg, and the anchor it starts at
+// decides whether casting midstream works at all.
+//
+// The clone used to inherit src.StartSec unconditionally, on the reasoning
+// that a shared playlist-time domain is what makes the sender's
+// `startTime = vid.currentTime` arithmetic correct. The arithmetic was right
+// and the readiness was not: a viewer 40 minutes into a session anchored at 0
+// got a clone that also started at 0, pre-warmed at 0, paced at
+// readRateFactor× realtime — and was then asked to seek 40 minutes into a
+// playlist whose encoder had produced seconds. The receiver accepts that load
+// and buffers until the encoder catches up (~10 minutes at 4×), which is the
+// issue #172 shape: connected, never played, no sender-side error.
+//
+// So the clone is anchored near the sender instead, and the anchor it actually
+// got is returned to the sender (CreateCastToken's start_sec) rather than
+// assumed — the no-clone path below still shares the source's domain, and the
+// two must not be conflated.
+func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID string, atSec int) (*TranscodeSession, error) {
 	src, ok := tm.GetSession(sessionID)
 	if !ok || src == nil {
 		return nil, fmt.Errorf("session not found")
@@ -1108,6 +1131,7 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	disableHWDecode := src.swDecodeFallback
 	src.variantMu.Unlock()
 	cloneOpts := castCloneOpts(src, needsVideoTranscode, disableHWDecode)
+	cloneOpts.StartSec = castCloneAnchorSec(src.StartSec, atSec)
 	// Record where the clone came from so the admin surface can pair the two
 	// rows a cast produces (see TranscodeSession.castCloneOf). Carried through
 	// SessionOpts rather than stamped afterwards so the clone is never
@@ -1120,9 +1144,54 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	slog.Info("cast: created cast-safe clone of session for receiver compatibility",
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
 		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
-		"source_video_codec", src.SourceVideoCodec, "subtitle_tracks_dropped", needsSubsClone)
+		"source_video_codec", src.SourceVideoCodec, "subtitle_tracks_dropped", needsSubsClone,
+		"source_start_sec", src.StartSec, "requested_at_sec", atSec, "clone_start_sec", clone.StartSec)
 	return clone, nil
 }
+
+// castAnchorPadSec is how far BEFORE the sender's reported position a cast
+// clone is anchored.
+//
+// The direction is the whole point. A receiver can seek forward anywhere
+// inside what the clone has produced, but it can never reach a position before
+// the clone's own -ss anchor: the sender's abs→receiver mapping floors at zero
+// there, so a party that moves backward past the anchor becomes unreachable by
+// seeking (the same dead end needsBackwardSessionRebuild closes for the local
+// <video>). Anchoring slightly early buys real headroom for that; anchoring
+// late — biasing forward by a guess at cast-load latency — buys nothing and
+// creates the dead end on purpose whenever the guess overshoots.
+//
+// 15s is cheap because readRateInitialBurstSec is 30: the pad sits entirely
+// inside the unthrottled burst every launch gets, so the receiver waits on
+// disk, not on the encode-ahead cap.
+const castAnchorPadSec = 15
+
+// castCloneAnchorSec picks the -ss anchor for a cast clone. A negative atSec
+// means the caller expressed no preference and the clone inherits the source
+// session's anchor — the pre-2026-09 behaviour, kept for callers (and tests)
+// that only care about the codec/subtitle shape of the clone.
+func castCloneAnchorSec(srcStartSec, atSec int) int {
+	if atSec < 0 {
+		return srcStartSec
+	}
+	// The pad may not push the anchor negative, and a nonsensical far-future
+	// position must not spawn an FFmpeg seeking past the end of the file. The
+	// ceiling is deliberately generous rather than duration-derived: this is a
+	// self-limiting value (a wrong one costs the caller their own cast), and
+	// the session has no trustworthy duration to check against here.
+	if atSec > maxCastAnchorSec {
+		atSec = maxCastAnchorSec
+	}
+	anchor := atSec - castAnchorPadSec
+	if anchor < 0 {
+		return 0
+	}
+	return anchor
+}
+
+// maxCastAnchorSec caps a requested cast anchor at 24 hours. Nothing in the
+// library is longer, and it keeps a garbage value from reaching FFmpeg's -ss.
+const maxCastAnchorSec = 24 * 60 * 60
 
 // decideStatic is the backward-compatible fallback using static allowlists.
 func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDecision {

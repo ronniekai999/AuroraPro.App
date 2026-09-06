@@ -389,6 +389,89 @@ Known limits, stated plainly:
   and the message mapping are pinned only through the pure helpers extracted
   into `lib/cast.ts`.
 
+## Casting midstream, and casting during a watch party (September 2026)
+
+Casting from the middle of a title, and doing it in a party without moving
+anyone else. Code: `CloneForCast`/`castCloneAnchorSec`/`castAnchorPadSec`
+(`internal/streaming/streaming.go`), `CreateCastToken`'s `?at=` + `start_sec`
+(`internal/api/phase2_handlers.go`), `castStartSecRef` / `castStartAbsSec` /
+`correctReceiverToward` and the host warm-up in `VideoPlayer.tsx`,
+`castAbsToReceiverSec` / `castTargetBeforeAnchor` / `castResyncAction` /
+`castHostPhase` / `partyTargetAbsSec` in `lib/partyPlayer.ts`.
+
+Invariants to preserve when touching this area:
+
+- **A cast clone's `-ss` anchor follows the SENDER, not the source session.**
+  It used to inherit `src.StartSec`, which is correct arithmetic and useless
+  readiness: a viewer 40 minutes into a session anchored at 0 got a clone also
+  anchored at 0, pre-warmed at 0, paced at `readRateFactor`, and was then asked
+  to seek 40 minutes into it — ~10 minutes of encoder catch-up presenting as
+  #172's "connected, never played". Clones are the NORMAL path
+  (`CastRemuxNeedsTranscode` is true for every remux; any subtitle track
+  clones), so this was most casts, not an edge.
+- **The anchor is padded BACKWARD, never forward** (`castAnchorPadSec`). A
+  receiver seeks forward freely inside what its playlist has produced but can
+  never reach a position before its own anchor, so early costs 15s of encode
+  and late creates an unreachable region on purpose. The pad must stay inside
+  `readRateInitialBurstSec` or it stops being free —
+  `TestCastAnchorPadFitsInsideTheInitialBurst` is the guard.
+- **`start_sec` in the cast-token response is the ONLY conversion key.** The
+  shared-session path (no clone needed) reports the LOCAL session's anchor and
+  the cloned path reports the clone's; they differ, and the sender cannot infer
+  which it got. `castStartSecRef` — never `startSecRef` — is what every
+  abs↔receiver conversion subtracts, and it is promoted on a resolved
+  `loadMedia` like `castLoadedMediaRef`, because a mint that never loaded
+  describes a session the receiver is not on.
+- **`?at=` is a hint, not a contract.** An absent or unparseable value means
+  "no preference" and restores the inherit-the-source behaviour; it never fails
+  the mint. `for_airplay=true` still skips cloning entirely (#326).
+- **A casting HOST is not the party's position until its receiver arrives**
+  (`castHostPhase`). A cast takes seconds to connect, load and buffer while the
+  party clock keeps running, so the host opens in a warm-up phase that behaves
+  like a guest — pulling the receiver toward the party, broadcasting nothing —
+  and only then becomes authoritative. The wait is BOUNDED
+  (`HOST_WARMUP_BUDGET_MS`): a receiver that never converges must not leave the
+  host unable to pause their own room from the TV. Warm-up with no usable tick
+  stays silent rather than falling through to broadcasting — `useParty` buffers
+  a pending intent across a socket outage and delivers it on reconnect, so a
+  position read during one would land on every guest afterwards.
+- **The host's own corrective seeks are not scrubs.** `hostCorrectionUntilMsRef`
+  suppresses the jump detector across the window one takes to land, and the
+  warm-up→authoritative transition drops `hostLastSnapshotRef` so the first
+  authoritative poll has no pre-correction baseline to compare against. Same
+  shape as the local loop's `applyingRemoteUntilRef`, same reason.
+- **A correction that cannot land escalates** (`castResyncAction`). A target
+  before the cast anchor is unreachable by arithmetic and re-anchors at once;
+  one past the receiver's produced edge is invisible to the sender and is
+  inferred from consecutive nowhere-near polls. The stuck test is deliberately
+  coarser than the seek test — the party's target advances while a seek takes
+  ~a second to reach a TV, so a WORKING correction reads out-of-tolerance for a
+  poll or two and counting those would re-anchor healthy casts on a loop.
+  Re-anchors are capped per cast and charged only when a reload actually
+  starts (`reloadCastAtAbsSec` returns whether it did).
+- **`loadCurrent`/`castLoadGetter` take ABSOLUTE source seconds.** The old
+  receiver-relative `startTimeSec` override only worked while every cast
+  session shared the local player's anchor. Keep the one conversion in the
+  getter, which is the thing that knows the anchor because it just minted it.
+
+Known limits, stated plainly:
+
+- **None of this is measured against a real device either.** The catch-up
+  model, the pad, and "a seek past the produced edge buffers silently" are
+  reasoned from the pacing constants and the #172/#324/#328 history. One
+  end-to-end cast 40 minutes into a party would settle the whole section.
+- **The produced edge is still not observable from the sender.**
+  `bufferedSecRef` describes the local `<video>`, frozen for the cast's whole
+  life. The escalation infers a stuck receiver rather than knowing one, so it
+  costs ~5s before acting and can in principle misread a receiver that is
+  merely very slow as unreachable — bounded by the re-anchor cap.
+- **The warm-up budget can still cost one guest-visible jump.** When it expires
+  unconverged the host takes authority with the TV where it is. Bounded and
+  rare, versus the alternative of a host who can never drive their own party.
+- **A guest casting is untouched by the warm-up**, which is correct (they never
+  broadcast) but means a guest whose receiver cannot converge simply watches a
+  TV that is out of step; nothing tells them so.
+
 ## Native-client direct play (Tier 1 of the Mac-app work)
 
 Capability keys that let a NATIVE client (libVLC/mpv/ExoPlayer-backed app)

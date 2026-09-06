@@ -45,7 +45,7 @@ func TestCloneForCast_RecordsTheSourceOnTheClone(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestCloneForCast_SharedSessionIsNotMarkedAsItsOwnClone(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	got, err := tm.CloneForCast(7, "ronnie", src.ID)
+	got, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}

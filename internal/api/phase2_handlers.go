@@ -1398,6 +1398,15 @@ func (h *StreamHandler) ServeHLSSubtitleFile(w http.ResponseWriter, r *http.Requ
 //
 // Requires a regular access token (this endpoint sits inside the RequireAuth
 // group). The caller must own the session, or be an admin.
+//
+// ?at=<seconds> is the sender's absolute source position — where the receiver
+// is about to be asked to play from. It decides the cast clone's -ss anchor
+// (see CloneForCast); omitting it keeps the pre-2026-09 behaviour of
+// inheriting the source session's anchor. The response's start_sec reports the
+// anchor the cast session ACTUALLY has, which is the only value the sender may
+// use to convert an absolute position into a receiver-relative startTime: it
+// is the source session's anchor on the shared-session path and the clone's
+// own on the cloned path, and the two differ.
 func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -1407,6 +1416,18 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "missing sessionID")
 		return
+	}
+	// A malformed or absent ?at= is "no preference", not an error: this is a
+	// positioning hint whose worst case is the behaviour that shipped before
+	// it existed, and failing the mint over it would break casting for any
+	// sender that hasn't been updated.
+	atSec := -1
+	if raw := r.URL.Query().Get("at"); raw != "" {
+		if parsed, perr := strconv.Atoi(raw); perr == nil && parsed >= 0 {
+			atSec = parsed
+		} else {
+			slog.Debug("cast: ignoring unusable ?at=", "session_id", sessionID, "raw", raw)
+		}
 	}
 	// Uniform 404 for "doesn't exist" and "not yours" — same enumeration
 	// hardening as requireSessionAccess (review finding S3).
@@ -1464,7 +1485,7 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		// setup for every Safari/iOS playback, receiver or not, and simply
 		// never produces a cast-scoped fetch unless an Apple TV really is
 		// pulling the stream — in which case the lease is deserved.
-		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
+		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID, atSec); cloneErr != nil {
 			if errors.Is(cloneErr, streaming.ErrUserSessionLimit) || errors.Is(cloneErr, streaming.ErrSessionLimit) {
 				slog.Warn("cast: clone hit session quota — refusing to silently cast the incompatible original",
 					"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
@@ -1511,10 +1532,25 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to mint cast token")
 		return
 	}
+	// The anchor the cast session actually has. On the shared-session and
+	// for_airplay paths this is the local player's own start_sec; on the
+	// cloned path it is the clone's, which CloneForCast may have moved to sit
+	// near the sender. The sender cannot infer which case it got, so report it
+	// rather than let it assume (assuming is what made a midstream cast seek
+	// 40 minutes into a playlist that had produced seconds).
+	//
+	// A session that vanished between the mint and here is not worth failing
+	// the request over: 0 is what every pre-2026-09 sender assumed anyway, and
+	// the token is already valid.
+	castStartSec := 0
+	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
+		castStartSec = cs.StartSec
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      tokenStr,
 		"expires_at": expiresAt.Unix(),
 		"playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8?token=%s", castSessionID, tokenStr),
+		"start_sec":  castStartSec,
 	})
 }
 

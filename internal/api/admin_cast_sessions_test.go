@@ -61,7 +61,7 @@ func castPairManager(t *testing.T) (*streaming.TranscodeManager, string, string)
 	if err != nil {
 		t.Fatalf("create source session: %v", err)
 	}
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}

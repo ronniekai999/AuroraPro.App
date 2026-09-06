@@ -359,7 +359,7 @@ func TestCloneForCast_HDRRemuxSource(t *testing.T) {
 		t.Fatalf("src session Remux=%v HDRTonemap=%v, want remux without tonemap", src.Remux, src.HDRTonemap)
 	}
 
-	clone, err := tm.CloneForCast(1, "alice", src.ID)
+	clone, err := tm.CloneForCast(1, "alice", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}

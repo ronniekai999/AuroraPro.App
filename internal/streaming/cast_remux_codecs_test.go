@@ -56,7 +56,7 @@ func TestCloneForCast_H264RemuxForcesTranscode(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCloneForCast_DropsSubtitleTracks(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestCloneForCast_TranscodeWithSubsForcesClone(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestCloneForCast_TranscodeReusedUnchanged(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestCloneForCast_ForcesTS(t *testing.T) {
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()
 
-	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID, -1)
 	if err != nil {
 		t.Fatalf("CloneForCast: %v", err)
 	}

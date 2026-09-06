@@ -888,10 +888,17 @@ func TestCastCloneOpts(t *testing.T) {
 		t.Error("AudioPassthrough must be false (force stereo re-encode)")
 	}
 
-	// Video / resume handling must carry over unchanged.
+	// Video handling must carry over unchanged.
 	if !opts.Remux || opts.AudioTrackIndex != 2 || opts.AudioChannels != 6 ||
-		!opts.HDRTonemap || opts.SourceVideoCodec != "hevc" || opts.StartSec != 120 {
+		!opts.HDRTonemap || opts.SourceVideoCodec != "hevc" {
 		t.Errorf("non-audio opts not preserved: %+v", opts)
+	}
+	// StartSec is deliberately NOT inherited here. The clone's -ss anchor
+	// depends on where the SENDER is, not on anything about cast-safety, so
+	// CloneForCast owns it via castCloneAnchorSec; a default here would give
+	// the anchor two owners. See castanchor_test.go.
+	if opts.StartSec != 0 {
+		t.Errorf("StartSec = %d, want 0 (the caller sets the anchor)", opts.StartSec)
 	}
 	// SubtitleTracks must NOT be carried into the cast clone. When they are
 	// present, GenerateMasterPlaylist emits a SUBTITLES rendition group that
