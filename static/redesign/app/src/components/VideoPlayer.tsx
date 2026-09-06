@@ -933,6 +933,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // cast (routine here; the box auto-deploys) understates the position by the
   // clone's whole anchor, and for a host broadcasts that to every guest.
   const castPendingStartSecRef = useRef<number | null>(null)
+  // Where the pending load asks the receiver to start, on the RECEIVER's
+  // clock — i.e. the CastLoadArgs.startTime the getter returned. Promoted into
+  // the host's comparison baseline so a load's own autoplay is not read as the
+  // host pressing play on the TV.
+  const castPendingStartTimeRef = useRef<number | null>(null)
   const castStartSecRef = useRef<number | null>(null)
   // Which title the pending load belongs to. Bumped whenever the player's
   // target identity changes; captured by the load getter on entry and checked
@@ -1053,6 +1058,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     return Math.max(0, localAbsSec)
   }
+  // Wraps the value handed to CastLoadArgs.startTime so the two branches
+  // cannot return one and record another.
+  const recordPendingStartTime = (startTime: number) => {
+    castPendingStartTimeRef.current = startTime
+    return startTime
+  }
   const castLoadGetter = useCallback(async (atAbsSec?: number) => {
     if (!target) return null
     // Captured BEFORE any await, so a target change during the mint is
@@ -1134,11 +1145,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // covers exactly that window and is zeroed the moment the seek lands.
         //
         // With no anchor to subtract, the absolute position IS the startTime.
-        startTime: castStartAbsSec(
+        startTime: recordPendingStartTime(castStartAbsSec(
           atAbsSec,
           (videoRef.current?.currentTime ?? 0) || dc.pendingResumeSec,
           target.episodeId,
-        ),
+        )),
       }
     }
     // The local element's position in ABSOLUTE source seconds: its own clock
@@ -1197,7 +1208,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // by connecting and buffering forever rather than erroring. Adding the
       // anchor instead of subtracting it — the original #172 — does the same
       // thing for the same reason.
-      startTime: castAbsToReceiverSec(desiredAbsSec, castStartSec),
+      startTime: recordPendingStartTime(castAbsToReceiverSec(desiredAbsSec, castStartSec)),
     }
   }, [target])
   // Why the current target cannot be cast, or null if it can (issue #503).
@@ -1318,6 +1329,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       castLoadsInFlightRef.current += 1
       try {
         await op()
+        // Only now: a load that threw before issuing loadMedia caused no
+        // receiver transition, so there is nothing to wait out. The IDLE that
+        // ends the OLD media arrives while the load is still in flight, which
+        // castLoadsInFlightRef already covers; this window covers the tail
+        // after the promise resolves.
+        castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castSessionRef.current?.commit()
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
@@ -1330,18 +1347,34 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // a failed load re-point every abs→receiver conversion at a session
           // nothing is playing.
           castStartSecRef.current = castPendingStartSecRef.current
+          // Seed the host's comparison baseline with what this load MAKES the
+          // receiver do, so the arms can tell that apart from what a person
+          // does — without suppressing either.
+          //
+          // Suppressing was the first attempt and it was wrong twice over: a
+          // window that merely gates the arm still falls through to the code
+          // that records the next baseline, so the user's pause is written
+          // into it and no later poll can find a transition (the pause is
+          // lost, not delayed — a paused receiver never moves, so the
+          // position arm never fires either). And gating alone cannot
+          // distinguish the two events anyway. We KNOW the post-load state
+          // exactly — loadMedia is issued with autoplay true at the requested
+          // startTime — so stating it is strictly better than blinding.
+          if (castPendingStartTimeRef.current !== null) {
+            hostLastSnapshotRef.current = {
+              paused: false,
+              sec: castPendingStartTimeRef.current,
+              atMs: Date.now(),
+            }
+          }
         }
       } catch (e) {
         castSessionRef.current?.abandon()
         throw e
       } finally {
         castLoadsInFlightRef.current = Math.max(0, castLoadsInFlightRef.current - 1)
-        // The receiver's own state changes lag the resolved promise: the IDLE
-        // that ends the OLD media and the PLAYING that starts the new one both
-        // arrive afterwards. Keep the load "settling" briefly so neither is
-        // mistaken for something the user did.
-        castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castPendingMediaRef.current = null
+        castPendingStartTimeRef.current = null
         // null, not 0 — see castStartSecRef. Unreachable today (the only
         // reader is guarded by castPendingMediaRef), but 0 here would mean
         // "the receiver's clock is absolute" to any future path that promotes
@@ -1683,6 +1716,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // trade-off (pass 5): bound it, don't chase certainty the SDK can't
   // promise.
   const confirmFallbackTimerRef = useRef<number | null>(null)
+  // Re-checks an end-of-media that arrived while one of our own loads was
+  // still settling. Separate from the confirmation fallback above: the two
+  // bound unrelated waits and must not cancel each other.
+  const loadSettleRecheckTimerRef = useRef<number | null>(null)
   // Bumped by the main play effect once a new local session is established;
   // drives the reload effect at exactly the moment castLoadGetter can mint a
   // cast token for the new target.
@@ -1692,6 +1729,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (confirmFallbackTimerRef.current != null) {
         window.clearTimeout(confirmFallbackTimerRef.current)
         confirmFallbackTimerRef.current = null
+      }
+    }
+    const clearLoadSettleRecheck = () => {
+      if (loadSettleRecheckTimerRef.current != null) {
+        window.clearTimeout(loadSettleRecheckTimerRef.current)
+        loadSettleRecheckTimerRef.current = null
       }
     }
     // The actual PLAYING/IDLE decision, factored out so the fallback timer
@@ -1704,7 +1747,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
       // Our own load ends the old media session; that IDLE is not the title
       // finishing. See castLoadIsSettling.
-      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE' && !castLoadIsSettling()) {
+      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
+        // A REAL end-of-media can land in this window too — a re-anchor within
+        // a few seconds of the end of the file — and the receiver goes quiet
+        // afterwards, so nothing would re-run this effect and the cast would
+        // sit connected-and-idle for the rest of the session. Re-check once
+        // the window closes rather than dropping it.
+        // Its OWN timer, not confirmFallbackTimerRef: that one bounds the
+        // post-blip confirmation wait, and borrowing it here would cancel a
+        // pending confirmation (or be cancelled by one) for an unrelated
+        // reason.
+        clearLoadSettleRecheck()
+        loadSettleRecheckTimerRef.current = window.setTimeout(
+          () => { loadSettleRecheckTimerRef.current = null; evaluate() },
+          Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50,
+        )
+        return
+      }
+      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE') {
         // De-arm synchronously so a re-render mid-advance can't re-enter here.
         castHasPlayedRef.current = false
         // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
@@ -1741,6 +1801,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       wasSettlingRef.current = false
       seqAtSettleClearRef.current = null
       clearFallbackTimer()
+      clearLoadSettleRecheck()
       // Cast over. Release the clone the receiver was on — nothing will ever
       // fetch it again, and leaving it to age out holds one of the user's
       // three session slots for the full 30-minute lease. The tracker no-ops
@@ -1792,6 +1853,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (cast.remote.updateSeq === seqAtSettleClearRef.current) return
       seqAtSettleClearRef.current = null
       clearFallbackTimer()
+      clearLoadSettleRecheck()
     }
     evaluate()
   }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
@@ -4546,7 +4608,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // the PARTY's position, not the TV's: we have not converged, so the
           // TV's position is exactly the thing not to broadcast. Freezing the
           // room where it already is moves nobody.
-          if (prev && prev.paused !== nowPaused && !castLoadIsSettling()) {
+          if (prev && prev.paused !== nowPaused) {
             snapshotNow()
             if (nowPaused) {
               // Already paused rooms need no pause: HandleRequestPause is not
@@ -4624,7 +4686,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // warm-up would otherwise have it dropped unread, and the room would
           // play on with no later transition to detect (a paused receiver does
           // not move, so the position arm never fires either).
-          if (prev && prev.paused !== nowPaused && !castLoadIsSettling()) {
+          if (prev && prev.paused !== nowPaused) {
             snapshotNow()
             if (nowPaused) {
               party.requestPause(castSecToAbsMs(nowSec))
@@ -4659,7 +4721,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // the TV within the settle window, room plays on).
         const correctionSettling = Date.now() < hostCorrectionUntilMsRef.current
 
-        if (nowPaused !== prev.paused && !castLoadIsSettling()) {
+        if (nowPaused !== prev.paused) {
           snapshotNow()
           if (nowPaused) {
             party.requestPause(castSecToAbsMs(nowSec))

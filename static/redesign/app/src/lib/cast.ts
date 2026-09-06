@@ -39,6 +39,10 @@ const CAST_SDK_SRC =
 // read rather than showing it verbatim (it leaked into a user-facing toast in
 // issue #503).
 export const CAST_NO_MEDIA_ERROR = 'no media to cast'
+// How long the pre-load URL self-test may take before it is abandoned. It is
+// diagnostics only — a non-OK probe never aborts the cast — so a slow one must
+// never hold the load open.
+const SELF_TEST_TIMEOUT_MS = 5000
 
 // describeCastError turns a Cast SDK rejection into a human-readable
 // message. The CAF Sender is maddeningly inconsistent about its reject
@@ -720,9 +724,16 @@ export function useCast(
     // response nobody reads.
     const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
     try {
+      // Timed out deliberately. fetch() has no default timeout, and a server
+      // that accepts the connection then never answers would leave this await
+      // pending forever — which does not merely delay a diagnostic: the load
+      // stays "in flight" on the sender, and the caller keys its correction
+      // and end-of-media suppression off exactly that. A stalled probe would
+      // silence the whole receiver loop for the rest of the cast.
       const probe = await fetch(load.contentUrl, {
         method: isPlaylist ? 'GET' : 'HEAD',
         credentials: 'omit',
+        signal: AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
       })
       const preview = probe.ok && isPlaylist
         ? (await probe.text()).split('\n').slice(0, 3).join(' | ')

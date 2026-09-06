@@ -401,22 +401,33 @@ anyone else. Code: `CloneForCast`/`castCloneAnchorSec`/`castAnchorPadSec`
 
 Invariants to preserve when touching this area:
 
-- **A load in flight suppresses every receiver transition it causes**
-  (`castLoadIsSettling`). A load onto a LIVE receiver replaces its media
-  session, and CAF reports that as `IDLE` with `idleReason` INTERRUPTED — "a
-  sender requested playing different media using the LOAD command" — and then
-  as a PLAYING when the new media autoplays. Both are OURS and both are
-  indistinguishable from a user's: an armed `IDLE` reads as the title finishing
-  (INTERRUPTED kills the cast; a momentarily-null reason starts the wrong
-  episode), and the autoplay reads as the host pressing play on the TV, which
-  can resume a room the host deliberately left paused.
-  **De-arming a flag before the load does not work**, and was tried: the getter
-  awaits a token mint that spawns a server-side FFmpeg, and the receiver keeps
-  publishing PLAYING updates throughout, re-arming it long before `loadMedia`
-  is issued. The gate has to be the load itself, held until shortly after it
-  resolves, because the receiver's own state changes lag the resolved promise.
-  This matters far more than it used to: the change turns a rare user-initiated
-  reload into an automatic poll-driven one.
+- **A load's own receiver transitions are STATED, not suppressed.** A load onto
+  a LIVE receiver replaces its media session, and CAF reports that as `IDLE`
+  with `idleReason` INTERRUPTED — "a sender requested playing different media
+  using the LOAD command" — and then as a PLAYING when the new media autoplays.
+  Both are OURS and both look exactly like a user's: an armed `IDLE` reads as
+  the title finishing (INTERRUPTED kills the cast; a momentarily-null reason
+  starts the wrong episode), and the autoplay reads as the host pressing play,
+  which can resume a room the host deliberately paused.
+  Two attempts failed before the current one, and both failure modes are worth
+  keeping in mind because they generalise:
+  **De-arming a flag before the load** is defeated by the load's own latency —
+  the getter awaits a token mint that spawns a server-side FFmpeg, and the
+  receiver keeps publishing PLAYING updates throughout, re-arming it long
+  before `loadMedia` is issued.
+  **Gating the transition arms on a settle window** silently ATE the thing it
+  protected: a window checked inside the arm's condition still falls through to
+  the code that records the next baseline, so a real pause made during it was
+  written into `prev` and no later poll could find a transition — lost, not
+  delayed, exactly as the `hostLastSnapshotRef` bullet below warns.
+  What works is seeding: `loadMedia` is issued with autoplay true at a known
+  `startTime`, so `runCastLoad` writes that exact state as the host's baseline
+  at promotion. The load's own transition then IS a non-transition, and a
+  person's is still a transition. `castLoadIsSettling` survives for the
+  end-of-media evaluator alone, which has no baseline to consume — and a
+  genuine end-of-media landing inside that window is re-checked on its own
+  timer rather than dropped, because the receiver goes quiet afterwards and
+  nothing else would re-run the effect.
 - **No correction crosses a load boundary.** The anchor is promoted only when a
   load RESOLVES, so while one is in flight `castStartSecRef` still describes the
   session the receiver is LEAVING while its reported position may already
