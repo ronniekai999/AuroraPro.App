@@ -882,8 +882,10 @@ look-ahead; see `downmixLimiter`).
 
 Two production failures reported as something else. Code: `node_vite_verdict`
 in `scripts/{install,redeploy,aurora-update}.sh`, pinned by
-`scripts/node-version-test.sh` (CI). Operator runbook for moved media:
-`docs/moving-media-paths.md`.
+`scripts/node-version-test.sh` (CI); `scripts/check-library-paths.sh`, pinned
+by `scripts/check-library-paths-test.sh` (CI) and by
+`internal/library/checkpaths_contract_test.go`. Operator runbook for moved
+media: `docs/moving-media-paths.md`.
 
 ### The Node build floor
 
@@ -910,11 +912,80 @@ Invariants to preserve:
   that may be mid-checkout, and a fourth file to `source` is a new failure mode
   in exactly the path that must not acquire one.
 
-Known limit: none of the verdicts are exercised against a real install. The
-crypto.hash floors come from Node's changelog, and `^20.19 || >=22.12` is
-vite 7.3.6's OWN declared `engines`, read out of `package-lock.json` — the
-app's `package.json` declares none, so a vite bump moves the floor with
-nothing in this repo restating it. The test drives a fake `node`.
+Known limits:
+
+- **None of the verdicts are exercised against a real install.** The
+  crypto.hash floors come from Node's changelog, and `^20.19 || >=22.12` is
+  vite 7.3.6's OWN declared `engines`, read out of `package-lock.json` — the
+  app's `package.json` declares none, so a vite bump moves the floor with
+  nothing in this repo restating it. The test drives a fake `node`.
+- **Verdict 3 is an assertion, not a measurement.** Vite's engines bump to
+  `^20.19 || >=22.12` is about unflagged `require(esm)`, not `crypto.hash`, so
+  a box on 20.12–20.18 is told "the build should still succeed" on reasoning
+  rather than evidence. One `npm run build` on a Node 20.15 container would
+  settle it.
+- **The updater's gate now precedes `git fetch`**, so a box below the floor
+  can no longer receive any commit — including one that would fix it. Net
+  neutral versus the old behaviour (the update aborted at the build anyway),
+  but the remedy is strictly manual.
+
+### The pre-flight path check
+
+`scripts/check-library-paths.sh` predicts what the next scan would prune, by
+reproducing the walk rather than modelling it. Invariants:
+
+- **A false ALL-CLEAR is the only unrecoverable outcome, and every ambiguity
+  resolves against it.** The operator is told not to start Aurora until it
+  exits 0, so an over-report costs an afternoon and an all-clear costs the
+  catalog. Anything the script cannot decide is exit 2 ("could not check"),
+  never exit 0.
+- **The scanner uses TWO different roots and so must this.** `collectVideoFiles`
+  walks the path as written (so walk output carries the unresolved prefix) but
+  tests its symlink-escape guard against `EvalSymlinks(root)`. Comparing a
+  resolved target against the lexical root drops every symlinked file under a
+  root with a symlinked component, empties the disk list, and lands on the
+  zero-discovered branch — which reports "the scan will prune nothing" and
+  exits 0 while the scan prunes. The runbook is what makes that state
+  reachable: the app only ever stores resolved paths, a hand-written `UPDATE`
+  does not.
+- **`walkFailed` is narrower than "I could not look".** `collectVideoFiles`
+  errors on exactly one condition — `EvalSymlinks(root)` failing — because its
+  walk callback returns nil on every error. A root that EXISTS but this user
+  cannot read is NOT walkFailed: the scan walks it as `aurora` and prunes
+  against it. Under `sudo` on a root_squashed NFS export, or run
+  unprivileged, this script can see less than the service does, so it must
+  refuse to answer rather than infer safety from its own blindness.
+- **Line-oriented comparison cannot represent every path.** A recorded path
+  containing a newline arrives from `psql -qtA` as two lines; an empty one
+  vanishes into the blank-line filter. Ask SQL for the count of those rows —
+  do not infer it by comparing a row count against a line count, because
+  `sort -u` collapses a duplicated half and the counts then agree.
+- **`find "$root" ! -type d` is exactly `!d.IsDir()`**, on the same lstat
+  semantics. Narrower filters were wrong in both directions: `-type f` dropped
+  every symlinked file (normal in *arr layouts), and requiring a regular-file
+  target dropped the symlink-to-directory and the FIFO the scanner accepts.
+
+Known limits:
+
+- **The script's own logic was untested for its first two rounds**, and an
+  independent review found two false all-clears in it that the Go contract
+  tests could not see — those pin the extension list and two properties of
+  `WalkDir`, but never run the script. `scripts/check-library-paths-test.sh`
+  runs it against real trees with a stubbed `psql`; its unreadable-root case
+  drops privileges, because as root `chmod 000` is not a barrier and skipping
+  under root let a revert of that very fix pass the whole suite.
+- **`underAnyPrefix` shielding is deliberately not reproduced.** Rows under a
+  subtree the scan cannot read are shielded, not pruned; the script counts
+  them as missing because it cannot know what the SERVICE user reads. That is
+  an over-report, chosen knowingly, and the message says so.
+- **The empty-item sweep is not modelled at all.** `DeleteEmptyMediaItems`
+  runs on every scan that walks cleanly and discovers anything, so a
+  `media_items` row that ALREADY has no file rows is swept even when this
+  script reports nothing missing.
+- **Two more over-reports.** An empty-string element in `libraries.paths` makes
+  `EvalSymlinks("")` fail, so the scan prunes nothing while the script may
+  still FAIL on the other roots; and ≥1000 unreadable entries trips
+  `maxTrackedUnreadable` into `walkFailed`, which the script does not count.
 
 ### Library repointing — attempted and WITHDRAWN. Read this before retrying.
 

@@ -354,6 +354,18 @@ if [ -d "$SPA_SRC_DIR" ]; then
         3)
             log "WARN: node $NODE_FOUND is outside the frontend toolchain's supported range ($NODE_ENGINES_TEXT) — the build should still succeed, but upgrade to Node ${NODE_TARGET_MAJOR}.x before it stops working"
             ;;
+        0) ;;
+        *)
+            # Unreachable from node_vite_verdict, which returns 0-3 — and that
+            # is precisely why it needs an arm. 127 is what the shell returns
+            # if that function is renamed, deleted, or moved below this call
+            # site. Without a default the gate does nothing and logs nothing,
+            # and this script runs unattended from a timer, so the box goes
+            # back to failing every update on an anonymous npm error with the
+            # check still sitting visibly in the file. Do not fail closed:
+            # an unknown verdict is not evidence the build is broken.
+            log "WARN: the Node version gate returned an unexpected verdict ($NODE_VERDICT) — continuing. This is a bug in this script; the build remains the real check."
+            ;;
     esac
 fi
 # AURORA-NODE-GATE-END

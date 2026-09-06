@@ -155,6 +155,16 @@ jobs:
       - name: Node version gate tests
         run: bash scripts/node-version-test.sh
 
+      # The pre-flight check an operator runs before starting Aurora on moved
+      # media. It shipped untested, and a review then found two states where
+      # it printed "nothing would be pruned" while the scan would delete rows
+      # and cascade the watch history away. Neither was visible to the Go
+      # contract tests, which never run the script. This does: real temp
+      # trees, a stubbed psql, and assertions on the exit codes an operator
+      # acts on.
+      - name: Library path check tests
+        run: bash scripts/check-library-paths-test.sh
+
   review-record:
     name: Review record present
     runs-on: ubuntu-latest

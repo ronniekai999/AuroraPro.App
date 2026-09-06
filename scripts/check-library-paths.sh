@@ -144,53 +144,104 @@ while IFS= read -r LIB; do
              WHERE mi.library_id = $LIB"
     fi
     recorded="$(q "$sel")" || die "query failed for library $LIB"
-    # How many paths SQL says there are, versus how many lines came back.
+
     # Everything below is line-oriented — psql -qtA and find both emit records
     # separated by newlines — so a path CONTAINING a newline arrives as two
     # lines and is compared as two paths. That is not merely an over-report: a
     # row spelling two real filenames in one value has both halves matched and
-    # is declared safe, while the scanner compares the whole string and prunes
+    # is declared safe, while the scanner keys on the whole string and prunes
     # it. An empty path is the same shape (dropped by the blank-line filter,
-    # so never reported missing at all). Neither can be handled by a
-    # line-oriented diff, so refuse to answer rather than answer wrongly.
-    n_rows="$(q "SELECT count(DISTINCT path) FROM ($sel) t")" \
+    # so never reported missing at all).
+    #
+    # ASK THE DATABASE, do not infer it from a line count. Comparing
+    # count(DISTINCT path) against the number of lines looks equivalent and is
+    # not: the line side is de-duplicated by `sort -u`, so rows 'A' and
+    # 'A\nB' give 2 distinct paths AND 2 lines (A, B) and the check passes —
+    # while the scan prunes the second row. That is the exact false all-clear
+    # the count was added to close, reintroduced by the de-duplication.
+    n_bad="$(q "SELECT count(*) FROM ($sel) t WHERE path = '' OR path LIKE E'%\\n%'")" \
         || die "query failed for library $LIB"
+    if [ "$n_bad" != "0" ]; then
+        die "library $LIB ($name): $n_bad recorded path(s) are empty or contain a newline. This check is line-oriented and cannot compare those correctly, so it will not give an answer for this library. Find them with:
+        SELECT id, path FROM media_files  WHERE path = '' OR path LIKE E'%\\n%';
+        SELECT id, path FROM episode_files WHERE path = '' OR path LIKE E'%\\n%';"
+    fi
 
-    # Walk each root the way the scanner does, and record WHY a root produced
+    # Walk each root the way the scanner does, and classify WHY a root produced
     # nothing — that distinction decides whether a prune happens at all.
     #
-    # unwalkable and unreadable are set by a plain loop, NOT inside a command
+    # The three states below are NOT interchangeable, and collapsing them was a
+    # false all-clear. collectVideoFiles returns an error — the only thing that
+    # sets walkFailed and skips the prune wholesale — on EXACTLY ONE condition:
+    # EvalSymlinks(root) failing, i.e. the root is absent or dangling. Its walk
+    # callback returns nil on every error, so `walkErr` is always nil. A root
+    # that EXISTS but this user cannot read is therefore NOT walkFailed: the
+    # scanner notes it unreadable and shields it — but only if the SERVICE user
+    # cannot read it either. Under `sudo` on an NFS export with root_squash, or
+    # run unprivileged, this check can see less than Aurora does; the scan then
+    # walks the root cleanly and prunes against it. Predicting "nothing will be
+    # deleted" from our own inability to look is how that becomes a wiped
+    # catalog.
+    #
+    # rootmissing  → matches walkFailed. The prune really is skipped. Safe.
+    # rootopaque   → we cannot see what Aurora will see. UNDECIDABLE, exit 2.
+    #
+    # These are set by a plain loop, NOT inside a command
     # substitution or a pipeline. An earlier version assigned them in a
     # subshell, so they never reached the tests below and the whole branch was
     # dead code that had never once run.
-    unwalkable=0
+    rootmissing=0
+    rootopaque=""
     unreadable=0
     : > "$WORK/disk"
     while IFS= read -r r; do
         [ -n "$r" ] || continue
         rc="$(canon "$r")"
-        if [ ! -d "$rc" ] || [ ! -r "$rc" ]; then
-            unwalkable=1
+        # EvalSymlinks-equivalent: follows symlinks and fails if the target
+        # does not exist. This is the root the scanner tests CONTAINMENT
+        # against; $rc is the one it PREFIXES walk output with. They differ
+        # whenever a root has a symlinked component, and conflating them is
+        # what let a symlinked library read as empty.
+        if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
+            rootmissing=1
             continue
         fi
-        # -type f, OR a symlink whose target resolves to a file under this
-        # root. The scanner accepts a symlinked FILE as long as EvalSymlinks
-        # lands inside the root and rejects it otherwise, so `find -type f`
-        # alone missed every one and reported them as about to be pruned — an
-        # unresolvable failure for the *arr-style layouts where symlinked media
-        # is normal. Directory symlinks are still not followed: no -L, and the
-        # resolved target must be a regular file.
-        find "$rc" \( -type f -o -type l \) -print 2>"$WORK/finderr" \
+        if [ ! -d "$rc" ]; then
+            # A root that resolves to something other than a directory. WalkDir
+            # visits it as a single entry, so if it happens to carry a video
+            # extension the scan discovers exactly one file and prunes the
+            # whole library against it. Too strange to model; refuse to answer.
+            rootopaque="$r (not a directory)"
+            continue
+        fi
+        if [ ! -r "$rc" ] || [ ! -x "$rc" ]; then
+            rootopaque="$r (unreadable by $(id -un))"
+            continue
+        fi
+        # `! -type d` is exactly the scanner's `!d.IsDir()`, on the same lstat
+        # semantics: a directory symlink is -type l here and IsDir()==false
+        # there, so both process it as a candidate rather than descending into
+        # it. Narrower filters were wrong in both directions — `-type f` alone
+        # dropped every symlinked file (normal in *arr layouts) and reported
+        # them as about to be pruned, and requiring the target be a regular
+        # file dropped the symlink-to-directory and the FIFO that the scanner
+        # does accept.
+        find "$rc" ! -type d -print 2>"$WORK/finderr" \
         | while IFS= read -r f; do
             if [ -L "$f" ]; then
+                # The scanner's symlink-escape guard, on ITS roots: resolve the
+                # link and require the result at or under the RESOLVED root.
                 t="$(realpath -e -- "$f" 2>/dev/null)" || continue
-                case "$t/" in "$rc"/*) ;; *) continue ;; esac
-                [ -f "$t" ] || continue
+                case "$t/" in "$rr"/*) ;; *) [ "$t" = "$rr" ] || continue ;; esac
             fi
             printf '%s\n' "$f"
           done >> "$WORK/disk"
         [ -s "$WORK/finderr" ] && unreadable=1
     done <<< "$roots"
+
+    if [ -n "$rootopaque" ]; then
+        die "library $LIB ($name): cannot inspect the root $rootopaque. Aurora may well be able to read it, in which case the next scan WILL walk it and prune against what it finds — so this check cannot tell you it is safe. Re-run as the user Aurora runs as."
+    fi
 
     disk_list="$(grep -Ei "$VIDEO_RE" "$WORK/disk" | sort -u)"
 
@@ -202,26 +253,22 @@ while IFS= read -r LIB; do
     # because filepath.Join cleans as it builds each child — which is what
     # makes the walk output canonical in the first place.
     db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"
-
     n_db=0; [ -n "$db_list" ] && n_db="$(printf '%s\n' "$db_list" | wc -l)"
-    if [ "$n_db" != "$n_rows" ]; then
-        die "library $LIB ($name): the database holds $n_rows distinct path(s) but they arrive as $n_db line(s) — at least one path contains a newline or is empty. This check is line-oriented and cannot compare those correctly, so it will not give an answer for this library. Find them with:
-        SELECT id, path FROM media_files WHERE path = '' OR path LIKE E'%\\n%';
-        SELECT id, path FROM episode_files WHERE path = '' OR path LIKE E'%\\n%';"
-    fi
 
     # ── The scanner's own two escape hatches, before any diff ──────
     # Reporting rows as "will be pruned" when the scan is not going to prune at
     # all is not a harmless over-report: it is a FAIL the operator cannot drive
     # to zero, under an instruction not to start the server until they do.
-    if [ "$unwalkable" -eq 1 ]; then
-        # walkFailed — collectVideoFiles errors on a root, so ScanLibrary skips
-        # the prune AND the sweep entirely. Nothing is deleted; the library is
-        # also not really being scanned, which is worth saying.
-        warn "library $LIB ($name): a configured path is missing or unreadable, so the scan will SKIP its prune — nothing will be deleted, but this library is not being scanned either"
+    if [ "$rootmissing" -eq 1 ]; then
+        # walkFailed — EvalSymlinks fails on a root, so collectVideoFiles
+        # errors and ScanLibrary skips the prune AND the sweep entirely.
+        # Nothing is deleted; the library is also not really being scanned,
+        # which is worth saying.
+        warn "library $LIB ($name): a configured path does not exist, so the scan will SKIP its prune — nothing will be deleted, but this library is not being scanned either"
         while IFS= read -r r; do
             [ -n "$r" ] || continue
-            [ -d "$(canon "$r")" ] || printf '        missing root: %s\n' "$r"
+            realpath -e -- "$(canon "$r")" >/dev/null 2>&1 \
+                || printf '        missing root: %s\n' "$r"
         done <<< "$roots"
         continue
     fi
@@ -278,4 +325,12 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
         "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
     exit 1
 fi
-ok "$CHECKED_FULLY of $CHECKED librarie(s) fully checked; nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
+ok "nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
+if [ "$CHECKED_FULLY" -ne "$CHECKED" ]; then
+    # Exit 0 is still correct — every skipped library was skipped because the
+    # SCAN will not prune it either (no paths, a missing root, or a walk that
+    # discovers nothing). But "nothing would be pruned" and "I compared every
+    # recorded row against the disk" are different statements, and the runbook
+    # tells the operator to act on exit 0. Say which one they got.
+    warn "$CHECKED_FULLY of $CHECKED librarie(s) were compared row by row. The rest were skipped above, each because the scan will not prune them either — read those warnings before starting Aurora."
+fi

@@ -267,6 +267,24 @@ for s in "${SCRIPTS[@]}"; do
         fi
     done
 
+    # An UNKNOWN verdict. node_vite_verdict only ever returns 0-3, so this is
+    # unreachable from it — and that is the point: 127 is what the shell
+    # returns when the function is renamed, deleted, or moved BELOW the call
+    # site. With no default arm the `case` matches nothing, the gate does
+    # nothing, says nothing, and the box is back to failing every update on an
+    # anonymous npm error with the check still visibly present in the file.
+    # Must warn and continue — failing closed here would block a box whose
+    # build is fine over a bug in this script.
+    res="$(verdict_action "$WORK/$s.site" 127)"
+    rc="${res%%|*}"; out="${res#*|}"
+    if [ "$rc" != "0" ]; then
+        bad "scripts/$s stops on an unrecognised verdict — a bug in the gate must not block a working build: $out"
+    elif [ -z "$out" ]; then
+        bad "scripts/$s is SILENT on an unrecognised verdict — if node_vite_verdict is renamed or moved below its call site, the gate vanishes without a word"
+    else
+        ok "scripts/$s warns and continues on an unrecognised verdict"
+    fi
+
     # A box that will not build the SPA needs no Node at all, and even the
     # fatal verdict must not stop it. Each script has its own way of not
     # building, and must respond to THAT one and not the other — checking both
@@ -310,6 +328,36 @@ echo
 echo "node gate: reachability"
 
 gate_line_of() { grep -n '# AURORA-NODE-GATE-BEGIN' "$1" | head -1 | cut -d: -f1; }
+def_line_of()  { grep -n '^node_vite_verdict() {' "$1" | head -1 | cut -d: -f1; }
+
+# Exactly one gate block per script. `head -1` above would silently check the
+# first of several and leave the rest unexamined, and extract_callsite's awk
+# range would splice them together.
+for s in "${SCRIPTS[@]}"; do
+    n="$(grep -c '# AURORA-NODE-GATE-BEGIN' "$REPO_ROOT/scripts/$s")"
+    if [ "$n" = "1" ]; then
+        ok "scripts/$s has exactly one gate block"
+    else
+        bad "scripts/$s has $n gate blocks — every check here inspects only the first"
+    fi
+done
+
+# The DEFINITION must precede the CALL. Bash resolves a function name at call
+# time, so a definition below its call site is not a syntax error: the shell
+# reports "command not found", returns 127, and the `case` falls through. The
+# call-site tests stub node_vite_verdict, so they cannot see this — the stub is
+# always defined first. Ordering is fine today; nothing pinned it.
+for s in "${SCRIPTS[@]}"; do
+    d="$(def_line_of "$REPO_ROOT/scripts/$s")"
+    g="$(gate_line_of "$REPO_ROOT/scripts/$s")"
+    if [ -z "$d" ] || [ -z "$g" ]; then
+        bad "scripts/$s: could not locate the definition ($d) or the gate ($g) — this check is inert"
+    elif [ "$d" -lt "$g" ]; then
+        ok "scripts/$s defines node_vite_verdict (line $d) before calling it (line $g)"
+    else
+        bad "scripts/$s calls node_vite_verdict at line $g but defines it at line $d — the call returns 127 and the gate does nothing"
+    fi
+done
 
 # Each script's gate must come before the thing it exists to pre-empt.
 check_before() {  # $1 = script, $2 = anchor regex, $3 = what the anchor is

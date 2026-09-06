@@ -50,6 +50,26 @@ Aurora has no UI for this. The procedure is below; read it through before
 running any of it, and note that the steps are deliberately **separate** —
 there is no single block to paste.
 
+**Run every SQL block in one interactive `psql` session**, opened once and
+kept open from step 2 to step 6:
+
+```bash
+sudo -u postgres psql aurora
+```
+
+Not `psql -c '…'` per statement. Steps 3, 4 and 5 open a transaction, show you
+what it is about to do, and wait for you to type `COMMIT;` yourself — and a
+`-c` string is its own session, so the transaction ends the instant the command
+does. Under `-c` the `BEGIN` is decorative, the review step reviews something
+already decided, and a `ROLLBACK` you typed afterwards has nothing left to roll
+back. The `\set ON_ERROR_STOP on` below is worth setting first, so a typo
+inside a transaction aborts it rather than leaving you typing `COMMIT` at a
+failed block:
+
+```
+\set ON_ERROR_STOP on
+```
+
 ### 0. Stop the server
 
 ```bash
@@ -82,6 +102,7 @@ lines after that marker, so the last line of a perfectly good dump is empty.)
 **To restore it**, if any check below fails:
 
 ```bash
+sudo systemctl stop aurora-update.timer
 sudo systemctl stop aurora
 sudo -u postgres dropdb aurora
 sudo -u postgres createdb -O aurora aurora
@@ -91,6 +112,11 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 aurora < ~/aurora-before-move.sql
 The `dropdb`/`createdb` is not optional. A plain `pg_dump` has no `--clean`, so
 replaying it over the live database leaves every existing row in place, fails
 several hundred statements — and still exits 0.
+
+Stop the timer here too, for the same reason as step 0: it ends in `systemctl
+restart aurora`, which starts a stopped unit, and it fires every five minutes.
+Restarting a restore mid-flight is worse than the state you were restoring
+from. Step 7 starts both units again.
 
 ### 2. Look at what you have
 
@@ -103,10 +129,22 @@ which, if any, are **duplicates** you created at the new location. You will
 refer to both lists by number below. Everything after this point depends on
 getting that right.
 
-### 3. If you created duplicate libraries, salvage anything watched through them
+### 3. If you created duplicate libraries, salvage WATCH PROGRESS from them
 
 Skip this if you did not create any. Otherwise do it **now** — step 4 deletes
 those rows.
+
+**This step covers `watch_progress` and nothing else.** The table at the top of
+this document lists six more things keyed to `media_items.id` with
+`ON DELETE CASCADE` — `user_ratings`, `item_feedback`, `taste_seeds`,
+`collection_items`, `recently_surfaced_items`, `recommendation_impressions` —
+and step 4 deletes every one of them for the duplicate libraries. Progress is
+covered here because it is the one people notice and the one with an awkward
+unique index; the rest are not, and stopping after step 3 believing otherwise
+is how the loss goes unnoticed. Each follows the same shape as the statement
+below (re-point `media_item_id` from `dup.id` to `orig.id`, skipping rows the
+original already has), so adapt it per table if any of them matter to you.
+Ratings are usually the ones that do.
 
 `media_files.path` is globally UNIQUE, so a duplicate library holding the new
 paths blocks the original from taking them; the duplicates have to go. Anything
@@ -234,6 +272,13 @@ Two things that bite:
   `SET path = path`, and it still reports `UPDATE n`. Escape those characters,
   or check step 6 rather than the row count. (The same characters are fine in
   the `LIKE` guard, though `%` and `_` in a path are wildcards there.)
+- **So is the REPLACEMENT string.** `\1`…`\9` are back-references and `\\` is a
+  literal backslash, so a NEW prefix containing a backslash is silently
+  mangled — and the row still counts toward the `UPDATE n` you would use to
+  reassure yourself. (Unlike `sed`, a bare `&` is *not* special in PostgreSQL,
+  so `AT&T` is fine.) If the new prefix contains a backslash, don't use
+  `regexp_replace` at all: `overlay(path placing '<new>' from 1 for <bytes in
+  old prefix>)` treats both sides as literal text.
 
 ```sql
 BEGIN;
@@ -260,6 +305,16 @@ UPDATE episode_files ef
    AND ef.path LIKE '/home/rontavious999/media/%';
 
 -- Repoint the libraries themselves. paths is a TEXT[].
+--
+-- USE THE SYMLINK-RESOLVED PATH — run each new root through `readlink -f`
+-- first and paste what that prints. The app itself never stores anything
+-- else (the library handler writes filepath.EvalSymlinks of what you type),
+-- so a hand-written UPDATE is the only way an unresolved path gets in, and a
+-- move to a new pool is exactly when /srv/storage -> /mnt/pool0/storage
+-- aliases get created. The scanner walks the path as written but tests its
+-- symlink-escape guard against the RESOLVED root, so the two disagree for
+-- every symlinked media file underneath — and check-library-paths.sh in
+-- step 6b has to reproduce both roots to see it.
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/movies']    WHERE id = 1;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/4kmovies']  WHERE id = 2;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/tvshows']   WHERE id = 3;
@@ -341,7 +396,15 @@ root.
 
 ```bash
 sudo systemctl start aurora
+sudo systemctl start aurora-update.timer
+systemctl is-active aurora aurora-update.timer      # both must say "active"
 ```
+
+Both units, because step 0 stopped both. The timer is still *enabled*, so it
+comes back on the next reboot and `systemctl status` looks unremarkable in the
+meantime — which is exactly how a box goes weeks without updating and nobody
+notices. That is the failure this document's sibling change exists to fix;
+do not reintroduce it here.
 
 The next scan should find exactly the paths already on record: no new files,
 nothing pruned. Open a title and press play.

@@ -221,6 +221,12 @@ if ! $SKIP_FRONTEND; then
         # Unparseable is not evidence of a problem; the build is the real check.
         2) warn "Could not determine the Node.js version (the frontend build wants ${NODE_BUILD_MIN_TEXT}) — continuing." ;;
         3) warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}) — the build should still succeed." ;;
+        0) ;;
+        # Unreachable from node_vite_verdict (it returns 0-3), which is why it
+        # needs an arm: 127 is what the shell returns if that function is
+        # renamed, deleted or moved below this call site, and with no default
+        # the gate silently does nothing while still appearing in the file.
+        *) warn "Node version gate returned an unexpected verdict ($NODE_BUILD_VERDICT) — treating it as unknown and continuing. This is a bug in this script." ;;
     esac
 fi
 # AURORA-NODE-GATE-END

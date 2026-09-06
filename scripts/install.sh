@@ -708,6 +708,16 @@ case "$NODE_BUILD_VERDICT" in
     3)
         warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}). The build should still succeed; upgrade to Node ${NODE_MIN}.x before it stops working."
         ;;
+    0) ;;
+    *)
+        # Not reachable from node_vite_verdict, which returns 0-3 — which is
+        # exactly why it needs an arm. 127 is what the shell returns if that
+        # function is renamed, deleted, or moved BELOW this call site, and
+        # without a default the gate then does nothing and says nothing: back
+        # to the anonymous npm failure this was written to remove, with the
+        # check still visibly present in the file.
+        warn "Node version gate returned an unexpected verdict ($NODE_BUILD_VERDICT) — treating it as unknown and continuing. This is a bug in this script."
+        ;;
 esac
 # AURORA-NODE-GATE-END
 if ! command -v npm &>/dev/null; then
