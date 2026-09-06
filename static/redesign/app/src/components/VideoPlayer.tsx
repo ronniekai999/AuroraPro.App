@@ -1014,6 +1014,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     hostCorrectionUntilMsRef.current = 0
     hostIntentEchoUntilMsRef.current = 0
     castLoadSettleUntilMsRef.current = 0
+    // Written from outside the effect since the load seeds it, so it is no
+    // longer the effect's own to keep in step — a snapshot from a finished
+    // cast (or a previous title) read as a transition on the next one.
+    hostLastSnapshotRef.current = null
   }
   // Where a cast should START, in absolute source seconds.
   //
@@ -1329,12 +1333,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       castLoadsInFlightRef.current += 1
       try {
         await op()
-        // Only now: a load that threw before issuing loadMedia caused no
-        // receiver transition, so there is nothing to wait out. The IDLE that
-        // ends the OLD media arrives while the load is still in flight, which
-        // castLoadsInFlightRef already covers; this window covers the tail
-        // after the promise resolves.
-        castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castSessionRef.current?.commit()
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
@@ -1373,6 +1371,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         throw e
       } finally {
         castLoadsInFlightRef.current = Math.max(0, castLoadsInFlightRef.current - 1)
+        // In `finally`, deliberately, and NOT only on success. A rejected
+        // loadMedia is the one throw site that has already disturbed the
+        // receiver: the LOAD tore down its previous media session before
+        // failing, so it reports IDLE with INTERRUPTED or ERROR just as a
+        // successful one does. Arming only on success left that IDLE
+        // unsuppressed — the player closes on a half-watched film, or the
+        // room advances an episode, because a load FAILED. The other three
+        // throw sites (SDK not ready, no session, no media) disturb nothing
+        // and pay only a few seconds of suppressed end-of-media detection.
+        castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castPendingMediaRef.current = null
         castPendingStartTimeRef.current = null
         // null, not 0 — see castStartSecRef. Unreachable today (the only
@@ -1760,7 +1768,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         clearLoadSettleRecheck()
         loadSettleRecheckTimerRef.current = window.setTimeout(
           () => { loadSettleRecheckTimerRef.current = null; evaluate() },
-          Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50,
+          // While the load is still in flight the window has not been armed
+          // yet (that happens in runCastLoad's finally), so the remaining time
+          // computes to zero and this would re-arm every 50ms for as long as
+          // the load takes. Wait a whole window instead and re-evaluate then.
+          castLoadsInFlightRef.current > 0
+            ? CAST_LOAD_SETTLE_MS
+            : Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50,
         )
         return
       }
@@ -1828,6 +1842,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // owns the decision once it resolves.
       seqAtSettleClearRef.current = null
       clearFallbackTimer()
+      // And the load-settle recheck: it re-enters evaluate() on a timer, and
+      // during a blip remote.playerState is FROZEN at whatever it held when
+      // the freeze started. Leaving it armed makes it a path into the
+      // destructive branch on exactly the stale reading `settling` exists to
+      // distrust.
+      clearLoadSettleRecheck()
       return
     }
     if (wasSettlingRef.current) {
@@ -1856,6 +1876,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       clearLoadSettleRecheck()
     }
     evaluate()
+    // Both timers re-enter evaluate(), which can stop the cast or advance the
+    // episode. Neither may survive the player unmounting.
+    return () => {
+      clearFallbackTimer()
+      clearLoadSettleRecheck()
+    }
   }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
 
   // A new title is a new convergence problem, and the state describing the old
@@ -1899,6 +1925,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     hostCorrectionUntilMsRef.current = 0
     hostIntentEchoUntilMsRef.current = 0
     castLoadSettleUntilMsRef.current = 0
+    // Written from outside the effect since the load seeds it, so it is no
+    // longer the effect's own to keep in step — a snapshot from a finished
+    // cast (or a previous title) read as a transition on the next one.
+    hostLastSnapshotRef.current = null
   }, [target?.fileId, target?.fileType, target?.episodeId])
 
   // Re-point a live receiver at a freshly-booted local session after a cast
@@ -4601,6 +4631,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // every guest afterwards.)
           const targetAbsSec = partyAbsSec()
           if (targetAbsSec === null) return
+          // See the authoritative path's copy: a load in flight makes the
+          // receiver's reported state ours, not the user's, and the seed that
+          // says so lands only at promotion.
+          if (castLoadsInFlightRef.current > 0) return
           // A receiver that was PLAYING and is now paused was paused by a
           // person — nothing else pauses a playing receiver. Honour it even
           // mid-warm-up, or the mirror below immediately undoes the host's own
@@ -4672,6 +4706,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // the two sides disagree about the episode is still compared once they
         // agree again.
         if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
+        // Likewise while one of our own loads is in flight. The seeded
+        // baseline is written at PROMOTION, so a poll that catches the new
+        // media already autoplaying before the LOAD ack resolves would still
+        // read the pre-load baseline and call the autoplay a transition —
+        // resuming a room the host deliberately paused. Returning here rather
+        // than gating the arm further down is the difference between deferring
+        // the comparison and destroying it (see the snapshotNow comment).
+        if (castLoadsInFlightRef.current > 0) return
 
         // Authoritative. When we got here by spending the budget rather than
         // by converging, latch it (so the phase check above stops re-deciding

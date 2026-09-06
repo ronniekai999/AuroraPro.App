@@ -434,10 +434,13 @@ Invariants to preserve when touching this area:
   describe the one it is joining. Correcting across that computes a target on
   the wrong timeline — for a re-anchor from 0 to ~40 minutes, a seek 40 minutes
   past the new clone's produced edge, i.e. #172 produced by the machinery built
-  to close it. `castLoadsInFlightRef` covers every load path. Note the scope:
-  this gates the CORRECTION paths and the transition arms; the authoritative
-  host's position broadcasts read `castStartSecRef` directly and rely on the
-  anchor being promoted before the receiver reports playing again.
+  to close it. `castLoadsInFlightRef` covers every load path, and both the
+  correction paths and the host's transition arms RETURN on it — before
+  recording a baseline, never by gating the arm in place, because a guard that
+  falls through to the recording code destroys the comparison rather than
+  deferring it. The authoritative host's position broadcasts still read
+  `castStartSecRef` directly and rely on the anchor being promoted before the
+  receiver reports playing again.
 - **A cast clone's `-ss` anchor follows the SENDER, not the source session.**
   It used to inherit `src.StartSec`, which is correct arithmetic and useless
   readiness: a viewer 40 minutes into a session anchored at 0 got a clone also
@@ -595,6 +598,20 @@ Known limits, stated plainly:
 - **The warm-up budget can still cost one guest-visible jump.** When it expires
   unconverged the host takes authority with the TV where it is. Bounded and
   rare, versus the alternative of a host who can never drive their own party.
+- **A user-requested resume that routes through a RELOAD is not broadcast.**
+  `resumeCast` and the keyboard play reload when the cast token has expired
+  (>4h paused), and the load then seeds `{paused:false}` as the baseline, so
+  the arm sees no transition and the party is never told to play: the host's
+  TV resumes and the room stays paused. Narrow, and the price of seeding
+  rather than suppressing; the honest fix is for those two call sites to state
+  the intent themselves rather than let it be inferred from the receiver.
+- **The seeded baseline can over-predict.** It says "playing from `startTime`
+  as of now", but the receiver is usually still buffering — so if the scrub
+  suppression then holds the poll out of re-recording for its 3s, the first
+  comparison afterwards can see several seconds of apparent shortfall and
+  broadcast one corrective seek. The position is genuinely where the TV is,
+  and the error is one-sided (always backward), but it is a room-visible jump
+  the seed itself caused.
 - **A guest casting is untouched by the warm-up**, which is correct (they never
   broadcast) but means a guest whose receiver cannot converge simply watches a
   TV that is out of step; nothing tells them so. The guest-only "⟳ Sync"
