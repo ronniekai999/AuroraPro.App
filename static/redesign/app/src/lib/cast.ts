@@ -39,6 +39,10 @@ const CAST_SDK_SRC =
 // read rather than showing it verbatim (it leaked into a user-facing toast in
 // issue #503).
 export const CAST_NO_MEDIA_ERROR = 'no media to cast'
+// How long the pre-load URL self-test may take before it is abandoned. It is
+// diagnostics only — a non-OK probe never aborts the cast — so a slow one must
+// never hold the load open.
+const SELF_TEST_TIMEOUT_MS = 5000
 
 // describeCastError turns a Cast SDK rejection into a human-readable
 // message. The CAF Sender is maddeningly inconsistent about its reject
@@ -282,12 +286,12 @@ export interface CastRemoteState {
 }
 
 export function useCast(
-  currentLoad?: () => CastLoadArgs | null | Promise<CastLoadArgs | null>,
+  currentLoad?: (atAbsSec?: number) => CastLoadArgs | null | Promise<CastLoadArgs | null>,
 ): {
   status: CastStatus
   remote: CastRemoteState
   start: () => Promise<void>
-  loadCurrent: (startTimeSec?: number) => Promise<void>
+  loadCurrent: (atAbsSec?: number) => Promise<void>
   stop: () => void
   playOrPause: () => void
   seek: (toSec: number) => void
@@ -665,14 +669,22 @@ export function useCast(
   // next-episode auto-advance can re-point a live receiver at a freshly-booted
   // local session (the receiver mirrors the local <video>'s server session).
   //
-  // startTimeSec (optional) OVERRIDES the getter's startTime. Used by the
-  // token-renewal resume path: after a long pause the session-scoped cast
-  // token in the loaded URL has expired, so the media is re-loaded with a
-  // freshly-minted token — and the resume position must be the RECEIVER's
-  // timeline (cast.remote.currentTime), not the getter's default (the frozen
-  // local <video> position, which paused when the cast began).
+  // atAbsSec (optional) is where the receiver should resume, in ABSOLUTE
+  // SOURCE seconds — the file's own clock, not the receiver's and not the
+  // local <video>'s. Omitting it lets the getter choose (the ordinary "cast
+  // from where I am" case).
+  //
+  // 2026-09: this used to be a receiver-relative `startTimeSec` that
+  // OVERWROTE load.startTime after the fact. That only worked while every
+  // cast session shared the local player's `-ss` anchor, which stopped being
+  // true when cast clones started being anchored near the sender: the same
+  // number now means different positions on the two timelines. Handing the
+  // absolute position to the getter instead — which is the thing that knows
+  // the cast session's anchor, because it just minted it — keeps the one
+  // conversion in the one place that can do it correctly.
+  //
   // Throws on every failure so callers decide whether to retry or stop.
-  const loadCurrent = async (startTimeSec?: number) => {
+  const loadCurrent = async (atAbsSec?: number) => {
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
       throw new Error('cast SDK not ready')
     }
@@ -680,19 +692,8 @@ export function useCast(
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
 
-    const load = await Promise.resolve(loadRef.current?.())
+    const load = await Promise.resolve(loadRef.current?.(atAbsSec))
     if (!load) throw new Error(CAST_NO_MEDIA_ERROR)
-    // >= 0, not > 0 (2026-08 review fix, issue #461 follow-up): 0 is a valid
-    // explicit resume position (the party/receiver rewound to the very
-    // start), and every caller that passes this argument at all means it as
-    // an authoritative override — "no override intended" is conveyed by
-    // omitting the argument (undefined), which the typeof check already
-    // handles. The old `> 0` silently ignored an explicit 0 and fell back to
-    // the getter's default startTime (the local <video>'s frozen position,
-    // stale since the cast session began), reloading at the wrong spot.
-    if (typeof startTimeSec === 'number' && startTimeSec >= 0) {
-      load.startTime = startTimeSec
-    }
     // eslint-disable-next-line no-console
     console.info('[Aurora Cast] loading media:', {
       url: load.contentUrl,
@@ -723,9 +724,16 @@ export function useCast(
     // response nobody reads.
     const isPlaylist = /mpegurl|vnd\.apple/i.test(load.contentType)
     try {
+      // Timed out deliberately. fetch() has no default timeout, and a server
+      // that accepts the connection then never answers would leave this await
+      // pending forever — which does not merely delay a diagnostic: the load
+      // stays "in flight" on the sender, and the caller keys its correction
+      // and end-of-media suppression off exactly that. A stalled probe would
+      // silence the whole receiver loop for the rest of the cast.
       const probe = await fetch(load.contentUrl, {
         method: isPlaylist ? 'GET' : 'HEAD',
         credentials: 'omit',
+        signal: AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
       })
       const preview = probe.ok && isPlaylist
         ? (await probe.text()).split('\n').slice(0, 3).join(' | ')

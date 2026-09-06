@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
+  castAbsToReceiverSec,
+  castHostPhase,
   castPlayPauseMismatch,
+  castReanchorBudgetAfter,
+  castResyncAction,
+  decideHostBroadcast,
+  type HostBroadcastInput,
+  castTargetBeforeAnchor,
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
   levelLagsPlayhead,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
+  partyTargetAbsSec,
   pauseIntentForReplacementSeek,
   partyPlayerAutoOpenKey,
   partyPlayerDismissalKeyOnClose,
@@ -459,5 +467,498 @@ describe('Chromecast receiver-driven party sync (issue #461)', () => {
     it('resyncs when the receiver is far behind', () => {
       expect(shouldResyncCastReceiver(90, 100, 2)).toBe(true)
     })
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────
+// Casting mid-party (2026-09).
+//
+// Three things had to change for "someone casts, nobody else notices, the
+// cast joins the timeline" to hold: cast sessions can now be anchored
+// independently of the local player's, a host does not speak for the party
+// until its receiver has actually arrived, and a correction that cannot land
+// escalates past a seek instead of repeating forever.
+
+describe('cast session anchoring', () => {
+  describe('castAbsToReceiverSec', () => {
+    it('subtracts the CAST anchor, not the local one', () => {
+      // A clone anchored at 2385 while the local session still starts at 0:
+      // 40 minutes in, the receiver is 15s into its own timeline.
+      expect(castAbsToReceiverSec(2400, 2385)).toBe(15)
+    })
+    it('is the identity for an unanchored session', () => {
+      expect(castAbsToReceiverSec(2400, 0)).toBe(2400)
+    })
+    it('floors below the anchor rather than going negative', () => {
+      expect(castAbsToReceiverSec(100, 2385)).toBe(0)
+    })
+    it('treats a nonsense negative anchor as zero', () => {
+      expect(castAbsToReceiverSec(100, -50)).toBe(100)
+    })
+  })
+
+  describe('castTargetBeforeAnchor', () => {
+    it('is false for a target inside the session', () => {
+      expect(castTargetBeforeAnchor(2400, 2385)).toBe(false)
+    })
+    it('is true for a target the session can never reach', () => {
+      expect(castTargetBeforeAnchor(100, 2385)).toBe(true)
+    })
+    it('tolerates sub-second noise at the boundary', () => {
+      // Not worth re-anchoring a whole cast session over rounding.
+      expect(castTargetBeforeAnchor(2384.5, 2385)).toBe(false)
+    })
+    it('is false for any target when the session is unanchored', () => {
+      expect(castTargetBeforeAnchor(0, 0)).toBe(false)
+    })
+  })
+})
+
+describe('castResyncAction (closing the cast correction dead ends)', () => {
+  const base = {
+    receiverSec: 100,
+    targetAbsSec: 100,
+    castStartSec: 0,
+    toleranceSec: 2,
+    stuckToleranceSec: 6,
+    stuckPolls: 0,
+    reanchorAfterPolls: 5,
+    reanchorAllowed: true,
+    unreachableReanchorAllowed: true,
+  }
+
+  it('does nothing while the receiver is within tolerance', () => {
+    const d = castResyncAction({ ...base, receiverSec: 101 })
+    expect(d.action).toBe('none')
+    expect(d.stuck).toBe(false)
+  })
+
+  it('seeks for ordinary drift', () => {
+    const d = castResyncAction({ ...base, receiverSec: 97 })
+    expect(d.action).toBe('seek')
+    expect(d.targetRecvSec).toBe(100)
+  })
+
+  it('targets the RECEIVER clock, not the absolute one', () => {
+    const d = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 2400, castStartSec: 2385 })
+    expect(d.action).toBe('seek')
+    expect(d.targetRecvSec).toBe(15)
+  })
+
+  it('never counts an unreachable-target poll toward the stuck streak', () => {
+    // The streak infers "this seek cannot land" from repeated nowhere-near
+    // readings. A target before the anchor is a different failure with its own
+    // immediate answer, and letting it inflate the streak would make an
+    // unrelated forward escalation fire early.
+    const before = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385 })
+    expect(before.stuck).toBe(false)
+    const blocked = castResyncAction({
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385,
+      unreachableReanchorAllowed: false,
+    })
+    expect(blocked.stuck).toBe(false)
+  })
+
+  it('re-anchors immediately for a target before the session anchor', () => {
+    // The dead end: absMsToCastSec floors here, so the correction ladder
+    // would aim at the anchor forever while the party sits earlier.
+    const d = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385 })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('reports BLOCKED, not none, when an unreachable target has no re-anchor left', () => {
+    const d = castResyncAction({
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385,
+      unreachableReanchorAllowed: false,
+    })
+    // A seek to the floored target would just re-pin the receiver at the
+    // anchor it is already stuck on, so the poll takes no action either way —
+    // but this is the opposite of 'none'. A host warm-up waiting to converge
+    // must not read "I have given up" as "it arrived" and start speaking for
+    // a party its TV is nowhere near.
+    expect(d.action).toBe('blocked')
+  })
+
+  it('does not count an ordinary correction as stuck', () => {
+    // Command latency plus a target that keeps advancing leaves a WORKING
+    // correction out of tolerance for a poll or two. Counting those would
+    // re-anchor healthy casts every few seconds.
+    const d = castResyncAction({ ...base, receiverSec: 97 })
+    expect(d.stuck).toBe(false)
+  })
+
+  it('counts a receiver nowhere near the target as stuck', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40 })
+    expect(d.stuck).toBe(true)
+    expect(d.action).toBe('seek') // not yet — the streak has to build
+  })
+
+  it('escalates to a re-anchor once the stuck streak completes', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40, stuckPolls: 4 })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('never escalates on a streak of merely-drifting polls', () => {
+    // stuckPolls can only have been raised by genuinely stuck readings, but
+    // pin the pairing: a poll inside stuckToleranceSec stays a seek however
+    // long the streak.
+    const d = castResyncAction({ ...base, receiverSec: 97, stuckPolls: 99 })
+    expect(d.action).toBe('seek')
+    expect(d.stuck).toBe(false)
+  })
+
+  it('falls back to seeking when the re-anchor budget is spent', () => {
+    const d = castResyncAction({ ...base, receiverSec: 40, stuckPolls: 9, reanchorAllowed: false })
+    expect(d.action).toBe('seek')
+  })
+})
+
+describe('castHostPhase (a casting host does not start out authoritative)', () => {
+  it('starts in warm-up', () => {
+    expect(castHostPhase(false, 1_000, 1_000, 12_000)).toBe('warmup')
+  })
+  it('becomes authoritative the moment the receiver converges', () => {
+    expect(castHostPhase(true, 1_000, 1_100, 12_000)).toBe('authoritative')
+  })
+  it('stays in warm-up while the budget has time left', () => {
+    expect(castHostPhase(false, 1_000, 12_999, 12_000)).toBe('warmup')
+  })
+  it('takes authority anyway once the budget is spent', () => {
+    // A receiver that never arrives must not leave the host permanently
+    // unable to pause the room from their own TV.
+    expect(castHostPhase(false, 1_000, 13_000, 12_000)).toBe('authoritative')
+  })
+  it('a converged host is never sent back to warm-up by the clock', () => {
+    expect(castHostPhase(true, 1_000, 1_001, 12_000)).toBe('authoritative')
+  })
+  it('treats an unarmed clock as not-yet-started, not as long-expired', () => {
+    // 0 is the ref's initial value. Reading `now - 0 >= budget` as an expired
+    // budget skips the warm-up on every path that reaches the first poll
+    // without arming it — a host already casting solo who then joins a party,
+    // or a first poll that finds the media already loaded.
+    expect(castHostPhase(false, 0, Date.now(), 12_000)).toBe('warmup')
+    expect(castHostPhase(false, -1, Date.now(), 12_000)).toBe('warmup')
+  })
+})
+
+describe('partyTargetAbsSec', () => {
+  // Emitted and received at the same instant on a shared clock, so elapsed
+  // time is simply `now - 5_000`.
+  const running = { abs_ms: 600_000, server_now_ms: 5_000, running: true, receivedAtMs: 5_000 }
+
+  it('projects a running party forward by elapsed time', () => {
+    // 2s since the tick was emitted and received.
+    expect(partyTargetAbsSec(running, true, 0, 7_000)).toBe((600_000 + 2_000) / 1000)
+  })
+
+  it('returns null when a running party tick has gone stale', () => {
+    // Free-run rather than seed a cast from a server that may have moved on.
+    expect(partyTargetAbsSec(running, true, 0, 9_001)).toBeNull()
+  })
+
+  it('reports a paused party exactly, however old the tick', () => {
+    // No tick loop runs while paused, so receivedAtMs ages without bound
+    // while abs_ms stays exactly right. Ageing this out would reject every
+    // paused party's true position.
+    const paused = { abs_ms: 600_000, server_now_ms: 5_000, running: false, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(paused, false, 0, 10_000_000)).toBe(600)
+  })
+
+  it('treats a party the client believes is paused as frozen too', () => {
+    // isPlaying is the client's own view of the canonical flag; a tick that
+    // still says running while the party has paused must not be projected.
+    expect(partyTargetAbsSec(running, false, 0, 10_000_000)).toBe(600)
+  })
+
+  it('returns null with no tick at all', () => {
+    expect(partyTargetAbsSec(null, true, 0, 1_000)).toBeNull()
+    expect(partyTargetAbsSec(undefined, true, 0, 1_000)).toBeNull()
+  })
+
+  it('applies the clock offset like the local drift loop does', () => {
+    // A client 500ms behind the server sees a correspondingly larger elapsed.
+    const withOffset = partyTargetAbsSec(running, true, 500, 7_000)
+    const withNone = partyTargetAbsSec(running, true, 0, 7_000)
+    expect(withOffset).toBeGreaterThan(withNone as number)
+  })
+
+  it('refuses a non-finite projection rather than reporting NaN', () => {
+    // NaN reads as "in tolerance" to every downstream comparison
+    // (Math.abs(NaN) >= tol is false), which would silently report a converged
+    // receiver and a settled cast.
+    const bad = { abs_ms: 600_000, server_now_ms: Number.NaN, running: true, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(bad, true, 0, 7_000)).toBeNull()
+    expect(partyTargetAbsSec(running, true, Number.NaN, 7_000)).toBeNull()
+  })
+
+  it('never returns a negative position', () => {
+    const weird = { abs_ms: -1, server_now_ms: 5_000, running: false, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(weird, false, 0, 6_000)).toBe(0)
+  })
+})
+
+describe('castReanchorBudgetAfter (the re-anchor budget)', () => {
+  const SETTLED = 10
+  const fresh = { used: 0, settledPolls: 0 }
+
+  it('charges a re-anchor and clears any settled run', () => {
+    const b = castReanchorBudgetAfter({ used: 0, settledPolls: 4 }, 'reanchored', SETTLED)
+    expect(b).toEqual({ used: 1, settledPolls: 0 })
+  })
+
+  it('refunds a re-anchor whose load never reached the receiver', () => {
+    // A mint that 429s on the per-user session cap, or a getter that finds no
+    // media because the local session is mid-reboot, re-anchored nothing.
+    const b = castReanchorBudgetAfter({ used: 1, settledPolls: 0 }, 'reanchor-failed', SETTLED)
+    expect(b.used).toBe(0)
+  })
+
+  it('never refunds below zero', () => {
+    // The refund is async; a per-title reset can land in between.
+    expect(castReanchorBudgetAfter(fresh, 'reanchor-failed', SETTLED).used).toBe(0)
+  })
+
+  it('does NOT earn a re-anchor back on a single in-tolerance poll', () => {
+    // This is the whole point. A re-anchor loads the receiver AT the party
+    // position, so the first poll after it lands is in tolerance almost by
+    // construction — refunding there would let a receiver that stalls a few
+    // seconds after every load re-anchor for the entire title.
+    const b = castReanchorBudgetAfter({ used: 2, settledPolls: 0 }, 'converged', SETTLED)
+    expect(b.used).toBe(2)
+    expect(b.settledPolls).toBe(1)
+  })
+
+  it('earns one back after a sustained run of in-tolerance polls', () => {
+    let b = { used: 2, settledPolls: 0 }
+    for (let i = 0; i < SETTLED; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+    expect(b.used).toBe(1)
+    expect(b.settledPolls).toBe(0) // the run restarts; the next one costs another full run
+  })
+
+  it('breaks the run on any correction, so a stalling receiver never earns one back', () => {
+    // Plays in tolerance for a few polls after each load, then drifts.
+    let b = { used: 2, settledPolls: 0 }
+    for (let cycle = 0; cycle < 20; cycle++) {
+      for (let i = 0; i < 4; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+      b = castReanchorBudgetAfter(b, 'other', SETTLED)
+    }
+    expect(b.used).toBe(2)
+  })
+
+  it('does not go below zero on a converged run with nothing spent', () => {
+    let b = fresh
+    for (let i = 0; i < SETTLED * 3; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+    expect(b.used).toBe(0)
+  })
+})
+
+describe('castResyncAction: the two escalations are budgeted separately', () => {
+  const base = {
+    receiverSec: 0,
+    targetAbsSec: 60,
+    castStartSec: 2385,
+    toleranceSec: 2,
+    stuckToleranceSec: 6,
+    stuckPolls: 0,
+    reanchorAfterPolls: 5,
+    reanchorAllowed: true,
+    unreachableReanchorAllowed: true,
+  }
+
+  it('answers a target before the anchor even when the INFERRED budget is spent', () => {
+    // The count cap exists because inference can misjudge a slow receiver. A
+    // target before the anchor is arithmetic — it cannot be a misdiagnosis —
+    // so spending the count on earlier stuck-inference escalations must not
+    // leave a host's rewind permanently unanswerable.
+    const d = castResyncAction({ ...base, reanchorAllowed: false })
+    expect(d.action).toBe('reanchor')
+  })
+
+  it('blocks a target before the anchor only when ITS own allowance is spent', () => {
+    const d = castResyncAction({ ...base, unreachableReanchorAllowed: false })
+    expect(d.action).toBe('blocked')
+  })
+
+  it('does not let the unreachable allowance answer an inferred stuck receiver', () => {
+    // Target is reachable (after the anchor); the receiver is just nowhere
+    // near it. That is the inference path, and only its own budget applies.
+    const d = castResyncAction({
+      ...base, targetAbsSec: 2500, receiverSec: 0, stuckPolls: 9,
+      reanchorAllowed: false, unreachableReanchorAllowed: true,
+    })
+    expect(d.action).toBe('seek')
+  })
+})
+
+describe('decideHostBroadcast', () => {
+  const now = { paused: false, sec: 100, atMs: 10_000 }
+  const playing = { paused: false, sec: 99, atMs: 9_000 }
+  const paused = { paused: true, sec: 99, atMs: 9_000 }
+  const base = {
+    prev: playing,
+    now,
+    latchingAuthority: false,
+    loadInFlight: false,
+    episodeMismatch: false,
+    anchorUnknown: false,
+    correctionSettling: false,
+    pausedScrubToleranceSec: 1,
+    seekJumpToleranceSec: 3,
+  }
+
+  // THE invariant. Four review rounds broke it in four different places: a
+  // guard that declines to act must leave the pre-guard baseline standing, or
+  // the transition it was protecting is destroyed rather than deferred.
+  //
+  // Note which guards are TOTAL and which are not. `correctionSettling` is
+  // deliberately absent: it suppresses POSITION comparisons only, because a
+  // corrective seek cannot change whether the receiver is paused — extending
+  // it over pause/play is what lost a host's pause on the headline path, and
+  // it has its own test below. Stating that difference here rather than
+  // assuming it uniform is the point of the table.
+  describe('every TOTAL guard keeps the baseline', () => {
+    const guards: Array<[string, Partial<HostBroadcastInput>]> = [
+      ['unknown anchor', { anchorUnknown: true }],
+      ['load in flight', { loadInFlight: true }],
+      ['episode mismatch', { episodeMismatch: true }],
+    ]
+    for (const [name, patch] of guards) {
+      it(`${name}: a host pause made during it survives to be broadcast later`, () => {
+        // The host pauses the TV while the guard is up.
+        const guarded = decideHostBroadcast({
+          ...base, ...patch, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 },
+        })
+        expect(guarded.broadcast.kind).toBe('none')
+        expect(guarded.baseline).toBe('keep')
+
+        // The guard lifts on the next poll. Because the baseline was KEPT, the
+        // transition is still there to find.
+        const after = decideHostBroadcast({
+          ...base, prev: playing, now: { paused: true, sec: 100, atMs: 11_000 },
+        })
+        expect(after.broadcast.kind).toBe('pause-at-receiver')
+      })
+    }
+  })
+
+  it('is silent on the first sample after a (re)connect', () => {
+    const d = decideHostBroadcast({ ...base, prev: null })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('broadcasts a pause the host makes on the TV', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('pause-at-receiver')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('corrects the position first when the TV was scrubbed while paused', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: false, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('seek-then-play')
+  })
+
+  it('just resumes when a paused TV was not scrubbed', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: false, sec: 99.2, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('play')
+  })
+
+  it('re-states a paused party position after a scrub on the TV', () => {
+    const d = decideHostBroadcast({ ...base, prev: paused, now: { paused: true, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('pause-rescrub')
+  })
+
+  it('reads a jump bigger than playback progression as a scrub', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('seek')
+  })
+
+  it('does not read natural progression as a scrub', () => {
+    const d = decideHostBroadcast({ ...base, prev: playing, now: { paused: false, sec: 100, atMs: 10_000 } })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('record')
+  })
+
+  it('reads pause/play through the correction window, but not position', () => {
+    // A corrective seek cannot change whether the receiver is paused, so
+    // suppressing pause/play there is what lost a host's pause on the
+    // headline path.
+    const pause = decideHostBroadcast({
+      ...base, correctionSettling: true, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 },
+    })
+    expect(pause.broadcast.kind).toBe('pause-at-receiver')
+    const jump = decideHostBroadcast({
+      ...base, correctionSettling: true, prev: playing, now: { paused: false, sec: 300, atMs: 10_000 },
+    })
+    expect(jump.broadcast.kind).toBe('none')
+    expect(jump.baseline).toBe('keep')
+  })
+
+  describe('taking authority on an expired warm-up budget', () => {
+    // Exactly what the call site passes on that poll. The earlier version of
+    // this block set an `authoritative` flag alongside it that the component
+    // could never produce, so all three cases passed while pinning a branch no
+    // user reached — and the real latch path had no test at all.
+    const latch = { ...base, latchingAuthority: true }
+
+    it('reads a pause from the last warm-up poll before dropping the baseline', () => {
+      const d = decideHostBroadcast({ ...latch, prev: playing, now: { paused: true, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('pause-at-receiver')
+      expect(d.baseline).toBe('record')
+    })
+
+    it('reads a play the same way — the mirror image is just as permanent', () => {
+      const d = decideHostBroadcast({ ...latch, prev: paused, now: { paused: false, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('play')
+    })
+
+    it('otherwise starts clean, with no pre-correction baseline', () => {
+      const d = decideHostBroadcast({ ...latch, prev: playing, now: { paused: false, sec: 100, atMs: 10_000 } })
+      expect(d.broadcast.kind).toBe('none')
+      expect(d.baseline).toBe('clear')
+    })
+  })
+
+  it('guards win over the arms, in order', () => {
+    // A load in flight during an episode mismatch on an unknown anchor is
+    // still just "do nothing, keep the baseline" — no arm can fire past a
+    // guard however the flags combine.
+    const d = decideHostBroadcast({
+      ...base, anchorUnknown: true, loadInFlight: true, episodeMismatch: true,
+      prev: playing, now: { paused: true, sec: 300, atMs: 10_000 },
+    })
+    expect(d.broadcast.kind).toBe('none')
+    expect(d.baseline).toBe('keep')
+  })
+})
+
+describe('decideHostBroadcast: the latch poll as the component actually calls it', () => {
+  // Regression cover for a wiring bug the earlier tests hid. They passed an
+  // `authoritative` flag alongside `latchingAuthority`, a combination the call
+  // site cannot produce, so three cases passed while pinning an unreachable
+  // branch — and the poll that really does hand a host authority on an expired
+  // warm-up budget had no test at all.
+  const now = { paused: true, sec: 100, atMs: 10_000 }
+  const playingBefore = { paused: false, sec: 99, atMs: 9_000 }
+  const latch = {
+    prev: playingBefore,
+    now,
+    latchingAuthority: true,
+    loadInFlight: false,
+    episodeMismatch: false,
+    anchorUnknown: false,
+    correctionSettling: false,
+    pausedScrubToleranceSec: 1,
+    seekJumpToleranceSec: 3,
+  }
+
+  // Note there is no partyIsPlaying input on this path by design: the TV's
+  // position has to reach the room even when the room is already stopped.
+  it('broadcasts the RECEIVER position, not the party position', () => {
+    // The room and the TV are apart — that is why the budget expired — and the
+    // latch is where the TV becomes the truth. Broadcasting the party's own
+    // position here would leave them apart permanently, since an authoritative
+    // host never corrects itself.
+    expect(decideHostBroadcast(latch).broadcast).toEqual({ kind: 'pause-at-receiver' })
   })
 })

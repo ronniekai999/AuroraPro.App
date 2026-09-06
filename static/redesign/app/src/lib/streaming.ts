@@ -511,15 +511,34 @@ export interface CastTokenResponse {
   token: string
   expires_at: number // Unix seconds
   playlist: string // /api/stream/hls/{sid}/master.m3u8?token=...
+  // The `-ss` anchor of the session the receiver will actually stream, in
+  // absolute source seconds. NOT interchangeable with the local player's
+  // start_sec: when the server clones for cast-safety it anchors the clone
+  // near `atSec`, and when it doesn't the receiver shares the local session's
+  // anchor instead. Converting an absolute position to a receiver-relative
+  // one through the wrong number is issue #172's failure shape (the receiver
+  // seeks somewhere the playlist has not produced and buffers forever).
+  //
+  // Optional only for the transition: a server that predates the field leaves
+  // the caller with the old assumption, which is what it had anyway.
+  start_sec?: number
 }
 
 export async function createCastToken(
   sessionId: string,
-  opts: { signal?: AbortSignal; forAirplay?: boolean } = {},
+  opts: { signal?: AbortSignal; forAirplay?: boolean; atSec?: number } = {},
 ): Promise<CastTokenResponse> {
-  const qs = opts.forAirplay ? '?for_airplay=true' : ''
+  const params = new URLSearchParams()
+  if (opts.forAirplay) params.set('for_airplay', 'true')
+  // Where the sender is, so the server can anchor a cast clone near it rather
+  // than inheriting the local session's anchor. Whole seconds — the server
+  // parses an integer and treats anything else as "no preference".
+  if (typeof opts.atSec === 'number' && Number.isFinite(opts.atSec) && opts.atSec >= 0) {
+    params.set('at', String(Math.floor(opts.atSec)))
+  }
+  const qs = params.toString()
   return apiFetch<CastTokenResponse>(
-    `/api/stream/sessions/${sessionId}/cast-token${qs}`,
+    `/api/stream/sessions/${sessionId}/cast-token${qs ? `?${qs}` : ''}`,
     { method: 'POST', signal: opts.signal },
   )
 }

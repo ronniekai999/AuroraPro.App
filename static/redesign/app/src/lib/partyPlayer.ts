@@ -268,9 +268,14 @@ export function levelLagsPlayhead(
  *    fixed here. Closing it needs a hysteresis-gated version of the
  *    forward arm (e.g. sustained across several ticks) so it doesn't
  *    reintroduce the storm this function exists to avoid.
- *  - The Chromecast-connected-guest path (VideoPlayer.tsx `absMsToCastSec`)
- *    has the identical clamp and no rebuild path either; this fix only
- *    covers the local-<video> guest loop.
+ *  - The Chromecast-connected-guest path had the identical clamp and no
+ *    rebuild path either. MOSTLY CLOSED (2026-09): `castResyncAction` detects
+ *    a target before the cast session's anchor and escalates to a re-anchored
+ *    cast load, the receiver-side equivalent of this rebuild. It cannot help
+ *    when the receiver is SHARING the local session (no clone was needed):
+ *    the server returns that session unchanged, so there is no other anchor
+ *    to move to, and the guest waits for the party clock to walk back up to
+ *    it. This function still covers only the local-<video> guest loop.
  *  - The explicit-seek branch (VideoPlayer.tsx, a few dozen lines above
  *    this function's call site) has no equivalent isPartyEpisodeMismatch
  *    guard and runs BEFORE the drift-loop check in the same tick, so on a
@@ -441,6 +446,309 @@ export function shouldResyncCastReceiver(
   return Math.abs(receiverSec - targetSec) >= toleranceSec
 }
 
+/**
+ * Absolute source seconds → the RECEIVER's own timeline.
+ *
+ * The subtrahend is the CAST session's `-ss` anchor, which since the
+ * playhead-anchoring change is routinely NOT the local <video>'s: a cast
+ * clone is anchored near the sender, while the local session may still be
+ * anchored wherever playback started. Passing the local anchor here maps
+ * every position onto the wrong timeline — the failure this signature exists
+ * to make hard to write by accident.
+ *
+ * The clamp is real and the reason `castTargetBeforeAnchor` exists: a
+ * receiver cannot play before its session's anchor, so a target below it is
+ * not a small error to be floored away, it is a position only a re-anchored
+ * cast can reach.
+ */
+export function castAbsToReceiverSec(absSec: number, castStartSec: number): number {
+  return Math.max(0, absSec - Math.max(0, castStartSec))
+}
+
+/**
+ * Whether the party's position lies before the cast session's own anchor —
+ * i.e. outside anything a seek can address.
+ *
+ * `toleranceSec` absorbs sub-second rounding at the boundary (every
+ * anchor-setting path floors to whole seconds), for the same reason
+ * needsBackwardSessionRebuild carries one: rebuilding a whole cast session to
+ * close a gap smaller than the clamp's own noise trades a bounded stutter for
+ * a much worse one.
+ */
+export function castTargetBeforeAnchor(
+  targetAbsSec: number,
+  castStartSec: number,
+  toleranceSec = 1,
+): boolean {
+  return targetAbsSec < Math.max(0, castStartSec) - toleranceSec
+}
+
+export type CastResyncAction =
+  /** The receiver is where it should be. */
+  | 'none'
+  /** Ordinary drift; a seek closes it. */
+  | 'seek'
+  /** Only a cast session anchored somewhere else can reach the target. */
+  | 'reanchor'
+  /**
+   * The target is unreachable AND no re-anchor is available. Deliberately not
+   * folded into 'none': the two are opposite states that happen to share the
+   * same immediate move (do nothing this poll). A caller waiting for the
+   * receiver to arrive — the host warm-up — must not read "I have given up" as
+   * "it arrived", which is how a host ends up speaking for a party its TV is
+   * nowhere near.
+   */
+  | 'blocked'
+
+export interface CastResyncDecision {
+  action: CastResyncAction
+  /** The party's position on the receiver's clock — what a seek would target. */
+  targetRecvSec: number
+  /**
+   * Whether this poll should count toward the stuck streak. Deliberately a
+   * COARSER test than `action === 'seek'`: the party's target advances in real
+   * time while a seek command takes ~a second to reach a TV and land, so an
+   * ordinary correction reads as still-out-of-tolerance for a poll or two
+   * afterwards. Counting those would re-anchor a perfectly healthy cast every
+   * few seconds. Only a receiver that is nowhere near the target — the shape
+   * of a seek into an unproduced part of the playlist — counts.
+   */
+  stuck: boolean
+}
+
+/**
+ * What to do about a receiver that is not where the party is (2026-09).
+ *
+ * A plain seek closes ordinary drift, and until now it was the only move
+ * available — which left two positions permanently unreachable:
+ *
+ *   - BEFORE the cast session's anchor. `castAbsToReceiverSec` floors there,
+ *     so the correction ladder aims at the anchor forever while the party sits
+ *     somewhere earlier. (The local <video> loop has closed its own version of
+ *     this since #488 via needsBackwardSessionRebuild; the cast path had the
+ *     identical clamp and no escape.)
+ *   - PAST what the receiver's playlist has produced. The seek is accepted and
+ *     simply never lands — the Default Media Receiver reports an indefinite
+ *     buffer, not an error, so nothing on the sender can see it directly.
+ *
+ * Both are answered by re-anchoring: minting a new cast session anchored at
+ * the party's position, which is the same move `onSeekRebuild` makes for local
+ * playback. The first is detected exactly (arithmetic); the second only by
+ * inference, after `reanchorAfterPolls` consecutive polls in which the
+ * receiver stayed nowhere near the target.
+ *
+ * `reanchorAllowed` is the caller's budget — re-anchoring costs a server-side
+ * transcode session and a visible reload, so it is capped per cast rather than
+ * left to fire in a loop against a receiver that is simply broken.
+ */
+export function castResyncAction(args: {
+  receiverSec: number
+  targetAbsSec: number
+  castStartSec: number
+  toleranceSec: number
+  stuckToleranceSec: number
+  stuckPolls: number
+  reanchorAfterPolls: number
+  /**
+   * Whether the INFERRED escalation may fire — a receiver judged unable to
+   * reach a target it can address, from repeated nowhere-near polls. Inference
+   * can be wrong about a merely-slow receiver, so its caller caps it by count.
+   */
+  reanchorAllowed: boolean
+  /**
+   * Whether the PROVEN escalation may fire — a target before the session's own
+   * anchor, which no seek can reach. Separate because a count cap is the wrong
+   * bound for it: it cannot misdiagnose anything, it fires only when the party
+   * genuinely moved behind the anchor, and exhausting a count leaves every
+   * later host rewind unanswerable. Callers rate-limit this one by time.
+   */
+  unreachableReanchorAllowed: boolean
+}): CastResyncDecision {
+  const {
+    receiverSec, targetAbsSec, castStartSec,
+    toleranceSec, stuckToleranceSec, stuckPolls, reanchorAfterPolls,
+    reanchorAllowed, unreachableReanchorAllowed,
+  } = args
+  const targetRecvSec = castAbsToReceiverSec(targetAbsSec, castStartSec)
+
+  // Unreachable by construction. Checked before the tolerance test because a
+  // target just below the anchor can floor to a value that LOOKS in-tolerance
+  // while the party is genuinely elsewhere.
+  if (castTargetBeforeAnchor(targetAbsSec, castStartSec)) {
+    return {
+      action: unreachableReanchorAllowed ? 'reanchor' : 'blocked',
+      targetRecvSec,
+      stuck: false,
+    }
+  }
+
+  if (!shouldResyncCastReceiver(receiverSec, targetRecvSec, toleranceSec)) {
+    return { action: 'none', targetRecvSec, stuck: false }
+  }
+
+  const stuck = shouldResyncCastReceiver(receiverSec, targetRecvSec, stuckToleranceSec)
+  if (reanchorAllowed && stuck && stuckPolls + 1 >= reanchorAfterPolls) {
+    return { action: 'reanchor', targetRecvSec, stuck }
+  }
+  return { action: 'seek', targetRecvSec, stuck }
+}
+
+/** The subset of a party tick these helpers read. */
+export interface PartyTickLike {
+  abs_ms: number
+  server_now_ms: number
+  running?: boolean
+  receivedAtMs?: number
+}
+
+/**
+ * The party's canonical position right now, in absolute source seconds, or
+ * null when the tick cannot be trusted to say.
+ *
+ * Used wherever a position must be chosen from the party rather than from a
+ * local media element — most importantly when seeding a cast, where the local
+ * <video> is either frozen (a cast already began) or about to be.
+ *
+ * A PAUSED party is exact and ageless: no tick loop runs while paused (the
+ * server suppresses them), so `receivedAtMs` grows arbitrarily old while
+ * `abs_ms` stays exactly right. Applying the running party's staleness rule
+ * there would reject every paused party's true position. A RUNNING party is
+ * the opposite — a tick we received seconds ago may describe a server that has
+ * since moved on, or a socket that died — so it ages out, with the same 3s
+ * budget and the same receipt-age (not clock-difference) test the drift loops
+ * use, for the same reason: client↔server skew must not masquerade as
+ * staleness before the time-sync offset converges.
+ */
+export function partyTargetAbsSec(
+  tick: PartyTickLike | null | undefined,
+  partyIsPlaying: boolean,
+  clockOffsetMs: number,
+  nowMs: number,
+  staleAfterMs = 3000,
+): number | null {
+  if (!tick || !Number.isFinite(tick.abs_ms)) return null
+  const running = tick.running !== false && partyIsPlaying
+  if (!running) return Math.max(0, tick.abs_ms / 1000)
+  const tickAgeMs = nowMs - (tick.receivedAtMs ?? nowMs)
+  if (tickAgeMs > staleAfterMs) return null
+  const projected = projectPartyTickAbsMs(
+    tick.abs_ms, tick.server_now_ms, tickAgeMs, clockOffsetMs, nowMs,
+  )
+  // A non-finite server_now_ms (or clock offset) makes the projection NaN,
+  // and NaN reads as "in tolerance" to every downstream comparison —
+  // Math.abs(NaN) >= tol is false — which would silently report a converged
+  // receiver and, for a host, a settled cast. Not a realistic wire value;
+  // cheap to refuse rather than to reason about.
+  if (!Number.isFinite(projected)) return null
+  return Math.max(0, projected / 1000)
+}
+
+export interface CastReanchorBudget {
+  /** Re-anchors spent on this cast. */
+  used: number
+  /** Consecutive in-tolerance polls since the last correction of any kind. */
+  settledPolls: number
+}
+
+export type CastReanchorOutcome =
+  | 'converged'
+  | 'reanchored'
+  | 'reanchor-failed'
+  | 'other'
+
+/**
+ * Fold one poll's outcome into the re-anchor budget (2026-09, third review).
+ *
+ * Two opposite pressures meet here. The cap exists so a receiver that is
+ * simply broken cannot be reloaded in a loop — each re-anchor costs a
+ * server-side transcode session and a visible reload on the TV. But a cap with
+ * no way back is a per-TITLE allowance, and a guest has no other recovery
+ * path (`seekToRealSec` refuses guests, and their local session is never
+ * rebuilt during a cast), so a host who rewinds the party past the receiver's
+ * anchor a third time would strand every guest's TV for the rest of the film.
+ *
+ * So the budget is earned back — but only by a receiver that has SETTLED, not
+ * by one that merely looked right for a moment. That distinction is the whole
+ * point: a re-anchor loads the receiver AT the party position, so the first
+ * poll after it lands is in tolerance almost by construction. Refunding on
+ * that single poll would let a receiver that stalls a few seconds after every
+ * load re-anchor indefinitely, roughly every 6-8s for the whole title, against
+ * the very server whose slowness caused the stall. Requiring a RUN of
+ * in-tolerance polls costs nothing in the case the replenishment is for (a
+ * cast that is genuinely fine for minutes between host rewinds) and denies the
+ * pathological one, whose drift re-opens long before the run completes.
+ */
+export function castReanchorBudgetAfter(
+  budget: CastReanchorBudget,
+  outcome: CastReanchorOutcome,
+  settledPollsToEarnBack: number,
+): CastReanchorBudget {
+  switch (outcome) {
+    case 'converged': {
+      const settledPolls = budget.settledPolls + 1
+      if (budget.used > 0 && settledPolls >= settledPollsToEarnBack) {
+        return { used: budget.used - 1, settledPolls: 0 }
+      }
+      return { used: budget.used, settledPolls }
+    }
+    case 'reanchored':
+      return { used: budget.used + 1, settledPolls: 0 }
+    case 'reanchor-failed':
+      // The load never reached the receiver, so it re-anchored nothing. Never
+      // below zero: the refund is asynchronous and a reset may have landed in
+      // between.
+      return { used: Math.max(0, budget.used - 1), settledPolls: budget.settledPolls }
+    case 'other':
+      // A seek, or a poll that could take no action: the receiver is not where
+      // it should be, so any run of settled polls is over.
+      return { used: budget.used, settledPolls: 0 }
+  }
+}
+
+export type CastHostPhase = 'warmup' | 'authoritative'
+
+/**
+ * Whether a casting HOST may speak for the party yet (2026-09).
+ *
+ * The host branch of the receiver-driven sync effect treats the TV as the
+ * party's source of truth: it watches `cast.remote` and pushes what it sees
+ * outward as requestPlay/requestPause/requestSeek. That is right once the TV
+ * IS the party's position, and wrong for the several seconds before it — a
+ * cast takes real time to connect, load and buffer, and the party's clock does
+ * not stop while it does. Broadcasting during that window rewinds every guest
+ * by the cast's own startup latency, which is the opposite of what casting
+ * mid-party is supposed to cost other people.
+ *
+ * So the host starts in `warmup`, where it behaves like a guest — correcting
+ * the receiver TOWARD the party and broadcasting nothing — and becomes
+ * `authoritative` the moment the receiver has actually reached the party's
+ * position.
+ *
+ * The budget is the escape hatch, and it is why this is bounded rather than
+ * "wait for convergence". A receiver that never converges (a title the party
+ * has since moved past, a wedged device) must not leave the host permanently
+ * unable to pause the room from their own TV. When it expires the host takes
+ * authority regardless, accepting the one corrective jump that entails —
+ * bounded and rare, versus silent and permanent.
+ */
+export function castHostPhase(
+  converged: boolean,
+  warmupStartedAtMs: number,
+  nowMs: number,
+  budgetMs: number,
+): CastHostPhase {
+  if (converged) return 'authoritative'
+  // An unarmed clock (0, the ref's initial value) is "the warm-up has not
+  // started", never "its budget expired in 1970". Getting that backwards
+  // skips the warm-up entirely on any path that reaches the first poll
+  // without passing through the arming branch — a host already casting solo
+  // who then joins a party, or a first poll that finds the media already
+  // loaded — which is exactly when a host is least caught up.
+  if (warmupStartedAtMs <= 0) return 'warmup'
+  if (nowMs - warmupStartedAtMs >= budgetMs) return 'authoritative'
+  return 'warmup'
+}
+
 /** Resolve late party-state changes at the instant an async boot completes. */
 export function resolvePlaybackBootPause(
   capturedPreservePause: boolean,
@@ -471,4 +779,154 @@ export function resolvePlaybackBootPause(
     return !latestPartyRunning
   }
   return capturedPreservePause
+}
+
+// ──────────────────────────────────────────────────────────────────
+// The casting host's broadcast decision (2026-09, ninth review).
+//
+// This is the one decision in the cast path that has been got wrong in four
+// consecutive review rounds, always the same way: a guard added to stop the
+// host broadcasting something it should not, placed where control still fell
+// through to the code that records the next comparison baseline — which
+// destroys the very transition the guard was protecting instead of deferring
+// it. A host's pause is then lost rather than delayed, and a paused receiver
+// never moves, so no later poll finds anything to broadcast.
+//
+// It lives here, as data in and data out, because that failure is mechanically
+// checkable and was never going to be caught by reading a 6,975-line
+// component. Every guard's effect on the baseline is now stated in one place
+// and pinned by a table.
+
+/** One poll's reading of the receiver, on the RECEIVER's clock. */
+export interface CastReceiverSample {
+  paused: boolean
+  sec: number
+  atMs: number
+}
+
+export type HostBroadcast =
+  | { kind: 'none' }
+  /** Pause the party at the receiver's position. */
+  | { kind: 'pause-at-receiver' }
+  | { kind: 'play' }
+  /** Correct the party's position to the receiver's, then resume. */
+  | { kind: 'seek-then-play' }
+  /** Re-state a paused party's position after a scrub on the TV. */
+  | { kind: 'pause-rescrub' }
+  /** The receiver was scrubbed while playing. */
+  | { kind: 'seek' }
+
+/**
+ * What to do with `hostLastSnapshotRef` after this poll.
+ *
+ * `keep` is the one that matters: a guard that declines to act must leave the
+ * PRE-guard baseline standing, so the comparison happens once the guard lifts.
+ * `record` belongs only to paths that consumed the reading.
+ */
+export type HostBaselineDisposition = 'keep' | 'record' | 'clear'
+
+export interface HostBroadcastDecision {
+  broadcast: HostBroadcast
+  baseline: HostBaselineDisposition
+}
+
+export interface HostBroadcastInput {
+  prev: CastReceiverSample | null
+  now: CastReceiverSample
+  /**
+   * True on the poll that takes authority by spending the warm-up budget
+   * without the receiver ever arriving — the one poll where the warm-up's own
+   * play/pause arm no longer runs, so a transition sitting in `prev` has to be
+   * read here or it is lost for good.
+   */
+  latchingAuthority: boolean
+  /** One of our own loads is between issued and resolved. */
+  loadInFlight: boolean
+  /** The party has moved to an episode this player has not caught up to. */
+  episodeMismatch: boolean
+  /** The cast session's anchor is unknown, so no conversion is honest. */
+  anchorUnknown: boolean
+  /** A corrective seek we issued is still landing. */
+  correctionSettling: boolean
+  pausedScrubToleranceSec: number
+  seekJumpToleranceSec: number
+}
+
+/**
+ * Decide what an AUTHORITATIVE casting host tells the party this poll, and
+ * what happens to the baseline.
+ *
+ * Scope is deliberate: the warm-up phase is NOT here. Warm-up broadcasts no
+ * position at all — it mirrors the party onto the receiver and corrects it,
+ * which is effects rather than a decision — so folding it in would mean
+ * inventing action variants for playOrPause, reloadCastAtAbsSec and
+ * correctReceiverToward and routing them through this type. The caller runs
+ * warm-up inline and returns on every one of its paths, so reaching this
+ * function at all means that phase is already over. `latchingAuthority` marks
+ * the single poll where it just ended without convergence.
+ *
+ * Order is load-bearing. The guards come first and all `keep`; the arms that
+ * consume `prev` come after and all `record`. Anything that returns without
+ * looking at `prev` must not touch it.
+ */
+export function decideHostBroadcast(input: HostBroadcastInput): HostBroadcastDecision {
+  const {
+    prev, now, latchingAuthority,
+    loadInFlight, episodeMismatch, anchorUnknown, correctionSettling,
+    pausedScrubToleranceSec, seekJumpToleranceSec,
+  } = input
+
+  // ── Guards. Every one keeps the baseline. ──
+  // No honest conversion between the two clocks exists.
+  if (anchorUnknown) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+  // The receiver's state is ours, not the user's, and the seed that says so
+  // does not land until the load resolves.
+  if (loadInFlight) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+  // The two sides are on different episodes; a position means nothing across
+  // that boundary.
+  if (episodeMismatch) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+
+  // ── Taking authority by spending the budget. ──
+  // Read the transition BEFORE discarding the warm-up baseline: past this
+  // poll the warm-up arm no longer runs and no later transition exists.
+  if (latchingAuthority) {
+    if (prev && prev.paused !== now.paused) {
+      return {
+        broadcast: now.paused ? { kind: 'pause-at-receiver' } : { kind: 'play' },
+        baseline: 'record',
+      }
+    }
+    return { broadcast: { kind: 'none' }, baseline: 'clear' }
+  }
+
+  // ── Authoritative: the TV speaks for the party. ──
+  if (!prev) return { broadcast: { kind: 'none' }, baseline: 'record' }
+
+  // A corrective seek cannot change whether the receiver is PAUSED, so the
+  // suppression below applies to POSITION only and this arm runs regardless.
+  if (prev.paused !== now.paused) {
+    if (now.paused) return { broadcast: { kind: 'pause-at-receiver' }, baseline: 'record' }
+    // Scrubbed while paused (TV remote, another Cast app): correct the party's
+    // position before resuming, or it resumes from the pre-scrub spot.
+    const scrubbed = Math.abs(now.sec - prev.sec) > pausedScrubToleranceSec
+    return {
+      broadcast: scrubbed ? { kind: 'seek-then-play' } : { kind: 'play' },
+      baseline: 'record',
+    }
+  }
+
+  if (correctionSettling) return { broadcast: { kind: 'none' }, baseline: 'keep' }
+
+  if (now.paused) {
+    // Still paused, so any movement is a direct scrub.
+    const scrubbed = Math.abs(now.sec - prev.sec) > pausedScrubToleranceSec
+    return {
+      broadcast: scrubbed ? { kind: 'pause-rescrub' } : { kind: 'none' },
+      baseline: 'record',
+    }
+  }
+
+  const elapsedSec = (now.atMs - prev.atMs) / 1000
+  const jumped = isCastHostSeekJump(now.sec, prev.sec, elapsedSec, seekJumpToleranceSec)
+  return { broadcast: jumped ? { kind: 'seek' } : { kind: 'none' }, baseline: 'record' }
 }

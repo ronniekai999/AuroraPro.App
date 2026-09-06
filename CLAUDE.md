@@ -389,6 +389,312 @@ Known limits, stated plainly:
   and the message mapping are pinned only through the pure helpers extracted
   into `lib/cast.ts`.
 
+## Casting midstream, and casting during a watch party (September 2026)
+
+Casting from the middle of a title, and doing it in a party without moving
+anyone else. Code: `CloneForCast`/`castCloneAnchorSec`/`castAnchorPadSec`
+(`internal/streaming/streaming.go`), `CreateCastToken`'s `?at=` + `start_sec`
+(`internal/api/phase2_handlers.go`), `castStartSecRef` / `castStartAbsSec` /
+`correctReceiverToward` and the host warm-up in `VideoPlayer.tsx`,
+`castAbsToReceiverSec` / `castTargetBeforeAnchor` / `castResyncAction` /
+`castHostPhase` / `partyTargetAbsSec` in `lib/partyPlayer.ts`.
+
+Invariants to preserve when touching this area:
+
+- **A load's own receiver transitions are STATED, not suppressed.** A load onto
+  a LIVE receiver replaces its media session, and CAF reports that as `IDLE`
+  with `idleReason` INTERRUPTED — "a sender requested playing different media
+  using the LOAD command" — and then as a PLAYING when the new media autoplays.
+  Both are OURS and both look exactly like a user's: an armed `IDLE` reads as
+  the title finishing (INTERRUPTED kills the cast; a momentarily-null reason
+  starts the wrong episode), and the autoplay reads as the host pressing play,
+  which can resume a room the host deliberately paused.
+  Two attempts failed before the current one, and both failure modes are worth
+  keeping in mind because they generalise:
+  **De-arming a flag before the load** is defeated by the load's own latency —
+  the getter awaits a token mint that spawns a server-side FFmpeg, and the
+  receiver keeps publishing PLAYING updates throughout, re-arming it long
+  before `loadMedia` is issued.
+  **Gating the transition arms on a settle window** silently ATE the thing it
+  protected: a window checked inside the arm's condition still falls through to
+  the code that records the next baseline, so a real pause made during it was
+  written into `prev` and no later poll could find a transition — lost, not
+  delayed, exactly as the `hostLastSnapshotRef` bullet below warns.
+  What works is seeding: `loadMedia` is issued with autoplay true at a known
+  `startTime`, so `runCastLoad` writes that exact state as the host's baseline
+  at promotion. The load's own transition then IS a non-transition, and a
+  person's is still a transition. `castLoadIsSettling` survives for the
+  end-of-media evaluator alone, which has no baseline to consume — and a
+  genuine end-of-media landing inside that window is re-checked on its own
+  timer rather than dropped, because the receiver goes quiet afterwards and
+  nothing else would re-run the effect.
+- **No correction crosses a load boundary.** The anchor is promoted only when a
+  load RESOLVES, so while one is in flight `castStartSecRef` still describes the
+  session the receiver is LEAVING while its reported position may already
+  describe the one it is joining. Correcting across that computes a target on
+  the wrong timeline — for a re-anchor from 0 to ~40 minutes, a seek 40 minutes
+  past the new clone's produced edge, i.e. #172 produced by the machinery built
+  to close it. `castLoadsInFlightRef` covers every load path, and both the
+  correction paths and the host's transition arms RETURN on it — before
+  recording a baseline, never by gating the arm in place, because a guard that
+  falls through to the recording code destroys the comparison rather than
+  deferring it. The authoritative host's position broadcasts still read
+  `castStartSecRef` directly and rely on the anchor being promoted before the
+  receiver reports playing again.
+- **A cast clone's `-ss` anchor follows the SENDER, not the source session.**
+  It used to inherit `src.StartSec`, which is correct arithmetic and useless
+  readiness: a viewer 40 minutes into a session anchored at 0 got a clone also
+  anchored at 0, pre-warmed at 0, paced at `readRateFactor`, and was then asked
+  to seek 40 minutes into it — ~10 minutes of encoder catch-up presenting as
+  #172's "connected, never played". Clones are the NORMAL path
+  (`CastRemuxNeedsTranscode` is true for every remux; any subtitle track
+  clones), so this was most casts, not an edge.
+- **The anchor is padded BACKWARD, never forward** (`castAnchorPadSec`). A
+  receiver seeks forward freely inside what its playlist has produced but can
+  never reach a position before its own anchor, so early costs 15s of encode
+  and late creates an unreachable region on purpose. The pad must stay inside
+  `readRateInitialBurstSec` or it stops being free —
+  `TestCastAnchorPadFitsInsideTheInitialBurst` is the guard.
+- **A missing `start_sec` is omitted, never sent as 0.** 0 is a real, common
+  anchor, so a sender that adopts it converts every receiver reading as if the
+  clock were absolute — for a host on a clone anchored 40 minutes in, the first
+  pause broadcast rewinds the whole room by 40 minutes. Omitting leaves the
+  client on its own local anchor, which is what it assumed before the field
+  existed. The source's anchor is no better a guess: on the cloned path it
+  describes a different session's timeline.
+- **`start_sec` in the cast-token response is the ONLY conversion key.** The
+  shared-session path (no clone needed) reports the LOCAL session's anchor and
+  the cloned path reports the clone's; they differ, and the sender cannot infer
+  which it got. `castStartSecRef` — never `startSecRef` — is what every
+  receiver↔absolute conversion subtracts, **including the ones outside the
+  sync effects**: the expanded transport bar's readout, its ±10s control, the
+  keyboard arrows, and the minimized widget's progress bar all read
+  `cast.remote.currentTime`. They were correct while clones inherited
+  `src.StartSec` and became wrong the moment anchors could diverge; a host's
+  ±10s button in particular reached `broadcastHostPartySeek`, so the unit slip
+  moved the whole room.
+- **`castStartSecRef` is NULLABLE, and 0 is not the unknown value.** 0 is a
+  real, common anchor (direct play always; any unresumed session), so
+  defaulting to it silently claims the receiver's clock is absolute. After a
+  page reload re-joins a live cast — routine, the box auto-deploys — that
+  understates by the clone's whole anchor and, for a host, broadcasts it.
+  Both sync branches bail on null; the display surfaces (the expanded
+  transport bar and the minimized widget) fall back to the raw receiver
+  reading with an explicit `??` so the guess is visible.
+- **`?at=` is a hint, not a contract.** An absent or unparseable value means
+  "no preference" and restores the inherit-the-source behaviour; it never fails
+  the mint. `for_airplay=true` still skips cloning entirely (#326).
+- **A casting HOST is not the party's position until its receiver arrives**
+  (`castHostPhase`). A cast takes seconds to connect, load and buffer while the
+  party clock keeps running, so the host opens in a warm-up phase that behaves
+  like a guest — pulling the receiver toward the party, broadcasting nothing —
+  and only then becomes authoritative. The wait is BOUNDED
+  (`HOST_WARMUP_BUDGET_MS`): a receiver that never converges must not leave the
+  host unable to pause their own room from the TV. Warm-up with no usable tick
+  stays silent rather than falling through to broadcasting — `useParty` buffers
+  a pending intent across a socket outage and delivers it on reconnect, so a
+  position read during one would land on every guest afterwards.
+- **The host's own corrective seeks are not scrubs, but they are not pauses
+  either.** `hostCorrectionUntilMsRef` suppresses the POSITION comparisons
+  across the window one takes to land (and is armed by the renewal reloads
+  too, which re-anchor and so also move the receiver's clock); pause/play
+  transitions are read normally, because a seek cannot change whether the
+  receiver is paused and suppressing them lost a host's pause outright.
+- **The warm-up honours a play/pause the host makes on the TV**, and stops
+  mirroring until its own request round-trips. `requestPause`/`requestPlay` do
+  not update `party.isPlaying` optimistically, so without that pause the mirror
+  reads the not-yet-updated party state as a disagreement and undoes what the
+  host just did, one poll later. Both directions matter: a cast starting into a
+  PAUSED room autoplays and gets mirror-paused, so a host pressing play needs
+  the same honouring a host pressing pause does.
+- **The authoritative host's broadcast is `decideHostBroadcast`, in
+  `lib/partyPlayer.ts`, not inline.** It was inline, and the same defect was
+  found in it four rounds running — a guard added to stop a broadcast, placed
+  where control still fell through to the code recording the next baseline.
+  That is a data decision, so it is now data in and data out, with a table
+  that walks every guard: pause the TV during it, lift it, assert the pause is
+  still there. Warm-up is deliberately NOT in the function (it broadcasts no
+  position; it mirrors and corrects, which is effects), so the caller runs
+  warm-up inline and returns on every path — reaching the function means that
+  phase is over, which is why `authoritative` is not an input. Do not add one
+  back without moving warm-up in too: an input the call site can only set one
+  way is how the latch poll's semantics got pinned wrong by a passing test.
+- **`hostLastSnapshotRef` is written where it is CONSUMED, never before the
+  guards.** A snapshot taken at the top of the poll becomes the baseline the
+  next poll compares against even when this one returned early — so a host who
+  pauses the TV inside the correction or episode-mismatch window has the pause
+  folded into `prev`, finds no transition afterwards, and never pauses the
+  room at all (the paused-position arm only re-broadcasts on movement, and a
+  paused receiver does not move). The pause is lost, not delayed. Guards leave
+  the pre-window baseline standing; `isCastHostSeekJump` takes elapsed time as
+  an input, so an older baseline still compares correctly.
+- **A correction that cannot land escalates** (`castResyncAction`). A target
+  before the cast anchor is unreachable by arithmetic and re-anchors at once;
+  one past the receiver's produced edge is invisible to the sender and is
+  inferred from consecutive nowhere-near polls. The stuck test is deliberately
+  coarser than the seek test — the party's target advances while a seek takes
+  ~a second to reach a TV, so a WORKING correction reads out-of-tolerance for a
+  poll or two and counting those would re-anchor healthy casts on a loop.
+  Re-anchors are capped, charged only when a reload actually starts
+  (`reloadCastAtAbsSec` returns whether it did) and REFUNDED when the one it
+  started never reaches the receiver, and refused outright when the receiver
+  is SHARING the local session — `CloneForCast` returns that session
+  unchanged, so a re-anchor there mints a new token for the same anchor and
+  the visible reload accomplishes nothing. The two escalation causes are
+  budgeted SEPARATELY, and that split is load-bearing. The INFERRED one (a
+  receiver judged stuck from repeated nowhere-near polls) is capped by COUNT,
+  because inference can misjudge a merely-slow receiver and a wrong diagnosis
+  must not reload the TV indefinitely; a sustained run of in-tolerance polls
+  earns one back (`castReanchorBudgetAfter`), and the run length matters
+  because a re-anchor loads the receiver AT the party position, so the FIRST
+  poll after it lands is in tolerance almost by construction — refunding on
+  that one poll let a receiver stalling a few seconds after every load
+  re-anchor every 6-8s for a whole title, against the very server whose
+  slowness caused the stall. The PROVEN one (a target before the session's own
+  anchor) is rate-limited by TIME instead: it is arithmetic, it cannot
+  misdiagnose anything, and a count cap on it strands the receiver — two host
+  rewinds inside one settled-run window spend the count, and every later
+  rewind is then unanswerable while the TV plays on ahead of the room. The
+  interval applies to BOTH causes, because a refund for a reload that keeps
+  failing (a mint 429ing on the per-user session cap) otherwise defeats the
+  count entirely and re-fires every few polls for the whole title. A guest has no
+  other recovery path at all (`seekToRealSec` refuses guests and their local
+  session is never rebuilt during a cast), so "unanswerable" means exactly
+  that.
+- **Per-title cast state is reset on TARGET IDENTITY, not on the auto-advance
+  path.** `castAdvancePendingRef` is set only by end-of-media and by a
+  seek-while-casting, so a PARTY media-change bumps `castReloadEpoch` and the
+  reload effect returns immediately — leaving the previous episode's anchor
+  published while the party's clock has moved to the next one. Every
+  conversion then reads the new episode against the old anchor, and a host
+  would broadcast the old episode's position into the new episode's party.
+  The reset clears BOTH halves of the pending pair, bumps
+  `castTargetEpochRef`, and nulls the committed anchor. All three are needed.
+  Clearing only the pending anchor leaves a load in flight able to promote the
+  OLD title's anchor, which every consumer reads as a fresh anchor for the NEW
+  title — the same defect one step removed. Clearing both covers a load past
+  its getter; the EPOCH covers one that has not reached it, because the getter
+  writes those refs only after awaiting the token mint (which spawns an FFmpeg
+  server-side) and is therefore invisible to the reset until then. A load that
+  fails the epoch check promotes nothing, leaving the anchor unknown, which is
+  what makes both branches decline instead of converting wrongly.
+- **`'blocked'` is not `'none'`.** Both mean "this poll takes no action", and
+  they are opposite states: one is "the receiver arrived", the other "it
+  cannot be got there and I am out of budget". The host warm-up promotes only
+  on a genuine arrival — conflating them hands authority to a TV that is
+  nowhere near the room, at exactly the moment the warm-up exists to prevent
+  that.
+- **The party clock is read through `isPartyEpisodeMismatch`, not just
+  `partyControlsMedia`, and through `partySyncRef` rather than the captured
+  `party` prop.** The former is SERIES-level for a TV show, so during the
+  seconds between a `media-change` and App resolving the new target it reads
+  true across two different episodes; anchoring a clone from the wrong
+  episode's clock puts its `-ss` somewhere arbitrary in the new file — past
+  EOF if the new episode is shorter, which is the silent hang again. The
+  latter is the trap the local drift loop already documents: `partyEpisodeId`
+  is deliberately NOT in the sync effect's dep array, so a room-socket
+  reconnect that patches it without moving isHost/isPlaying/partyMediaItemId
+  leaves a captured value stale and the guard silently fails. The
+  AUTHORITATIVE host needs its own copy of this check — it never calls
+  `partyAbsSec`, so nothing else would stop it broadcasting the old episode's
+  position into the new episode's room.
+- **`loadCurrent`/`castLoadGetter` take ABSOLUTE source seconds.** The old
+  receiver-relative `startTimeSec` override only worked while every cast
+  session shared the local player's anchor. Keep the one conversion in the
+  getter, which is the thing that knows the anchor because it just minted it.
+
+Known limits, stated plainly:
+
+- **None of this is measured against a real device either.** The catch-up
+  model, the pad, and "a seek past the produced edge buffers silently" are
+  reasoned from the pacing constants and the #172/#324/#328 history. One
+  end-to-end cast 40 minutes into a party would settle the whole section.
+- **The produced edge is still not observable from the sender.**
+  `bufferedSecRef` describes the local `<video>`, frozen for the cast's whole
+  life. The escalation infers a stuck receiver rather than knowing one, so it
+  costs ~5s before acting and can in principle misread a receiver that is
+  merely very slow as unreachable — bounded by the re-anchor cap.
+- **The warm-up budget can still cost one guest-visible jump.** When it expires
+  unconverged the host takes authority with the TV where it is. Bounded and
+  rare, versus the alternative of a host who can never drive their own party.
+- **A user-requested resume that routes through a RELOAD is not broadcast.**
+  `resumeCast` and the keyboard play reload when the cast token has expired
+  (>4h paused), and the load then seeds `{paused:false}` as the baseline, so
+  the arm sees no transition and the party is never told to play: the host's
+  TV resumes and the room stays paused. Narrow, and the price of seeding
+  rather than suppressing; the honest fix is for those two call sites to state
+  the intent themselves rather than let it be inferred from the receiver.
+- **The seeded baseline can over-predict.** It says "playing from `startTime`
+  as of now", but the receiver is usually still buffering — so if the scrub
+  suppression then holds the poll out of re-recording for its 3s, the first
+  comparison afterwards can see several seconds of apparent shortfall and
+  broadcast one corrective seek. The position is genuinely where the TV is,
+  and the error is one-sided (always backward), but it is a room-visible jump
+  the seed itself caused.
+- **A guest casting is untouched by the warm-up**, which is correct (they never
+  broadcast) but means a guest whose receiver cannot converge simply watches a
+  TV that is out of step; nothing tells them so. The guest-only "⟳ Sync"
+  button is NOT the remedy it looks like: it assigns `vid.currentTime` on the
+  local `<video>`, which `pausedByCastRef` holds frozen for the whole cast, so
+  while casting it does nothing at all. Pre-existing, and the one position
+  control this pass did not convert.
+- **Shared-session casts cannot escalate at all.** `castCanReanchor*` refuses
+  them because `CloneForCast` returns that session unchanged, so a party seek
+  before a RESUMED local session's anchor leaves the guest blocked until the
+  party clock walks back up to it — minutes, potentially. The cloned case
+  self-heals far faster because its anchor is only the pad behind the sender.
+- **The pad is only free on FFmpeg ≥ 6.1.** `-readrate_initial_burst` rides on
+  `readrateBurstOK`; without it the 15s pad is paced at `readRateFactor` and
+  costs ~3.75s of extra wall time before the receiver's `startTime` exists.
+  `TestCastAnchorPadFitsInsideTheInitialBurst` compares two constants and
+  cannot see this.
+- **`?at=` is not bounded by the file's duration** — `castCloneAnchorSec` caps
+  at 24h only, because the session carries no duration to check against. A
+  sender that asks for a position past EOF gets an FFmpeg that produces
+  nothing, i.e. the silent hang. Self-limiting (it costs that caller their own
+  cast), and the episode-mismatch guard closes the one path that reached it by
+  accident, but it is a guard the server does not have.
+- **An OMITTED `start_sec` is the one place the sender still guesses an
+  anchor.** It falls back to the local session's, which was right when the
+  server always inherited `src.StartSec` and is wrong now that every clone is
+  re-anchored near the sender: a host would then compute `startTime` as the
+  whole playhead against a clone anchored a pad behind it (the #172 hang) and
+  broadcast ~0 as the party's position. Reachable only if the just-created
+  clone vanishes before the handler reads it back. Treating a missing field as
+  UNKNOWN — the discipline `castStartSecRef` applies everywhere else — is the
+  consistent fix and is not built.
+- **`anchorUnknown` is an input `decideHostBroadcast`'s only caller can set
+  just one way** (the poll narrows the anchor to non-null before calling). Its
+  guard is therefore unreachable from production while two tests pin it — the
+  same shape as the `authoritative` input whose removal this section warns
+  about. Inert, because the caller's own early return covers it, but it should
+  go the same way.
+- **The warm-up mirror's own command reads as the user's one poll later.**
+  The baseline is recorded before `playOrPause()` is issued, so the next poll
+  sees a transition. Harmless in the common case (`HandleRequestPlay`
+  short-circuits on an already-running party), but if the party transitions to
+  playing inside that ~1s window — a scheduled auto-start — our own mirror
+  pause is read as the host pausing the TV and stops a room that just began.
+  Arming the intent-echo suppression from the mirror itself would close it;
+  today only the transition arm arms it, which is the wrong half.
+- **The unknown-anchor state stops corrections rather than recovering them.**
+  A page reload that re-joins a live cast leaves `castStartSecRef` null, and
+  both sync branches (plus the ±10s controls) then decline to act rather than
+  convert through a guessed anchor. Correct, but it means a re-joined cast in
+  a party no longer drift-corrects at all until the receiver is re-pointed.
+  Reading the anchor back off a re-joined session is the fix, and is not built.
+- **A party media-change still strands the receiver on the old episode.**
+  Pre-existing — nothing re-points a cast on that path — and this change only
+  makes it safe rather than fixing it: the anchor goes to unknown, so both
+  branches stop converting instead of converting wrongly. The escalation is
+  the first machinery that COULD recover it; wiring the two together is the
+  open follow-up.
+- **An AUTHORITATIVE host never escalates.** `correctReceiverToward` is
+  reachable from the host branch only during warm-up, so a host whose receiver
+  falls behind after converging broadcasts the lagging TV outward rather than
+  correcting itself. Consistent with "the host is ground truth", but it means
+  the escalation covers guests and host warm-up only.
+
 ## Native-client direct play (Tier 1 of the Mac-app work)
 
 Capability keys that let a NATIVE client (libVLC/mpv/ExoPlayer-backed app)
