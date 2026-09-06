@@ -297,41 +297,52 @@ for s in "${SCRIPTS[@]}"; do
     fi
 done
 
-# ── Position: the updater's gate must precede the fetch ───────────
+# ── Reachability: the gate must actually run ──────────────────────
 #
-# Behaviour in isolation is not enough. The gate exists so an operator learns
-# their Node is too old BEFORE an update is attempted; a refactor that moved
-# the marked block after `git fetch` would keep every assertion above green
-# while restoring exactly the failure this was written to remove. Verified by
-# line order rather than by running the script, which needs a real source
-# mirror, a lock and a network.
-gate_line="$(grep -n '# AURORA-NODE-GATE-BEGIN' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
-fetch_line="$(grep -n '^if ! git fetch' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
-status_line="$(grep -n 'write_status checking' "$REPO_ROOT/scripts/aurora-update.sh" | head -1 | cut -d: -f1)"
+# Behaviour in isolation is not enough. A gate that never executes passes every
+# assertion above while restoring exactly the anonymous npm failure it was
+# written to remove. Two shapes do that — moving the marked block past the
+# thing it must precede, and wrapping it in a function nobody calls — and both
+# are checked for ALL THREE scripts. Checking only the updater left the
+# first-run path (install.sh) and the manual deploy path (redeploy.sh) able to
+# lose their gate silently.
 echo
-echo "node gate: position"
-if [ -z "$gate_line" ] || [ -z "$fetch_line" ] || [ -z "$status_line" ]; then
-    bad "could not locate the gate ($gate_line), the fetch ($fetch_line) or the checking status ($status_line) in aurora-update.sh"
-else
-    if [ "$gate_line" -lt "$fetch_line" ]; then
-        ok "aurora-update.sh gates on Node (line $gate_line) before it fetches (line $fetch_line)"
-    else
-        bad "aurora-update.sh fetches (line $fetch_line) BEFORE its Node gate (line $gate_line) — the operator would learn about Node only after an update was attempted"
-    fi
-    if [ "$gate_line" -lt "$status_line" ]; then
-        ok "aurora-update.sh gates on Node before it reports 'checking'"
-    else
-        bad "aurora-update.sh reports 'checking' (line $status_line) before its Node gate (line $gate_line)"
-    fi
-fi
+echo "node gate: reachability"
 
-# The gate must be at top level, not tucked inside a function nobody calls —
-# another shape that keeps the behavioural assertions green.
-if awk -v n="$gate_line" 'NR==n {exit} /^[a-z_]+\(\) \{$/ {f=1} /^\}$/ {f=0} END {exit !f}' "$REPO_ROOT/scripts/aurora-update.sh"; then
-    bad "aurora-update.sh's Node gate sits inside a function — it may never run"
-else
-    ok "aurora-update.sh's Node gate is at top level"
-fi
+gate_line_of() { grep -n '# AURORA-NODE-GATE-BEGIN' "$1" | head -1 | cut -d: -f1; }
+
+# Each script's gate must come before the thing it exists to pre-empt.
+check_before() {  # $1 = script, $2 = anchor regex, $3 = what the anchor is
+    local f="$REPO_ROOT/scripts/$1" g a
+    g="$(gate_line_of "$f")"
+    a="$(grep -nE "$2" "$f" | head -1 | cut -d: -f1)"
+    if [ -z "$g" ] || [ -z "$a" ]; then
+        bad "scripts/$1: could not locate the gate ($g) or $3 ($a) — this check is inert"
+        return
+    fi
+    if [ "$g" -lt "$a" ]; then
+        ok "scripts/$1 gates on Node (line $g) before $3 (line $a)"
+    else
+        bad "scripts/$1 reaches $3 (line $a) BEFORE its Node gate (line $g) — the operator would learn about Node only after the build had already failed"
+    fi
+}
+
+check_before aurora-update.sh '^if ! git fetch'                'the fetch'
+check_before aurora-update.sh 'write_status checking'          'the "checking" status'
+check_before install.sh       'build_frontend_bundle '         'the frontend build'
+check_before redeploy.sh      'npm ci --no-audit'              'npm ci'
+
+# ...and must be at top level, not inside a function nobody calls.
+for s in "${SCRIPTS[@]}"; do
+    g="$(gate_line_of "$REPO_ROOT/scripts/$s")"
+    if [ -z "$g" ]; then
+        bad "scripts/$s has no gate marker"
+    elif awk -v n="$g" 'NR==n {exit} /^[a-z_]+\(\) \{$/ {f=1} /^\}$/ {f=0} END {exit !f}' "$REPO_ROOT/scripts/$s"; then
+        bad "scripts/$s's Node gate sits inside a function — it may never run"
+    else
+        ok "scripts/$s's Node gate is at top level"
+    fi
+done
 
 echo
 echo "passed: $PASS   failed: $FAIL"

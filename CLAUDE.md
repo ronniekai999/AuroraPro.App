@@ -911,8 +911,10 @@ Invariants to preserve:
   in exactly the path that must not acquire one.
 
 Known limit: none of the verdicts are exercised against a real install. The
-crypto.hash floors come from Node's changelog and the engines from the
-toolchain's `package.json`; the test drives a fake `node`.
+crypto.hash floors come from Node's changelog, and `^20.19 || >=22.12` is
+vite 7.3.6's OWN declared `engines`, read out of `package-lock.json` — the
+app's `package.json` declares none, so a vite bump moves the floor with
+nothing in this repo restating it. The test drives a fake `node`.
 
 ### Library repointing — attempted and WITHDRAWN. Read this before retrying.
 

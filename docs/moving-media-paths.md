@@ -245,10 +245,16 @@ UPDATE media_files mf
    AND mi.library_id IN (1, 2, 3, 4)
    AND mf.path LIKE '/home/rontavious999/media/%';
 
+-- The join runs episode → season → item, which is the join
+-- GetEpisodeFilePathsForLibrary uses. tv_episodes carries its own
+-- media_item_id and it is the same row today, but reaching the library
+-- through a column the scanner does not read means a rewrite here and a
+-- prune there can disagree the moment those two ever drift.
 UPDATE episode_files ef
    SET path = regexp_replace(ef.path, '^/home/rontavious999/media/', '/srv/storage/media/')
   FROM tv_episodes te
-  JOIN media_items mi ON mi.id = te.media_item_id
+  JOIN tv_seasons  ts ON ts.id = te.season_id
+  JOIN media_items mi ON mi.id = ts.media_item_id
  WHERE te.id = ef.episode_id
    AND mi.library_id IN (1, 2, 3, 4)
    AND ef.path LIKE '/home/rontavious999/media/%';
@@ -275,9 +281,12 @@ SELECT id, name, paths FROM libraries
                    OR p = '/home/rontavious999/media');
 ```
 
-Must return no rows. (The `OR p =` arm matters: `LIKE 'prefix/%'` requires at
-least one character after the slash, so a library rooted at exactly the old
-prefix — the common one-library-covers-everything layout — would slip past.)
+Must return no rows. (The `OR p =` arm matters: the pattern ends in a literal
+`/`, and `%` matches the empty string but the slash before it does not — so
+`'…/media/%'` matches `/home/rontavious999/media/` but *not*
+`/home/rontavious999/media`. A library rooted at exactly the old prefix, spelled
+without a trailing slash — the common one-library-covers-everything layout —
+would otherwise slip past.)
 Also compare the full `SELECT id, name, paths FROM libraries` against the list
 you wrote down in step 2; this query only catches a library still under the
 prefix you happened to type.

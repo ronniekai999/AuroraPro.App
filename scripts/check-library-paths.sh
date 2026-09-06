@@ -43,10 +43,19 @@ set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
 
-# Extensions the scanner treats as video. Keep in step with IsVideoFile in
-# internal/library/scanner.go — a missing one here shows up as a false alarm
-# (a file on disk that the DB does not have), never as a false all-clear.
-VIDEO_RE='\.(mkv|mp4|m4v|avi|mov|wmv|flv|webm|mpg|mpeg|m2ts|ts|vob|ogv|3gp|mts)$'
+# EXACTLY the extensions IsVideoFile accepts (videoExtensions in
+# internal/library/parser.go). Not a superset: an extra entry here is a FALSE
+# ALL-CLEAR — a recorded row the scanner will never rediscover, reported as
+# "will be found" while the scan prunes it and the sweep takes its title.
+# TestCheckScriptExtensionsMatchIsVideoFile pins the two lists together.
+VIDEO_RE='\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)$'
+
+# Byte collation. sort -u and comm both honour LC_COLLATE, and under a UTF-8
+# locale two byte-distinct paths that strcoll ranks equal are treated as
+# common by comm — dropping a genuinely-missing row and reporting all-clear.
+# GNU sort also aborts on invalid UTF-8, which would silently truncate the
+# disk side.
+export LC_ALL=C
 
 info() { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
 warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
@@ -82,63 +91,148 @@ else
 fi
 [ -n "$LIB_IDS" ] || die "no libraries found in $DB_NAME"
 
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 TOTAL_MISSING=0
 TOTAL_UNKNOWN=0
 CHECKED=0
+CHECKED_FULLY=0
+LIBS_MISSING=0
 
 while IFS= read -r LIB; do
     [ -n "$LIB" ] || continue
-    name="$(q "SELECT name FROM libraries WHERE id = $LIB")"
-    [ -n "$name" ] || { warn "library $LIB does not exist — skipping"; continue; }
+    # Every query is checked. A psql that starts failing mid-run — the cluster
+    # going away, a permission change — must not leave this reporting a green
+    # all-clear on the libraries it never managed to read. "Could not check" is
+    # not the same answer as "nothing to fix".
+    exists="$(q "SELECT count(*) FROM libraries WHERE id = $LIB")" \
+        || die "query failed for library $LIB — cannot say whether a scan would prune anything"
+    if [ "$exists" != "1" ]; then
+        # Not a skip. An id that does not exist is an operator error, and
+        # answering it with a green summary is how a typo reads as safety.
+        die "library $LIB does not exist"
+    fi
+    name="$(q "SELECT name FROM libraries WHERE id = $LIB")" || die "query failed for library $LIB"
+    [ -n "$name" ] || name="(unnamed)"
     CHECKED=$((CHECKED + 1))
 
-    roots="$(q "SELECT unnest(paths) FROM libraries WHERE id = $LIB")"
+    ltype="$(q "SELECT type FROM libraries WHERE id = $LIB")" || die "query failed for library $LIB"
+    roots="$(q "SELECT unnest(paths) FROM libraries WHERE id = $LIB")" || die "query failed for library $LIB"
     if [ -z "$roots" ]; then
-        warn "library $LIB ($name) has no paths — skipping"
+        warn "library $LIB ($name) has no paths — it is not scanned at all"
         continue
     fi
 
-    # Recorded: movie rows hang off media_items; episode rows reach the
-    # library through tv_seasons, which is the join the scanner's own
-    # GetEpisodeFilePathsForLibrary uses. Going via tv_episodes.media_item_id
-    # instead would agree with this script and disagree with the scan on any
-    # row where the two have drifted.
-    recorded="$(q "
-        SELECT mf.path FROM media_files mf
-          JOIN media_items mi ON mi.id = mf.media_item_id
-         WHERE mi.library_id = $LIB
-        UNION
-        SELECT ef.path FROM episode_files ef
-          JOIN tv_episodes te ON te.id = ef.episode_id
-          JOIN tv_seasons  ts ON ts.id = te.season_id
-          JOIN media_items mi ON mi.id = ts.media_item_id
-         WHERE mi.library_id = $LIB")" || die "query failed for library $LIB"
+    # ONE table, chosen by library type — pruneDeletedFiles branches on
+    # `lib.Type == LibraryShows` and reads either GetEpisodeFilePathsForLibrary
+    # or GetMediaFilePathsForLibrary, never both. Unioning them would report a
+    # stray row of the other kind as prunable when the scan will not look at
+    # it. The episode side joins through tv_seasons because that is the join
+    # GetEpisodeFilePathsForLibrary uses; going via tv_episodes.media_item_id
+    # would agree with this script and disagree with the scan wherever the two
+    # have drifted.
+    if [ "$ltype" = "show" ]; then
+        sel="SELECT ef.path FROM episode_files ef
+              JOIN tv_episodes te ON te.id = ef.episode_id
+              JOIN tv_seasons  ts ON ts.id = te.season_id
+              JOIN media_items mi ON mi.id = ts.media_item_id
+             WHERE mi.library_id = $LIB"
+    else
+        sel="SELECT mf.path FROM media_files mf
+              JOIN media_items mi ON mi.id = mf.media_item_id
+             WHERE mi.library_id = $LIB"
+    fi
+    recorded="$(q "$sel")" || die "query failed for library $LIB"
+    # How many paths SQL says there are, versus how many lines came back.
+    # Everything below is line-oriented — psql -qtA and find both emit records
+    # separated by newlines — so a path CONTAINING a newline arrives as two
+    # lines and is compared as two paths. That is not merely an over-report: a
+    # row spelling two real filenames in one value has both halves matched and
+    # is declared safe, while the scanner compares the whole string and prunes
+    # it. An empty path is the same shape (dropped by the blank-line filter,
+    # so never reported missing at all). Neither can be handled by a
+    # line-oriented diff, so refuse to answer rather than answer wrongly.
+    n_rows="$(q "SELECT count(DISTINCT path) FROM ($sel) t")" \
+        || die "query failed for library $LIB"
 
+    # Walk each root the way the scanner does, and record WHY a root produced
+    # nothing — that distinction decides whether a prune happens at all.
+    #
+    # unwalkable and unreadable are set by a plain loop, NOT inside a command
+    # substitution or a pipeline. An earlier version assigned them in a
+    # subshell, so they never reached the tests below and the whole branch was
+    # dead code that had never once run.
     unwalkable=0
-    disk_list="$(
+    unreadable=0
+    : > "$WORK/disk"
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        rc="$(canon "$r")"
+        if [ ! -d "$rc" ] || [ ! -r "$rc" ]; then
+            unwalkable=1
+            continue
+        fi
+        # -type f, OR a symlink whose target resolves to a file under this
+        # root. The scanner accepts a symlinked FILE as long as EvalSymlinks
+        # lands inside the root and rejects it otherwise, so `find -type f`
+        # alone missed every one and reported them as about to be pruned — an
+        # unresolvable failure for the *arr-style layouts where symlinked media
+        # is normal. Directory symlinks are still not followed: no -L, and the
+        # resolved target must be a regular file.
+        find "$rc" \( -type f -o -type l \) -print 2>"$WORK/finderr" \
+        | while IFS= read -r f; do
+            if [ -L "$f" ]; then
+                t="$(realpath -e -- "$f" 2>/dev/null)" || continue
+                case "$t/" in "$rc"/*) ;; *) continue ;; esac
+                [ -f "$t" ] || continue
+            fi
+            printf '%s\n' "$f"
+          done >> "$WORK/disk"
+        [ -s "$WORK/finderr" ] && unreadable=1
+    done <<< "$roots"
+
+    disk_list="$(grep -Ei "$VIDEO_RE" "$WORK/disk" | sort -u)"
+
+    # NOT canonicalised. The scanner compares its walk output against the RAW
+    # recorded string by exact equality, so normalising this side would hide
+    # precisely the disagreement that gets a row pruned: a recorded
+    # "/srv//media/x.mkv" can never equal the walk's "/srv/media/x.mkv",
+    # however equivalent they look. The ROOT is canonicalised above instead,
+    # because filepath.Join cleans as it builds each child — which is what
+    # makes the walk output canonical in the first place.
+    db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"
+
+    n_db=0; [ -n "$db_list" ] && n_db="$(printf '%s\n' "$db_list" | wc -l)"
+    if [ "$n_db" != "$n_rows" ]; then
+        die "library $LIB ($name): the database holds $n_rows distinct path(s) but they arrive as $n_db line(s) — at least one path contains a newline or is empty. This check is line-oriented and cannot compare those correctly, so it will not give an answer for this library. Find them with:
+        SELECT id, path FROM media_files WHERE path = '' OR path LIKE E'%\\n%';
+        SELECT id, path FROM episode_files WHERE path = '' OR path LIKE E'%\\n%';"
+    fi
+
+    # ── The scanner's own two escape hatches, before any diff ──────
+    # Reporting rows as "will be pruned" when the scan is not going to prune at
+    # all is not a harmless over-report: it is a FAIL the operator cannot drive
+    # to zero, under an instruction not to start the server until they do.
+    if [ "$unwalkable" -eq 1 ]; then
+        # walkFailed — collectVideoFiles errors on a root, so ScanLibrary skips
+        # the prune AND the sweep entirely. Nothing is deleted; the library is
+        # also not really being scanned, which is worth saying.
+        warn "library $LIB ($name): a configured path is missing or unreadable, so the scan will SKIP its prune — nothing will be deleted, but this library is not being scanned either"
         while IFS= read -r r; do
             [ -n "$r" ] || continue
-            rc="$(canon "$r")"
-            if [ ! -d "$rc" ]; then
-                unwalkable=1
-                continue
-            fi
-            # No -L: WalkDir does not follow directory symlinks, and neither
-            # must this.
-            find "$rc" -type f 2>/dev/null
-        done <<< "$roots" | grep -Ei "$VIDEO_RE" | sort -u
-    )"
-
-    # NOT canonicalised. The scanner compares its walk output against the
-    # RAW recorded string by exact equality (pruneDeletedFiles builds a set of
-    # discovered paths and asks whether each DB path is in it), so normalising
-    # this side would hide precisely the disagreement that gets a row pruned:
-    # a recorded "/srv//media/x.mkv" can never equal the walk's
-    # "/srv/media/x.mkv", however equivalent they look. The ROOT is
-    # canonicalised above instead, because filepath.Join cleans as it builds
-    # each child — which is what makes the walk output canonical in the first
-    # place.
-    db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"
+            [ -d "$(canon "$r")" ] || printf '        missing root: %s\n' "$r"
+        done <<< "$roots"
+        continue
+    fi
+    if [ -z "$disk_list" ]; then
+        # pruneDeletedFiles' zero-discovered guard: a walk that finds nothing
+        # is treated as suspect (the classic present-but-empty NFS mount) and
+        # prunes nothing. Common mid-move, when the new root exists but the
+        # copy has not started.
+        warn "library $LIB ($name): no media found under its paths, so the scan will prune nothing — but it will also show an empty library"
+        continue
+    fi
 
     missing="$(comm -23 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list") | sed '/^$/d')"
     unknown="$(comm -13 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list") | sed '/^$/d')"
@@ -148,20 +242,28 @@ while IFS= read -r LIB; do
 
     if [ "$n_missing" -gt 0 ]; then
         TOTAL_MISSING=$((TOTAL_MISSING + n_missing))
+        LIBS_MISSING=$((LIBS_MISSING + 1))
         printf '\n'
         warn "library $LIB ($name): $n_missing recorded file(s) the scanner will NOT find."
         warn "These rows are pruned on the next scan, and any title left with no files is deleted with its watch history."
+        if [ "$unreadable" -eq 1 ]; then
+            # This is the one case where the count above can be too HIGH, and
+            # saying only "re-run as root" understates it. pruneDeletedFiles
+            # scopes the prune AROUND unreadable subtrees (underAnyPrefix), so
+            # a row Aurora also cannot read is shielded, not pruned. This check
+            # cannot reproduce that split without knowing what the SERVICE user
+            # can read — which is not the user running this — so it counts them
+            # as missing, because over-reporting is the safe direction and a
+            # false all-clear here is a deleted catalog.
+            warn "NOTE: part of this library was unreadable by $(id -un). Rows under an unreadable subtree are SHIELDED from the prune, not deleted — so some of the paths below may be counted here and left alone by the scan. Re-run as the user Aurora runs as (or root) to get an exact count."
+        fi
         printf '%s\n' "$missing" | head -20 | sed 's/^/        /'
         [ "$n_missing" -gt 20 ] && printf '        … and %d more\n' "$((n_missing - 20))"
-    elif [ "$unwalkable" -eq 1 ]; then
-        # A root that cannot be walked trips the scanner's own walkFailed
-        # guard, so nothing is pruned — but the library is not being scanned
-        # either, and that is worth saying out loud.
-        warn "library $LIB ($name): every recorded file was found, but a configured path is missing or unreadable — that root is not being scanned"
     else
-        ok "library $LIB ($name): all $( [ -n "$db_list" ] && printf '%s\n' "$db_list" | wc -l || echo 0) recorded file(s) will be found"
+        ok "library $LIB ($name): all $n_db recorded file(s) will be found"
     fi
 
+    CHECKED_FULLY=$((CHECKED_FULLY + 1))
     if [ "$n_unknown" -gt 0 ]; then
         TOTAL_UNKNOWN=$((TOTAL_UNKNOWN + n_unknown))
         info "library $LIB ($name): $n_unknown file(s) on disk are not in the catalog yet — the next scan will add them (this is not a problem)"
@@ -173,7 +275,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
     # Exit 1, not 2: this is a successful check with a bad answer, which is
     # different from being unable to check at all.
     printf '\033[1;31m[FAIL]\033[0m %s\n' \
-        "$TOTAL_MISSING recorded file(s) across $CHECKED librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
+        "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
     exit 1
 fi
-ok "checked $CHECKED librarie(s); nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
+ok "$CHECKED_FULLY of $CHECKED librarie(s) fully checked; nothing would be pruned. $TOTAL_UNKNOWN new file(s) would be added."
