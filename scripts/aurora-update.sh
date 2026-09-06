@@ -286,9 +286,9 @@ esac
 # problem with its own remediation, per the H4 note above) and the
 # message can name the version we found and the fix.
 #
-# NODE_FLOOR_* is kept in sync with scripts/install.sh and
-# scripts/redeploy.sh — TestNodeVersionFloorsAgreeAcrossScripts pins
-# the three copies.
+# node_vite_verdict is duplicated in scripts/install.sh and
+# scripts/redeploy.sh — scripts/node-version-test.sh asserts the three
+# copies are identical and agree on a table of real version strings.
 NODE_ENGINES_TEXT="20.19+ or 22.12+"
 NODE_TARGET_MAJOR=22
 
@@ -332,6 +332,7 @@ node_vite_verdict() {
 # Only when we actually build the SPA from source. build_frontend_bundle
 # falls back to the committed static/v2 bundle when the source tree is
 # absent, and that path needs no Node at all.
+# AURORA-NODE-GATE-BEGIN (extracted by scripts/node-version-test.sh)
 if [ -d "$SPA_SRC_DIR" ]; then
     NODE_VERDICT=0
     node_vite_verdict || NODE_VERDICT=$?
@@ -355,6 +356,7 @@ if [ -d "$SPA_SRC_DIR" ]; then
             ;;
     esac
 fi
+# AURORA-NODE-GATE-END
 
 # ── Fetch + check ─────────────────────────────────────────────────
 write_status checking "Checking origin/$BRANCH for new commits"

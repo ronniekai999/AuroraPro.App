@@ -883,86 +883,118 @@ look-ahead; see `downmixLimiter`).
 Two unrelated production failures with the same shape — a real problem
 reported as something else. Code: `validateLibraryPaths` / `samePaths` /
 `Update` / `rescanMovedLibrary` (`internal/api/media_handlers.go`),
-`NoteRepointed` / `consumeRepoint` / `ForgetRepoint`
-(`internal/library/scanner.go`), `UpdateLibrary`
-(`internal/db/queries.go`), `node_vite_verdict` in
+`allPathsOutsideRoots` / `planPrune` / `NoteRepointed` / `isRepointed` /
+`clearRepoint` / `sweepEmptyMediaItems` (`internal/library/scanner.go`),
+`UpdateLibrary` (`internal/db/queries.go`), `node_vite_verdict` in
 `scripts/{install,redeploy,aurora-update}.sh`, SPA `LibraryEditRow` +
 `updateLibrary`. Operator runbook: `docs/moving-media-paths.md`.
 
 Invariants to preserve when touching this area:
 
-- **Repointing preserves history only because the prune is SKIPPED on the
-  first scan after it.** `ScanLibrary` prunes deleted files (1b) and sweeps
-  media items with no files (1c) BEFORE phase 2 attaches the files it just
-  found. On the first scan after a move, every DB row describes the old
-  location and none of it is in the walk — so without the guard the sweep
-  deletes each media item moments before the same title is re-created from
-  the new path, cascading away the watch progress, ratings, feedback, taste
-  seeds and embedding that repointing exists to keep. The feature would
-  destroy exactly what it advertises. It is the same rule `walkFailed`
-  already applies: absence from a walk is evidence of deletion only when the
-  walk covered where the file was supposed to be.
-- **The repoint record is keyed on the PATHS, not a bare flag.** A periodic
-  scan can start between the admin's save and the handler's own rescan, and
-  it is still running against the OLD paths; a bare flag is consumed by that
-  scan and the real post-move scan prunes unguarded. `consumeRepoint`
-  requires every path to match, element for element.
-- **The record is written BEFORE the UPDATE commits.** Once the row changes,
-  any scan — periodic timer, watcher debounce, another admin's Scan button —
-  reads the new paths and is the one that would prune. Recording after the
-  write leaves that window open, and the window is the whole failure.
-- **Duplicate libraries at the new path must be deleted BEFORE the original
-  is repointed.** `media_files.path` and `episode_files.path` are globally
-  UNIQUE, and the movie-side `ON CONFLICT (path) DO UPDATE` does NOT
-  re-parent `media_item_id` (the episode-side one does). So while a
-  duplicate owns the row, the repointed library's insert silently leaves the
-  file attached to the duplicate's catalog entry and the repointed library
-  ends up owning nothing.
+- **A relocation DEFERS the prune to after phase 2; it never skips it.**
+  `ScanLibrary` prunes deleted files and sweeps empty media items BEFORE
+  phase 2 attaches what the walk found. Run at the top on a library whose
+  media just moved, that deletes every media item moments before the same
+  titles are recreated under new ids, cascading away the watch progress,
+  ratings, feedback, taste seeds and embeddings repointing exists to keep.
+  Skipping instead was the first fix and is not enough: it leaves every title
+  holding a dead path that sorts FIRST in `GetMediaFiles` (lower id, same
+  `version_tag`), so `pickFile` takes it and nothing plays until the next
+  scan — and an operator seeing that reasonably deletes and recreates the
+  library, which is the loss this all exists to prevent. Deferring deletes
+  the same stale rows in the SAME scan, with the items intact.
+- **The primary guard is derived from the data, not signalled by the
+  caller.** `allPathsOutsideRoots` asks whether EVERY recorded row lies
+  outside all of the library's current roots. Paths change without the
+  handler — a `psql` edit (which the runbook documents for boxes that cannot
+  take a new binary), a restored database, a marker lost to the restart that
+  deploys — and an in-memory signal covers none of those. It is re-derived
+  every scan, so it cannot be spent by a scan that then fails. It is
+  deliberately ALL and not "most": one row still under a root shows the roots
+  are live, and a wholesale deletion must still prune.
+- **The handler's marker is a supplement for the PARTIAL move**, [A B] → [A
+  C], where rows still under A stop the data check from firing. Never the
+  only thing between a move and the sweep.
+- **The marker is PEEKED, never consumed at the top of a scan**
+  (`isRepointed` reads; only a completed deferred prune calls
+  `clearRepoint`). A marker consumed up front is spent before the work it
+  protects is durable: a walk that finds nothing (repointed at a mount still
+  being populated), a scan cancelled by the 5-minute auto-deploy, or an error
+  in phase 2 would each burn it and hand the NEXT scan an unguarded shot at
+  the catalog. The asymmetry runs one way — a marker held too long costs one
+  deferred prune, a marker lost costs every user's history.
+- **The deferred prune is gated on the scan having finished.** A cancelled
+  context means some titles never got their new rows, and pruning then empties
+  exactly those. It keeps the rows AND the marker so the next scan retries.
+- **`walkFailed` outranks the relocation guards** (`planPrune`). An unwalkable
+  root says nothing about any row under it, so there is nothing to defer TO —
+  deferring would schedule a prune we still have no evidence for.
+- **Duplicate libraries at the new path must be deleted BEFORE the original is
+  repointed.** `media_files.path` and `episode_files.path` are globally
+  UNIQUE, and the movie-side `ON CONFLICT (path) DO UPDATE` does NOT re-parent
+  `media_item_id` (the episode-side one does). While the duplicate owns the
+  row, the repointed library attaches nothing, its items keep only their old
+  rows, and the NEXT scan prunes those as genuinely absent and sweeps the
+  history away — the same total loss, one scan later.
 - **`validateLibraryPaths` is one helper with two call sites** (Create and
-  Update). It resolves symlinks BEFORE applying the blocklist and stores the
-  RESOLVED path — a second inline copy in Update is how one of the two ends
-  up without the blocklist, or storing the link.
+  Update), it resolves symlinks BEFORE applying the blocklist, stores the
+  RESOLVED path, and requires an ABSOLUTE one. `filepath.Clean("")` is `"."`,
+  which resolves to Aurora's working directory and matches no absolute-prefix
+  blocklist entry; on Update that would repoint a live library there.
 - **The Node gate distinguishes "cannot build" from "unsupported".** Vite 7
   calls `crypto.hash()`, added in Node 20.12/21.7, so below that the build
-  provably dies; the declared engines (`^20.19 || >=22.12`) are stricter,
-  and vite merely warns and carries on inside the gap. Only the provable
-  case is fatal — refusing every Node below the engines would strand a box
-  on 20.15 whose build succeeds. `scripts/node-version-test.sh` pins the
-  table and asserts the three duplicated copies have not drifted.
+  provably dies; the declared engines (`^20.19 || >=22.12`) are stricter, and
+  vite merely warns and carries on inside the gap. Only the provable case is
+  fatal — refusing every Node below the engines would strand a box on 20.15
+  whose build succeeds. All three call sites are wrapped in the same
+  "will we actually build the SPA?" guard, because every one of them falls
+  back to the committed `static/v2` bundle when the source tree is absent.
 - **The updater reports it as `misconfigured`, in preflight, before the
   fetch.** As a build failure it read "frontend build failed — old
   binary/static assets are still running", named neither Node nor a version,
   and sat several hundred lines into npm's output. A box ran eight
   consecutive failed updates over a fortnight on that message.
+- **`scripts/node-version-test.sh` tests the call sites by RUNNING them**
+  against a stubbed verdict, not by grepping for the error string. The grep
+  version passed with the `case` arms swapped, with `exit 1` removed, and
+  with the message surviving only in a comment.
 
 Known limits, stated plainly:
 
 - **The upsert re-matches on `(library_id, type, title, year)`, parsed from
   the filename.** A move that also RENAMES files such that Aurora parses a
   different title or year gives that title a new row and leaves its history
-  behind — the new-library outcome, for that one title. Nothing detects or
-  warns about this; "move without renaming" is a documented precondition,
-  not an enforced one.
+  behind. Nothing detects or warns about this; "move without renaming" is a
+  documented precondition, not an enforced one.
 - **Nothing stops an admin repointing a library at a path another library
-  already owns.** The result is the silent `ON CONFLICT` no-op above. A
-  cross-library overlap check at save time is the obvious guard and is not
-  built.
-- **The stale old-location rows survive until the SECOND scan.** Between the
-  two, the library carries file rows for a location that no longer exists,
-  so a play started against one 404s. Bounded by the periodic scan interval
-  (default 6h; the box runs 30 min) and self-healing, but real.
-- **Empty old roots left in place are a live hazard**, and this change does
-  not remove it. `pruneDeletedFiles`'s zero-discovered guard and the sweep's
-  `len(allFiles) > 0` are the only things holding the catalog while an
-  abandoned root sits empty; ONE stray video file under it makes the walk
-  non-empty and the next scan deletes that library's whole catalog and
-  cascades the watch history. An unreachable root is safe (`walkFailed`); an
-  empty present one is one file away from not being.
-- **`rescanMovedLibrary` gives up if a scan is already running**, logging
-  that the new paths land on the next periodic pass. The repoint record
-  survives (that scan is on the old paths and cannot consume it), so the
-  guard still fires when the real scan happens — but the rescan is delayed
-  by up to the scan interval with nothing in the UI saying so.
+  already owns**, which is the ordering hazard above. A cross-library overlap
+  check at save time is the obvious guard and is not built.
+- **`Update` is a whole-row read-modify-write with no concurrency control.**
+  `UpdateLibrary` writes both columns unconditionally, and the SPA always
+  sends both, so two admin tabs can have the second silently revert the
+  first's repoint — and set a fresh marker back to the old paths. Previously
+  `SET name = $2` could not touch `paths` at all. An `updated_at` precondition
+  is the fix and is not built.
+- **`ForgetRepoint` on the failure path is not owner-scoped.** Two PUTs
+  repointing one library to the same paths, where the first one's UPDATE
+  fails and its `ForgetRepoint` lands after the second one's `NoteRepointed`,
+  leave the successful repoint without a marker. The data-derived check still
+  covers the whole-library case; only a concurrent PARTIAL move is exposed.
+- **Empty old roots left in place remain a hazard**, and this change does not
+  remove it. `pruneDeletedFiles`' zero-discovered guard and the sweep's
+  `len(allFiles) > 0` are all that hold the catalog while an abandoned root
+  sits empty; ONE stray video file under it makes the walk non-empty. The
+  relocation check then usually saves it — the rows are all outside the
+  library's current roots — but only while the library has been repointed
+  away. A library still POINTED at that root gets no such help.
+- **`rescanMovedLibrary` gives up if a scan is already running.** The marker
+  survives (only a completed deferred prune clears it), so the guard still
+  fires, but the rescan waits up to the scan interval with nothing in the UI
+  saying so.
 - **None of the Node verdicts are exercised against a real install.** The
   crypto.hash floors are from Node's changelog and the engines from the
   toolchain's `package.json`; the test drives a fake `node` on PATH.
+- **`ScanLibrary` itself is untested** — it needs a live Postgres and a real
+  tree. `planPrune` and `allPathsOutsideRoots` are extracted and pinned, but
+  the wiring between them, the deferred call after phase 2, and the
+  `clearRepoint` that follows it are covered by no test.

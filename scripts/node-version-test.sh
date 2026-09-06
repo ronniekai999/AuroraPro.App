@@ -141,21 +141,91 @@ for s in "${SCRIPTS[@]}"; do
     fi
 done
 
-# ── The fatal path must be fatal, and only there ──────────────────
-# The verdict is only useful if the call sites act on it. Assert each script
-# still routes verdict 1 to a hard stop, since a refactor that drops the
-# `case` is exactly the regression this whole file exists to prevent.
-if grep -q 'write_status misconfigured "Node.js' "$REPO_ROOT/scripts/aurora-update.sh"; then
-    ok "aurora-update.sh reports verdict 1 as misconfigured"
-else
-    bad "aurora-update.sh no longer reports verdict 1 as misconfigured"
-fi
-for s in install.sh redeploy.sh; do
-    if grep -q '1) error "Node.js\|error "Node.js' "$REPO_ROOT/scripts/$s"; then
-        ok "scripts/$s exits on verdict 1"
-    else
-        bad "scripts/$s no longer exits on verdict 1"
+# ── The call sites must ACT on the verdict ────────────────────────
+#
+# The function being right is worth nothing if its callers ignore it. These
+# used to be greps for the error message, which pass if the `case` arms are
+# swapped (old Node warns, current Node is refused), if `exit 1` is dropped,
+# or if the message survives only in a comment. So instead: extract each
+# script's real call site, run it against a stubbed node_vite_verdict, and
+# assert what it does.
+#
+# Extraction is by marker comment rather than by guessing line ranges, so a
+# refactor that moves the block is a failure here rather than a silent pass.
+extract_callsite() {  # $1 = script, prints the guarded block
+    awk '/# AURORA-NODE-GATE-BEGIN/ {grab=1; next} /# AURORA-NODE-GATE-END/ {exit} grab {print}' "$1"
+}
+
+# verdict_action: run one script's call site with node_vite_verdict stubbed to
+# return $2, and report what happened as one of exit:<code> / warn / silent.
+verdict_action() {  # $1 = fn file, $2 = stubbed verdict
+    local block="$1" verdict="$2" out rc=0
+    out="$(PATH="$WORK/bin:/usr/bin:/bin" "${BASH:-/bin/bash}" -c "
+        set -uo pipefail
+        SPA_SRC_DIR=. ; PROJECT_DIR=. ; SKIP_FRONTEND=false ; SPA_OUTPUT_DIR=static/v2
+        NODE_BUILD_MIN_TEXT='20.19+ or 22.12+'
+        NODE_ENGINES_TEXT='20.19+ or 22.12+'
+        NODE_MIN=22 ; NODE_TARGET_MAJOR=22
+        info() { :; }
+        warn() { echo \"WARNED: \$1\"; }
+        ok()   { :; }
+        log()  { echo \"LOGGED: \$1\"; }
+        error() { echo \"ERRORED: \$1\"; exit \"\${2:-1}\"; }
+        write_status() { echo \"STATUS: \$1 \$2\"; }
+        node() { echo v18.19.1; }
+        node_vite_verdict() { return $verdict; }
+        $(cat "$block")
+    " 2>&1)" || rc=$?
+    printf '%s|%s' "$rc" "$out"
+}
+
+echo
+echo "node gate: call sites"
+for s in "${SCRIPTS[@]}"; do
+    extract_callsite "$REPO_ROOT/scripts/$s" > "$WORK/$s.site"
+    if [ ! -s "$WORK/$s.site" ]; then
+        bad "scripts/$s has no AURORA-NODE-GATE-BEGIN/END block"
+        continue
     fi
+
+    # Verdict 1 — cannot build — must stop the script.
+    res="$(verdict_action "$WORK/$s.site" 1)"
+    rc="${res%%|*}"; out="${res#*|}"
+    if [ "$rc" = "0" ]; then
+        bad "scripts/$s does not stop on verdict 1 (cannot build) — output: $out"
+    else
+        ok "scripts/$s stops on verdict 1 (exit $rc)"
+    fi
+    case "$out" in
+        *"Node.js"*) ok "scripts/$s names Node.js in its verdict-1 message" ;;
+        *)           bad "scripts/$s's verdict-1 message does not mention Node.js: $out" ;;
+    esac
+
+    # Verdict 0 — fine — must be silent and must NOT stop.
+    res="$(verdict_action "$WORK/$s.site" 0)"
+    rc="${res%%|*}"; out="${res#*|}"
+    if [ "$rc" != "0" ]; then
+        bad "scripts/$s stops on verdict 0 (a supported Node) — this would block every update: $out"
+    elif [ -n "$out" ]; then
+        bad "scripts/$s complains on verdict 0 (a supported Node): $out"
+    else
+        ok "scripts/$s is silent and continues on verdict 0"
+    fi
+
+    # Verdicts 2 and 3 — unknown, and unsupported-but-working — must warn and
+    # continue. Stopping here is the regression that would strand a box whose
+    # build actually succeeds.
+    for v in 2 3; do
+        res="$(verdict_action "$WORK/$s.site" "$v")"
+        rc="${res%%|*}"; out="${res#*|}"
+        if [ "$rc" != "0" ]; then
+            bad "scripts/$s stops on verdict $v — it must warn and continue: $out"
+        elif [ -z "$out" ]; then
+            bad "scripts/$s says nothing on verdict $v — it must warn"
+        else
+            ok "scripts/$s warns and continues on verdict $v"
+        fi
+    done
 done
 
 echo

@@ -593,8 +593,8 @@ done
 # On apt we add NodeSource, which is the vendor-supported way to get a current
 # LTS; elsewhere we fall back to the distro package.
 #
-# NODE_BUILD_MIN_* is kept in sync with scripts/aurora-update.sh and
-# scripts/redeploy.sh — TestNodeVersionFloorsAgreeAcrossScripts pins the three.
+# The floors below are duplicated in scripts/aurora-update.sh and
+# scripts/redeploy.sh — scripts/node-version-test.sh pins the three copies.
 NODE_MIN=22
 NODE_BUILD_MIN_TEXT="20.19+ or 22.12+"
 
@@ -614,7 +614,7 @@ node_major() {
 # 1 and 3 are deliberately distinct: only the provable case is fatal, so a
 # box on e.g. 20.15 whose build succeeds is not refused an install over a
 # tidier rule. Kept in sync with scripts/aurora-update.sh and
-# scripts/redeploy.sh — TestNodeVersionFloorsAgreeAcrossScripts pins them.
+# scripts/redeploy.sh — scripts/node-version-test.sh pins them.
 node_vite_verdict() {
     local ver major minor rest
     command -v node &>/dev/null || return 2
@@ -684,8 +684,17 @@ fi
 # build step with a message that names neither Node nor a version, which is the
 # failure this check exists to prevent. Better to stop now, while an operator is
 # watching the terminal.
+# Only when we will actually build the SPA from source. build_frontend_bundle
+# above falls back to the committed $SPA_OUTPUT_DIR bundle when the source tree
+# is absent (a release tarball), and that path never invokes node or npm —
+# refusing to install there would break a case that works today. Matches the
+# guards in aurora-update.sh ([ -d "$SPA_SRC_DIR" ]) and redeploy.sh
+# (! $SKIP_FRONTEND).
+# AURORA-NODE-GATE-BEGIN (extracted by scripts/node-version-test.sh)
 NODE_BUILD_VERDICT=0
-node_vite_verdict || NODE_BUILD_VERDICT=$?
+if [ -d "$PROJECT_DIR/$SPA_SRC_DIR" ]; then
+    node_vite_verdict || NODE_BUILD_VERDICT=$?
+fi
 case "$NODE_BUILD_VERDICT" in
     1)
         error "Node.js $(node --version 2>/dev/null || echo unknown) cannot build Aurora's frontend — Vite calls crypto.hash(), which needs Node 20.12+, and the toolchain asks for ${NODE_BUILD_MIN_TEXT}. Install Node.js ${NODE_MIN}.x and re-run this script: curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN}.x | sudo -E bash - && sudo apt-get install -y nodejs"
@@ -700,6 +709,7 @@ case "$NODE_BUILD_VERDICT" in
         warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}). The build should still succeed; upgrade to Node ${NODE_MIN}.x before it stops working."
         ;;
 esac
+# AURORA-NODE-GATE-END
 if ! command -v npm &>/dev/null; then
     info "Installing npm..."
     pkg_install npm

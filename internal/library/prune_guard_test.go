@@ -15,11 +15,17 @@ func TestPruneDeletedFilesRefusesZeroDiscovered(t *testing.T) {
 	s := &Scanner{} // queries is nil on purpose: the guard must return before it is used
 	lib := &models.Library{Name: "Movies"}
 
-	pruned, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil)
+	pruned, relocated, err := s.pruneDeletedFiles(context.Background(), lib, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil error from zero-discovered prune, got %v", err)
 	}
 	if pruned != 0 {
 		t.Fatalf("expected 0 rows pruned when zero files discovered, got %d", pruned)
+	}
+	// Zero-discovered is NOT a relocation: reporting one would make the caller
+	// defer the prune to after phase 2 and then run it against the same empty
+	// walk. The two guards must stay distinguishable.
+	if relocated {
+		t.Fatal("a zero-discovered walk must not be reported as a relocation")
 	}
 }

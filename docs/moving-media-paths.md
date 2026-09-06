@@ -47,21 +47,69 @@ new paths, delete those **first** — see the ordering note below.
 
 ### By hand, on a server that cannot update yet
 
-The Edit button ships in the release that also fixes the frontend build, so
-on a box stuck on an older binary, do it in SQL. The scanner reads
-`libraries.paths` from the database on every scan, so this needs no code:
+The Edit button ships in the release that also fixes the frontend build, so on
+a box stuck on an older binary you have to do it in SQL.
 
-```sql
--- What you have now.
-SELECT id, name, type, paths FROM libraries ORDER BY id;
+**Rewrite the file rows, not just the library paths.** Updating
+`libraries.paths` alone and letting the rescan rediscover everything is the
+obvious move and it is wrong on an older binary: the relocation guard that
+makes that safe is part of the same release. Without it, the next scan walks
+the new root, finds not one of the library's recorded paths among what it
+discovered, prunes every row, and the empty-item sweep then deletes every
+`media_items` row in that library — cascading away exactly the history in the
+table above, unattended, up to a scan interval later. Rewriting the paths in
+place sidesteps the question: the rows and the walk agree, so nothing is
+stale, nothing is pruned, and playback works immediately rather than after a
+second scan.
+
+Open a shell on the database. The `postgres` superuser connects over the local
+socket without a password:
+
+```bash
+sudo -u postgres psql aurora
 ```
 
+(Aurora's own credentials are in `/etc/aurora/aurora.env` as `DATABASE_URL` if
+you would rather use those: `psql "$(sudo grep -oP '(?<=^DATABASE_URL=).*' /etc/aurora/aurora.env)"`.)
+
+**Back up first — this is not reversible.**
+
+```bash
+sudo -u postgres pg_dump aurora > ~/aurora-before-move.sql
+```
+
+Then, in one transaction so a mistake rolls back:
+
 ```sql
--- Repoint. One statement per library; paths is a TEXT[].
+BEGIN;
+
+-- 1. Look. Confirm which ids are the originals and which are duplicates.
+SELECT id, name, type, paths FROM libraries ORDER BY id;
+
+-- 2. Remove the duplicate libraries created at the new paths, if any.
+--    Must come first: media_files.path is globally UNIQUE, so while a
+--    duplicate owns a row for the new path, the original cannot take it.
+DELETE FROM libraries WHERE id IN (5, 6, 7, 8);
+
+-- 3. Move the file rows to where the files actually are.
+UPDATE media_files
+   SET path = replace(path, '/home/rontavious999/media/', '/srv/storage/media/')
+ WHERE path LIKE '/home/rontavious999/media/%';
+UPDATE episode_files
+   SET path = replace(path, '/home/rontavious999/media/', '/srv/storage/media/')
+ WHERE path LIKE '/home/rontavious999/media/%';
+
+-- 4. Repoint the libraries themselves. paths is a TEXT[].
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/movies'],    updated_at = NOW() WHERE id = 1;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/4kmovies'],  updated_at = NOW() WHERE id = 2;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/tvshows'],   updated_at = NOW() WHERE id = 3;
 UPDATE libraries SET paths = ARRAY['/srv/storage/media/4ktvshows'], updated_at = NOW() WHERE id = 4;
+
+-- 5. Check before committing: this must return 0.
+SELECT count(*) FROM media_files   WHERE path LIKE '/home/rontavious999/media/%';
+SELECT count(*) FROM episode_files WHERE path LIKE '/home/rontavious999/media/%';
+
+COMMIT;
 ```
 
 Then restart so the file watcher attaches to the new directories:
@@ -70,12 +118,23 @@ Then restart so the file watcher attaches to the new directories:
 sudo systemctl restart aurora
 ```
 
+Substitute your own prefixes in steps 3 and 4, and keep them identical between
+the two — a `replace()` whose search string does not match simply changes
+nothing, which looks like success and leaves every row pointing at the old
+location.
+
 > **Check the service can read the new location first.** Aurora runs as the
 > unprivileged `aurora` user, and home directories are 0700/0750 on modern
 > distros — a path you can plainly see in your own shell is often unreadable
 > to the service. `sudo -u aurora ls /srv/storage/media/movies` is the test.
 > If it fails: `sudo setfacl -m u:aurora:x` on each parent directory, then
 > `sudo setfacl -R -m u:aurora:rX` on the media root.
+
+On a box running this release or later, none of the above is needed — the
+relocation guard makes a plain `libraries.paths` update safe too, because the
+scanner detects the move from the data (see "What the first rescan does").
+The path rewrite is still the better option when you have it, since it leaves
+no dead rows at all.
 
 ## Ordering: delete the duplicates first
 
@@ -97,6 +156,17 @@ Deleting them through the admin UI (or `DELETE FROM libraries WHERE id IN
 (...)`) is safe *provided* they are the recent duplicates: their
 `media_items` are new, so cascading them away costs nothing you had before
 the move.
+
+Ignoring this ordering is not a cosmetic mistake. With the duplicate still
+holding the new paths, the repointed library's first scan attaches nothing
+(its inserts hit `ON CONFLICT (path)` and the movie-side clause does not
+re-parent `media_item_id`), so its items are left with only their old rows.
+On the **next** scan those are pruned as genuinely absent, the items are
+empty, and the sweep cascades the whole history away — the total loss this
+page exists to prevent, one scan later than it would have happened without
+the guard. The TV side is different but no better: `episode_files`' conflict
+clause *does* re-parent, so two libraries on one path take files from each
+other and each sweeps the other's shows on alternating scans.
 
 ### Keeping what you watched in the meantime
 
@@ -153,8 +223,8 @@ the equivalent join through `tv_episodes` (season number + episode number).
 For a few hours of viewing it is usually not worth it — re-watch position on
 one or two episodes against the risk of a hand-written UPDATE.
 
-**Back up first**: `pg_dump aurora > aurora-before-move.sql`. Aurora also has
-Admin → Server → Download database snapshot.
+**Back up first**: `sudo -u postgres pg_dump aurora > ~/aurora-before-move.sql`.
+Aurora also has Admin → Backup → Download database snapshot.
 
 ## The hazard of leaving old roots in place
 
@@ -178,21 +248,34 @@ noisy in the log.
 
 ## What the first rescan does
 
-The scan after a repoint deliberately **skips** the deleted-file prune and
-the empty-item sweep for that library, and says so in the log:
+The scan after a repoint **defers** the deleted-file prune and the empty-item
+sweep to the end of the same scan, instead of running them at the start, and
+says so in the log:
 
 ```
-skipping prune: library paths just changed — the existing file rows describe
-the previous location and will be pruned on the next scan
+deferring prune: every recorded file lies outside this library's current
+paths — pruning after the new files are attached
 ```
 
-That is not a bug. The prune runs *before* the scan attaches the files it
-just found, so on the first pass every row still describes the old location:
-pruning there would empty each media item moments before the same title was
-re-created from the new path, and the sweep would cascade away exactly the
-history this whole procedure exists to keep. The stale rows are pruned on the
-next scan, once the new files are attached to those same items — normally
-within the periodic scan interval.
+That is not a bug. The prune normally runs *before* the scan attaches the
+files it found, so on the first pass after a move every row still describes
+the old location: pruning there would empty each media item moments before
+the same title was re-created from the new path, and the sweep would cascade
+away exactly the history this procedure exists to keep. Deferring gets the
+same stale rows deleted once the new ones are attached — in one scan, so no
+title is left holding only a dead path.
+
+Aurora reaches that conclusion two ways, and the first needs nobody to tell
+it anything: if **every** file row for a library lies outside all of its
+current paths, the library moved rather than lost its files. That is what
+makes a `psql` edit, a restored database, or a server restart mid-move as
+safe as pressing Edit. The second is a marker the Edit button sets, which
+additionally covers a *partial* move — one root of several changed — where
+rows still under an unchanged root stop the first check from firing.
+
+If the deferred prune cannot run (the scan is cancelled by a restart, or
+nothing was found under the new paths) the stale rows and the marker are both
+kept, and the next scan tries again. Nothing is deleted on a guess.
 
 ## What is not preserved
 

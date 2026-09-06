@@ -183,8 +183,8 @@ fi
 # Node version, not just presence. Vite 7 calls crypto.hash(), absent before
 # Node 20.12, so an old Node fails the build ~200 lines into npm's output
 # rather than up here. Same floor and same helper as scripts/install.sh and
-# scripts/aurora-update.sh — TestNodeVersionFloorsAgreeAcrossScripts pins the
-# three copies.
+# scripts/aurora-update.sh — scripts/node-version-test.sh pins the three
+# copies.
 NODE_BUILD_MIN_TEXT="20.19+ or 22.12+"
 # See scripts/install.sh for the full note on the two floors and why only the
 # provable one (no crypto.hash) is fatal.
@@ -212,6 +212,7 @@ node_vite_verdict() {
     fi
     return 3
 }
+# AURORA-NODE-GATE-BEGIN (extracted by scripts/node-version-test.sh)
 if ! $SKIP_FRONTEND; then
     NODE_BUILD_VERDICT=0
     node_vite_verdict || NODE_BUILD_VERDICT=$?
@@ -222,6 +223,7 @@ if ! $SKIP_FRONTEND; then
         3) warn "Node.js $(node --version 2>/dev/null || echo unknown) is outside the frontend toolchain's supported range (${NODE_BUILD_MIN_TEXT}) — the build should still succeed." ;;
     esac
 fi
+# AURORA-NODE-GATE-END
 if $RESTART && ! command -v systemctl &>/dev/null; then
     warn "systemctl not available — service restart will be skipped; pass --no-restart to silence this"
 fi

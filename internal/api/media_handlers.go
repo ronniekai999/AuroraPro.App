@@ -99,6 +99,19 @@ var libraryPathBlocklist = []string{"/etc", "/root", "/proc", "/sys", "/dev", "/
 func validateLibraryPaths(paths []string) ([]string, string) {
 	resolved := make([]string, 0, len(paths))
 	for _, p := range paths {
+		// Require an absolute path before anything else. filepath.Clean("")
+		// is ".", which EvalSymlinks happily resolves to Aurora's working
+		// directory — an absolute-prefix blocklist never matches it and
+		// Lstat calls it a directory, so `{"paths":[""]}` would point a
+		// library at the server's CWD. Harmless-looking on Create; on
+		// Update it repoints an existing library there and the next scan
+		// takes its catalog with it.
+		if strings.TrimSpace(p) == "" {
+			return nil, "path must not be empty"
+		}
+		if !filepath.IsAbs(p) {
+			return nil, "path must be absolute (start with /): " + p
+		}
 		cleanPath := filepath.Clean(p)
 
 		real, err := filepath.EvalSymlinks(cleanPath)
@@ -344,25 +357,27 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		pathsMoved = !samePaths(existing.Paths, resolved)
 	}
 
-	// Tell the scanner BEFORE the row changes. Once the UPDATE commits, any
-	// scan that starts — the periodic timer, the watcher's debounce, another
-	// admin's Scan button — reads the new paths, finds none of the library's
-	// existing file rows beneath them, and prunes the lot; the empty-item
-	// sweep then cascades away the watch history this whole operation exists
-	// to preserve. Recording first means whichever scan gets there first is
-	// the one that skips. Recorded even when the paths turn out to be
-	// unchanged is not a risk: consumeRepoint matches on the paths, and a
-	// record for the CURRENT paths is exactly the no-op case.
+	// Mark the scanner BEFORE the row changes, so whichever scan reaches the
+	// new paths first is the one that defers its prune — the periodic timer
+	// and the watcher's debounce both read the library fresh from the DB, so
+	// after the commit either of them can be that scan.
+	//
+	// This marker is a supplement, not the safety net. The scanner's own
+	// data-derived check (allPathsOutsideRoots) catches a whole-library move
+	// with nobody having said anything, which is what covers a psql edit, a
+	// restored database, and this marker being lost to the restart that
+	// deploys. What the marker adds is the PARTIAL move — [A B] to [A C] —
+	// where rows still under A stop the data check from firing.
 	if pathsMoved && h.scanner != nil {
 		h.scanner.NoteRepointed(id, paths)
 	}
 
 	updated, err := h.queries.UpdateLibrary(r.Context(), id, name, paths)
 	if err != nil || updated == nil {
-		// The move did not land. The record cannot fire as things stand —
-		// consumeRepoint matches on paths, and the library still has its old
+		// The move did not land. The marker cannot fire as things stand —
+		// isRepointed matches on paths, and the library still has its old
 		// ones — but leaving it means a repoint to these same paths days
-		// later would consume a skip nobody set for it. Drop it.
+		// later would find a marker nobody set for it. Drop it.
 		if pathsMoved && h.scanner != nil {
 			h.scanner.ForgetRepoint(id)
 		}
@@ -398,39 +413,61 @@ func (h *LibraryHandler) Update(w http.ResponseWriter, r *http.Request) {
 // scans it. Split out of Update so the goroutine's body is testable and so
 // the handler reads as one decision.
 func (h *LibraryHandler) rescanMovedLibrary(lib *models.Library) {
-	if h.watcher != nil {
-		h.watcher.UnwatchLibrary(lib.ID)
-		if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
-			slog.Warn("failed to re-attach watcher after library paths changed",
-				"library", lib.Name, "error", err)
-		}
-	}
 	// Nil scanner/hub only happens in tests that construct the handler
 	// directly, but this runs in a goroutine, where a nil dereference takes
 	// the whole process down rather than failing one request.
 	if h.scanner == nil {
 		return
 	}
-	if !h.scanner.TryStartScan(lib.ID) {
-		// A scan is already running — on the OLD paths, since it started
-		// before this update landed. Nothing to do but let it finish; the
-		// periodic timer picks up the new paths within the scan interval.
-		slog.Info("library paths changed while a scan was in flight — the new paths will be scanned on the next pass",
+	// Scan FIRST, watcher second. WatchLibrary walks the new tree
+	// recursively, which the Create path documents as taking minutes on a
+	// large library — and the scan does not depend on the watcher, so
+	// re-attaching first only delays getting the files back and widens the
+	// window in which a restart loses the repoint marker.
+	if h.scanner.TryStartScan(lib.ID) {
+		if h.watcher != nil {
+			h.watcher.NoteExternalScan(lib.ID)
+		}
+		scanCtx := h.scanContext()
+		h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
+			if h.hub != nil {
+				h.hub.Broadcast(ws.EventScanProgress, p)
+			}
+			if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
+				h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
+			}
+		})
+	} else {
+		// A scan is already in flight. It may be on either set of paths —
+		// the periodic timer and the Scan button both read the library fresh
+		// from the DB, so one that started after the commit is already on the
+		// new ones. Either way the repoint marker survives (it is released
+		// only by a scan that completes its deferred prune), so nothing is
+		// lost; the new paths are picked up by that scan or the next.
+		slog.Info("library paths changed while a scan was in flight — the new paths will be picked up by that scan or the next",
 			"library", lib.Name)
+	}
+
+	// Re-attach the file watcher last: its recursive walk takes minutes on a
+	// large library and nothing above depends on it.
+	//
+	// UnwatchLibrary + WatchLibrary is not atomic, and a failed re-attach
+	// leaves the library out of the watcher's map entirely — so it would drop
+	// out of the PERIODIC scan loop too, not just fsnotify, and nothing would
+	// bring it back before a restart. Retry once rather than log and leave it
+	// there.
+	if h.watcher == nil {
 		return
 	}
-	if h.watcher != nil {
-		h.watcher.NoteExternalScan(lib.ID)
+	h.watcher.UnwatchLibrary(lib.ID)
+	if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
+		slog.Warn("failed to re-attach watcher after library paths changed — retrying",
+			"library", lib.Name, "error", err)
+		if err := h.watcher.WatchLibrary(context.Background(), lib); err != nil {
+			slog.Error("library is no longer watched after a path change — it will not be scanned again until Aurora restarts or an admin presses Scan",
+				"library", lib.Name, "library_id", lib.ID, "error", err)
+		}
 	}
-	scanCtx := h.scanContext()
-	h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
-		if h.hub != nil {
-			h.hub.Broadcast(ws.EventScanProgress, p)
-		}
-		if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
-			h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
-		}
-	})
 }
 
 func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
