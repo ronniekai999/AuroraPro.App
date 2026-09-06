@@ -170,8 +170,11 @@ jobs:
       # delete rows and cascade the watch history away. None was visible to the
       # Go contract tests, which never run the script. This does: real temp
       # trees, a stubbed psql, and assertions on the exit codes an operator
-      # acts on. Some cases drop privileges, so they need a non-root runner or
-      # setpriv — ubuntu-latest runs unprivileged and takes the former path.
+      # acts on. Cases that need an unreadable directory use mode 000, not 750:
+      # on a non-root runner (which this is) there is no setpriv drop, so the
+      # script runs as the user that created the fixture and 750 would grant it
+      # everything. Three cases got that wrong and were red here while green
+      # under root — run this suite BOTH ways before trusting it.
       - name: Library path check tests
         run: bash scripts/check-library-paths-test.sh
 

@@ -426,7 +426,7 @@ it means the answer is unknown.
 
 **What exit 0 does and does not promise.** At best it means: every path
 recorded for these libraries was found by *this* walk, run as *this* user. It
-does **not** cover three things, all in `CLAUDE.md`'s known-limits list and
+does **not** cover the following, all in `CLAUDE.md`'s known-limits list and
 none of them modelled here:
 
 - **The empty-item sweep runs anyway.** `DeleteEmptyMediaItems` fires on every
@@ -441,10 +441,14 @@ none of them modelled here:
 - **A thousand or more unreadable entries** trips the scanner's own
   `maxTrackedUnreadable` into skipping the prune, which this script does not
   count either.
-- **A symlink loop, or a non-directory partway down a root**, both give exit 2
-  here while the scan sets `walkFailed` and prunes nothing. The check refuses
-  to answer rather than guess, which is the right default and still an exit
-  you cannot clear except by fixing the path.
+- **A symlink loop as a root** gives exit 2 here while the scan sets
+  `walkFailed` and prunes nothing — the check refuses to answer rather than
+  guess, which is right, and still an exit you cannot clear except by fixing
+  the path. **A non-directory partway down a root** gives exit 2 only when it
+  is not executable; an executable regular file mid-path is reported as
+  "does not exist" instead, which is the correct *answer* (the scan's
+  `EvalSymlinks` fails with ENOTDIR, so it skips the prune) under a wrong
+  explanation.
 
 The same script is worth running any time you want to know what a scan is about
 to do: after restoring a backup, after a disk goes missing, or before an

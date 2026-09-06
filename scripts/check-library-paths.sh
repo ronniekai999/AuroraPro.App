@@ -54,13 +54,15 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Five independent adversarial reviews of
-# this file each found a state where it reported "nothing would be pruned"
-# while the scan would have deleted rows — four of them in one class, a
-# permission failure it could not tell apart from "the path is gone", which is
-# the one state it treats as safe. All five are fixed and each is pinned by a
-# test that fails if the fix is reverted. Five for five is still a track
-# record: exit 0 is evidence, not permission. Take the backup regardless.
+# THIS IS A SECOND OPINION, NOT A GATE. Six independent adversarial reviews of
+# this file found EIGHT states where it reported "nothing would be pruned"
+# while the scan would have deleted rows. Five were one class — a permission
+# failure it could not tell apart from "the path is gone", which is the one
+# state it treats as safe — and three were a tool failing quietly (comm, sort,
+# find), each leaving a variable empty, which reads the same way. All are fixed
+# and each is pinned by a test that fails if the fix is reverted. That record
+# is why the wording here is what it is: exit 0 is evidence, not permission.
+# Take the backup regardless.
 set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
@@ -455,6 +457,16 @@ while IFS= read -r LIB; do
         # DB-side newline hazard (closed by the n_bad query above) mirrored on
         # the disk side, and leaving it open while the comments claimed
         # newlines were handled was worse than not claiming it.
+        # find's status is checked too — it was the one tool in this pipeline
+        # left out, while grep, sort and comm all gained a check for exactly
+        # this reason. A find that produces nothing AND says nothing (shadowed
+        # or broken binary, killed at startup, the stderr redirect itself
+        # failing) empties the disk list, which reads as "no media found, so
+        # the scan will prune nothing" and exits 0. Reproduced.
+        #
+        # Gated on `finderr` being EMPTY: GNU find exits 1 on an ordinary
+        # permission error too, and that case is already handled by the
+        # unreadable latch below. Only a silent non-zero exit is unexplained.
         find "$rc" ! -type d -print0 2>"$WORK/finderr" \
         | while IFS= read -r -d '' f; do
             case "$f" in
@@ -473,7 +485,11 @@ while IFS= read -r LIB; do
             fi
             printf '%s\n' "$f"
           done >> "$WORK/disk"
+        fs=("${PIPESTATUS[@]}")
         [ -s "$WORK/finderr" ] && unreadable=1
+        if [ "${fs[0]}" -ne 0 ] && [ ! -s "$WORK/finderr" ]; then
+            die "library $LIB ($name): find failed on $r with status ${fs[0]} and no error output. Nothing was discovered and nothing said why, which would read here as 'no media found, so the scan will prune nothing'."
+        fi
     done <<< "$roots"
 
     # rootmissing DOMINATES rootopaque, and is therefore tested first (below,
@@ -531,8 +547,13 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
         warn "library $LIB ($name): a configured path does not exist, so the scan will SKIP its prune — nothing will be deleted, but this library is not being scanned either"
         while IFS= read -r r; do
             [ -n "$r" ] || continue
-            realpath -e -- "$(canon "$r")" >/dev/null 2>&1 \
-                || printf '        missing root: %s\n' "$r"
+            # classify_root, NOT realpath -e. Re-testing with realpath here
+            # reintroduced the exact ENOENT/EACCES conflation this file spends
+            # eighty lines explaining: with one absent root and one merely
+            # blocked, it labelled the blocked one "missing root".
+            case "$(classify_root "$(canon "$r")")" in
+                absent) printf '        missing root: %s\n' "$r" ;;
+            esac
         done <<< "$roots"
         continue
     fi
@@ -620,7 +641,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Five reviews found five states where
+# the file header they will never open. Six reviews found eight states where
 # this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what

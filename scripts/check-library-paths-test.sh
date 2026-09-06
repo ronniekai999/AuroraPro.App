@@ -176,6 +176,14 @@ expect_out() {  # $1 = substring, $2 = label
                    *) bad "$2 (output lacks \"$1\")"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;; esac
 }
 
+# ── A NOTE ON MODES IN THIS FILE ───────────────────────────────────
+# Privilege-dependent cases use `chmod 000`, never 750. 750 grants the OWNER
+# rwx, and on a non-root runner there is no setpriv drop — the script under
+# test runs as the very user that created the fixture, so a 750 directory is
+# fully traversable and the blocked state is never built. Three cases used 750
+# and were therefore RED on every non-root runner (which is what CI uses) while
+# passing under root, where setpriv drops to a non-owner. 000 denies the owner
+# too, so both invocations build the same state.
 echo "check-library-paths: agreement with the scanner"
 
 # ── 1. The happy path ─────────────────────────────────────────────
@@ -579,7 +587,7 @@ else
     : > "$TMP/ancestor/parent/media/A.mkv"
     echo "$TMP/ancestor/parent/media" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/ancestor/parent/media/A.mkv" "$TMP/ancestor/parent/media/GONE.mkv" > "$FIX/recorded"
-    chmod 750 "$TMP/ancestor/parent"
+    chmod 000 "$TMP/ancestor/parent"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/ancestor"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -844,7 +852,7 @@ else
     ln -s "$TMP/symanc/pool0/storage" "$TMP/symanc/srv"
     echo "$TMP/symanc/srv/movies" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/symanc/srv/movies/A.mkv" "$TMP/symanc/srv/movies/GONE.mkv" > "$FIX/recorded"
-    chmod 750 "$TMP/symanc/pool0"
+    chmod 000 "$TMP/symanc/pool0"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/symanc"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
@@ -891,13 +899,128 @@ else
     ln -s wall/inner "$TMP/relsym/base/link"
     echo "$TMP/relsym/base/link" > "$FIX/roots"
     printf '%s\n%s\n' "$TMP/relsym/base/link/A.mkv" "$TMP/relsym/base/link/GONE.mkv" > "$FIX/recorded"
-    chmod 750 "$TMP/relsym/base/wall"
+    chmod 000 "$TMP/relsym/base/wall"
     [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$TMP/relsym" "$TMP/relsym/base"; }
     OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
            FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
     RC=$?
     chmod 755 "$TMP/relsym/base/wall"
     expect_rc 2 "a RELATIVE symlink into an untraversable directory → exit 2"
+fi
+
+# ── 37. Each status guard, individually ───────────────────────────
+# Case 32 shadows a tool GLOBALLY, so whichever guard fires first satisfies it
+# and the siblings can each be removed with the suite still green — a case
+# passing through the wrong guard. These shadow one INVOCATION at a time and
+# assert on the specific message, so each guard is pinned on its own.
+#
+# The tool is made to fail only in the shape that reaches the guard under test:
+# `sort` reading a FILE operand is the disk side, `sort` reading STDIN is the
+# recorded side (a pipe). That distinction is what separates the two sort
+# guards, which are otherwise indistinguishable from outside.
+guard_case() {  # $1 = stub body, $2 = expected message fragment, $3 = label
+    local tool="$4"
+    mkdir -p "$TMP/guardbin"
+    printf '%s\n' "$1" > "$TMP/guardbin/$tool"
+    chmod +x "$TMP/guardbin/$tool"
+    OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+    RC=$?
+    rm -f "$TMP/guardbin/$tool"
+    if [ "$RC" = 2 ] && case "$OUT" in *"$2"*) true ;; *) false ;; esac; then
+        ok "$3"
+    else
+        bad "$3 (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'
+    fi
+}
+
+fixture guards
+R="$TMP/guards"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+
+# grep: fails only when asked to write disk.video (a -E invocation with a file
+# operand). The stub passes every other grep through to the real one.
+guard_case '#!/bin/sh
+for a in "$@"; do case "$a" in *disk.video*) exit 2 ;; esac; done
+case "$*" in *"-Ei"*) exit 2 ;; esac
+exec /usr/bin/grep "$@"'   "grep failed while filtering" "the grep guard fires on its own" grep
+
+# sort with a FILE operand — the disk side.
+guard_case '#!/bin/sh
+case "$*" in *disk.video*) exit 2 ;; esac
+exec /usr/bin/sort "$@"'   "sort failed while ordering the discovered files" "the disk-side sort guard fires on its own" sort
+
+# sort reading STDIN — the recorded side.
+guard_case '#!/bin/sh
+case "$*" in *disk.video*) exec /usr/bin/sort "$@" ;; esac
+exit 2'   "ordering the recorded paths" "the recorded-side sort guard fires on its own" sort
+
+# comm -23 builds `missing`; comm -13 builds `unknown`. Only the first can
+# produce a false all-clear, so it gets its own case.
+guard_case '#!/bin/sh
+case "$*" in *-23*) exit 2 ;; esac
+exec /usr/bin/comm "$@"'   "comm failed while comparing the recorded paths" "the missing-side comm guard fires on its own" comm
+
+# find: a silent non-zero exit. Gated on finderr being EMPTY, because GNU find
+# also exits 1 on an ordinary permission error — which the unreadable latch
+# already handles and must NOT be turned into a die.
+guard_case '#!/bin/sh
+exit 1' \
+  "find failed on" "the find status guard fires on its own" find
+
+# ...and the same find failing NOISILY must NOT die: that is a permission
+# error, the latch handles it, and dying would be an over-report on every
+# library that has one unreadable folder.
+fixture find_noisy
+R="$TMP/find_noisy"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+mkdir -p "$TMP/guardbin"
+{
+  echo '#!/bin/sh'
+  echo '/usr/bin/find "$@"'
+  echo 'echo "find: permission denied somewhere" >&2'
+  echo 'exit 1'
+} > "$TMP/guardbin/find"
+chmod +x "$TMP/guardbin/find"
+OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -f "$TMP/guardbin/find"
+if [ "$RC" != 2 ]; then ok "a find that fails NOISILY is the unreadable latch, not a die"
+else bad "a noisy find was treated as an unexplained failure (exit 2)"; printf '%s\n' "$OUT" | sed 's/^/       | /'; fi
+
+# ── 38. The missing-root REPORT names the right root ──────────────
+# With one absent root and one merely blocked, the report loop used to re-test
+# each root with `realpath -e` — the ENOENT/EACCES conflation classify_root
+# exists to avoid — and labelled the blocked root "missing root". Exit code
+# unaffected; the sentence was the one this file spends eighty lines saying is
+# wrong. (rootmissing dominates, so this library exits 0 either way.)
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "missing-root report: running as root and setpriv is unavailable"
+else
+    # The blocked component must be an ANCESTOR of the root, not the root
+    # itself: `realpath -e` on a chmod-000 DIRECTORY succeeds (stat needs x on
+    # the parent, not on the target), so a root-level block does not
+    # distinguish the two implementations. One level up does.
+    fixture reportlabel
+    W="$TMP/reportlabel-wall"; B="$W/inner"; mkdir -p "$B"
+    : > "$B/A.mkv"
+    printf '%s\n%s\n' "$TMP/reportlabel-absent" "$B" > "$FIX/roots"
+    printf '%s\n' "$B/A.mkv" > "$FIX/recorded"
+    chmod 000 "$W"
+    [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP"; }
+    OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+           FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+    RC=$?
+    chmod 755 "$W"
+    if printf '%s\n' "$OUT" | grep -q "missing root: $TMP/reportlabel-absent" \
+       && ! printf '%s\n' "$OUT" | grep -q "missing root: $B"; then
+        ok "only the genuinely absent root is labelled 'missing root'"
+    else
+        bad "the blocked root was labelled missing (exit $RC)"; printf '%s\n' "$OUT" | sed 's/^/       | /'
+    fi
 fi
 
 echo
