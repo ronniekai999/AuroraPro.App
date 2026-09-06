@@ -95,6 +95,7 @@ import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSampl
 import {
   castHostPhase,
   castPlayPauseMismatch,
+  castReanchorBudgetAfter,
   castResyncAction,
   isCastHostSeekJump,
   isPartyEpisodeMismatch,
@@ -110,6 +111,8 @@ import {
   shouldPreservePauseForBoot,
   shouldPreservePauseForLocalSeekRebuild,
   shouldPreservePauseOnSeekRebuild,
+  type CastReanchorBudget,
+  type CastReanchorOutcome,
   type PlaybackDeliveryMode,
 } from '@/lib/partyPlayer'
 import { nextUpArmSecond, type ReceivedSeekPayload } from '@/lib/party'
@@ -948,7 +951,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // per-load: a re-anchor is itself a load, so resetting on load would hand
   // the budget straight back to the loop that just spent it.
   const castStuckPollsRef = useRef(0)
-  const castReanchorsUsedRef = useRef(0)
+  const castReanchorBudgetRef = useRef<CastReanchorBudget>({ used: 0, settledPolls: 0 })
   // Host warm-up state (see castHostPhase). Refs rather than effect-scoped
   // state for the same reason the confirmation tracking below is: this
   // effect re-runs on party.isPlaying, and a warm-up recreated on every
@@ -972,7 +975,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
-    castReanchorsUsedRef.current = 0
+    castReanchorBudgetRef.current = { used: 0, settledPolls: 0 }
     hostConvergedRef.current = false
     hostWarmupStartedAtMsRef.current = 0
     hostCorrectionUntilMsRef.current = 0
@@ -1723,10 +1726,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // branches bail on null, which is right, because until the receiver is
   // re-pointed there is no correct conversion to make.
   useEffect(() => {
-    castPendingStartSecRef.current = null
+    // Only the COMMITTED anchor. The pending pair belongs to a load that may
+    // still be in flight for the media the receiver is genuinely on, and
+    // runCastLoad promotes the two together — nulling one half here would
+    // publish (media, no anchor) if that load resolved afterwards, breaking
+    // the invariant the direct-play seek path cites as its proof of
+    // correctness. If it does resolve, promoting the old media's real anchor
+    // is right: that is what the receiver is playing.
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
-    castReanchorsUsedRef.current = 0
+    castReanchorBudgetRef.current = { used: 0, settledPolls: 0 }
     hostConvergedRef.current = false
     hostWarmupStartedAtMsRef.current = 0
     hostCorrectionUntilMsRef.current = 0
@@ -4174,6 +4183,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // short enough that a viewer notices one reload rather than a stall.
     const CAST_REANCHOR_AFTER_POLLS = 5
     const CAST_MAX_REANCHORS = 2
+    // ~10s of unbroken in-tolerance polls before a re-anchor is earned back.
+    // Comfortably longer than the few seconds a receiver that stalls after
+    // every load stays in tolerance, and irrelevant to a cast that is simply
+    // fine between one host rewind and the next.
+    const CAST_REANCHOR_SETTLED_POLLS = 10
     // How long a corrective seek is given to land before the host's scrub
     // detector trusts the receiver's position again.
     const HOST_CORRECTION_SETTLE_MS = 3000
@@ -4199,7 +4213,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // somewhere arbitrary in the new file — possibly past its end, which is
       // the silent-hang shape this whole change exists to close. Same guard,
       // same reason, as the local drift loop's rebuild check.
-      if (isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId)) return null
+      // Through partySyncRef, NOT the closure-captured `party` — identical
+      // reasoning (and identical trap) to the local drift loop's own guard
+      // above: partyEpisodeId is not in this effect's dep array, so a
+      // room-socket reconnect that patches episodeId without moving
+      // isHost/isPlaying/partyMediaItemId leaves a captured value stale and
+      // the guard silently fails to block the race it exists for.
+      if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return null
       return partyTargetAbsSec(
         party.tickRef.current,
         party.isPlaying,
@@ -4218,7 +4238,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const committed = castSessionRef.current?.committed() ?? null
       return committed !== null &&
         committed !== sessionIdRef.current &&
-        castReanchorsUsedRef.current < CAST_MAX_REANCHORS
+        castReanchorBudgetRef.current.used < CAST_MAX_REANCHORS
     }
     // One correction step shared by the guest branch and the host's warm-up:
     // seek the receiver toward the party, or re-anchor the whole cast when
@@ -4243,36 +4263,34 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         reanchorAllowed: castCanReanchor(),
       })
       castStuckPollsRef.current = decision.stuck ? castStuckPollsRef.current + 1 : 0
+      const foldBudget = (outcome: CastReanchorOutcome) => {
+        castReanchorBudgetRef.current = castReanchorBudgetAfter(
+          castReanchorBudgetRef.current, outcome, CAST_REANCHOR_SETTLED_POLLS,
+        )
+      }
       if (decision.action === 'none') {
-        // Arrived. Replenish the re-anchor budget: it is meant to bound one
-        // episode of divergence, not to be a per-title lifetime allowance.
-        // Without this a host who rewinds the party past the receiver's anchor
-        // three times in a long film leaves every guest's TV permanently ahead
-        // of the room after the third, silently — 'blocked' takes no action and
-        // surfaces nothing. Re-arming only on a GENUINE arrival is what stops
-        // that from becoming a loop: the streak has to rebuild from scratch,
-        // and rebuilding it requires the receiver to diverge for real again.
-        castReanchorsUsedRef.current = 0
+        // In tolerance. A RUN of these earns a re-anchor back — see
+        // castReanchorBudgetAfter for why a single one must not, and why the
+        // budget needs earning back at all.
+        foldBudget('converged')
         return 'converged'
       }
-      if (decision.action === 'blocked') return 'blocked'
+      if (decision.action === 'blocked') { foldBudget('other'); return 'blocked' }
       if (decision.action === 'reanchor') {
         // The reload cycles isMediaLoaded, which re-arms the gate below; the
         // suppression window keeps the host's scrub detector quiet across the
         // reload's own position change on top of that.
         hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
-        const charged = reloadCastAtAbsSec(targetAbsSec, () => {
-          // The load never reached the receiver, so it re-anchored nothing.
-          castReanchorsUsedRef.current = Math.max(0, castReanchorsUsedRef.current - 1)
-        })
+        const charged = reloadCastAtAbsSec(targetAbsSec, () => foldBudget('reanchor-failed'))
         if (charged) {
           // Charged only when a reload really started — see reloadCastAtAbsSec.
-          castReanchorsUsedRef.current += 1
+          foldBudget('reanchored')
           castStuckPollsRef.current = 0
         }
         return 'correcting'
       }
       hostCorrectionUntilMsRef.current = Date.now() + HOST_CORRECTION_SETTLE_MS
+      foldBudget('other')
       seekCastSafely(decision.targetRecvSec)
       return 'correcting'
     }
@@ -4377,6 +4395,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           }
           return
         }
+        // The party has moved to an episode this player has not caught up to.
+        // The warm-up branch gets this from partyAbsSec; the authoritative
+        // path never calls it, so it needs its own guard — without one, a host
+        // converged on episode 1 whose TV pauses on the credits broadcasts
+        // ~21:40 into episode 2's room and jumps every guest. The per-title
+        // reset effect closes this only from the moment `target` resolves,
+        // and the window is the seconds BEFORE that.
+        if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
+
         // Authoritative. When we got here by spending the budget rather than
         // by converging, latch it (so the phase check above stops re-deciding
         // every poll) and drop the warm-up-era snapshot, whose position the
@@ -4963,12 +4990,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (castLoadedIsDirectFor(castLoadedMediaRef.current, target)) {
         broadcastHostPartySeek()
         // targetSec is ABSOLUTE and seekCastSafely takes RECEIVER seconds; the
-      // two coincide here and only here. castLoadedIsDirectFor is true only
-      // for a direct-play cast, and the getter's direct branch is the one that
-      // publishes an anchor of 0 — the media ref and the anchor are promoted
-      // together in runCastLoad, so "the receiver is on our direct file"
-      // implies castStartSecRef === 0. Do not reuse this shape elsewhere.
-      seekCastSafelyRef.current(targetSec)
+        // two coincide here and only here. castLoadedIsDirectFor is true only
+        // for a direct-play cast, and the getter's direct branch is the one
+        // that publishes an anchor of 0 — the media ref and the anchor are
+        // promoted together in runCastLoad, so "the receiver is on our direct
+        // file" implies castStartSecRef === 0. Do not reuse this shape.
+        seekCastSafelyRef.current(targetSec)
         return
       }
       castAdvancePendingRef.current = true
@@ -6384,10 +6411,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   act on the receiver when casting — display what they'd
                   actually act on too, or the scrub bar shows a frozen
                   position/wrong icon that visibly jumps once touched.
-                  cast.remote.currentTime is receiver/session-relative (like
-                  local vid.currentTime), so it needs the same +startSecRef
-                  conversion used everywhere else in this file to become
-                  REAL-FILE absolute; cast.remote.duration is comparatively
+                  cast.remote.currentTime is relative to the CAST session's
+                  own -ss anchor, which since cast clones are anchored near
+                  the sender is routinely not the local <video>'s — so it is
+                  converted through recvToAbsSec (castStartSecRef), never
+                  +startSecRef, to become REAL-FILE absolute, and falls back
+                  to the raw reading when that anchor is unknown;
+                  cast.remote.duration is comparatively
                   unreliable for a growing HLS transcode, so durationSec
                   keeps using the already-absolute, receiver-independent
                   realDurationSec regardless of cast state. There's no

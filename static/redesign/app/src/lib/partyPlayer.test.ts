@@ -3,6 +3,7 @@ import {
   castAbsToReceiverSec,
   castHostPhase,
   castPlayPauseMismatch,
+  castReanchorBudgetAfter,
   castResyncAction,
   castTargetBeforeAnchor,
   isCastHostSeekJump,
@@ -541,6 +542,19 @@ describe('castResyncAction (closing the cast correction dead ends)', () => {
     expect(d.targetRecvSec).toBe(15)
   })
 
+  it('never counts an unreachable-target poll toward the stuck streak', () => {
+    // The streak infers "this seek cannot land" from repeated nowhere-near
+    // readings. A target before the anchor is a different failure with its own
+    // immediate answer, and letting it inflate the streak would make an
+    // unrelated forward escalation fire early.
+    const before = castResyncAction({ ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385 })
+    expect(before.stuck).toBe(false)
+    const blocked = castResyncAction({
+      ...base, receiverSec: 0, targetAbsSec: 60, castStartSec: 2385, reanchorAllowed: false,
+    })
+    expect(blocked.stuck).toBe(false)
+  })
+
   it('re-anchors immediately for a target before the session anchor', () => {
     // The dead end: absMsToCastSec floors here, so the correction ladder
     // would aim at the anchor forever while the party sits earlier.
@@ -663,8 +677,72 @@ describe('partyTargetAbsSec', () => {
     expect(withOffset).toBeGreaterThan(withNone as number)
   })
 
+  it('refuses a non-finite projection rather than reporting NaN', () => {
+    // NaN reads as "in tolerance" to every downstream comparison
+    // (Math.abs(NaN) >= tol is false), which would silently report a converged
+    // receiver and a settled cast.
+    const bad = { abs_ms: 600_000, server_now_ms: Number.NaN, running: true, receivedAtMs: 5_000 }
+    expect(partyTargetAbsSec(bad, true, 0, 7_000)).toBeNull()
+    expect(partyTargetAbsSec(running, true, Number.NaN, 7_000)).toBeNull()
+  })
+
   it('never returns a negative position', () => {
     const weird = { abs_ms: -1, server_now_ms: 5_000, running: false, receivedAtMs: 5_000 }
     expect(partyTargetAbsSec(weird, false, 0, 6_000)).toBe(0)
+  })
+})
+
+describe('castReanchorBudgetAfter (the re-anchor budget)', () => {
+  const SETTLED = 10
+  const fresh = { used: 0, settledPolls: 0 }
+
+  it('charges a re-anchor and clears any settled run', () => {
+    const b = castReanchorBudgetAfter({ used: 0, settledPolls: 4 }, 'reanchored', SETTLED)
+    expect(b).toEqual({ used: 1, settledPolls: 0 })
+  })
+
+  it('refunds a re-anchor whose load never reached the receiver', () => {
+    // A mint that 429s on the per-user session cap, or a getter that finds no
+    // media because the local session is mid-reboot, re-anchored nothing.
+    const b = castReanchorBudgetAfter({ used: 1, settledPolls: 0 }, 'reanchor-failed', SETTLED)
+    expect(b.used).toBe(0)
+  })
+
+  it('never refunds below zero', () => {
+    // The refund is async; a per-title reset can land in between.
+    expect(castReanchorBudgetAfter(fresh, 'reanchor-failed', SETTLED).used).toBe(0)
+  })
+
+  it('does NOT earn a re-anchor back on a single in-tolerance poll', () => {
+    // This is the whole point. A re-anchor loads the receiver AT the party
+    // position, so the first poll after it lands is in tolerance almost by
+    // construction — refunding there would let a receiver that stalls a few
+    // seconds after every load re-anchor for the entire title.
+    const b = castReanchorBudgetAfter({ used: 2, settledPolls: 0 }, 'converged', SETTLED)
+    expect(b.used).toBe(2)
+    expect(b.settledPolls).toBe(1)
+  })
+
+  it('earns one back after a sustained run of in-tolerance polls', () => {
+    let b = { used: 2, settledPolls: 0 }
+    for (let i = 0; i < SETTLED; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+    expect(b.used).toBe(1)
+    expect(b.settledPolls).toBe(0) // the run restarts; the next one costs another full run
+  })
+
+  it('breaks the run on any correction, so a stalling receiver never earns one back', () => {
+    // Plays in tolerance for a few polls after each load, then drifts.
+    let b = { used: 2, settledPolls: 0 }
+    for (let cycle = 0; cycle < 20; cycle++) {
+      for (let i = 0; i < 4; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+      b = castReanchorBudgetAfter(b, 'other', SETTLED)
+    }
+    expect(b.used).toBe(2)
+  })
+
+  it('does not go below zero on a converged run with nothing spent', () => {
+    let b = fresh
+    for (let i = 0; i < SETTLED * 3; i++) b = castReanchorBudgetAfter(b, 'converged', SETTLED)
+    expect(b.used).toBe(0)
   })
 })

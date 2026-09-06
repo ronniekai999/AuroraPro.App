@@ -1540,11 +1540,18 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// 40 minutes into a playlist that had produced seconds).
 	//
 	// A session that vanished between the mint and here is not worth failing
-	// the request over: 0 is what every pre-2026-09 sender assumed anyway, and
-	// the token is already valid.
+	// the request over — the token is already valid — but 0 is the wrong
+	// fallback now that senders convert through this number: it would have the
+	// sender ask a clone anchored near its playhead to seek to that playhead
+	// again, i.e. far past the clone's produced edge, which is the #172 hang
+	// this field exists to prevent. The SOURCE session's anchor degrades
+	// safely instead: it is what a sender assumed before the field existed,
+	// and it is exactly right whenever no clone was made.
 	castStartSec := 0
 	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
 		castStartSec = cs.StartSec
+	} else if src, ok := h.transcode.GetSession(sessionID); ok && src != nil {
+		castStartSec = src.StartSec
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      tokenStr,

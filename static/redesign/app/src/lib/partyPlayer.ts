@@ -610,9 +610,78 @@ export function partyTargetAbsSec(
   if (!running) return Math.max(0, tick.abs_ms / 1000)
   const tickAgeMs = nowMs - (tick.receivedAtMs ?? nowMs)
   if (tickAgeMs > staleAfterMs) return null
-  return Math.max(0, projectPartyTickAbsMs(
+  const projected = projectPartyTickAbsMs(
     tick.abs_ms, tick.server_now_ms, tickAgeMs, clockOffsetMs, nowMs,
-  ) / 1000)
+  )
+  // A non-finite server_now_ms (or clock offset) makes the projection NaN,
+  // and NaN reads as "in tolerance" to every downstream comparison —
+  // Math.abs(NaN) >= tol is false — which would silently report a converged
+  // receiver and, for a host, a settled cast. Not a realistic wire value;
+  // cheap to refuse rather than to reason about.
+  if (!Number.isFinite(projected)) return null
+  return Math.max(0, projected / 1000)
+}
+
+export interface CastReanchorBudget {
+  /** Re-anchors spent on this cast. */
+  used: number
+  /** Consecutive in-tolerance polls since the last correction of any kind. */
+  settledPolls: number
+}
+
+export type CastReanchorOutcome =
+  | 'converged'
+  | 'reanchored'
+  | 'reanchor-failed'
+  | 'other'
+
+/**
+ * Fold one poll's outcome into the re-anchor budget (2026-09, third review).
+ *
+ * Two opposite pressures meet here. The cap exists so a receiver that is
+ * simply broken cannot be reloaded in a loop — each re-anchor costs a
+ * server-side transcode session and a visible reload on the TV. But a cap with
+ * no way back is a per-TITLE allowance, and a guest has no other recovery
+ * path (`seekToRealSec` refuses guests, and their local session is never
+ * rebuilt during a cast), so a host who rewinds the party past the receiver's
+ * anchor a third time would strand every guest's TV for the rest of the film.
+ *
+ * So the budget is earned back — but only by a receiver that has SETTLED, not
+ * by one that merely looked right for a moment. That distinction is the whole
+ * point: a re-anchor loads the receiver AT the party position, so the first
+ * poll after it lands is in tolerance almost by construction. Refunding on
+ * that single poll would let a receiver that stalls a few seconds after every
+ * load re-anchor indefinitely, roughly every 6-8s for the whole title, against
+ * the very server whose slowness caused the stall. Requiring a RUN of
+ * in-tolerance polls costs nothing in the case the replenishment is for (a
+ * cast that is genuinely fine for minutes between host rewinds) and denies the
+ * pathological one, whose drift re-opens long before the run completes.
+ */
+export function castReanchorBudgetAfter(
+  budget: CastReanchorBudget,
+  outcome: CastReanchorOutcome,
+  settledPollsToEarnBack: number,
+): CastReanchorBudget {
+  switch (outcome) {
+    case 'converged': {
+      const settledPolls = budget.settledPolls + 1
+      if (budget.used > 0 && settledPolls >= settledPollsToEarnBack) {
+        return { used: budget.used - 1, settledPolls: 0 }
+      }
+      return { used: budget.used, settledPolls }
+    }
+    case 'reanchored':
+      return { used: budget.used + 1, settledPolls: 0 }
+    case 'reanchor-failed':
+      // The load never reached the receiver, so it re-anchored nothing. Never
+      // below zero: the refund is asynchronous and a reset may have landed in
+      // between.
+      return { used: Math.max(0, budget.used - 1), settledPolls: budget.settledPolls }
+    case 'other':
+      // A seek, or a poll that could take no action: the receiver is not where
+      // it should be, so any run of settled polls is over.
+      return { used: budget.used, settledPolls: 0 }
+  }
 }
 
 export type CastHostPhase = 'warmup' | 'authoritative'
