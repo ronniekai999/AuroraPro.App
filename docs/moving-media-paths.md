@@ -53,13 +53,17 @@ there is no single block to paste.
 ### 0. Stop the server
 
 ```bash
+sudo systemctl stop aurora-update.timer
 sudo systemctl stop aurora
 ```
 
-Not optional. Moving files fires filesystem-watch events, which schedule a
-rescan; a scan whose walk finishes before your changes land and whose prune
-runs after them compares the new database paths against a file list gathered
-from the old location, matches nothing, and prunes the lot.
+Not optional, and it is two units, not one. Moving files fires filesystem-watch
+events, which schedule a rescan; a scan whose walk finishes before your changes
+land and whose prune runs after them compares the new database paths against a
+file list gathered from the old location, matches nothing, and prunes the lot.
+And the auto-updater's timer fires every five minutes and ends in `systemctl
+restart aurora` — which STARTS a stopped unit — so a commit landing mid-window
+would bring Aurora up on a half-rewritten catalog.
 
 ### 1. Back up
 
@@ -151,7 +155,9 @@ UPDATE watch_progress wp
 > watched the same film through TWO duplicate libraries, both rows target the
 > same `(user_id, profile_id, media_item_id)` inside one statement and it
 > aborts on `idx_watch_progress_user_profile_media`. Re-run it restricted to
-> one duplicate library at a time.
+> one duplicate library at a time — narrowing `dup.library_id` only. Leave
+> `orig.library_id NOT IN (…)` naming ALL of them, or the other duplicates
+> become valid destinations and step 4 deletes what you just salvaged.
 
 If a film sits in two of your libraries (`Movies` and `4K Movies`), `orig`
 matches more than one row and Postgres picks one arbitrarily — so progress can
@@ -190,9 +196,15 @@ step 2.
 ```sql
 BEGIN;
 DELETE FROM libraries WHERE id IN (5, 6, 7, 8);
--- Confirm the survivors are the ones you meant to keep, then:
 SELECT id, name, paths FROM libraries ORDER BY id;
-COMMIT;   -- or ROLLBACK; if that list is wrong
+```
+
+Read that list. It is the set of libraries you will be left with. Only when it
+is right, type the commit yourself — deliberately, as a separate line, so a
+paste cannot do it for you:
+
+```sql
+COMMIT;   -- or ROLLBACK; if the list above is wrong
 ```
 
 ### 5. Move the file rows, scoped to the libraries you are moving
@@ -252,102 +264,69 @@ COMMIT;
 
 ### 6. Verify before starting the server
 
-Three checks. All of them must pass; if any does not, **restore the backup**
-(see step 1) rather than starting Aurora — a scan against a half-moved catalog
-is what this whole procedure exists to avoid.
-
-**6a — no library still points at the old location.** This is the check for the
-one mistake the others structurally cannot see: a library you left out of
-step 5 entirely is internally consistent (old rows, old root), so nothing about
-it looks wrong. Only its *root* gives it away.
+**6a — no library still points at the old location.** A library you left out of
+step 5 is internally consistent — old rows under its old root — so nothing
+about its *contents* looks wrong. Only its root gives it away.
 
 ```sql
 SELECT id, name, paths FROM libraries
  WHERE EXISTS (SELECT 1 FROM unnest(paths) p
-                WHERE p LIKE '/home/rontavious999/media/%');
+                WHERE p LIKE '/home/rontavious999/media/%'
+                   OR p = '/home/rontavious999/media');
 ```
 
-Must return no rows. Compare the full `SELECT id, name, paths FROM libraries`
-against the list you wrote down in step 2 as well — this query only catches a
-library still under the prefix you happened to type.
+Must return no rows. (The `OR p =` arm matters: `LIKE 'prefix/%'` requires at
+least one character after the slash, so a library rooted at exactly the old
+prefix — the common one-library-covers-everything layout — would slip past.)
+Also compare the full `SELECT id, name, paths FROM libraries` against the list
+you wrote down in step 2; this query only catches a library still under the
+prefix you happened to type.
 
-**6b — no file row has been left outside its own library's roots.** These are
-data-derived: each row is compared against its own library's actual `paths`,
-so they catch a dropped root of a multi-root library, a prefix mistyped in one
-statement but not another, and a partially-applied step 5. The second query is
-not optional — movie libraries store rows in `media_files` and show libraries
-in `episode_files`, so a check against only the first is blind to every TV
-library you just moved, and returns 0 on a shows-only install whatever state it
-is in.
-
-```sql
--- Movie rows no longer under any root of their own library.
-SELECT count(*)
-  FROM media_files mf
-  JOIN media_items mi ON mi.id = mf.media_item_id
-  JOIN libraries   l  ON l.id  = mi.library_id
- WHERE NOT EXISTS (
-         SELECT 1 FROM unnest(l.paths) p
-          WHERE left(mf.path, length(rtrim(p, '/')) + 1) = rtrim(p, '/') || '/');
-
--- The same for episodes. Show libraries have no media_files rows at all.
-SELECT count(*)
-  FROM episode_files ef
-  JOIN tv_episodes te ON te.id = ef.episode_id
-  JOIN media_items mi ON mi.id = te.media_item_id
-  JOIN libraries   l  ON l.id  = mi.library_id
- WHERE NOT EXISTS (
-         SELECT 1 FROM unnest(l.paths) p
-          WHERE left(ef.path, length(rtrim(p, '/')) + 1) = rtrim(p, '/') || '/');
-```
-
-Both must return 0. (`left(...) =` rather than `LIKE`: the pattern would be
-built from the library's own path, where `_` and `%` are wildcards you cannot
-escape — and the error is one-directional, so a root like `/mnt/media_2024`
-could only ever produce a false *clean*.) To see the offenders, swap `count(*)`
-for `mf.path, l.name`.
-
-**6c — every recorded path exists on disk, and the service can read it.**
-
-This is the check that matters most, and it is the one people skip. A row
-rewritten to a path with nothing at it is **not** a title that waits for the
-file to turn up: the next scan finds it missing, prunes the row, and the
-empty-item sweep then deletes the whole `media_items` row and cascades every
-table in the list at the top of this page. Permanently. 6a and 6b cannot see
-it — the row is under its library's root, it just is not on disk.
+**6b — nothing will be pruned.**
 
 ```bash
-sudo -u postgres psql aurora -tAc \
-  "SELECT path FROM media_files
-   UNION ALL
-   SELECT path FROM episode_files" \
-| while IFS= read -r p; do
-    [ -e "$p" ] || echo "MISSING: $p"
-  done
+sudo ./scripts/check-library-paths.sh
 ```
 
-Must print nothing. If it prints anything, the file did not arrive — finish the
-copy and re-run this before going any further.
+Must exit 0. This is the check that matters, and it is a script rather than a
+query for a reason: the scanner decides what to prune by comparing its
+directory walk against the recorded paths as **exact strings**, so no amount of
+SQL about prefixes and `EXISTS` can predict it. Two states in particular pass
+every plausible SQL check and then delete the catalog — a directory symlink
+inside a root (the walk does not descend into one, but `test -e` follows it),
+and a path that is merely spelled differently (`/srv//media/…`) from what the
+walk produces. The script reproduces the walk instead of modelling it, and
+reports exactly which rows would go.
 
-Then confirm the service user can actually READ one, not merely list it. Aurora
-runs unprivileged, and home directories are 0700/0750 on modern distros, so a
-path you can see in your own shell is often unreachable for it:
+If it lists anything, **do not start Aurora.** Each listed path is a row the
+next scan deletes, and any title left with no files goes with it, along with
+everything in the table at the top of this page. Fix the paths — or restore the
+backup from step 1 — and run it again.
+
+The same script is worth running any time you want to know what a scan is about
+to do: after restoring a backup, after a disk goes missing, or before an
+upgrade.
+
+**6c — the service can actually read the media.** Aurora runs unprivileged, and
+home directories are 0700/0750 on modern distros, so a path you can see in your
+own shell is often unreachable for it:
 
 ```bash
-sudo -u postgres psql aurora -tAc \
-  "SELECT mf.path FROM media_files mf
-     JOIN media_items mi ON mi.id = mf.media_item_id
-    WHERE mi.library_id = 1 LIMIT 1" \
-| xargs -r -d'\n' -I{} sudo -u aurora head -c1 "{}" > /dev/null \
-  && echo "aurora can read it" || echo "aurora CANNOT read it"
+p=$(sudo -u postgres psql aurora -tAc \
+      "SELECT mf.path FROM media_files mf
+         JOIN media_items mi ON mi.id = mf.media_item_id
+        WHERE mi.library_id = 1 LIMIT 1")
+[ -n "$p" ] || echo "no rows — wrong library id, or a show library (use the episode_files join)"
+sudo -u aurora head -c1 -- "$p" > /dev/null && echo "aurora can read it" || echo "aurora CANNOT read it"
 ```
 
-`head -c1`, not `ls` — `ls` succeeds with only search permission on the parent
-and would pass on a file the service cannot open. `-r` matters too: without it
-an empty result runs the command with no arguments and reads as success. Repeat
-for one library of each type you moved (use the `episode_files` join for a show
-library). If it fails: `sudo setfacl -m u:aurora:x` on each parent directory,
-then `sudo setfacl -R -m u:aurora:rX` on the media root.
+`head -c1`, not `ls`: `ls` succeeds with only search permission on the parent
+and would pass on a file the service cannot open. Check the empty case
+explicitly — a query that returns nothing must not read as success. Repeat for
+one library of each type you moved (a show library stores its rows in
+`episode_files`, so swap the join). If it fails: `sudo setfacl -m u:aurora:x`
+on each parent directory, then `sudo setfacl -R -m u:aurora:rX` on the media
+root.
 
 ### 7. Start the server
 
