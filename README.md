@@ -320,6 +320,7 @@ npm run audit      # build + a11y, contrast, glass, motion, breakpoint, layout &
 - Manual reverse-proxy configs (Caddy + nginx): [`docs/reverse-proxy/`](docs/reverse-proxy/).
 - Web push internals and operator notes: [`docs/push.md`](docs/push.md).
 - Recommender measurement — the privacy-bounded Match beta report: [`docs/match-report.md`](docs/match-report.md) (`scripts/match-report.sh`).
+- Moved your media to a new disk or path? Don't delete and recreate the library — that discards watch history, ratings and recommendations. The SQL procedure is in [`docs/moving-media-paths.md`](docs/moving-media-paths.md).
 
 ## 📄 License
 

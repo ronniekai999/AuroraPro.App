@@ -147,6 +147,37 @@ jobs:
       - name: Review gate mutation tests
         run: bash scripts/review-gate-mutation-test.sh
 
+  # Deliberately NOT folded into review-gate above: these guard the deploy
+  # scripts and the operator tooling, and a failure in either reported as
+  # "Review gate self-test" sends the reader to the wrong file.
+  operator-scripts:
+    name: Deploy and operator script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The deploy scripts' Node gate. Three scripts carry their own copy of
+      # node_vite_verdict(); this asserts they have not drifted and that all
+      # three agree on a table of real version strings. A box ran Node 18 for
+      # two weeks of failed updates because nothing checked the version before
+      # npm did.
+      - name: Node version gate tests
+        run: bash scripts/node-version-test.sh
+
+      # The pre-flight check an operator runs before starting Aurora on moved
+      # media. It shipped untested, and nine review rounds then found fourteen
+      # states where it printed "nothing would be pruned" while the scan would
+      # delete rows and cascade the watch history away. None was visible to the
+      # Go contract tests, which never run the script. This does: real temp
+      # trees, a stubbed psql, and assertions on the exit codes an operator
+      # acts on. Cases that need an unreadable directory use mode 000, not 750:
+      # on a non-root runner (which this is) there is no setpriv drop, so the
+      # script runs as the user that created the fixture and 750 would grant it
+      # everything. Three cases got that wrong and were red here while green
+      # under root — run this suite BOTH ways before trusting it.
+      - name: Library path check tests
+        run: bash scripts/check-library-paths-test.sh
+
   review-record:
     name: Review record present
     runs-on: ubuntu-latest

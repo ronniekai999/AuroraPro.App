@@ -877,3 +877,207 @@ scanner; detection alone would only move its wrong colours from direct play
 to a transcode until a DV-aware tonemap (libplacebo) is probed in. The
 limiter policies carry a fixed 5 ms audio delay (alimiter's uncompensated
 look-ahead; see `downmixLimiter`).
+
+## The Node build floor, and why library repointing was withdrawn (September 2026)
+
+Two production failures reported as something else. Code: `node_vite_verdict`
+in `scripts/{install,redeploy,aurora-update}.sh`, pinned by
+`scripts/node-version-test.sh` (CI); `scripts/check-library-paths.sh`, pinned
+by `scripts/check-library-paths-test.sh` (CI) and by
+`internal/library/checkpaths_contract_test.go`. Operator runbook for moved
+media: `docs/moving-media-paths.md`.
+
+### The Node build floor
+
+Invariants to preserve:
+
+- **The gate distinguishes "cannot build" from "unsupported".** Vite 7 calls
+  `crypto.hash()`, added in Node 20.12/21.7, so below that the build provably
+  dies; the declared engines (`^20.19 || >=22.12`) are stricter, and vite
+  merely warns and carries on inside the gap. Only the provable case is fatal —
+  refusing every Node below the engines would strand a box on 20.15 whose build
+  succeeds.
+- **The updater reports it as `misconfigured`, in preflight, before the fetch.**
+  As a build failure it read "frontend build failed — old binary/static assets
+  are still running", named neither Node nor a version, and sat several hundred
+  lines into npm's output. A box ran eight consecutive failed updates over a
+  fortnight on that message.
+- **The check only fires when the SPA is built from source.** `install.sh` and
+  `aurora-update.sh` both fall back to the committed `static/v2` bundle when
+  the source tree is absent, and that path needs no Node at all.
+- **`scripts/node-version-test.sh` tests the call sites by RUNNING them**
+  against a fake `node` on PATH, and asserts the three duplicated copies of
+  `node_vite_verdict` have not drifted. The copies are duplicated rather than
+  sourced on purpose: `aurora-update.sh` runs as root out of a source mirror
+  that may be mid-checkout, and a fourth file to `source` is a new failure mode
+  in exactly the path that must not acquire one.
+
+Known limits:
+
+- **None of the verdicts are exercised against a real install.** The
+  crypto.hash floors come from Node's changelog, and `^20.19 || >=22.12` is
+  vite 7.3.6's OWN declared `engines`, read out of `package-lock.json` — the
+  app's `package.json` declares none, so a vite bump moves the floor with
+  nothing in this repo restating it. The test drives a fake `node`.
+- **Verdict 3 is an assertion, not a measurement.** Vite's engines bump to
+  `^20.19 || >=22.12` is about unflagged `require(esm)`, not `crypto.hash`, so
+  a box on 20.12–20.18 is told "the build should still succeed" on reasoning
+  rather than evidence. One `npm run build` on a Node 20.15 container would
+  settle it.
+- **The updater's gate now precedes `git fetch`**, so a box below the floor
+  can no longer receive any commit — including one that would fix it. Net
+  neutral versus the old behaviour (the update aborted at the build anyway),
+  but the remedy is strictly manual.
+
+### The pre-flight path check
+
+`scripts/check-library-paths.sh` predicts what the next scan would prune, by
+reproducing the walk rather than modelling it. Invariants:
+
+- **It is documented as a second opinion, not a gate, and the runbook must
+  keep saying so.** Five review rounds each found a false all-clear in it. That
+  is the honest summary of its reliability, and softening it in the runbook
+  would be the most consequential edit anyone could make to this feature.
+- **`classify_root` is the load-bearing function, and it must never be phrased
+  as "did that call succeed".** `test -e` and `realpath -e` BOTH collapse
+  ENOENT and EACCES, and only ENOENT matches `walkFailed`. Four of the five
+  false all-clears were that conflation at successively greater distance —
+  the root, a subtree, an ancestor, then an ancestor behind a SYMLINK, which
+  `test -e` reaches because it follows links. So it requires POSITIVE PROOF of
+  absence (search permission on the lexical parent plus no entry there),
+  classifies an unresolvable symlink by recursing on its target rather than
+  guessing, and treats everything else — unreadable parent, symlink loop,
+  chain past the depth cap — as blocked. Unknown is never absent.
+- **A false ALL-CLEAR is the only unrecoverable outcome, and every ambiguity
+  resolves against it.** The operator is told not to start Aurora until it
+  exits 0, so an over-report costs an afternoon and an all-clear costs the
+  catalog. Anything the script cannot decide is exit 2 ("could not check"),
+  never exit 0.
+- **The scanner uses TWO different roots and so must this.** `collectVideoFiles`
+  walks the path as written (so walk output carries the unresolved prefix) but
+  tests its symlink-escape guard against `EvalSymlinks(root)`. Comparing a
+  resolved target against the lexical root drops every symlinked file under a
+  root with a symlinked component, empties the disk list, and lands on the
+  zero-discovered branch — which reports "the scan will prune nothing" and
+  exits 0 while the scan prunes. The runbook is what makes that state
+  reachable: the app only ever stores resolved paths, a hand-written `UPDATE`
+  does not.
+- **`walkFailed` is narrower than "I could not look", and every adjacent
+  branch had to be found the hard way.** `collectVideoFiles` returns an error
+  on exactly one condition — `EvalSymlinks(root)` failing — because its walk
+  callback returns nil on every error. (`ScanLibrary` sets `walkFailed` a
+  second way, at `maxTrackedUnreadable`; the script does not model that and
+  over-reports there.) Anything else the check cannot see is its own
+  blindness, and answering "nothing will be deleted" from it is a wiped
+  catalog. Four rounds each found one more branch, each adjacent to the last:
+  the ROOT unreadable, a SUBTREE unreadable with the empty disk list read as
+  "no media", an ANCESTOR unreadable, and an ancestor behind a SYMLINK. The
+  fix is `classify_root`, above — not another ordering tweak. Anything of this
+  shape that turns up next should be assumed adjacent again rather than novel.
+- **Line-oriented comparison cannot represent every path.** A recorded path
+  containing a newline arrives from `psql -qtA` as two lines; an empty one
+  vanishes into the blank-line filter. Ask SQL for the count of those rows —
+  do not infer it by comparing a row count against a line count, because
+  `sort -u` collapses a duplicated half and the counts then agree.
+- **`find "$root" ! -type d` is exactly `!d.IsDir()`**, on the same lstat
+  semantics. Narrower filters were wrong in both directions: `-type f` dropped
+  every symlinked file (normal in *arr layouts), and requiring a regular-file
+  target dropped the symlink-to-directory and the FIFO the scanner accepts.
+
+Known limits:
+
+- **The script's own logic was untested when it shipped**, and five review
+  rounds then found seven false all-clears in it that the Go contract tests
+  could not see — five permission/absence conflations, plus a failing `comm`
+  and a failing `sort`, each of which produced the all-clear by leaving a
+  variable empty — those pin the extension list and two properties of
+  `WalkDir`, but never run the script.
+  `scripts/check-library-paths-test.sh` runs it against real trees with a
+  stubbed `psql`, and every fix in it is mutation-tested: revert the fix, the
+  suite must go red. Two lessons are baked into that file. The
+  privilege-dependent cases DROP PRIVILEGES rather than skipping under root —
+  `chmod 000` is no barrier to root, and skipping there let a revert of the
+  round-1 fix pass every other case in the file. And a case must fail for the RIGHT
+  reason: the case-insensitivity case originally had one uppercase file, so
+  losing `grep -i` emptied the disk list and exited 0 through the
+  zero-discovered branch — the same exit code, the opposite meaning, and the
+  case passed either way.
+- **One property is pinned structurally, not behaviourally.** `LC_ALL=C` is
+  asserted by grepping the script for it, because demonstrating a collation
+  collision needs a non-C UTF-8 locale generated on the machine and this
+  repo's container has only `C.utf8` — where a behavioural case passes
+  whatever the script does, which is worse than no case.
+- **A tool that FAILS QUIETLY is the second defect class here, and it took six
+  rounds to enumerate.** `comm`, `sort`, `find`, the pipeline recording what
+  find found, `sed` and `wc` each produced the all-clear by leaving a variable
+  empty. Status checks close the non-zero half; the zero-with-empty-output half
+  needs a CONTRADICTION the script already holds evidence for (a non-empty
+  input yielding empty output), and `comm` needs arithmetic instead, because an
+  empty `missing` list is the legitimate all-clear. `find` and `grep` can have
+  neither: producing nothing is a real answer and is exactly the scanner's
+  zero-discovered case — so they get known-answer probes at startup instead,
+  which catch a consistently broken binary and cannot catch an intermittent
+  one. Do not add a tool to this script without deciding which of those three
+  it needs.
+- **`underAnyPrefix` shielding is deliberately not reproduced.** Rows under a
+  subtree the scan cannot read are shielded, not pruned; the script counts
+  them as missing because it cannot know what the SERVICE user reads. That is
+  an over-report, chosen knowingly, and the message says so.
+- **The empty-item sweep is not modelled at all.** `DeleteEmptyMediaItems`
+  runs on every scan that walks cleanly and discovers anything, so a
+  `media_items` row that ALREADY has no file rows is swept even when this
+  script reports nothing missing.
+- **Two more over-reports.** An empty-string element in `libraries.paths` makes
+  `EvalSymlinks("")` fail, so the scan prunes nothing while the script may
+  still FAIL on the other roots; and ≥1000 unreadable entries trips
+  `maxTrackedUnreadable` into `walkFailed`, which the script does not count.
+
+### Library repointing — attempted and WITHDRAWN. Read this before retrying.
+
+Moving media to a new path orphans everything keyed to `media_item_id`, because
+`media_items` is scoped per library and keyed on
+`(library_id, type, title, year)`. An admin whose files move has no UI for it
+and creates a new library, which builds a parallel catalog with fresh ids. That
+is a real gap and `docs/moving-media-paths.md` documents the SQL that closes
+it.
+
+An **Edit** button to do the same thing was built and removed. Five independent
+adversarial reviews each found a distinct way it destroyed catalog history, and
+each defect was introduced by the previous round's fix:
+
+1. Repoint + rescan pruned the old rows before phase 2 attached the new ones,
+   so the empty-item sweep cascaded every title's history away.
+2. The fix — defer the prune to after phase 2 — was MORE destructive: with a
+   duplicate library owning the new paths, phase 2 attaches nothing, and one
+   unowned file was enough to make the prune run against rows that were still
+   the only ones their titles had.
+3. The premise itself was false. `UpsertMediaItem` keys on the FILENAME while
+   the stored row carries what TMDB enrichment wrote, so a repoint re-keys
+   `title='Seven'` / folder `Se7en (1995)` to a NEW item and sweeps the old.
+   A NULL stored year does it with no enrichment drift at all.
+4. Moving the file rows instead fixed that — and deleting the deferred prune
+   removed the only caller that released the relocation marker, so a repointed
+   library latched into "delete nothing" and never pruned or swept again.
+5. TV was still broken: `episode_files`' `ON CONFLICT (path) DO UPDATE SET
+   episode_id = EXCLUDED.episode_id` re-parents a file onto a newly created
+   show whenever the quick hash changes (any `cp`/`rsync` without `-a`), which
+   empties the original show for the sweep.
+
+What to take from it, if this is picked up again:
+
+- **The catalog-delete path is the most dangerous code in this repo**, and
+  every one of those defects was invisible to a green test suite. Four of the
+  five were found by RUNNING code against a real Postgres, not by reading it.
+  CI already provides one (`TEST_DATABASE_URL`); use it from the first commit.
+- **Do not detect a relocation and suppress the scan's prune.** Four variants
+  were tried (skip, defer, gate the deferral, skip again) and each lost
+  something. The per-ROW rule — a recorded path outside the library's current
+  roots was never walked, so its absence is not evidence — is the only one that
+  needed nothing armed and nothing cleared. It is not in the tree; it is worth
+  starting from.
+- **Fix `episode_id = EXCLUDED.episode_id` FIRST, on its own, with its own
+  review.** It is pre-existing, it fires with no repoint involved, and it makes
+  any relocation work unsound until it is addressed.
+- **`FindMediaItemByTitle` errors on a NULL year** (it scans into a
+  non-nullable field), so the TV pre-check fails unconditionally for those
+  rows and the upsert re-keys. Also pre-existing, also worth fixing alone.

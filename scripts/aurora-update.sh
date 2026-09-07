@@ -271,6 +271,105 @@ case "$ORIGIN_URL" in
         ;;
 esac
 
+# ── Node version (deep-debug: the two-week silent stall) ──────────
+#
+# Vite 7 needs Node ^20.19 || >=22.12 and calls crypto.hash(), which
+# does not exist before Node 20.12. On an older Node the build dies
+# with "crypto.hash is not a function" — but only AFTER npm ci has
+# run, so the failure lands several hundred lines into update.log and
+# surfaces to the operator as the generic "frontend build failed —
+# old binary/static assets are still running". A production box sat
+# 8 updates behind for a fortnight on exactly that: eight identical
+# failures whose status message named neither Node nor the version.
+#
+# Check it here, where the state is `misconfigured` (a configuration
+# problem with its own remediation, per the H4 note above) and the
+# message can name the version we found and the fix.
+#
+# node_vite_verdict is duplicated in scripts/install.sh and
+# scripts/redeploy.sh — scripts/node-version-test.sh asserts the three
+# copies are identical and agree on a table of real version strings.
+NODE_ENGINES_TEXT="20.19+ or 22.12+"
+NODE_TARGET_MAJOR=22
+
+# node_vite_verdict — how usable is this box's Node for the SPA build?
+#   0  meets vite/@vitejs-plugin-react's declared engines (^20.19 || >=22.12)
+#   1  CANNOT build: no crypto.hash(), which vite 7 calls unconditionally
+#      (added in Node 20.12 and 21.7). This is the provable failure.
+#   2  no node, or a version string we could not parse
+#   3  has crypto.hash but sits outside the declared engines — vite prints
+#      its "please upgrade" notice and carries on, so the build works
+#
+# 1 and 3 are deliberately distinct. Refusing every Node below the declared
+# engines would strand a box on, say, 20.15 whose build succeeds today —
+# trading an unattended regression for a tidier rule. Only the provable
+# case stops an update; the rest is said out loud and left to the build.
+node_vite_verdict() {
+    local ver major minor rest
+    command -v node &>/dev/null || return 2
+    ver="$(node --version 2>/dev/null)" || return 2
+    ver="${ver#v}"
+    major="${ver%%.*}"
+    case "$ver" in
+        *.*) rest="${ver#*.}"; minor="${rest%%.*}" ;;
+        *)   minor=0 ;;
+    esac
+    case "$major" in ''|*[!0-9]*) return 2 ;; esac
+    case "$minor" in ''|*[!0-9]*) return 2 ;; esac
+    if [ "$major" -lt 20 ] \
+        || { [ "$major" -eq 20 ] && [ "$minor" -lt 12 ]; } \
+        || { [ "$major" -eq 21 ] && [ "$minor" -lt 7 ]; }; then
+        return 1
+    fi
+    if { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; } \
+        || { [ "$major" -eq 22 ] && [ "$minor" -ge 12 ]; } \
+        || [ "$major" -ge 23 ]; then
+        return 0
+    fi
+    return 3
+}
+
+# Only when we actually build the SPA from source. build_frontend_bundle
+# falls back to the committed static/v2 bundle when the source tree is
+# absent, and that path needs no Node at all.
+# AURORA-NODE-GATE-BEGIN (extracted by scripts/node-version-test.sh)
+if [ -d "$SPA_SRC_DIR" ]; then
+    NODE_VERDICT=0
+    node_vite_verdict || NODE_VERDICT=$?
+    NODE_FOUND="$(node --version 2>/dev/null || echo unknown)"
+    case "$NODE_VERDICT" in
+        1)
+            write_status misconfigured "Node.js $NODE_FOUND is too old to build Aurora's frontend — Vite calls crypto.hash(), which needs Node 20.12+, and the toolchain asks for $NODE_ENGINES_TEXT. Every update will fail at the build step until this is fixed. Install Node.js ${NODE_TARGET_MAJOR}.x — 'curl -fsSL https://deb.nodesource.com/setup_${NODE_TARGET_MAJOR}.x | sudo -E bash - && sudo apt-get install -y nodejs' — or re-run install.sh, then update again."
+            log "node $NODE_FOUND cannot build the frontend (no crypto.hash; toolchain wants $NODE_ENGINES_TEXT) — refusing update"
+            exit 1
+            ;;
+        2)
+            # Absent or unparseable. NOT fail-closed: unlike the transport
+            # checks above, "unknown" is not evidence of a problem, and
+            # blocking here would strand a box whose `node` merely prints
+            # something we did not anticipate. The build is the real check
+            # and will say so plainly if Node is genuinely unusable.
+            log "WARN: could not determine the Node.js version (frontend build wants $NODE_ENGINES_TEXT) — continuing; the build will report it if this is a problem"
+            ;;
+        3)
+            log "WARN: node $NODE_FOUND is outside the frontend toolchain's supported range ($NODE_ENGINES_TEXT) — the build should still succeed, but upgrade to Node ${NODE_TARGET_MAJOR}.x before it stops working"
+            ;;
+        0) ;;
+        *)
+            # Unreachable from node_vite_verdict, which returns 0-3 — and that
+            # is precisely why it needs an arm. 127 is what the shell returns
+            # if that function is renamed, deleted, or moved below this call
+            # site. Without a default the gate does nothing and logs nothing,
+            # and this script runs unattended from a timer, so the box goes
+            # back to failing every update on an anonymous npm error with the
+            # check still sitting visibly in the file. Do not fail closed:
+            # an unknown verdict is not evidence the build is broken.
+            log "WARN: the Node version gate returned an unexpected verdict ($NODE_VERDICT) — continuing. This is a bug in this script; the build remains the real check."
+            ;;
+    esac
+fi
+# AURORA-NODE-GATE-END
+
 # ── Fetch + check ─────────────────────────────────────────────────
 write_status checking "Checking origin/$BRANCH for new commits"
 
