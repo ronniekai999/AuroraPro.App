@@ -386,13 +386,15 @@ prefix you happened to type.
 **6b — an advisory check on what the next scan would prune.**
 
 > **Read this before you rely on it.** This check is a second opinion, not a
-> gate. Five independent adversarial reviews of it each found a state in which
-> it reported "nothing would be pruned" while the scan would have deleted rows
-> and cascaded the watch history away — four of them in the same class (a
-> permission failure it could not distinguish from "the path is gone", which is
-> the one state it treats as safe). All five are fixed and each has a test that
-> fails if the fix is reverted. But five for five is a track record, and the
-> useful inference is not "it is correct now".
+> gate. Eight independent adversarial reviews of it found ELEVEN states in
+> which it reported "nothing would be pruned" while the scan would have deleted
+> rows and cascaded the watch history away — five in one class (a permission
+> failure it could not distinguish from "the path is gone", which is the one
+> state it treats as safe), and six where a command failed quietly and its
+> empty output read as good news. One of the eleven was inside the fix for
+> another. All are fixed and each has a test that
+> fails if the fix is reverted — but eleven across eight rounds is a track
+> record, and the useful inference is not "it is correct now".
 >
 > So: **exit 0 is evidence, not permission.** It can tell you something IS
 > wrong. It cannot tell you nothing is. Do not skip the backup in step 1 on the

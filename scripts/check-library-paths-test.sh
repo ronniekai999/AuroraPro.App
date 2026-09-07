@@ -174,16 +174,25 @@ assert_denied() {
     # owner. Other digits are fine and are used deliberately: 4 tests
     # readable-but-not-traversable, 1 tests traversable-but-not-listable, 6
     # tests neither-traversable. 750 was the defect, and its owner digit is 7.
+    # Every call site here needs an UNTRAVERSABLE directory, so the bit that
+    # matters is x, not r. Rejecting only 5 and 7 accepted 1 and 3, which leave
+    # the path fully traversable — and the comment below used to commend digit
+    # 1 for a different kind of case, inviting exactly the substitution this
+    # could not catch.
     case "${mode%??}" in
-        5|7) bad "$label: $path is mode $mode — the OWNER digit $((${mode%??})) grants both read and execute, so on a non-root runner (no setpriv drop) the script runs as the owner and this case is vacuous." ;;
+        1|3|5|7) bad "$label: $path is mode $mode — the OWNER digit grants execute, so on a non-root runner (no setpriv drop) the script runs as the owner, can traverse it, and this case is vacuous. Use 000." ;;
     esac
-    # 2. And then confirm it empirically for the user that will actually run.
+    # 2. And then confirm it empirically, for the user that will actually run,
+    #    by testing TRAVERSAL rather than listing. `ls` needs r; every state
+    #    these cases build is a traverse-block, and a mode-100 directory is
+    #    unlistable but perfectly traversable — so an ls probe called it denied
+    #    while the script walked straight through.
     if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -gt 0 ]; then
-        probe="$("${DROP[@]}" env sh -c 'ls "$1" >/dev/null 2>&1 && echo readable || echo denied' _ "$path")"
+        probe="$("${DROP[@]}" env sh -c 'cd "$1" 2>/dev/null && echo traversable || echo denied' _ "$path")"
     else
-        probe="$(ls "$path" >/dev/null 2>&1 && echo readable || echo denied)"
+        probe="$(cd "$path" 2>/dev/null && echo traversable || echo denied)"
     fi
-    [ "$probe" = denied ] || bad "$label: $path is READABLE by the user the script runs as — this case is vacuous"
+    [ "$probe" = denied ] || bad "$label: $path is TRAVERSABLE by the user the script runs as — this case is vacuous"
 }
 
 # fixture <name> — start a fresh fixture directory with sane defaults.
@@ -734,7 +743,14 @@ expect_rc 2 "a relative library root → exit 2"
 
 # ── 29. A root that can be traversed but not LISTED ───────────────
 # Mode 111: classify_root passes it (it IS -x), so this is the one shape
-# that still reaches the -r half of the root check. Without that half the root
+# that still reaches the -r half of the root check.
+#
+# HONESTY NOTE: this does not strictly PIN that half. Drop the -r test and a
+# mode-111 root is walked instead, find errors on every entry, and the
+# unreadable latch produces the same exit 2 by a different route — so the
+# mutation survives. Probably equivalent in practice; recorded rather than
+# claimed as coverage, because five cases in this file have passed for the
+# wrong reason and each was found by someone else. Without that half the root
 # is walked, `find` errors on every entry, the disk list comes back empty and
 # the zero-discovered branch answers — correctly only by way of the unreadable
 # latch, which is a different guard. Pin the -r half directly.
@@ -1022,9 +1038,9 @@ guard_case '#!/bin/sh
 n=0
 [ -f "$TMP_SEDCOUNT" ] && n=$(cat "$TMP_SEDCOUNT")
 n=$((n + 1)); echo "$n" > "$TMP_SEDCOUNT"
-[ "$n" -ge 2 ] && exit 2
+[ "$n" -eq 2 ] && exit 2
 exec /bin/sed "$@"' \
-  "sed failed" "the sed guard fires on its own" sed
+  "trimming the missing-file list" "the sed guard fires on its own" sed
 
 # wc: an empty count falls through the `-gt 0` test into the all-clear arm.
 guard_case '#!/bin/sh
@@ -1121,9 +1137,137 @@ R="$TMP/writerfail"; mkdir -p "$R"
 echo "$R" > "$FIX/roots"
 printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
 OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
-       bash -c 'ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>/dev/null)"
+       bash -c 'ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
 RC=$?
 expect_rc 2 "a failing WRITE of the discovered-file list → exit 2, not 'no media found'"
+expect_out "could not record what find discovered" "…through the recording guard, not some other die"
+
+# ── 40. The writer failing when the LAST entry takes `continue` ───
+# A while loop's exit status is whatever its LAST body command returned, and
+# three paths in that body end in `continue` (a newline name, an unresolvable
+# symlink, an escaping symlink) — all of which return 0. So a run where every
+# write failed but the final entry was one of those reported PIPESTATUS[1]=0,
+# left the disk list empty, and answered "no media found, so the scan will
+# prune nothing". Case 39 could not see it: bare `ulimit -f 0` KILLS the
+# subshell with SIGXFSZ on the first write, and a signal death sets the status
+# regardless of ordering, so that case is structurally blind to the very thing
+# it looks like it covers. `trap "" XFSZ` makes printf RETURN the error
+# instead, which is what a full filesystem actually does.
+#
+# A dangling symlink under a library root is the most ordinary artefact of the
+# half-finished move this script exists for, so this ordering is the likely
+# one, not the exotic one.
+fixture writerorder
+R="$TMP/writerorder"; mkdir -p "$R"
+: > "$R/keep.mkv"
+# MANY dangling symlinks, and then an ASSERTED precondition. The defect needs
+# find's LAST emitted entry to take a `continue` path, and find emits in
+# readdir order — which is a hash order, not creation or name order, so it
+# cannot be arranged by naming. One symlink and one file put the FILE last on
+# every pair I tried, which would have made this case vacuous. Twenty makes it
+# overwhelmingly likely, and the check below makes it impossible for the case
+# to pass without it: a fixture that does not reproduce the ordering fails
+# loudly instead of quietly asserting nothing.
+i=1; while [ "$i" -le 20 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/d$i.mkv"; i=$((i + 1)); done
+lastentry="$(find "$R" ! -type d -print0 | tr '\0' '\n' | grep -v '^$' | tail -1)"
+if [ ! -L "$lastentry" ]; then
+    bad "writer-ordering: find emitted a plain file last ($lastentry), so the continue-path ordering this case needs was not built — it would pass without testing anything"
+fi
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/keep.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+       bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
+RC=$?
+expect_rc 2 "a failed write whose LAST entry takes continue → exit 2, not 'no media found'"
+expect_out "could not record what find discovered" "…and says the recording failed, not that the disk is empty"
+
+# The control: the same failure with a plain file last. Both orderings must
+# die, or the guard is merely ordering-dependent in the other direction.
+# ONLY plain files, so the last entry is necessarily one — no ordering to
+# assert and nothing to get wrong. (The first attempt put one symlink beside
+# one file and asserted the file came last; readdir handed back the symlink,
+# and the control failed on its own premise. Ordering is not arrangeable here,
+# so the control simply removes the possibility.)
+fixture writerorder2
+R="$TMP/writerorder2"; mkdir -p "$R"
+: > "$R/aa.mkv"; : > "$R/zz.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/zz.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+       bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
+RC=$?
+expect_rc 2 "…and the same with a plain file last"
+
+# ── 41. The findfail deferral behind rootmissing ──────────────────
+# Any root failing EvalSymlinks makes the scan skip the prune for the WHOLE
+# library, so a find failure alongside an absent root must not become an
+# exit 2 the operator cannot clear.
+fixture findfail_defer
+R="$TMP/findfail_defer"; mkdir -p "$R"
+: > "$R/A.mkv"
+printf '%s\n%s\n' "$TMP/findfail_defer-absent" "$R" > "$FIX/roots"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+mkdir -p "$TMP/guardbin"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/guardbin/find"
+chmod +x "$TMP/guardbin/find"
+OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -f "$TMP/guardbin/find"
+expect_rc 0 "a find failure alongside an ABSENT root → exit 0 (walkFailed skips the prune)"
+
+# ── 42. A tool that exits 0 and prints NOTHING ────────────────────
+# The status guards close the non-zero case. `wc` returning 0 with empty
+# output leaves the count empty, which falls straight through the `-gt 0`
+# test into the all-clear with only a `[: : integer expression expected` on
+# stderr to show for it. The guard's own message said as much while checking
+# only the status.
+fixture wcempty
+R="$TMP/wcempty"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+guard_case '#!/bin/sh
+exit 0' \
+  "is not a number" "a wc that exits 0 and prints nothing → exit 2" wc
+
+# ── 43. mktemp producing no usable directory ──────────────────────
+# An empty $WORK is not merely useless: under the documented `sudo`
+# invocation every scratch file would be written to the FILESYSTEM ROOT
+# (/disk, /finderr, …). Observed before the check was added.
+fixture mktempfail
+R="$TMP/mktempfail"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
+# Exits 0 and prints NOTHING — the shape that reaches the second check. An
+# exit-1 shadow is caught by the `|| die` on the call itself, so it leaves the
+# empty-result check unpinned (it did).
+guard_case '#!/bin/sh
+exit 0' \
+  "no usable directory" "a mktemp that succeeds but returns nothing → exit 2" mktemp
+
+# ── 44. The badnames write, when it is the failing one ────────────
+# A newline-named video file routes to $WORK/badnames rather than to the disk
+# list. If THAT write fails silently the badnames file stays empty, the
+# newline refusal never fires, and the run compares a truncated disk list —
+# the all-clear by a second route. Needs the write to fail, hence the same
+# XFSZ trick as case 40.
+# ONLY the newline-named entry. With a plain file beside it, that file's own
+# failing disk write dies first and masks this one — a case passing through
+# the wrong guard, which is the shape five earlier cases had.
+fixture badnamewrite
+R="$TMP/badnamewrite"; mkdir -p "$R"
+touch "$R/$(printf 'weird\nname.mkv')" 2>/dev/null || true
+if [ -e "$R/$(printf 'weird\nname.mkv')" ]; then
+    echo "$R" > "$FIX/roots"
+    printf '%s\n' "$R/DELETED.mkv" > "$FIX/recorded"
+    OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+           bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
+    RC=$?
+    expect_rc 2 "a failing badnames write → exit 2, not a truncated comparison"
+else
+    ok "badnames write: SKIPPED (filesystem refused a newline in a filename)"
+fi
 
 echo
 echo "passed: $PASS   failed: $FAIL"

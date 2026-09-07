@@ -54,14 +54,18 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Seven independent adversarial reviews
-# of this file found TEN states where it reported "nothing would be pruned"
+# THIS IS A SECOND OPINION, NOT A GATE. Eight independent adversarial reviews
+# of this file found ELEVEN states where it reported "nothing would be pruned"
 # while the scan would have deleted rows. Five were one class — a permission
 # failure it could not tell apart from "the path is gone", which is the one
 # state it treats as safe — and five were something failing quietly (comm,
 # sort, find, the pipeline that RECORDS what find found, and sed), each
-# leaving a variable empty, which reads the same way. All are fixed and each
-# is pinned by a test that fails if the fix is reverted. That record is why
+# leaving a variable empty, which reads the same way — and the eleventh was
+# inside the fix for the tenth: the recording guard read the loop's exit
+# status, which is whatever its LAST body command returned, so a run where
+# every write failed but the final entry was a dangling symlink reported
+# success. All are fixed and each is pinned by a test that fails if the fix
+# is reverted. That record is why
 # the wording here is what it is: exit 0 is evidence, not permission. Take the
 # backup regardless.
 set -uo pipefail
@@ -112,7 +116,7 @@ die()  {
 # states they cover (a stripped container, a shadowed binary on PATH) are real
 # and produce the all-clear rather than an error. Recorded so the next review
 # does not spend a round rediscovering that they survive mutation.
-for tool in realpath psql comm sort find grep sed wc readlink; do
+for tool in realpath psql comm sort find grep sed wc readlink mktemp stat id; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
 done
@@ -255,7 +259,11 @@ else
 fi
 [ -n "$LIB_IDS" ] || die "no libraries found in $DB_NAME"
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" || die "mktemp -d failed — nowhere to work"
+# An empty $WORK is not merely useless: under the documented `sudo` invocation
+# every scratch file would be written to the filesystem ROOT (/disk, /finderr,
+# …), observed. Refuse rather than litter.
+[ -n "$WORK" ] && [ -d "$WORK" ] || die "mktemp -d produced no usable directory"
 trap 'rm -rf "$WORK"' EXIT
 
 TOTAL_MISSING=0
@@ -476,7 +484,7 @@ while IFS= read -r LIB; do
                     # Only a video-extension name can affect the comparison;
                     # anything else is filtered out below regardless.
                     printf '%s' "$f" | grep -qEi "$VIDEO_RE" \
-                        && printf '%s\n' "$f" >> "$WORK/badnames"
+                        && { printf '%s\n' "$f" >> "$WORK/badnames" || exit 9; }
                     continue ;;
             esac
             if [ -L "$f" ]; then
@@ -485,7 +493,17 @@ while IFS= read -r LIB; do
                 t="$(realpath -e -- "$f" 2>/dev/null)" || continue
                 case "$t/" in "$rr"/*) ;; *) [ "$t" = "$rr" ] || continue ;; esac
             fi
-            printf '%s\n' "$f"
+            # `|| exit 9`, not a status check after the loop. A while loop's
+            # exit status is whatever its LAST body command returned, and three
+            # paths in this body end in `continue`, which returns 0 — so a run
+            # where every write failed but the final entry was a dangling
+            # symlink (or a newline name, or an escaping symlink) reported
+            # ${fs[1]} = 0, left the disk list empty, and answered "no media
+            # found, so the scan will prune nothing". A dangling symlink under
+            # a library root is the most ordinary artefact of the half-finished
+            # move this script exists for, so the ordering was not exotic.
+            # Failing HERE removes the ordering from the question entirely.
+            printf '%s\n' "$f" || exit 9
           done >> "$WORK/disk"
         fs=("${PIPESTATUS[@]}")
         [ -s "$WORK/finderr" ] && unreadable=1
@@ -629,13 +647,26 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
         die "library $LIB ($name): sed failed while trimming the unknown-file list."
     fi
 
+    # Status AND value. `wc -l` on a non-empty input can never legitimately
+    # print nothing, and an empty count falls straight through the `-gt 0`
+    # test below into the all-clear — with only a `[: : integer expression
+    # expected` on stderr to show for it. The guard said this in its own
+    # message while checking only the status.
     n_missing=0
-    if [ -n "$missing" ] && ! n_missing="$(printf '%s\n' "$missing" | wc -l)"; then
-        die "library $LIB ($name): wc failed while counting the missing files. An empty count here falls through to the all-clear."
+    if [ -n "$missing" ]; then
+        n_missing="$(printf '%s\n' "$missing" | wc -l)" \
+            || die "library $LIB ($name): wc failed while counting the missing files. An empty count here falls through to the all-clear."
+        case "$n_missing" in
+            ''|*[!0-9]*) die "library $LIB ($name): wc produced '$n_missing' counting the missing files, which is not a number. An unusable count here falls through to the all-clear." ;;
+        esac
     fi
     n_unknown=0
-    if [ -n "$unknown" ] && ! n_unknown="$(printf '%s\n' "$unknown" | wc -l)"; then
-        die "library $LIB ($name): wc failed while counting the new files."
+    if [ -n "$unknown" ]; then
+        n_unknown="$(printf '%s\n' "$unknown" | wc -l)" \
+            || die "library $LIB ($name): wc failed while counting the new files."
+        case "$n_unknown" in
+            ''|*[!0-9]*) n_unknown=0 ;;
+        esac
     fi
 
     if [ "$n_missing" -gt 0 ]; then
@@ -678,8 +709,8 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Seven reviews found ten states where
-# this line appeared while the scan would have deleted rows.
+# the file header they will never open. Eight reviews found eleven states
+# where this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
 # the runbook tells the operator to act on and this is the one deletion it does
