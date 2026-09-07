@@ -386,11 +386,11 @@ prefix you happened to type.
 **6b — an advisory check on what the next scan would prune.**
 
 > **Read this before you rely on it.** This check is a second opinion, not a
-> gate. Eight independent adversarial reviews of it found ELEVEN states in
+> gate. Nine independent adversarial reviews of it found FOURTEEN states in
 > which it reported "nothing would be pruned" while the scan would have deleted
 > rows and cascaded the watch history away — five in one class (a permission
 > failure it could not distinguish from "the path is gone", which is the one
-> state it treats as safe), and six where a command failed quietly and its
+> state it treats as safe), and nine where a command failed quietly and its
 > empty output read as good news. One of the eleven was inside the fix for
 > another. All are fixed and each has a test that
 > fails if the fix is reverted — but eleven across eight rounds is a track

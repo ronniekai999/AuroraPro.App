@@ -1005,9 +1005,12 @@ printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
 
 # grep: fails only when asked to write disk.video (a -E invocation with a file
 # operand). The stub passes every other grep through to the real one.
+# Fails only the invocation with a FILE operand — the disk.video filter. The
+# startup probe pipes through stdin, so it still passes and this reaches the
+# per-site guard instead of dying at the probe. A GLOBALLY broken grep is
+# caught by the probe, which is the better outcome and has its own case below.
 guard_case '#!/bin/sh
-for a in "$@"; do case "$a" in *disk.video*) exit 2 ;; esac; done
-case "$*" in *"-Ei"*) exit 2 ;; esac
+for a in "$@"; do case "$a" in /*) exit 2 ;; esac; done
 exec /usr/bin/grep "$@"'   "grep failed while filtering" "the grep guard fires on its own" grep
 
 # sort with a FILE operand — the disk side.
@@ -1050,8 +1053,10 @@ exit 2' \
 # find: a silent non-zero exit. Gated on finderr being EMPTY, because GNU find
 # also exits 1 on an ordinary permission error — which the unreadable latch
 # already handles and must NOT be turned into a die.
+# -print0 only: the startup probe uses -print and must still pass.
 guard_case '#!/bin/sh
-exit 1' \
+case "$*" in *-print0*) exit 1 ;; esac
+exec /usr/bin/find "$@"' \
   "find failed on" "the find status guard fires on its own" find
 
 # ...and the same find failing NOISILY must NOT die: that is a permission
@@ -1208,11 +1213,22 @@ R="$TMP/findfail_defer"; mkdir -p "$R"
 printf '%s\n%s\n' "$TMP/findfail_defer-absent" "$R" > "$FIX/roots"
 printf '%s\n' "$R/A.mkv" > "$FIX/recorded"
 mkdir -p "$TMP/guardbin"
-printf '#!/bin/sh\nexit 1\n' > "$TMP/guardbin/find"
+# The stub touches a marker, and the case asserts it ran. Without that, this
+# passes identically with no stub at all — the absent root reaches exit 0 on
+# its own — so it would go on "covering" the deferral while covering nothing.
+rm -f "$TMP/findstub-ran"
+{
+  echo '#!/bin/sh'
+  # -print0 only, so the startup known-answer probe still passes.
+  echo 'case "$*" in *-print0*) : > "$FINDSTUB_MARKER"; exit 1 ;; esac'
+  echo 'exec /usr/bin/find "$@"'
+} > "$TMP/guardbin/find"
 chmod +x "$TMP/guardbin/find"
-OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+       FINDSTUB_MARKER="$TMP/findstub-ran" bash "$SCRIPT" 2>&1)"
 RC=$?
 rm -f "$TMP/guardbin/find"
+[ -f "$TMP/findstub-ran" ] || bad "findfail deferral: the find stub never ran, so this case proves nothing about the deferral"
 expect_rc 0 "a find failure alongside an ABSENT root → exit 0 (walkFailed skips the prune)"
 
 # ── 42. A tool that exits 0 and prints NOTHING ────────────────────
@@ -1265,9 +1281,81 @@ if [ -e "$R/$(printf 'weird\nname.mkv')" ]; then
            bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
     RC=$?
     expect_rc 2 "a failing badnames write → exit 2, not a truncated comparison"
+    # WHICH die matters. Without this the case is satisfied by the
+    # newline-in-filename refusal, which fires whether or not the write
+    # failed — so deleting the fault injection left the suite green. The
+    # seventh case in this file to pass for the wrong reason.
+    expect_out "could not record what find discovered" "…through the recording guard, not the newline refusal"
 else
     ok "badnames write: SKIPPED (filesystem refused a newline in a filename)"
 fi
+
+# ── 45. Exit 0 with EMPTY output, per site ────────────────────────
+# The status guards close the non-zero case. A tool that exits 0 and prints
+# nothing defeats them, and that was closed for wc and mktemp one round before
+# being carried to the three siblings on the same decision path — where each
+# one produced a clean exit 0 on a library with a row that would be pruned.
+#
+# Each site now tests a CONTRADICTION it already holds the evidence for
+# (a non-empty input yielding empty output), except comm, where an empty
+# result is the legitimate all-clear and the cross-check is arithmetic.
+fixture emptyout
+R="$TMP/emptyout"; mkdir -p "$R"
+: > "$R/A.mkv"; : > "$R/B.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n%s\n' "$R/A.mkv" "$R/B.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+
+guard_case '#!/bin/sh
+case "$*" in *disk.video*) exit 0 ;; esac
+exec /usr/bin/sort "$@"' \
+  "sort returned nothing from a non-empty file" "a sort exiting 0 with no output (disk side) → exit 2" sort
+
+# The recorded side is a PIPELINE (printf | sed | sort), so a sort that exits
+# without reading hands sed a SIGPIPE and `pipefail` catches it in the status
+# guard before the value guard is reached. Either die is correct — the point is
+# that no route here reaches exit 0 — so this asserts the exit code and says
+# why the message is the status one.
+mkdir -p "$TMP/guardbin"
+{
+  echo '#!/bin/sh'
+  echo 'case "$*" in *disk.video*) exec /usr/bin/sort "$@" ;; esac'
+  echo 'exit 0'
+} > "$TMP/guardbin/sort"
+chmod +x "$TMP/guardbin/sort"
+OUT="$(PATH="$TMP/guardbin:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -f "$TMP/guardbin/sort"
+expect_rc 2 "a sort exiting 0 with no output (recorded side) → exit 2"
+
+guard_case '#!/bin/sh
+exit 0' \
+  "empty" "a sed exiting 0 with no output → exit 2" sed
+
+guard_case '#!/bin/sh
+case "$*" in *-23*) exit 0 ;; esac
+exec /usr/bin/comm "$@"' \
+  "does not add up" "a comm exiting 0 with no output → exit 2, via the arithmetic cross-check" comm
+
+# ── 46. The known-answer probes ───────────────────────────────────
+# `find` and `grep` are the one pair whose empty output is legitimately
+# meaningful — an empty root, or a root with no video files — so a broken one
+# is indistinguishable from the truth AT THE CALL SITE, and the all-clear it
+# produces is the dangerous one. The probes move the question off the call
+# site: both have exactly one right answer, so a tool that gets them wrong
+# cannot be trusted for the real one.
+fixture probes
+R="$TMP/probes"; mkdir -p "$R"
+: > "$R/A.mkv"
+echo "$R" > "$FIX/roots"
+printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+
+guard_case '#!/bin/sh
+exit 0' \
+  "did not match a known video filename" "a grep that matches nothing at all → caught at startup" grep
+
+guard_case '#!/bin/sh
+exit 0' \
+  "did not report a directory that exists" "a find that outputs nothing at all → caught at startup" find
 
 echo
 echo "passed: $PASS   failed: $FAIL"

@@ -165,7 +165,7 @@ jobs:
         run: bash scripts/node-version-test.sh
 
       # The pre-flight check an operator runs before starting Aurora on moved
-      # media. It shipped untested, and eight review rounds then found eleven
+      # media. It shipped untested, and nine review rounds then found fourteen
       # states where it printed "nothing would be pruned" while the scan would
       # delete rows and cascade the watch history away. None was visible to the
       # Go contract tests, which never run the script. This does: real temp

@@ -1007,6 +1007,18 @@ Known limits:
   collision needs a non-C UTF-8 locale generated on the machine and this
   repo's container has only `C.utf8` — where a behavioural case passes
   whatever the script does, which is worse than no case.
+- **A tool that FAILS QUIETLY is the second defect class here, and it took six
+  rounds to enumerate.** `comm`, `sort`, `find`, the pipeline recording what
+  find found, `sed` and `wc` each produced the all-clear by leaving a variable
+  empty. Status checks close the non-zero half; the zero-with-empty-output half
+  needs a CONTRADICTION the script already holds evidence for (a non-empty
+  input yielding empty output), and `comm` needs arithmetic instead, because an
+  empty `missing` list is the legitimate all-clear. `find` and `grep` can have
+  neither: producing nothing is a real answer and is exactly the scanner's
+  zero-discovered case — so they get known-answer probes at startup instead,
+  which catch a consistently broken binary and cannot catch an intermittent
+  one. Do not add a tool to this script without deciding which of those three
+  it needs.
 - **`underAnyPrefix` shielding is deliberately not reproduced.** Rows under a
   subtree the scan cannot read are shielded, not pruned; the script counts
   them as missing because it cannot know what the SERVICE user reads. That is

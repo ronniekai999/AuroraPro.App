@@ -54,12 +54,12 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Eight independent adversarial reviews
-# of this file found ELEVEN states where it reported "nothing would be pruned"
+# THIS IS A SECOND OPINION, NOT A GATE. Nine independent adversarial reviews
+# of this file found FOURTEEN states where it reported "nothing would be pruned"
 # while the scan would have deleted rows. Five were one class — a permission
 # failure it could not tell apart from "the path is gone", which is the one
 # state it treats as safe — and five were something failing quietly (comm,
-# sort, find, the pipeline that RECORDS what find found, and sed), each
+# sort, find, the pipeline that RECORDS what find found, sed and wc), each
 # leaving a variable empty, which reads the same way — and the eleventh was
 # inside the fix for the tenth: the recording guard read the loop's exit
 # status, which is whatever its LAST body command returned, so a run where
@@ -116,7 +116,7 @@ die()  {
 # states they cover (a stripped container, a shadowed binary on PATH) are real
 # and produce the all-clear rather than an error. Recorded so the next review
 # does not spend a round rediscovering that they survive mutation.
-for tool in realpath psql comm sort find grep sed wc readlink mktemp stat id; do
+for tool in realpath psql comm sort find grep sed wc readlink mktemp tr; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
 done
@@ -265,6 +265,34 @@ WORK="$(mktemp -d)" || die "mktemp -d failed — nowhere to work"
 # …), observed. Refuse rather than litter.
 [ -n "$WORK" ] && [ -d "$WORK" ] || die "mktemp -d produced no usable directory"
 trap 'rm -rf "$WORK"' EXIT
+
+# ── The tools actually WORK, not merely exist ─────────────────────
+# `command -v` sees absence; it cannot see a binary that runs and produces
+# nothing. For most tools here that shows up as a contradiction the script can
+# test (a non-empty input yielding empty output). For `find` and `grep` it
+# cannot: producing nothing is a legitimate, common answer — an empty root, or
+# a root holding no video files — and it is also exactly what the scanner's
+# zero-discovered guard means. So those two are the one pair where a broken
+# binary is indistinguishable from the truth AT THE CALL SITE, and the
+# all-clear it yields is the dangerous one.
+#
+# A known-answer probe moves the check off the call site. Both of these have
+# one right answer, and a tool that gets them wrong cannot be trusted for the
+# real question.
+probe_video="$(printf 'probe.mkv\n' | grep -Ei "$VIDEO_RE" || true)"
+[ "$probe_video" = "probe.mkv" ] \
+    || die "grep did not match a known video filename ('probe.mkv' against the extension pattern). A grep that silently matches nothing would empty the discovered-file list, which reads as 'no media found, so the scan will prune nothing'."
+probe_find="$(find "$WORK" -maxdepth 0 -print 2>/dev/null || true)"
+[ "$probe_find" = "$WORK" ] \
+    || die "find did not report a directory that exists ($WORK). A find that silently produces nothing would empty the discovered-file list, which reads as 'no media found, so the scan will prune nothing'."
+# WHAT THIS DOES NOT CLOSE, stated plainly: the probes prove these two tools
+# worked ONCE. A binary that answers the probe and then returns nothing for the
+# real walk is still indistinguishable from an empty root — because for `find`
+# and `grep`, "nothing" IS a legitimate answer, and it is precisely the answer
+# the scanner's own zero-discovered guard is built around. A consistently
+# broken or shadowed binary (the realistic shape, and the one the tool-presence
+# loop above is aimed at) is caught here; an intermittently broken one is not,
+# and cannot be at this layer.
 
 TOTAL_MISSING=0
 TOTAL_UNKNOWN=0
@@ -539,7 +567,7 @@ while IFS= read -r LIB; do
     fi
 
     if [ -s "$WORK/badnames" ] && [ "$rootmissing" -eq 0 ]; then
-        die "library $LIB ($name): $(wc -l < "$WORK/badnames") file(s) on disk have a newline in their name. This check is line-oriented and would compare a truncated half of each, which can read as a match for a recorded path whose file is gone. Rename them, or check this library by hand:
+        die "library $LIB ($name): at least one file on disk has a newline in its name (the halves are listed below; a single name spans two lines here, which is the whole problem). This check is line-oriented and would compare a truncated half of each, which can read as a match for a recorded path whose file is gone. Rename them, or check this library by hand:
 $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     fi
 
@@ -561,6 +589,14 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     if ! disk_list="$(sort -u "$WORK/disk.video")"; then
         die "library $LIB ($name): sort failed while ordering the discovered files. No answer was produced, and an empty result here reads as 'no media found, nothing will be pruned'."
     fi
+    # STATUS is not enough. A tool that exits 0 and prints nothing defeats it,
+    # and this exact reasoning was applied to wc and mktemp one round earlier
+    # without being carried to the three siblings on the same decision path.
+    # Here the contradiction is already in hand: disk.video has content, so an
+    # empty disk_list is impossible from a working sort.
+    if [ -s "$WORK/disk.video" ] && [ -z "$disk_list" ]; then
+        die "library $LIB ($name): sort returned nothing from a non-empty file. An empty result here reads as 'no media found, so the scan will prune nothing'."
+    fi
 
     # NOT canonicalised. The scanner compares its walk output against the RAW
     # recorded string by exact equality, so normalising this side would hide
@@ -571,6 +607,9 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     # makes the walk output canonical in the first place.
     if ! db_list="$(printf '%s\n' "$recorded" | sed '/^$/d' | sort -u)"; then
         die "library $LIB ($name): sort or sed failed while ordering the recorded paths. An empty result here reads as 'this library records no files'."
+    fi
+    if [ -n "$(printf '%s' "$recorded" | tr -d '[:space:]')" ] && [ -z "$db_list" ]; then
+        die "library $LIB ($name): the recorded-path list came back non-empty from the database but empty after sorting. An empty result here reads as 'this library records no files', which is the all-clear."
     fi
     n_db=0; [ -n "$db_list" ] && n_db="$(printf '%s\n' "$db_list" | wc -l)"
 
@@ -634,14 +673,31 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     if ! unknown="$(comm -13 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list"))"; then
         die "library $LIB ($name): comm failed while comparing the disk against the recorded paths."
     fi
+    # comm is the one site with no contradiction to test — an empty `missing`
+    # IS the all-clear, so emptiness proves nothing on its own. Use arithmetic
+    # instead: every recorded path is either present on disk or missing from
+    # it, so the two sets must account for all of them exactly.
+    if ! common="$(comm -12 <(printf '%s\n' "$db_list") <(printf '%s\n' "$disk_list"))"; then
+        die "library $LIB ($name): comm failed while cross-checking the comparison."
+    fi
+    n_common=0; [ -n "$common" ] && n_common="$(printf '%s\n' "$common" | grep -c . || true)"
+    n_miss_raw=0; [ -n "$missing" ] && n_miss_raw="$(printf '%s\n' "$missing" | grep -c . || true)"
+    n_db_raw=0;  [ -n "$db_list" ] && n_db_raw="$(printf '%s\n' "$db_list" | grep -c . || true)"
+    if [ "$((n_common + n_miss_raw))" -ne "$n_db_raw" ]; then
+        die "library $LIB ($name): the comparison does not add up — $n_db_raw recorded path(s), $n_common found on disk, $n_miss_raw reported missing. Something in the comparison produced a partial result, and a short 'missing' list is the all-clear."
+    fi
     # sed and wc are status-checked too. Both leave a variable EMPTY on
     # failure, which is the all-clear — and the sed one produced it with no
     # diagnostic on stdout or stderr at all, the worst shape in this file. An
     # always-failing sed is caught upstream by the db_list pipeline, which is
     # why shadowing the tool globally could not see this; it needs the
     # per-invocation shape.
+    missing_before="$missing"
     if ! missing="$(printf '%s\n' "$missing" | sed '/^$/d')"; then
         die "library $LIB ($name): sed failed while trimming the missing-file list. An empty result here is the all-clear."
+    fi
+    if [ -n "$(printf '%s' "$missing_before" | tr -d '[:space:]')" ] && [ -z "$missing" ]; then
+        die "library $LIB ($name): the missing-file list was non-empty before trimming and empty after. That result IS the all-clear, so it is not one this check will report."
     fi
     if ! unknown="$(printf '%s\n' "$unknown" | sed '/^$/d')"; then
         die "library $LIB ($name): sed failed while trimming the unknown-file list."
@@ -656,6 +712,8 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     if [ -n "$missing" ]; then
         n_missing="$(printf '%s\n' "$missing" | wc -l)" \
             || die "library $LIB ($name): wc failed while counting the missing files. An empty count here falls through to the all-clear."
+        n_missing="${n_missing#"${n_missing%%[![:space:]]*}"}"
+        n_missing="${n_missing%"${n_missing##*[![:space:]]}"}"
         case "$n_missing" in
             ''|*[!0-9]*) die "library $LIB ($name): wc produced '$n_missing' counting the missing files, which is not a number. An unusable count here falls through to the all-clear." ;;
         esac
@@ -664,6 +722,10 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
     if [ -n "$unknown" ]; then
         n_unknown="$(printf '%s\n' "$unknown" | wc -l)" \
             || die "library $LIB ($name): wc failed while counting the new files."
+        n_unknown="${n_unknown#"${n_unknown%%[![:space:]]*}"}"
+        n_unknown="${n_unknown%"${n_unknown##*[![:space:]]}"}"
+        # Display-only, so it degrades to 0 rather than dying — unlike
+        # n_missing, which feeds the exit code.
         case "$n_unknown" in
             ''|*[!0-9]*) n_unknown=0 ;;
         esac
@@ -709,7 +771,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Eight reviews found eleven states
+# the file header they will never open. Nine reviews found fourteen states
 # where this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
