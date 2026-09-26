@@ -31,11 +31,13 @@
 // `.rail-title` back to nowrap, or losing overflow-wrap or min-width; the subtitle losing
 // break-words; `.co-meta` back to a one-line nowrap flex row, losing its
 // one-line height, or losing overflow:hidden; `.co-tok` losing nowrap or
-// min-width:0; `.co-txt` losing overflow:hidden or text-overflow. Two survive
+// min-width:0; `.co-txt` losing overflow:hidden or text-overflow. Three survive
 // and are EQUIVALENT for what this asserts rather than uncovered: the title row
-// losing `flex-wrap`, and the AI chip losing `whitespace-nowrap`. Either way the
-// title wraps and nothing overflows; they only move the chip beside a wrapped
-// title instead of below it.
+// losing `flex-wrap`, and the AI chip losing `whitespace-nowrap` or `flex-none`.
+// Either way the title wraps and nothing overflows; they only move the chip
+// beside a wrapped title instead of below it. What this cannot see is the card
+// markup itself — the probe rebuilds it from class names — so the token /
+// separator STRUCTURE is pinned by MediaCardCinema.meta.test.tsx instead.
 //
 //   npm run build && node scripts/verify-mobile-layout.mjs
 
@@ -43,7 +45,10 @@ import { chromium } from 'playwright'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const ASSETS = path.resolve(import.meta.dirname, '../../../v2/assets')
+// Everything resolves from this script's own location, so the check reads the
+// same tree whichever directory it is run from.
+const APP = path.resolve(import.meta.dirname, '..')
+const ASSETS = path.resolve(APP, '../../v2/assets')
 const cssFile = fs.existsSync(ASSETS)
   ? fs.readdirSync(ASSETS).filter(f => /^index-.*\.css$/.test(f))
       .sort((a, b) => fs.statSync(path.join(ASSETS, b)).mtimeMs - fs.statSync(path.join(ASSETS, a)).mtimeMs)[0]
@@ -56,7 +61,7 @@ const EXE = fs.existsSync(PINNED) ? PINNED : undefined
 // The className whose value contains `marker`; exactly one, or this check is
 // stale. (Same contract as verify-page-alignment.mjs's classesOf.)
 function classesOf(file, marker) {
-  const src = fs.readFileSync(file, 'utf8')
+  const src = fs.readFileSync(path.join(APP, file), 'utf8')
   const hits = [...src.matchAll(/className="([^"]*)"/g)].map(m => m[1]).filter(v => v.includes(marker))
   if (hits.length !== 1) {
     throw new Error(`verify-mobile: expected exactly one className containing "${marker}" in ${file}, found ${hits.length}` +
@@ -81,11 +86,12 @@ const CO_TOK = classesOf(CARD, 'co-tok')
 const CO_TXT = classesOf(CARD, 'co-txt')
 const OVERLAY = classesOf(CARD, 'card-overlay')
 const BADGES = classesOf(CARD, 'card-badges')
+const RESUME = classesOf(CARD, 'resume-pill')
 const POSTER_WRAP = classesOf(CARD, 'poster-wrap')
 // Settings' typefaces: the attribute-less default plus every `data-font` value.
 // Read from appearance.ts so a new typeface is measured without editing this.
 const FONTS = [null, ...JSON.parse(
-  (fs.readFileSync('src/lib/appearance.ts', 'utf8').match(/ATTRIBUTED_FONTS[^=]*=\s*(\[[^\]]*\])/) ??
+  (fs.readFileSync(path.join(APP, 'src/lib/appearance.ts'), 'utf8').match(/ATTRIBUTED_FONTS[^=]*=\s*(\[[^\]]*\])/) ??
     (() => { throw new Error('verify-mobile: could not read ATTRIBUTED_FONTS from appearance.ts — this check is out of date') })())[1]
     .replace(/'/g, '"'))]
 
@@ -100,8 +106,10 @@ const RAILS = [
   ['a cozy mystery set in a small coastal town with a quirky detective and no gore', true, 'Your conversational search', false],
   // An unbroken word — a typed query can be anything.
   ['Supercalifragilisticexpialidociousmarathonnight', true, null, true],
-  // An LLM-written subtitle carrying one long unbroken token.
-  ['Mind-bending sci-fi', true, 'Seeded from themoviedb.org/collection/1241-harry-potter-collection-extended', false],
+  // An LLM-written subtitle carrying one long UNBROKEN token. Underscores, not
+  // "/" or "-": Chromium breaks after those, and a fixture it could break was
+  // caught by the subtitle's missing break-words in 1 of 24 passes.
+  ['Mind-bending sci-fi', true, 'Seeded from collection_1241_harry_potter_extended_directors_cuts_boxset', false],
 ]
 const railHtml = RAILS.map(([t, chip, sub, seeAll], i) => `
   <section class="rail-container" data-rail="${i}">
@@ -139,6 +147,7 @@ const cardHtml = CARD_WIDTHS.flatMap(w => [[META, `${w}`], [META_LONE, `${w} lon
     <div class="${POSTER_WRAP}">
       <div class="poster-img" style="aspect-ratio:2/3;background:#345"></div>
       <div class="${BADGES}"><span class="card-badge is-quality">4K</span><span class="card-badge">PG-13</span></div>
+      <button class="${RESUME}"><svg width="10" height="10"></svg>Resume</button>
       <div class="${OVERLAY}">
         <div class="${CO_TITLE}">The Grand Budapest Hotel</div>
         <div class="${CO_META}">${meta}</div>
@@ -209,6 +218,9 @@ for (const font of FONTS) {
         const lh = parseFloat(ms.lineHeight) || parseFloat(ms.fontSize) * 1.5
         const title = card.querySelector('.co-title').getBoundingClientRect()
         const badges = card.querySelector('.card-badges').getBoundingClientRect()
+        // The resume pill clears the overlay by its own fixed offset (58px, vs the
+        // badges' 62px), so it is the tighter of the two.
+        const resume = card.querySelector('.resume-pill').getBoundingClientRect()
         const row = meta.getBoundingClientRect()
         // Tokens that start inside the row are the visible ones; the rest have
         // wrapped to a second line that the row must CLIP away — without the
@@ -239,7 +251,8 @@ for (const font of FONTS) {
         return { w: card.dataset.card, metaH: +row.height.toFixed(1), lh: +lh.toFixed(1),
                  tallestToken: +Math.max(0, ...visible.map(b => b.height)).toFixed(1),
                  shown: visible.length, of: toks.length, hidden: hiddenToks.length, rowClips, truncated, noEllipsis,
-                 spill: +spill.toFixed(1), gap: +(title.top - badges.bottom).toFixed(1) }
+                 spill: +spill.toFixed(1), gap: +(title.top - badges.bottom).toFixed(1),
+                 pillGap: +(title.top - resume.bottom).toFixed(1) }
       })
       return { rails, cards, fontErrors, fontsLoaded, bodyFamily, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
     })
@@ -257,6 +270,7 @@ for (const font of FONTS) {
       if (c.shown < 1) fail(`${at}: shows no meta at all`)
       if (!(c.tallestToken <= c.lh + 1 && c.metaH <= c.lh + 1)) fail(`${at}: META WRAPS — row ${c.metaH}px, tallest token ${c.tallestToken}px, line ${c.lh}px`)
       if (c.gap < 0) fail(`${at}: BADGES OVER TITLE by ${-c.gap}px`)
+      if (c.pillGap < 0) fail(`${at}: RESUME PILL OVER TITLE by ${-c.pillGap}px`)
       if (c.spill > 0.5 || c.noEllipsis) fail(`${at}: TOKENS HARD-CLIPPED — spill ${c.spill}px, ${c.noEllipsis} overrun(s) with no ellipsis`)
       if (c.hidden && !c.rowClips) fail(`${at}: ${c.hidden} wrapped token(s) are PAINTED below the row — it does not clip`)
       if (c.truncated && c.shown > 1) fail(`${at}: TOKENS SHRUNK INSTEAD OF DROPPED — ${c.truncated} of ${c.shown} truncated`)

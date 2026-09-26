@@ -30,17 +30,6 @@ export interface DetailRow {
 interface DetailRailProps {
   poster: string
   title: string
-  // True when the hero above is showing genuine backdrop art (DetailView owns
-  // that judgement, including a backdrop that failed to load). Below lg the
-  // grid is one column, so the poster would render full-width — ~530px tall on
-  // a phone, ~990px on an iPad in portrait — between the hero and the Play
-  // button, pushing the page's primary action one to two screens down beneath
-  // a second copy of the same art. With this set the poster is dropped below
-  // lg and its resume progress moves above the action stack. False for a title
-  // whose poster is the only artwork on the page, which keeps it. (A title
-  // with no poster either drops the box below lg regardless: it would be an
-  // empty 2:3 panel.)
-  heroShowsArt?: boolean
   // resume-progress overlay on the poster (fraction 0..1; undefined = none)
   resumeFraction?: number
   resumeLeftLabel?: string // "Resume · 0:08" | "S1·E4 · 18:23"
@@ -212,7 +201,6 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
 export function DetailRail({
   poster,
   title,
-  heroShowsArt = false,
   resumeFraction,
   resumeLeftLabel,
   resumeRightLabel,
@@ -241,9 +229,6 @@ export function DetailRail({
   const hasProgress = resumeFraction !== undefined
   const progressPct = Math.round((resumeFraction ?? 0) * 100)
   const tileCount = 1 + (onAddToList ? 1 : 0) + (onParty ? 1 : 0)
-  // Single-column layouts (below lg) drop the poster when the hero already
-  // carries the art, or when there is no poster to show — see heroShowsArt.
-  const posterBelowLg = !heroShowsArt && !!poster
   return (
     // Top offset clears the app's sticky nav + a small gap. Reads
     // --topnav-h (2026-07-25, Aurora Stage Phase 2) instead of the old
@@ -263,11 +248,23 @@ export function DetailRail({
           '' for an unmatched title, so this box renders the alt text and a
           broken-image glyph — previously against flat #050505 below the hero,
           now against backdrop artwork at ~17% scrim alpha. */}
-      {/* `hidden lg:block` unless the poster is needed below lg — see
-          posterBelowLg. display:none, so below lg the poster's progress bar is
-          out of the accessibility tree as well as out of sight, and the compact
-          copy below is the only one exposed. */}
-      <div className={cn('relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12]', !posterBelowLg && 'hidden lg:block')}>
+      {/* `hidden lg:block`: the poster is a DESKTOP rail element. Below lg the
+          grid is one column, so it rendered full-width — ~530px tall on a
+          phone, ~990px on an iPad in portrait — between the hero and Play,
+          pushing the page's primary action one to two screens down under a
+          second copy of the hero's art. DetailHero falls back to this same
+          poster when there is no backdrop, so the art is not lost.
+
+          Unconditional ON PURPOSE. Keying it on "does the hero have a
+          backdrop" was tried and flips for the same title between the
+          pre-payload render and the payload's: My Library / Calendar /
+          Collections open titles with no backdrop field at all, so the ~530px
+          box appeared or collapsed above Play after the page had settled.
+
+          display:none, so below lg the poster's progress bar is out of the
+          accessibility tree as well as out of sight, and the compact copy
+          below is the only one exposed. */}
+      <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12] hidden lg:block">
         {/* decoding=async keeps a 2:3 decode off the click-to-detail frame;
             a poster that 404s hides itself and the box's own fill shows. */}
         <img
@@ -292,7 +289,7 @@ export function DetailRail({
       {/* The poster's progress, relocated for the single-column layout. The
           exact complement of the poster's `hidden lg:block`, so exactly one
           copy is displayed at every width. */}
-      {!posterBelowLg && hasProgress && (
+      {hasProgress && (
         <div className="lg:hidden px-0.5">
           <ResumeProgress leftLabel={resumeLeftLabel} rightLabel={resumeRightLabel} pct={progressPct} />
         </div>

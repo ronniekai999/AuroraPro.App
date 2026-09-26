@@ -235,19 +235,6 @@ export default function DetailView({
   const rating = detail?.rating ?? media.rating
   const realPoster = detail ? posterURL(detail.poster_path) : media.poster
   const realBackdrop = detail ? backdropURL(detail.backdrop_path) : (media.backdrop || media.poster)
-  // Whether the hero is showing genuine BACKDROP art, which is what lets
-  // DetailRail drop its poster on single-column layouts. Deliberately not
-  // `!!realBackdrop`: before the payload lands that falls back to the POSTER,
-  // so a title with no backdrop had its rail poster hidden, then restored
-  // ~530px tall when the payload arrived — shoving Play down after the page
-  // had settled. media.backdrop is mapped from the same row's backdrop_path, so
-  // the pre- and post-payload answers agree and the layout holds still.
-  // A backdrop that fails to load (the image proxy 502s on a TMDB miss) hides
-  // itself and also counts as no art. Keyed on the src, so one title's failed
-  // backdrop cannot write off a different one.
-  const heroBackdrop = detail ? realBackdrop : (media.backdrop || '')
-  const [failedHeroSrc, setFailedHeroSrc] = useState<string | null>(null)
-  const heroShowsArt = !!heroBackdrop && failedHeroSrc !== heroBackdrop
   // 2026-05-28 — Removed poster-derived accent tinting of the primary
   // CTA. Deriving the button color from the artwork made the action
   // bar a different color on every title (green on Drake & Josh, red
@@ -481,7 +468,10 @@ export default function DetailView({
         tagline={detail?.tagline}
         error={error}
         onBack={onBack}
-        onBackdropError={setFailedHeroSrc}
+        // The poster, as the hero's art whenever there is no backdrop or the
+        // backdrop fails to load. Below lg DetailRail always drops its poster,
+        // so the hero is then the page's only artwork and must not go blank.
+        fallback={realPoster}
       />
 
       {/* `.stage-gutter` for the PADDING, `max-w-[1304px]` on the grid inside for
@@ -520,7 +510,6 @@ export default function DetailView({
           <DetailRail
             poster={realPoster}
             title={media.title}
-            heroShowsArt={heroShowsArt}
             resumeFraction={railResumeFraction}
             resumeLeftLabel={railResumeLeft}
             resumeRightLabel={railResumeRight}

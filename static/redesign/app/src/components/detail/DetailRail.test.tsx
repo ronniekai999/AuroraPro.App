@@ -7,10 +7,10 @@
 // under a second copy of art the hero already shows.
 //
 // jsdom has no layout, so what is pinned here is the WIRING that makes the
-// breakpoint behaviour true: which element carries `hidden lg:block`, that the
-// relocated progress bar is its exact complement (`lg:hidden`), and that
-// neither happens for a title whose poster is the page's only artwork. The
-// breakpoint classes themselves are Tailwind's and are not re-tested.
+// breakpoint behaviour true: the poster carries `hidden lg:block` for every
+// title (a data-dependent version flipped between the pre-payload and payload
+// renders — see the component), and the relocated progress bar is its exact
+// complement (`lg:hidden`). The breakpoint classes themselves are Tailwind's.
 
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -35,14 +35,19 @@ const withResume = {
 const posterBox = () => screen.getByAltText('The Dark Knight').parentElement!
 const bars = () => screen.getAllByRole('progressbar', { name: 'Resume progress' })
 
-describe('DetailRail — below lg with a backdrop in the hero (heroShowsArt)', () => {
-  it('drops the poster below lg and keeps it from lg up', () => {
-    render(<DetailRail {...base} heroShowsArt />)
+describe('DetailRail — the poster is a desktop (lg+) element', () => {
+  it.each([
+    ['a poster', base.poster],
+    ['no poster', ''],
+  ])('is dropped below lg and kept from lg up, with %s', (_, poster) => {
+    render(<DetailRail {...base} poster={poster} />)
     expect(posterBox()).toHaveClass('hidden', 'lg:block')
   })
+})
 
-  it('relocates the resume progress as the poster\'s exact complement', () => {
-    render(<DetailRail {...base} {...withResume} heroShowsArt />)
+describe('DetailRail — resume progress below lg', () => {
+  it('is relocated as the poster\'s exact complement', () => {
+    render(<DetailRail {...base} {...withResume} />)
     // Two copies exist in the DOM; CSS shows exactly one at any width. The
     // overlay copy lives inside the poster box (hidden below lg); the other
     // must be lg:hidden and must NOT be inside the poster box.
@@ -60,33 +65,16 @@ describe('DetailRail — below lg with a backdrop in the hero (heroShowsArt)', (
     expect(screen.getAllByText('Resume · 30:00')).toHaveLength(2)
   })
 
-  it('places the relocated progress ABOVE the primary action', () => {
-    render(<DetailRail {...base} {...withResume} heroShowsArt />)
+  it('sits ABOVE the primary action', () => {
+    render(<DetailRail {...base} {...withResume} />)
     const outside = bars().find(b => !posterBox().contains(b))!
     const play = screen.getByRole('button', { name: 'Play' })
     expect(outside.compareDocumentPosition(play) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('adds no relocated progress when there is nothing to resume', () => {
-    render(<DetailRail {...base} heroShowsArt />)
+  it('is absent when there is nothing to resume', () => {
+    render(<DetailRail {...base} />)
     expect(screen.queryAllByRole('progressbar')).toHaveLength(0)
-  })
-})
-
-describe('DetailRail — no backdrop: the poster is the only artwork', () => {
-  it('keeps the poster at every width and renders a single progress bar', () => {
-    render(<DetailRail {...base} {...withResume} />)
-    expect(posterBox()).not.toHaveClass('hidden')
-    expect(bars()).toHaveLength(1)
-    expect(posterBox().contains(bars()[0])).toBe(true)
-  })
-
-  it('still drops the box below lg when there is no poster either — it would be an empty 2:3 panel', () => {
-    render(<DetailRail {...base} {...withResume} poster="" />)
-    expect(posterBox()).toHaveClass('hidden', 'lg:block')
-    const outside = bars().filter(b => !posterBox().contains(b))
-    expect(outside).toHaveLength(1)
-    expect(outside[0].closest('.lg\\:hidden')).not.toBeNull()
   })
 })
 
@@ -96,7 +84,7 @@ describe('DetailRail — spacing', () => {
   // earned the next child a 20px top margin below lg. A display:none flex item
   // takes no gap, so the root must space its children with flex + gap.
   it('spaces its children with a flex gap, not space-y', () => {
-    render(<DetailRail {...base} heroShowsArt />)
+    render(<DetailRail {...base} />)
     const root = posterBox().parentElement!
     expect(root).toHaveClass('flex', 'flex-col', 'gap-5')
     expect(root.className).not.toMatch(/\bspace-y-/)
