@@ -174,6 +174,12 @@ func TestFullGPUHEVCEncoderArgs(t *testing.T) {
 // combination — including unknown values and TS-forced sessions —
 // normalizes to H.264, and the master-playlist CODECS follows.
 func TestCreateSession_VideoCodecOutClamp(t *testing.T) {
+	// CreateSession's only use of ffmpeg on this path is its PATH lookup: the
+	// assertions read session fields, and the HEVC probe is simulated below.
+	// So a stub on PATH, like the sibling CreateSession tests use — not
+	// requireFFmpeg, which would SKIP this pure-logic test on every machine
+	// without media tooling instead of running it.
+	fakeFFmpegOnPath(t)
 	newTM := func(t *testing.T) *TranscodeManager {
 		t.Helper()
 		tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4", HEVCOutput: "off"})
