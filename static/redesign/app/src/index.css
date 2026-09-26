@@ -2900,7 +2900,15 @@ html[data-glow="subtle"] .rail-container {
   font-size: 1.05rem;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.95);
-  white-space: nowrap;
+  /* Wraps rather than `nowrap`. With nowrap a title wider than its column
+     (phones, long "Because you watched …" / LLM rail names) overflowed the
+     rail, and the page with it — the layout viewport grew past the device
+     width. Wrapping only engages once the header is genuinely out of room:
+     the title column's flex basis is still its one-line max-content width,
+     so desktop headers render exactly as before. min-width + break-word
+     cover a single word longer than the column. */
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 /* Divider line that fills the space between title and the See-All chevron. */
 .rail-header .rail-spacer {
@@ -3257,20 +3265,52 @@ html[data-glow="subtle"] .rail-container {
   color: var(--text-secondary);
   display: flex;
   align-items: center;
-  gap: 5px;
-  /* NOWRAP is load-bearing, not a style choice. The overlay is anchored to
-     the card bottom and grows UPWARD, while .card-badges and .resume-pill
-     clear it via fixed offsets. A wrapped row pushes the title up INTO the
-     badges, which are z:3 against the overlay's z:1 — opaque "4K" chips
-     painting over the title, at rest, no hover needed. Measured at real
-     Inter metrics this was the COMMON case: at the widest desktop layout
-     (1440px, 6-up, ~179px of content) "★ 9.5 · 2008 · 2h 55m · Comedy"
-     already wraps, as does any longer genre. Truncating to one line keeps
-     those offsets true. Wrapping also let a line begin with a stray "·". */
-  flex-wrap: nowrap;
+  column-gap: 5px;
+  /* ONE VISIBLE LINE is load-bearing, not a style choice. The overlay is
+     anchored to the card bottom and grows UPWARD, while .card-badges and
+     .resume-pill clear it via fixed offsets. A taller row pushes the title
+     up INTO the badges, which are z:3 against the overlay's z:1 — opaque
+     "4K" chips painting over the title, at rest, no hover needed. Measured
+     at real Inter metrics a full row does not fit even on desktop: at 1440px
+     (6-up, ~179px of content) "★ 9.5 · 2008 · 2h 55m · Comedy" overflows,
+     and on a phone's two-up grid (~130–165px cards) far sooner.
+
+     This used to be `flex-wrap: nowrap`, which did not deliver it: each
+     token was its own flex item that shrank and then wrapped its OWN text,
+     so at ~165px "2h 16m" broke into "2h" / "16m", the row grew a line and
+     the title slid under the badges on nearly every card in the phone grid.
+
+     So the row WRAPS — whole tokens only (.co-tok is nowrap, and carries
+     the dot that precedes it) — into a box exactly one line tall that clips
+     everything below. A token that does not fit moves to the hidden second
+     line and vanishes whole with its separator: "★ 9.2 · 1999" on a narrow
+     card, never "2h 1" cut mid-glyph and never a trailing "·". The first
+     token cannot wrap away (a flex line always takes its first item), so a
+     row too narrow even for that ellipsizes it instead (.co-txt below).
+     The card's aria-label carries the full meta, so nothing is lost to a
+     screen reader either way. */
+  flex-wrap: wrap;
+  line-height: 1.5;
+  height: 1.5em;
   min-width: 0;
   overflow: hidden;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+/* min-width:0 is what lets a token ALONE on the row shrink to it (and its
+   .co-txt ellipsize) rather than overrun. Line breaking still uses each token's
+   full max-content width, so a token that does not fit wraps away whole. */
+.media-card-cinema .card-overlay .co-meta .co-tok {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+/* overflow:hidden also zeroes this flex item's automatic minimum size, so it
+   needs no min-width of its own to shrink. */
+.media-card-cinema .card-overlay .co-meta .co-txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .media-card-cinema .card-overlay .co-meta .star {
   color: #facc15;

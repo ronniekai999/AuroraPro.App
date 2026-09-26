@@ -17,7 +17,7 @@
 // also keeps the rendered SVG markup smaller — `Icon` ships every
 // listed glyph in its lookup table even when only one is used.
 
-import { Fragment, memo, useState } from 'react'
+import { memo, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react'
 
 // MediaLike is the structural subset of App.tsx's `Media` interface
@@ -513,14 +513,19 @@ function MediaCardCinemaInner<T extends MediaLike>({
                 // year, runtime and genre are all kind:'text', so an item
                 // with year 1917 and genre "1917" produced two identical
                 // keys. The index buys the same stability without the risk.
-                <Fragment key={i}>
+                //
+                // One wrapper per token, carrying the separator that PRECEDES
+                // it: on a card too narrow for the whole row, a token that does
+                // not fit wraps (with its dot) onto a clipped second line and
+                // disappears whole — see .co-meta in index.css.
+                <span key={i} className="co-tok">
                   {i > 0 && <span className="sep" aria-hidden="true">·</span>}
                   {t.kind === 'rating' ? (
                     <span className="star"><StarSvg /> {t.value}</span>
                   ) : (
-                    <span>{t.value}</span>
+                    <span className="co-txt">{t.value}</span>
                   )}
-                </Fragment>
+                </span>
               ))}
             </div>
           )}

@@ -1,16 +1,19 @@
 // Aurora V2 — DetailView hero banner.
 //
 // Tall cinematic backdrop with bottom/left gradients + a subtle purple
-// "aurora-floor" glow, badges, title, and a single meta row. No poster in
-// the hero (it lives in the rail) — the negative-margin overlap collides,
-// which is the bug we already fixed in the mockup.
+// "aurora-floor" glow, badges, title, and a single meta row. The poster is not
+// composed INTO the hero (it lives in the rail from lg up) — the negative-
+// margin overlap collides, which is the bug we already fixed in the mockup. It
+// can still be the hero's IMAGE: `fallback` shows it in the backdrop's place
+// when there is no backdrop or it fails to load, which below lg (where the rail
+// drops its poster) keeps the page from having no art at all.
 //
 // 2026-07-25 (Aurora Stage Phase 2) — this used to note that DetailView's
 // root applied a -mx-8/-mt-8 bleed. It doesn't any more: App's content
 // wrapper no longer pads, and the `detail` view opts out of the page
 // gutter, so the section is genuinely full-bleed with nothing to escape.
 
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { ArrowLeftIcon, StarIcon } from './icons'
 import { backdropSrcSet } from '@/lib/api'
 
@@ -27,6 +30,13 @@ interface DetailHeroProps {
   error?: string | null
   onBack: () => void
   objectPosition?: string // backdrop object-position, default "center 28%"
+  // Art to show when there is no backdrop, or when the backdrop fails to load
+  // (the image proxy 502s on a TMDB miss) — DetailView passes the poster. The
+  // hero is the page's ONLY artwork below lg, where DetailRail drops its
+  // poster, so it must not go blank while any art exists. Pre-payload this is
+  // what the hero already showed (DetailView's backdrop falls back to the
+  // poster there), so post-payload it no longer flips from poster to nothing.
+  fallback?: string
 }
 
 export function DetailHero({
@@ -42,7 +52,14 @@ export function DetailHero({
   error,
   onBack,
   objectPosition = 'center 28%',
+  fallback,
 }: DetailHeroProps) {
+  // Sources that have failed to load, by URL. The first candidate — backdrop,
+  // then fallback — that is non-empty and has not failed is shown; none
+  // renders no <img> and the gradient ramp carries the frame. By URL rather
+  // than a flag, so a later backdrop for the same mounted hero is tried fresh.
+  const [failed, setFailed] = useState<readonly string[]>([])
+  const src = [backdrop, fallback].find(s => !!s && !failed.includes(s))
   const metaParts: React.ReactNode[] = []
   if (rating !== undefined && rating > 0) {
     metaParts.push(
@@ -62,19 +79,28 @@ export function DetailHero({
       {/* The detail page's largest paint. It shipped with no loading hints
           and no error path: a backdrop the server has not mirrored yet
           rendered the browser's broken-image glyph across a 58vh banner.
-          Hidden on error; the gradient ramp below carries the frame. */}
-      <img
-        key={backdrop}
-        src={backdrop}
-        srcSet={backdropSrcSet(backdrop)}
-        alt=""
-        className="w-full h-full object-cover scale-105"
-        style={{ objectPosition }}
-        loading="eager"
-        fetchPriority="high"
-        decoding="async"
-        onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
-      />
+          On error it falls back to `fallback` (the poster); with nothing
+          left, no image renders and the gradient ramp below carries the frame. */}
+      {src && (
+        <img
+          // key: each source gets a fresh node, so a failed one's error state
+          // cannot carry over to the next candidate.
+          key={src}
+          src={src}
+          // Only the BACKDROP gets the 2x srcset. backdropSrcSet keys on the
+          // w780/w1280 size in the URL, not on what the image is, so a poster
+          // fallback at those sizes would pull the full-size `original` poster
+          // (~2000x3000) at high priority on every 2x/3x screen.
+          srcSet={src === backdrop ? backdropSrcSet(src) : undefined}
+          alt=""
+          className="w-full h-full object-cover scale-105"
+          style={{ objectPosition }}
+          loading="eager"
+          fetchPriority="high"
+          decoding="async"
+          onError={() => setFailed(f => (f.includes(src) ? f : [...f, src]))}
+        />
+      )}
       {/* Phase 5 — the mockup's two-layer ramp as one element, replacing two
           inline-styled gradient divs.
 

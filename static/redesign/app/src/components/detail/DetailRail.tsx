@@ -114,6 +114,33 @@ function Tile({
   )
 }
 
+// Resume label row + progress bar. Rendered over the poster's foot, or —
+// below lg, when the poster is dropped — on its own above the action stack.
+// Only one of the two is ever displayed at a given width.
+function ResumeProgress({ leftLabel, rightLabel, pct }: { leftLabel?: string; rightLabel?: string; pct: number }) {
+  return (
+    <>
+      <div className="flex items-center justify-between text-[11px] text-white/80 mb-1.5 font-medium">
+        <span className="truncate">{leftLabel}</span>
+        {rightLabel && <span className="flex-shrink-0 ml-2">{rightLabel}</span>}
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Resume progress"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="h-[3px] rounded-full bg-white/20 overflow-hidden"
+      >
+        <div
+          className="h-full bg-purple-500 rounded-full shadow-[0_0_8px_rgba(168,85,247,0.9)]"
+          style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+        />
+      </div>
+    </>
+  )
+}
+
 // RATING_LABELS[n] captions the n-star verdict — shown for the hovered star
 // (preview) or the saved rating, and read to screen readers via the buttons'
 // aria-labels.
@@ -209,13 +236,35 @@ export function DetailRail({
     // time its height changes. Note the admin scan bar sits above the nav
     // and adds ~3px while a scan runs; that pre-existing few-pixel drift
     // is the same one BrowseView's toolbar comment calls out.
-    <div className={cn('lg:sticky lg:z-20 lg:top-[calc(var(--chrome-h,var(--topnav-h))+12px)] self-start space-y-5', className)}>
+    //
+    // flex + gap, not `space-y-5`: Tailwind 3's space-y selector
+    // (`> :not([hidden]) ~ :not([hidden])`) only skips the hidden ATTRIBUTE, so
+    // a poster hidden by `hidden lg:block` still earned the next child a 20px
+    // top margin below lg. A display:none flex item takes no gap. Same 1.25rem
+    // spacing at every width otherwise.
+    <div className={cn('lg:sticky lg:z-20 lg:top-[calc(var(--chrome-h,var(--topnav-h))+12px)] self-start flex flex-col gap-5', className)}>
       {/* Poster + resume overlay */}
       {/* bg matters now that the poster overlaps the hero: posterURL() returns
           '' for an unmatched title, so this box renders the alt text and a
           broken-image glyph — previously against flat #050505 below the hero,
           now against backdrop artwork at ~17% scrim alpha. */}
-      <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12]">
+      {/* `hidden lg:block`: the poster is a DESKTOP rail element. Below lg the
+          grid is one column, so it rendered full-width — ~530px tall on a
+          phone, ~990px on an iPad in portrait — between the hero and Play,
+          pushing the page's primary action one to two screens down under a
+          second copy of the hero's art. DetailHero falls back to this same
+          poster when there is no backdrop, so the art is not lost.
+
+          Unconditional ON PURPOSE. Keying it on "does the hero have a
+          backdrop" was tried and flips for the same title between the
+          pre-payload render and the payload's: My Library / Calendar /
+          Collections open titles with no backdrop field at all, so the ~530px
+          box appeared or collapsed above Play after the page had settled.
+
+          display:none, so below lg the poster's progress bar is out of the
+          accessibility tree as well as out of sight, and the compact copy
+          below is the only one exposed. */}
+      <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12] hidden lg:block">
         {/* decoding=async keeps a 2:3 decode off the click-to-detail frame;
             a poster that 404s hides itself and the box's own fill shows. */}
         <img
@@ -225,6 +274,11 @@ export function DetailRail({
           src={poster}
           alt={title}
           className="w-full aspect-[2/3] object-cover"
+          // lazy: below lg the box is display:none, and a lazy image that never
+          // lays out is never fetched — without it every phone detail view
+          // downloaded a w500 poster it could not show. From lg up the poster
+          // sits in the first viewport, so lazy loading starts it at once.
+          loading="lazy"
           decoding="async"
           onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
         />
@@ -232,27 +286,19 @@ export function DetailRail({
           <>
             <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/85 to-transparent" />
             <div className="absolute bottom-3 left-3.5 right-3.5">
-              <div className="flex items-center justify-between text-[11px] text-white/80 mb-1.5 font-medium">
-                <span className="truncate">{resumeLeftLabel}</span>
-                {resumeRightLabel && <span className="flex-shrink-0 ml-2">{resumeRightLabel}</span>}
-              </div>
-              <div
-                role="progressbar"
-                aria-label="Resume progress"
-                aria-valuenow={progressPct}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                className="h-[3px] rounded-full bg-white/20 overflow-hidden"
-              >
-                <div
-                  className="h-full bg-purple-500 rounded-full shadow-[0_0_8px_rgba(168,85,247,0.9)]"
-                  style={{ width: `${Math.min(100, Math.max(2, progressPct))}%` }}
-                />
-              </div>
+              <ResumeProgress leftLabel={resumeLeftLabel} rightLabel={resumeRightLabel} pct={progressPct} />
             </div>
           </>
         )}
       </div>
+      {/* The poster's progress, relocated for the single-column layout. The
+          exact complement of the poster's `hidden lg:block`, so exactly one
+          copy is displayed at every width. */}
+      {hasProgress && (
+        <div className="lg:hidden px-0.5">
+          <ResumeProgress leftLabel={resumeLeftLabel} rightLabel={resumeRightLabel} pct={progressPct} />
+        </div>
+      )}
 
       {/* Action stack */}
       <div className="space-y-2.5">
