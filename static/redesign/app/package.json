@@ -12,12 +12,12 @@
     "audit:a11y": "node scripts/audit-focus-indicators.mjs",
     "audit:contrast": "node scripts/audit-onart-contrast.mjs",
     "audit:breakpoints": "node scripts/audit-breakpoints.mjs",
-    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:glass && npm run audit:motion && npm run audit:breakpoints && npm run audit:cascade && node scripts/verify-page-alignment.mjs && node scripts/verify-pwa.mjs",
+    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:glass && npm run audit:motion && npm run audit:breakpoints && npm run audit:cascade && node scripts/verify-page-alignment.mjs && node scripts/verify-mobile-layout.mjs && node scripts/verify-pwa.mjs",
     "verify:pwa": "npm run build && node scripts/verify-pwa.mjs",
     "audit:cascade": "node scripts/resolve-focus.mjs",
     "audit:glass": "node scripts/audit-glass-contrast.mjs",
     "audit:motion": "node scripts/audit-reduced-motion.mjs",
-    "verify:layout": "npm run build && node scripts/verify-page-alignment.mjs"
+    "verify:layout": "npm run build && node scripts/verify-page-alignment.mjs && node scripts/verify-mobile-layout.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",

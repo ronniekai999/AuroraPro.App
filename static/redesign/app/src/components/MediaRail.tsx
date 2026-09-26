@@ -137,10 +137,17 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
       <div className="rail-header">
         <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
         <div className="flex flex-col gap-0.5 min-w-0">
-          <div className="flex items-center gap-2.5">
+          {/* flex-wrap + a nowrap chip: when title and chip do not fit on one
+              line (a phone, or a long LLM-written title) the chip drops BELOW
+              the title instead of being pushed past the rail's right edge. It
+              used to be pushed, and on a 390px phone "Hidden gems in your
+              library" + AI PICK widened the whole page to 407px — which also
+              clipped the right edge of the menu sheet and search palette,
+              because their `right-2` resolves against that widened viewport. */}
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <h2 className="rail-title">{title}</h2>
             {aiPick && (
-              <span className="inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
+              <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
                 <Icon name="sparkle" size={10} className="text-yellow-300" /> AI Pick
               </span>
             )}

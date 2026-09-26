@@ -72,7 +72,10 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
         title="My Library"
         sub={
           library.length === 0
-            ? 'Hover any card and click + to save titles here.'
+            // Device-neutral: phones have no hover, and the + is always
+            // visible on a touch screen, so "hover … and click" was wrong
+            // for exactly the users most likely to read it there.
+            ? 'Use the + on any card to save titles here.'
             : library.length === 1
               ? '1 saved title'
               : `${library.length} saved titles`
@@ -102,7 +105,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
           <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
           <p className="text-white/40 text-sm max-w-md mx-auto">
-            Hover any title and click the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
+            Use the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left of any title to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>
         </div>
       ) : filteredLibrary.length === 0 ? (

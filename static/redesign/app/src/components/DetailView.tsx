@@ -506,6 +506,7 @@ export default function DetailView({
           <DetailRail
             poster={realPoster}
             title={media.title}
+            heroShowsArt={!!realBackdrop}
             resumeFraction={railResumeFraction}
             resumeLeftLabel={railResumeLeft}
             resumeRightLabel={railResumeRight}
