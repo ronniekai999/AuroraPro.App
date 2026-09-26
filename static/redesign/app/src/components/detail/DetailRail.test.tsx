@@ -80,4 +80,25 @@ describe('DetailRail — no backdrop: the poster is the only artwork', () => {
     expect(bars()).toHaveLength(1)
     expect(posterBox().contains(bars()[0])).toBe(true)
   })
+
+  it('still drops the box below lg when there is no poster either — it would be an empty 2:3 panel', () => {
+    render(<DetailRail {...base} {...withResume} poster="" />)
+    expect(posterBox()).toHaveClass('hidden', 'lg:block')
+    const outside = bars().filter(b => !posterBox().contains(b))
+    expect(outside).toHaveLength(1)
+    expect(outside[0].closest('.lg\\:hidden')).not.toBeNull()
+  })
+})
+
+describe('DetailRail — spacing', () => {
+  // Tailwind 3's space-y selector (`> :not([hidden]) ~ :not([hidden])`) skips
+  // only the hidden ATTRIBUTE, so a poster hidden by `hidden lg:block` still
+  // earned the next child a 20px top margin below lg. A display:none flex item
+  // takes no gap, so the root must space its children with flex + gap.
+  it('spaces its children with a flex gap, not space-y', () => {
+    render(<DetailRail {...base} heroShowsArt />)
+    const root = posterBox().parentElement!
+    expect(root).toHaveClass('flex', 'flex-col', 'gap-5')
+    expect(root.className).not.toMatch(/\bspace-y-/)
+  })
 })

@@ -27,6 +27,10 @@ interface DetailHeroProps {
   error?: string | null
   onBack: () => void
   objectPosition?: string // backdrop object-position, default "center 28%"
+  // Called with the failing src when the backdrop does not load, after it is
+  // hidden. DetailView uses it to know the hero is showing NO art, so the
+  // rail's poster must stay up on single-column layouts.
+  onBackdropError?: (src: string) => void
 }
 
 export function DetailHero({
@@ -42,6 +46,7 @@ export function DetailHero({
   error,
   onBack,
   objectPosition = 'center 28%',
+  onBackdropError,
 }: DetailHeroProps) {
   const metaParts: React.ReactNode[] = []
   if (rating !== undefined && rating > 0) {
@@ -73,7 +78,7 @@ export function DetailHero({
         loading="eager"
         fetchPriority="high"
         decoding="async"
-        onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
+        onError={(e) => { e.currentTarget.style.visibility = 'hidden'; onBackdropError?.(backdrop) }}
       />
       {/* Phase 5 — the mockup's two-layer ramp as one element, replacing two
           inline-styled gradient divs.

@@ -152,7 +152,10 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
               </span>
             )}
           </div>
-          {subtitle && <span className="text-white/55 text-xs">{subtitle}</span>}
+          {/* break-words for the same reason the title wraps: subtitles are
+              often LLM-written (Discover rail descriptions), and one long
+              unbroken token here widened a 320px page to 373px. */}
+          {subtitle && <span className="text-white/55 text-xs break-words">{subtitle}</span>}
         </div>
         <span className="rail-spacer" aria-hidden="true" />
         {onSeeAll && (

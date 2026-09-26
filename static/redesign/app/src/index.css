@@ -3296,16 +3296,19 @@ html[data-glow="subtle"] .rail-container {
   overflow: hidden;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
+/* min-width:0 is what lets a token ALONE on the row shrink to it (and its
+   .co-txt ellipsize) rather than overrun. Line breaking still uses each token's
+   full max-content width, so a token that does not fit wraps away whole. */
 .media-card-cinema .card-overlay .co-meta .co-tok {
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
-  max-width: 100%;
   white-space: nowrap;
 }
+/* overflow:hidden also zeroes this flex item's automatic minimum size, so it
+   needs no min-width of its own to shrink. */
 .media-card-cinema .card-overlay .co-meta .co-txt {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

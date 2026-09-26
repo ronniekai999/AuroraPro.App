@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
 // DetailView → DetailRail `heroShowsArt` wiring. DetailRail drops its poster
-// below lg only when told the hero above it carries artwork; this pins that the
-// flag tracks the image the hero is ACTUALLY given (`realBackdrop`), including
-// the case that matters most — a title whose detail payload has no backdrop,
-// where the poster is the only art on the page and must stay.
+// below lg only when told the hero above it is showing genuine backdrop art;
+// this pins that judgement: no backdrop in the payload, the pre-payload poster
+// fallback, and a backdrop that fails to load all count as NO art, so the
+// poster — then the only art on the page — stays.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import DetailView from './DetailView'
 import type { Media } from '@/lib/types'
 import type { MediaDetail } from '@/lib/api'
@@ -71,11 +71,29 @@ describe('DetailView heroShowsArt', () => {
     expect(last()).toBe(false)
   })
 
-  it('before the payload lands, follows the card art the hero is given', () => {
+  it('before the payload lands, follows the card\'s own backdrop', () => {
     renderWith(movie)
     expect(last()).toBe(true)
-    seen.heroShowsArt.length = 0
-    renderWith({ ...movie, backdrop: undefined, poster: '' })
+  })
+
+  it('does NOT count the hero\'s pre-payload POSTER fallback as backdrop art', () => {
+    // Before the payload, realBackdrop falls back to the poster. Counting that
+    // hid the rail's poster for a title with no backdrop, then restored it
+    // ~530px tall when the payload landed — shoving Play down after the page
+    // had settled. Both answers must agree for a backdrop-less title.
+    const noBackdrop = { ...movie, backdrop: '' }
+    const r = renderWith(noBackdrop)
+    expect(last()).toBe(false)
+    r.rerender(<DetailView media={noBackdrop} detail={payload(undefined)} onBack={() => {}} onPlay={() => {}} onToggleLib={() => {}} inLibrary={false} />)
+    expect(last()).toBe(false)
+  })
+
+  it('is false once the hero\'s backdrop FAILS to load — the hero is then showing no art', () => {
+    const { container } = renderWith(movie, payload('/backdrop.jpg'))
+    expect(last()).toBe(true)
+    const heroImg = container.querySelector('section img') as HTMLImageElement
+    expect(heroImg.getAttribute('src')).toBe('/api/images/w1280/backdrop.jpg')
+    fireEvent.error(heroImg)
     expect(last()).toBe(false)
   })
 })
