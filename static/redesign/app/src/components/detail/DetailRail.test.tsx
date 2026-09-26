@@ -43,6 +43,11 @@ describe('DetailRail — the poster is a desktop (lg+) element', () => {
     render(<DetailRail {...base} poster={poster} />)
     expect(posterBox()).toHaveClass('hidden', 'lg:block')
   })
+
+  it('loads lazily, so the display:none poster is never fetched below lg', () => {
+    render(<DetailRail {...base} />)
+    expect(screen.getByAltText('The Dark Knight')).toHaveAttribute('loading', 'lazy')
+  })
 })
 
 describe('DetailRail — resume progress below lg', () => {

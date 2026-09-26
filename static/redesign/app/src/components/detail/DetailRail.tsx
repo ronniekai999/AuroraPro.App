@@ -274,6 +274,11 @@ export function DetailRail({
           src={poster}
           alt={title}
           className="w-full aspect-[2/3] object-cover"
+          // lazy: below lg the box is display:none, and a lazy image that never
+          // lays out is never fetched — without it every phone detail view
+          // downloaded a w500 poster it could not show. From lg up the poster
+          // sits in the first viewport, so lazy loading starts it at once.
+          loading="lazy"
           decoding="async"
           onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
         />

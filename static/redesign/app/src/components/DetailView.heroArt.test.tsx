@@ -57,19 +57,29 @@ describe('DetailView hero art', () => {
     expect(heroImg(container)).toHaveAttribute('src', '/api/images/w1280/backdrop.jpg')
   })
 
-  it('shows the payload POSTER when the payload has no backdrop', () => {
+  it('shows the payload POSTER, at w780, when the payload has no backdrop', () => {
     const { container } = renderWith(movie, payload(undefined))
-    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/poster.jpg')
+    // w780, not the rail's w500 — it is stretched across the full-width hero.
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w780/poster.jpg')
   })
 
   it('falls back to the payload poster when the payload backdrop fails', () => {
     const { container } = renderWith(movie, payload('/backdrop.jpg'))
     fireEvent.error(heroImg(container)!)
-    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/poster.jpg')
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w780/poster.jpg')
   })
 
-  it('before the payload, falls back to the card\'s poster', () => {
-    const { container } = renderWith({ ...movie, backdrop: undefined })
+  it('before the payload, shows the card\'s backdrop', () => {
+    const { container } = renderWith(movie)
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w1280/card-backdrop.jpg')
+  })
+
+  it('before the payload, falls back to the card\'s poster when the card\'s backdrop FAILS', () => {
+    // Exercises the `fallback` prop pre-payload. (A card with no backdrop at all
+    // shows its poster through realBackdrop's own `|| media.poster`, which is
+    // why that case alone could not pin the wiring.)
+    const { container } = renderWith(movie)
+    fireEvent.error(heroImg(container)!)
     expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/card-poster.jpg')
   })
 })

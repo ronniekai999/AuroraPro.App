@@ -471,7 +471,10 @@ export default function DetailView({
         // The poster, as the hero's art whenever there is no backdrop or the
         // backdrop fails to load. Below lg DetailRail always drops its poster,
         // so the hero is then the page's only artwork and must not go blank.
-        fallback={realPoster}
+        // w780 rather than the rail's w500: here it is stretched across a
+        // full-width banner, ~3x at 1440 from w500. Pre-payload the card's
+        // poster is all there is, and is what realBackdrop already shows.
+        fallback={detail ? posterURL(detail.poster_path, 'w780') : media.poster}
       />
 
       {/* `.stage-gutter` for the PADDING, `max-w-[1304px]` on the grid inside for
