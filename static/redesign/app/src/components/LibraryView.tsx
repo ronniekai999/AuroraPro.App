@@ -73,8 +73,8 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
         sub={
           library.length === 0
             // Device-neutral: phones have no hover, and the + is always
-            // visible on a touch screen, so "hover … and click" was wrong
-            // for exactly the users most likely to read it there.
+            // visible (on every device — it has no hover gating), so "hover …
+            // and click" was wrong for exactly the users reading it on a phone.
             ? 'Use the + on any card to save titles here.'
             : library.length === 1
               ? '1 saved title'

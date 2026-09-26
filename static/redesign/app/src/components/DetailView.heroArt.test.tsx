@@ -57,16 +57,31 @@ describe('DetailView hero art', () => {
     expect(heroImg(container)).toHaveAttribute('src', '/api/images/w1280/backdrop.jpg')
   })
 
-  it('shows the payload POSTER, at w780, when the payload has no backdrop', () => {
+  it('shows the payload POSTER when the payload has no backdrop — the rail\'s w500 URL, with no srcset', () => {
     const { container } = renderWith(movie, payload(undefined))
-    // w780, not the rail's w500 — it is stretched across the full-width hero.
-    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w780/poster.jpg')
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/poster.jpg')
+    expect(heroImg(container)).not.toHaveAttribute('srcset')
+  })
+
+  it('does not remount or refetch the hero when the payload lands for a backdrop-less title', () => {
+    // Pre-payload the hero shows the card's poster; post-payload the fallback
+    // must be the SAME URL, or the <img> (keyed by src) remounts — the hero
+    // blinks blank and the art is fetched again. A larger fallback size did
+    // exactly that.
+    const card = { ...movie, backdrop: undefined }
+    const view = (detail?: MediaDetail) => <DetailView media={card} detail={detail} onBack={() => {}} onPlay={() => {}} onToggleLib={() => {}} inLibrary={false} />
+    const { container, rerender } = render(view())
+    const before = heroImg(container)
+    expect(before).toHaveAttribute('src', '/api/images/w500/card-poster.jpg')
+    rerender(view({ ...payload(undefined), poster_path: '/card-poster.jpg' }))
+    expect(heroImg(container)).toBe(before)
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/card-poster.jpg')
   })
 
   it('falls back to the payload poster when the payload backdrop fails', () => {
     const { container } = renderWith(movie, payload('/backdrop.jpg'))
     fireEvent.error(heroImg(container)!)
-    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w780/poster.jpg')
+    expect(heroImg(container)).toHaveAttribute('src', '/api/images/w500/poster.jpg')
   })
 
   it('before the payload, shows the card\'s backdrop', () => {

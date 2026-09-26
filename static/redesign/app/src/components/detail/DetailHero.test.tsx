@@ -26,7 +26,22 @@ describe('DetailHero art', () => {
   it('shows the poster when there is no backdrop', () => {
     const { container } = renderHero('', POSTER)
     expect(heroImg(container)).toHaveAttribute('src', POSTER)
-    // The backdrop-only srcset helper must not attach a backdrop 2x to a poster.
+  })
+
+  // backdropSrcSet keys on the SIZE in the URL (w780/w1280), not on what the
+  // image is — so a poster fallback at w780 would get an `original` 2x and pull
+  // the full-size (~2000x3000) poster on every 2x/3x screen. Only the backdrop
+  // may carry the srcset. A w500 poster cannot test this (the helper never
+  // matches w500), which is how the first version of this test passed while
+  // the bug shipped.
+  it.each([
+    ['no backdrop', ''],
+    ['a failed backdrop', BACKDROP],
+  ])('gives a poster fallback at a srcset-matching size NO srcset — %s', (_, backdrop) => {
+    const W780_POSTER = '/api/images/w780/poster.jpg'
+    const { container } = renderHero(backdrop, W780_POSTER)
+    if (backdrop) fireEvent.error(heroImg(container)!)
+    expect(heroImg(container)).toHaveAttribute('src', W780_POSTER)
     expect(heroImg(container)).not.toHaveAttribute('srcset')
   })
 

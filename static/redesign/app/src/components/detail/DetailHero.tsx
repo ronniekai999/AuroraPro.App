@@ -87,7 +87,11 @@ export function DetailHero({
           // cannot carry over to the next candidate.
           key={src}
           src={src}
-          srcSet={backdropSrcSet(src)}
+          // Only the BACKDROP gets the 2x srcset. backdropSrcSet keys on the
+          // w780/w1280 size in the URL, not on what the image is, so a poster
+          // fallback at those sizes would pull the full-size `original` poster
+          // (~2000x3000) at high priority on every 2x/3x screen.
+          srcSet={src === backdrop ? backdropSrcSet(src) : undefined}
           alt=""
           className="w-full h-full object-cover scale-105"
           style={{ objectPosition }}
