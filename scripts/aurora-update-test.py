@@ -139,6 +139,8 @@ echo 'service:restart' >> "$TEST_EVENTS"
         self.target = self.git("-C", str(self.seed), "rev-parse", "HEAD")
         self.git("-C", str(self.seed), "push", "--quiet", str(self.remote), "main")
         (self.live / "static/v2").mkdir(parents=True)
+        # Rollback assertions must not depend on the caller's directory umask.
+        (self.live / "static").chmod(0o755)
         (self.live / "migrations").mkdir()
         self.live_binary.write_text("old binary\n")
         self.live_updater.write_text("old updater\n")
