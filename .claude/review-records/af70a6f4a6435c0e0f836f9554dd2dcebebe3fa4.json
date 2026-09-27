@@ -1,0 +1,10 @@
+{
+  "sha": "af70a6f4a6435c0e0f836f9554dd2dcebebe3fa4",
+  "verdict": "clean",
+  "summary": "Fresh final-diff review of e726299...af70a6f found no actionable defects after resolving static snapshot metadata finding; residual real-systemd, service-identity, crash/disk fault gaps noted.",
+  "reviewer": "/root/adversarial_review",
+  "findings": "0",
+  "diff_digest": "",
+  "branch": "work",
+  "recorded_at": "2026-09-27T20:40:06Z"
+}

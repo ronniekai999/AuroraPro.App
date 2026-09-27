@@ -72,6 +72,8 @@ INSTALL_UPDATER=/usr/local/bin/aurora-update
 DEPLOY_STATE_DIR=/var/lib/aurora-updater
 DEPLOYED_FILE="$DEPLOY_STATE_DIR/deployed"
 PENDING_FILE="$DEPLOY_STATE_DIR/pending"
+ROLLBACK_BIN="$DEPLOY_STATE_DIR/rollback-binary"
+ROLLBACK_STATIC="$DEPLOY_STATE_DIR/rollback-static"
 SPA_SRC_DIR=static/redesign/app
 SPA_OUTPUT_DIR=static/v2
 
@@ -452,6 +454,39 @@ write_deploy_state() {
     fi
 }
 
+# Create each rollback snapshot completely under a temporary name and publish it
+# with one rename.  A pending install means the existing snapshot is the last
+# version that actually ran successfully, not necessarily the current live
+# files (an earlier attempt may already have promoted its binary/assets).
+# Therefore retries and newer targets fill only missing snapshots and never
+# replace an existing one until a deployment has passed its health check.
+prepare_rollback_snapshots() {
+    local tmp
+    if [ ! -f "$ROLLBACK_BIN" ] && [ -f "$INSTALL_BIN" ]; then
+        tmp="$(mktemp "$DEPLOY_STATE_DIR/.rollback-binary.XXXXXX")" || return 1
+        if ! cp -p -- "$INSTALL_BIN" "$tmp" || ! mv -f -- "$tmp" "$ROLLBACK_BIN"; then
+            rm -f -- "$tmp"
+            return 1
+        fi
+    fi
+    if [ ! -d "$ROLLBACK_STATIC" ] && [ -d "$INSTALL_DIR/static" ]; then
+        tmp="$(mktemp -d "$DEPLOY_STATE_DIR/.rollback-static.XXXXXX")" || return 1
+        # Copy the directory itself beneath the private mktemp parent so its
+        # owner/mode are preserved. Copying only `static/.` would leave the
+        # published snapshot root at mktemp's root-only 0700; restoring that
+        # root would make assets unreadable to the aurora service.
+        if ! cp -a -- "$INSTALL_DIR/static" "$tmp/snapshot"; then
+            rm -rf -- "$tmp"
+            return 1
+        fi
+        if ! mv -- "$tmp/snapshot" "$ROLLBACK_STATIC"; then
+            rm -rf -- "$tmp"
+            return 1
+        fi
+        rm -rf -- "$tmp"
+    fi
+}
+
 # Cover the binary, updater, static tree, and migrations. Manual redeploys and
 # installer re-runs do not maintain this ledger, so checking the SHA alone would
 # make their replaced artifacts invisible. Hash content/paths/modes, not mtimes.
@@ -649,7 +684,7 @@ write_deploy_state "$PENDING_FILE" "$NEW_SHA"
 write_status installing "Installing new binary, migrations, and static assets" "$OLD_SHA" "$NEW_SHA"
 log "installing..."
 
-# Audit H3 — snapshot the CURRENT binary + static dir BEFORE the
+# Audit H3 — snapshot the last known-good binary + static dir BEFORE the
 # swap so we can roll back if the new build fails its health
 # check. Migrations are intentionally NOT snapshotted: forward
 # migrations are usually irreversible (DROP COLUMN, type changes),
@@ -658,11 +693,14 @@ log "installing..."
 # Operators with reversible migrations can `pg_dump` separately
 # before tagging a release.
 
-# Snapshot binary. install -p preserves mode + mtime; .prev is
-# overwritten on each update so it always reflects the immediately-
-# prior version (not some weeks-old build).
-if [ -f "$INSTALL_BIN" ]; then
-    cp -p "$INSTALL_BIN" "$INSTALL_BIN.prev"
+# Snapshot publication is atomic.  In particular, a failed copy cannot turn a
+# partially prepared tree into a valid snapshot or destroy one retained from a
+# prior failed attempt.
+if ! prepare_rollback_snapshots; then
+    write_status failed "Could not prepare a complete rollback snapshot; live files were not changed. Correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+    log "rollback snapshot preparation failed"
+    rm -rf "$FRONTEND_TMP"
+    exit 1
 fi
 
 # Binary swap. install + rename = atomic on POSIX — there's never
@@ -693,11 +731,9 @@ if ! cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/" 2>>"$LOG_FILE"; then
     exit 1
 fi
 
-# Static SPA bundle. Atomic-swap pattern; we now KEEP static.old
-# around as our rollback snapshot until after the health check.
-# The install.sh C1 fix (clear stale .old before rename) still
-# applies — we only clear .old AFTER success or rollback.
-rm -rf "$INSTALL_DIR/static.old"   # clear any pre-existing crash leftover
+# Static SPA bundle. The root-owned rollback snapshot above remains untouched
+# while any install is pending; static.old is only a transient swap name.
+rm -rf "$INSTALL_DIR/static.old"
 stage_static_bundle "$FRONTEND_TMP/v2"
 if [ -d "$INSTALL_DIR/static" ]; then
     mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
@@ -897,8 +933,8 @@ if $SVC_OK; then
     # Actually — we COULD keep them for cross-update rollback, but
     # that grows disk forever and the dual-step rollback semantics
     # are confusing. Wipe on success.
-    rm -f "$INSTALL_BIN.prev"
-    rm -rf "$INSTALL_DIR/static.old"
+    rm -f -- "$ROLLBACK_BIN"
+    rm -rf -- "$ROLLBACK_STATIC" "$INSTALL_DIR/static.old"
     exit 0
 fi
 
@@ -911,20 +947,20 @@ log "service unhealthy — attempting rollback to the previous installed snapsho
 write_status restarting "New version failed health check — rolling back to previous binary" "$OLD_SHA" "$NEW_SHA"
 
 ROLLBACK_OK=true
-if [ -f "$INSTALL_BIN.prev" ]; then
+if [ -f "$ROLLBACK_BIN" ]; then
     # The failing binary stays as /usr/local/bin/aurora.failed for
     # post-mortem; .prev becomes the live binary again.
     mv "$INSTALL_BIN" "$INSTALL_BIN.failed"
-    mv "$INSTALL_BIN.prev" "$INSTALL_BIN"
+    cp -p -- "$ROLLBACK_BIN" "$INSTALL_BIN"
 else
     log "no $INSTALL_BIN.prev snapshot found — cannot rollback binary"
     ROLLBACK_OK=false
 fi
-if [ -d "$INSTALL_DIR/static.old" ]; then
+if [ -d "$ROLLBACK_STATIC" ]; then
     # Move the broken static dir aside (for inspection) and
     # restore the snapshot.
     mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.failed"
-    mv "$INSTALL_DIR/static.old" "$INSTALL_DIR/static"
+    cp -a -- "$ROLLBACK_STATIC/." "$INSTALL_DIR/static/"
     rm -rf "$INSTALL_DIR/static.failed"
 else
     log "no $INSTALL_DIR/static.old snapshot found — cannot rollback static"

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -196,6 +197,24 @@ echo 'service:restart' >> "$TEST_EVENTS"
 
     def flag(self, name: str) -> None:
         (self.control / name).touch()
+
+    def fail_migration_copy(self) -> None:
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$*" in *migrations*) exit 28 ;; esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+
+    def restore_cp(self) -> None:
+        (self.bin / "cp").unlink()
+        (self.bin / "cp").symlink_to(shutil.which("cp"))
+
+    def publish_release(self, revision: str) -> str:
+        (self.seed / "revision").write_text(revision + "\n")
+        self.git("-C", str(self.seed), "commit", "--quiet", "-am", revision)
+        sha = self.git("-C", str(self.seed), "rev-parse", "HEAD")
+        self.git("-C", str(self.seed), "push", "--quiet", str(self.remote), "main")
+        return sha
 
     def assert_old_assets(self) -> None:
         self.assertEqual(self.live_binary.read_text(), "old binary\n")
@@ -388,6 +407,61 @@ echo 'service:restart' >> "$TEST_EVENTS"
         self.assertEqual(self.run_update()["state"], "success")
         self.assertEqual(self.live_binary.read_text(), "binary new fixed\n")
 
+    def check_partial_install_then_failed_recovery(self, newer_target: bool) -> None:
+        # B promotes its binary, then fails before the static swap. The next
+        # attempt must retain A as the rollback source rather than snapshot B.
+        self.fail_migration_copy()
+        self.run_update(expected=1)
+        self.assertEqual(self.live_binary.read_text(), "binary new\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
+        self.assertEqual((self.state_dir / "rollback-static/v2/index.html").read_text(),
+                         "old frontend\n")
+
+        self.restore_cp()
+        args = ("--retry",)
+        if newer_target:
+            self.publish_release("newer broken")
+            args = ()
+        self.flag("health-fail")
+        self.run_update(*args, expected=1)
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertEqual(stat.S_IMODE((self.live / "static").stat().st_mode), 0o755)
+
+        # Repeated explicit failure must still roll back to A, not to either
+        # failed candidate B/C.
+        self.run_update("--retry", expected=1)
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+
+    def test_explicit_retry_preserves_original_snapshot(self) -> None:
+        self.check_partial_install_then_failed_recovery(False)
+
+    def test_new_target_preserves_original_snapshot(self) -> None:
+        self.check_partial_install_then_failed_recovery(True)
+
+    def test_interrupted_snapshot_is_never_published_or_used(self) -> None:
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$*" in
+  *rollback-static*) mkdir -p "$4"; echo partial > "$4/partial"; exit 28 ;;
+esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+        self.run_update(expected=1)
+        self.assert_old_assets()
+        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
+        self.assertFalse((self.state_dir / "rollback-static").exists())
+        self.assertEqual(list(self.state_dir.glob(".rollback-static.*")), [])
+
+        # Another preparation failure leaves the already complete binary
+        # snapshot intact; a later retry can finish and deploy normally.
+        self.run_update("--retry", expected=1)
+        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
+        self.restore_cp()
+        self.assertEqual(self.run_update("--retry")["state"], "success")
+
 
     def test_npm_install_failure_also_stops_before_build(self) -> None:
         # Exercise the supported no-lockfile fallback, not just npm ci.
@@ -416,11 +490,7 @@ echo 'service:restart' >> "$TEST_EVENTS"
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "committed bundle\n")
 
     def test_incomplete_install_is_blocked_not_reported_idle(self) -> None:
-        real_cp = shutil.which("cp")
-        self.stub("cp", f'''
-case "$*" in *migrations*) exit 28 ;; esac
-exec {shlex.quote(real_cp)} "$@"
-''')
+        self.fail_migration_copy()
         self.run_update(expected=1)
         self.assertTrue((self.state_dir / "pending").exists())
         self.assertFalse((self.state_dir / "deployed").exists())
