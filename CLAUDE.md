@@ -1084,7 +1084,7 @@ What to take from it, if this is picked up again:
 
 ## Enrichment recovery: NULL columns scanned into non-nullable Go fields
 
-Found while fixing issue #510 and swept in that follow-up. Four tables declare
+Found while fixing issue #510 and swept in that follow-up. Six tables declare
 columns NULLABLE that the structs they are scanned into declare as plain
 `int` / `string` / `float64`. pgx refuses that scan — `cannot scan NULL into
 *int` — and because the failure happens mid-iteration it fails the **whole
@@ -1167,10 +1167,13 @@ all-clear of exactly the shape `scripts/check-library-paths.sh` is full of.
 
 Known limits, stated plainly:
 
-- **The probe only covers queries some test actually exercises**, and it was
-  the minority of them. The sweep's real coverage came from reading every
-  projection; 16 of the 18 read paths had to be driven by hand to prove
-  anything. Read the call sites rather than trusting the probe.
+- **The probe only covers queries some test actually exercises**, and that is
+  a small minority of them. Measured: with one all-NULL `media_items` row
+  present and the fixes reverted, the ENTIRE suite produced exactly two
+  failures, both of them `GetRecentMedia` — every other exposed query was
+  invisible to it. The sweep's real coverage came from reading every
+  projection and then driving each read path by hand. Read the call sites;
+  a green suite is not evidence here.
 - **A probe that returns zero rows proves nothing, and says so in the same
   voice as a pass.** `GetCrossLibraryFiles` reported clean on the first run
   purely because the fixture had no `tmdb_id` and the function returns early;
