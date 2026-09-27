@@ -12,9 +12,10 @@
 #     to the PathChanged= event, so no sudo/NOPASSWD grant is
 #     required on the aurora user.
 #
-# Performance contract: when there's nothing new upstream, exits
-# in <1 s (just a `git fetch` + HEAD compare + status write). The
-# heavy lifting only runs when origin has commits we don't.
+# An idle check fetches the target and verifies the last successful deployment's
+# artifact fingerprint. Checkout HEAD alone is NOT proof of a successful deploy.
+# Failed builds retry the same revision; failures after installation begins need
+# --retry (or a newer upstream revision) to avoid repeated disruptive restarts.
 #
 # Status reporting: every phase writes a JSON document to
 # /var/lib/aurora/update-status.json. The admin UI polls
@@ -30,9 +31,8 @@
 #   - Refuses non-fast-forward merges (would require conflict
 #     resolution we can't automate).
 #   - On build failure, leaves the running binary untouched.
-#   - On post-restart health-check failure, leaves status=failed
-#     but does NOT auto-rollback (rollback is risky to automate;
-#     operator decides).
+#   - On health-check failure, attempts binary/static rollback, NOT DB rollback.
+#   - Marks a revision deployed only after restart and health check succeed.
 #
 # Concurrency: systemd's Type=oneshot serializes invocations, so
 # even if the timer fires while a manual button-click is running,
@@ -40,6 +40,17 @@
 # unit's RefuseManualStart setting).
 
 set -euo pipefail
+
+RETRY=false
+case "$#:${1:-}" in
+    0:) ;;
+    1:--retry) RETRY=true ;;
+    1:--help|1:-h)
+        echo "Usage: aurora-update [--retry]"
+        echo "--retry: explicitly retry an interrupted/failed install or rebuild the current revision."
+        exit 0 ;;
+    *) echo "Usage: aurora-update [--retry]" >&2; exit 2 ;;
+esac
 
 # ── Load installer-written env ────────────────────────────────────
 # install.sh writes AURORA_SOURCE_DIR=<the path you cloned to> to
@@ -55,6 +66,12 @@ STATUS_FILE=/var/lib/aurora/update-status.json
 LOG_FILE=/var/log/aurora/update.log
 INSTALL_BIN=/usr/local/bin/aurora
 INSTALL_DIR=/opt/aurora
+INSTALL_UPDATER=/usr/local/bin/aurora-update
+# Outside aurora-owned /var/lib/aurora and /opt/aurora: this is root's deploy
+# ledger, not UI state. Never infer success from update-status.json or HEAD.
+DEPLOY_STATE_DIR=/var/lib/aurora-updater
+DEPLOYED_FILE="$DEPLOY_STATE_DIR/deployed"
+PENDING_FILE="$DEPLOY_STATE_DIR/pending"
 SPA_SRC_DIR=static/redesign/app
 SPA_OUTPUT_DIR=static/v2
 
@@ -151,9 +168,9 @@ build_frontend_bundle() {
             log "No SPA source or committed $SPA_OUTPUT_DIR bundle found"
             return 1
         fi
-        rm -rf "$out_dir"
-        mkdir -p "$(dirname "$out_dir")"
-        cp -R "$SPA_OUTPUT_DIR" "$out_dir"
+        rm -rf "$out_dir" || return 1
+        mkdir -p "$(dirname "$out_dir")" || return 1
+        cp -R "$SPA_OUTPUT_DIR" "$out_dir" || return 1
         return 0
     fi
     if ! command -v npm >/dev/null 2>&1; then
@@ -161,14 +178,20 @@ build_frontend_bundle() {
         return 1
     fi
 
-    rm -rf "$out_dir"
-    mkdir -p "$(dirname "$out_dir")"
+    rm -rf "$out_dir" || return 1
+    mkdir -p "$(dirname "$out_dir")" || return 1
     if [ -f "$SPA_SRC_DIR/package-lock.json" ]; then
         log "npm ci..."
-        (cd "$SPA_SRC_DIR" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1)
+        if ! (cd "$SPA_SRC_DIR" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
+            log "npm ci failed; refusing to build with incomplete dependencies"
+            return 1
+        fi
     else
         log "npm install..."
-        (cd "$SPA_SRC_DIR" && npm install --no-audit --no-fund >>"$LOG_FILE" 2>&1)
+        if ! (cd "$SPA_SRC_DIR" && npm install --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
+            log "npm install failed; refusing to build with incomplete dependencies"
+            return 1
+        fi
     fi
     log "vite build..."
     (cd "$SPA_SRC_DIR" && npm run build -- --outDir "$out_dir" >>"$LOG_FILE" 2>&1)
@@ -193,6 +216,33 @@ on_error() {
     exit 1
 }
 trap 'on_error $LINENO' ERR
+
+# Take the shared lock BEFORE status writes, fetch, and merge. A manual
+# redeploy may be building this very checkout; merging before the lock can
+# change its sources mid-build. A losing contender must not overwrite the
+# active deploy's status. Missing locking is a configuration error, not safe
+# permission to proceed unprotected.
+LOCK_FILE=/var/lock/aurora-deploy.lock
+if ! command -v flock >/dev/null 2>&1; then
+    echo "FATAL: flock not found; install util-linux before updating Aurora." >&2
+    exit 1
+fi
+if ! exec 9>"$LOCK_FILE"; then
+    echo "FATAL: cannot open deploy lock $LOCK_FILE; no update attempted." >&2
+    exit 1
+fi
+if ! flock -n 9; then
+    echo "Another deploy holds $LOCK_FILE; skipping without changing its status."
+    exit 0
+fi
+cleanup() {
+    if [ -n "${FRONTEND_TMP:-}" ]; then rm -rf -- "$FRONTEND_TMP"; fi
+    exec 9>&- || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+install -d -m 700 "$DEPLOY_STATE_DIR"
 
 # ── Preflight ─────────────────────────────────────────────────────
 #
@@ -270,6 +320,27 @@ case "$ORIGIN_URL" in
         exit 1
         ;;
 esac
+
+# Presence and execution are separate from the version parser below. An
+# unrecognised version string can warn; a missing/broken executable cannot
+# build the SPA. Check both tools before HEAD can advance. systemd does not
+# source interactive shell profiles or automatically activate nvm.
+# AURORA-TOOLCHAIN-GATE-BEGIN
+if [ -d "$SPA_SRC_DIR" ]; then
+    for tool in node npm; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            write_status misconfigured "$tool not found on the updater PATH. Install a compatible system-wide Node.js/npm toolchain (Node 22.x recommended), or configure the service PATH; then retry Update Now. Source and running assets were not changed. See docs/updater-recovery.md."
+            log "$tool not found on updater PATH; refusing update before checkout changes"
+            exit 1
+        fi
+        if ! "$tool" --version >/dev/null 2>>"$LOG_FILE"; then
+            write_status misconfigured "$tool exists but '$tool --version' failed in the updater environment. Repair the Node.js/npm installation and retry; source and running assets were not changed. See /var/log/aurora/update.log and docs/updater-recovery.md."
+            log "$tool --version failed; refusing update before checkout changes"
+            exit 1
+        fi
+    done
+fi
+# AURORA-TOOLCHAIN-GATE-END
 
 # ── Node version (deep-debug: the two-week silent stall) ──────────
 #
@@ -370,6 +441,87 @@ if [ -d "$SPA_SRC_DIR" ]; then
 fi
 # AURORA-NODE-GATE-END
 
+# Atomically replace a root-only ledger entry. The shared deploy lock is held
+# for every read/write. A crash before rename leaves the old entry intact.
+write_deploy_state() {
+    local target="$1" value="$2" tmp
+    tmp="$(mktemp "$DEPLOY_STATE_DIR/.state.XXXXXX")" || return 1
+    if ! printf '%s\n' "$value" > "$tmp" || ! mv -f -- "$tmp" "$target"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+# Cover the binary, updater, static tree, and migrations. Manual redeploys and
+# installer re-runs do not maintain this ledger, so checking the SHA alone would
+# make their replaced artifacts invisible. Hash content/paths/modes, not mtimes.
+# Never follow symlinks, and fail on unreadable/missing artifacts rather than
+# treating an incomplete tree as successfully deployed.
+deployment_fingerprint() {
+    python3 - "$INSTALL_BIN" "$INSTALL_UPDATER" "$INSTALL_DIR/static" "$INSTALL_DIR/migrations" <<'DEPLOY_PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+h = hashlib.sha256()
+def field(value):
+    h.update(len(value).to_bytes(8, "big"))
+    h.update(value)
+
+def visit(path, relative):
+    mode = path.lstat().st_mode
+    field(os.fsencode(relative))
+    field(str(stat.S_IMODE(mode)).encode())
+    if stat.S_ISREG(mode):
+        field(b"file")
+        content = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                content.update(chunk)
+        field(content.digest())
+    elif stat.S_ISDIR(mode):
+        field(b"directory")
+        for child in sorted(path.iterdir(), key=lambda p: os.fsencode(p.name)):
+            visit(child, relative + "/" + child.name)
+    else:
+        # Symlink targets can change without the link changing. Refuse them
+        # rather than certify content we did not hash (or follow outside roots).
+        raise OSError("unsupported artifact type: " + str(path))
+
+try:
+    for i, root in enumerate(sys.argv[1:]):
+        visit(Path(root), str(i))
+except OSError as exc:
+    print("Cannot fingerprint deployment: " + str(exc), file=sys.stderr)
+    sys.exit(1)
+print(h.hexdigest())
+DEPLOY_PY
+}
+
+deployment_matches() {
+    local sha fingerprint extra actual
+    [ -r "$DEPLOYED_FILE" ] || return 1
+    IFS=' ' read -r sha fingerprint extra < "$DEPLOYED_FILE" || return 1
+    [[ "$sha" = "$1" && "$fingerprint" =~ ^[0-9a-f]{64}$ && -z "$extra" ]] || return 1
+    actual="$(deployment_fingerprint 2>>"$LOG_FILE")" || return 1
+    [ "$actual" = "$fingerprint" ]
+}
+
+# Refresh from the exact verified commit, not a possibly modified worktree.
+# Renaming the installed script leaves this process's open script inode alone.
+refresh_installed_updater() {
+    local tmp
+    tmp="$(mktemp "${INSTALL_UPDATER}.XXXXXX")" || return 1
+    if ! git show "$NEW_SHA:scripts/aurora-update.sh" > "$tmp" \
+        || ! bash -n "$tmp" || ! chmod 755 "$tmp" \
+        || ! mv -f -- "$tmp" "$INSTALL_UPDATER"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
 # ── Fetch + check ─────────────────────────────────────────────────
 write_status checking "Checking origin/$BRANCH for new commits"
 
@@ -383,14 +535,25 @@ fi
 
 NEW_SHA="$(git rev-parse "origin/$BRANCH")"
 
-if [ "$OLD_SHA" = "$NEW_SHA" ]; then
-    write_status idle "Already up to date ($OLD_SHA)" "$OLD_SHA" "$NEW_SHA"
-    # No log spam for the common no-op case (5-min cadence × idle
-    # would fill the log fast). One log line per actual update.
+# An install that did not reach success may already have changed live files
+# or run migrations. Do not automatically retry it every five minutes. Build
+# failures never create this intent record and remain automatically retryable.
+PENDING_SHA=""
+if [ -f "$PENDING_FILE" ]; then
+    IFS= read -r PENDING_SHA < "$PENDING_FILE" || true
+    if ! $RETRY && { [ "$PENDING_SHA" = "$NEW_SHA" ] || [[ ! "$PENDING_SHA" =~ ^[0-9a-f]{40}$ ]]; }; then
+        write_status failed "An earlier install of $PENDING_SHA did not finish successfully. Automatic retry is paused to prevent restart loops. Inspect update.log and service health, then run 'sudo aurora-update --retry' explicitly. A valid failed-revision record may also be superseded by a newer upstream revision."
+        log "incomplete install record blocks automatic retry of $NEW_SHA"
+        exit 1
+    fi
+fi
+
+if ! $RETRY && [ "$OLD_SHA" = "$NEW_SHA" ] && deployment_matches "$NEW_SHA"; then
+    write_status idle "Already successfully deployed ($NEW_SHA); installed artifacts match" "$OLD_SHA" "$NEW_SHA"
     exit 0
 fi
 
-log "Update available: $OLD_SHA → $NEW_SHA on $BRANCH"
+log "Deployment needed: source $OLD_SHA → $NEW_SHA on $BRANCH (checkout equality is not deployment success)"
 
 # ── Commit-signature verification (deep-debug H12) ────────────────
 # When AURORA_UPDATE_REQUIRE_SIGNED=true, the fetched tip MUST carry a valid
@@ -409,9 +572,9 @@ if [ "${AURORA_UPDATE_REQUIRE_SIGNED:-false}" = "true" ] || [ "${AURORA_UPDATE_R
             log "allowed-signers file unreadable: $AURORA_UPDATE_ALLOWED_SIGNERS"
             exit 1
         fi
-        git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$AURORA_UPDATE_ALLOWED_SIGNERS" verify-commit "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
+        git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$AURORA_UPDATE_ALLOWED_SIGNERS" verify-commit "$NEW_SHA" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
     else
-        git verify-commit "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
+        git verify-commit "$NEW_SHA" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
     fi
     if [ "$VERIFY_OK" -ne 1 ]; then
         write_status failed "Commit-signature verification FAILED for origin/$BRANCH ($NEW_SHA) — refusing to build + install unverified code as root. Check the maintainer's signing key / AURORA_UPDATE_ALLOWED_SIGNERS." "$OLD_SHA" "$NEW_SHA"
@@ -443,78 +606,18 @@ fi
 # ── Pull ──────────────────────────────────────────────────────────
 write_status updating "Pulling commits from origin/$BRANCH" "$OLD_SHA" "$NEW_SHA"
 
-if ! git merge --ff-only "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
+# --ff-only alone accepts a target behind local HEAD as "already up to date".
+# That would build unverified local commits while labelling them as NEW_SHA.
+if ! git merge-base --is-ancestor "$OLD_SHA" "$NEW_SHA"; then
+    write_status failed "Source checkout is ahead of or diverged from origin/$BRANCH; refusing to build a different revision from the verified target." "$OLD_SHA" "$NEW_SHA"
+    log "source is not an ancestor of the verified target; manual reconciliation needed"
+    exit 1
+fi
+if ! git merge --ff-only "$NEW_SHA" >>"$LOG_FILE" 2>&1; then
     write_status failed "Cannot fast-forward to origin/$BRANCH — manual reconciliation needed (the local branch has diverged)." "$OLD_SHA" "$NEW_SHA"
     log "merge --ff-only refused; branch diverged"
     exit 1
 fi
-
-# ── Cross-script deploy lock (audit MED) ─────────────────────────
-# redeploy.sh (the manual deploy helper) takes a NON-blocking flock
-# on /var/lock/aurora-deploy.lock to serialize its rebuild+install
-# +atomic-swap against US. Until now this updater never acquired
-# that lock, so a root auto-update could interleave with a manual
-# redeploy and corrupt /opt/aurora/static (one script's
-# `mv static.new static` landing mid-`cp` of the other). Acquire the
-# SAME lock here, around the mutating build → install → atomic-swap
-# → restart window. We take it just before the build (the read-only
-# fetch/idle path above stays lock-free so the <1 s no-op case never
-# contends) and hold it until process exit (released by the EXIT
-# trap below + the kernel on fd close), matching redeploy.sh's hold
-# duration so neither script can swap static while the other is
-# restarting/rolling back.
-#
-# Non-blocking by design: if redeploy.sh (or a queued sibling) holds
-# the lock, we DON'T fail the update — we log + write a benign status
-# and skip THIS run cleanly. The timer fires again in 5 min, by which
-# point the other deploy has almost certainly finished. fd 9 matches
-# redeploy.sh's choice (high enough to avoid stdin/out/err 0,1,2).
-#
-# set -euo pipefail safety: every fallible command below is tested by
-# `if`/`!`, which both exempts it from `set -e` AND prevents the ERR
-# trap from firing a spurious `failed` status on a lock we chose to
-# skip. We run as root, so a plain `touch` suffices (redeploy.sh
-# needs sudo); /var/lock is world-writable + sticky on Linux.
-LOCK_FILE=/var/lock/aurora-deploy.lock
-LOCK_HELD=false
-if ! command -v flock >/dev/null 2>&1; then
-    # No flock (non-Linux / minimal image). redeploy.sh already
-    # assumes flock on the Linux target, so this is belt-and-
-    # suspenders: warn that the cross-script guard is unavailable and
-    # proceed (systemd's Type=oneshot still serializes the updater
-    # against itself; only a concurrent manual redeploy.sh is unguarded).
-    log "WARN: flock not found — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
-elif ! touch "$LOCK_FILE" 2>>"$LOG_FILE"; then
-    log "WARN: could not create/open $LOCK_FILE — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
-# `exec 9>` is tested by `if !` so a redirection failure (e.g. fd in
-# use, FS gone read-only between the touch and here) is caught HERE —
-# it does not trip `set -e`/the ERR trap into a spurious `failed`.
-# On success the open fd persists for the rest of the script.
-elif ! exec 9>"$LOCK_FILE"; then
-    log "WARN: could not open $LOCK_FILE on fd 9 — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
-else
-    if ! flock -n 9; then
-        # Another deploy (redeploy.sh, or a queued aurora-update) holds
-        # the lock. Skip cleanly — NOT a failure. Use `idle` so the
-        # admin UI doesn't flash an alarming "failed" for a transient,
-        # self-healing condition; the next timer tick retries.
-        write_status idle "Skipped this update: another deploy holds $LOCK_FILE (likely a manual redeploy.sh). Will retry on the next timer tick." "$OLD_SHA" "$NEW_SHA"
-        log "deploy lock $LOCK_FILE held by another process — skipping this run"
-        exec 9>&- 2>/dev/null || true
-        exit 0
-    fi
-    LOCK_HELD=true
-    log "acquired deploy lock $LOCK_FILE (fd 9)"
-fi
-
-# Release the deploy lock on ANY exit. Closing fd 9 drops the flock;
-# the kernel also does this on process exit, but explicit is safer
-# (matches redeploy.sh). The ERR trap only reports+exits, so this
-# single EXIT trap for cleanup is sufficient and runs after it (e.g.
-# on a `set -e` abort, on_error's `exit 1` fires this). Guarded on
-# LOCK_HELD so we never touch fd 9 when we didn't open it, and the
-# body always succeeds so it can't perturb the script's exit code.
-trap 'if [ "${LOCK_HELD:-false}" = true ]; then exec 9>&- 2>/dev/null || true; fi' EXIT
 
 # ── Build ─────────────────────────────────────────────────────────
 write_status building "Building Aurora frontend and binary" "$OLD_SHA" "$NEW_SHA"
@@ -530,13 +633,17 @@ fi
 log "go build..."
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
-if ! CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o aurora.new ./cmd/aurora >>"$LOG_FILE" 2>&1; then
+if ! CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o "$FRONTEND_TMP/aurora" ./cmd/aurora >>"$LOG_FILE" 2>&1; then
     write_status failed "go build failed — see /var/log/aurora/update.log. Old binary is still running." "$OLD_SHA" "$NEW_SHA"
     log "go build failed"
-    rm -f aurora.new
     rm -rf "$FRONTEND_TMP"
     exit 1
 fi
+
+# Record installation intent before the first live-file mutation. Retain it
+# after interrupted installs, restart failures, or rollback; only confirmed
+# success clears it. Pre-install build failures do not poison future retries.
+write_deploy_state "$PENDING_FILE" "$NEW_SHA"
 
 # ── Install ───────────────────────────────────────────────────────
 write_status installing "Installing new binary, migrations, and static assets" "$OLD_SHA" "$NEW_SHA"
@@ -562,8 +669,7 @@ fi
 # a moment when /usr/local/bin/aurora doesn't exist or is
 # half-written. (systemd keeps using the OLD inode for the running
 # process until we restart; the new binary is what fires on next exec.)
-install -m 755 aurora.new "$INSTALL_BIN.new"
-rm aurora.new
+install -m 755 "$FRONTEND_TMP/aurora" "$INSTALL_BIN.new"
 mv "$INSTALL_BIN.new" "$INSTALL_BIN"
 
 # Migrations
@@ -773,6 +879,14 @@ for _ in $(seq 1 30); do
 done
 
 if $SVC_OK; then
+    if ! refresh_installed_updater; then
+        write_status failed "Aurora passed its health check, but installing the updated updater script failed. See update.log; correct permissions/storage and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+        log "updater refresh failed after healthy application restart"
+        exit 1
+    fi
+    DEPLOYED_FINGERPRINT="$(deployment_fingerprint)"
+    write_deploy_state "$DEPLOYED_FILE" "$NEW_SHA $DEPLOYED_FINGERPRINT"
+    rm -f -- "$PENDING_FILE"
     COMMIT_SUBJECT="$(git log -1 --format=%s "$NEW_SHA" 2>/dev/null || echo "$NEW_SHA")"
     write_status success "Updated to $NEW_SHA ($COMMIT_SUBJECT)" "$OLD_SHA" "$NEW_SHA"
     log "SUCCESS: now running $NEW_SHA"
@@ -793,7 +907,7 @@ fi
 # place (see snapshot rationale above). If rollback also fails,
 # we leave the box in the broken state but report it loudly so
 # the operator knows what they're walking into.
-log "service unhealthy — attempting rollback to $OLD_SHA"
+log "service unhealthy — attempting rollback to the previous installed snapshot (not inferred from checkout HEAD)"
 write_status restarting "New version failed health check — rolling back to previous binary" "$OLD_SHA" "$NEW_SHA"
 
 ROLLBACK_OK=true
@@ -831,8 +945,8 @@ for _ in $(seq 1 30); do
 done
 
 if $ROLLBACK_HEALTHY; then
-    write_status failed "Update to $NEW_SHA failed its health check — rolled back to $OLD_SHA. The bad binary is at $INSTALL_BIN.failed for post-mortem; check 'journalctl -u aurora -n 80' to see why it crashed." "$OLD_SHA" "$NEW_SHA"
-    log "rolled back successfully — now running $OLD_SHA"
+    write_status failed "Update to $NEW_SHA failed its health check — restored the previous installed snapshot. Automatic retry of this revision is paused; inspect the failure before using --retry. The bad binary is at $INSTALL_BIN.failed for post-mortem; check 'journalctl -u aurora -n 80' to see why it crashed." "$OLD_SHA" "$NEW_SHA"
+    log "rollback health check passed; failed revision $NEW_SHA remains pending manual retry"
 elif $ROLLBACK_OK; then
     write_status failed "Update FAILED and rollback ALSO failed health check. Manual recovery required: ssh in, inspect 'journalctl -u aurora -n 80', and restore service." "$OLD_SHA" "$NEW_SHA"
     log "rollback restart also unhealthy — manual recovery required"
