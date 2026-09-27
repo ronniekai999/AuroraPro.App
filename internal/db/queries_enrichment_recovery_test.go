@@ -1,28 +1,45 @@
 package db
 
-// Integration coverage for the enrichment-recovery path behind issue #510: a
-// TV show whose media_items row was created but whose (deferred) enrichment
-// never ran must remain reachable, both by a later rescan and by the periodic
-// metadata refresh.
+// Regression tests for the NULL-column scan defect class found while fixing
+// issue #510.
 //
-// Three distinct failures are pinned here, each of which on its own made that
-// state permanent:
+// media_items, media_files, episode_files and requests all declare columns
+// NULLABLE that the Go structs they are scanned into declare as plain
+// int/string/float64 (models.MediaItem, models.MediaFile, models.EpisodeFile,
+// models.ContinueWatchingItem, models.WatchlistItem, models.Request). pgx
+// refuses that scan outright — "cannot scan NULL into *int" — and because the
+// failure happens mid-iteration it fails the WHOLE query, not one row. A single
+// NULL anywhere in the catalog therefore takes out an entire endpoint: one such
+// row turned /api/media/recent into a 500 for every user, and made
+// Enricher.RefreshStaleMetadata return an error having enriched nothing (its
+// query sorts un-enriched rows first, so the state was self-sustaining and
+// silently disabled metadata refresh for the whole catalog).
 //
-//  1. FindMediaItemByTitle could not report whether a row had been enriched, so
-//     the scanner latched enrichment off for any row that merely existed.
-//  2. FindMediaItemByTitle and GetStaleMetadataItems both scanned the nullable
-//     `year` column into a non-nullable int, so a single row whose year the
-//     parser could not determine failed the query outright — and for
-//     GetStaleMetadataItems that meant RefreshStaleMetadata returned an error
-//     having enriched NOTHING, for ever, since NULL-year rows are exactly the
-//     un-enriched ones the queue exists to reach.
-//  3. Items no provider has an entry for kept last_metadata NULL for ever and
-//     so held the head of a NULLS-FIRST-ordered LIMIT 100 queue, starving every
-//     other item in the catalog once 100 of them accumulated.
+// No application write path produces these NULLs — UpsertMediaItem inserts the
+// Go zero values and UpdateMediaMetadata only sets fields it has values for.
+// They arrive via hand-written catalog SQL, which this repo's own runbooks
+// prescribe (docs/moving-media-paths.md) and which is how #510 was remediated
+// in production. So this is latent robustness with a real trigger.
 //
-// Opt-in: set TEST_DATABASE_URL=postgres://... to run; skipped otherwise.
-// Shares the harness (requireIntegrationDB / seedTestUser / seedTestLibrary /
-// randomSuffix) with queries_jsonb_integration_test.go.
+// The fix is in the SQL, not the structs: COALESCE to the zero values the
+// codebase already uses as "unknown" sentinels (`json:"...,omitempty"` on all
+// five media_items columns, `nilIfZero` on the enricher's year write-back,
+// "0 = unknown" / "Empty = unknown" on the MediaFile colour and fps fields).
+// Making the struct fields pointers would touch a very large number of call
+// sites for no gain.
+//
+// Opt-in integration: set TEST_DATABASE_URL=postgres://... to run. Reuses
+// requireIntegrationDB / randomSuffix / seedTestUser from
+// queries_jsonb_integration_test.go.
+//
+// !! A NULL ROW IN THIS SHARED DATABASE IS VISIBLE TO EVERY OTHER PACKAGE. !!
+// `go test ./...` runs packages CONCURRENTLY against one database, and the
+// queries under test here are catalog-wide (GetRecentMedia takes no library,
+// type or file filter at all). A fixture that leaks a NULL row does not fail
+// this package — it fails whichever unrelated package happens to read the
+// catalog next, which is exactly how the GetRecentMedia instance was found.
+// Every helper below therefore registers a t.Cleanup that deletes its own row,
+// and insertShow/insertMovie NULL only the columns the test is about.
 
 import (
 	"context"
@@ -32,552 +49,842 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 )
 
-// insertShow creates a show row with explicit control over the three columns
-// that decide enrichment state. A nil year inserts SQL NULL.
-//
-// overview/rating/runtime_minutes/content_rating are written as the zero values
-// UpsertMediaItem really inserts, rather than left to default to NULL. That is
-// deliberate: several queries read the WHOLE of media_items with no library
-// filter, so a NULL left lying around by a fixture is visible to every other
-// package running against this shared database. The tests that specifically need
-// NULLs write them explicitly and say so.
-func insertShow(t *testing.T, q *Queries, libID int64, title string, year *int, lastMetadata, lastAttempt *time.Time) int64 {
+// nullProbeLibrary seeds a library to hang NULL-column fixtures off.
+func nullProbeLibrary(t *testing.T, q *Queries, ownerID int64, libType string) int64 {
 	t.Helper()
 	var id int64
-	if err := q.pool.QueryRow(context.Background(),
-		`INSERT INTO media_items
-		   (library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		    content_rating, last_metadata, last_metadata_attempt)
-		 VALUES ($1, 'show', $2, $2, $3, '', 0, 0, '', $4, $5) RETURNING id`,
-		libID, title, year, lastMetadata, lastAttempt).Scan(&id); err != nil {
-		t.Fatalf("insert show %q: %v", title, err)
+	err := q.pool.QueryRow(context.Background(),
+		`INSERT INTO libraries (name, type, paths, owner_id)
+		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		"nullcol_test_"+randomSuffix(t), libType,
+		[]string{"/tmp/nullcol_test"}, ownerID,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed %s library: %v", libType, err)
 	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM libraries WHERE id = $1`, id)
+	})
 	return id
 }
 
-// The scanner's latch reads FindMediaItemByTitle().Attempted to tell "this show
-// has already been dealt with" from "this show's row exists but its enrichment
-// never ran". Those are the same thing as far as the row's existence goes, and
-// opposite as far as re-queueing a full enrichment is concerned.
+// insertShow inserts a media_items row with EVERY nullable column this defect
+// class covers left NULL — the shape a hand-written catalog UPDATE/INSERT
+// leaves behind, and the shape no application write path produces.
 //
-// All three states are asserted, because both boundaries matter: reporting an
-// untouched row as attempted makes #510 permanent, and reporting an
-// answered-but-unmatched row as un-attempted re-pays a full search on every
-// scan that brings one of its files.
-func TestFindMediaItemByTitleReportsWhetherRowWasAttempted(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-	year := 2016
-	ts := time.Now().Add(-24 * time.Hour)
-
-	cases := []struct {
-		name         string
-		lastMetadata *time.Time
-		lastAttempt  *time.Time
-		want         bool
-		why          string
-	}{
-		{
-			name: "never touched", want: false,
-			why: "a row whose enrichment never ran must be re-queued for a full pass, or #510 is permanent",
-		},
-		{
-			name: "stored", lastMetadata: &ts, lastAttempt: &ts, want: true,
-			why: "an enriched row must not be re-enriched on every rescan",
-		},
-		{
-			name: "attempted, nothing stored", lastAttempt: &ts, want: true,
-			why: "a row a provider answered about with no match must not re-pay a search, embed and LLM re-match on every scan that brings a file",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			title := "Attempt " + tc.name + " " + randomSuffix(t)
-			insertShow(t, q, libID, title, &year, tc.lastMetadata, tc.lastAttempt)
-			found, err := q.FindMediaItemByTitle(ctx, libID, "show", title)
-			if err != nil {
-				t.Fatalf("find: %v", err)
-			}
-			if found == nil {
-				t.Fatal("show not found")
-			}
-			if found.Attempted != tc.want {
-				t.Errorf("Attempted = %v, want %v — %s", found.Attempted, tc.want, tc.why)
-			}
-		})
-	}
+// It returns the new row's id and the unique title token, so a catalog-wide
+// query can be scoped to this fixture rather than asserted against the whole
+// database.
+//
+// The t.Cleanup delete is load-bearing, not tidiness: see the note at the top
+// of this file. Leaving the row behind breaks OTHER packages, not this one.
+func insertShow(t *testing.T, q *Queries, libraryID int64) (int64, string) {
+	t.Helper()
+	return insertNullColumnItem(t, q, libraryID, "show")
 }
 
-// A show whose folder carries no year parses to a NULL year. The wide
-// projection scanned that into models.MediaItem.Year (a plain int) and failed
-// with "cannot scan NULL into *int", so the canonical-row lookup errored on
-// exactly the rows it exists to find — the scanner then fell through to
-// UpsertMediaItem and lost the enrichment state entirely.
-func TestFindMediaItemByTitleHandlesNullYear(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
+func insertMovie(t *testing.T, q *Queries, libraryID int64) (int64, string) {
+	t.Helper()
+	return insertNullColumnItem(t, q, libraryID, "movie")
+}
 
-	title := "No Year Show " + randomSuffix(t)
-	id := insertShow(t, q, libID, title, nil, nil, nil)
-
-	found, err := q.FindMediaItemByTitle(ctx, libID, "show", title)
+func insertNullColumnItem(t *testing.T, q *Queries, libraryID int64, itemType string) (int64, string) {
+	t.Helper()
+	token := "NullProbe" + randomSuffix(t)
+	var id int64
+	err := q.pool.QueryRow(context.Background(),
+		`INSERT INTO media_items
+		   (library_id, type, title, sort_title,
+		    year, overview, rating, runtime_minutes, content_rating)
+		 VALUES ($1, $2, $3, $3, NULL, NULL, NULL, NULL, NULL) RETURNING id`,
+		libraryID, itemType, token,
+	).Scan(&id)
 	if err != nil {
-		t.Fatalf("NULL-year row must not fail the lookup, got: %v", err)
+		t.Fatalf("seed all-NULL %s media item: %v", itemType, err)
 	}
-	if found == nil {
-		t.Fatal("NULL-year show not found")
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM media_items WHERE id = $1`, id)
+	})
+	return id, token
+}
+
+// assertUnknownSentinels pins the OTHER half of the contract: the fix must not
+// merely stop erroring, it must produce the zero values the rest of the
+// codebase already reads as "unknown". `omitempty` on all five JSON tags means
+// these are the values that make the field vanish from the API response, which
+// is what the SPA and the enricher's nilIfZero write-back both assume.
+func assertUnknownSentinels(t *testing.T, where string, m *models.MediaItem) {
+	t.Helper()
+	if m.Year != 0 {
+		t.Errorf("%s: Year = %d, want 0 (the unknown sentinel)", where, m.Year)
 	}
-	if found.ID != id {
-		t.Errorf("found id %d, want %d", found.ID, id)
+	if m.Overview != "" {
+		t.Errorf("%s: Overview = %q, want \"\"", where, m.Overview)
 	}
-	if found.Attempted {
-		t.Error("NULL-year untouched row reported as Attempted")
+	if m.Rating != 0 {
+		t.Errorf("%s: Rating = %v, want 0", where, m.Rating)
+	}
+	if m.RuntimeMin != 0 {
+		t.Errorf("%s: RuntimeMin = %d, want 0", where, m.RuntimeMin)
+	}
+	if m.ContentRating != "" {
+		t.Errorf("%s: ContentRating = %q, want \"\"", where, m.ContentRating)
 	}
 }
 
-// The severe half of the same defect: one row with ANY nullable projected
-// column NULL failed GetStaleMetadataItems outright, so RefreshStaleMetadata
-// returned "get stale items: ..." and enriched nothing at all — and because
-// un-enriched rows sort FIRST here, one such row disabled metadata refresh for
-// the whole catalog, permanently and silently.
-//
-// Every nullable column in the projection is left NULL here, not just `year`:
-// the first version of this test nulled only the year and the query then failed
-// on `overview` instead, which is the "assume the next one is adjacent rather
-// than novel" lesson from the check-library-paths post-mortem. Asserting all of
-// them at once is what makes a re-narrowed COALESCE list fail here.
+// TestGetRecentMediaSurvivesNullColumns is the user-facing instance. The query
+// reads every media_items row with no library, type or file filter and backs
+// the "Recently Added" rail, so one NULL row anywhere in the catalog turned
+// /api/media/recent into a 500 for every user.
+func TestGetRecentMediaSurvivesNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "show")
+	id, _ := insertShow(t, q, lib)
+
+	items, err := q.GetRecentMedia(context.Background(), 500)
+	if err != nil {
+		t.Fatalf("GetRecentMedia with a NULL-column row present: %v", err)
+	}
+	found := false
+	for _, it := range items {
+		if it.ID == id {
+			found = true
+			assertUnknownSentinels(t, "GetRecentMedia", it)
+		}
+	}
+	if !found {
+		// Not a pass: the row is the newest in the catalog and the limit is
+		// generous, so its absence means the query silently dropped it.
+		t.Errorf("the NULL-column row (id %d) is missing from GetRecentMedia's %d results", id, len(items))
+	}
+}
+
+// TestGetStaleMetadataItemsSurvivesNullColumns is the enrichment instance. One
+// NULL row made Enricher.RefreshStaleMetadata return an error having enriched
+// NOTHING, and because un-enriched rows (last_metadata IS NULL) sort FIRST in
+// this query, the row that broke it was always in the first page — so the
+// state was self-sustaining.
 func TestGetStaleMetadataItemsSurvivesNullColumns(t *testing.T) {
 	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "show")
+	id, _ := insertShow(t, q, lib)
 
-	// Explicit NULLs for year, overview, rating, runtime_minutes and
-	// content_rating — every nullable column GetStaleMetadataItems projects into
-	// a non-nullable Go field.
-	var id int64
-	if err := q.pool.QueryRow(ctx,
-		`INSERT INTO media_items
-		   (library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating)
-		 VALUES ($1,'show',$2,$2,NULL,NULL,NULL,NULL,NULL) RETURNING id`,
-		libID, "Stale All Null "+randomSuffix(t)).Scan(&id); err != nil {
-		t.Fatalf("insert all-null row: %v", err)
-	}
-
-	items, err := q.GetStaleMetadataItems(ctx, 0)
+	items, err := q.GetStaleMetadataItems(context.Background(), time.Nanosecond)
 	if err != nil {
-		t.Fatalf("a row with NULL nullable columns must not fail the whole refresh pass, got: %v", err)
+		t.Fatalf("GetStaleMetadataItems with a NULL-column row present: %v", err)
 	}
-	// Never-touched rows sort first under NULLS FIRST, so our row should be in
-	// the window. Assert it is actually returned AND that each NULL read back as
-	// its zero-value sentinel rather than the row being dropped.
+	// Presence is asserted, not assumed. The query is LIMIT 100 over a catalog
+	// shared with concurrently-running packages, and the fixture's NULL
+	// last_metadata puts it in the NULLS FIRST group where ties break
+	// arbitrarily — so on a populated database it CAN fall off the page, and
+	// then both halves of this test are vacuous: the error half too, because
+	// the query only fails if a NULL row is actually in the page. A skip that
+	// looks like a pass is the failure mode this whole file exists to avoid,
+	// so make it loud instead.
 	for _, it := range items {
-		if it.ID != id {
-			continue
-		}
-		if it.Year != 0 {
-			t.Errorf("NULL year read back as %d, want 0", it.Year)
-		}
-		if it.Overview != "" {
-			t.Errorf("NULL overview read back as %q, want empty", it.Overview)
-		}
-		if it.Rating != 0 {
-			t.Errorf("NULL rating read back as %v, want 0", it.Rating)
-		}
-		if it.RuntimeMin != 0 {
-			t.Errorf("NULL runtime_minutes read back as %d, want 0", it.RuntimeMin)
-		}
-		if it.ContentRating != "" {
-			t.Errorf("NULL content_rating read back as %q, want empty", it.ContentRating)
-		}
-		return
-	}
-	// Not being inside the LIMIT 100 window is legitimate on a shared database;
-	// the query not erroring is the property under test.
-	t.Logf("all-null stale row %d not within the returned %d; the no-error assertion still held", id, len(items))
-}
-
-// TouchMetadataAttempt records "a provider was asked and answered" without
-// claiming metadata was stored. Conflating the two would corrupt
-// RefreshStaleMetadata's smart diffing, which hands last_metadata to TMDB's
-// changes API and is only meaningful for an item that really was matched.
-func TestTouchMetadataAttemptDoesNotClaimMetadataWasStored(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-	id := insertShow(t, q, libID, "Attempt Only "+randomSuffix(t), nil, nil, nil)
-
-	if err := q.TouchMetadataAttempt(ctx, id); err != nil {
-		t.Fatalf("touch attempt: %v", err)
-	}
-
-	var lastMetadata, lastAttempt *time.Time
-	if err := q.pool.QueryRow(ctx,
-		`SELECT last_metadata, last_metadata_attempt FROM media_items WHERE id = $1`,
-		id).Scan(&lastMetadata, &lastAttempt); err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if lastAttempt == nil {
-		t.Error("last_metadata_attempt not stamped")
-	}
-	if lastMetadata != nil {
-		t.Error("last_metadata was written by an attempt stamp — smart diffing would hand TMDB a changes-since date for an item that was never matched")
-	}
-}
-
-// The starvation fix. Selection and ordering both read metadataProgressExpr, so
-// the predicates here are built from that same constant: it keeps the test from
-// drifting from production SQL, and scoping it to one row makes the assertion
-// independent of the LIMIT 100 window (which other packages' fixtures share).
-func TestUnmatchableItemsStopStarvingTheRefreshQueue(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-
-	// Exactly the production predicate, scoped to a single row.
-	selected := func(id int64, maxAge time.Duration) bool {
-		t.Helper()
-		cutoff := time.Now().Add(-maxAge)
-		var n int
-		if err := q.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM media_items WHERE id = $1
-			   AND (`+metadataProgressExpr+` IS NULL OR `+metadataProgressExpr+` < $2)`,
-			id, cutoff).Scan(&n); err != nil {
-			t.Fatalf("selection probe: %v", err)
-		}
-		return n == 1
-	}
-	// Ordering key, same expression. nil ⇒ sorts first under NULLS FIRST.
-	progress := func(id int64) *time.Time {
-		t.Helper()
-		var ts *time.Time
-		if err := q.pool.QueryRow(ctx,
-			`SELECT `+metadataProgressExpr+` FROM media_items WHERE id = $1`, id).Scan(&ts); err != nil {
-			t.Fatalf("progress probe: %v", err)
-		}
-		return ts
-	}
-
-	const refresh = 168 * time.Hour
-	unmatchable := insertShow(t, q, libID, "Unmatchable "+randomSuffix(t), nil, nil, nil)
-
-	// Before any attempt is recorded it is "never made progress": selected, and
-	// sorted ahead of every item that has a timestamp.
-	if !selected(unmatchable, refresh) {
-		t.Fatal("a never-attempted item must be selected for refresh")
-	}
-	if progress(unmatchable) != nil {
-		t.Fatal("a never-attempted item must sort first (NULL ordering key)")
-	}
-
-	// The provider answered, with no match: last_metadata stays NULL because
-	// UpdateMediaMetadata was never reached.
-	if err := q.TouchMetadataAttempt(ctx, unmatchable); err != nil {
-		t.Fatalf("touch attempt: %v", err)
-	}
-	if progress(unmatchable) == nil {
-		t.Error("an attempted item still sorts first — it would hold the head of the NULLS FIRST queue for ever and starve the rest of the catalog")
-	}
-	if selected(unmatchable, refresh) {
-		t.Error("an item attempted moments ago is still selected for refresh — the pass would re-read the same unmatchable items on every tick")
-	}
-	// It must come back once the refresh interval has actually elapsed: this is
-	// a rotation, not a permanent exclusion.
-	if !selected(unmatchable, 0) {
-		t.Error("an attempted item is excluded even past its refresh interval — it would never be retried")
-	}
-
-	// A genuinely enriched item stays on its normal rotation: due once
-	// last_metadata is older than the interval, not before.
-	old := time.Now().Add(-200 * time.Hour)
-	recent := time.Now().Add(-1 * time.Hour)
-	staleEnriched := insertShow(t, q, libID, "Stale Enriched "+randomSuffix(t), nil, &old, &old)
-	freshEnriched := insertShow(t, q, libID, "Fresh Enriched "+randomSuffix(t), nil, &recent, &recent)
-	if !selected(staleEnriched, refresh) {
-		t.Error("an item last enriched 200h ago must be due at a 168h interval")
-	}
-	if selected(freshEnriched, refresh) {
-		t.Error("an item enriched an hour ago must not be due at a 168h interval")
-	}
-
-	// A re-attempt that finds nothing must not leave an item permanently due on
-	// the strength of its stale last_metadata — GREATEST takes the later event.
-	if err := q.TouchMetadataAttempt(ctx, staleEnriched); err != nil {
-		t.Fatalf("touch attempt on stale item: %v", err)
-	}
-	if selected(staleEnriched, refresh) {
-		t.Error("a freshly re-attempted item is still due because its last_metadata is old — it would be re-read on every tick")
-	}
-}
-
-// The starvation fix, pinned END-TO-END through GetStaleMetadataItems itself.
-//
-// TestUnmatchableItemsStopStarvingTheRefreshQueue below exercises the
-// metadataProgressExpr predicate in isolation, which is NOT enough: because it
-// builds its predicate from the same constant the query interpolates, changing
-// the query body to plain `last_metadata` leaves it green. Only calling the real
-// function catches that.
-//
-// Deliberately does NOT seed more than the query's LIMIT 100 window. An earlier
-// version seeded 150 rows to demonstrate a two-pass rotation, which made this
-// file pair a test that assumes the window is not overflowed with a test that
-// overflows it by design — and an interrupted run left the excess rows behind and
-// broke both tests permanently on the shared database. The decisive assertion
-// here ("a stamped row is NOT selected") is a WHERE-clause property and so is
-// window-independent anyway; it is what kills the mutation.
-func TestGetStaleMetadataItemsRotatesPastAttemptedItems(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-	const refresh = 168 * time.Hour
-
-	const seeded = 5
-	ours := make(map[int64]bool, seeded)
-	ids := make([]int64, 0, seeded)
-	for i := 0; i < seeded; i++ {
-		id := insertShow(t, q, libID, "Rotate "+randomSuffix(t), nil, nil, nil)
-		ours[id] = true
-		ids = append(ids, id)
-	}
-	// Remove them promptly as well as on cleanup: a row with no metadata
-	// progress sorts to the head of this query's window, so leftovers from an
-	// interrupted run are visible to every other package sharing this database.
-	t.Cleanup(func() {
-		_, _ = q.pool.Exec(context.Background(), `DELETE FROM media_items WHERE id = ANY($1)`, ids)
-	})
-
-	selectedOurs := func() map[int64]bool {
-		t.Helper()
-		got, err := q.GetStaleMetadataItems(ctx, refresh)
-		if err != nil {
-			t.Fatalf("get stale: %v", err)
-		}
-		out := make(map[int64]bool)
-		for _, it := range got {
-			if ours[it.ID] {
-				out[it.ID] = true
-			}
-		}
-		return out
-	}
-
-	// Never touched ⇒ due, and sorted to the head under NULLS FIRST.
-	before := selectedOurs()
-	if len(before) != seeded {
-		t.Fatalf("%d of %d never-touched rows selected; if this is short, the shared test database is holding ~100 never-touched rows from an interrupted run and needs clearing", len(before), seeded)
-	}
-
-	// A provider answered about each of them with no match: last_metadata stays
-	// NULL because UpdateMediaMetadata was never reached.
-	for _, id := range ids {
-		if err := q.TouchMetadataAttempt(ctx, id); err != nil {
-			t.Fatalf("touch attempt: %v", err)
-		}
-	}
-
-	// The decisive assertion, and the window-independent one: selection is a
-	// WHERE clause, so a row excluded by it cannot appear whatever the LIMIT
-	// does. Under the old ordering these rows stay selected for ever and the
-	// pass re-reads the same items on every tick.
-	if after := selectedOurs(); len(after) != 0 {
-		t.Errorf("%d of %d items attempted moments ago are still selected for refresh — they hold the head of the NULLS FIRST queue and starve the rest of the catalog", len(after), seeded)
-	}
-
-	// And it is a rotation, not a permanent exclusion: clear one stamp and it
-	// comes straight back.
-	if _, err := q.pool.Exec(ctx,
-		`UPDATE media_items SET last_metadata_attempt = NULL WHERE id = $1`, ids[0]); err != nil {
-		t.Fatalf("clear attempt: %v", err)
-	}
-	if back := selectedOurs(); !back[ids[0]] {
-		t.Error("an item with no metadata progress is not selected — the queue would never reach it at all")
-	}
-}
-
-// Every catalog reader that projects media_items' nullable columns into
-// non-nullable Go fields must survive a row where they are NULL. One such row
-// fails the WHOLE query — pgx reports "cannot scan NULL into *int" mid-iteration
-// — so the caller gets an error instead of a result set.
-//
-// The list matters as much as the assertion. This started as one query
-// (GetStaleMetadataItems, where a NULL row silently disabled metadata refresh for
-// the entire catalog), then GetRecentMedia was found because this file's fixtures
-// left NULL columns lying around and broke it. At that point one all-NULL row was
-// the only thing in the whole SUITE that broke, and that measurement was briefly
-// mistaken for a reachability argument — but GetMediaItems, GetMediaItem,
-// SearchMedia and GetItemsNeedingReview have the identical shape and are all
-// user-facing: catalog browse, the detail page, search, the admin flagged list.
-// They were simply not covered by a test. "Not covered" is not "not reachable".
-func TestCatalogReadersSurviveNullColumns(t *testing.T) {
-	q := requireIntegrationDB(t)
-	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-
-	title := "All Null " + randomSuffix(t)
-	var id int64
-	if err := q.pool.QueryRow(ctx,
-		`INSERT INTO media_items
-		   (library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		    content_rating, match_status)
-		 VALUES ($1,'show',$2,$2,NULL,NULL,NULL,NULL,NULL,'needs_review') RETURNING id`,
-		libID, title).Scan(&id); err != nil {
-		t.Fatalf("insert all-null row: %v", err)
-	}
-
-	// A nil item means the row fell outside this reader's window, which is
-	// legitimate on a shared database; the no-error result is the property every
-	// case shares, and it is the one that was failing.
-	checkZeroed := func(t *testing.T, it *models.MediaItem) {
-		t.Helper()
-		if it == nil {
-			t.Log("row not within this reader's window; the no-error assertion still held")
+		if it.ID == id {
+			assertUnknownSentinels(t, "GetStaleMetadataItems", &it.MediaItem)
 			return
 		}
-		if it.Year != 0 || it.Overview != "" || it.Rating != 0 || it.RuntimeMin != 0 || it.ContentRating != "" {
-			t.Errorf("NULLs read back as year=%d overview=%q rating=%v runtime=%d content_rating=%q, want zero values",
-				it.Year, it.Overview, it.Rating, it.RuntimeMin, it.ContentRating)
-		}
 	}
-	find := func(items []*models.MediaItem) *models.MediaItem {
-		for _, it := range items {
-			if it.ID == id {
-				return it
-			}
-		}
-		return nil
-	}
-
-	t.Run("GetRecentMedia backs the Recently Added rail", func(t *testing.T) {
-		items, err := q.GetRecentMedia(ctx, 100)
-		if err != nil {
-			t.Fatalf("/api/media/recent would 500 for every user: %v", err)
-		}
-		checkZeroed(t, find(items))
-	})
-
-	t.Run("GetMediaItems backs catalog browse", func(t *testing.T) {
-		items, _, err := q.GetMediaItems(ctx, models.MediaFilter{}, models.PaginationParams{Page: 1, PerPage: 100})
-		if err != nil {
-			t.Fatalf("GET /api/media would 500: %v", err)
-		}
-		checkZeroed(t, find(items))
-	})
-
-	t.Run("GetMediaItem backs the detail page", func(t *testing.T) {
-		it, err := q.GetMediaItem(ctx, id)
-		if err != nil {
-			t.Fatalf("GET /api/media/{id} would 500 for this title: %v", err)
-		}
-		if it == nil {
-			t.Fatal("detail lookup by id returned no row")
-		}
-		checkZeroed(t, it)
-	})
-
-	t.Run("SearchMedia backs search", func(t *testing.T) {
-		items, err := q.SearchMedia(ctx, title, 50)
-		if err != nil {
-			t.Fatalf("search would 500 on any match: %v", err)
-		}
-		checkZeroed(t, find(items))
-	})
-
-	t.Run("GetItemsNeedingReview backs the admin flagged list", func(t *testing.T) {
-		items, err := q.GetItemsNeedingReview(ctx)
-		if err != nil {
-			t.Fatalf("the admin flagged list would 500: %v", err)
-		}
-		checkZeroed(t, find(items))
-	})
-
-	// The seventh site, found by a round-5 review after the other six were done.
-	// MetadataHandler.GetEnriched calls it on any authenticated request, so a NULL
-	// here is a bare 500 on the enriched detail view.
-	t.Run("GetMediaItemEnriched backs the enriched detail view", func(t *testing.T) {
-		enriched, err := q.GetMediaItemEnriched(ctx, id)
-		if err != nil {
-			t.Fatalf("the enriched detail endpoint would 500 for this title: %v", err)
-		}
-		if enriched == nil || enriched.MediaItem == nil {
-			t.Fatal("enriched lookup returned no row")
-		}
-		checkZeroed(t, enriched.MediaItem)
-	})
+	t.Errorf("the NULL-column row (id %d) is missing from GetStaleMetadataItems' %d "+
+		"results, so this case proved nothing; it sorts into the NULLS FIRST group "+
+		"and was pushed off the LIMIT 100 page", id, len(items))
 }
 
-// The scanner's re-queue query, which exists because the per-file latch could not
-// reach the #510 state at all.
-//
-// processFile returns early when a file's hash is unchanged, BEFORE consulting
-// FindMediaItemByTitle — and #510 is precisely "every episode file was recorded and
-// flushed, then the deferred enrichment pass was cancelled". So on the next scan
-// every file is unchanged and the latch is never evaluated. A round-5 review caught
-// that the fix was therefore unreachable in the exact state it targets unless the
-// show happened to gain a new or modified file. ScanLibrary now asks this question
-// once per scan.
-func TestGetUnattemptedShowsForLibrary(t *testing.T) {
+// TestGetMediaItemsSurvivesNullColumns covers the paginated catalog query
+// behind GET /api/media. It is scoped to the fixture by title token, because
+// the query is catalog-wide and paginated and a concurrently-seeded row could
+// otherwise push the fixture off the first page.
+func TestGetMediaItemsSurvivesNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	id, token := insertMovie(t, q, lib)
+
+	items, total, err := q.GetMediaItems(context.Background(),
+		models.MediaFilter{Query: token},
+		models.PaginationParams{Page: 1, PerPage: 50},
+	)
+	if err != nil {
+		t.Fatalf("GetMediaItems with a NULL-column row present: %v", err)
+	}
+	if total == 0 || len(items) == 0 {
+		t.Fatalf("GetMediaItems returned nothing for token %q (total=%d)", token, total)
+	}
+	for _, it := range items {
+		if it.ID == id {
+			assertUnknownSentinels(t, "GetMediaItems", it)
+			return
+		}
+	}
+	t.Errorf("the NULL-column row (id %d) is missing from GetMediaItems' %d results", id, len(items))
+}
+
+// TestSingleItemReadsSurviveNullColumns covers the three single-row reads.
+// FindMediaItemByTitle is called by the scanner's TV pre-check on every scan,
+// so a NULL year there is not a read-path inconvenience: it makes the upsert
+// re-key the item (see CLAUDE.md's withdrawn-repointing notes).
+func TestSingleItemReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	id, token := insertMovie(t, q, lib)
+	ctx := context.Background()
+
+	item, err := q.GetMediaItem(ctx, id)
+	if err != nil {
+		t.Fatalf("GetMediaItem: %v", err)
+	}
+	if item == nil {
+		t.Fatal("GetMediaItem returned no row for the fixture")
+	}
+	assertUnknownSentinels(t, "GetMediaItem", item)
+
+	// FindMediaItemByTitle no longer projects the nullable columns at all: the
+	// #510 enrichment work narrowed it to the four fields the scanner reads
+	// (id, added_at, updated_at, and whether the row has made metadata progress),
+	// which removes this defect class from that query by construction rather than
+	// by COALESCE. There are therefore no sentinels to assert here — the property
+	// that remains is that an all-NULL row does not fail the lookup, and that is
+	// covered by TestFindMediaItemByTitleHandlesNullYear in
+	// queries_enrichment_latch_test.go.
+	byTitle, err := q.FindMediaItemByTitle(ctx, lib, "movie", token)
+	if err != nil {
+		t.Fatalf("FindMediaItemByTitle: %v", err)
+	}
+	if byTitle == nil {
+		t.Fatal("FindMediaItemByTitle returned no row for the fixture")
+	}
+
+	enriched, err := q.GetMediaItemEnriched(ctx, id)
+	if err != nil {
+		t.Fatalf("GetMediaItemEnriched: %v", err)
+	}
+	if enriched == nil || enriched.MediaItem == nil {
+		t.Fatal("GetMediaItemEnriched returned no row for the fixture")
+	}
+	assertUnknownSentinels(t, "GetMediaItemEnriched", enriched.MediaItem)
+}
+
+// TestSearchMediaSurvivesNullColumns covers GET /api/media/search. The query's
+// own WHERE clause reads `overview`, which made it look as though it excluded
+// NULL rows — it does not: the title predicate alone matches them.
+func TestSearchMediaSurvivesNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	id, token := insertMovie(t, q, lib)
+
+	items, err := q.SearchMedia(context.Background(), token, 50)
+	if err != nil {
+		t.Fatalf("SearchMedia with a NULL-column row present: %v", err)
+	}
+	for _, it := range items {
+		if it.ID == id {
+			assertUnknownSentinels(t, "SearchMedia", it)
+			return
+		}
+	}
+	t.Errorf("the NULL-column row (id %d) is missing from SearchMedia's %d results for %q", id, len(items), token)
+}
+
+// TestGetItemsNeedingReviewSurvivesNullColumns covers the admin match-review
+// queue. Its sibling GetFlaggedWithoutAISuggestion — same table, same
+// match_status predicate — already COALESCEd; this one did not.
+func TestGetItemsNeedingReviewSurvivesNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	id, _ := insertMovie(t, q, lib)
+	if _, err := q.pool.Exec(context.Background(),
+		`UPDATE media_items SET match_status = 'needs_review' WHERE id = $1`, id); err != nil {
+		t.Fatalf("flag fixture for review: %v", err)
+	}
+
+	items, err := q.GetItemsNeedingReview(context.Background())
+	if err != nil {
+		t.Fatalf("GetItemsNeedingReview with a NULL-column row present: %v", err)
+	}
+	for _, it := range items {
+		if it.ID == id {
+			assertUnknownSentinels(t, "GetItemsNeedingReview", it)
+			return
+		}
+	}
+	t.Errorf("the flagged NULL-column row (id %d) is missing from GetItemsNeedingReview's %d results", id, len(items))
+}
+
+// seedNullProbeProfile returns a default sub-profile for the user.
+func seedNullProbeProfile(t *testing.T, q *Queries, userID int64) int64 {
+	t.Helper()
+	var id int64
+	err := q.pool.QueryRow(context.Background(),
+		`INSERT INTO user_profiles (user_id, name, is_default)
+		 VALUES ($1, $2, TRUE) RETURNING id`, userID, "nullcol_"+randomSuffix(t),
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM user_profiles WHERE id = $1`, id)
+	})
+	return id
+}
+
+// TestContinueWatchingSurvivesNullYear covers the four watch_progress read
+// paths. All four already COALESCEd `rating` and left `mi.year` raw, and
+// ContinueWatchingItem.Year is a plain int — so a NULL-year title in one
+// viewer's history 500s their Continue Watching rail and their whole history
+// page, while everyone else's works.
+func TestContinueWatchingSurvivesNullYear(t *testing.T) {
 	q := requireIntegrationDB(t)
 	ctx := context.Background()
-	libID := seedTestLibrary(t, q, seedTestUser(t, q))
-	ts := time.Now().Add(-24 * time.Hour)
+	owner := seedTestUser(t, q)
+	profile := seedNullProbeProfile(t, q, owner)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	itemID, _ := insertMovie(t, q, lib)
 
-	// withFiles gives a show a season, an episode and an episode file, which is
-	// what makes it a real catalog entry rather than a row awaiting the sweep.
-	withFiles := func(itemID int64) {
+	if _, err := q.pool.Exec(ctx,
+		`INSERT INTO watch_progress (user_id, profile_id, media_item_id, position_ms, duration_ms, completed)
+		 VALUES ($1, $2, $3, 1000, 5000, FALSE)`, owner, profile, itemID); err != nil {
+		t.Fatalf("seed watch progress: %v", err)
+	}
+
+	check := func(name string, items []models.ContinueWatchingItem, err error) {
 		t.Helper()
-		var seasonID, epID int64
-		if err := q.pool.QueryRow(ctx,
-			`INSERT INTO tv_seasons (media_item_id, season_number) VALUES ($1,1) RETURNING id`, itemID).Scan(&seasonID); err != nil {
-			t.Fatalf("season: %v", err)
+		if err != nil {
+			t.Fatalf("%s with a NULL-year row present: %v", name, err)
 		}
-		if err := q.pool.QueryRow(ctx,
-			`INSERT INTO tv_episodes (season_id, media_item_id, episode_number) VALUES ($1,$2,1) RETURNING id`,
-			seasonID, itemID).Scan(&epID); err != nil {
-			t.Fatalf("episode: %v", err)
+		for _, it := range items {
+			if it.MediaItemID == itemID {
+				if it.Year != 0 {
+					t.Errorf("%s: Year = %d, want 0 (the unknown sentinel)", name, it.Year)
+				}
+				return
+			}
 		}
-		if _, err := q.pool.Exec(ctx,
-			`INSERT INTO episode_files (episode_id, path, file_hash) VALUES ($1,$2,'h')`,
-			epID, "/tmp/unattempted-"+randomSuffix(t)+".mkv"); err != nil {
-			t.Fatalf("episode file: %v", err)
+		t.Errorf("%s: the NULL-year row (media_item %d) is missing from %d results", name, itemID, len(items))
+	}
+
+	cw, err := q.GetContinueWatching(ctx, owner, 50)
+	check("GetContinueWatching", cw, err)
+
+	cwp, err := q.GetContinueWatchingByProfile(ctx, profile, 50)
+	check("GetContinueWatchingByProfile", cwp, err)
+
+	rw, err := q.GetRecentlyWatched(ctx, owner, 50)
+	check("GetRecentlyWatched", rw, err)
+
+	hist, _, err := q.GetWatchHistory(ctx, owner, models.PaginationParams{Page: 1, PerPage: 50})
+	check("GetWatchHistory", hist, err)
+}
+
+// TestWatchlistItemsSurvivesNullYear covers the two watchlist reads, which
+// scan mi.year raw into models.WatchlistItem.Year (a plain int).
+func TestWatchlistItemsSurvivesNullYear(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	profile := seedNullProbeProfile(t, q, owner)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	itemID, _ := insertMovie(t, q, lib)
+
+	var listID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO watchlists (profile_id, name) VALUES ($1, $2) RETURNING id`,
+		profile, "nullcol_"+randomSuffix(t),
+	).Scan(&listID); err != nil {
+		t.Fatalf("seed watchlist: %v", err)
+	}
+	if _, err := q.pool.Exec(ctx,
+		`INSERT INTO watchlist_items (watchlist_id, media_item_id) VALUES ($1, $2)`,
+		listID, itemID); err != nil {
+		t.Fatalf("seed watchlist item: %v", err)
+	}
+
+	check := func(name string, items []*models.WatchlistItem, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s with a NULL-year row present: %v", name, err)
+		}
+		for _, it := range items {
+			if it.MediaItemID == itemID {
+				if it.Year != 0 {
+					t.Errorf("%s: Year = %d, want 0", name, it.Year)
+				}
+				return
+			}
+		}
+		t.Errorf("%s: the NULL-year row (media_item %d) is missing from %d results", name, itemID, len(items))
+	}
+
+	all, err := q.GetAllWatchlistItems(ctx, listID)
+	check("GetAllWatchlistItems", all, err)
+
+	paged, _, err := q.GetWatchlistItems(ctx, listID, models.PaginationParams{Page: 1, PerPage: 50})
+	check("GetWatchlistItems", paged, err)
+}
+
+// TestMediaFileReadsSurviveNullColumns covers the same defect on media_files.
+// container/video_codec/audio_codec/resolution/bitrate/duration_ms are all
+// nullable and all scanned into non-nullable models.MediaFile fields, whose own
+// doc comments already name the zero values as the unknown sentinels.
+//
+// The fixture carries a tmdb_id because GetCrossLibraryFiles returns early
+// when the item has none — without it that path reports a false pass, having
+// never reached the scan.
+func TestMediaFileReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	itemID, token := insertMovie(t, q, lib)
+	tmdbID := uniqueTMDBID(t)
+	if _, err := q.pool.Exec(ctx,
+		`UPDATE media_items SET tmdb_id = $2 WHERE id = $1`, itemID, tmdbID); err != nil {
+		t.Fatalf("set fixture tmdb_id: %v", err)
+	}
+
+	path := "/tmp/nullcol_test/" + token + ".mkv"
+	var fileID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO media_files
+		   (media_item_id, path, size_bytes, container, video_codec, audio_codec,
+		    resolution, bitrate, duration_ms, file_hash)
+		 VALUES ($1, $2, 1, NULL, NULL, NULL, NULL, NULL, NULL, $3) RETURNING id`,
+		itemID, path, "nullcol"+randomSuffix(t),
+	).Scan(&fileID); err != nil {
+		t.Fatalf("seed all-NULL media file: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM media_files WHERE id = $1`, fileID)
+	})
+
+	assertFileSentinels := func(name string, f *models.MediaFile) {
+		t.Helper()
+		if f.Container != "" || f.VideoCodec != "" || f.AudioCodec != "" || f.Resolution != "" {
+			t.Errorf("%s: want empty codec/container/resolution, got %q/%q/%q/%q",
+				name, f.Container, f.VideoCodec, f.AudioCodec, f.Resolution)
+		}
+		if f.Bitrate != 0 || f.DurationMs != 0 {
+			t.Errorf("%s: want 0 bitrate/duration, got %d/%d", name, f.Bitrate, f.DurationMs)
 		}
 	}
 
-	// The #510 row: created, never attempted, all its files on record.
-	stuck := insertShow(t, q, libID, "Stuck "+randomSuffix(t), nil, nil, nil)
-	withFiles(stuck)
-	// Already attempted and unmatched — the rotation's job, not the scanner's.
-	attempted := insertShow(t, q, libID, "Attempted "+randomSuffix(t), nil, nil, &ts)
-	withFiles(attempted)
-	// Already enriched.
-	enriched := insertShow(t, q, libID, "Enriched "+randomSuffix(t), nil, &ts, &ts)
-	withFiles(enriched)
-	// Never attempted but has no files left: about to be swept by
-	// DeleteEmptyMediaItems, so enriching it would spend provider calls on a row
-	// that is being deleted.
-	fileless := insertShow(t, q, libID, "Fileless "+randomSuffix(t), nil, nil, nil)
-
-	got, err := q.GetUnattemptedShowsForLibrary(ctx, libID)
+	files, err := q.GetMediaFiles(ctx, itemID)
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		t.Fatalf("GetMediaFiles with a NULL-column file present: %v", err)
 	}
-	found := map[int64]string{}
-	for _, u := range got {
-		found[u.Item.ID] = u.FilePath
+	if len(files) != 1 {
+		t.Fatalf("GetMediaFiles returned %d files, want 1", len(files))
+	}
+	assertFileSentinels("GetMediaFiles", files[0])
+
+	byPath, err := q.GetMediaFileByPath(ctx, path)
+	if err != nil {
+		t.Fatalf("GetMediaFileByPath: %v", err)
+	}
+	if byPath == nil {
+		t.Fatal("GetMediaFileByPath returned no row")
+	}
+	assertFileSentinels("GetMediaFileByPath", byPath)
+
+	byID, err := q.GetMediaFileByID(ctx, fileID)
+	if err != nil {
+		t.Fatalf("GetMediaFileByID: %v", err)
+	}
+	if byID == nil {
+		t.Fatal("GetMediaFileByID returned no row")
+	}
+	assertFileSentinels("GetMediaFileByID", byID)
+
+	xlib, _, err := q.GetCrossLibraryFiles(ctx, itemID)
+	if err != nil {
+		t.Fatalf("GetCrossLibraryFiles: %v", err)
+	}
+	if len(xlib) == 0 {
+		t.Fatal("GetCrossLibraryFiles returned nothing — the scan was never reached, " +
+			"so this case proves nothing; check the fixture's tmdb_id")
+	}
+	foundFixture := false
+	for _, f := range xlib {
+		if f.ID == fileID {
+			foundFixture = true
+			assertFileSentinels("GetCrossLibraryFiles", f)
+		}
+	}
+	if !foundFixture {
+		t.Errorf("GetCrossLibraryFiles returned %d files but none was the fixture (id %d), "+
+			"so the sentinel assertions never ran", len(xlib), fileID)
+	}
+}
+
+// TestEpisodeFileReadsSurviveNullColumns is the episode_files counterpart.
+func TestEpisodeFileReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "show")
+	showID, token := insertShow(t, q, lib)
+	tmdbID := uniqueTMDBID(t)
+	if _, err := q.pool.Exec(ctx,
+		`UPDATE media_items SET tmdb_id = $2 WHERE id = $1`, showID, tmdbID); err != nil {
+		t.Fatalf("set fixture tmdb_id: %v", err)
 	}
 
-	if path, ok := found[stuck]; !ok {
-		t.Error("the never-attempted show with files was NOT returned — the scanner has no way to recover it when none of its files changed, which is the #510 state")
-	} else if path == "" {
-		t.Error("no representative file path returned; enrichNewItem resolves a sibling .nfo from it")
+	var seasonID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO tv_seasons (media_item_id, season_number, title, overview)
+		 VALUES ($1, 1, NULL, NULL) RETURNING id`, showID).Scan(&seasonID); err != nil {
+		t.Fatalf("seed season: %v", err)
 	}
-	if _, ok := found[attempted]; ok {
-		t.Error("an already-attempted show was returned — the scanner would re-pay a search, a retry and an embed for it on every scan")
+	var episodeID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO tv_episodes
+		   (season_id, media_item_id, episode_number, title, overview, runtime_minutes,
+		    air_date, tmdb_id, still_path, vote_average, vote_count)
+		 VALUES ($1, $2, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) RETURNING id`,
+		seasonID, showID).Scan(&episodeID); err != nil {
+		t.Fatalf("seed episode: %v", err)
 	}
-	if _, ok := found[enriched]; ok {
-		t.Error("an already-enriched show was returned — every scan would re-run its show match")
+
+	path := "/tmp/nullcol_test/" + token + ".s01e01.mkv"
+	var fileID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO episode_files
+		   (episode_id, path, size_bytes, container, video_codec, audio_codec,
+		    resolution, bitrate, duration_ms, file_hash)
+		 VALUES ($1, $2, 1, NULL, NULL, NULL, NULL, NULL, NULL, $3) RETURNING id`,
+		episodeID, path, "nullcol"+randomSuffix(t),
+	).Scan(&fileID); err != nil {
+		t.Fatalf("seed all-NULL episode file: %v", err)
 	}
-	if _, ok := found[fileless]; ok {
-		t.Error("a show with no episode files was returned — it is about to be swept, so enriching it wastes provider calls")
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM episode_files WHERE id = $1`, fileID)
+	})
+
+	assertFileSentinels := func(name string, f *models.EpisodeFile) {
+		t.Helper()
+		if f.Container != "" || f.VideoCodec != "" || f.AudioCodec != "" || f.Resolution != "" {
+			t.Errorf("%s: want empty codec/container/resolution, got %q/%q/%q/%q",
+				name, f.Container, f.VideoCodec, f.AudioCodec, f.Resolution)
+		}
+		if f.Bitrate != 0 || f.DurationMs != 0 {
+			t.Errorf("%s: want 0 bitrate/duration, got %d/%d", name, f.Bitrate, f.DurationMs)
+		}
+	}
+
+	// GetSeasons / GetEpisodes already COALESCEd their own nullable columns;
+	// asserted here so the episode fixture's own NULLs stay covered too.
+	if _, err := q.GetSeasons(ctx, showID); err != nil {
+		t.Fatalf("GetSeasons with NULL season columns: %v", err)
+	}
+	if _, err := q.GetEpisodes(ctx, showID, 1); err != nil {
+		t.Fatalf("GetEpisodes with NULL episode columns: %v", err)
+	}
+
+	files, err := q.GetEpisodeFiles(ctx, episodeID)
+	if err != nil {
+		t.Fatalf("GetEpisodeFiles with a NULL-column file present: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("GetEpisodeFiles returned %d files, want 1", len(files))
+	}
+	assertFileSentinels("GetEpisodeFiles", files[0])
+
+	byPath, err := q.GetEpisodeFileByPath(ctx, path)
+	if err != nil {
+		t.Fatalf("GetEpisodeFileByPath: %v", err)
+	}
+	if byPath == nil {
+		t.Fatal("GetEpisodeFileByPath returned no row")
+	}
+	assertFileSentinels("GetEpisodeFileByPath", byPath)
+
+	byID, err := q.GetEpisodeFileByID(ctx, fileID)
+	if err != nil {
+		t.Fatalf("GetEpisodeFileByID: %v", err)
+	}
+	if byID == nil {
+		t.Fatal("GetEpisodeFileByID returned no row")
+	}
+	assertFileSentinels("GetEpisodeFileByID", byID)
+
+	xlib, _, err := q.GetCrossLibraryEpisodeFiles(ctx, episodeID, tmdbID)
+	if err != nil {
+		t.Fatalf("GetCrossLibraryEpisodeFiles: %v", err)
+	}
+	if len(xlib) == 0 {
+		t.Fatal("GetCrossLibraryEpisodeFiles returned nothing — the scan was never " +
+			"reached, so this case proves nothing")
+	}
+	foundFixture := false
+	for _, f := range xlib {
+		if f.ID == fileID {
+			foundFixture = true
+			assertFileSentinels("GetCrossLibraryEpisodeFiles", f)
+		}
+	}
+	if !foundFixture {
+		t.Errorf("GetCrossLibraryEpisodeFiles returned %d files but none was the fixture (id %d), "+
+			"so the sentinel assertions never ran", len(xlib), fileID)
+	}
+
+	batch, _, err := q.GetCrossLibraryEpisodeFilesBatch(ctx, []int64{episodeID}, tmdbID)
+	if err != nil {
+		t.Fatalf("GetCrossLibraryEpisodeFilesBatch: %v", err)
+	}
+	if len(batch[episodeID]) == 0 {
+		t.Fatal("GetCrossLibraryEpisodeFilesBatch returned nothing for the fixture " +
+			"episode — the scan was never reached, so this case proves nothing")
+	}
+	foundInBatch := false
+	for _, f := range batch[episodeID] {
+		if f.ID == fileID {
+			foundInBatch = true
+			assertFileSentinels("GetCrossLibraryEpisodeFilesBatch", f)
+		}
+	}
+	if !foundInBatch {
+		t.Errorf("GetCrossLibraryEpisodeFilesBatch returned %d files for the fixture "+
+			"episode but none was the fixture file (id %d), so the sentinel "+
+			"assertions never ran", len(batch[episodeID]), fileID)
+	}
+}
+
+// TestRequestReadsSurviveNullColumns covers the requests table, whose
+// poster_path/overview/year/arr_job_ids/error_message are nullable (with
+// non-NULL DEFAULTs, which is why no application write reaches this) and are
+// scanned into non-nullable models.Request fields through ONE shared
+// requestColumns projection — so all six request reads shared one defect and
+// one fix.
+func TestRequestReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+
+	// One fixture PER STATUS. The six reads filter on different statuses, and a
+	// read that matches no row scans nothing — so a single 'pending_approval'
+	// fixture left GetProcessingRequests and GetStalePendingRequests passing
+	// identically against the un-COALESCEd projection. requested_at is backdated
+	// so the 'pending' row is stale enough for GetStalePendingRequests' cutoff.
+	seedNullRequest := func(status string) int64 {
+		t.Helper()
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO requests
+			   (user_id, media_type, tmdb_id, title, poster_path, overview, year,
+			    status, arr_job_ids, error_message, requested_at)
+			 VALUES ($1, 'movie', $2, 'NullProbe Request', NULL, NULL, NULL,
+			         $3, NULL, NULL, NOW() - INTERVAL '1 day') RETURNING id`,
+			owner, uniqueTMDBID(t), status,
+		).Scan(&id); err != nil {
+			t.Fatalf("seed all-NULL %s request: %v", status, err)
+		}
+		t.Cleanup(func() {
+			_, _ = q.pool.Exec(context.Background(), `DELETE FROM requests WHERE id = $1`, id)
+		})
+		return id
+	}
+	reqID := seedNullRequest("pending_approval")
+	seedNullRequest("processing")
+	seedNullRequest("pending")
+
+	assertRequestSentinels := func(name string, r *models.Request) {
+		t.Helper()
+		if r.PosterPath != "" || r.Overview != "" || r.ArrJobIDs != "" || r.ErrorMessage != "" {
+			t.Errorf("%s: want empty strings, got %q/%q/%q/%q",
+				name, r.PosterPath, r.Overview, r.ArrJobIDs, r.ErrorMessage)
+		}
+		if r.Year != 0 {
+			t.Errorf("%s: Year = %d, want 0", name, r.Year)
+		}
+	}
+
+	byID, err := q.GetRequestByID(ctx, reqID)
+	if err != nil {
+		t.Fatalf("GetRequestByID with a NULL-column request present: %v", err)
+	}
+	if byID == nil {
+		t.Fatal("GetRequestByID returned no row")
+	}
+	assertRequestSentinels("GetRequestByID", byID)
+
+	byUser, err := q.GetRequestsByUserID(ctx, owner)
+	if err != nil {
+		t.Fatalf("GetRequestsByUserID: %v", err)
+	}
+	// Three fixtures are seeded (one per status), so assert the one we hold an
+	// id for is present rather than an exact count.
+	foundByUser := false
+	for i := range byUser {
+		if byUser[i].ID == reqID {
+			foundByUser = true
+			assertRequestSentinels("GetRequestsByUserID", &byUser[i])
+		}
+	}
+	if !foundByUser {
+		t.Errorf("the NULL-column request (id %d) is missing from GetRequestsByUserID's "+
+			"%d results", reqID, len(byUser))
+	}
+
+	// Each of these must scan at least one NULL row, or it proves nothing about
+	// the shared projection. nonEmpty is what makes that explicit.
+	nonEmpty := func(name string, n int, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s with a NULL-column request present: %v", name, err)
+		}
+		if n == 0 {
+			t.Errorf("%s returned 0 rows, so it never reached the scan and this "+
+				"case proves nothing", name)
+		}
+	}
+	all, err := q.GetAllRequests(ctx)
+	nonEmpty("GetAllRequests", len(all), err)
+
+	approval, err := q.GetPendingApprovalRequests(ctx)
+	nonEmpty("GetPendingApprovalRequests", len(approval), err)
+
+	processing, err := q.GetProcessingRequests(ctx)
+	nonEmpty("GetProcessingRequests", len(processing), err)
+
+	stale, err := q.GetStalePendingRequests(ctx, time.Now())
+	nonEmpty("GetStalePendingRequests", len(stale), err)
+}
+
+// TestProfileReadsSurviveNullColumns covers user_profiles.language and
+// subtitle_mode — both nullable, both scanned into non-nullable
+// models.UserProfile string fields, and both sitting in a select list that
+// already COALESCEs avatar_url, max_age_rating and subtitle_lang three tokens
+// away. That is the same "coalesced the sibling, missed this one" shape the four
+// ContinueWatching queries had.
+//
+// Blast radius is narrower than the catalog-wide queries (one user, not
+// everyone) but reachability is HIGHER: ResolveActingProfile funnels
+// essentially every profile-scoped request through GetProfile /
+// GetDefaultProfile, so one NULL on a user's default profile takes out that
+// user's whole session rather than one field.
+func TestProfileReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+
+	var profileID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
+		 VALUES ($1, $2, TRUE, NULL, NULL) RETURNING id`,
+		owner, "nullcol_"+randomSuffix(t),
+	).Scan(&profileID); err != nil {
+		t.Fatalf("seed all-NULL profile: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM user_profiles WHERE id = $1`, profileID)
+	})
+
+	assertProfileSentinels := func(name string, p *models.UserProfile) {
+		t.Helper()
+		if p.Language != "" {
+			t.Errorf("%s: Language = %q, want \"\"", name, p.Language)
+		}
+		if p.SubtitleMode != "" {
+			t.Errorf("%s: SubtitleMode = %q, want \"\"", name, p.SubtitleMode)
+		}
+	}
+
+	byID, err := q.GetProfile(ctx, profileID)
+	if err != nil {
+		t.Fatalf("GetProfile with a NULL-column profile present: %v", err)
+	}
+	if byID == nil {
+		t.Fatal("GetProfile returned no row for the fixture")
+	}
+	assertProfileSentinels("GetProfile", byID)
+
+	def, err := q.GetDefaultProfile(ctx, owner)
+	if err != nil {
+		t.Fatalf("GetDefaultProfile with a NULL-column profile present: %v", err)
+	}
+	if def == nil {
+		t.Fatal("GetDefaultProfile returned no row for the fixture")
+	}
+	assertProfileSentinels("GetDefaultProfile", def)
+
+	list, err := q.GetProfilesByUser(ctx, owner)
+	if err != nil {
+		t.Fatalf("GetProfilesByUser with a NULL-column profile present: %v", err)
+	}
+	found := false
+	for _, p := range list {
+		if p.ID == profileID {
+			found = true
+			assertProfileSentinels("GetProfilesByUser", p)
+		}
+	}
+	if !found {
+		t.Errorf("the NULL-column profile (id %d) is missing from GetProfilesByUser' "+
+			"%d results", profileID, len(list))
+	}
+
+	// ResolveActingProfile is the funnel every profile-scoped request goes
+	// through, so it is asserted separately rather than assumed from GetProfile.
+	resolved, err := q.ResolveActingProfile(ctx, owner, 0)
+	if err != nil {
+		t.Fatalf("ResolveActingProfile with a NULL-column profile present: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("ResolveActingProfile returned no profile")
+	}
+	assertProfileSentinels("ResolveActingProfile", resolved)
+}
+
+// TestGetArtworkSurvivesNullVoteAverage covers artwork.vote_average, nullable
+// and scanned into models.Artwork.VoteAverage (a plain float64) beside
+// COALESCEd local_path/width/height/lang/blurhash.
+//
+// GET /api/media/{id}/artwork surfaces the failure as a 500; the media-detail
+// artwork block swallows the error, so there it degrades silently to
+// "no artwork" — which is the worse of the two, being invisible.
+func TestGetArtworkSurvivesNullVoteAverage(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	itemID, _ := insertMovie(t, q, lib)
+
+	var artID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO artwork
+		   (media_item_id, art_type, source, remote_path, width, height, lang,
+		    vote_average, is_primary, blurhash)
+		 VALUES ($1, 'poster', 'tmdb', $2, NULL, NULL, NULL, NULL, TRUE, NULL)
+		 RETURNING id`,
+		itemID, "/nullcol_"+randomSuffix(t)+".jpg",
+	).Scan(&artID); err != nil {
+		t.Fatalf("seed all-NULL artwork: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM artwork WHERE id = $1`, artID)
+	})
+
+	art, err := q.GetArtwork(ctx, itemID)
+	if err != nil {
+		t.Fatalf("GetArtwork with a NULL vote_average present: %v", err)
+	}
+	found := false
+	for _, a := range art {
+		if a.ID == artID {
+			found = true
+			if a.VoteAverage != 0 {
+				t.Errorf("GetArtwork: VoteAverage = %v, want 0", a.VoteAverage)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the NULL-vote_average row (id %d) is missing from GetArtwork's %d "+
+			"results, so the assertion never ran", artID, len(art))
 	}
 }

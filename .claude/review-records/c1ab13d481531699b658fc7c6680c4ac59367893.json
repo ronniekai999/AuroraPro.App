@@ -1,0 +1,10 @@
+{
+  "sha": "c1ab13d481531699b658fc7c6680c4ac59367893",
+  "verdict": "fix-first",
+  "summary": "Independent complete-diff review against e72629995ce2f12d190f47cc1d96a35dc22445a6 confirmed two high-severity defects: interruption during separate snapshot cleanup mixes rollback generations, and the uninstall harness can remove real nginx configuration. Both reproduced at root and non-root privilege with real file operations in disposable Linux fixtures. Passing 35-case updater and 2-case uninstall suites do not clear these findings. Fix both and independently review the revised complete diff. Service commands are stubbed; live systemd, service-account access, database migrations, frontend runtime, playback, power loss, and exhaustive disk-full behavior remain unverified.",
+  "reviewer": "/root/updater_independent_review",
+  "findings": "2",
+  "diff_digest": "4be913b5d702030818864508691f58a1c8b2c0bc72184a3f4ea193426eb76d65",
+  "branch": "fix/updater-retry-toolchain",
+  "recorded_at": "2026-09-27T23:18:24Z"
+}
