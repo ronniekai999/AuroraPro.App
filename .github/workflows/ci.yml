@@ -178,6 +178,9 @@ jobs:
       - name: Library path check tests
         run: bash scripts/check-library-paths-test.sh
 
+      - name: Uninstall state cleanup tests
+        run: python3 scripts/uninstall-test.py
+
   review-record:
     name: Review record present
     runs-on: ubuntu-latest

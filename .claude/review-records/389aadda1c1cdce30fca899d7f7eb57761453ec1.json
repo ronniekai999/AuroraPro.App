@@ -1,0 +1,10 @@
+{
+  "sha": "389aadda1c1cdce30fca899d7f7eb57761453ec1",
+  "verdict": "clean",
+  "summary": "Fresh independent adversarial review of the complete diff from e72629995ce2f12d190f47cc1d96a35dc22445a6 to 389aadda1c1cdce30fca899d7f7eb57761453ec1 found no actionable defects. Reviewed deployment ledger, toolchain/source/signature/ancestry/lock gates, rollback generation publication and retirement, uninstall scope and test isolation, recovery bootstrap, CI, and historical review records. Five additional fault/trust probes and all five uninstall cases passed independently at both root and non-root privilege; VM hashes and the supplied full diff matched this candidate. Author Linux build/full uncached Go suite/vet, 38 updater cases at both privilege levels, and operator checks passed. Fixtures stub build, systemd, HTTP health and chown; actual service-account behavior, production database/frontend/playback, runtime SHA attestation, power-loss durability and exhaustive storage faults remain unverified. The earlier fix-first result and original recovered review are preserved as historical records.",
+  "reviewer": "/root/updater_final_review",
+  "findings": "0",
+  "diff_digest": "c7f1cb57b12cb4fbebd5c74a6950e0be793c771ce440b5685e1052c7eddff860",
+  "branch": "fix/updater-retry-toolchain",
+  "recorded_at": "2026-09-27T23:33:59Z"
+}

@@ -1,0 +1,10 @@
+{
+  "sha": "35c8d099f00410f8c4d1ead47da184642ec3f2fc",
+  "verdict": "bypass",
+  "summary": "Independent adversarial review is INCOMPLETE. No separate reviewer could be executed in the implementation environment; author self-review and 32 passing sandbox tests at each privilege level are not independent review. This explicit bypass permits publishing a DRAFT PR to request GitHub-side Codex review. Do not merge or treat this as approval; resolve findings and obtain a fresh review of the final complete diff before recording a passing verdict. Full Go/SPA builds were not run locally and require CI.",
+  "reviewer": "",
+  "findings": "",
+  "diff_digest": "902da38c0e653b4b9f911241667a389711d1522a1eaa9ad6509cbc71a41c8fbc",
+  "branch": "fix/updater-retry-toolchain",
+  "recorded_at": "2026-09-27T20:08:45Z"
+}

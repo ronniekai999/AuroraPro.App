@@ -8,7 +8,8 @@
 #   - /etc/sudoers.d/aurora-update (legacy; new installs don't create it)
 #   - /opt/aurora (install dir), /etc/aurora (config)
 #   - /var/cache/aurora (image+subtitle+transcode caches)
-#   - /var/lib/aurora (source mirror + updater state)
+#   - /var/lib/aurora (source mirror + UI updater state)
+#   - /var/lib/aurora-updater (root-owned deployment ledger + rollback snapshot)
 #   - /var/log/aurora
 #   - PostgreSQL database + role 'aurora'
 #   - Nginx reverse proxy config + Let's Encrypt certificate
@@ -58,6 +59,7 @@ UPDATER_SUDOERS="/etc/sudoers.d/aurora-update"
 
 # State + log dirs (install.sh writes status JSON + log files here).
 STATE_DIR="/var/lib/aurora"             # contains source/ mirror + update-status.json
+DEPLOY_STATE_DIR="/var/lib/aurora-updater" # pending/deployed ledger + rollback snapshot
 UPDATER_SOURCE_DIR="/var/lib/aurora/source"
 LOG_DIR="/var/log/aurora"
 
@@ -162,6 +164,7 @@ detect_components() {
     HAS_UPDATER_BIN=false
     HAS_UPDATER_SUDOERS=false
     HAS_STATE_DIR=false
+    HAS_DEPLOY_STATE_DIR=false
     HAS_LOG_DIR=false
 
     # Media library paths captured BEFORE the DB is dropped so we can
@@ -200,6 +203,7 @@ detect_components() {
     [ -f "$UPDATER_BIN" ]     && HAS_UPDATER_BIN=true     || true
     [ -f "$UPDATER_SUDOERS" ] && HAS_UPDATER_SUDOERS=true || true
     [ -d "$STATE_DIR" ]       && HAS_STATE_DIR=true       || true
+    [ -d "$DEPLOY_STATE_DIR" ] && HAS_DEPLOY_STATE_DIR=true || true
     [ -d "$LOG_DIR" ]         && HAS_LOG_DIR=true         || true
 
     # Check PostgreSQL database and user if psql is available
@@ -310,6 +314,10 @@ if $HAS_CONFIG_DIR; then
 fi
 if $HAS_STATE_DIR; then
     printf '    %-42s %s\n' "State directory (source mirror)" "$STATE_DIR"
+    FOUND_SOMETHING=true
+fi
+if $HAS_DEPLOY_STATE_DIR; then
+    printf '    %-42s %s\n' "Updater deployment state" "$DEPLOY_STATE_DIR"
     FOUND_SOMETHING=true
 fi
 if $HAS_LOG_DIR; then
@@ -792,6 +800,21 @@ if $HAS_STATE_DIR; then
     fi
 else
     ok "State directory not found (skipping)"
+fi
+
+# Root-owned deployment truth is deliberately outside STATE_DIR so the
+# application user cannot forge it.  Give it the same explicit preservation
+# choice as other state; --force/-y confirms this removal as it does every
+# other data-bearing directory.
+if $HAS_DEPLOY_STATE_DIR; then
+    if confirm "Remove $DEPLOY_STATE_DIR (deployment ledger + rollback snapshot)?"; then
+        rm -rf -- "$DEPLOY_STATE_DIR"
+        ok "Removed $DEPLOY_STATE_DIR"
+    else
+        warn "Keeping $DEPLOY_STATE_DIR"
+    fi
+else
+    ok "Updater deployment state not found (skipping)"
 fi
 
 # Log directory — install.sh creates /var/log/aurora owned by aurora:aurora

@@ -1,0 +1,26 @@
+name: Updater regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  updater:
+    name: Updater state, retries, and toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n scripts/aurora-update.sh
+      # These execute the updater against temporary roots and real local Git
+      # remotes. Build, health, and service commands are stubs; no host services
+      # or real deployment paths are touched. Exercise both privilege levels.
+      - name: Regression tests (unprivileged)
+        run: python3 scripts/aurora-update-test.py -v
+      - name: Regression tests (root)
+        run: sudo python3 scripts/aurora-update-test.py -v
