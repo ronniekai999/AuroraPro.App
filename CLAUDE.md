@@ -226,6 +226,114 @@ Invariants to preserve when touching this area:
   embeds null vectors then fail re-embed). The SPA blanks model fields
   when the provider FAMILY changes and restores loaded values on return.
 
+## Merging duplicate media items (`MergeMediaItems`)
+
+Enrichment can discover that two separately-created `media_items` rows are the
+same title, and `handleDuplicateMetadata` then merges them. The function ends in
+`DELETE FROM media_items WHERE id = duplicate`, and `media_items` has 19 children
+with `ON DELETE CASCADE` — so **anything not re-parented before that DELETE is
+destroyed, silently and unrecoverably**. This is the code CLAUDE.md's
+library-repointing post-mortem calls the most dangerous in the repo, and it is
+reachable from an ordinary rescan. Code: `MergeMediaItems`, `mergeChildren`,
+`mergeEpisodeChildren`, `repointEpisodeChildren`,
+`mergeRecapConversationChildren` (`internal/db/queries_phase2.go`), tests in
+`queries_merge_children_test.go`.
+
+It handled 8 of the 19. The other 11 arrived in later migrations and nobody
+revisited it, so a watchlist entry and a 5-star rating on the duplicate both read
+back as zero after a merge.
+
+Invariants to preserve when touching this area:
+
+- **`mergeChildren` DRIVES the generic loop; it is not a checklist.** An earlier
+  version kept the list purely as a cross-check, and that was defeated in one
+  line: adding an entry turned the drift guard green while every row in the new
+  table was still destroyed. A classification that does not cause handling is a
+  comment. The behavioural test's seed set is derived from the same list, so an
+  entry with no test row fails too.
+- **`bespoke: true` is the one entry shape the loop does NOT handle, so the
+  behavioural test must cover those tables too.** It did not, and a review walked
+  straight through the gap: adding `{table: "anything", bespoke: true}` with no
+  hand-written code passed the drift guard (listed), the key guard (schema agreed)
+  and the behavioural guard (which skipped bespoke entries), while a merge
+  destroyed every row in the table. That is the same
+  classification-without-handling defect one door along.
+  `TestMergeMediaItemsPreservesUserDataOnEveryChild` now seeds a row for all 19
+  children, bespoke included.
+- **`keyPredicate` is documentation, and the generic loops REFUSE a non-bespoke
+  entry that carries one** (`mergeChildStrategyError`). The loops build their
+  collision check from `keyCols` alone, so a partial-keyed table on the generic
+  path would get a check that ignores the index's WHERE clause and would delete
+  rows outside it — the `watch_progress` bug reintroduced. A review demonstrated
+  that live. Teach the loops to apply predicates BEFORE adding such a table.
+- **A collision key must be the FULL unique key minus `media_item_id`.** A partial
+  key does not error — it silently decides another profile's or parent's row is a
+  collision and deletes it. This has been got wrong TWICE here: on
+  `recently_surfaced_items` (keyed `(profile_id, media_item_id, surface)`) and on
+  `watch_progress`, where omitting `profile_id` destroyed a KID PROFILE's watch
+  history whenever the adult had progress on the canonical. Both paths
+  (item-level and episode-level) had it.
+- **`watch_progress`'s unique indexes are PARTIAL**, which is why the schema guard
+  must not filter on `indpred IS NULL` — an earlier version did, and that excluded
+  precisely the one table with the bug. `keyPredicate` records the predicate, and
+  the guard checks only that it is DECLARED when the schema has one — never that
+  its text is correct, and (per above) nothing applies it.
+- **`episode_recaps` is re-pointed with a plain UPDATE, deliberately.** Its key is
+  `(media_item_id, up_to_episode_id)` and at re-point time the row still carries
+  the DUPLICATE's `media_item_id`, so a collision check there can only compare the
+  row against itself — a no-op that read like protection until a review caught it.
+  The re-point cannot collide (the target pair is necessarily free) and the real
+  collision is resolved by the `mergeChildren` pass afterwards, which is keyed
+  correctly. `TestMergeMediaItemsResolvesCollidingEpisodeRecaps` pins that the two
+  passes compose.
+- **Both drift guards cover CASCADE *and* SET NULL.** The `media_items` guard used
+  to check CASCADE only while the `tv_episodes` one checked both — an
+  inconsistency between two trees this code treats as equally dangerous.
+- **The episode-referencing column is not uniform.** Most tables use `episode_id`;
+  the recap tables use `up_to_episode_id`. Assuming otherwise produced a runtime
+  "column episode_id does not exist", caught by a behavioural test rather than the
+  compiler, so `episodeCol` is data and is pinned against `pg_constraint`.
+- **Deleting a colliding duplicate EPISODE needs its own re-pointing pass.** It
+  cascades `recommendation_watch_events` and `episode_recaps` away and NULLs
+  `watch_parties.episode_id` and `recap_conversation_turns.up_to_episode_id`. The
+  SET NULLs are the nastier half: an active party silently became a show with no
+  episode, and `internal/watchparty/rehydrate.go` reads `EpisodeID` straight off
+  that row at boot, which is routine here because the box auto-deploys.
+- **`recap_conversations` is a container, not an opinion.** It owns
+  `recap_conversation_turns`/`_requests`, so "canonical wins" destroyed a person's
+  whole Q&A thread when the survivor was the empty conversation. Its children are
+  moved onto the survivor first.
+- **A self-merge must be a no-op.** Every collision check matches the row against
+  itself, so without the guard nothing moves and the DELETEs strip the item's own
+  ratings, feedback, watchlist entries and recaps.
+- **One transaction, and new errors return.** The pre-existing statements swallow
+  errors (`_, _ = tx.Exec`); the added ones do not. A swallowed error already
+  poisoned the pgx transaction so the final DELETE failed anyway — returning early
+  just reports it accurately. On abort `handleDuplicateMetadata` logs and leaves
+  both items in place, which is the right trade against destroying data.
+
+Known limits, stated plainly:
+
+- **Recaps on a colliding duplicate EPISODE are still lost.** `episode_recaps`
+  also cascades from `tv_episodes`, so a recap attached to a duplicate episode the
+  canonical already had dies with that episode, before the re-pointing pass. That
+  is inherent to collapsing two episode rows into one.
+- **`watch_parties.media_title` / `media_poster` are denormalized** and keep
+  describing the duplicate after a merge. The FK points at the survivor; the text
+  the room displays does not.
+- **A failed merge is swallowed.** `handleDuplicateMetadata` reports the duplicate
+  handled even when `MergeMediaItems` returned an error — see the enrichment
+  ledger for what that strands.
+- **Nothing locks the duplicate row.** A child row inserted concurrently, after
+  that table's pass, is still cascade-destroyed by the final DELETE. Pre-existing
+  and narrow (the FK takes `FOR KEY SHARE`), but the blast radius is now 19 tables
+  rather than 8.
+- **`media_cast`'s pre-existing collision check compares a nullable `character`**,
+  so NULL vs NULL reads as "no collision" and the row duplicates rather than
+  merging. Cosmetic (it over-keeps), unlike the partial-key bugs which lose data.
+- **Whether a merge should happen at all** in the cases that reach it is untouched.
+  This only makes the merge non-destructive.
+
 ## Social features (member profiles + follows, PRs #428/#429)
 
 Member-visible profiles (`/user/:name`, bio/socials/recent watches), a
