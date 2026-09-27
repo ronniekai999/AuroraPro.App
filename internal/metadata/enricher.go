@@ -113,6 +113,26 @@ func (e *Enricher) EnrichMediaItem(ctx context.Context, item *models.MediaItem) 
 		return 0, fmt.Errorf("unknown media type: %s", item.Type)
 	}
 
+	// Record that we asked, separately from whether we found anything.
+	//
+	// Gated on err == nil on purpose: the enrich* helpers return (0, nil) for
+	// "the provider answered and has no entry for this", and a non-nil error
+	// only for "we could not get an answer" (search failed, detail fetch
+	// failed, the metadata write failed). Stamping the latter would let a
+	// single TMDB outage during a scan defer every item it touched by a whole
+	// refresh interval. Stamping the former is the point: without it an
+	// unmatchable item keeps last_metadata NULL for ever and holds the head of
+	// GetStaleMetadataItems' NULLS FIRST queue, which starves every other item
+	// in the catalog once 100 of them exist.
+	//
+	// Non-blocking, like the match-status writes below it: failing to stamp
+	// costs one redundant retry next pass, never the enrichment itself.
+	if err == nil {
+		if touchErr := e.queries.TouchMetadataAttempt(ctx, item.ID); touchErr != nil {
+			slog.Warn("failed to record metadata attempt", "item_id", item.ID, "error", touchErr)
+		}
+	}
+
 	// Set match status based on confidence (non-blocking)
 	if confidence >= e.autoThreshold {
 		if setErr := e.queries.SetMatchStatus(ctx, item.ID, "matched"); setErr != nil {

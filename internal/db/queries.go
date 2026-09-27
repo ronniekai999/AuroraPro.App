@@ -923,9 +923,20 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	}
 	offset := (page.Page - 1) * page.PerPage
 
+	// year/overview/rating/runtime_minutes/content_rating are COALESCEd. All five
+	// are nullable in media_items and land in non-nullable models.MediaItem
+	// fields, so ONE row with any of them NULL fails the whole query — pgx
+	// reports "cannot scan NULL into *int" mid-iteration and the caller gets an
+	// error instead of a result set. Every reader of these columns needs the
+	// same treatment; see the note on GetRecentMedia for the full story.
+	//
+	// Only the SQL is COALESCEd, never the ORDER BY or the richness CASEs: those
+	// read the raw columns and already collapse NULL and zero identically, so
+	// ranking and NULL sort order are untouched.
 	dataQuery := dedupCTE + fmt.Sprintf(
-		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, d.year,
-		        d.overview, d.rating, d.runtime_minutes, d.content_rating,
+		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, COALESCE(d.year, 0),
+		        COALESCE(d.overview, ''), COALESCE(d.rating, 0), COALESCE(d.runtime_minutes, 0),
+		        COALESCE(d.content_rating, ''),
 		        d.poster_path, d.backdrop_path, d.added_at, d.updated_at
 		 FROM deduped d
 		 ORDER BY %s LIMIT $%d OFFSET $%d`,
@@ -959,30 +970,60 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	return items, total, nil
 }
 
+// FoundMediaItem is the narrow projection FindMediaItemByTitle returns: the
+// identity fields the scanner needs to adopt an existing row, plus whether that
+// row has ever actually had metadata written to it.
+//
+// Deliberately NOT models.MediaItem. Two reasons:
+//
+//   - The scanner only ever reads ID/AddedAt/UpdatedAt off this result, so the
+//     wide projection was carrying eleven columns nobody looked at.
+//   - models.MediaItem.Year is a non-nullable int while media_items.year is
+//     nullable, so the wide projection FAILED — "cannot scan NULL into *int" —
+//     for any row whose year the parser could not determine. That is routine
+//     for a folder with no year in its name, and it made the canonical-row
+//     lookup error out on exactly the rows it exists to find.
+type FoundMediaItem struct {
+	ID        int64
+	AddedAt   time.Time
+	UpdatedAt time.Time
+	// Attempted reports whether this row has ever made metadata PROGRESS:
+	// either metadata was stored (last_metadata) or a provider was asked and
+	// answered (last_metadata_attempt). It reads the same metadataProgressExpr
+	// the refresh queue orders on, so the scanner and the queue cannot disagree
+	// about what "already dealt with" means.
+	//
+	// "Stored" alone would be the wrong test. It cannot distinguish "enrichment
+	// never ran" — the #510 state, which must be re-queued — from "enrichment
+	// ran and no provider has an entry for this title", which must NOT be, or
+	// every scan that brings a file re-pays a TMDB search, a TVDB search, an
+	// embed and possibly an LLM re-match for a show that will never match.
+	// Progress covers both: a scan interrupted before its deferred TV pass
+	// leaves BOTH columns NULL, so the #510 rows still recover, while an
+	// answered-but-unmatched show is left to the refresh queue's rotation.
+	Attempted bool
+}
+
 // FindMediaItemByTitle finds an existing media item by (library_id, type, title)
 // regardless of year. Used by the scanner under the per-show lock to resolve the
 // canonical item even after enrichment has changed its year (which breaks the
 // UpsertMediaItem ON CONFLICT path that includes COALESCE(year, 0)).
 // Returns nil, nil if no matching item exists.
-func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*models.MediaItem, error) {
-	item := &models.MediaItem{}
+func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*FoundMediaItem, error) {
+	found := &FoundMediaItem{}
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, added_at, updated_at, `+metadataProgressExpr+` IS NOT NULL
 		 FROM media_items WHERE library_id = $1 AND type = $2 AND title = $3
 		 ORDER BY id ASC LIMIT 1`,
 		libraryID, mediaType, title,
-	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
-		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
-		&item.PosterPath, &item.BackdropPath,
-		&item.AddedAt, &item.UpdatedAt,
-	)
+	).Scan(&found.ID, &found.AddedAt, &found.UpdatedAt, &found.Attempted)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find media item by title: %w", err)
 	}
-	return item, nil
+	return found, nil
 }
 
 func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem, error) {
@@ -994,7 +1035,9 @@ func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem
 	// Bug 7.1). COALESCE because pre-Phase-2 rows may have NULL status.
 	var matchStatus *string
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), match_status, added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
+		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), match_status, added_at, updated_at
 		 FROM media_items WHERE id = $1`, id,
 	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
 		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
@@ -1018,7 +1061,9 @@ func (q *Queries) SearchMedia(ctx context.Context, query string, limit int) ([]*
 		limit = 20
 	}
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
+		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
 		 FROM media_items
 		 WHERE title % $1 OR title ILIKE '%' || $1 || '%'
 		    OR overview % $1 OR overview ILIKE '%' || $1 || '%'
@@ -1068,8 +1113,9 @@ func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaIte
 	// presence of ai_suggested_tmdb_id to render a one-click "Accept
 	// suggestion" button that hits the existing ManualMatch endpoint.
 	rows, err := q.pool.Query(ctx,
-		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
-		        m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title, COALESCE(m.year, 0),
+		        COALESCE(m.overview, ''), COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
+		        COALESCE(m.content_rating, ''),
 		        COALESCE(m.poster_path,''), COALESCE(m.backdrop_path,''),
 		        m.added_at, m.updated_at,
 		        m.ai_suggested_tmdb_id, COALESCE(m.ai_suggested_title, ''),
@@ -1229,6 +1275,29 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 	// Among duplicates sharing a tmdb_id, pick the item with the richest
 	// metadata, then order the deduped set by added_at DESC.
 	//
+	// The outer projection COALESCEs year/overview/rating/runtime_minutes/
+	// content_rating. All five are nullable and land in non-nullable
+	// models.MediaItem fields, so ONE row with any of them NULL failed this whole
+	// query and took the user-facing "Recently Added" rail (/api/media/recent)
+	// down with a 500 for every user, catalog-wide — this query carries no
+	// library, type or file filter, so it reads every media_items row there is.
+	//
+	// It is not the only reader of those columns, and a test sweep is NOT a
+	// reachability argument: with one all-NULL row present, this was the only
+	// query in the SUITE that broke, but GetMediaItems, GetMediaItem,
+	// SearchMedia and GetItemsNeedingReview have the identical scan shape and are
+	// all user-facing. They are COALESCEd too. The remaining projections in this
+	// package with the same shape are the open sweep recorded in CLAUDE.md.
+	//
+	// No application write path produces these NULLs today (UpsertMediaItem
+	// inserts Go zero values, UpdateMediaMetadata only sets fields it has), so
+	// this is latent robustness — but hand-written catalog SQL does produce them,
+	// this repo's runbooks prescribe exactly that, and it is how #510 was
+	// remediated in production.
+	//
+	// The richness CASEs below read the RAW CTE columns, not this projection, and
+	// each already collapses NULL and zero identically, so ranking is unchanged.
+	//
 	// m.type is part of the dedup key because TMDB's movie and TV id spaces are
 	// INDEPENDENT: movie 100 and tv 100 both exist and are unrelated titles.
 	// This query carries no type filter at all, so without the type in the key
@@ -1256,8 +1325,9 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 		           + CASE WHEN EXISTS (SELECT 1 FROM media_genres WHERE media_item_id = m.id) THEN 1 ELSE 0 END) DESC,
 		            m.id ASC
 		 )
-		 SELECT id, library_id, type, title, sort_title, year,
-		        overview, rating, runtime_minutes, content_rating,
+		 SELECT id, library_id, type, title, sort_title, COALESCE(year, 0),
+		        COALESCE(overview, ''), COALESCE(rating, 0), COALESCE(runtime_minutes, 0),
+		        COALESCE(content_rating, ''),
 		        poster_path, backdrop_path, added_at, updated_at
 		 FROM deduped
 		 ORDER BY added_at DESC LIMIT $1`, limit,
