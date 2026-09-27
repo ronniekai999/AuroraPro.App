@@ -299,8 +299,10 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 		}
 	}
 
-	// Cross-library dedup FIRST: same TMDB-ID items in different libraries
-	// collapse to one. Done before genre annotation because DeduplicateByTMDBID
+	// Cross-library dedup FIRST: items sharing a TMDB id AND type in
+	// different libraries collapse to one. The type matters — TMDB's movie
+	// and TV id spaces are independent, so movie 100 and tv 100 are
+	// unrelated titles. Done before genre annotation because DeduplicateByTMDBID
 	// may swap a winning "best" pointer that was not in the original input
 	// slice — annotating before dedup wasted DB work AND left the dedup-
 	// winner with empty Genres (so the rerank prompt got less signal).

@@ -162,12 +162,21 @@ func (q *Queries) UpdateMediaMetadata(ctx context.Context, u *models.MetadataUpd
 	// (migration 011 allows cross-library items to share tmdb_id), so we manually
 	// detect same-library duplicates that should be merged (e.g., "The Avengers" and
 	// "Avengers" in the same library both resolving to TMDB 24428).
+	//
+	// mi2.type = mi1.type because TMDB's movie and TV id spaces are independent,
+	// so a shared numeric id is not evidence of the same title. Today every row
+	// in one library shares that library's type (UpsertMediaItem is the only
+	// INSERT and takes the type from lib.Type; nothing ever UPDATEs it), which
+	// makes this predicate redundant — but no constraint enforces that, and what
+	// this query feeds is a catalog MERGE, which CLAUDE.md names the most
+	// dangerous code in this repo. Keeping the invariant local costs nothing.
 	if u.TMDBID != nil && *u.TMDBID > 0 {
 		var canonicalID int64
 		err := q.pool.QueryRow(ctx,
 			`SELECT mi2.id FROM media_items mi1
 			 JOIN media_items mi2 ON mi2.tmdb_id = mi1.tmdb_id
-			   AND mi2.library_id = mi1.library_id AND mi2.id != mi1.id
+			   AND mi2.library_id = mi1.library_id AND mi2.type = mi1.type
+			   AND mi2.id != mi1.id
 			 WHERE mi1.id = $1 AND mi1.tmdb_id = $2
 			 ORDER BY mi2.id ASC LIMIT 1`,
 			u.MediaItemID, *u.TMDBID,
