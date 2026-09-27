@@ -746,7 +746,7 @@ func (q *Queries) GetArtwork(ctx context.Context, mediaItemID int64) ([]models.A
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, media_item_id, art_type, source, remote_path, COALESCE(local_path, ''),
 		       COALESCE(width, 0), COALESCE(height, 0), COALESCE(lang, ''),
-		       vote_average, is_primary, COALESCE(blurhash, ''), cached_at, created_at
+		       COALESCE(vote_average, 0), is_primary, COALESCE(blurhash, ''), cached_at, created_at
 		FROM artwork
 		WHERE media_item_id = $1
 		ORDER BY art_type, is_primary DESC, vote_average DESC`, mediaItemID)

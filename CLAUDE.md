@@ -1104,6 +1104,14 @@ The affected column sets, and the struct that makes each one fatal:
 - `requests`: `poster_path`, `overview`, `year`, `arr_job_ids`,
   `error_message` → `models.Request`, all through the one shared
   `requestColumns` projection.
+- `user_profiles`: `language`, `subtitle_mode` → `models.UserProfile`. Narrower
+  blast radius than the catalog-wide queries (one user, not everyone) but
+  HIGHER reachability: `ResolveActingProfile` funnels essentially every
+  profile-scoped request through `GetProfile` / `GetDefaultProfile`, so one
+  NULL on a user's default profile takes out that user's whole session.
+- `artwork`: `vote_average` → `models.Artwork`. `GET
+  /api/media/{id}/artwork` 500s; the media-detail artwork block swallows the
+  error and degrades silently to "no artwork", which is the worse of the two.
 
 Invariants to preserve when touching this area:
 
@@ -1117,19 +1125,28 @@ Invariants to preserve when touching this area:
 - **A WHERE clause that mentions a nullable column does NOT exclude NULL
   rows.** `SearchMedia` reads `overview` in its own predicate and looked
   scoped; its title predicate matches NULL-overview rows regardless. Only an
-  explicit `IS NOT NULL` (or a join that requires one, as in the already-safe
-  `GetFlaggedWithoutAISuggestion`) does.
+  explicit `IS NOT NULL` on the column you are about to scan does — and note
+  that almost nothing here has one, so in practice the answer is COALESCE.
+  `GetFlaggedWithoutAISuggestion` is safe because it ALREADY COALESCEs all
+  five, not because its `match_status` / `ai_match_ran_at` predicate excludes
+  anything; do not read a nearby predicate or join as a licence to skip the
+  COALESCE.
 - **COALESCE inside a `DISTINCT ON` CTE is enough**, and the outer `SELECT`
   reading `d.<col>` needs no second one. The richness `ORDER BY` still
   references the base `m.<col>`, which stays legal because `DISTINCT ON`
   (unlike plain `DISTINCT`) permits ORDER BY expressions outside the select
   list. `NULLS LAST` on the outer sort becomes inert — a COALESCE'd 0 already
   sorts last under `DESC`, so ordering is unchanged.
-- **Coalescing `rating` but not `year` is the shape this defect actually
-  took.** All four ContinueWatching queries and both watchlist queries did
-  exactly that, so the bug hid beside a fix for its own sibling column. When
-  auditing a projection, check every nullable column, not the one that looks
-  recently touched.
+- **A COALESCE'd column sitting beside a raw one is the shape this defect
+  actually took, every time.** The four ContinueWatching queries COALESCEd
+  `rating` and left `year` raw; the two watchlist queries COALESCEd
+  `poster_path` and left `year` raw (they project no `rating` at all —
+  `models.WatchlistItem` has no such field); the three `user_profiles` reads
+  COALESCE `avatar_url`, `max_age_rating` and `subtitle_lang` while leaving
+  `language` and `subtitle_mode` raw three tokens away; `GetArtwork` COALESCEs
+  five columns and leaves `vote_average`. So the bug hides BESIDE a fix for its
+  own sibling, and a projection that looks recently tended is not evidence.
+  Check every nullable column in the list, every time.
 
 **No application write path produces these NULLs**: `UpsertMediaItem` inserts
 the Go zero values, `UpdateMediaMetadata` only sets fields it has values for,
@@ -1165,11 +1182,21 @@ Known limits, stated plainly:
   fails whichever unrelated package reads the catalog next. Every helper in
   `queries_enrichment_recovery_test.go` deletes its own row in `t.Cleanup`;
   that is load-bearing, not tidiness.
-- **Only the four tables above were swept.** The schema has 128 nullable
-  columns across ~30 tables; the rest were checked only insofar as they
-  appeared in the same projections, and most legitimately scan into pointer
-  fields (`tmdb_id`, `match_status`, `processed_at`). A table not named here
-  has not been cleared.
+- **Six tables were swept; the other 26 were not.** The schema has 128
+  nullable columns across 32 tables. The rest were checked by resolving every
+  SQL literal in `internal/db`'s non-test files against
+  `information_schema.columns` and then driving ~40 read paths against an
+  all-NULL fixture, and most legitimately scan into pointer fields
+  (`tmdb_id`, `match_status`, `processed_at`, `read_at`, `trailer_key` — that
+  last one's three-state NULL is load-bearing and must stay raw). A table not
+  named here still has not been cleared.
+- **Following the STRUCTS named in the issue is what missed two instances.**
+  The first pass swept the tables reachable from `models.MediaItem` and its
+  neighbours, and an independent review then found `user_profiles.language` /
+  `subtitle_mode` and `artwork.vote_average` — one of them in a file that pass
+  had already edited. The authoritative input is
+  `information_schema.columns` joined against the scan target's Go type, not
+  the struct the bug report happened to name.
 - **Nothing prevents the next instance.** The rule is prose in this section
   plus the tests above; there is no lint, no generated projection and no
   `NOT NULL` migration enforcing it. Tightening the columns to `NOT NULL

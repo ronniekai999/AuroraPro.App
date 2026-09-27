@@ -175,14 +175,23 @@ func TestGetStaleMetadataItemsSurvivesNullColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStaleMetadataItems with a NULL-column row present: %v", err)
 	}
-	// The query is LIMIT 100 over a shared catalog, so the fixture is not
-	// guaranteed to be in the page — but if it is, its values must be the
-	// sentinels. Erroring at all is the defect; this pins both halves.
+	// Presence is asserted, not assumed. The query is LIMIT 100 over a catalog
+	// shared with concurrently-running packages, and the fixture's NULL
+	// last_metadata puts it in the NULLS FIRST group where ties break
+	// arbitrarily — so on a populated database it CAN fall off the page, and
+	// then both halves of this test are vacuous: the error half too, because
+	// the query only fails if a NULL row is actually in the page. A skip that
+	// looks like a pass is the failure mode this whole file exists to avoid,
+	// so make it loud instead.
 	for _, it := range items {
 		if it.ID == id {
 			assertUnknownSentinels(t, "GetStaleMetadataItems", &it.MediaItem)
+			return
 		}
 	}
+	t.Errorf("the NULL-column row (id %d) is missing from GetStaleMetadataItems' %d "+
+		"results, so this case proved nothing; it sorts into the NULLS FIRST group "+
+		"and was pushed off the LIMIT 100 page", id, len(items))
 }
 
 // TestGetMediaItemsSurvivesNullColumns covers the paginated catalog query
@@ -493,10 +502,16 @@ func TestMediaFileReadsSurviveNullColumns(t *testing.T) {
 		t.Fatal("GetCrossLibraryFiles returned nothing — the scan was never reached, " +
 			"so this case proves nothing; check the fixture's tmdb_id")
 	}
+	foundFixture := false
 	for _, f := range xlib {
 		if f.ID == fileID {
+			foundFixture = true
 			assertFileSentinels("GetCrossLibraryFiles", f)
 		}
+	}
+	if !foundFixture {
+		t.Errorf("GetCrossLibraryFiles returned %d files but none was the fixture (id %d), "+
+			"so the sentinel assertions never ran", len(xlib), fileID)
 	}
 }
 
@@ -599,10 +614,16 @@ func TestEpisodeFileReadsSurviveNullColumns(t *testing.T) {
 		t.Fatal("GetCrossLibraryEpisodeFiles returned nothing — the scan was never " +
 			"reached, so this case proves nothing")
 	}
+	foundFixture := false
 	for _, f := range xlib {
 		if f.ID == fileID {
+			foundFixture = true
 			assertFileSentinels("GetCrossLibraryEpisodeFiles", f)
 		}
+	}
+	if !foundFixture {
+		t.Errorf("GetCrossLibraryEpisodeFiles returned %d files but none was the fixture (id %d), "+
+			"so the sentinel assertions never ran", len(xlib), fileID)
 	}
 
 	batch, _, err := q.GetCrossLibraryEpisodeFilesBatch(ctx, []int64{episodeID}, tmdbID)
@@ -613,10 +634,17 @@ func TestEpisodeFileReadsSurviveNullColumns(t *testing.T) {
 		t.Fatal("GetCrossLibraryEpisodeFilesBatch returned nothing for the fixture " +
 			"episode — the scan was never reached, so this case proves nothing")
 	}
+	foundInBatch := false
 	for _, f := range batch[episodeID] {
 		if f.ID == fileID {
+			foundInBatch = true
 			assertFileSentinels("GetCrossLibraryEpisodeFilesBatch", f)
 		}
+	}
+	if !foundInBatch {
+		t.Errorf("GetCrossLibraryEpisodeFilesBatch returned %d files for the fixture "+
+			"episode but none was the fixture file (id %d), so the sentinel "+
+			"assertions never ran", len(batch[episodeID]), fileID)
 	}
 }
 
@@ -631,20 +659,32 @@ func TestRequestReadsSurviveNullColumns(t *testing.T) {
 	ctx := context.Background()
 	owner := seedTestUser(t, q)
 
-	var reqID int64
-	if err := q.pool.QueryRow(ctx,
-		`INSERT INTO requests
-		   (user_id, media_type, tmdb_id, title, poster_path, overview, year,
-		    status, arr_job_ids, error_message)
-		 VALUES ($1, 'movie', $2, 'NullProbe Request', NULL, NULL, NULL,
-		         'pending_approval', NULL, NULL) RETURNING id`,
-		owner, uniqueTMDBID(t),
-	).Scan(&reqID); err != nil {
-		t.Fatalf("seed all-NULL request: %v", err)
+	// One fixture PER STATUS. The six reads filter on different statuses, and a
+	// read that matches no row scans nothing — so a single 'pending_approval'
+	// fixture left GetProcessingRequests and GetStalePendingRequests passing
+	// identically against the un-COALESCEd projection. requested_at is backdated
+	// so the 'pending' row is stale enough for GetStalePendingRequests' cutoff.
+	seedNullRequest := func(status string) int64 {
+		t.Helper()
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO requests
+			   (user_id, media_type, tmdb_id, title, poster_path, overview, year,
+			    status, arr_job_ids, error_message, requested_at)
+			 VALUES ($1, 'movie', $2, 'NullProbe Request', NULL, NULL, NULL,
+			         $3, NULL, NULL, NOW() - INTERVAL '1 day') RETURNING id`,
+			owner, uniqueTMDBID(t), status,
+		).Scan(&id); err != nil {
+			t.Fatalf("seed all-NULL %s request: %v", status, err)
+		}
+		t.Cleanup(func() {
+			_, _ = q.pool.Exec(context.Background(), `DELETE FROM requests WHERE id = $1`, id)
+		})
+		return id
 	}
-	t.Cleanup(func() {
-		_, _ = q.pool.Exec(context.Background(), `DELETE FROM requests WHERE id = $1`, reqID)
-	})
+	reqID := seedNullRequest("pending_approval")
+	seedNullRequest("processing")
+	seedNullRequest("pending")
 
 	assertRequestSentinels := func(name string, r *models.Request) {
 		t.Helper()
@@ -670,21 +710,174 @@ func TestRequestReadsSurviveNullColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRequestsByUserID: %v", err)
 	}
-	if len(byUser) != 1 {
-		t.Fatalf("GetRequestsByUserID returned %d rows, want 1", len(byUser))
+	// Three fixtures are seeded (one per status), so assert the one we hold an
+	// id for is present rather than an exact count.
+	foundByUser := false
+	for i := range byUser {
+		if byUser[i].ID == reqID {
+			foundByUser = true
+			assertRequestSentinels("GetRequestsByUserID", &byUser[i])
+		}
 	}
-	assertRequestSentinels("GetRequestsByUserID", &byUser[0])
+	if !foundByUser {
+		t.Errorf("the NULL-column request (id %d) is missing from GetRequestsByUserID's "+
+			"%d results", reqID, len(byUser))
+	}
 
-	if _, err := q.GetAllRequests(ctx); err != nil {
-		t.Fatalf("GetAllRequests: %v", err)
+	// Each of these must scan at least one NULL row, or it proves nothing about
+	// the shared projection. nonEmpty is what makes that explicit.
+	nonEmpty := func(name string, n int, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s with a NULL-column request present: %v", name, err)
+		}
+		if n == 0 {
+			t.Errorf("%s returned 0 rows, so it never reached the scan and this "+
+				"case proves nothing", name)
+		}
 	}
-	if _, err := q.GetPendingApprovalRequests(ctx); err != nil {
-		t.Fatalf("GetPendingApprovalRequests: %v", err)
+	all, err := q.GetAllRequests(ctx)
+	nonEmpty("GetAllRequests", len(all), err)
+
+	approval, err := q.GetPendingApprovalRequests(ctx)
+	nonEmpty("GetPendingApprovalRequests", len(approval), err)
+
+	processing, err := q.GetProcessingRequests(ctx)
+	nonEmpty("GetProcessingRequests", len(processing), err)
+
+	stale, err := q.GetStalePendingRequests(ctx, time.Now())
+	nonEmpty("GetStalePendingRequests", len(stale), err)
+}
+
+// TestProfileReadsSurviveNullColumns covers user_profiles.language and
+// subtitle_mode — both nullable, both scanned into non-nullable
+// models.UserProfile string fields, and both sitting in a select list that
+// already COALESCEs avatar_url, max_age_rating and subtitle_lang three tokens
+// away. That is the same "coalesced the sibling, missed this one" shape the four
+// ContinueWatching queries had.
+//
+// Blast radius is narrower than the catalog-wide queries (one user, not
+// everyone) but reachability is HIGHER: ResolveActingProfile funnels
+// essentially every profile-scoped request through GetProfile /
+// GetDefaultProfile, so one NULL on a user's default profile takes out that
+// user's whole session rather than one field.
+func TestProfileReadsSurviveNullColumns(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+
+	var profileID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
+		 VALUES ($1, $2, TRUE, NULL, NULL) RETURNING id`,
+		owner, "nullcol_"+randomSuffix(t),
+	).Scan(&profileID); err != nil {
+		t.Fatalf("seed all-NULL profile: %v", err)
 	}
-	if _, err := q.GetProcessingRequests(ctx); err != nil {
-		t.Fatalf("GetProcessingRequests: %v", err)
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM user_profiles WHERE id = $1`, profileID)
+	})
+
+	assertProfileSentinels := func(name string, p *models.UserProfile) {
+		t.Helper()
+		if p.Language != "" {
+			t.Errorf("%s: Language = %q, want \"\"", name, p.Language)
+		}
+		if p.SubtitleMode != "" {
+			t.Errorf("%s: SubtitleMode = %q, want \"\"", name, p.SubtitleMode)
+		}
 	}
-	if _, err := q.GetStalePendingRequests(ctx, time.Now()); err != nil {
-		t.Fatalf("GetStalePendingRequests: %v", err)
+
+	byID, err := q.GetProfile(ctx, profileID)
+	if err != nil {
+		t.Fatalf("GetProfile with a NULL-column profile present: %v", err)
+	}
+	if byID == nil {
+		t.Fatal("GetProfile returned no row for the fixture")
+	}
+	assertProfileSentinels("GetProfile", byID)
+
+	def, err := q.GetDefaultProfile(ctx, owner)
+	if err != nil {
+		t.Fatalf("GetDefaultProfile with a NULL-column profile present: %v", err)
+	}
+	if def == nil {
+		t.Fatal("GetDefaultProfile returned no row for the fixture")
+	}
+	assertProfileSentinels("GetDefaultProfile", def)
+
+	list, err := q.GetProfilesByUser(ctx, owner)
+	if err != nil {
+		t.Fatalf("GetProfilesByUser with a NULL-column profile present: %v", err)
+	}
+	found := false
+	for _, p := range list {
+		if p.ID == profileID {
+			found = true
+			assertProfileSentinels("GetProfilesByUser", p)
+		}
+	}
+	if !found {
+		t.Errorf("the NULL-column profile (id %d) is missing from GetProfilesByUser' "+
+			"%d results", profileID, len(list))
+	}
+
+	// ResolveActingProfile is the funnel every profile-scoped request goes
+	// through, so it is asserted separately rather than assumed from GetProfile.
+	resolved, err := q.ResolveActingProfile(ctx, owner, 0)
+	if err != nil {
+		t.Fatalf("ResolveActingProfile with a NULL-column profile present: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("ResolveActingProfile returned no profile")
+	}
+	assertProfileSentinels("ResolveActingProfile", resolved)
+}
+
+// TestGetArtworkSurvivesNullVoteAverage covers artwork.vote_average, nullable
+// and scanned into models.Artwork.VoteAverage (a plain float64) beside
+// COALESCEd local_path/width/height/lang/blurhash.
+//
+// GET /api/media/{id}/artwork surfaces the failure as a 500; the media-detail
+// artwork block swallows the error, so there it degrades silently to
+// "no artwork" — which is the worse of the two, being invisible.
+func TestGetArtworkSurvivesNullVoteAverage(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	lib := nullProbeLibrary(t, q, owner, "movie")
+	itemID, _ := insertMovie(t, q, lib)
+
+	var artID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO artwork
+		   (media_item_id, art_type, source, remote_path, width, height, lang,
+		    vote_average, is_primary, blurhash)
+		 VALUES ($1, 'poster', 'tmdb', $2, NULL, NULL, NULL, NULL, TRUE, NULL)
+		 RETURNING id`,
+		itemID, "/nullcol_"+randomSuffix(t)+".jpg",
+	).Scan(&artID); err != nil {
+		t.Fatalf("seed all-NULL artwork: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM artwork WHERE id = $1`, artID)
+	})
+
+	art, err := q.GetArtwork(ctx, itemID)
+	if err != nil {
+		t.Fatalf("GetArtwork with a NULL vote_average present: %v", err)
+	}
+	found := false
+	for _, a := range art {
+		if a.ID == artID {
+			found = true
+			if a.VoteAverage != 0 {
+				t.Errorf("GetArtwork: VoteAverage = %v, want 0", a.VoteAverage)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the NULL-vote_average row (id %d) is missing from GetArtwork's %d "+
+			"results, so the assertion never ran", artID, len(art))
 	}
 }

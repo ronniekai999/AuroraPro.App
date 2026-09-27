@@ -28,8 +28,8 @@ func (q *Queries) CreateProfile(ctx context.Context, p *models.UserProfile) erro
 func (q *Queries) GetProfilesByUser(ctx context.Context, userID int64) ([]*models.UserProfile, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE user_id = $1
 		ORDER BY is_default DESC, name`, userID)
@@ -55,8 +55,8 @@ func (q *Queries) GetProfile(ctx context.Context, profileID int64) (*models.User
 	p := &models.UserProfile{}
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE id = $1`, profileID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
@@ -75,8 +75,8 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 	p := &models.UserProfile{}
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE user_id = $1 AND is_default = TRUE`, userID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
