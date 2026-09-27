@@ -1081,3 +1081,98 @@ What to take from it, if this is picked up again:
 - **`FindMediaItemByTitle` errors on a NULL year** (it scans into a
   non-nullable field), so the TV pre-check fails unconditionally for those
   rows and the upsert re-keys. Also pre-existing, also worth fixing alone.
+
+## Enrichment recovery: NULL columns scanned into non-nullable Go fields
+
+Found while fixing issue #510 and swept in that follow-up. Four tables declare
+columns NULLABLE that the structs they are scanned into declare as plain
+`int` / `string` / `float64`. pgx refuses that scan — `cannot scan NULL into
+*int` — and because the failure happens mid-iteration it fails the **whole
+query, not one row**, so a single bad row anywhere takes out an entire
+endpoint. Code: `internal/db/{queries,queries_phase2,queries_phase4,
+queries_crosslib,queries_requests}.go`; regression tests in
+`internal/db/queries_enrichment_recovery_test.go`.
+
+The affected column sets, and the struct that makes each one fatal:
+
+- `media_items`: `year`, `overview`, `rating`, `runtime_minutes`,
+  `content_rating` → `models.MediaItem`, `models.ContinueWatchingItem`,
+  `models.WatchlistItem`.
+- `media_files` / `episode_files`: `container`, `video_codec`, `audio_codec`,
+  `resolution`, `bitrate`, `duration_ms` → `models.MediaFile` /
+  `models.EpisodeFile`.
+- `requests`: `poster_path`, `overview`, `year`, `arr_job_ids`,
+  `error_message` → `models.Request`, all through the one shared
+  `requestColumns` projection.
+
+Invariants to preserve when touching this area:
+
+- **The fix is in the SQL, never in the struct.** The zero values are already
+  the codebase's "unknown" sentinels — `json:"...,omitempty"` on all five
+  `media_items` fields, the enricher's `nilIfZero` year write-back, and
+  `MediaFile`'s own "0 = unknown" / "Empty = unknown" comments — so
+  `COALESCE(col, 0)` / `COALESCE(col, '')` preserves meaning exactly.
+  Making the fields pointers would touch a very large number of call sites and
+  buy nothing. **Any new query projecting these columns must COALESCE them.**
+- **A WHERE clause that mentions a nullable column does NOT exclude NULL
+  rows.** `SearchMedia` reads `overview` in its own predicate and looked
+  scoped; its title predicate matches NULL-overview rows regardless. Only an
+  explicit `IS NOT NULL` (or a join that requires one, as in the already-safe
+  `GetFlaggedWithoutAISuggestion`) does.
+- **COALESCE inside a `DISTINCT ON` CTE is enough**, and the outer `SELECT`
+  reading `d.<col>` needs no second one. The richness `ORDER BY` still
+  references the base `m.<col>`, which stays legal because `DISTINCT ON`
+  (unlike plain `DISTINCT`) permits ORDER BY expressions outside the select
+  list. `NULLS LAST` on the outer sort becomes inert — a COALESCE'd 0 already
+  sorts last under `DESC`, so ordering is unchanged.
+- **Coalescing `rating` but not `year` is the shape this defect actually
+  took.** All four ContinueWatching queries and both watchlist queries did
+  exactly that, so the bug hid beside a fix for its own sibling column. When
+  auditing a projection, check every nullable column, not the one that looks
+  recently touched.
+
+**No application write path produces these NULLs**: `UpsertMediaItem` inserts
+the Go zero values, `UpdateMediaMetadata` only sets fields it has values for,
+and `requests`' nullable columns all carry non-NULL DEFAULTs. They arrive via
+hand-written catalog SQL — which this repo's own runbooks prescribe
+(`docs/moving-media-paths.md`) and which is exactly how #510 was remediated in
+production. Treat this as latent robustness with a real trigger, not a live
+outage.
+
+**How the blast radius was measured, and why that matters more than reading
+the code.** Bring up Postgres with the migrated schema, insert one row per
+table with every nullable column NULL, and run `go test -count=1 ./...`.
+Anything that breaks is a reachable instance. That measurement is what found
+`GetRecentMedia` — before the fix it was the only query in the whole suite
+that broke. Note `-count=1`: without it Go serves cached package results and
+the probe reports a clean run against rows it never read, which is a false
+all-clear of exactly the shape `scripts/check-library-paths.sh` is full of.
+
+Known limits, stated plainly:
+
+- **The probe only covers queries some test actually exercises**, and it was
+  the minority of them. The sweep's real coverage came from reading every
+  projection; 16 of the 18 read paths had to be driven by hand to prove
+  anything. Read the call sites rather than trusting the probe.
+- **A probe that returns zero rows proves nothing, and says so in the same
+  voice as a pass.** `GetCrossLibraryFiles` reported clean on the first run
+  purely because the fixture had no `tmdb_id` and the function returns early;
+  the scan was never reached. The regression tests for both cross-library
+  paths therefore `t.Fatal` on an empty result rather than passing vacuously.
+- **A NULL fixture row is visible to every other package.** `go test ./...`
+  runs packages concurrently against one database and these queries are
+  catalog-wide (`GetRecentMedia` takes no filter at all), so a leaked fixture
+  fails whichever unrelated package reads the catalog next. Every helper in
+  `queries_enrichment_recovery_test.go` deletes its own row in `t.Cleanup`;
+  that is load-bearing, not tidiness.
+- **Only the four tables above were swept.** The schema has 128 nullable
+  columns across ~30 tables; the rest were checked only insofar as they
+  appeared in the same projections, and most legitimately scan into pointer
+  fields (`tmdb_id`, `match_status`, `processed_at`). A table not named here
+  has not been cleared.
+- **Nothing prevents the next instance.** The rule is prose in this section
+  plus the tests above; there is no lint, no generated projection and no
+  `NOT NULL` migration enforcing it. Tightening the columns to `NOT NULL
+  DEFAULT` in a migration would make the class structurally impossible and is
+  the obvious follow-up — it is not built, because it needs a data backfill on
+  live installs that may already hold the NULLs this section exists for.

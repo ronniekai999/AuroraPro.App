@@ -556,8 +556,10 @@ func (q *Queries) UpdateEpisodeMetadata(ctx context.Context, u *models.EpisodeMe
 func (q *Queries) GetStaleMetadataItems(ctx context.Context, maxAge time.Duration) ([]*models.StaleMediaItem, error) {
 	cutoff := time.Now().Add(-maxAge)
 	rows, err := q.pool.Query(ctx, `
-		SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		       content_rating, added_at, updated_at, tmdb_id, last_metadata
+		SELECT id, library_id, type, title, sort_title,
+		       COALESCE(year, 0), COALESCE(overview, ''), COALESCE(rating, 0),
+		       COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		       added_at, updated_at, tmdb_id, last_metadata
 		FROM media_items
 		WHERE last_metadata IS NULL OR last_metadata < $1
 		ORDER BY last_metadata ASC NULLS FIRST
@@ -960,8 +962,9 @@ func (q *Queries) GetEpisodes(ctx context.Context, mediaItemID int64, seasonNum 
 // GetEpisodeFiles returns all files for a specific episode.
 func (q *Queries) GetEpisodeFiles(ctx context.Context, episodeID int64) ([]*models.EpisodeFile, error) {
 	rows, err := q.pool.Query(ctx, `
-		SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		SELECT id, episode_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		       COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		       file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM episode_files
 		WHERE episode_id = $1
 		ORDER BY CASE version_tag WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4 END, id`, episodeID)
@@ -1294,7 +1297,8 @@ func (q *Queries) GetContinueWatching(ctx context.Context, userID int64, limit i
 		  SELECT DISTINCT ON (wp.media_item_id)
 		         wp.id, wp.user_id, COALESCE(wp.profile_id, 0) AS profile_id, wp.media_item_id, wp.episode_id,
 		         wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type, mi.year,
+		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type,
+		         COALESCE(mi.year, 0) AS year,
 		         COALESCE(mi.rating, 0) AS rating,
 		         COALESCE(e.title, '') AS episode_title,
 		         s.season_number, e.episode_number
@@ -1332,7 +1336,8 @@ func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID in
 		  SELECT DISTINCT ON (wp.media_item_id)
 		         wp.id, wp.user_id, COALESCE(wp.profile_id, 0) AS profile_id, wp.media_item_id, wp.episode_id,
 		         wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type, mi.year,
+		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type,
+		         COALESCE(mi.year, 0) AS year,
 		         COALESCE(mi.rating, 0) AS rating,
 		         COALESCE(e.title, '') AS episode_title,
 		         s.season_number, e.episode_number
@@ -1458,8 +1463,10 @@ func (q *Queries) GetMediaGenres(ctx context.Context, mediaItemID int64) ([]stri
 // GetMediaItemEnriched returns a media item with all TMDB-enriched fields.
 func (q *Queries) GetMediaItemEnriched(ctx context.Context, id int64) (*models.MediaItemEnriched, error) {
 	row := q.pool.QueryRow(ctx, `
-		SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		       content_rating, added_at, updated_at,
+		SELECT id, library_id, type, title, sort_title,
+		       COALESCE(year, 0), COALESCE(overview, ''), COALESCE(rating, 0),
+		       COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		       added_at, updated_at,
 		       tmdb_id, COALESCE(imdb_id, ''), COALESCE(tagline, ''),
 		       COALESCE(poster_path, ''), COALESCE(backdrop_path, ''),
 		       COALESCE(studio, ''), COALESCE(network, ''), COALESCE(release_date, ''),
@@ -1502,8 +1509,9 @@ func (q *Queries) GetMediaFileByID(ctx context.Context, id int64) (*models.Media
 	f := &models.MediaFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx, `
-		SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		SELECT id, media_item_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		       COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		       file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM media_files WHERE id = $1`, id).
 		Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
@@ -1522,8 +1530,9 @@ func (q *Queries) GetEpisodeFileByID(ctx context.Context, id int64) (*models.Epi
 	f := &models.EpisodeFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx, `
-		SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		SELECT id, episode_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		       COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		       file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM episode_files WHERE id = $1`, id).
 		Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
@@ -1715,7 +1724,9 @@ func (q *Queries) GetEpisodeFileByPath(ctx context.Context, path string) (*model
 	f := &models.EpisodeFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		`SELECT id, episode_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		        COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		        file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM episode_files WHERE path = $1`, path,
 	).Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
 		&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,

@@ -438,7 +438,7 @@ func (q *Queries) GetOrCreateLibraryWatchlist(ctx context.Context, profileID int
 func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64) ([]*models.WatchlistItem, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
-		       mi.title, COALESCE(mi.poster_path, ''), mi.year, mi.type
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.year, 0), mi.type
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
@@ -471,7 +471,7 @@ func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, para
 	offset := (params.Page - 1) * params.PerPage
 	rows, err := q.pool.Query(ctx, `
 		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
-		       mi.title, COALESCE(mi.poster_path, ''), mi.year, mi.type
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.year, 0), mi.type
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
@@ -808,7 +808,8 @@ func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit in
 	rows, err := q.pool.Query(ctx, `
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type,
+		       COALESCE(mi.year, 0),
 		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
@@ -839,7 +840,8 @@ func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params mode
 	rows, err := q.pool.Query(ctx, `
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type,
+		       COALESCE(mi.year, 0),
 		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number

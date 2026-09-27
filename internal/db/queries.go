@@ -875,8 +875,12 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	dedupCTE := fmt.Sprintf(
 		`WITH deduped AS (
 		   SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
-		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
-		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		          m.id, m.library_id, m.type, m.title, m.sort_title,
+		          COALESCE(m.year, 0) AS year,
+		          COALESCE(m.overview, '') AS overview,
+		          COALESCE(m.rating, 0) AS rating,
+		          COALESCE(m.runtime_minutes, 0) AS runtime_minutes,
+		          COALESCE(m.content_rating, '') AS content_rating,
 		          COALESCE(m.poster_path,'') AS poster_path,
 		          COALESCE(m.backdrop_path,'') AS backdrop_path,
 		          m.added_at, m.updated_at
@@ -967,7 +971,9 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*models.MediaItem, error) {
 	item := &models.MediaItem{}
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
+		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
 		 FROM media_items WHERE library_id = $1 AND type = $2 AND title = $3
 		 ORDER BY id ASC LIMIT 1`,
 		libraryID, mediaType, title,
@@ -994,7 +1000,9 @@ func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem
 	// Bug 7.1). COALESCE because pre-Phase-2 rows may have NULL status.
 	var matchStatus *string
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), match_status, added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
+		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), match_status, added_at, updated_at
 		 FROM media_items WHERE id = $1`, id,
 	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
 		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
@@ -1018,7 +1026,9 @@ func (q *Queries) SearchMedia(ctx context.Context, query string, limit int) ([]*
 		limit = 20
 	}
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
+		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
+		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
 		 FROM media_items
 		 WHERE title % $1 OR title ILIKE '%' || $1 || '%'
 		    OR overview % $1 OR overview ILIKE '%' || $1 || '%'
@@ -1068,8 +1078,10 @@ func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaIte
 	// presence of ai_suggested_tmdb_id to render a one-click "Accept
 	// suggestion" button that hits the existing ManualMatch endpoint.
 	rows, err := q.pool.Query(ctx,
-		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
-		        m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title,
+		        COALESCE(m.year, 0), COALESCE(m.overview, ''),
+		        COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
+		        COALESCE(m.content_rating, ''),
 		        COALESCE(m.poster_path,''), COALESCE(m.backdrop_path,''),
 		        m.added_at, m.updated_at,
 		        m.ai_suggested_tmdb_id, COALESCE(m.ai_suggested_title, ''),
@@ -1145,7 +1157,9 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 	f := &models.MediaFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		`SELECT id, media_item_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		        COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		        file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM media_files WHERE path = $1`, path,
 	).Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
 		&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
@@ -1169,7 +1183,9 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 
 func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*models.MediaFile, error) {
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
+		`SELECT id, media_item_id, path, size_bytes, COALESCE(container, ''), COALESCE(video_codec, ''), COALESCE(audio_codec, ''),
+		        COALESCE(resolution, ''), COALESCE(bitrate, 0), COALESCE(duration_ms, 0),
+		        file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM media_files WHERE media_item_id = $1
 		 ORDER BY CASE version_tag WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4 END, id`, mediaItemID,
 	)
@@ -1239,8 +1255,12 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 	rows, err := q.pool.Query(ctx,
 		`WITH deduped AS (
 		   SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
-		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
-		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		          m.id, m.library_id, m.type, m.title, m.sort_title,
+		          COALESCE(m.year, 0) AS year,
+		          COALESCE(m.overview, '') AS overview,
+		          COALESCE(m.rating, 0) AS rating,
+		          COALESCE(m.runtime_minutes, 0) AS runtime_minutes,
+		          COALESCE(m.content_rating, '') AS content_rating,
 		          COALESCE(m.poster_path,'') AS poster_path,
 		          COALESCE(m.backdrop_path,'') AS backdrop_path,
 		          m.added_at, m.updated_at
