@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pty
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -22,15 +24,16 @@ class UninstallUpdaterStateTest(unittest.TestCase):
         self.root = Path(work.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.ledger = self.root / "aurora-updater"
-        self.sibling = self.root / "aurora-updater-keep"
+        self.host = self.root / "host"
+        self.ledger = self.host / "var/lib/aurora-updater"
+        self.sibling = self.ledger.with_name("aurora-updater-keep")
         for directory in (self.ledger, self.sibling):
-            directory.mkdir()
+            directory.mkdir(parents=True)
         (self.ledger / "pending").write_text("b" * 40 + "\n")
         (self.ledger / "deployed").write_text("a" * 40 + " fingerprint\n")
         (self.sibling / "sentinel").write_text("keep\n")
 
-        for name in ("rm", "printf", "head", "grep", "dirname"):
+        for name in ("printf", "head", "grep", "dirname"):
             target = shutil.which(name)
             if target:
                 (self.bin / name).symlink_to(target)
@@ -39,32 +42,45 @@ class UninstallUpdaterStateTest(unittest.TestCase):
         self.stub("getent", "exit 1")
         self.stub("systemctl", "exit 1")
 
-        # Redirect every uninstall-owned absolute path. Only the deployment
-        # ledger exists, so its presence alone must keep discovery from the
-        # early "nothing to remove" exit.
-        runner = SCRIPT
-        replacements = {
-            'DEPLOY_STATE_DIR="/var/lib/aurora-updater"': f'DEPLOY_STATE_DIR="{self.ledger}"',
-            'STATE_DIR="/var/lib/aurora"': f'STATE_DIR="{self.root / "state"}"',
-            'INSTALL_BIN="/usr/local/bin/aurora"': f'INSTALL_BIN="{self.root / "aurora"}"',
-            'INSTALL_DIR="/opt/aurora"': f'INSTALL_DIR="{self.root / "opt"}"',
-            'CONFIG_DIR="/etc/aurora"': f'CONFIG_DIR="{self.root / "etc"}"',
-            'CACHE_DIR="/var/cache/aurora"': f'CACHE_DIR="{self.root / "cache"}"',
-            'TRANSCODE_FALLBACK="/tmp/aurora-transcode"': f'TRANSCODE_FALLBACK="{self.root / "transcode"}"',
-            'LOG_DIR="/var/log/aurora"': f'LOG_DIR="{self.root / "logs"}"',
-            'SYSTEMD_UNIT="/etc/systemd/system/aurora.service"': f'SYSTEMD_UNIT="{self.root / "aurora.service"}"',
-            'UPDATER_BIN="/usr/local/bin/aurora-update"': f'UPDATER_BIN="{self.root / "aurora-update"}"',
-            'UPDATER_SERVICE="/etc/systemd/system/aurora-update.service"': f'UPDATER_SERVICE="{self.root / "aurora-update.service"}"',
-            'UPDATER_TIMER="/etc/systemd/system/aurora-update.timer"': f'UPDATER_TIMER="{self.root / "aurora-update.timer"}"',
-            'UPDATER_PATH_UNIT="/etc/systemd/system/aurora-update.path"': f'UPDATER_PATH_UNIT="{self.root / "aurora-update.path"}"',
-            'UPDATER_SUDOERS="/etc/sudoers.d/aurora-update"': f'UPDATER_SUDOERS="{self.root / "sudoers"}"',
-        }
-        for old, new in replacements.items():
-            self.assertIn(old, runner)
-            runner = runner.replace(old, new)
+        # Rewrite whole filesystem namespaces, including paths used directly
+        # in tests/redirections rather than declared as variables: nginx,
+        # Let's Encrypt, and root's Git credentials must never reach the host.
+        # No real service/database/account/ACL tools are exposed in PATH.
+        runner = re.sub(r"/(?:etc|root|opt|var|usr/local|tmp)(?=/)",
+                        lambda match: str(self.host) + match.group(), SCRIPT)
+
+        # Keep real deletion behavior, but validate EVERY operand first. This
+        # fails closed if a future path rewrite is missed, or if a fixture
+        # path escapes via '..', a prefix sibling, or a symlinked directory.
+        guarded_rm = self.bin / "rm"
+        guarded_rm.write_text(f'''#!{sys.executable}
+from pathlib import Path
+import os
+import sys
+root = Path({str(self.host)!r}).resolve()
+operands = []
+options = True
+for arg in sys.argv[1:]:
+    if options and arg == "--":
+        options = False
+    elif options and arg.startswith("-"):
+        if arg not in ("-f", "-r", "-rf", "-fr"):
+            raise SystemExit("unsafe rm option: " + arg)
+    else:
+        path = Path(arg).resolve()
+        if root not in path.parents:
+            raise SystemExit("refusing deletion outside fixture: " + arg)
+        operands.append(arg)
+if not operands:
+    raise SystemExit("rm requires a fixture operand")
+os.execv({shutil.which("rm")!r}, ["rm", *sys.argv[1:]])
+''')
+        guarded_rm.chmod(0o755)
         self.runner = self.root / "uninstall.sh"
         self.runner.write_text(runner)
         self.env = {**os.environ, "PATH": str(self.bin)}
+        for key in ("BASH_ENV", "ENV"):
+            self.env.pop(key, None)
 
     def stub(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -100,6 +116,52 @@ class UninstallUpdaterStateTest(unittest.TestCase):
         self.assertTrue((self.ledger / "pending").exists())
         self.assertTrue((self.ledger / "deployed").exists())
         self.assertTrue((self.sibling / "sentinel").exists())
+
+    def test_proxy_and_credentials_cleanup_stays_in_fixture(self) -> None:
+        paths = [self.host / path for path in (
+            "etc/nginx/sites-available/aurora.conf", "etc/nginx/sites-enabled/aurora.conf",
+            "etc/nginx/conf.d/aurora.conf", "etc/nginx/conf.d/aurora-map.conf",
+            "root/.git-credentials",
+        )]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("https://fixture@example.invalid@github.com/\n")
+        result = subprocess.run([BASH, str(self.runner), "--force"], env=self.env,
+                                text=True, capture_output=True, check=False, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path in paths:
+            self.assertFalse(path.exists(), str(path))
+        self.assertTrue((self.sibling / "sentinel").exists())
+
+    def test_missed_proxy_rewrite_cannot_delete_outside_fixture(self) -> None:
+        # Model the original isolation defect without touching any /etc path.
+        with tempfile.TemporaryDirectory(prefix="aurora-host-proxy-") as outside:
+            config = Path(outside) / "conf.d/aurora.conf"
+            config.parent.mkdir()
+            config.write_text("host configuration must survive\n")
+            runner = self.runner.read_text().replace(str(self.host / "etc/nginx"), outside)
+            self.runner.write_text(runner)
+            result = subprocess.run([BASH, str(self.runner), "--force"], env=self.env,
+                                    text=True, capture_output=True, check=False, timeout=10)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("refusing deletion outside fixture", result.stderr)
+            self.assertEqual(config.read_text(), "host configuration must survive\n")
+
+    def test_delete_guard_rejects_escapes_before_any_deletion(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aurora-outside-") as outside:
+            sentinel = Path(outside) / "sentinel"
+            sentinel.write_text("keep\n")
+            link = self.host / "escape"
+            link.symlink_to(outside, target_is_directory=True)
+            for path in (sentinel, link / "sentinel", self.host / "..", self.root):
+                with self.subTest(path=path):
+                    result = subprocess.run([str(self.bin / "rm"), "-rf", "--",
+                                             str(self.ledger), str(path)], env=self.env,
+                                            text=True, capture_output=True, check=False, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("refusing deletion outside fixture", result.stderr)
+                    self.assertTrue(self.ledger.exists())
+                    self.assertEqual(sentinel.read_text(), "keep\n")
 
 
 if __name__ == "__main__":

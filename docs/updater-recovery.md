@@ -109,7 +109,16 @@ application-owned UI status and installation directories:
   It is written only after restart, the health check, and updater refresh succeed.
 - `pending` records installation intent after both builds pass and before the
   first live-file mutation. A failure, crash, or rollback during installation
-  leaves it present. It is cleared only on success.
+  leaves it present. It is cleared only after health, updater refresh, and
+  rollback snapshot retirement succeed.
+- `rollback/` holds the prior binary and static tree as a single generation.
+  Both are copied into a private staging directory before one rename publishes
+  the generation. Retries and newer targets preserve it intact while an install
+  is pending. After health succeeds, one rename detaches the whole generation
+  before recursive cleanup. An interruption during cleanup cannot leave one
+  old component active alongside a new component; the next install captures
+  the healthy live pair together. Abandoned staging and retired directories
+  are cleaned under the shared lock before preparing another snapshot.
 
 A failed frontend/dependency/Go build has not started installation, so the
 same revision is retried normally. A failed or interrupted **installation** is
@@ -157,7 +166,11 @@ sudo python3 scripts/aurora-update-test.py -v
 ```
 
 The suite uses real temporary Git repositories, file operations, and locks with
-stubbed build/service/health commands. It validates updater control flow, not
+stubbed build/service/health commands. It includes process kills during snapshot
+preparation and retirement, plus a newer failed deployment that must restore a
+matching binary/frontend pair. These checks do not model filesystem durability
+after power loss or exhaustively cover storage failures. It validates updater
+control flow, not
 actual npm compilation, Go compilation, PostgreSQL migrations, systemd behavior,
 or media playback. The repository's existing Go and SPA CI jobs remain necessary,
 as does independent adversarial review of the final diff.

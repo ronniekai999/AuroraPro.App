@@ -41,6 +41,7 @@ class UpdaterTest(unittest.TestCase):
         self.live = self.root / "live"
         self.live_binary, self.live_updater = self.live / "aurora", self.live / "aurora-update"
         self.state_dir = self.root / "deploy-state"
+        self.rollback_dir = self.state_dir / "rollback"
         self.status = self.root / "ui-state/update-status.json"
         self.events, self.lock = self.root / "events", self.root / "deploy.lock"
         self.env = {
@@ -416,8 +417,8 @@ exec {shlex.quote(real_cp)} "$@"
         self.run_update(expected=1)
         self.assertEqual(self.live_binary.read_text(), "binary new\n")
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
-        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
-        self.assertEqual((self.state_dir / "rollback-static/v2/index.html").read_text(),
+        self.assertEqual((self.rollback_dir / "rollback-binary").read_text(), "old binary\n")
+        self.assertEqual((self.rollback_dir / "rollback-static/v2/index.html").read_text(),
                          "old frontend\n")
 
         self.restore_cp()
@@ -453,16 +454,94 @@ exec {shlex.quote(real_cp)} "$@"
 ''')
         self.run_update(expected=1)
         self.assert_old_assets()
-        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
-        self.assertFalse((self.state_dir / "rollback-static").exists())
-        self.assertEqual(list(self.state_dir.glob(".rollback-static.*")), [])
+        self.assertFalse(self.rollback_dir.exists())
+        self.assertEqual(list(self.state_dir.glob(".rollback-stage.*")), [])
 
-        # Another preparation failure leaves the already complete binary
-        # snapshot intact; a later retry can finish and deploy normally.
+        # Another preparation failure still publishes no partial generation;
+        # a later retry can capture both original artifacts and deploy normally.
         self.run_update("--retry", expected=1)
-        self.assertEqual((self.state_dir / "rollback-binary").read_text(), "old binary\n")
+        self.assertFalse(self.rollback_dir.exists())
+        self.assert_old_assets()
         self.restore_cp()
         self.assertEqual(self.run_update("--retry")["state"], "success")
+
+    def test_killed_snapshot_preparation_leaves_no_active_generation(self) -> None:
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$*" in
+  *rollback-static*)
+    mkdir -p "$4"; echo partial > "$4/partial"
+    kill -KILL "$PPID"; exit 0 ;;
+esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+        self.run_update(expected=-9)
+        self.assert_old_assets()
+        self.assertFalse(self.rollback_dir.exists())
+        self.assertTrue(list(self.state_dir.glob(".rollback-stage.*")))
+        self.restore_cp()
+        self.flag("health-fail")
+        self.run_update("--retry", expected=1)
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertEqual(list(self.state_dir.glob(".rollback-stage.*")), [])
+
+    def test_interrupted_success_cleanup_cannot_mix_rollback_generations(self) -> None:
+        real_rm = shutil.which("rm")
+        self.stub("rm", f'''
+if [ ! -f "$TEST_CONTROL/cleanup-killed" ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      */.rollback-retired.*)
+        [ -d "$arg/snapshot" ] || continue
+        {shlex.quote(real_rm)} -f -- "$arg/snapshot/rollback-binary" || exit $?
+        touch "$TEST_CONTROL/cleanup-killed"
+        kill -KILL "$PPID"; exit 0 ;;
+      */deploy-state/rollback-binary)
+        # Also exercise the old separate-delete implementation: this test
+        # must expose its mixed restored assets, not just a changed layout.
+        {shlex.quote(real_rm)} "$@" || exit $?
+        touch "$TEST_CONTROL/cleanup-killed"
+        kill -KILL "$PPID"; exit 0 ;;
+    esac
+  done
+fi
+exec {shlex.quote(real_rm)} "$@"
+''')
+        self.run_update(expected=-9)
+        self.assertEqual(self.live_binary.read_text(), "binary new\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "new\n")
+        healthy_static_mode = stat.S_IMODE((self.live / "static").stat().st_mode)
+        self.publish_release("newer broken")
+        self.stub("curl", '''
+echo 'health:check' >> "$TEST_EVENTS"
+if grep -q newer "$TEST_INSTALL_BIN"; then exit 22; fi
+echo '{"status":"ok"}'
+''')
+        status = self.run_update(expected=1)
+        self.assertIn("restored the previous installed snapshot", status["message"])
+        self.assertEqual(self.live_binary.read_text(), "binary new\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "new\n")
+        self.assertEqual(stat.S_IMODE((self.live / "static").stat().st_mode), healthy_static_mode)
+        self.assertEqual(list(self.state_dir.glob(".rollback-retired.*")), [])
+
+    def test_failed_snapshot_retirement_keeps_pending_until_retry(self) -> None:
+        real_mv = shutil.which("mv")
+        self.stub("mv", f'''
+case "$*" in *.rollback-retired.*) exit 28 ;; esac
+exec {shlex.quote(real_mv)} "$@"
+''')
+        status = self.run_update(expected=1)
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("rollback snapshot cleanup failed", status["message"])
+        self.assertTrue((self.state_dir / "pending").exists())
+        self.assertTrue(self.rollback_dir.exists())
+        self.assertEqual(self.live_binary.read_text(), "binary new\n")
+        (self.bin / "mv").unlink()
+        (self.bin / "mv").symlink_to(real_mv)
+        self.assertEqual(self.run_update("--retry")["state"], "success")
+        self.assertFalse((self.state_dir / "pending").exists())
+        self.assertFalse(self.rollback_dir.exists())
 
 
     def test_npm_install_failure_also_stops_before_build(self) -> None:

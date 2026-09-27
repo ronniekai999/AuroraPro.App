@@ -72,8 +72,9 @@ INSTALL_UPDATER=/usr/local/bin/aurora-update
 DEPLOY_STATE_DIR=/var/lib/aurora-updater
 DEPLOYED_FILE="$DEPLOY_STATE_DIR/deployed"
 PENDING_FILE="$DEPLOY_STATE_DIR/pending"
-ROLLBACK_BIN="$DEPLOY_STATE_DIR/rollback-binary"
-ROLLBACK_STATIC="$DEPLOY_STATE_DIR/rollback-static"
+ROLLBACK_DIR="$DEPLOY_STATE_DIR/rollback"
+ROLLBACK_BIN="$ROLLBACK_DIR/rollback-binary"
+ROLLBACK_STATIC="$ROLLBACK_DIR/rollback-static"
 SPA_SRC_DIR=static/redesign/app
 SPA_OUTPUT_DIR=static/v2
 
@@ -454,37 +455,45 @@ write_deploy_state() {
     fi
 }
 
-# Create each rollback snapshot completely under a temporary name and publish it
-# with one rename.  A pending install means the existing snapshot is the last
-# version that actually ran successfully, not necessarily the current live
-# files (an earlier attempt may already have promoted its binary/assets).
-# Therefore retries and newer targets fill only missing snapshots and never
-# replace an existing one until a deployment has passed its health check.
+# Publish binary and static snapshots as ONE generation with a single rename.
+# A pending install may already have changed live files, so never fill in or
+# replace components of an existing generation from the current installation.
+# The shared deploy lock also protects cleanup of interrupted private stages.
 prepare_rollback_snapshots() {
     local tmp
-    if [ ! -f "$ROLLBACK_BIN" ] && [ -f "$INSTALL_BIN" ]; then
-        tmp="$(mktemp "$DEPLOY_STATE_DIR/.rollback-binary.XXXXXX")" || return 1
-        if ! cp -p -- "$INSTALL_BIN" "$tmp" || ! mv -f -- "$tmp" "$ROLLBACK_BIN"; then
-            rm -f -- "$tmp"
-            return 1
-        fi
-    fi
-    if [ ! -d "$ROLLBACK_STATIC" ] && [ -d "$INSTALL_DIR/static" ]; then
-        tmp="$(mktemp -d "$DEPLOY_STATE_DIR/.rollback-static.XXXXXX")" || return 1
-        # Copy the directory itself beneath the private mktemp parent so its
-        # owner/mode are preserved. Copying only `static/.` would leave the
-        # published snapshot root at mktemp's root-only 0700; restoring that
-        # root would make assets unreadable to the aurora service.
-        if ! cp -a -- "$INSTALL_DIR/static" "$tmp/snapshot"; then
-            rm -rf -- "$tmp"
-            return 1
-        fi
-        if ! mv -- "$tmp/snapshot" "$ROLLBACK_STATIC"; then
-            rm -rf -- "$tmp"
-            return 1
-        fi
+    rm -rf -- "$DEPLOY_STATE_DIR"/.rollback-stage.* "$DEPLOY_STATE_DIR"/.rollback-retired.* || return 1
+    [ ! -L "$ROLLBACK_DIR" ] || return 1
+    [ ! -d "$ROLLBACK_DIR" ] || return 0
+    [ ! -e "$ROLLBACK_DIR" ] || return 1
+    tmp="$(mktemp -d "$DEPLOY_STATE_DIR/.rollback-stage.XXXXXX")" || return 1
+    if [ -f "$INSTALL_BIN" ] && ! cp -p -- "$INSTALL_BIN" "$tmp/rollback-binary"; then
         rm -rf -- "$tmp"
+        return 1
     fi
+    # Copy the directory itself, preserving its root's owner/mode instead of
+    # inheriting mktemp's 0700 and making restored assets unreadable to Aurora.
+    if [ -d "$INSTALL_DIR/static" ] && ! cp -a -- "$INSTALL_DIR/static" "$tmp/rollback-static"; then
+        rm -rf -- "$tmp"
+        return 1
+    fi
+    if ! mv -- "$tmp" "$ROLLBACK_DIR"; then
+        rm -rf -- "$tmp"
+        return 1
+    fi
+}
+
+# Detach the entire generation before deleting any component. A kill during
+# recursive deletion then leaves only an inactive retired directory; the next
+# attempt snapshots the healthy live binary and frontend together.
+retire_rollback_snapshots() {
+    local tmp
+    [ -d "$ROLLBACK_DIR" ] || return 0
+    tmp="$(mktemp -d "$DEPLOY_STATE_DIR/.rollback-retired.XXXXXX")" || return 1
+    if ! mv -- "$ROLLBACK_DIR" "$tmp/snapshot"; then
+        rm -rf -- "$tmp"
+        return 1
+    fi
+    rm -rf -- "$tmp"
 }
 
 # Cover the binary, updater, static tree, and migrations. Manual redeploys and
@@ -922,19 +931,16 @@ if $SVC_OK; then
     fi
     DEPLOYED_FINGERPRINT="$(deployment_fingerprint)"
     write_deploy_state "$DEPLOYED_FILE" "$NEW_SHA $DEPLOYED_FINGERPRINT"
+    if ! retire_rollback_snapshots; then
+        write_status failed "Aurora passed its health check, but rollback snapshot cleanup failed. Pending state is retained; correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+        log "rollback snapshot retirement failed after healthy deployment"
+        exit 1
+    fi
+    rm -rf -- "$INSTALL_DIR/static.old"
     rm -f -- "$PENDING_FILE"
     COMMIT_SUBJECT="$(git log -1 --format=%s "$NEW_SHA" 2>/dev/null || echo "$NEW_SHA")"
     write_status success "Updated to $NEW_SHA ($COMMIT_SUBJECT)" "$OLD_SHA" "$NEW_SHA"
     log "SUCCESS: now running $NEW_SHA"
-    # Clean up rollback snapshots only after the new version proved
-    # healthy. The .prev / .old now reflect the LAST GOOD version
-    # if there were any updates in flight; we keep them around so
-    # the next update has a known-good rollback target.
-    # Actually — we COULD keep them for cross-update rollback, but
-    # that grows disk forever and the dual-step rollback semantics
-    # are confusing. Wipe on success.
-    rm -f -- "$ROLLBACK_BIN"
-    rm -rf -- "$ROLLBACK_STATIC" "$INSTALL_DIR/static.old"
     exit 0
 fi
 
@@ -949,11 +955,11 @@ write_status restarting "New version failed health check — rolling back to pre
 ROLLBACK_OK=true
 if [ -f "$ROLLBACK_BIN" ]; then
     # The failing binary stays as /usr/local/bin/aurora.failed for
-    # post-mortem; .prev becomes the live binary again.
+    # post-mortem; the retained snapshot becomes the live binary again.
     mv "$INSTALL_BIN" "$INSTALL_BIN.failed"
     cp -p -- "$ROLLBACK_BIN" "$INSTALL_BIN"
 else
-    log "no $INSTALL_BIN.prev snapshot found — cannot rollback binary"
+    log "no $ROLLBACK_BIN snapshot found — cannot rollback binary"
     ROLLBACK_OK=false
 fi
 if [ -d "$ROLLBACK_STATIC" ]; then
@@ -963,7 +969,7 @@ if [ -d "$ROLLBACK_STATIC" ]; then
     cp -a -- "$ROLLBACK_STATIC/." "$INSTALL_DIR/static/"
     rm -rf "$INSTALL_DIR/static.failed"
 else
-    log "no $INSTALL_DIR/static.old snapshot found — cannot rollback static"
+    log "no $ROLLBACK_STATIC snapshot found — cannot rollback static"
 fi
 
 systemctl restart aurora
