@@ -586,7 +586,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 	}
 	rows, err := q.pool.Query(ctx, `
 		WITH ranked AS (
-		  SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		  SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		         m.id, m.library_id, m.type, m.title, m.sort_title,
 		         COALESCE(m.year, 0) AS year,
 		         COALESCE(m.overview, '') AS overview,
@@ -617,7 +617,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
+		  ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
@@ -677,7 +677,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 	}
 	rows, err := q.pool.Query(ctx, `
 		WITH ranked AS (
-		  SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		  SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		         m.id, m.library_id, m.type, m.title, m.sort_title,
 		         COALESCE(m.year, 0) AS year,
 		         COALESCE(m.overview, '') AS overview,
@@ -703,7 +703,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
+		  ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
@@ -1004,27 +1004,59 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 	if limit <= 0 {
 		limit = 12
 	}
+	// m.type is part of the dedup key: TMDB's movie and TV id spaces are
+	// INDEPENDENT, so movie 100 and tv 100 are unrelated titles and must not
+	// collapse into one row. This query spans both types.
+	//
+	// Unlike the other dedup queries in this file, this one's ORDER BY was also
+	// its FINAL ordering, immediately ahead of LIMIT — and the rows feed the
+	// cold-start hero rail directly. Prepending m.type there would have sorted
+	// every movie ahead of every show and let the LIMIT truncate shows out of
+	// the rail entirely. So the dedup moves into a CTE and the outer query
+	// re-establishes the previous ordering before limiting.
+	//
+	// Precisely what that does and does not preserve: rows that survived before
+	// keep their relative order, but truncation DOES change when a collision
+	// exists — the newly-preserved row interleaves by dedup_key and can push a
+	// higher-keyed row past the LIMIT. That is inherent to no longer discarding
+	// it, and a collision is the only case this change exists for.
+	//
+	// The outer sort keeps `rating DESC` after dedup_key: a colliding movie and
+	// show share one dedup_key, so ordering on the key alone left which of the
+	// two lands inside the LIMIT window up to the query plan. `rating DESC` was
+	// exactly the key that decided between them before, and `id` makes the
+	// result total rather than merely deterministic-in-practice.
 	rows, err := q.pool.Query(ctx, `
-		SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
-		       m.id, m.library_id, m.type, m.title, m.sort_title,
-		       COALESCE(m.year, 0), COALESCE(m.overview, ''),
-		       COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
-		       COALESCE(m.content_rating, ''),
-		       COALESCE(m.poster_path, ''), COALESCE(m.backdrop_path, ''),
-		       m.added_at, m.updated_at
-		FROM media_items m
-		WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
-		  AND m.rating > 0
-		  AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
-		  AND NOT EXISTS (
-		    SELECT 1 FROM watch_progress wp
-		    WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM taste_seeds ts
-		    WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		  )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
-		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
+		WITH ranked AS (
+		  SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		         m.id, m.library_id, m.type, m.title, m.sort_title,
+		         COALESCE(m.year, 0) AS year, COALESCE(m.overview, '') AS overview,
+		         COALESCE(m.rating, 0) AS rating,
+		         COALESCE(m.runtime_minutes, 0) AS runtime_minutes,
+		         COALESCE(m.content_rating, '') AS content_rating,
+		         COALESCE(m.poster_path, '') AS poster_path,
+		         COALESCE(m.backdrop_path, '') AS backdrop_path,
+		         m.added_at, m.updated_at,
+		         COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id) AS dedup_key
+		  FROM media_items m
+		  WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
+		    AND m.rating > 0
+		    AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
+		    AND NOT EXISTS (
+		      SELECT 1 FROM watch_progress wp
+		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM taste_seeds ts
+		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
+		    )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
+		  ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
+		)
+		SELECT id, library_id, type, title, sort_title, year, overview, rating,
+		       runtime_minutes, content_rating, poster_path, backdrop_path,
+		       added_at, updated_at
+		FROM ranked
+		ORDER BY dedup_key, rating DESC, id
 		LIMIT $2`,
 		profileID, limit*2, allowedRatings,
 	)

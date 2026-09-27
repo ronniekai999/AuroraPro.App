@@ -157,7 +157,7 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit, of
 	}
 	rows, err := q.pool.Query(ctx, `
 		WITH ranked AS (
-		  SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		  SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		         m.id, m.library_id, m.type, m.title, m.sort_title,
 		         COALESCE(m.year, 0) AS year,
 		         COALESCE(m.overview, '') AS overview,
@@ -181,7 +181,7 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit, of
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), COALESCE(m.popularity, 0) DESC
+		  ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), COALESCE(m.popularity, 0) DESC
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
@@ -222,7 +222,7 @@ func (q *Queries) OnboardingGridReactive(ctx context.Context, profileID int64, v
 	}
 	rows, err := q.pool.Query(ctx, `
 		WITH ranked AS (
-		  SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		  SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		         m.id, m.library_id, m.type, m.title, m.sort_title,
 		         COALESCE(m.year, 0) AS year,
 		         COALESCE(m.overview, '') AS overview,
@@ -246,7 +246,7 @@ func (q *Queries) OnboardingGridReactive(ctx context.Context, profileID int64, v
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
+		  ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,

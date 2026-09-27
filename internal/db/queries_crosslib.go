@@ -31,6 +31,11 @@ func unmarshalTracks(raw []byte, v any, fileID int64, kind string) {
 // and "4K Movies"), both media_items share the same tmdb_id but have
 // different library_id values. These queries aggregate files across all
 // such sibling items so the user sees a unified version selector.
+//
+// A sibling is matched on (tmdb_id, TYPE), never on tmdb_id alone: TMDB's
+// movie and TV id spaces are INDEPENDENT, so movie 100 and tv 100 are
+// unrelated titles. migrations/011_cross_library_linking.up.sql ships
+// idx_media_items_tmdb_type for exactly this predicate.
 // ============================================================
 
 // GetTMDBIDForItem returns the tmdb_id for a media item, or 0 if not enriched.
@@ -49,15 +54,22 @@ func (q *Queries) GetTMDBIDForItem(ctx context.Context, mediaItemID int64) (int,
 }
 
 // GetCrossLibraryFiles returns all media_files for a given media item AND all
-// sibling media_items that share the same tmdb_id (but in different libraries).
-// Each file is annotated with the library name it belongs to.
+// sibling media_items that share the same tmdb_id AND type (but in different
+// libraries). Each file is annotated with the library name it belongs to.
 // Returns nil if the item has no tmdb_id (not yet enriched).
+//
+// The type must match, not just the tmdb_id: TMDB's movie and TV id spaces are
+// independent, so movie 100 and tv 100 are unrelated titles. Without it, a
+// colliding movie's files were attached to a show's detail page as its own
+// versions (this is called for show details from phase2_handlers.go), and the
+// caller then derived has_4k from a movie's file.
 func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) ([]*models.MediaFile, map[int64]string, error) {
-	// First, get the tmdb_id for this item
+	// First, get the tmdb_id and type for this item
 	var tmdbID *int
+	var itemType string
 	err := q.pool.QueryRow(ctx,
-		`SELECT tmdb_id FROM media_items WHERE id = $1`, mediaItemID,
-	).Scan(&tmdbID)
+		`SELECT tmdb_id, type FROM media_items WHERE id = $1`, mediaItemID,
+	).Scan(&tmdbID, &itemType)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get item tmdb_id: %w", err)
 	}
@@ -66,7 +78,8 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 		return nil, nil, nil
 	}
 
-	// Query files from ALL media_items with this tmdb_id, including the current one
+	// Query files from ALL media_items with this tmdb_id and type, including the
+	// current one
 	rows, err := q.pool.Query(ctx, `
 		SELECT mf.id, mf.media_item_id, mf.path, mf.size_bytes, mf.container,
 		       mf.video_codec, mf.audio_codec, mf.resolution, mf.bitrate,
@@ -76,10 +89,10 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 		FROM media_files mf
 		JOIN media_items mi ON mi.id = mf.media_item_id
 		JOIN libraries l ON l.id = mi.library_id
-		WHERE mi.tmdb_id = $1 AND mi.tmdb_id > 0
+		WHERE mi.tmdb_id = $1 AND mi.tmdb_id > 0 AND mi.type = $2
 		ORDER BY CASE mf.version_tag
 			WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4
-		END, mf.id`, *tmdbID)
+		END, mf.id`, *tmdbID, itemType)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get cross-library files: %w", err)
 	}
@@ -111,7 +124,8 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 
 // GetCrossLibraryEpisodeFiles returns all episode_files for a given episode
 // AND matching episodes (same season_number + episode_number) in sibling
-// media_items that share the same tmdb_id.
+// media_items that share the same tmdb_id (and, necessarily, type — see the
+// inert-predicate note in the query below).
 func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int64, tmdbID int) ([]*models.EpisodeFile, map[int64]string, error) {
 	if tmdbID == 0 {
 		return nil, nil, nil
@@ -129,7 +143,14 @@ func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int
 		return nil, nil, fmt.Errorf("get episode info: %w", err)
 	}
 
-	// Find all episode files matching this season/episode across all sibling items
+	// Find all episode files matching this season/episode across all sibling items.
+	//
+	// The `mi.type = 'show'` predicate is INERT and deliberately kept: this query
+	// reaches media_items only through tv_episodes, which solely the TV scan branch
+	// ever writes, so no movie row can be reached here. It is stated for
+	// explicitness and selectivity, not to fix a live defect (and not for index
+	// eligibility — mi.tmdb_id = $1 already matches the leading column of
+	// idx_media_items_tmdb_type).
 	rows, err := q.pool.Query(ctx, `
 		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
 		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
@@ -141,7 +162,7 @@ func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int
 		JOIN tv_seasons s ON s.id = e.season_id
 		JOIN media_items mi ON mi.id = e.media_item_id
 		JOIN libraries l ON l.id = mi.library_id
-		WHERE mi.tmdb_id = $1 AND mi.tmdb_id > 0
+		WHERE mi.tmdb_id = $1 AND mi.tmdb_id > 0 AND mi.type = 'show'
 		  AND s.season_number = $2
 		  AND e.episode_number = $3
 		ORDER BY CASE ef.version_tag
@@ -185,7 +206,13 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 	}
 
 	// Single query: for each episode in the batch, find matching episodes across
-	// all sibling shows (same tmdb_id) by season_number + episode_number
+	// all sibling shows (same tmdb_id and type) by season_number + episode_number.
+	//
+	// The `mi.type = 'show'` predicate is INERT and deliberately kept: the
+	// tv_seasons join below already restricts mi to rows that have seasons, which
+	// only the TV scan branch writes. It is stated for explicitness and
+	// selectivity, not for index eligibility (mi.tmdb_id = $1 already matches the
+	// index's leading column).
 	rows, err := q.pool.Query(ctx, `
 		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
 		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
@@ -195,7 +222,7 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 		       src_ep.id AS src_episode_id
 		FROM tv_episodes src_ep
 		JOIN tv_seasons src_s ON src_s.id = src_ep.season_id
-		JOIN media_items mi ON mi.tmdb_id = $1
+		JOIN media_items mi ON mi.tmdb_id = $1 AND mi.type = 'show'
 		JOIN tv_seasons s ON s.media_item_id = mi.id AND s.season_number = src_s.season_number
 		JOIN tv_episodes e ON e.season_id = s.id AND e.episode_number = src_ep.episode_number
 		JOIN episode_files ef ON ef.episode_id = e.id
@@ -235,8 +262,9 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 }
 
 // GetMediaItemsWith4KCrossLibrary extends GetMediaItemsWith4K to also check
-// sibling media_items that share the same tmdb_id. If "Inception" in library A
-// has no 4K file, but "Inception" in library B does, both should show the 4K badge.
+// sibling media_items that share the same tmdb_id AND type. If "Inception" in
+// library A has no 4K file, but "Inception" in library B does, both should show
+// the 4K badge.
 func (q *Queries) GetMediaItemsWith4KCrossLibrary(ctx context.Context, mediaItemIDs []int64) (map[int64]bool, error) {
 	if len(mediaItemIDs) == 0 {
 		return map[int64]bool{}, nil
@@ -260,11 +288,15 @@ func (q *Queries) GetMediaItemsWith4KCrossLibrary(ctx context.Context, mediaItem
 		return directResult, nil
 	}
 
-	// Find which of these items have siblings (via tmdb_id) that have 4K files
+	// Find which of these items have siblings (via tmdb_id AND type) that have
+	// 4K files. The type must match: TMDB's movie and TV id spaces are
+	// independent, so without it a movie sharing a numeric id with a show lent
+	// it a 4K badge it had not earned (and vice versa).
 	rows, err := q.pool.Query(ctx, `
 		SELECT DISTINCT src.id
 		FROM media_items src
 		JOIN media_items sibling ON sibling.tmdb_id = src.tmdb_id
+		    AND sibling.type = src.type
 		    AND sibling.id != src.id
 		    AND sibling.tmdb_id IS NOT NULL
 		WHERE src.id = ANY($1)
@@ -300,7 +332,7 @@ func (q *Queries) GetMediaItemsWith4KCrossLibrary(ctx context.Context, mediaItem
 }
 
 // GetMediaItemsWithHDRCrossLibrary extends GetMediaItemsWithHDR to also
-// check sibling media_items that share the same tmdb_id, exactly like
+// check sibling media_items that share the same tmdb_id AND type, exactly like
 // GetMediaItemsWith4KCrossLibrary does for 4K. If "Dune" in library A has
 // no HDR file but "Dune" in library B does, both show the HDR badge. HDR
 // is detected via color_transfer (hdrColorTransfers), not version_tag.
@@ -326,10 +358,13 @@ func (q *Queries) GetMediaItemsWithHDRCrossLibrary(ctx context.Context, mediaIte
 		return directResult, nil
 	}
 
+	// Siblings match on tmdb_id AND type, for the same reason as the 4K variant:
+	// TMDB's movie and TV id spaces are independent.
 	rows, err := q.pool.Query(ctx, `
 		SELECT DISTINCT src.id
 		FROM media_items src
 		JOIN media_items sibling ON sibling.tmdb_id = src.tmdb_id
+		    AND sibling.type = src.type
 		    AND sibling.id != src.id
 		    AND sibling.tmdb_id IS NOT NULL
 		WHERE src.id = ANY($1)
@@ -365,9 +400,14 @@ func (q *Queries) GetMediaItemsWithHDRCrossLibrary(ctx context.Context, mediaIte
 }
 
 // DeduplicateByTMDBID takes a list of media items and deduplicates items that
-// share the same tmdb_id across different libraries. For each group of duplicates,
-// it keeps the item with the richest metadata (most non-empty fields) and annotates
-// it with has_4k=true if any sibling has 4K files.
+// share the same tmdb_id AND type across different libraries. For each group of
+// duplicates, it keeps the item with the richest metadata (most non-empty
+// fields) and annotates it with has_4k=true if any sibling has 4K files.
+//
+// The type is part of the grouping key, not just the tmdb_id: TMDB's movie and
+// TV id spaces are INDEPENDENT, so movie 100 and tv 100 are unrelated titles.
+// Grouping on the id alone collapsed a colliding movie and show into one
+// search result, which made one of the two unreachable from search entirely.
 //
 // Items without a tmdb_id are always kept (they can't be linked).
 // Returns the deduplicated list.
@@ -382,52 +422,61 @@ func (q *Queries) DeduplicateByTMDBID(ctx context.Context, items []*models.Media
 		ids[i] = item.ID
 	}
 
-	// Fetch tmdb_ids for all items
+	// Fetch tmdb_ids and types for all items. The type is read from the DB
+	// rather than taken from item.Type so the grouping cannot be skewed by a
+	// caller that left the field unpopulated.
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, tmdb_id FROM media_items WHERE id = ANY($1)`, ids)
+		`SELECT id, tmdb_id, type FROM media_items WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("fetch tmdb_ids for dedup: %w", err)
 	}
 	defer rows.Close()
 
-	tmdbMap := make(map[int64]int) // media_item_id -> tmdb_id
+	// siblingKey identifies one cross-library title: a tmdb_id within a type.
+	type siblingKey struct {
+		tmdbID int
+		typ    string
+	}
+
+	keyMap := make(map[int64]siblingKey) // media_item_id -> (tmdb_id, type)
 	for rows.Next() {
 		var id int64
 		var tmdbID *int
-		if err := rows.Scan(&id, &tmdbID); err != nil {
+		var itemType string
+		if err := rows.Scan(&id, &tmdbID, &itemType); err != nil {
 			return nil, err
 		}
 		if tmdbID != nil && *tmdbID > 0 {
-			tmdbMap[id] = *tmdbID
+			keyMap[id] = siblingKey{tmdbID: *tmdbID, typ: itemType}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	// Group items by tmdb_id
+	// Group items by (tmdb_id, type)
 	type group struct {
-		tmdbID int
-		items  []*models.MediaItem
+		key   siblingKey
+		items []*models.MediaItem
 	}
-	seenTMDB := make(map[int]*group) // tmdb_id -> group
+	seenTMDB := make(map[siblingKey]*group) // (tmdb_id, type) -> group
 	var result []*models.MediaItem
 
 	for _, item := range items {
-		tmdbID, hasTMDB := tmdbMap[item.ID]
+		key, hasTMDB := keyMap[item.ID]
 		if !hasTMDB {
 			// No TMDB ID -- keep it as-is, no dedup possible
 			result = append(result, item)
 			continue
 		}
 
-		if g, exists := seenTMDB[tmdbID]; exists {
-			// Already seen this TMDB ID -- add to group
+		if g, exists := seenTMDB[key]; exists {
+			// Already seen this (TMDB ID, type) -- add to group
 			g.items = append(g.items, item)
 		} else {
-			// First time seeing this TMDB ID
-			g := &group{tmdbID: tmdbID, items: []*models.MediaItem{item}}
-			seenTMDB[tmdbID] = g
+			// First time seeing this (TMDB ID, type)
+			g := &group{key: key, items: []*models.MediaItem{item}}
+			seenTMDB[key] = g
 			// Reserve a slot in the result -- we'll fill it with the best item
 			result = append(result, item)
 		}
@@ -449,10 +498,12 @@ func (q *Queries) DeduplicateByTMDBID(ctx context.Context, items []*models.Media
 			}
 		}
 
-		// Replace the slot in result with the best item
+		// Replace the slot in result with the best item. The slot is matched on
+		// the full (tmdb_id, type) key: matching on the tmdb_id alone would let
+		// a show's winner overwrite a colliding movie's slot, which is the same
+		// cross-type defect as the grouping itself, one step removed.
 		for i, item := range result {
-			tmdbID := tmdbMap[item.ID]
-			if tmdbID == g.tmdbID {
+			if key, ok := keyMap[item.ID]; ok && key == g.key {
 				// Propagate has_4k / has_hdr from any sibling so the
 				// winning item carries the union of quality flags across
 				// the dedup group (symmetry: both badges survive dedup).

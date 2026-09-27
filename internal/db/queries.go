@@ -863,9 +863,18 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	// Among duplicates, we pick the item with the richest metadata via a
 	// scoring expression that mirrors Go's metadataRichness(), including
 	// a Genres check via EXISTS subquery.
+	//
+	// m.type is part of the dedup key because TMDB's movie and TV id spaces are
+	// INDEPENDENT: movie 100 and tv 100 both exist and are unrelated titles.
+	// The `m.type = $n` filter above cannot be relied on to scope this — it is
+	// only added when filter.Type is non-empty, and GET /api/media without a
+	// `type` param is a real call (the SPA's catalog-size count issues
+	// `/api/media?per_page=1`). Without the type in the key, such a request
+	// collapsed a colliding movie and show into one row and undercounted
+	// total_items by one per collision.
 	dedupCTE := fmt.Sprintf(
 		`WITH deduped AS (
-		   SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		   SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
 		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
 		          COALESCE(m.poster_path,'') AS poster_path,
@@ -873,7 +882,7 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 		          m.added_at, m.updated_at
 		   FROM media_items m
 		   WHERE %s
-		   ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
+		   ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
 		            (CASE WHEN m.overview IS NOT NULL AND m.overview <> '' THEN 3 ELSE 0 END
 		           + CASE WHEN m.poster_path IS NOT NULL AND m.poster_path <> '' THEN 3 ELSE 0 END
 		           + CASE WHEN m.backdrop_path IS NOT NULL AND m.backdrop_path <> '' THEN 2 ELSE 0 END
@@ -1219,16 +1228,24 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 	// Cross-library deduplication: same DISTINCT ON pattern as GetMediaItems.
 	// Among duplicates sharing a tmdb_id, pick the item with the richest
 	// metadata, then order the deduped set by added_at DESC.
+	//
+	// m.type is part of the dedup key because TMDB's movie and TV id spaces are
+	// INDEPENDENT: movie 100 and tv 100 both exist and are unrelated titles.
+	// This query carries no type filter at all, so without the type in the key
+	// a colliding movie and show collapsed into one row and one of the two
+	// vanished from "Recently Added" entirely — in practice the show, because the
+	// tie-break after equal richness is media_items.id ASC and movie libraries
+	// are typically scanned first, so their rows carry the lower ids.
 	rows, err := q.pool.Query(ctx,
 		`WITH deduped AS (
-		   SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		   SELECT DISTINCT ON (m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
 		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
 		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
 		          COALESCE(m.poster_path,'') AS poster_path,
 		          COALESCE(m.backdrop_path,'') AS backdrop_path,
 		          m.added_at, m.updated_at
 		   FROM media_items m
-		   ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
+		   ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
 		            (CASE WHEN m.overview IS NOT NULL AND m.overview <> '' THEN 3 ELSE 0 END
 		           + CASE WHEN m.poster_path IS NOT NULL AND m.poster_path <> '' THEN 3 ELSE 0 END
 		           + CASE WHEN m.backdrop_path IS NOT NULL AND m.backdrop_path <> '' THEN 2 ELSE 0 END
