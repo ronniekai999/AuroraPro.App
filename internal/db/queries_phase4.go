@@ -28,8 +28,8 @@ func (q *Queries) CreateProfile(ctx context.Context, p *models.UserProfile) erro
 func (q *Queries) GetProfilesByUser(ctx context.Context, userID int64) ([]*models.UserProfile, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE user_id = $1
 		ORDER BY is_default DESC, name`, userID)
@@ -55,8 +55,8 @@ func (q *Queries) GetProfile(ctx context.Context, profileID int64) (*models.User
 	p := &models.UserProfile{}
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE id = $1`, profileID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
@@ -75,8 +75,8 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 	p := &models.UserProfile{}
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
-		       COALESCE(max_age_rating, ''), language, COALESCE(subtitle_lang, ''),
-		       subtitle_mode, created_at, updated_at, taste_onboarding_completed,
+		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
+		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
 		       maturity_pref
 		FROM user_profiles WHERE user_id = $1 AND is_default = TRUE`, userID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
@@ -438,7 +438,7 @@ func (q *Queries) GetOrCreateLibraryWatchlist(ctx context.Context, profileID int
 func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64) ([]*models.WatchlistItem, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
-		       mi.title, COALESCE(mi.poster_path, ''), mi.year, mi.type
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.year, 0), mi.type
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
@@ -471,7 +471,7 @@ func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, para
 	offset := (params.Page - 1) * params.PerPage
 	rows, err := q.pool.Query(ctx, `
 		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
-		       mi.title, COALESCE(mi.poster_path, ''), mi.year, mi.type
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.year, 0), mi.type
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
@@ -808,7 +808,8 @@ func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit in
 	rows, err := q.pool.Query(ctx, `
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type,
+		       COALESCE(mi.year, 0),
 		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
@@ -839,7 +840,8 @@ func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params mode
 	rows, err := q.pool.Query(ctx, `
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type,
+		       COALESCE(mi.year, 0),
 		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number

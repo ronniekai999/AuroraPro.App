@@ -50,8 +50,8 @@ func scanRequest(row pgx.Row) (*models.Request, error) {
 
 // requestColumns is the standard SELECT column list for the requests table.
 const requestColumns = `id, user_id, media_type, tmdb_id, title,
-	poster_path, overview, year, status,
-	quality_1080p, quality_4k, arr_job_ids, error_message,
+	COALESCE(poster_path, ''), COALESCE(overview, ''), COALESCE(year, 0), status,
+	quality_1080p, quality_4k, COALESCE(arr_job_ids, ''), COALESCE(error_message, ''),
 	requested_at, processed_at, completed_at, updated_at`
 
 // GetRequestsByUserID returns all requests for a specific user, newest first.

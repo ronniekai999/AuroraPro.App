@@ -81,9 +81,10 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 	// Query files from ALL media_items with this tmdb_id and type, including the
 	// current one
 	rows, err := q.pool.Query(ctx, `
-		SELECT mf.id, mf.media_item_id, mf.path, mf.size_bytes, mf.container,
-		       mf.video_codec, mf.audio_codec, mf.resolution, mf.bitrate,
-		       mf.duration_ms, mf.file_hash, mf.scanned_at, mf.audio_tracks,
+		SELECT mf.id, mf.media_item_id, mf.path, mf.size_bytes, COALESCE(mf.container, ''),
+		       COALESCE(mf.video_codec, ''), COALESCE(mf.audio_codec, ''),
+		       COALESCE(mf.resolution, ''), COALESCE(mf.bitrate, 0),
+		       COALESCE(mf.duration_ms, 0), mf.file_hash, mf.scanned_at, mf.audio_tracks,
 		       mf.subtitle_tracks, mf.version_tag, mf.video_profile, mf.video_pix_fmt, mf.color_transfer, mf.color_primaries, mf.video_fps,
 		       l.name AS library_name
 		FROM media_files mf
@@ -152,9 +153,10 @@ func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int
 	// eligibility — mi.tmdb_id = $1 already matches the leading column of
 	// idx_media_items_tmdb_type).
 	rows, err := q.pool.Query(ctx, `
-		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
-		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
-		       ef.duration_ms, ef.file_hash, ef.scanned_at, ef.audio_tracks,
+		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, COALESCE(ef.container, ''),
+		       COALESCE(ef.video_codec, ''), COALESCE(ef.audio_codec, ''),
+		       COALESCE(ef.resolution, ''), COALESCE(ef.bitrate, 0),
+		       COALESCE(ef.duration_ms, 0), ef.file_hash, ef.scanned_at, ef.audio_tracks,
 		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries, ef.video_fps,
 		       l.name AS library_name
 		FROM episode_files ef
@@ -214,9 +216,10 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 	// selectivity, not for index eligibility (mi.tmdb_id = $1 already matches the
 	// index's leading column).
 	rows, err := q.pool.Query(ctx, `
-		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
-		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
-		       ef.duration_ms, ef.file_hash, ef.scanned_at, ef.audio_tracks,
+		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, COALESCE(ef.container, ''),
+		       COALESCE(ef.video_codec, ''), COALESCE(ef.audio_codec, ''),
+		       COALESCE(ef.resolution, ''), COALESCE(ef.bitrate, 0),
+		       COALESCE(ef.duration_ms, 0), ef.file_hash, ef.scanned_at, ef.audio_tracks,
 		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries, ef.video_fps,
 		       l.name AS library_name,
 		       src_ep.id AS src_episode_id

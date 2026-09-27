@@ -1081,3 +1081,128 @@ What to take from it, if this is picked up again:
 - **`FindMediaItemByTitle` errors on a NULL year** (it scans into a
   non-nullable field), so the TV pre-check fails unconditionally for those
   rows and the upsert re-keys. Also pre-existing, also worth fixing alone.
+
+## Enrichment recovery: NULL columns scanned into non-nullable Go fields
+
+Found while fixing issue #510 and swept in that follow-up. Six tables declare
+columns NULLABLE that the structs they are scanned into declare as plain
+`int` / `string` / `float64`. pgx refuses that scan — `cannot scan NULL into
+*int` — and because the failure happens mid-iteration it fails the **whole
+query, not one row**, so a single bad row anywhere takes out an entire
+endpoint. Code: `internal/db/{queries,queries_phase2,queries_phase4,
+queries_crosslib,queries_requests}.go`; regression tests in
+`internal/db/queries_enrichment_recovery_test.go`.
+
+The affected column sets, and the struct that makes each one fatal:
+
+- `media_items`: `year`, `overview`, `rating`, `runtime_minutes`,
+  `content_rating` → `models.MediaItem`, `models.ContinueWatchingItem`,
+  `models.WatchlistItem`.
+- `media_files` / `episode_files`: `container`, `video_codec`, `audio_codec`,
+  `resolution`, `bitrate`, `duration_ms` → `models.MediaFile` /
+  `models.EpisodeFile`.
+- `requests`: `poster_path`, `overview`, `year`, `arr_job_ids`,
+  `error_message` → `models.Request`, all through the one shared
+  `requestColumns` projection.
+- `user_profiles`: `language`, `subtitle_mode` → `models.UserProfile`. Narrower
+  blast radius than the catalog-wide queries (one user, not everyone) but
+  HIGHER reachability: `ResolveActingProfile` funnels essentially every
+  profile-scoped request through `GetProfile` / `GetDefaultProfile`, so one
+  NULL on a user's default profile takes out that user's whole session.
+- `artwork`: `vote_average` → `models.Artwork`. `GET
+  /api/media/{id}/artwork` 500s; the media-detail artwork block swallows the
+  error and degrades silently to "no artwork", which is the worse of the two.
+
+Invariants to preserve when touching this area:
+
+- **The fix is in the SQL, never in the struct.** The zero values are already
+  the codebase's "unknown" sentinels — `json:"...,omitempty"` on all five
+  `media_items` fields, the enricher's `nilIfZero` year write-back, and
+  `MediaFile`'s own "0 = unknown" / "Empty = unknown" comments — so
+  `COALESCE(col, 0)` / `COALESCE(col, '')` preserves meaning exactly.
+  Making the fields pointers would touch a very large number of call sites and
+  buy nothing. **Any new query projecting these columns must COALESCE them.**
+- **A WHERE clause that mentions a nullable column does NOT exclude NULL
+  rows.** `SearchMedia` reads `overview` in its own predicate and looked
+  scoped; its title predicate matches NULL-overview rows regardless. Only an
+  explicit `IS NOT NULL` on the column you are about to scan does — and note
+  that almost nothing here has one, so in practice the answer is COALESCE.
+  `GetFlaggedWithoutAISuggestion` is safe because it ALREADY COALESCEs all
+  five, not because its `match_status` / `ai_match_ran_at` predicate excludes
+  anything; do not read a nearby predicate or join as a licence to skip the
+  COALESCE.
+- **COALESCE inside a `DISTINCT ON` CTE is enough**, and the outer `SELECT`
+  reading `d.<col>` needs no second one. The richness `ORDER BY` still
+  references the base `m.<col>`, which stays legal because `DISTINCT ON`
+  (unlike plain `DISTINCT`) permits ORDER BY expressions outside the select
+  list. `NULLS LAST` on the outer sort becomes inert — a COALESCE'd 0 already
+  sorts last under `DESC`, so ordering is unchanged.
+- **A COALESCE'd column sitting beside a raw one is the shape this defect
+  actually took, every time.** The four ContinueWatching queries COALESCEd
+  `rating` and left `year` raw; the two watchlist queries COALESCEd
+  `poster_path` and left `year` raw (they project no `rating` at all —
+  `models.WatchlistItem` has no such field); the three `user_profiles` reads
+  COALESCE `avatar_url`, `max_age_rating` and `subtitle_lang` while leaving
+  `language` and `subtitle_mode` raw three tokens away; `GetArtwork` COALESCEs
+  five columns and leaves `vote_average`. So the bug hides BESIDE a fix for its
+  own sibling, and a projection that looks recently tended is not evidence.
+  Check every nullable column in the list, every time.
+
+**No application write path produces these NULLs**: `UpsertMediaItem` inserts
+the Go zero values, `UpdateMediaMetadata` only sets fields it has values for,
+and `requests`' nullable columns all carry non-NULL DEFAULTs. They arrive via
+hand-written catalog SQL — which this repo's own runbooks prescribe
+(`docs/moving-media-paths.md`) and which is exactly how #510 was remediated in
+production. Treat this as latent robustness with a real trigger, not a live
+outage.
+
+**How the blast radius was measured, and why that matters more than reading
+the code.** Bring up Postgres with the migrated schema, insert one row per
+table with every nullable column NULL, and run `go test -count=1 ./...`.
+Anything that breaks is a reachable instance. That measurement is what found
+`GetRecentMedia` — before the fix it was the only query in the whole suite
+that broke. Note `-count=1`: without it Go serves cached package results and
+the probe reports a clean run against rows it never read, which is a false
+all-clear of exactly the shape `scripts/check-library-paths.sh` is full of.
+
+Known limits, stated plainly:
+
+- **The probe only covers queries some test actually exercises**, and that is
+  a small minority of them. Measured: with one all-NULL `media_items` row
+  present and the fixes reverted, the ENTIRE suite produced exactly two
+  failures, both of them `GetRecentMedia` — every other exposed query was
+  invisible to it. The sweep's real coverage came from reading every
+  projection and then driving each read path by hand. Read the call sites;
+  a green suite is not evidence here.
+- **A probe that returns zero rows proves nothing, and says so in the same
+  voice as a pass.** `GetCrossLibraryFiles` reported clean on the first run
+  purely because the fixture had no `tmdb_id` and the function returns early;
+  the scan was never reached. The regression tests for both cross-library
+  paths therefore `t.Fatal` on an empty result rather than passing vacuously.
+- **A NULL fixture row is visible to every other package.** `go test ./...`
+  runs packages concurrently against one database and these queries are
+  catalog-wide (`GetRecentMedia` takes no filter at all), so a leaked fixture
+  fails whichever unrelated package reads the catalog next. Every helper in
+  `queries_enrichment_recovery_test.go` deletes its own row in `t.Cleanup`;
+  that is load-bearing, not tidiness.
+- **Six tables were swept; the other 26 were not.** The schema has 128
+  nullable columns across 32 tables. The rest were checked by resolving every
+  SQL literal in `internal/db`'s non-test files against
+  `information_schema.columns` and then driving ~40 read paths against an
+  all-NULL fixture, and most legitimately scan into pointer fields
+  (`tmdb_id`, `match_status`, `processed_at`, `read_at`, `trailer_key` — that
+  last one's three-state NULL is load-bearing and must stay raw). A table not
+  named here still has not been cleared.
+- **Following the STRUCTS named in the issue is what missed two instances.**
+  The first pass swept the tables reachable from `models.MediaItem` and its
+  neighbours, and an independent review then found `user_profiles.language` /
+  `subtitle_mode` and `artwork.vote_average` — one of them in a file that pass
+  had already edited. The authoritative input is
+  `information_schema.columns` joined against the scan target's Go type, not
+  the struct the bug report happened to name.
+- **Nothing prevents the next instance.** The rule is prose in this section
+  plus the tests above; there is no lint, no generated projection and no
+  `NOT NULL` migration enforcing it. Tightening the columns to `NOT NULL
+  DEFAULT` in a migration would make the class structurally impossible and is
+  the obvious follow-up — it is not built, because it needs a data backfill on
+  live installs that may already hold the NULLs this section exists for.
