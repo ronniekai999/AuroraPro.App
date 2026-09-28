@@ -23,6 +23,32 @@ import (
 
 const batchFlushSize = 100
 
+// requeueUnattemptedLimit caps how many never-attempted shows one scan re-queues
+// for a full enrichment pass, and requeueSweepInterval caps how often a library is
+// swept at all. Both bound the same hazard, from different directions.
+//
+// The sweep selects shows with no metadata PROGRESS, and the attempt stamp is
+// gated on the provider having ANSWERED (see Enricher.EnrichMediaItem — stamping a
+// failure would let one TMDB outage defer the whole catalog by a refresh
+// interval). So a show whose enrichment reliably ERRORS never acquires progress
+// and stays eligible for ever. With an absent or invalid TMDB key that is EVERY
+// show in the library. Each eligible show costs a TMDB search plus a year-less
+// retry — each with tmdb.go's 4 attempts and ~7s of backoff — a TVDB search where
+// TVDB is enabled, and an unconditional embed, because cmd/aurora's OnNewItem
+// calls embedItem whether or not enrichment errored. The watcher fires on fsnotify
+// with a 30-second dedup window, so an *arr-fed library can scan every ~30s: left
+// unbounded this re-searched and re-embedded a whole library, continuously. That
+// is precisely the cost the per-file latch's own comment gives as the reason to
+// read PROGRESS rather than STORED, so handing it back here would have undone the
+// thing it was added to protect.
+//
+// 100 matches GetStaleMetadataItems' window, and clears the 80-show library that
+// produced #510 in a single sweep.
+const (
+	requeueUnattemptedLimit = 100
+	requeueSweepInterval    = time.Hour
+)
+
 type pendingEnrichItem struct {
 	item     *models.MediaItem
 	filePath string
@@ -112,6 +138,16 @@ type Scanner struct {
 	// a concurrent scan of a different library has workers still reading the old map.
 	enrichedItems atomic.Pointer[sync.Map]
 
+	// requeueSweptAt records when each library was last swept for shows whose
+	// enrichment never ran, so the sweep is rate-limited rather than run on every
+	// scan (see requeueSweepInterval). Process-local by design: it is a recovery
+	// sweep, and a restart re-arming it is the behaviour a restart should have,
+	// since an interrupted scan is exactly what a restart causes.
+	requeueSweptAt sync.Map // map[int64]time.Time
+
+	// requeueSweepEvery is requeueSweepInterval, overridable in tests.
+	requeueSweepEvery time.Duration
+
 	// showLocks provides per-show serialization during scanning.
 	// Key: "libraryID:showTitle" (lowercased).
 	// Purpose: Enrichment can mutate the media_items unique key (e.g., setting the
@@ -151,9 +187,10 @@ type Scanner struct {
 
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
 	s := &Scanner{
-		cfg:      cfg,
-		queries:  queries,
-		progress: make(map[int64]*models.ScanProgress),
+		cfg:               cfg,
+		queries:           queries,
+		progress:          make(map[int64]*models.ScanProgress),
+		requeueSweepEvery: requeueSweepInterval,
 	}
 	s.enrichedItems.Store(&sync.Map{})
 	return s
@@ -450,8 +487,13 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Skipped when the walk found nothing: that is the transient-mount shape
 	// pruneDeletedFiles refuses to act on, and it is no better a moment to spend
 	// provider calls.
-	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil {
-		unattempted, err := s.queries.GetUnattemptedShowsForLibrary(ctx, lib.ID)
+	//
+	// BOUNDED twice over — see requeueUnattemptedLimit and requeueSweepInterval.
+	// The sweep set is not the scan's own delta, so an unbounded one would also
+	// have starved the episode backfills below, which only run once every full has
+	// (a backlog longer than the deploy window would mean no backfill ever ran).
+	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil && s.dueForRequeueSweep(lib.ID) {
+		unattempted, err := s.queries.GetUnattemptedShowsForLibrary(ctx, lib.ID, requeueUnattemptedLimit)
 		if err != nil {
 			slog.Warn("could not list shows awaiting enrichment", "library", lib.Name, "error", err)
 		} else if len(unattempted) > 0 {
@@ -465,7 +507,8 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 			pendingMu.Unlock()
 			if added > 0 {
 				slog.Info("re-queued shows whose enrichment never ran",
-					"library", lib.Name, "shows", added)
+					"library", lib.Name, "shows", added,
+					"capped_at", requeueUnattemptedLimit)
 			}
 		}
 	}
@@ -528,6 +571,31 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	)
 
 	return nil
+}
+
+// dueForRequeueSweep reports whether this library's never-attempted shows may be
+// swept now, and claims the slot if so.
+//
+// Claiming BEFORE the query, and regardless of what it returns, is deliberate: the
+// cost being rate-limited is the enrichment the sweep queues, and a sweep that
+// errored or found nothing must not leave the next scan a free pass. The trade is
+// that a #510 state arising just after a sweep waits up to requeueSweepInterval for
+// the scanner's half; RefreshStaleMetadata's rotation covers it in the meantime,
+// and never-attempted rows sort to the head of that queue.
+//
+// A zero requeueSweepEvery disables the rate limit (tests).
+func (s *Scanner) dueForRequeueSweep(libraryID int64) bool {
+	if s.requeueSweepEvery <= 0 {
+		return true
+	}
+	now := time.Now()
+	if prev, ok := s.requeueSweptAt.Load(libraryID); ok {
+		if at, ok := prev.(time.Time); ok && now.Sub(at) < s.requeueSweepEvery {
+			return false
+		}
+	}
+	s.requeueSweptAt.Store(libraryID, now)
+	return true
 }
 
 // showLockKey returns the per-show lock for a given library+title combination.

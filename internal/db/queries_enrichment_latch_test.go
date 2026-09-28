@@ -373,7 +373,7 @@ func TestGetUnattemptedShowsForLibrary(t *testing.T) {
 	// that is being deleted.
 	fileless := insertLatchShow(t, q, libID, "Fileless "+randomSuffix(t), nil, nil, nil)
 
-	got, err := q.GetUnattemptedShowsForLibrary(ctx, libID)
+	got, err := q.GetUnattemptedShowsForLibrary(ctx, libID, 100)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -394,6 +394,32 @@ func TestGetUnattemptedShowsForLibrary(t *testing.T) {
 		t.Error("an already-enriched show was returned — every scan would re-run its show match")
 	}
 	if _, ok := found[fileless]; ok {
-		t.Error("a show with no episode files was returned — it is about to be swept, so enriching it wastes provider calls")
+		t.Error("a show with no episode files was returned — it is one sweep from removal, so enriching it wastes provider calls")
+	}
+
+	// The limit is what bounds the sweep's provider cost, and it is the only
+	// bound: the predicate is "no metadata PROGRESS", and the attempt stamp is
+	// gated on the provider having answered, so a show whose enrichment reliably
+	// ERRORS stays eligible for ever. Unbounded, an install with a bad TMDB key
+	// re-searched and re-embedded its whole shows library on every scan.
+	withFiles(insertLatchShow(t, q, libID, "Stuck Two "+randomSuffix(t), nil, nil, nil))
+	capped, err := q.GetUnattemptedShowsForLibrary(ctx, libID, 1)
+	if err != nil {
+		t.Fatalf("query (limit 1): %v", err)
+	}
+	if len(capped) != 1 {
+		t.Errorf("limit 1 returned %d rows; the sweep is unbounded and re-pays a search per eligible show on every scan", len(capped))
+	}
+	// ORDER BY id, so which row a capped sweep covers is deterministic rather
+	// than whatever the planner returns — the same trade GetStaleMetadataItems'
+	// id tiebreaker makes.
+	if len(capped) == 1 && capped[0].Item.ID != stuck {
+		t.Errorf("capped sweep returned item %d, want the lowest eligible id %d", capped[0].Item.ID, stuck)
+	}
+
+	// A non-positive limit is a caller bug, not "no limit" — returning the whole
+	// set there would silently restore the unbounded behaviour.
+	if _, err := q.GetUnattemptedShowsForLibrary(ctx, libID, 0); err == nil {
+		t.Error("limit 0 was accepted; a zero limit must not read as unbounded")
 	}
 }

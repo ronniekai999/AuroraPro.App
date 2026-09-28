@@ -970,7 +970,18 @@ func (q *Queries) UpdateEpisodeMetadata(ctx context.Context, u *models.EpisodeMe
 // for the RIGHT reason" trap from the check-library-paths post-mortem. The
 // rotation is therefore pinned end-to-end, through GetStaleMetadataItems itself,
 // by TestGetStaleMetadataItemsRotatesPastAttemptedItems.
-const metadataProgressExpr = `GREATEST(last_metadata, last_metadata_attempt)`
+// metadataProgressFor is where that expression is WRITTEN — once. An earlier
+// version had a second literal copy for the aliased form while its comment
+// claimed there was only one definition, so a change to the constant would have
+// left the qualified copy silently behind.
+func metadataProgressFor(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return fmt.Sprintf("GREATEST(%[1]slast_metadata, %[1]slast_metadata_attempt)", alias)
+}
+
+var metadataProgressExpr = metadataProgressFor("")
 
 // GetStaleMetadataItems returns items whose metadata is older than maxAge or was never fetched.
 //
@@ -1049,10 +1060,26 @@ type UnattemptedShow struct {
 // for unless the show happened to gain a new or modified file. A round-5 review
 // caught that; ScanLibrary now asks this question once per scan instead.
 //
-// The EXISTS clause matters: a show with no files left is about to be swept by
-// DeleteEmptyMediaItems, and enriching it would spend provider calls on a row
-// that is being deleted.
-func (q *Queries) GetUnattemptedShowsForLibrary(ctx context.Context, libraryID int64) ([]UnattemptedShow, error) {
+// The EXISTS clause matters: a show with no episode files is swept by
+// DeleteEmptyMediaItems on the next scan that walks cleanly and discovers
+// anything, so enriching it would spend provider calls on a row that is going
+// away. (That sweep runs in phase 1c, BEFORE this query — so such a row is one
+// scan from removal, not already gone.) The predicate here mirrors
+// DeleteEmptyMediaItems' own.
+//
+// limit is MANDATORY and bounds the provider cost of one sweep. The selection is
+// "no metadata PROGRESS", and the attempt stamp is (correctly) gated on the
+// provider having answered, so a show whose enrichment reliably ERRORS never
+// acquires progress and is eligible on every scan for ever — an invalid TMDB key
+// puts every show in a library in that class. Unbounded, that hands back exactly
+// the per-scan search-plus-retry-plus-embed cost the progress latch exists to
+// avoid, and hands it back for all scans rather than only scans that bring a
+// file. ORDER BY mi.id makes WHICH shows a bounded sweep covers deterministic,
+// the same trade GetStaleMetadataItems' tiebreaker makes.
+func (q *Queries) GetUnattemptedShowsForLibrary(ctx context.Context, libraryID int64, limit int) ([]UnattemptedShow, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("get unattempted shows: limit must be positive, got %d", limit)
+	}
 	rows, err := q.pool.Query(ctx, `
 		SELECT mi.id, mi.library_id, mi.type, mi.title, mi.sort_title, COALESCE(mi.year, 0),
 		       COALESCE((
@@ -1064,13 +1091,14 @@ func (q *Queries) GetUnattemptedShowsForLibrary(ctx context.Context, libraryID i
 		FROM media_items mi
 		WHERE mi.library_id = $1
 		  AND mi.type = 'show'
-		  AND `+metadataProgressExpr2("mi")+` IS NULL
+		  AND `+metadataProgressFor("mi")+` IS NULL
 		  AND EXISTS (
 		    SELECT 1 FROM tv_episodes te
 		    JOIN episode_files ef ON ef.episode_id = te.id
 		    WHERE te.media_item_id = mi.id
 		  )
-		ORDER BY mi.id`, libraryID)
+		ORDER BY mi.id
+		LIMIT $2`, libraryID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get unattempted shows: %w", err)
 	}
@@ -1087,13 +1115,6 @@ func (q *Queries) GetUnattemptedShowsForLibrary(ctx context.Context, libraryID i
 		out = append(out, UnattemptedShow{Item: item, FilePath: path})
 	}
 	return out, rows.Err()
-}
-
-// metadataProgressExpr2 qualifies metadataProgressExpr with a table alias, for
-// queries that join. Kept as a helper so there is still exactly one definition of
-// "has this row made metadata progress".
-func metadataProgressExpr2(alias string) string {
-	return fmt.Sprintf("GREATEST(%[1]s.last_metadata, %[1]s.last_metadata_attempt)", alias)
 }
 
 // TouchLastMetadata bumps the last_metadata timestamp for an item without changing any data.

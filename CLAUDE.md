@@ -375,10 +375,16 @@ the stamp in `Enricher.EnrichMediaItem`.
 
 Invariants to preserve when touching this area:
 
-- **There are exactly TWO recovery paths and they divide the work.** The scanner
-  re-queues a full pass for rows that were NEVER ATTEMPTED (the interrupted-scan
-  state — both progress columns NULL); everything already attempted belongs to
-  `RefreshStaleMetadata`'s rotation.
+- **There are exactly TWO recovery paths and they divide the work, FOR SHOWS.**
+  The scanner re-queues a full pass for TV rows that were NEVER ATTEMPTED (the
+  interrupted-scan state — both progress columns NULL); everything already
+  attempted belongs to `RefreshStaleMetadata`'s rotation. A MOVIE reaches the
+  identical never-attempted state (`processFile` upserts the row, the inline
+  `enrichNewItem` errors, nothing is stamped) and the scanner recovers it from
+  neither path: the per-file latch is skipped on an unchanged hash and the sweep
+  is `LibraryShows`-only. The rotation is the movie's ONLY path, which is sound
+  (`GetStaleMetadataItems` has no type filter) but is not the division stated
+  above — a review found the invariant as written would mislead the next change.
 - **The scanner's half runs ONCE PER SCAN, not from the per-file path, and that is
   not an optimisation.** `processFile` returns early on an unchanged hash BEFORE it
   consults `FindMediaItemByTitle`, and the #510 state is exactly "every episode file
@@ -388,12 +394,28 @@ Invariants to preserve when touching this area:
   the fix was structurally unreachable except for shows that happened to gain a new
   or modified file, while three separate comments claimed otherwise.
   `GetUnattemptedShowsForLibrary` + the re-queue block after `wg.Wait()` is what
-  makes it real. Keep the per-file latch as well: it covers a show that gains files
-  before the once-per-scan query runs. Latching the scanner on *stored* metadata
+  makes it real, and `TestScanLibraryRequeuesAShowWhoseEnrichmentNeverRan` drives a
+  real `ScanLibrary` twice with nothing changed on disk to pin it — deleting the
+  block used to fail no test in any package. Keep the per-file latch as well: it
+  covers a show that gains files before the once-per-scan query runs. Latching the scanner on *stored* metadata
   instead re-pays a TMDB search, a year-less retry, a TVDB search and an
   unconditional `embedItem` for every unmatchable show on every scan that brings
   one of its files. `cmd/aurora/main.go`'s `OnEpisodeBackfill` comment states this
   policy; keep the two in step.
+- **The sweep is BOUNDED twice over, and both bounds are load-bearing**
+  (`requeueUnattemptedLimit` = 100, `requeueSweepInterval` = 1h, plus a mandatory
+  `limit` argument that REFUSES a non-positive value rather than reading it as
+  "unbounded"). The selection is "no metadata PROGRESS" while the attempt stamp is
+  gated on the provider having ANSWERED, so a show whose enrichment reliably
+  ERRORS never acquires progress and stays eligible for ever — with an absent or
+  invalid TMDB key that is every show in the library. Each eligible show costs a
+  TMDB search plus a year-less retry (4 attempts and ~7s of backoff each), a TVDB
+  search where TVDB is enabled, and an unconditional `embedItem`, because
+  `OnNewItem` calls it whether or not enrichment errored. The watcher fires on
+  fsnotify with a 30-second dedup window, so unbounded this re-searched and
+  re-embedded a whole library continuously — precisely the cost the per-file
+  latch's own comment gives as its reason for reading PROGRESS rather than STORED.
+  A review found it; do not remove either bound to make recovery faster.
 - **For a show that matched nothing, the rotation is the ONLY recovery path —
   there is no flagged/needs_review net.** `match_status` DEFAULTs to `'matched'`
   (migration 007) and `UpsertMediaItem` never sets it, while `EnrichMediaItem`
@@ -405,7 +427,11 @@ Invariants to preserve when touching this area:
   is the single definition of "already dealt with"**, read by the refresh
   queue's WHERE and ORDER BY and by `FoundMediaItem.Attempted`. Postgres
   `GREATEST` ignores NULL operands and yields NULL only when all are NULL, which
-  is what puts never-touched rows at the head of the `NULLS FIRST` queue.
+  is what puts never-touched rows at the head of the `NULLS FIRST` queue. The
+  alias-qualified form goes through `metadataProgressFor(alias)` and the bare
+  constant is `metadataProgressFor("")` — it was briefly a second literal copy
+  whose own comment claimed otherwise, which would have left the qualified form
+  silently behind on any change.
 - **`last_metadata` means STORED, `last_metadata_attempt` means ASKED AND
   ANSWERED.** Do not collapse them: `RefreshStaleMetadata`'s smart diffing hands
   `last_metadata` to TMDB's changes API, which is meaningless for an item that
@@ -423,9 +449,12 @@ Invariants to preserve when touching this area:
   `GetStaleMetadataItems` itself; keep it that way. The enricher's call site has
   no seam at all (`tmdbBaseURL` is a package const, `Enricher.queries` is
   concrete) and is pinned only by a source-marker test.
-- **A re-queue must exclude shows with no episode files.** They are about to be
-  removed by `DeleteEmptyMediaItems`, so enriching them spends provider calls on
-  rows being deleted.
+- **A re-queue must exclude shows with no episode files.** `DeleteEmptyMediaItems`
+  will remove them, so enriching them spends provider calls on rows that are going
+  away. Note the order, which is easy to state backwards: that sweep runs in phase
+  1c, BEFORE the re-queue, so such a row is one clean scan from removal rather
+  than already gone. The `EXISTS` guard mirrors `DeleteEmptyMediaItems`' own
+  predicate.
 - **Every nullable column `GetStaleMetadataItems` projects is COALESCEd.** Five
   of them land in non-nullable Go fields, and ONE row with any one NULL failed
   the whole query, so `RefreshStaleMetadata` returned an error having enriched
@@ -469,9 +498,11 @@ Known limits, stated plainly:
   leaves it alone permanently; only the rotation can reach it.
 - **The `err == nil` gate is now pinned BEHAVIOURALLY**
   (`TestEnrichMediaItemStampsTheAttemptOnlyWhenTheProviderAnswered`): it drives the
-  real `EnrichMediaItem` against a fake TMDB (via `setBaseURLForTest`, an
-  in-package seam; the production base URL stays a compile-time const) and a real
-  database, asserting a zero-result answer stamps the attempt and a 401 does not.
+  real `EnrichMediaItem` against a fake TMDB (the test assigns `tmdb.baseURL`
+  directly — an unexported field, so the seam is in-package only and the
+  production default `tmdbBaseURL` stays a compile-time const; there is no
+  `setBaseURLForTest` helper, whatever an earlier version of this line said) and a
+  real database, asserting a zero-result answer stamps the attempt and a 401 does not.
   Two SYNTACTIC guards over this gate were each defeated by a review first — a
   substring check beaten by a decoy `if err == nil`, then an AST check beaten by a
   shadowed `err`, because matching an identifier by name is not matching it by
@@ -479,12 +510,35 @@ Known limits, stated plainly:
   and says so; do not treat a pass there as evidence the gate is correct. The
   helpers' contract underneath (`(0, nil)` for "no entry", non-nil only for "no
   answer") is still pinned by no test.
-- **`ScanLibrary` has no test harness**, so `addPendingFull`, the
-  fulls-before-backfills ordering and the `s.enrichedItems` interaction are
-  covered by a unit test on the helper plus reading, not end to end.
+- **`ScanLibrary`'s harness covers the sweep and nothing else.**
+  `internal/library/scanner_requeue_scan_test.go` runs real scans against
+  Postgres and a temp tree, which pins the re-queue and its rate limit end to end;
+  `addPendingFull`, the fulls-before-backfills ordering and the `s.enrichedItems`
+  interaction are still covered by a unit test on the helper plus reading.
 - **The refresh interval doubles as the ticker interval**
   (`cfg.TMDB.MetadataRefresh`), so a stamped item becomes due on the SECOND
   following tick, not the first. Pre-existing, unchanged.
+- **The deterministic-error class is BOUNDED here, not fixed.** A show whose
+  enrichment reliably errors is still swept again every `requeueSweepInterval`,
+  up to `requeueUnattemptedLimit` shows, for as long as it keeps erroring. The
+  rate limit is process-local by design, so on a host that redeploys often — this
+  one — it re-arms on every boot and the effective bound is one sweep per boot per
+  library. Closing it properly means stamping a FAILED attempt into a third column
+  with backoff, which the `err == nil` gate deliberately refuses to do with
+  `last_metadata_attempt`; that is a migration and its own commit.
+- **The sweep set is not the scan's own delta, which is why its size matters to
+  the backfills.** Fulls run before backfills and the backfill loop is gated on
+  the fulls having finished, so a sweep long enough to outlast the deploy window
+  would mean no episode backfill ever ran — genuinely new episode files keeping
+  bare titles and stills indefinitely. `requeueUnattemptedLimit` is what keeps
+  that bounded; the ordering itself is still not covered end to end.
+- **`last_metadata` means STORED is an invariant this code RELIES on but does not
+  enforce.** `UpdateMediaMetadata` always stamps `last_metadata`, and the admin
+  refresh endpoint (`internal/api/phase2_handlers.go`) calls it with a
+  sort-title-only update after an enrichment that may have stored nothing — so one
+  admin "refresh metadata" click on an unmatchable show writes a stored-claim.
+  Benign today (the smart diff is gated on `TMDBID != nil` as well), but the
+  distinction the two columns rest on is weaker than the invariant above reads.
 - **The NULL-scan defect class this work uncovered is swept separately** — see
   "Enrichment recovery: NULL columns scanned into non-nullable Go fields" below,
   which went much wider than the seven queries this work touched (six tables,

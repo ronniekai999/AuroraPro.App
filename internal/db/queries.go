@@ -927,20 +927,13 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	}
 	offset := (page.Page - 1) * page.PerPage
 
-	// year/overview/rating/runtime_minutes/content_rating are COALESCEd. All five
-	// are nullable in media_items and land in non-nullable models.MediaItem
-	// fields, so ONE row with any of them NULL fails the whole query — pgx
-	// reports "cannot scan NULL into *int" mid-iteration and the caller gets an
-	// error instead of a result set. Every reader of these columns needs the
-	// same treatment; see the note on GetRecentMedia for the full story.
-	//
-	// Only the SQL is COALESCEd, never the ORDER BY or the richness CASEs: those
-	// read the raw columns and already collapse NULL and zero identically, so
-	// ranking and NULL sort order are untouched.
+	// The nullable columns are handled INSIDE dedupCTE, which COALESCEs and
+	// aliases them; this projection reads those aliases, so it needs no second
+	// COALESCE. A branch of the #510 work briefly added one here and it was pure
+	// noise — see the NULL-scan section in CLAUDE.md, which states the rule.
 	dataQuery := dedupCTE + fmt.Sprintf(
-		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, COALESCE(d.year, 0),
-		        COALESCE(d.overview, ''), COALESCE(d.rating, 0), COALESCE(d.runtime_minutes, 0),
-		        COALESCE(d.content_rating, ''),
+		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, d.year,
+		        d.overview, d.rating, d.runtime_minutes, d.content_rating,
 		        d.poster_path, d.backdrop_path, d.added_at, d.updated_at
 		 FROM deduped d
 		 ORDER BY %s LIMIT $%d OFFSET $%d`,
@@ -1284,28 +1277,15 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 	// Among duplicates sharing a tmdb_id, pick the item with the richest
 	// metadata, then order the deduped set by added_at DESC.
 	//
-	// The outer projection COALESCEs year/overview/rating/runtime_minutes/
-	// content_rating. All five are nullable and land in non-nullable
-	// models.MediaItem fields, so ONE row with any of them NULL failed this whole
-	// query and took the user-facing "Recently Added" rail (/api/media/recent)
-	// down with a 500 for every user, catalog-wide — this query carries no
-	// library, type or file filter, so it reads every media_items row there is.
+	// The nullable columns are COALESCEd and aliased inside the CTE below, so the
+	// outer SELECT reads those aliases and needs no second COALESCE. One lesson
+	// from finding this query's NULL defect is worth keeping, though: with a
+	// single all-NULL row present this was the only query in the SUITE that
+	// broke, and that was briefly mistaken for evidence that the others were
+	// unreachable. A test sweep is not a reachability argument.
 	//
-	// It is not the only reader of those columns, and a test sweep is NOT a
-	// reachability argument: with one all-NULL row present, this was the only
-	// query in the SUITE that broke, but GetMediaItems, GetMediaItem,
-	// SearchMedia and GetItemsNeedingReview have the identical scan shape and are
-	// all user-facing. They are COALESCEd too. The remaining projections in this
-	// package with the same shape are the open sweep recorded in CLAUDE.md.
-	//
-	// No application write path produces these NULLs today (UpsertMediaItem
-	// inserts Go zero values, UpdateMediaMetadata only sets fields it has), so
-	// this is latent robustness — but hand-written catalog SQL does produce them,
-	// this repo's runbooks prescribe exactly that, and it is how #510 was
-	// remediated in production.
-	//
-	// The richness CASEs below read the RAW CTE columns, not this projection, and
-	// each already collapses NULL and zero identically, so ranking is unchanged.
+	// The richness CASEs below read the raw columns and each already collapses
+	// NULL and zero identically, so ranking is unaffected either way.
 	//
 	// m.type is part of the dedup key because TMDB's movie and TV id spaces are
 	// INDEPENDENT: movie 100 and tv 100 both exist and are unrelated titles.
@@ -1338,9 +1318,8 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 		           + CASE WHEN EXISTS (SELECT 1 FROM media_genres WHERE media_item_id = m.id) THEN 1 ELSE 0 END) DESC,
 		            m.id ASC
 		 )
-		 SELECT id, library_id, type, title, sort_title, COALESCE(year, 0),
-		        COALESCE(overview, ''), COALESCE(rating, 0), COALESCE(runtime_minutes, 0),
-		        COALESCE(content_rating, ''),
+		 SELECT id, library_id, type, title, sort_title, year,
+		        overview, rating, runtime_minutes, content_rating,
 		        poster_path, backdrop_path, added_at, updated_at
 		 FROM deduped
 		 ORDER BY added_at DESC LIMIT $1`, limit,
