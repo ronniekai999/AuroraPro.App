@@ -472,7 +472,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	requestH := NewRequestHandler(deps.Queries, deps.Hub, deps.Activity, deps.ArrClients, deps.Tmdb, deps.Tvdb)
 	requestH.SetDispatcher(deps.Dispatcher)
 	notificationH := NewNotificationHandler(deps.Queries)
-	// Web Push endpoints (Phase 2 — do/pwa-push/IMPLEMENTATION.md D12).
+	// Web Push endpoints (see docs/push.md).
 	// PushSender may be nil in tests that build a router without push;
 	// the handler is only registered when it exists.
 	var pushH *PushHandler

@@ -15,7 +15,8 @@ import (
 // VAPIDSettingKey is the server_settings row holding the keypair. The
 // `_secret` suffix is load-bearing: isSecretSettingKey masks it in the admin
 // listing, and it is deliberately absent from allowedKeys so the admin API
-// cannot overwrite it (do/pwa-push/IMPLEMENTATION.md D6). Rotation = delete
+// cannot overwrite it (see the atomic setting contract in docs/push.md).
+// Rotation = delete
 // the row and restart; sends to old subscriptions are then REJECTED
 // (401/403 — not pruned, see sendOne) until each device's next app boot,
 // where bootResyncPush detects the key change and replaces its

@@ -433,7 +433,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
-          {/* Drawn Borealis wordmark (docs/design/aurorapro-typeface). Stays
+          {/* Drawn Borealis wordmark. Stays
               an h1 — the sign-in screen's only heading, and the card's own
               "Welcome Back" is an h2 under it. The svg's role="img" +
               aria-label give the h1 its accessible name "Aurora Pro" (the
@@ -2938,7 +2938,7 @@ export default function App() {
   // One socket for the whole session, enabled only while logged in.
   const realtimeUserId = user && typeof user === 'object' ? user.id : null
 
-  // Boot-time push re-POST (do/pwa-push/IMPLEMENTATION.md D11): once per
+  // Boot-time push re-POST (see docs/push.md): once per
   // signed-in session, re-report this device's live subscription so
   // last_seen_at stays fresh and a push-service key rotation heals. Reads
   // state only — never prompts, never subscribes.

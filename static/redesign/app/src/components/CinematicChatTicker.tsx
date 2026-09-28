@@ -7,7 +7,7 @@
 // each one out and dismisses it after a few seconds — so the resting
 // state is "just the movie."
 //
-// Design notes (mockup-cinematic-overlay.html `.ticker`):
+// Cinematic overlay contract (`.ticker`):
 //   - lower-third, left-aligned, translucent glass bubbles
 //   - purple author name, near-white message text (AA over the blur)
 //   - new messages slide in from the left (motion-safe only)

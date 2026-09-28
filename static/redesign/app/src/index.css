@@ -126,8 +126,7 @@
       0 0 72px rgba(255, 255, 255, 0.08);
 
     /* ============================================================
-       Aurora Stage (Option B) — Phase 0 tokens
-       do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md
+       Aurora Stage design tokens
        ============================================================
        The mockup's :root is otherwise identical to the tokens above
        (#050505 bg, --glow-border, --glow-halo == the mockup's --halo);
@@ -619,8 +618,7 @@
 }
 
 /* ====================================================================
-   AURORA STAGE (Option B) — shared primitives
-   do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md · Phase 0
+   AURORA STAGE — shared primitives
 
    Ported 1:1 from the mockup so Phases 1–8 consume them instead of
    re-deriving the same chrome per screen. Nothing here is wired up yet

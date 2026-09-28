@@ -1,6 +1,5 @@
 -- ============================================================
--- Smart Skip — intro / recap / credits markers (proposal:
--- docs/proposals/smart-skip/IMPLEMENTATION_PLAN.md)
+-- Smart Skip — intro / recap / credits markers.
 -- ============================================================
 
 -- One row per (file, kind). A marker belongs to EXACTLY ONE of

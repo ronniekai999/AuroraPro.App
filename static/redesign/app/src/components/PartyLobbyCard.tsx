@@ -1,6 +1,6 @@
 // Aurora V2 — PartyLobbyCard (watch-party invites)
 //
-// The "wait" state from docs/proposals/watch-party-invites: rendered by
+// The "wait" state from the watch-party invite contract: rendered by
 // PartyPanel's rail while a party is scheduled but not started. Shows the
 // live countdown, the RSVP roster (from GET /api/parties/{code}/invites,
 // polled while the lobby is visible — RSVPs land in Postgres, not on the

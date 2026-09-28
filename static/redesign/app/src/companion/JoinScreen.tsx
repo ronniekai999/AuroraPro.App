@@ -1,7 +1,7 @@
 // Aurora V2 — Companion JoinScreen
 //
 // The phone "second screen" entry surface. Matches
-// docs/proposals/watch-party-chat/mockup-mobile-companion.html (PHONE 1):
+// the phone companion join flow:
 //   - Aurora-branded logo + "Join the party" heading
 //   - Big OTP-style 6-box code entry (validates ^[A-Z0-9]{6}$)
 //   - "Scan the QR on the TV instead" hint

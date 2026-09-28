@@ -5,8 +5,28 @@ ready/failed (to the requester), watch-party highlight reels (to the host),
 watch-party invites / RSVPs / start reminders (migration 051), and two admin
 alerts — a new request awaiting review, and library scans that added items.
 Every type the dispatcher persists is also pushed; `push.Envelope` is the
-single place that maps a notification type to its title and body. Design:
-`do/pwa-push/IMPLEMENTATION.md` (Phase 2).
+single place that maps a notification type to its title and body.
+
+## Architecture contract
+
+- The service worker is a hand-written, stable `/v2/sw.js`; it is not generated
+  by the frontend build. It exists only for push delivery and never caches or
+  intercepts fetches. It updates through the browser's normal service-worker
+  lifecycle.
+- VAPID keys are generated server-side and stored atomically as one masked
+  setting. The admin API cannot overwrite the key material.
+- A push subscription belongs to one user and one browser endpoint. Reposting
+  an endpoint transfers it to the currently authenticated user, and stale or
+  permanently rejected endpoints are deleted.
+- Permission prompts are user initiated. The application never asks for
+  notification permission during startup.
+- Persisted in-app notifications are the source of truth. Web Push is a
+  best-effort delivery channel produced by `notify.Dispatcher`, and push
+  failures must not roll back the durable notification.
+- The browser posts its current subscription again at startup so key rotation
+  and account changes converge without a separate migration job.
+- Push payload text is centralized in `push.Envelope`; keep sensitive details
+  out of lock-screen-visible bodies.
 
 ## Zero configuration
 

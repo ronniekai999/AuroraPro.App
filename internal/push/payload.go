@@ -8,7 +8,7 @@ import (
 )
 
 // Envelope builds the one payload every platform understands
-// (do/pwa-push/IMPLEMENTATION.md D9):
+// (see docs/push.md):
 //
 //   - iOS/iPadOS ≥18.4 recognizes the "web_push": 8030 marker and renders
 //     the "notification" member declaratively — no service worker wake.

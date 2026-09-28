@@ -60,7 +60,7 @@ export function CompanionBrand({
         </svg>
       </div>
       {withWord && (
-        // Drawn Borealis wordmark (docs/design/aurorapro-typeface); carries
+        // Drawn Borealis wordmark; carries
         // its own accessible name "Aurora Pro", like the text it replaced.
         <AuroraWordmark ink="#EDE9FE" className="h-[15px] w-auto" />
       )}

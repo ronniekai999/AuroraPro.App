@@ -299,6 +299,9 @@ Removes the binary, systemd units, config, cache, source clone, database, and th
 <a id="development"></a>
 ## 🛠️ Development
 
+Focused operator and developer guides are indexed in
+[`docs/README.md`](docs/README.md).
+
 Backend (repo root):
 
 ```bash

@@ -1,7 +1,7 @@
 // Aurora V2 — CompanionRoom
 //
 // The active "second screen" once joined. Matches
-// docs/proposals/watch-party-chat/mockup-mobile-companion.html (PHONE 2):
+// the phone companion room:
 //   - LIVE header (party name + code + connection dot)
 //   - Read-only now-playing strip ("in sync with host" + position)
 //   - Horizontal members row with speaking-glow + companion badge
