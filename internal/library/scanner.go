@@ -243,7 +243,11 @@ func (s *Scanner) TryStartScan(libraryID int64) bool {
 func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progressCb func(*models.ScanProgress)) error {
 	now := time.Now()
 
-	// Retrieve the progress entry (set by TryStartScan or create one for direct callers like watcher)
+	// Retrieve the progress entry, or create one. Every caller today takes
+	// TryStartScan first (cmd/aurora — including the watcher's onChange closure —
+	// the two media handlers and the request handler), so the fallback is
+	// defensive. This comment used to name the watcher as a direct caller, which
+	// it is not; the requeueMu note above retracts the same claim.
 	s.mu.Lock()
 	progress, exists := s.progress[lib.ID]
 	if !exists || progress.Status != models.ScanRunning {
@@ -518,11 +522,15 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// remaining window on recovery work and, on a cancellation, take every
 	// episode backfill down with it — and a backfill is only ever signalled in the
 	// scan that FIRST sees the file, so a dropped one is not merely delayed. The
-	// rotation is not a safety net here: RefreshStaleMetadata's smart diffing
-	// skips a show outright when it has a last_metadata AND a tmdb_id AND
-	// HasTVChanged reports no upstream change — and a backfill-eligible show has
-	// the first two by definition, while a locally added episode file is not an
-	// upstream change. Those episodes can keep bare titles, overviews and stills
+	// rotation is only a PARTIAL safety net here: RefreshStaleMetadata's smart
+	// diffing skips a show outright when it has a last_metadata AND a tmdb_id AND
+	// HasTVChanged reports no upstream change, and a locally added episode file is
+	// not an upstream change. That is the MATCHED class — the common one, and the
+	// one whose episodes would stay bare permanently. It is not every
+	// backfill-eligible show: eligibility is `Attempted`, which is either progress
+	// column, so a show asked-and-unmatched has last_metadata and tmdb_id NULL and
+	// the rotation does re-enrich it. An earlier version of this comment said the
+	// first two hold "by definition", which is the wrong half of that distinction. Those episodes can keep bare titles, overviews and stills
 	// permanently. A review found the ordering; a later one found that this is
 	// what it costs. The sweep runs LAST for the same reason it is capped.
 	var sweptTVEnrich []*pendingEnrichItem
@@ -648,9 +656,26 @@ func (s *Scanner) dueForRequeueSweep(libraryID int64) bool {
 			return false
 		}
 	}
+	if hook := requeueClaimHook; hook != nil {
+		hook()
+	}
 	s.requeueSweptAt.Store(libraryID, now)
 	return true
 }
+
+// requeueClaimHook, when non-nil, runs between reading the previous sweep time
+// and writing the new one — i.e. inside the window the mutex above exists to make
+// exclusive. It is nil in production and one branch on a package variable.
+//
+// It exists because the property cannot be tested by racing goroutines and hoping.
+// A review deleted the mutex and ran a 16-goroutine, 200-round stress test: it
+// passed 20/20 at GOMAXPROCS=1 with and without -race (the race detector is right
+// to stay quiet — sync.Map is race-safe and this is a logical check-then-set, not
+// a data race), and still passed about one run in five on four cores. A guard that
+// survives its own mutation on a single-CPU CI runner is not pinned. The seam lets
+// the test interleave two callers deterministically instead, the way
+// tmdb.baseURL lets the enricher test drive a fake provider.
+var requeueClaimHook func()
 
 // showLockKey returns the per-show lock for a given library+title combination.
 // The lock serializes all operations on the same show: UpsertMediaItem, UpsertSeason,

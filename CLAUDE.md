@@ -333,11 +333,13 @@ restart mid-scan produces the state.
   one part not derived from the scan's delta, and a backfill is only ever
   signalled in the scan that FIRST sees the file — so a cancellation during a
   sweep queued ahead of them dropped a signal that is never raised again. The
-  rotation is not a net for that either: its smart diffing skips a show outright
-  when it has a `last_metadata` and a `tmdb_id` and TMDB reports no upstream
-  change — a backfill-eligible show has the first two by definition, and a
-  locally added file is not an upstream change — so those episodes can stay bare
-  permanently.
+  rotation is only a PARTIAL net for that: its smart diffing skips a show
+  outright when it has a `last_metadata` and a `tmdb_id` and TMDB reports no
+  upstream change, and a locally added file is not one — so for the MATCHED
+  class, which is the common one, those episodes stay bare permanently. Not
+  every backfill-eligible show: eligibility is `Attempted`, which is either
+  progress column, so an asked-and-unmatched show has both NULL and the rotation
+  does re-enrich it.
   The sweep's shows cannot also hold a backfill entry (a backfill needs the row
   ATTEMPTED, the sweep selects rows that are not, and progress only moves
   forwards), so the ordering costs no redundant pass.

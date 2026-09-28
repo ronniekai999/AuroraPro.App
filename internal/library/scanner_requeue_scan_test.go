@@ -322,14 +322,75 @@ func TestRequeueSweepConstantsAreBounded(t *testing.T) {
 	}
 }
 
-// TestDueForRequeueSweepClaimsTheSlotOnce pins the mutex, and needs no database.
+// TestDueForRequeueSweepClaimIsExclusive pins the mutex deterministically, on one
+// CPU as well as sixteen, and needs no database.
 //
-// It is a check-then-set over a sync.Map, which has no compare-and-swap for this
-// shape, so without the lock two concurrent scans of one library both read a
-// stale timestamp and both sweep — spending the provider calls the rate limit
-// exists to bound. Deleting the two lock lines left the whole suite green,
-// including under -race, which is the same unpinned-guard shape this file's
-// constant assertion was just moved out of a database gate for.
+// dueForRequeueSweep is a check-then-set over a sync.Map, which has no
+// compare-and-swap for this shape, so without the lock two concurrent scans of one
+// library both read a stale timestamp and both sweep — spending the provider calls
+// the rate limit exists to bound.
+//
+// The obvious test for that is the stress test below, and it is not enough: a
+// review deleted the mutex and the 16-goroutine version passed 20/20 at
+// GOMAXPROCS=1 with and without -race, and still passed roughly one run in five on
+// four cores. So it holds the two callers inside the claim window instead, through
+// requeueClaimHook. With the lock the second caller cannot enter while the first
+// is there; without it, it walks straight in. Neither outcome depends on the
+// scheduler.
+func TestDueForRequeueSweepClaimIsExclusive(t *testing.T) {
+	s := NewScanner(config.ScannerConfig{}, nil)
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	requeueClaimHook = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	t.Cleanup(func() { requeueClaimHook = nil })
+
+	var claimed atomic.Int64
+	var done sync.WaitGroup
+	done.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer done.Done()
+			if s.dueForRequeueSweep(1) {
+				claimed.Add(1)
+			}
+		}()
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		done.Wait()
+		t.Fatal("no caller reached the claim window")
+	}
+	// A second caller arriving while the first is still inside is the defect
+	// itself: both have read the same stale timestamp and both will write.
+	overlapped := false
+	select {
+	case <-entered:
+		overlapped = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	done.Wait()
+
+	if overlapped {
+		t.Error("two callers were inside the claim window at once; the check and the claim must be one critical section, or one library is swept once per concurrent scan rather than once per interval")
+	}
+	if got := claimed.Load(); got != 1 {
+		t.Errorf("%d of 2 callers claimed the sweep slot, want 1", got)
+	}
+}
+
+// TestDueForRequeueSweepClaimsTheSlotOnce is the stress companion to the test
+// above. It is deliberately kept even though it is PROBABILISTIC — it explores
+// interleavings the deterministic seam does not reach — but do not read a pass
+// here as evidence the lock is present: it survives its own mutation on a
+// single-CPU runner entirely, and about one run in five on four cores.
 func TestDueForRequeueSweepClaimsTheSlotOnce(t *testing.T) {
 	s := NewScanner(config.ScannerConfig{}, nil)
 	const goroutines = 16
