@@ -260,12 +260,21 @@ Invariants to preserve when touching this area:
   classification-without-handling defect one door along.
   `TestMergeMediaItemsPreservesUserDataOnEveryChild` now seeds a row for all 19
   children, bespoke included.
-- **`keyPredicate` is documentation, and the generic loops REFUSE a non-bespoke
-  entry that carries one** (`mergeChildStrategyError`). The loops build their
-  collision check from `keyCols` alone, so a partial-keyed table on the generic
-  path would get a check that ignores the index's WHERE clause and would delete
-  rows outside it — the `watch_progress` bug reintroduced. A review demonstrated
-  that live. Teach the loops to apply predicates BEFORE adding such a table.
+- **A partial-keyed table cannot reach the generic path, DECLARED OR NOT, and it
+  takes two checks to say that.** `mergeChildStrategyError` refuses a non-bespoke
+  entry carrying a `keyPredicate`; `mergeChildPartialKeyError` asks the LIVE
+  schema, on every merge, whether any generic-path child has a PARTIAL unique
+  index over the column that path re-writes. The second is the one that matters:
+  the loops build their collision check from `keyCols` alone, so a partial-keyed
+  table gets a check that ignores the index's WHERE clause and deletes rows
+  outside it — the `watch_progress` bug reintroduced. A review demonstrated the
+  declared half live, the fix refused only that half, and the NEXT review walked
+  through the adjacent door — a partial index with `keyPredicate` simply left
+  blank — and watched `MergeMediaItems` return nil having destroyed the row.
+  Partiality is a property of the schema, not of the list, so only the schema can
+  answer; a `TEST_DATABASE_URL`-gated test is not enough, because it does not run
+  where the merge does. Teach the loops to apply predicates BEFORE adding such a
+  table.
 - **A collision key must be the FULL unique key minus `media_item_id`.** A partial
   key does not error — it silently decides another profile's or parent's row is a
   collision and deletes it. This has been got wrong TWICE here: on
@@ -282,13 +291,20 @@ Invariants to preserve when touching this area:
   `(media_item_id, up_to_episode_id)` and at re-point time the row still carries
   the DUPLICATE's `media_item_id`, so a collision check there can only compare the
   row against itself — a no-op that read like protection until a review caught it.
-  The re-point cannot collide (the target pair is necessarily free) and the real
-  collision is resolved by the `mergeChildren` pass afterwards, which is keyed
-  correctly. `TestMergeMediaItemsResolvesCollidingEpisodeRecaps` pins that the two
-  passes compose.
-- **Both drift guards cover CASCADE *and* SET NULL.** The `media_items` guard used
-  to check CASCADE only while the `tv_episodes` one checked both — an
-  inconsistency between two trees this code treats as equally dangerous.
+  The target pair being free is a data-consistency EXPECTATION, not a constraint:
+  if it is ever violated the checked `tx.Exec` raises 23505 and the whole merge
+  rolls back, which is the right trade but is "fails loudly if wrong", not
+  arithmetic certainty. The real collision is resolved by the `mergeChildren` pass
+  afterwards, which is keyed correctly.
+  `TestMergeMediaItemsResolvesCollidingEpisodeRecaps` pins that the two passes
+  compose.
+- **There are THREE drift guards, not two, and all cover CASCADE *and* SET NULL.**
+  The `media_items` guard used to check CASCADE only while the `tv_episodes` one
+  checked both — an inconsistency between two trees this code treats as equally
+  dangerous. `tv_seasons` had none at all for a round, while the merge DELETEs
+  season rows on a colliding season number: its only child today is `tv_episodes`
+  (re-parented by the walk first), so the gap was inert — which is exactly the
+  state `media_items` was in before the eleven later migrations.
 - **The episode-referencing column is not uniform.** Most tables use `episode_id`;
   the recap tables use `up_to_episode_id`. Assuming otherwise produced a runtime
   "column episode_id does not exist", caught by a behavioural test rather than the
@@ -328,6 +344,17 @@ Known limits, stated plainly:
   that table's pass, is still cascade-destroyed by the final DELETE. Pre-existing
   and narrow (the FK takes `FOR KEY SHARE`), but the blast radius is now 19 tables
   rather than 8.
+- **Two guards are structural where a third is hand-maintained.** The drift guards
+  and the behavioural test derive their sets from the schema and from
+  `mergeChildren`, so a new child cannot appear unnoticed;
+  `TestMergeMediaItemsCollisionSparesThirdPartiesOnEveryGenericChild` has a
+  hand-written case list, so it now asserts its own coverage against
+  `mergeChildren` and names the sibling test for each child it does not cover
+  itself. The key-vs-schema guard also used to `return` on the FIRST matching
+  unique index, which would have passed a table with two `media_item_id`-bearing
+  unique keys while the loop's check covered one of them; it checks all of them
+  now and refuses that shape outright. Both were inert when found, and both are
+  the classification-without-handling defect in test clothing.
 - **`media_cast`'s pre-existing collision check compares a nullable `character`**,
   so NULL vs NULL reads as "no collision" and the row duplicates rather than
   merging. Cosmetic (it over-keeps), unlike the partial-key bugs which lose data.

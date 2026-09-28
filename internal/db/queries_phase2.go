@@ -258,6 +258,9 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err != nil {
 		return err
 	}
+	if err := q.mergeChildPartialKeyError(ctx); err != nil {
+		return err
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
@@ -726,9 +729,13 @@ var mergeEpisodeChildren = []mergeChildStrategy{
 	// Plain UPDATE, deliberately. Its key is (media_item_id, up_to_episode_id) and
 	// at this point the row's media_item_id is still the DUPLICATE's, so a
 	// collision check here could only ever compare the row against itself — a
-	// no-op that read like protection (a review caught it). The re-point cannot
-	// collide anyway: the target (duplicateID, canonEpID) is necessarily free,
-	// because canonEpID belongs to the canonical item. The genuine collision,
+	// no-op that read like protection (a review caught it). The target pair
+	// (duplicateID, canonEpID) should be free, since canonEpID belongs to the
+	// canonical item — but that is a data-consistency expectation, not a
+	// constraint, so treat it as "fails loudly if wrong" rather than as
+	// arithmetic: a row pairing the duplicate item with a canonical episode would
+	// raise 23505 on this checked tx.Exec and roll the whole merge back, leaving
+	// both items in place. That is the right trade here. The genuine collision,
 	// against the canonical's own recap for that episode, is resolved by the
 	// mergeChildren pass afterwards, which is keyed correctly.
 	{table: "episode_recaps", episodeCol: "up_to_episode_id", why: "re-pointed; CASCADE would drop the generated recap"},
@@ -755,6 +762,85 @@ func mergeChildStrategyError(specs ...[]mergeChildStrategy) error {
 				"merge child %q declares keyPredicate %q but is not bespoke: the generic loop does not apply predicates, so its collision check would ignore the partial index and delete rows it does not cover",
 				m.table, m.keyPredicate)
 		}
+	}
+	return nil
+}
+
+// mergeChildPartialKeyError asks the LIVE schema whether any generic-path child
+// carries a PARTIAL unique index over the column that path re-writes, and refuses
+// the merge if one does.
+//
+// mergeChildStrategyError above catches only the DECLARED half of this hazard: an
+// entry that states a keyPredicate the generic loops cannot apply. The undeclared
+// half is the dangerous one and nothing caught it. A review registered a table
+// with a partial unique index and simply left keyPredicate blank; the spec then
+// looked complete, the loop built its collision check from keyCols alone, and the
+// merge DELETED a duplicate row the index does not even cover — the watch_progress
+// bug one door along, silent, at runtime.
+//
+// The spec cannot see that, by construction: partiality is a property of the
+// schema, not of the list. So the schema is asked, on every merge, and a
+// partial-keyed child cannot reach the generic path AT ALL — declared or not.
+// Teaching the loops to apply predicates is the fix if a table ever needs one.
+//
+// TestMergeMediaItemsKeyColumnsMatchTheSchema pins the same property, but it is an
+// integration test that skips without TEST_DATABASE_URL; this check runs wherever
+// the merge does.
+//
+// Refusing when the introspection query itself fails is deliberate. It runs before
+// the transaction, handleDuplicateMetadata logs and leaves both items in place, and
+// a schema we could not read is not a licence to run nineteen DELETEs. The query is
+// one round trip against the catalogs and is deliberately NOT cached: a merge is
+// rare (an enrichment collision), and a cache would answer from a schema that may
+// no longer be the one about to be modified.
+func (q *Queries) mergeChildPartialKeyError(ctx context.Context) error {
+	var tables, cols []string
+	add := func(specs []mergeChildStrategy, colFor func(mergeChildStrategy) string) {
+		for _, m := range specs {
+			if m.bespoke || len(m.keyCols) == 0 {
+				continue
+			}
+			tables = append(tables, m.table)
+			cols = append(cols, colFor(m))
+		}
+	}
+	add(mergeChildren, func(mergeChildStrategy) string { return "media_item_id" })
+	add(mergeEpisodeChildren, func(m mergeChildStrategy) string { return m.episodeCol })
+	if len(tables) == 0 {
+		return nil
+	}
+
+	rows, err := q.pool.Query(ctx, `
+		SELECT spec.tbl, spec.col, pg_get_expr(i.indpred, i.indrelid)
+		FROM unnest($1::text[], $2::text[]) AS spec(tbl, col)
+		JOIN pg_class c ON c.relname = spec.tbl
+		JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+		JOIN pg_index i ON i.indrelid = c.oid
+		WHERE i.indisunique
+		  AND i.indpred IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1 FROM pg_attribute a
+		    WHERE a.attrelid = i.indrelid
+		      AND a.attnum = ANY(i.indkey)
+		      AND a.attname = spec.col
+		  )`, tables, cols)
+	if err != nil {
+		return fmt.Errorf("merge child partial-key check: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var table, col, pred string
+		if err := rows.Scan(&table, &col, &pred); err != nil {
+			return fmt.Errorf("merge child partial-key check: %w", err)
+		}
+		return fmt.Errorf(
+			"merge child %q has a PARTIAL unique index over %s with predicate %s, but is on the generic path: "+
+				"the generic collision check ignores the predicate and would delete rows the index does not cover. "+
+				"Handle it bespoke, or teach the generic loops to apply keyPredicate",
+			table, col, pred)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("merge child partial-key check: %w", err)
 	}
 	return nil
 }

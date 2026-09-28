@@ -664,7 +664,7 @@ type StreamInfo struct {
 	Resolution   string `json:"resolution"`
 	DurationMs   int64  `json:"duration_ms"`
 	// Client-aware decision fields (populated when client sends capabilities)
-	TranscodeReason string `json:"transcode_reason,omitempty"` // Why not direct_play
+	TranscodeReason  string `json:"transcode_reason,omitempty"`  // Why not direct_play
 	// ReasonCode is TranscodeReason collapsed into one of the fixed buckets
 	// the QoE schema records (migration 056). The prose above is for a human
 	// reading a log line; this is what aggregates. Bucketed server-side so the

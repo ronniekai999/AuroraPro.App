@@ -22,6 +22,7 @@ package db
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -234,19 +235,38 @@ func TestMergeMediaItemsKeyColumnsMatchTheSchema(t *testing.T) {
 			}
 			want := append([]string(nil), m.keyCols...)
 			sort.Strings(want)
+
+			// Every matching index is checked, not just the first. An earlier
+			// version returned on the first match, so a table with two
+			// media_item_id-bearing unique keys — one of them partial — passed
+			// while the loop's check covered only one of them.
+			matched := 0
+			distinct := map[string]bool{}
 			for _, k := range keys {
-				if equalStrings(k.cols, want) {
-					if k.predicate != "" && m.keyPredicate == "" {
-						t.Errorf("matches the PARTIAL unique index on media_item_id + %v WHERE %s, but declares no keyPredicate", k.cols, k.predicate)
-					}
-					return
+				distinct[strings.Join(k.cols, ",")+" WHERE "+k.predicate] = true
+				if !equalStrings(k.cols, want) {
+					continue
+				}
+				matched++
+				if k.predicate != "" && m.keyPredicate == "" {
+					t.Errorf("matches the PARTIAL unique index on media_item_id + %v WHERE %s, but declares no keyPredicate", k.cols, k.predicate)
 				}
 			}
-			var got [][]string
-			for _, k := range keys {
-				got = append(got, k.cols)
+			if len(distinct) > 1 {
+				var got []string
+				for d := range distinct {
+					got = append(got, d)
+				}
+				sort.Strings(got)
+				t.Errorf("has %d distinct unique keys involving media_item_id (%v). keyCols names ONE of them, so the generic collision check covers one and a collision on any other raises a unique violation that aborts the whole merge. Handle the table bespoke.", len(distinct), got)
 			}
-			t.Errorf("compares %v, but the schema's unique key(s) minus media_item_id are %v. A partial key does not error — it silently drops rows belonging to another profile or parent.", want, got)
+			if matched == 0 {
+				var got [][]string
+				for _, k := range keys {
+					got = append(got, k.cols)
+				}
+				t.Errorf("compares %v, but the schema's unique key(s) minus media_item_id are %v. A partial key does not error — it silently drops rows belonging to another profile or parent.", want, got)
+			}
 		})
 	}
 }
@@ -1246,5 +1266,166 @@ func TestMergeMediaItemsCollisionSparesThirdPartiesOnEveryGenericChild(t *testin
 				t.Errorf("%d rows still reference the deleted duplicate", dangling)
 			}
 		})
+	}
+
+	// Structural cross-check: the name says "every generic child", so a new one
+	// must not be able to appear with no third-party case. The behavioural test
+	// derives its seed set from mergeChildren and so fails on a new entry
+	// automatically; this test's case list is hand-written, so the coverage is
+	// asserted instead. A child covered by a sibling test is recorded here with
+	// which one — that is a decision, not a silence.
+	coveredBySibling := map[string]string{
+		"user_ratings":            "TestMergeMediaItemsCollisionKeepsCanonicalAndSparesOtherProfiles",
+		"recently_surfaced_items": "TestMergeMediaItemsCollisionKeepsCanonicalAndSparesOtherProfiles",
+		"episode_recaps":          "TestMergeMediaItemsResolvesCollidingEpisodeRecaps",
+		"recap_conversations":     "TestMergeMediaItemsKeepsTheRecapThreadOnCollision",
+	}
+	here := map[string]bool{}
+	for _, tc := range cases {
+		here[tc.table] = true
+	}
+	for _, m := range mergeChildren {
+		if m.bespoke || len(m.keyCols) == 0 {
+			continue // no collision check to get wrong
+		}
+		if here[m.table] {
+			continue
+		}
+		if _, ok := coveredBySibling[m.table]; ok {
+			continue
+		}
+		t.Errorf("%s is collision-checked by the generic loop but no test proves the check spares a THIRD party's row. A partial collision key does not error — it decides an unrelated profile's or parent's row is a collision and deletes it. Add a case above, or record which sibling test covers it.", m.table)
+	}
+	for table, sibling := range coveredBySibling {
+		if here[table] {
+			t.Errorf("%s is recorded as covered by %s but also has a case here — drop one", table, sibling)
+		}
+	}
+}
+
+// TestMergeMediaItemsCoversEveryTvSeasonChild is the third drift guard, and it
+// exists because the other two framed themselves as the complete set while the
+// merge also DELETEs tv_seasons rows (`DELETE FROM tv_seasons WHERE id = $1`, on a
+// duplicate season number the canonical already has).
+//
+// tv_seasons' only child today is tv_episodes, which the walk re-parents onto the
+// surviving season before that DELETE — so the gap is currently inert. That is
+// exactly the state media_items was in before the eleven later migrations: a
+// season_artwork or season_recaps table would be cascade-destroyed by that DELETE
+// with both other guards green, which is the drift this whole commit exists to
+// stop. A new child here needs the same decision every other child got, so it
+// fails until someone makes it.
+func TestMergeMediaItemsCoversEveryTvSeasonChild(t *testing.T) {
+	q := requireIntegrationDB(t)
+	schema := cascadeChildren(t, q, "tv_seasons")
+
+	// Handled by the bespoke season walk in MergeMediaItems: episodes on a
+	// duplicate season are re-parented onto the canonical season (and their own
+	// children re-pointed by repointEpisodeChildren) before the season is deleted.
+	handled := map[string]string{
+		"tv_episodes": "re-parented onto the surviving season by the bespoke walk",
+	}
+	for table := range schema {
+		if _, ok := handled[table]; !ok {
+			t.Errorf("%s cascades from tv_seasons but the merge's season walk does not handle it: `DELETE FROM tv_seasons` destroys every row in it when a duplicate season number collides. Decide what a merge owes it, handle it in the walk, and add it here with the reason.", table)
+		}
+	}
+	for table := range handled {
+		if !schema[table] {
+			t.Errorf("%s is recorded here as a tv_seasons child but no longer cascades from it — stale entry", table)
+		}
+	}
+}
+
+// TestMergeRefusesAPartialKeyedGenericChild is the runtime half of the
+// partial-key rule, and covers the case the static check cannot see.
+//
+// mergeChildStrategyError refuses an entry that DECLARES a keyPredicate without
+// being bespoke. The adjacent case is the dangerous one: a partial unique index
+// where the developer simply does not declare the predicate. The spec then looks
+// complete, the generic loop builds its collision check from keyCols alone, and
+// the merge deletes a duplicate row the index does not even cover — the
+// watch_progress bug one door along. A review reproduced exactly that against
+// live Postgres and MergeMediaItems returned nil while destroying the row.
+//
+// Partiality is a property of the schema, not of the list, so only the schema can
+// answer. mergeChildPartialKeyError asks it on every merge; this test pins that
+// it does, using the same probe shape the review used.
+func TestMergeRefusesAPartialKeyedGenericChild(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+
+	// A future child of media_items with a PARTIAL unique key, registered on the
+	// generic path with no keyPredicate — the shape that used to pass.
+	if _, err := q.pool.Exec(ctx, `
+		CREATE TABLE zz_partial_key_probe (
+			id BIGSERIAL PRIMARY KEY,
+			media_item_id BIGINT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+			profile_id BIGINT NOT NULL,
+			archived BOOLEAN NOT NULL DEFAULT FALSE
+		)`); err != nil {
+		t.Fatalf("create probe table: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DROP TABLE IF EXISTS zz_partial_key_probe`)
+	})
+	if _, err := q.pool.Exec(ctx, `
+		CREATE UNIQUE INDEX zz_partial_key_probe_uq
+		ON zz_partial_key_probe (profile_id, media_item_id) WHERE archived = FALSE`); err != nil {
+		t.Fatalf("create probe index: %v", err)
+	}
+
+	restore := mergeChildren
+	mergeChildren = append(append([]mergeChildStrategy(nil), mergeChildren...),
+		mergeChildStrategy{table: "zz_partial_key_probe", keyCols: []string{"profile_id"}, why: "probe"})
+	t.Cleanup(func() { mergeChildren = restore })
+
+	// The static check passes it — no keyPredicate is declared, so there is
+	// nothing for it to object to. That is the gap.
+	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err != nil {
+		t.Fatalf("precondition: the static check was expected to pass an entry with no keyPredicate, got %v", err)
+	}
+
+	err := q.mergeChildPartialKeyError(ctx)
+	if err == nil {
+		t.Fatal("a generic-path child with a PARTIAL unique index over media_item_id was accepted: the collision check ignores the index's WHERE clause, so a duplicate row the index does not cover is deleted outright")
+	}
+	if !strings.Contains(err.Error(), "zz_partial_key_probe") {
+		t.Errorf("error does not name the offending table: %v", err)
+	}
+
+	// And a merge must not proceed past it. Seeding rows is unnecessary — the
+	// refusal happens before the transaction opens — but the caller's contract is
+	// what matters: MergeMediaItems returns the error rather than deleting.
+	ownerID := seedTestUser(t, q)
+	libID := seedTestLibrary(t, q, ownerID)
+	sfx := randomSuffix(t)
+	mkItem := func(title string) int64 {
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO media_items (library_id, type, title, sort_title, overview, rating, runtime_minutes, content_rating, year)
+			 VALUES ($1,'show',$2,$2,'',0,0,'',0) RETURNING id`, libID, title).Scan(&id); err != nil {
+			t.Fatalf("insert item: %v", err)
+		}
+		return id
+	}
+	canonical := mkItem("Probe Canonical " + sfx)
+	duplicate := mkItem("Probe Duplicate " + sfx)
+	if err := q.MergeMediaItems(ctx, canonical, duplicate); err == nil {
+		t.Error("MergeMediaItems ran with a partial-keyed generic child registered, want a refusal")
+	}
+	var alive int
+	if err := q.pool.QueryRow(ctx, `SELECT COUNT(*) FROM media_items WHERE id = $1`, duplicate).Scan(&alive); err != nil {
+		t.Fatalf("count duplicate: %v", err)
+	}
+	if alive != 1 {
+		t.Error("the duplicate was deleted despite the refusal")
+	}
+
+	// Declaring the predicate instead is refused too, by the static check — a
+	// partial-keyed table cannot reach the generic path either way.
+	mergeChildren[len(mergeChildren)-1].keyPredicate = "archived = FALSE"
+	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err == nil {
+		t.Error("declaring keyPredicate on a non-bespoke entry was accepted; the generic loop does not apply predicates")
 	}
 }
