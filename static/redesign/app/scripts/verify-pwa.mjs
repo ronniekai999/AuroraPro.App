@@ -1,5 +1,5 @@
-// End-to-end PWA registration check in real Chromium (do/pwa-push/
-// IMPLEMENTATION.md, Phase 1): serves the built bundle the way Aurora's Go
+// End-to-end PWA registration check in real Chromium (see docs/push.md):
+// serves the built bundle the way Aurora's Go
 // server does — /v2/ mount, SPA fallback, no-cache, and the REAL production
 // Content-Security-Policy, extracted from internal/api/router.go at run
 // time — then asserts the service worker registers, activates, claims the

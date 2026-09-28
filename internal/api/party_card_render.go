@@ -19,11 +19,8 @@ import (
 // Watch-party share card — the compositor
 // ============================================================
 //
-// Renders the card described by
-// docs/proposals/watch-party-share-card/mockup-share-card.html. Every
-// length below is copied out of a `.card-story` CSS block: the mockup
-// builds the card at TRUE output pixels and scales it down for review, so
-// the stylesheet doubles as this file's layout spec.
+// Renders the story-format share card. Dimensions are intentionally fixed so
+// the server compositor and snapshot tests share one measured layout.
 //
 // Structure:
 //

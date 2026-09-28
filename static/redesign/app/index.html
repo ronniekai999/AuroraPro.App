@@ -8,7 +8,7 @@
          /v2/favicon.svg. type="image/svg+xml" lets modern browsers
          use the vector at any DPI without bitmap scaling. -->
     <link rel="icon" type="image/svg+xml" href="/v2/favicon.svg" />
-    <!-- PWA (do/pwa-push/IMPLEMENTATION.md, Phase 1). Like the favicon,
+    <!-- PWA shell (see docs/push.md). Like the favicon,
          everything in public/ deploys under /v2/, and these paths are
          literals — they do NOT follow vite.config.ts `base` and must be
          edited together with it if the SPA ever moves to the root. -->
@@ -56,9 +56,8 @@
   <body>
     <div id="root"></div>
     <!-- Photon boot splash — the display cut of the drawn AuroraPro wordmark.
-         STATIC COPY of the letterform paths: the canonical source is
-         docs/design/aurorapro-typeface/generate.mjs, and the in-app React
-         copy is src/components/AuroraWordmark.tsx (variant="photon"); this
+         STATIC COPY of the letterform paths. The in-app source is
+         src/components/AuroraWordmark.tsx (variant="photon"); this
          one cannot import either because it must paint pre-bundle. Removed
          by main.tsx once React commits into #root. aria-hidden: purely
          decorative — the page title already says Aurora Pro. -->

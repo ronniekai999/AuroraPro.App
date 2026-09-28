@@ -6,7 +6,7 @@
 // + a short status label. No new voice logic — it reads the exact same
 // VoiceState and calls the same join/leave/mute handlers the rail uses.
 //
-// Mockup reference: mockup-cinematic-overlay.html `.voice-pill`.
+// Cinematic overlay contract: `.voice-pill`.
 //   - emerald-tinted glass pill, emerald glow when voice is live
 //   - circular mic button (toggles mute when in voice; joins otherwise)
 //   - overlapping avatar stack; a talking peer gets an emerald ring

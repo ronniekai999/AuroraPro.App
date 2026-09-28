@@ -1,9 +1,7 @@
 // AuroraWordmark — the drawn "AuroraPro" brand lockup.
 //
-// These are NOT glyphs from a font: the nine letters are hand-drawn vector
-// paths from the typeface study in docs/design/aurorapro-typeface/ (see
-// generate.mjs there — the canonical source of the path data, where the
-// letterforms can be regenerated and previewed against the other concepts).
+// These are NOT glyphs from a font: the nine letters are hand-drawn Borealis
+// vector paths. This component is the canonical source of the path data.
 // Two cuts shipped from that study:
 //
 //   borealis — rounded geometric monoline, aurora-wave crossbar, brand

@@ -3,7 +3,7 @@
 // The compact pill dock for the cinematic ("minimal") overlay mode.
 // Bottom-center, it holds the three things you reach for without the
 // full rail: an emoji reaction, a one-line quick reply, and a mic
-// mute toggle. Mockup reference: mockup-cinematic-overlay.html
+// mute toggle. Keep this aligned with the cinematic overlay controls.
 // `.mini-dock`.
 //
 // It reuses the existing ReactionPicker verbatim (opening UPWARD, since

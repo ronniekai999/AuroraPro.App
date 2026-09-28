@@ -305,7 +305,7 @@ export default function DetailView({
   // a tall hero banner, a sticky left rail (poster + actions + a credits
   // card), and a tabbed content column. The heavy derivation lives above;
   // here we shape it into plain props for the presentational components in
-  // components/detail/*. See docs/proposals/details-page-redesign/.
+  // components/detail/*. See the detail component contract.
   const isShow = media.type === 'show'
   const [activeTab, setActiveTab] = useState('overview')
   const [showAllCast, setShowAllCast] = useState(false)

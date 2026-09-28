@@ -2893,7 +2893,7 @@ export async function markAllNotificationsRead(): Promise<void> {
   await apiFetch('/api/me/notifications/read-all', { method: 'POST' })
 }
 
-// ── Web Push (do/pwa-push/IMPLEMENTATION.md, Phase 2) ─────────────
+// ── Web Push (see docs/push.md) ─────────────
 
 export interface PushConfig {
   /** Operator switch (admin setting push_enabled). false ⇒ no key served. */

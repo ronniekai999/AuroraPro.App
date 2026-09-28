@@ -11,8 +11,7 @@ import (
 	"testing"
 )
 
-// Serving + source contract for the PWA entry files (do/pwa-push/
-// IMPLEMENTATION.md, Phase 1).
+// Serving + source contract for the PWA entry files (see docs/push.md).
 //
 // The SPA fallback answers 200 with index.html for ANY missing /v2/* path,
 // so a bare status assertion on /v2/sw.js or the manifest proves nothing —
@@ -117,7 +116,7 @@ func TestPWASourceContract(t *testing.T) {
 	// D1: the service worker must NEVER intercept fetches. The box deletes
 	// old bundles on every deploy, so any SW-held asset would go stale or
 	// 404. This grep guard is deliberately blunt — if it fires, read
-	// do/pwa-push/IMPLEMENTATION.md before "fixing" the test.
+	// docs/push.md before "fixing" the test.
 	if regexp.MustCompile(`addEventListener\(\s*['"]fetch['"]`).Match(sw) {
 		t.Error("sw.js registers a 'fetch' listener — forbidden by design (D1): the auto-updater replaces the bundle in place, so a caching/intercepting worker will serve a stale site")
 	}

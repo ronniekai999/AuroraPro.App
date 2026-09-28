@@ -5,7 +5,7 @@
 // minutes via aurora-update.timer) and deletes the old files, so any asset a
 // service worker held onto would outlive the bundle it came from — the
 // "stale site" failure class this design forbids by construction. Full
-// rationale: do/pwa-push/IMPLEMENTATION.md (decision D1). A repo test pins
+// rationale: docs/push.md. A repo test pins
 // the absence of a fetch listener; do not add one.
 //
 // This file's URL is its identity (/v2/sw.js) — never rename or hash it. It
@@ -25,7 +25,7 @@ self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim())
 })
 
-// ── Push (Phase 2 — do/pwa-push/IMPLEMENTATION.md D9) ──────────────
+// ── Push delivery (see docs/push.md) ──────────────
 //
 // The payload is the declarative-web-push envelope:
 //   { web_push: 8030, notification: {title, body, navigate, app_badge},

@@ -1,4 +1,4 @@
--- 047: Web Push subscriptions (do/pwa-push/IMPLEMENTATION.md, D11).
+-- 047: Web Push subscriptions (see docs/push.md).
 --
 -- One row per browser-profile-per-device that enabled push. The endpoint is
 -- the push service's globally-unique URL for that browser instance, so it is

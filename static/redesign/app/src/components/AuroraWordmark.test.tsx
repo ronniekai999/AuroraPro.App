@@ -8,7 +8,7 @@
 //     bounding box of a perfectly vertical stem and Chromium drops the
 //     stroke — the r/a/P/u stems of the wordmark silently vanish while
 //     every curved letter renders. (Found the hard way in the typeface
-//     study; see docs/design/aurorapro-typeface/README.md.)
+//     study; the component itself is now the durable source.)
 //
 //   - IDs must be per-instance. TopNav (decorative, flat) and the sign-in
 //     hero (gradient) can mount together; with fixed ids the first defs in

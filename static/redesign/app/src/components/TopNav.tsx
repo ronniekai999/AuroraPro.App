@@ -1,6 +1,6 @@
 // Aurora Stage (Option B) — TopNav.
 //
-// Phase 2 of do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md: replaces the
+// The production top navigation replaces the
 // 240px fixed <aside> Sidebar + the separate content header with one 64px
 // bar. Same eight destinations, same admin gate, same triggers — only the
 // chrome moves. The vertical space the sidebar ate is handed back to
@@ -779,7 +779,7 @@ export function TopNav({
         <span className="flex-none drop-shadow-[0_0_10px_rgba(168,85,247,0.45)]">
           <AuroraMark />
         </span>
-        {/* Drawn Borealis wordmark (docs/design/aurorapro-typeface), flat
+        {/* Drawn Borealis wordmark, flat
             ink per the study's small-size guidance — the gradient has
             nowhere to travel at 15px. Decorative: the button's aria-label
             already names it. */}

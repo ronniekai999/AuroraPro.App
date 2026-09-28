@@ -5,7 +5,7 @@
 //
 //   node scripts/render-icons.mjs
 //
-// Variants (see do/pwa-push/IMPLEMENTATION.md D5):
+// Variants (see docs/push.md):
 //   icon-192 / icon-512              purpose "any": the favicon mark as-is,
 //                                    transparent outside the circle.
 //   icon-maskable-192 / -512         purpose "maskable": full-bleed gradient,

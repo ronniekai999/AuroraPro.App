@@ -1,5 +1,5 @@
 // Package notify owns the persist → broadcast → push pipeline for per-user
-// notifications (do/pwa-push/IMPLEMENTATION.md D7). Before it existed, the
+// notifications (see the delivery contract in docs/push.md). Before it existed, the
 // persist-then-broadcast dance was hand-rolled at each producer with
 // inconsistent WS payloads; producers now call Notify and get all three
 // legs, consistently, best-effort.

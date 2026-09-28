@@ -1,4 +1,4 @@
-// Web Push client plumbing (do/pwa-push/IMPLEMENTATION.md D11/D13): the
+// Web Push client plumbing (see docs/push.md): the
 // Settings-card state machine, subscribe/unsubscribe orchestration, and the
 // boot-time re-POST that keeps subscriptions alive.
 //
