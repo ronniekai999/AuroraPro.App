@@ -32,12 +32,15 @@ const batchFlushSize = 100
 // failure would let one TMDB outage defer the whole catalog by a refresh
 // interval). So a show whose enrichment reliably ERRORS never acquires progress
 // and stays eligible for ever. With an absent or invalid TMDB key that is EVERY
-// show in the library. Each eligible show costs a TMDB search plus a year-less
-// retry, a TVDB search where TVDB is enabled, and an unconditional embed, because
-// cmd/aurora's OnNewItem calls embedItem whether or not enrichment errored.
-// (tmdb.go's 4 attempts and ~7s of backoff ride on network errors, 429 and 5xx —
-// NOT on the 401 an invalid key produces, which returns at once. That case is one
-// round trip per call, not five; the embed is the expensive half of it.) The watcher fires on fsnotify
+// show in the library. Each eligible show costs up to a TMDB search plus a
+// year-less retry — those with tmdb.go's 4 attempts and ~7s of backoff on
+// network errors, 429 and 5xx — a TVDB search where TVDB is enabled, and an
+// unconditional embed, because cmd/aurora's OnNewItem calls embedItem whether or
+// not enrichment errored. The invalid-key headline is the CHEAPEST member of the
+// class, not the worst: a 401 returns at once and enrichShow gives up on the
+// first search error, so neither the year-less retry nor the TVDB fallback runs
+// and the embed is the expensive half. The unreachable-provider and sustained-429
+// cases are where the retries and backoff actually land. The watcher fires on fsnotify
 // with a 30-second dedup window, so an *arr-fed library can scan every ~30s: left
 // unbounded this re-searched and re-embedded a whole library, continuously. That
 // is precisely the cost the per-file latch's own comment gives as the reason to
@@ -149,6 +152,12 @@ type Scanner struct {
 
 	// requeueSweepEvery is requeueSweepInterval, overridable in tests.
 	requeueSweepEvery time.Duration
+
+	// requeueMu makes dueForRequeueSweep's check-and-claim atomic. sync.Map has
+	// no compare-and-swap for this shape, and ScanLibrary does not itself enforce
+	// TryStartScan — the watcher calls it directly — so two scans of one library
+	// could otherwise both claim the slot and both sweep.
+	requeueMu sync.Mutex
 
 	// showLocks provides per-show serialization during scanning.
 	// Key: "libraryID:showTitle" (lowercased).
@@ -501,11 +510,14 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// because it is the one part of the deferred pass that is not derived from
 	// this scan's delta. Queued ahead of the backfills it would spend the scan's
 	// remaining window on recovery work and, on a cancellation, take every
-	// episode backfill down with it — and those backfills are only ever signalled
-	// in the scan that first sees the file, so their episodes would keep bare
-	// titles and stills until the refresh rotation reached the show, up to a
-	// whole MetadataRefresh interval away. A review found that; the sweep runs
-	// LAST for the same reason it is capped.
+	// episode backfill down with it — and a backfill is only ever signalled in the
+	// scan that FIRST sees the file, so a dropped one is not merely delayed. The
+	// rotation is not a safety net here: RefreshStaleMetadata's smart diffing
+	// skips a show outright when it has a tmdb_id and HasTVChanged reports no
+	// upstream change, and a locally added episode file is not an upstream
+	// change. Those episodes can keep bare titles, overviews and stills
+	// permanently. A review found the ordering; a later one found that this is
+	// what it costs. The sweep runs LAST for the same reason it is capped.
 	var sweptTVEnrich []*pendingEnrichItem
 	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil && s.dueForRequeueSweep(lib.ID) {
 		unattempted, err := s.queries.GetUnattemptedShowsForLibrary(ctx, lib.ID, requeueUnattemptedLimit)
@@ -621,6 +633,8 @@ func (s *Scanner) dueForRequeueSweep(libraryID int64) bool {
 	if s.requeueSweepEvery <= 0 {
 		return true
 	}
+	s.requeueMu.Lock()
+	defer s.requeueMu.Unlock()
 	now := time.Now()
 	if prev, ok := s.requeueSweptAt.Load(libraryID); ok {
 		if at, ok := prev.(time.Time); ok && now.Sub(at) < s.requeueSweepEvery {

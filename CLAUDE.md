@@ -331,11 +331,16 @@ restart mid-scan produces the state.
 - The sweep runs LAST in the deferred pass, after the per-file fulls AND the
   episode backfills, and is kept in its own slice to make that true. It is the
   one part not derived from the scan's delta, and a backfill is only ever
-  signalled in the scan that first sees the file — so a cancellation during a
-  sweep queued ahead of them would leave those episodes bare until the rotation
-  reached the show. Its shows cannot also hold a backfill entry (a backfill
-  needs the row ATTEMPTED, the sweep selects rows that are not, and progress
-  only moves forwards), so the ordering costs no redundant pass.
+  signalled in the scan that FIRST sees the file — so a cancellation during a
+  sweep queued ahead of them dropped a signal that is never raised again. The
+  rotation is not a net for that either: its smart diffing skips a show outright
+  when it has a `tmdb_id` and TMDB reports no upstream change, and a locally
+  added episode file is not one, so those episodes can stay bare permanently.
+  The sweep's shows cannot also hold a backfill entry (a backfill needs the row
+  ATTEMPTED, the sweep selects rows that are not, and progress only moves
+  forwards), so the ordering costs no redundant pass.
+  `TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills` pins it; moving
+  the loop back to the front left the whole suite green.
 - Known gaps: deterministically erroring items are bounded, not fixed, and the
   process-local interval re-arms on every deploy; a scan and the background
   refresh can enrich one row concurrently with nothing serialising them — and
@@ -348,7 +353,11 @@ restart mid-scan produces the state.
   failed merge strands a row; `UpdateMediaMetadata` always stamps
   `last_metadata`, so the admin refresh endpoint can write a stored-claim for an
   unmatchable show; `tv_episodes` has no index on `media_item_id` and the sweep
-  query joins on it twice (pre-existing shape, amortised by the hourly limit).
+  query joins on it twice (pre-existing shape, amortised by the hourly limit);
+  and the sweep claims its rate-limit slot up front but now does its work last,
+  so a scan cancelled before reaching it has spent the interval for nothing —
+  bounded only by the slot being process-local, so the restart that caused the
+  cancellation re-arms it.
 
 ### Nullable database columns
 

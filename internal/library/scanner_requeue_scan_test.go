@@ -132,14 +132,6 @@ func TestScanLibrarySweepIsRateLimited(t *testing.T) {
 	if s.requeueSweepEvery != requeueSweepInterval {
 		t.Fatalf("NewScanner left requeueSweepEvery at %v, want %v — an unset interval disables the rate limit", s.requeueSweepEvery, requeueSweepInterval)
 	}
-	// The other bound. GetUnattemptedShowsForLibrary refuses a non-positive
-	// limit, so "no limit" cannot be expressed by passing 0 — but nothing
-	// otherwise stops the constant being raised until it stops bounding anything,
-	// and the cost it bounds is provider calls per sweep. A review raised it to a
-	// million and the whole suite stayed green.
-	if requeueUnattemptedLimit <= 0 || requeueUnattemptedLimit > 500 {
-		t.Errorf("requeueUnattemptedLimit is %d; the sweep's whole cost argument rests on it staying in the same order as GetStaleMetadataItems' window (100). Raising it past a few hundred needs the reasoning in its doc comment revisited, not just the number changed.", requeueUnattemptedLimit)
-	}
 
 	var calls []int64
 	s.OnNewItem = func(_ context.Context, item *models.MediaItem) {
@@ -202,4 +194,117 @@ func TestScanLibrarySweepIsRateLimited(t *testing.T) {
 		t.Errorf("a scan after the interval elapsed asked for %d full enrichments, want 1 — the sweep must come back round, or a show stuck after the first scan of a long-lived process is never recovered by the scanner", len(calls))
 	}
 
+}
+
+// TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills pins the ORDER of
+// the deferred pass, which is the part of it that is not obvious.
+//
+// Fulls before backfills is old and deliberate: a full covers the backfill's
+// work and marks the show in the per-scan dedup map. The sweep is the new third
+// phase and it goes last, because it is the only one not derived from this
+// scan's own files. Queued ahead of the backfills — which is where it started —
+// a cancellation partway through it took every backfill down with it, and a
+// backfill is only ever signalled in the scan that FIRST sees the file. Nor is
+// the refresh rotation a net for that: its smart diffing skips a show outright
+// when it has a tmdb_id and TMDB reports no upstream change, and a locally added
+// episode file is not an upstream change. So a dropped backfill can be
+// permanent, not delayed.
+//
+// A review moved the loop back to the front and the whole suite stayed green,
+// which by this file's own standard is the thing that needs a scan rather than
+// an argument.
+func TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills(t *testing.T) {
+	queries, pool := latchTestQueries(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := seedShowLibraryAt(t, pool, root)
+	sfx := latchSuffix(t)
+	stuckName := "Stuck Show " + sfx
+	growingName := "Growing Show " + sfx
+	stuckFile := writeEpisodeFile(t, root, stuckName, 1, 1)
+	growingFile := writeEpisodeFile(t, root, growingName, 1, 1)
+
+	s := NewScanner(config.ScannerConfig{FFprobePath: "/nonexistent/ffprobe", Workers: 1}, queries)
+	s.requeueSweepEvery = 0
+
+	// One log, both hooks, so the ORDER between them is what is recorded.
+	type call struct {
+		kind  string
+		title string
+	}
+	var calls []call
+	s.OnNewItem = func(_ context.Context, item *models.MediaItem) {
+		calls = append(calls, call{"full", item.Title})
+	}
+	s.OnEpisodeBackfill = func(_ context.Context, item *models.MediaItem, _ []int) {
+		calls = append(calls, call{"backfill", item.Title})
+	}
+
+	if err := s.ScanLibrary(ctx, lib, nil); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("scan 1 produced %d calls (%v), want one full per show", len(calls), calls)
+	}
+
+	// The growing show has been asked and answered; the stuck one never was.
+	// That is what puts one on the backfill path and the other in the sweep.
+	idFor := func(path string) int64 {
+		t.Helper()
+		title := ParseTVPath(path).Title
+		found, err := queries.FindMediaItemByTitle(ctx, lib.ID, "show", title)
+		if err != nil || found == nil {
+			t.Fatalf("look up %q: %v (found=%v)", title, err, found)
+		}
+		return found.ID
+	}
+	growingID := idFor(growingFile)
+	if err := queries.TouchMetadataAttempt(ctx, growingID); err != nil {
+		t.Fatalf("stamp attempt: %v", err)
+	}
+	if idFor(stuckFile) == growingID {
+		t.Fatal("both files resolved to the same show row")
+	}
+
+	// A new episode file for the attempted show: that is a backfill signal, and
+	// the only scan in which it is ever raised.
+	writeEpisodeFile(t, root, growingName, 1, 2)
+
+	calls = nil
+	if err := s.ScanLibrary(ctx, lib, nil); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("scan 2 produced %d calls (%v), want a backfill for the growing show and a swept full for the stuck one", len(calls), calls)
+	}
+	if calls[0].kind != "backfill" {
+		t.Errorf("scan 2 ran %q first (%v); the episode backfill must precede the recovery sweep, or a cancellation partway through the sweep drops a signal that is never raised again", calls[0].kind, calls)
+	}
+	if calls[1].kind != "full" {
+		t.Errorf("scan 2 ran %q second (%v), want the swept full last", calls[1].kind, calls)
+	}
+	if calls[0].title != growingName {
+		t.Errorf("the backfill was for %q, want %q", calls[0].title, growingName)
+	}
+	if calls[1].title != stuckName {
+		t.Errorf("the swept full was for %q, want %q", calls[1].title, stuckName)
+	}
+}
+
+// TestRequeueSweepConstantsAreBounded needs no database, deliberately: it is a
+// check on two constants, and living inside a TEST_DATABASE_URL-gated test left
+// them unguarded on exactly the runs that have no Postgres.
+//
+// GetUnattemptedShowsForLibrary refuses a non-positive limit, so "no limit"
+// cannot be expressed by passing 0 — but nothing otherwise stops the constant
+// being raised until it stops bounding anything, and what it bounds is provider
+// calls per sweep. A review raised it to a million and the whole suite stayed
+// green.
+func TestRequeueSweepConstantsAreBounded(t *testing.T) {
+	if requeueUnattemptedLimit <= 0 || requeueUnattemptedLimit > 500 {
+		t.Errorf("requeueUnattemptedLimit is %d; the sweep's cost argument rests on it staying in the same order as GetStaleMetadataItems' window (100). Raising it past a few hundred means revisiting the reasoning in its doc comment, not just the number.", requeueUnattemptedLimit)
+	}
+	if requeueSweepInterval <= 0 {
+		t.Errorf("requeueSweepInterval is %v; a non-positive interval disables the rate limit entirely (see dueForRequeueSweep), so the sweep would run on every scan again", requeueSweepInterval)
+	}
 }

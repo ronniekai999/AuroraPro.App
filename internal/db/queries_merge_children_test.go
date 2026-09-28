@@ -1428,6 +1428,33 @@ func TestMergeRefusesAPartialKeyedGenericChild(t *testing.T) {
 	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err == nil {
 		t.Error("declaring keyPredicate on a non-bespoke entry was accepted; the generic loop does not apply predicates")
 	}
+
+	// And the other shape: an entry declaring NO keyCols, whose unique index is
+	// partial and covers media_item_id alone. It takes the plain UPDATE, so it
+	// cannot delete — but the claim is that a partial-keyed child cannot reach
+	// the generic path AT ALL, and an earlier version of the check filtered
+	// keyCols-less entries out, which made that claim false for exactly this
+	// table. A review found the arm unpinned; it is the shape the next one would
+	// try.
+	if _, err := q.pool.Exec(ctx, `
+		CREATE UNIQUE INDEX zz_partial_key_probe_solo
+		ON zz_partial_key_probe (media_item_id) WHERE archived = TRUE`); err != nil {
+		t.Fatalf("create solo probe index: %v", err)
+	}
+	if _, err := q.pool.Exec(ctx, `DROP INDEX zz_partial_key_probe_uq`); err != nil {
+		t.Fatalf("drop composite probe index: %v", err)
+	}
+	mergeChildren[len(mergeChildren)-1].keyCols = nil
+	mergeChildren[len(mergeChildren)-1].keyPredicate = ""
+	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err != nil {
+		t.Fatalf("precondition: an entry with no keyCols and no keyPredicate should pass the static check, got %v", err)
+	}
+	err = q.mergeChildPartialKeyError(ctx)
+	if err == nil {
+		t.Error("a generic-path child with NO keyCols but a PARTIAL unique index over media_item_id was accepted; the plain UPDATE cannot delete, but it raises 23505 and aborts the merge, and the rule is that a partial-keyed child does not reach this path at all")
+	} else if !strings.Contains(err.Error(), "zz_partial_key_probe") {
+		t.Errorf("error does not name the offending table: %v", err)
+	}
 }
 
 // TestMergeMediaItemsDoesNotMoveARecapThreadIntoAnotherProfilesConversation is
