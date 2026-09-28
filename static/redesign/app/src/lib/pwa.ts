@@ -1,6 +1,6 @@
 // PWA plumbing: service-worker registration and the install-prompt lifecycle.
 //
-// Design contract (do/pwa-push/IMPLEMENTATION.md): the service worker exists
+// Design contract (docs/push.md): the service worker exists
 // for push delivery only — it never intercepts fetches and never caches, so
 // registering it can never affect what the app serves. Everything here is
 // therefore allowed to be best-effort: any failure degrades to "the site

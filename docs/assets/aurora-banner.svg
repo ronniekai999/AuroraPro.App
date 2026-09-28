@@ -3,7 +3,7 @@
        in-app marks (App.tsx auroraMarkA/B): violet #A855F7 →
        purple #7C3AED → cyan #22D3EE over a night sky. The wordmark is
        the drawn Borealis cut of the AuroraPro letterforms
-       (docs/design/aurorapro-typeface, mirrored in the app's
+       (the Borealis wordmark geometry, mirrored in the app's
        AuroraWordmark component) — vector paths, so it renders
        identically everywhere; only the tagline still uses a system
        font stack. Self-contained: no external refs, own dark
@@ -95,7 +95,7 @@
          y=110, baseline y=220 in path units; stroke 26). scale 0.2963 sets
          the artwork box (y 17–233) to 64px tall, vertically centered on the
          mark's cy=150; visual left edge lands at x=479 (mark right 451 +
-         28 gap). Path data mirrors docs/design/aurorapro-typeface. -->
+         28 gap). Path data mirrors the Borealis wordmark geometry. -->
     <g transform="translate(471 113) scale(0.2963)" fill="none"
        stroke="url(#wordInk)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
       <path d="M 40 220 L 115 30 L 190 220"/>

@@ -4,7 +4,7 @@ package api
 // party invite" flow — invite people you follow to a party that is live now
 // or scheduled for later, RSVP from the bell, and read the lobby roster.
 //
-// Design contract (mirrors the mockup in docs/proposals/watch-party-invites/):
+// Watch-party invitation contract:
 //   * Sending is host-only and post-hoc by code, so it composes with BOTH
 //     create paths (quick party + persistent-room start) without new create
 //     shapes: the composer creates the party first, then posts invites.

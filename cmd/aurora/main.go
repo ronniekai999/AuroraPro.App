@@ -204,8 +204,7 @@ func main() {
 	hub := ws.NewHub(cfg.OriginAllowed)
 	activity := api.NewActivityLogger(queries)
 
-	// Smart Skip — background intro/recap/credits detection (proposal:
-	// docs/proposals/smart-skip/IMPLEMENTATION_PLAN.md). Always
+	// Smart Skip — background intro/recap/credits detection. Always
 	// constructed: the worker self-gates on FFmpeg availability and the
 	// skip_markers_enabled server setting, and runs one niced FFmpeg at
 	// a time so it never competes with live transcodes. The boot sweep
@@ -222,8 +221,8 @@ func main() {
 		skipWorker.TriggerSweep()
 	}
 
-	// Notification pipeline (Phase 2 push — do/pwa-push/IMPLEMENTATION.md
-	// D7/D8): one dispatcher owns persist → WS broadcast → push fan-out.
+	// Notification pipeline (see docs/push.md): one dispatcher owns persist →
+	// WS broadcast → push fan-out.
 	// Every producer (request monitor, watch party, the four scan sites,
 	// request creation) routes through it. Constructed here, before the
 	// watcher, because the watcher's scan callback is the first producer.

@@ -1,6 +1,6 @@
 // Aurora V2 — PartyComposerModal (watch-party invites)
 //
-// The "Plan a Watch Party" modal from docs/proposals/watch-party-invites:
+// The "Plan a Watch Party" modal from the watch-party invite contract:
 // one modal, one decision at the top — When. "Right now" starts the party
 // the moment you send; "Schedule" books it for a quick-chip time or a
 // custom date/time. Below that, both modes share the same people picker

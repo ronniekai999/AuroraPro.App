@@ -479,7 +479,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         ))}
 
         {/* Notifications: the in-app pref plus per-device Web Push
-            (do/pwa-push/IMPLEMENTATION.md D13). Push state is capability-
+            (see docs/push.md). Push state is capability-
             driven — PushControls decides what this browser/device can do
             via the tested pushUIState machine. */}
         <div className="glass-panel rounded-2xl p-6">
@@ -508,7 +508,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
           </div>
         </div>
 
-        {/* Install-as-app (PWA Phase 1 — do/pwa-push/IMPLEMENTATION.md).
+        {/* Install-as-app (see docs/push.md).
             Which body renders is decided by installUIState: an installed app
             confirms itself; a captured browser prompt gets a one-tap button;
             iOS gets the Add-to-Home-Screen walkthrough it requires (and which
@@ -1193,7 +1193,7 @@ function readyWithTimeout(ms = 4000): Promise<ServiceWorkerRegistration> {
 }
 
 /**
- * Per-device Web Push controls (do/pwa-push/IMPLEMENTATION.md D13). What
+ * Per-device Web Push controls (see docs/push.md). What
  * renders is decided by the tested pushUIState machine over real
  * capability inputs; every path out of 'off'/'on' is a direct response to
  * a user tap — no automatic permission prompts, ever.
