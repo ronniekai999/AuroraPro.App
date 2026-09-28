@@ -795,9 +795,15 @@ func mergeChildStrategyError(specs ...[]mergeChildStrategy) error {
 // no longer be the one about to be modified.
 func (q *Queries) mergeChildPartialKeyError(ctx context.Context) error {
 	var tables, cols []string
+	// Entries with NO keyCols are checked too, deliberately. They take the plain
+	// UPDATE, which cannot delete anything — but a partial unique index on
+	// (media_item_id) alone would make that UPDATE raise 23505 and abort the
+	// merge, and more to the point the claim above is that a partial-keyed child
+	// cannot reach the generic path AT ALL. Filtering them out made the claim
+	// false for one shape; the check is a single round trip, so it covers both.
 	add := func(specs []mergeChildStrategy, colFor func(mergeChildStrategy) string) {
 		for _, m := range specs {
-			if m.bespoke || len(m.keyCols) == 0 {
+			if m.bespoke {
 				continue
 			}
 			tables = append(tables, m.table)

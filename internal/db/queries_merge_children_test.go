@@ -1429,3 +1429,114 @@ func TestMergeRefusesAPartialKeyedGenericChild(t *testing.T) {
 		t.Error("declaring keyPredicate on a non-bespoke entry was accepted; the generic loop does not apply predicates")
 	}
 }
+
+// TestMergeMediaItemsDoesNotMoveARecapThreadIntoAnotherProfilesConversation is
+// the sibling of the test above, and it exists because that one could not see
+// the defect.
+//
+// mergeRecapConversationChildren moves a duplicate conversation's turns and
+// requests onto the SURVIVING conversation for the SAME profile, and the join
+// that expresses "same profile" is one predicate. A review deleted it and
+// nothing in the suite went red: with two candidate canonical conversations the
+// unconstrained join picks one arbitrarily, so the single-profile test passes
+// whenever Postgres happens to choose correctly. Recaps are a person's own Q&A
+// thread; landing one in another profile's conversation is a disclosure, not a
+// misplacement, so it must not be pinned by a coin toss.
+//
+// The shape here removes the toss. The canonical carries a conversation for
+// ANOTHER profile only, and the duplicate carries this profile's thread — so
+// under the predicate there is no canonical conversation to move into (the
+// generic recap_conversations pass re-parents the duplicate's own conversation,
+// turns and all), and without it there is exactly ONE candidate and it is the
+// wrong one. Both assertions below then fail on the mutation, every run.
+func TestMergeMediaItemsDoesNotMoveARecapThreadIntoAnotherProfilesConversation(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	ownerID := seedTestUser(t, q)
+	libID := seedTestLibrary(t, q, ownerID)
+	sfx := randomSuffix(t)
+
+	mkItem := func(title string) int64 {
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO media_items (library_id, type, title, sort_title, overview, rating, runtime_minutes, content_rating, year)
+			 VALUES ($1,'show',$2,$2,'',0,0,'',0) RETURNING id`, libID, title).Scan(&id); err != nil {
+			t.Fatalf("insert item: %v", err)
+		}
+		return id
+	}
+	canonical := mkItem("Recap Xprofile Canonical " + sfx)
+	duplicate := mkItem("Recap Xprofile Duplicate " + sfx)
+
+	mkProfile := func(name string) int64 {
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO user_profiles (user_id, name, is_default, language, subtitle_mode)
+			 VALUES ($1,$2,FALSE,'en','off') RETURNING id`, ownerID, name).Scan(&id); err != nil {
+			t.Fatalf("insert profile %s: %v", name, err)
+		}
+		return id
+	}
+	mine := mkProfile("recap-mine-" + sfx)
+	theirs := mkProfile("recap-theirs-" + sfx)
+
+	mkConv := func(profile, itemID int64) int64 {
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO recap_conversations (profile_id, media_item_id, generation_epoch) VALUES ($1,$2,1) RETURNING id`,
+			profile, itemID).Scan(&id); err != nil {
+			t.Fatalf("insert conversation: %v", err)
+		}
+		return id
+	}
+	theirConv := mkConv(theirs, canonical)
+	myConv := mkConv(mine, duplicate)
+
+	for i := 0; i < 3; i++ {
+		var reqID string
+		if err := q.pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&reqID); err != nil {
+			t.Fatalf("uuid: %v", err)
+		}
+		if _, err := q.pool.Exec(ctx,
+			`INSERT INTO recap_conversation_turns
+			   (conversation_id, request_id, question, answer,
+			    boundary_season, boundary_episode, boundary_title, grounding_mode)
+			 VALUES ($1,$2::uuid,$3,'a',1,1,'t','grounded')`, myConv, reqID, "private q"+string(rune('1'+i))); err != nil {
+			t.Fatalf("insert turn: %v", err)
+		}
+		if _, err := q.pool.Exec(ctx,
+			`INSERT INTO recap_conversation_requests (conversation_id, request_id, question_hash, conversation_epoch, status)
+			 VALUES ($1,$2::uuid,repeat('b',64),1,'completed')`, myConv, reqID); err != nil {
+			t.Fatalf("insert request: %v", err)
+		}
+	}
+
+	if err := q.MergeMediaItems(ctx, canonical, duplicate); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	var leakedTurns, leakedRequests int
+	if err := q.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM recap_conversation_turns WHERE conversation_id = $1`, theirConv).Scan(&leakedTurns); err != nil {
+		t.Fatalf("count turns on the other profile's conversation: %v", err)
+	}
+	if err := q.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM recap_conversation_requests WHERE conversation_id = $1`, theirConv).Scan(&leakedRequests); err != nil {
+		t.Fatalf("count requests on the other profile's conversation: %v", err)
+	}
+	if leakedTurns != 0 || leakedRequests != 0 {
+		t.Errorf("%d turns and %d requests were moved into ANOTHER profile's recap conversation; the move must be keyed on profile_id", leakedTurns, leakedRequests)
+	}
+
+	// And this profile still has its own thread, on the canonical.
+	var mineTurns int
+	if err := q.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM recap_conversation_turns t
+		   JOIN recap_conversations c ON c.id = t.conversation_id
+		 WHERE c.media_item_id = $1 AND c.profile_id = $2`, canonical, mine).Scan(&mineTurns); err != nil {
+		t.Fatalf("count own turns: %v", err)
+	}
+	if mineTurns != 3 {
+		t.Errorf("%d of this profile's recap turns survived on the canonical, want 3", mineTurns)
+	}
+}

@@ -273,11 +273,23 @@ migrations. Code in `internal/db/queries_phase2.go`, tests in
   row against itself, nothing moves, and the DELETEs strip the item's own data.
 - Added statements return their errors; the pre-existing ones swallow them. On
   abort, both items are left in place, which beats destroying data.
+- `mergeRecapConversationChildren` moves turns onto the surviving conversation
+  for the SAME profile. Drop that one predicate and the join has two candidates
+  and picks arbitrarily, so one person's private Q&A lands in another's — a
+  disclosure, not a misplacement. A review showed the single-profile test could
+  not see it, and a two-profile test that relies on which candidate Postgres
+  picks is a coin toss; the pinning test gives the OTHER profile the only
+  canonical conversation, so the wrong answer is the only one available.
 - Known gaps: recaps on a colliding duplicate EPISODE still die with it;
   `watch_parties.media_title`/`media_poster` stay denormalized;
   `handleDuplicateMetadata` swallows a merge error and reports the duplicate
-  handled; nothing locks the duplicate row, so a concurrently inserted child is
-  still cascaded away; `media_cast`'s nullable-`character` check over-keeps.
+  handled — including a refusal from `mergeChildPartialKeyError`, so a
+  transient catalog-read failure stamps the surviving duplicate as attempted
+  and leaves it to the rotation; nothing locks the duplicate row, so a
+  concurrently inserted child is still cascaded away; `media_cast`'s
+  nullable-`character` check over-keeps; the recap move's `NOT EXISTS` de-dup
+  is unpinned (without it a repeated `request_id` raises 23505 and rolls the
+  merge back, so it fails loudly).
 
 ### Enrichment recovery for never-attempted items (issue #510, migration 059)
 
@@ -316,12 +328,27 @@ restart mid-scan produces the state.
   stamp gate behaviourally against a fake TMDB (the test assigns the unexported
   `tmdb.baseURL`; there is no exported seam), and the sweep by real
   `ScanLibrary` runs — deleting the sweep block used to fail no test anywhere.
+- The sweep runs LAST in the deferred pass, after the per-file fulls AND the
+  episode backfills, and is kept in its own slice to make that true. It is the
+  one part not derived from the scan's delta, and a backfill is only ever
+  signalled in the scan that first sees the file — so a cancellation during a
+  sweep queued ahead of them would leave those episodes bare until the rotation
+  reached the show. Its shows cannot also hold a backfill entry (a backfill
+  needs the row ATTEMPTED, the sweep selects rows that are not, and progress
+  only moves forwards), so the ordering costs no redundant pass.
 - Known gaps: deterministically erroring items are bounded, not fixed, and the
   process-local interval re-arms on every deploy; a scan and the background
-  refresh can enrich one row concurrently with nothing serialising them; a
+  refresh can enrich one row concurrently with nothing serialising them — and
+  the two queues now select the SAME rows in the same order by construction
+  (`NULLS FIRST` puts the no-progress set at the rotation's head, `id ASC`
+  orders it, and the sweep uses the same predicate and `ORDER BY id`), so for a
+  single-library install the overlap is the common case rather than a
+  coincidence; `enrichSeasons`' error is discarded, so a show whose episode pass
+  failed is still stamped attempted and the scanner latch then excludes it; a
   failed merge strands a row; `UpdateMediaMetadata` always stamps
   `last_metadata`, so the admin refresh endpoint can write a stored-claim for an
-  unmatchable show.
+  unmatchable show; `tv_episodes` has no index on `media_item_id` and the sweep
+  query joins on it twice (pre-existing shape, amortised by the hourly limit).
 
 ### Nullable database columns
 

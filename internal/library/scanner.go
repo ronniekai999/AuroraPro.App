@@ -33,9 +33,11 @@ const batchFlushSize = 100
 // interval). So a show whose enrichment reliably ERRORS never acquires progress
 // and stays eligible for ever. With an absent or invalid TMDB key that is EVERY
 // show in the library. Each eligible show costs a TMDB search plus a year-less
-// retry — each with tmdb.go's 4 attempts and ~7s of backoff — a TVDB search where
-// TVDB is enabled, and an unconditional embed, because cmd/aurora's OnNewItem
-// calls embedItem whether or not enrichment errored. The watcher fires on fsnotify
+// retry, a TVDB search where TVDB is enabled, and an unconditional embed, because
+// cmd/aurora's OnNewItem calls embedItem whether or not enrichment errored.
+// (tmdb.go's 4 attempts and ~7s of backoff ride on network errors, 429 and 5xx —
+// NOT on the 401 an invalid key produces, which returns at once. That case is one
+// round trip per call, not five; the embed is the expensive half of it.) The watcher fires on fsnotify
 // with a 30-second dedup window, so an *arr-fed library can scan every ~30s: left
 // unbounded this re-searched and re-embedded a whole library, continuously. That
 // is precisely the cost the per-file latch's own comment gives as the reason to
@@ -266,8 +268,13 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	}
 
 	// Reset per-scan dedup tracker so each scan starts fresh.
-	// Uses atomic pointer swap so concurrent scans of other libraries
-	// that still reference the old map are not affected.
+	//
+	// The atomic pointer swap keeps this memory-safe under a concurrent scan, but
+	// it does NOT isolate the two: enrichNewItem and backfillEpisodeMetadata
+	// Load() on every call, so a scan of another library starting here wipes the
+	// dedup map a scan already running is still reading. The consequence is a
+	// redundant enrichment, not lost data. Pre-existing — but the deferred pass is
+	// longer now that the recovery sweep feeds it, so the window is wider.
 	s.enrichedItems.Store(&sync.Map{})
 
 	slog.Info("scan started", "library", lib.Name, "id", lib.ID, "paths", lib.Paths)
@@ -489,25 +496,34 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// provider calls.
 	//
 	// BOUNDED twice over — see requeueUnattemptedLimit and requeueSweepInterval.
-	// The sweep set is not the scan's own delta, so an unbounded one would also
-	// have starved the episode backfills below, which only run once every full has
-	// (a backlog longer than the deploy window would mean no backfill ever ran).
+	//
+	// It is also kept in its OWN slice rather than appended to pendingTVEnrich,
+	// because it is the one part of the deferred pass that is not derived from
+	// this scan's delta. Queued ahead of the backfills it would spend the scan's
+	// remaining window on recovery work and, on a cancellation, take every
+	// episode backfill down with it — and those backfills are only ever signalled
+	// in the scan that first sees the file, so their episodes would keep bare
+	// titles and stills until the refresh rotation reached the show, up to a
+	// whole MetadataRefresh interval away. A review found that; the sweep runs
+	// LAST for the same reason it is capped.
+	var sweptTVEnrich []*pendingEnrichItem
 	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil && s.dueForRequeueSweep(lib.ID) {
 		unattempted, err := s.queries.GetUnattemptedShowsForLibrary(ctx, lib.ID, requeueUnattemptedLimit)
 		if err != nil {
 			slog.Warn("could not list shows awaiting enrichment", "library", lib.Name, "error", err)
 		} else if len(unattempted) > 0 {
+			// The same seen-set as the per-file fulls, so a show this scan already
+			// queued is not enriched twice — and so the sweep cannot displace a
+			// scan-derived entry, which carries the .nfo-bearing file path.
 			pendingMu.Lock()
-			before := len(pendingTVEnrich)
 			for _, u := range unattempted {
-				pendingTVEnrich = addPendingFull(pendingFullSeen, pendingTVEnrich,
+				sweptTVEnrich = addPendingFull(pendingFullSeen, sweptTVEnrich,
 					&pendingEnrichItem{item: u.Item, filePath: u.FilePath})
 			}
-			added := len(pendingTVEnrich) - before
 			pendingMu.Unlock()
-			if added > 0 {
+			if len(sweptTVEnrich) > 0 {
 				slog.Info("re-queued shows whose enrichment never ran",
-					"library", lib.Name, "shows", added,
+					"library", lib.Name, "shows", len(sweptTVEnrich),
 					"capped_at", requeueUnattemptedLimit)
 			}
 		}
@@ -516,9 +532,10 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Enrich TV shows after all files are processed.
 	// All season/episode rows now exist in the DB, so enrichSeasons() can
 	// populate every episode with TMDB metadata (titles, overviews, stills).
-	if len(pendingTVEnrich) > 0 || len(pendingBackfill) > 0 {
+	if len(pendingTVEnrich) > 0 || len(pendingBackfill) > 0 || len(sweptTVEnrich) > 0 {
 		slog.Info("enriching TV shows",
-			"full", len(pendingTVEnrich), "episode_backfills", len(pendingBackfill))
+			"full", len(pendingTVEnrich), "episode_backfills", len(pendingBackfill),
+			"recovery_sweep", len(sweptTVEnrich))
 		// Fulls run before backfills: a full enrichment covers the
 		// backfill's work and marks the show in the shared per-scan dedup
 		// map, so backfillEpisodeMetadata skips shows enriched this scan.
@@ -536,7 +553,8 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		for i, p := range pendingTVEnrich {
 			if ctx.Err() != nil {
 				slog.Warn("TV enrichment interrupted by context cancellation",
-					"completed", i, "remaining", len(pendingTVEnrich)-i+len(pendingBackfill))
+					"completed", i,
+					"remaining", len(pendingTVEnrich)-i+len(pendingBackfill)+len(sweptTVEnrich))
 				interrupted = true
 				break
 			}
@@ -553,6 +571,21 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 				s.backfillEpisodeMetadata(ctx, b.item, b.sortedSeasons())
 				done++
 			}
+		}
+		// The recovery sweep goes last: everything above is work this scan's own
+		// files asked for, and recovering a show that has been stuck since some
+		// earlier scan must not be what stops that work from happening. The
+		// sweep's shows cannot also hold a backfill entry — a backfill needs the
+		// row to have been ATTEMPTED and the sweep selects rows that have not,
+		// and progress only moves forwards — so ordering them after costs no
+		// redundant pass.
+		for i, p := range sweptTVEnrich {
+			if ctx.Err() != nil {
+				slog.Warn("enrichment recovery sweep interrupted by context cancellation",
+					"completed", i, "remaining", len(sweptTVEnrich)-i)
+				break
+			}
+			s.enrichNewItem(ctx, p.item, p.filePath)
 		}
 	}
 

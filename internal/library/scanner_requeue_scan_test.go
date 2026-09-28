@@ -132,6 +132,14 @@ func TestScanLibrarySweepIsRateLimited(t *testing.T) {
 	if s.requeueSweepEvery != requeueSweepInterval {
 		t.Fatalf("NewScanner left requeueSweepEvery at %v, want %v — an unset interval disables the rate limit", s.requeueSweepEvery, requeueSweepInterval)
 	}
+	// The other bound. GetUnattemptedShowsForLibrary refuses a non-positive
+	// limit, so "no limit" cannot be expressed by passing 0 — but nothing
+	// otherwise stops the constant being raised until it stops bounding anything,
+	// and the cost it bounds is provider calls per sweep. A review raised it to a
+	// million and the whole suite stayed green.
+	if requeueUnattemptedLimit <= 0 || requeueUnattemptedLimit > 500 {
+		t.Errorf("requeueUnattemptedLimit is %d; the sweep's whole cost argument rests on it staying in the same order as GetStaleMetadataItems' window (100). Raising it past a few hundred needs the reasoning in its doc comment revisited, not just the number changed.", requeueUnattemptedLimit)
+	}
 
 	var calls []int64
 	s.OnNewItem = func(_ context.Context, item *models.MediaItem) {
@@ -155,6 +163,32 @@ func TestScanLibrarySweepIsRateLimited(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("a second scan within requeueSweepInterval swept again (%v); the sweep is a recovery pass, not a per-scan duty", calls)
+	}
+
+	// The limit is PER LIBRARY. Keyed globally instead, one library's scan would
+	// suppress every other library's sweep for a whole interval — a recovery
+	// regression on any multi-library install, and one a single-library test
+	// cannot see. Note the shape: a SECOND library's first scan queues its full
+	// from processFile, not from the sweep, so merely counting calls there proves
+	// nothing. The distinguishing move is to make the second library — and only
+	// the second — due again, then scan it with nothing changed on disk.
+	otherRoot := t.TempDir()
+	otherLib := seedShowLibraryAt(t, pool, otherRoot)
+	writeEpisodeFile(t, otherRoot, "Second Library "+latchSuffix(t), 1, 1)
+	calls = nil
+	if err := s.ScanLibrary(ctx, otherLib, nil); err != nil {
+		t.Fatalf("scan of a second library: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("a second library's first scan asked for %d full enrichments, want 1", len(calls))
+	}
+	s.requeueSweptAt.Store(otherLib.ID, time.Now().Add(-2*requeueSweepInterval))
+	calls = nil
+	if err := s.ScanLibrary(ctx, otherLib, nil); err != nil {
+		t.Fatalf("second scan of the second library: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Errorf("the second library was due but swept %d shows, want 1 — the rate limit must be keyed per library, or one library's scan suppresses every other library's recovery", len(calls))
 	}
 
 	// And the limit is a real interval, not a once-per-process latch: a library

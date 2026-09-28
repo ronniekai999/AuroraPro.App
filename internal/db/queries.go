@@ -971,15 +971,17 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 // identity fields the scanner needs to adopt an existing row, plus whether that
 // row has ever actually had metadata written to it.
 //
-// Deliberately NOT models.MediaItem. Two reasons:
+// Deliberately NOT models.MediaItem: the scanner only ever reads
+// ID/AddedAt/UpdatedAt off this result, so the wide projection was carrying
+// eleven columns nobody looked at, and every one of them a column this query
+// then had to keep NULL-safe.
 //
-//   - The scanner only ever reads ID/AddedAt/UpdatedAt off this result, so the
-//     wide projection was carrying eleven columns nobody looked at.
-//   - models.MediaItem.Year is a non-nullable int while media_items.year is
-//     nullable, so the wide projection FAILED — "cannot scan NULL into *int" —
-//     for any row whose year the parser could not determine. That is routine
-//     for a folder with no year in its name, and it made the canonical-row
-//     lookup error out on exactly the rows it exists to find.
+// It is NOT the fix for the NULL-year scan error. That was already closed on the
+// base branch, by COALESCEing the wide projection; narrowing it removes the
+// columns rather than the NULLs, and nothing about UpsertMediaItem's
+// COALESCE(year, 0) keying moves either way. Do not read this as a second fix
+// for the same bug — an earlier version of this comment did, and stating a
+// defect the code never had is how the next reader mis-reasons about it.
 type FoundMediaItem struct {
 	ID        int64
 	AddedAt   time.Time
