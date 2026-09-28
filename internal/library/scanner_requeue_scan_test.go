@@ -330,23 +330,24 @@ func TestRequeueSweepConstantsAreBounded(t *testing.T) {
 // library both read a stale timestamp and both sweep — spending the provider calls
 // the rate limit exists to bound.
 //
-// The obvious test for that is the stress test below, and it is not enough: a
-// review deleted the mutex and the 16-goroutine version passed 20/20 at
-// GOMAXPROCS=1 with and without -race, and still passed roughly one run in five on
-// four cores. So it holds the two callers inside the claim window instead, through
-// requeueClaimHook. With the lock the second caller cannot enter while the first
-// is there; without it, it walks straight in. Neither outcome depends on the
-// scheduler.
+// The obvious test for that is the stress test below, and it is not enough: with
+// the mutex deleted, the 16-goroutine version passed EVERY run at GOMAXPROCS=1,
+// with and without -race, and still passed a substantial fraction on four cores.
+// (Rates vary by machine — two reviewers measured different figures above one
+// CPU. The part that does not vary is the single-CPU result.) So this test holds
+// the two callers inside the claim window instead, through the scanner's
+// testHookInRequeueClaim. With the lock the second caller cannot enter while the
+// first is there; without it, it walks straight in. Neither outcome depends on
+// the scheduler.
 func TestDueForRequeueSweepClaimIsExclusive(t *testing.T) {
 	s := NewScanner(config.ScannerConfig{}, nil)
 
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
-	requeueClaimHook = func() {
+	s.testHookInRequeueClaim = func() {
 		entered <- struct{}{}
 		<-release
 	}
-	t.Cleanup(func() { requeueClaimHook = nil })
 
 	var claimed atomic.Int64
 	var done sync.WaitGroup
@@ -389,8 +390,8 @@ func TestDueForRequeueSweepClaimIsExclusive(t *testing.T) {
 // TestDueForRequeueSweepClaimsTheSlotOnce is the stress companion to the test
 // above. It is deliberately kept even though it is PROBABILISTIC — it explores
 // interleavings the deterministic seam does not reach — but do not read a pass
-// here as evidence the lock is present: it survives its own mutation on a
-// single-CPU runner entirely, and about one run in five on four cores.
+// here as evidence the lock is present: it survives its own mutation ENTIRELY on
+// a single-CPU runner, and a machine-dependent fraction of runs above one.
 func TestDueForRequeueSweepClaimsTheSlotOnce(t *testing.T) {
 	s := NewScanner(config.ScannerConfig{}, nil)
 	const goroutines = 16

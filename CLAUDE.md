@@ -345,6 +345,15 @@ restart mid-scan produces the state.
   forwards), so the ordering costs no redundant pass.
   `TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills` pins it; moving
   the loop back to the front left the whole suite green.
+- The sweep's rate limit is claimed under `requeueMu`, and that exclusivity is
+  pinned through `Scanner.testHookInRequeueClaim` rather than by racing
+  goroutines. A 16-goroutine stress test passed EVERY run with the mutex deleted
+  at `GOMAXPROCS=1`, `-race` included — the detector is right to stay quiet,
+  since `sync.Map` is race-safe and this is a logical check-then-set — so a
+  guard can survive its own mutation entirely on a single-CPU runner. The hook
+  is a FIELD, not a package variable: as a global it fired for every `Scanner`,
+  and a `t.Parallel()` anywhere in the package turned it into a false failure
+  whose second "caller" was an unrelated `ScanLibrary` holding the mutex.
 - Known gaps: deterministically erroring items are bounded, not fixed, and the
   process-local interval re-arms on every deploy; a scan and the background
   refresh can enrich one row concurrently with nothing serialising them — and

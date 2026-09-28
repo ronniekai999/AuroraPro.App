@@ -153,6 +153,29 @@ type Scanner struct {
 	// requeueSweepEvery is requeueSweepInterval, overridable in tests.
 	requeueSweepEvery time.Duration
 
+	// testHookInRequeueClaim, when non-nil, runs inside dueForRequeueSweep's
+	// critical section, between reading the previous sweep time and writing the
+	// new one. Nil in production; one nil-compare per sweep.
+	//
+	// It is a FIELD, not a package variable, because dueForRequeueSweep is a
+	// method and the test drives one Scanner: as a global it fired for every
+	// Scanner in the process, and a review showed that a `t.Parallel()` on any
+	// other test in this package turned the exclusivity test into a FALSE FAILURE
+	// — the second "caller" in its claim window was an unrelated ScanLibrary,
+	// which then blocked holding requeueMu. Scoping it removes that, and removes a
+	// mutable global from a production file.
+	//
+	// The seam exists because this property cannot be tested by racing goroutines
+	// and hoping. A review deleted the mutex and ran a 16-goroutine, 200-round
+	// stress test: it passed every run at GOMAXPROCS=1 with and without -race (the
+	// race detector is right to stay quiet — sync.Map is race-safe and this is a
+	// logical check-then-set, not a data race), and still passed a substantial
+	// fraction of runs on four cores. Rates vary by machine; the load-bearing part
+	// is that a guard can survive its own mutation entirely on a single-CPU runner.
+	// The hook lets the test interleave two callers deterministically instead, the
+	// way tmdb.baseURL lets the enricher test drive a fake provider.
+	testHookInRequeueClaim func()
+
 	// requeueMu makes dueForRequeueSweep's check-and-claim atomic. sync.Map has no
 	// compare-and-swap for this shape, and ScanLibrary does not itself enforce
 	// TryStartScan, so two scans of one library could otherwise both claim the
@@ -530,8 +553,8 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// backfill-eligible show: eligibility is `Attempted`, which is either progress
 	// column, so a show asked-and-unmatched has last_metadata and tmdb_id NULL and
 	// the rotation does re-enrich it. An earlier version of this comment said the
-	// first two hold "by definition", which is the wrong half of that distinction. Those episodes can keep bare titles, overviews and stills
-	// permanently. A review found the ordering; a later one found that this is
+	// first two hold "by definition", which is the wrong half of that
+	// distinction. A review found the ordering; a later one found that this is
 	// what it costs. The sweep runs LAST for the same reason it is capped.
 	var sweptTVEnrich []*pendingEnrichItem
 	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil && s.dueForRequeueSweep(lib.ID) {
@@ -656,26 +679,12 @@ func (s *Scanner) dueForRequeueSweep(libraryID int64) bool {
 			return false
 		}
 	}
-	if hook := requeueClaimHook; hook != nil {
-		hook()
+	if s.testHookInRequeueClaim != nil {
+		s.testHookInRequeueClaim()
 	}
 	s.requeueSweptAt.Store(libraryID, now)
 	return true
 }
-
-// requeueClaimHook, when non-nil, runs between reading the previous sweep time
-// and writing the new one — i.e. inside the window the mutex above exists to make
-// exclusive. It is nil in production and one branch on a package variable.
-//
-// It exists because the property cannot be tested by racing goroutines and hoping.
-// A review deleted the mutex and ran a 16-goroutine, 200-round stress test: it
-// passed 20/20 at GOMAXPROCS=1 with and without -race (the race detector is right
-// to stay quiet — sync.Map is race-safe and this is a logical check-then-set, not
-// a data race), and still passed about one run in five on four cores. A guard that
-// survives its own mutation on a single-CPU CI runner is not pinned. The seam lets
-// the test interleave two callers deterministically instead, the way
-// tmdb.baseURL lets the enricher test drive a fake provider.
-var requeueClaimHook func()
 
 // showLockKey returns the per-show lock for a given library+title combination.
 // The lock serializes all operations on the same show: UpsertMediaItem, UpsertSeason,
