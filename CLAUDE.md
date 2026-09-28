@@ -334,8 +334,10 @@ restart mid-scan produces the state.
   signalled in the scan that FIRST sees the file — so a cancellation during a
   sweep queued ahead of them dropped a signal that is never raised again. The
   rotation is not a net for that either: its smart diffing skips a show outright
-  when it has a `tmdb_id` and TMDB reports no upstream change, and a locally
-  added episode file is not one, so those episodes can stay bare permanently.
+  when it has a `last_metadata` and a `tmdb_id` and TMDB reports no upstream
+  change — a backfill-eligible show has the first two by definition, and a
+  locally added file is not an upstream change — so those episodes can stay bare
+  permanently.
   The sweep's shows cannot also hold a backfill entry (a backfill needs the row
   ATTEMPTED, the sweep selects rows that are not, and progress only moves
   forwards), so the ordering costs no redundant pass.

@@ -153,10 +153,16 @@ type Scanner struct {
 	// requeueSweepEvery is requeueSweepInterval, overridable in tests.
 	requeueSweepEvery time.Duration
 
-	// requeueMu makes dueForRequeueSweep's check-and-claim atomic. sync.Map has
-	// no compare-and-swap for this shape, and ScanLibrary does not itself enforce
-	// TryStartScan — the watcher calls it directly — so two scans of one library
-	// could otherwise both claim the slot and both sweep.
+	// requeueMu makes dueForRequeueSweep's check-and-claim atomic. sync.Map has no
+	// compare-and-swap for this shape, and ScanLibrary does not itself enforce
+	// TryStartScan, so two scans of one library could otherwise both claim the
+	// slot and both sweep. Every call site today DOES take TryStartScan first
+	// (cmd/aurora, the two media handlers and the request handler — the watcher
+	// reaches ScanLibrary through cmd/aurora's onChange closure, not directly), so
+	// this is a defensive leaf lock rather than a fix for a live race. An earlier
+	// version of this comment claimed the watcher called ScanLibrary directly; it
+	// does not, and a wrong reachability claim in a comment is the thing this
+	// repo's ledger warns about, not the lock.
 	requeueMu sync.Mutex
 
 	// showLocks provides per-show serialization during scanning.
@@ -513,9 +519,10 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// episode backfill down with it — and a backfill is only ever signalled in the
 	// scan that FIRST sees the file, so a dropped one is not merely delayed. The
 	// rotation is not a safety net here: RefreshStaleMetadata's smart diffing
-	// skips a show outright when it has a tmdb_id and HasTVChanged reports no
-	// upstream change, and a locally added episode file is not an upstream
-	// change. Those episodes can keep bare titles, overviews and stills
+	// skips a show outright when it has a last_metadata AND a tmdb_id AND
+	// HasTVChanged reports no upstream change — and a backfill-eligible show has
+	// the first two by definition, while a locally added episode file is not an
+	// upstream change. Those episodes can keep bare titles, overviews and stills
 	// permanently. A review found the ordering; a later one found that this is
 	// what it costs. The sweep runs LAST for the same reason it is capped.
 	var sweptTVEnrich []*pendingEnrichItem

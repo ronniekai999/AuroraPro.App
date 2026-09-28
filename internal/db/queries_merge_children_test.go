@@ -1357,10 +1357,18 @@ func TestMergeRefusesAPartialKeyedGenericChild(t *testing.T) {
 
 	// A future child of media_items with a PARTIAL unique key, registered on the
 	// generic path with no keyPredicate — the shape that used to pass.
+	//
+	// Deliberately NO foreign key to media_items, even though the table it stands
+	// in for would have one: mergeChildPartialKeyError reads pg_index and never
+	// the constraint, so the FK adds nothing to what is under test, while CREATE
+	// TABLE would take ShareRowExclusive on media_items and the DROP would take
+	// AccessExclusive. `go test ./...` runs internal/library and internal/metadata
+	// against this same database, both writing media_items, and CLAUDE.md already
+	// records cross-package coupling through it as a trap here.
 	if _, err := q.pool.Exec(ctx, `
 		CREATE TABLE zz_partial_key_probe (
 			id BIGSERIAL PRIMARY KEY,
-			media_item_id BIGINT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+			media_item_id BIGINT NOT NULL,
 			profile_id BIGINT NOT NULL,
 			archived BOOLEAN NOT NULL DEFAULT FALSE
 		)`); err != nil {

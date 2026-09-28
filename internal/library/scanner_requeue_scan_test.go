@@ -17,6 +17,8 @@ package library
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,6 +225,18 @@ func TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills(t *testing.T) {
 	growingName := "Growing Show " + sfx
 	stuckFile := writeEpisodeFile(t, root, stuckName, 1, 1)
 	growingFile := writeEpisodeFile(t, root, growingName, 1, 1)
+	// Assert against the PARSED titles, never the names as written. latchSuffix is
+	// 16 hex characters and parser.go's year regex has no word boundary, so a
+	// suffix containing 19dd or 20dd anywhere past the first position is read as a
+	// year and truncates the title there — "Growing Show 274a920755e36afe" parses
+	// as "Growing Show 274a9", year 2075. A review measured the resulting flake at
+	// ~3.6% of runs, and its message reads like an ordering failure, which is the
+	// worst kind of red. The file already has the right idiom in idFor below.
+	stuckTitle := ParseTVPath(stuckFile).Title
+	growingTitle := ParseTVPath(growingFile).Title
+	if stuckTitle == "" || growingTitle == "" || stuckTitle == growingTitle {
+		t.Fatalf("parser produced unusable titles: stuck=%q growing=%q", stuckTitle, growingTitle)
+	}
 
 	s := NewScanner(config.ScannerConfig{FFprobePath: "/nonexistent/ffprobe", Workers: 1}, queries)
 	s.requeueSweepEvery = 0
@@ -249,20 +263,19 @@ func TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills(t *testing.T) {
 
 	// The growing show has been asked and answered; the stuck one never was.
 	// That is what puts one on the backfill path and the other in the sweep.
-	idFor := func(path string) int64 {
+	idFor := func(title string) int64 {
 		t.Helper()
-		title := ParseTVPath(path).Title
 		found, err := queries.FindMediaItemByTitle(ctx, lib.ID, "show", title)
 		if err != nil || found == nil {
 			t.Fatalf("look up %q: %v (found=%v)", title, err, found)
 		}
 		return found.ID
 	}
-	growingID := idFor(growingFile)
+	growingID := idFor(growingTitle)
 	if err := queries.TouchMetadataAttempt(ctx, growingID); err != nil {
 		t.Fatalf("stamp attempt: %v", err)
 	}
-	if idFor(stuckFile) == growingID {
+	if idFor(stuckTitle) == growingID {
 		t.Fatal("both files resolved to the same show row")
 	}
 
@@ -283,11 +296,11 @@ func TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills(t *testing.T) {
 	if calls[1].kind != "full" {
 		t.Errorf("scan 2 ran %q second (%v), want the swept full last", calls[1].kind, calls)
 	}
-	if calls[0].title != growingName {
-		t.Errorf("the backfill was for %q, want %q", calls[0].title, growingName)
+	if calls[0].title != growingTitle {
+		t.Errorf("the backfill was for %q, want %q", calls[0].title, growingTitle)
 	}
-	if calls[1].title != stuckName {
-		t.Errorf("the swept full was for %q, want %q", calls[1].title, stuckName)
+	if calls[1].title != stuckTitle {
+		t.Errorf("the swept full was for %q, want %q", calls[1].title, stuckTitle)
 	}
 }
 
@@ -306,5 +319,39 @@ func TestRequeueSweepConstantsAreBounded(t *testing.T) {
 	}
 	if requeueSweepInterval <= 0 {
 		t.Errorf("requeueSweepInterval is %v; a non-positive interval disables the rate limit entirely (see dueForRequeueSweep), so the sweep would run on every scan again", requeueSweepInterval)
+	}
+}
+
+// TestDueForRequeueSweepClaimsTheSlotOnce pins the mutex, and needs no database.
+//
+// It is a check-then-set over a sync.Map, which has no compare-and-swap for this
+// shape, so without the lock two concurrent scans of one library both read a
+// stale timestamp and both sweep — spending the provider calls the rate limit
+// exists to bound. Deleting the two lock lines left the whole suite green,
+// including under -race, which is the same unpinned-guard shape this file's
+// constant assertion was just moved out of a database gate for.
+func TestDueForRequeueSweepClaimsTheSlotOnce(t *testing.T) {
+	s := NewScanner(config.ScannerConfig{}, nil)
+	const goroutines = 16
+	for round := 0; round < 200; round++ {
+		s.requeueSweptAt.Delete(int64(1))
+		var claimed atomic.Int64
+		var start, done sync.WaitGroup
+		start.Add(1)
+		done.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer done.Done()
+				start.Wait()
+				if s.dueForRequeueSweep(1) {
+					claimed.Add(1)
+				}
+			}()
+		}
+		start.Done()
+		done.Wait()
+		if got := claimed.Load(); got != 1 {
+			t.Fatalf("round %d: %d goroutines claimed the sweep slot, want 1 — the check-and-claim must be atomic, or one library is swept once per concurrent scan rather than once per interval", round, got)
+		}
 	}
 }
