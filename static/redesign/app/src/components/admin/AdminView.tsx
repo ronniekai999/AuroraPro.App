@@ -56,6 +56,7 @@ import {
   listAdminUsers,
   listFlaggedItems,
   listLibraries,
+  getLibraryHealth,
   listPendingApprovals,
   listRooms,
   manualMatch,
@@ -77,6 +78,7 @@ import {
   type AIRematchJobStatus,
   type EmbeddingStatus,
   type Library,
+  type LibraryHealthReport,
   type LLMSettings,
   type LLMTestResult,
   type LogEntry,
@@ -567,11 +569,19 @@ function AdminLibrariesTab() {
   const [newName, setNewName] = useState('')
   const [newType, setNewType] = useState<'movie' | 'show'>('movie')
   const [newPaths, setNewPaths] = useState('')
+  // Metadata-match health (#510). Fetched alongside the list rather than folded
+  // into it because /api/libraries is member-visible and this is not. A failure
+  // here is swallowed: it is a diagnostic, and losing it must not take the
+  // libraries list down with it.
+  const [health, setHealth] = useState<LibraryHealthReport | null>(null)
   const reload = useCallback(async () => {
     try { setItems(await listLibraries()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+    try { setHealth(await getLibraryHealth()) }
+    catch { setHealth(null) }
   }, [])
   useEffect(() => { void reload() }, [reload])
+  const healthFor = (id: number) => health?.libraries.find(h => h.library_id === id)
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
@@ -606,16 +616,36 @@ function AdminLibrariesTab() {
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
-        {items && items.map(lib => (
-          <div key={lib.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
+        {health?.install_warning && (
+          <div className="mb-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+            <p className="text-amber-200 text-xs">{health.install_warning}</p>
+          </div>
+        )}
+        {items && items.map(lib => {
+          const h = healthFor(lib.id)
+          return (
+          <div key={lib.id} className="py-3 border-b border-white/[0.04] last:border-0">
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
-              <p className="text-white/40 text-xs truncate">{lib.type} · {lib.paths.join(', ')}</p>
+              <p className="text-white/40 text-xs truncate">
+                {lib.type} · {lib.paths.join(', ')}
+                {h && h.items > 0 && (
+                  <span className={h.warning ? 'text-amber-300' : ''}>
+                    {' · '}{h.matched}/{h.items} matched ({h.matched_pct}%)
+                  </span>
+                )}
+              </p>
             </div>
             <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Scan</button>
             <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
           </div>
-        ))}
+          {h?.warning && (
+            <p className="mt-2 text-amber-300/90 text-xs leading-relaxed">{h.warning}</p>
+          )}
+          </div>
+          )
+        })}
       </div>
     </div>
   )

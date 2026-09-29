@@ -1670,6 +1670,31 @@ export async function scanLibrary(id: number): Promise<void> {
   await apiFetch(`/api/libraries/${id}/scan`, { method: 'POST' })
 }
 
+// Per-library metadata-match health (#510). Admin-only, and deliberately NOT on
+// /api/libraries: that endpoint is member-visible (the browse tabs read it) and
+// item counts plus a diagnosis of what is wrong with the server are not.
+// Report only — nothing here changes a library.
+export interface LibraryHealthRow {
+  library_id: number
+  name: string
+  type: 'movie' | 'show'
+  items: number
+  matched: number
+  matched_pct: number
+  scanning: boolean
+  /** Absent when the library needs no attention. */
+  warning?: string
+}
+export interface LibraryHealthReport {
+  libraries: LibraryHealthRow[]
+  /** Set INSTEAD of per-library warnings when the whole install is starved. */
+  install_warning?: string
+}
+export async function getLibraryHealth(signal?: AbortSignal): Promise<LibraryHealthReport> {
+  const res = await apiFetch<LibraryHealthReport>('/api/admin/library-health', { signal })
+  return res || { libraries: [] }
+}
+
 // Unified Active Streams row. Transcode-backed and direct-play-backed
 // streams arrive on the same array tagged with `kind` so the admin
 // Sessions tab can render them together. Fields that don't apply to

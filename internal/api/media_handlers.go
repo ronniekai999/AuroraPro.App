@@ -335,6 +335,24 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"message": "scan started"})
 }
 
+// Health reports each library's metadata-match rate and warns about the ones
+// that look mis-typed. Admin-only, and mounted under /api/admin rather than
+// beside the other library routes because GET /api/libraries is NOT admin-gated
+// — every signed-in member reads it to render the browse tabs, and per-library
+// item counts plus a diagnosis of what is wrong with the server are not theirs.
+//
+// Report only. It never changes a library; correcting one destroys catalog rows
+// and has its own explicit action.
+func (h *LibraryHandler) Health(w http.ResponseWriter, r *http.Request) {
+	tallies, err := h.queries.GetLibraryMatchHealth(r.Context())
+	if err != nil {
+		slog.Error("library health query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to read library health")
+		return
+	}
+	writeJSON(w, http.StatusOK, LibraryHealthReportFor(tallies, h.scanner))
+}
+
 func (h *LibraryHandler) ScanStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
