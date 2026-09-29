@@ -27,6 +27,10 @@ history rather than in the working tree once their decision has been made.
   contract shared by the server and native clients.
 - [`match-report.md`](match-report.md) — privacy-bounded recommender calibration
   report.
+- [`playback-casting-review-2026-09.md`](playback-casting-review-2026-09.md) —
+  September 2026 bug review and phased remediation plan for playback,
+  transcoding, casting, and watch-party sync, plus a technology-stack
+  assessment. A plan awaiting decisions; delete it once its work packages land.
 
 Start with the repository [`README`](../README.md) for installation,
 configuration, architecture, and build commands. Agent-specific invariants and
