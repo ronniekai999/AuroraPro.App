@@ -31,3 +31,30 @@ func TestAddPendingBackfillAggregatesPerShow(t *testing.T) {
 		t.Fatalf("show 2: expected seasons [1], got %v", got)
 	}
 }
+
+// The full-enrichment queue dedups per show, like the backfill map. Without it a
+// show not yet attempted contributes one entry per new file — thousands on a
+// large library — and the "enriching TV shows full=N" log counts files rather
+// than shows. First-wins is load-bearing: enrichNewItem reads the retained
+// entry's filePath to find a sibling .nfo.
+func TestAddPendingFullDedupsPerShowAndKeepsTheFirstEntry(t *testing.T) {
+	seen := make(map[int64]struct{})
+	var pending []*pendingEnrichItem
+	show1 := &models.MediaItem{ID: 1}
+	show2 := &models.MediaItem{ID: 2}
+
+	pending = addPendingFull(seen, pending, &pendingEnrichItem{item: show1, filePath: "/s1/e01.mkv"})
+	pending = addPendingFull(seen, pending, &pendingEnrichItem{item: show1, filePath: "/s1/e02.mkv"})
+	pending = addPendingFull(seen, pending, &pendingEnrichItem{item: show1, filePath: "/s1/e03.mkv"})
+	pending = addPendingFull(seen, pending, &pendingEnrichItem{item: show2, filePath: "/s2/e01.mkv"})
+
+	if len(pending) != 2 {
+		t.Fatalf("expected one entry per show, got %d", len(pending))
+	}
+	if pending[0].item.ID != 1 || pending[1].item.ID != 2 {
+		t.Fatalf("expected shows [1 2] in first-seen order, got [%d %d]", pending[0].item.ID, pending[1].item.ID)
+	}
+	if pending[0].filePath != "/s1/e01.mkv" {
+		t.Errorf("kept filePath %q, want the FIRST file's — enrichNewItem resolves the .nfo from it", pending[0].filePath)
+	}
+}

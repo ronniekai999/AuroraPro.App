@@ -232,12 +232,35 @@ func (q *Queries) findCanonicalItem(ctx context.Context, u *models.MetadataUpdat
 	return canonicalID
 }
 
-// MergeMediaItems reassigns all child records (media_files, tv_seasons,
-// tv_episodes, episode_files, artwork, media_cast, media_genres, external_ids,
-// watch_progress) from duplicateID to canonicalID, then deletes the duplicate.
-// This is used when enrichment discovers that two separately-created media items
-// actually represent the same movie or show.
+// MergeMediaItems reassigns every child record from duplicateID to canonicalID
+// and then deletes the duplicate. Used when enrichment discovers that two
+// separately-created media items are the same movie or show.
+//
+// Deliberately does NOT enumerate the tables here. It used to, and the list went
+// stale: eleven cascade children were added by later migrations and nobody
+// revisited the function, so the final DELETE destroyed all of them. The list
+// lives in mergeChildren, the generic loop is DRIVEN by it, and the tests derive
+// their expectations from it too.
+//
+// The dangerous property to preserve: media_items has ON DELETE CASCADE children,
+// so anything not re-parented before the final DELETE is destroyed silently.
+// CLAUDE.md calls this the most dangerous code in the repo.
 func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID int64) error {
+	// L3: a self-merge would be strictly destructive — every collision check
+	// below matches the row against itself, so nothing moves and the DELETEs
+	// then strip the item's own watchlist entries, ratings, feedback, taste
+	// seeds and recaps before the final DELETE finishes it off. The only
+	// caller cannot do this (findCanonicalItem excludes the row by id), which
+	// is exactly why it is worth one cheap line here.
+	if canonicalID == duplicateID {
+		return nil
+	}
+	if err := mergeChildStrategyError(mergeChildren, mergeEpisodeChildren); err != nil {
+		return err
+	}
+	if err := q.mergeChildPartialKeyError(ctx); err != nil {
+		return err
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
@@ -350,17 +373,38 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 						return fmt.Errorf("merge episode_files: %w", err)
 					}
 					// Move watch_progress for this episode
+					// profile_id is part of the collision key. The unique index is
+					// idx_watch_progress_user_profile_episode ON
+					// (user_id, profile_id, episode_id) WHERE episode_id IS NOT NULL,
+					// so comparing user_id alone judges a SIBLING PROFILE's progress
+					// a collision: an adult with progress on the canonical episode
+					// made a kid profile's progress on the duplicate unmovable, and
+					// the DELETE below then destroyed it. Same shape as the
+					// recently_surfaced_items key — a partial key does not error, it
+					// silently drops a third party's row.
 					_, _ = tx.Exec(ctx,
 						`UPDATE watch_progress SET episode_id = $1, media_item_id = $2
 						 WHERE episode_id = $3
 						 AND NOT EXISTS (
 						   SELECT 1 FROM watch_progress wp2
-						   WHERE wp2.user_id = watch_progress.user_id AND wp2.episode_id = $1
+						   WHERE wp2.user_id = watch_progress.user_id
+						     AND wp2.profile_id = watch_progress.profile_id
+						     AND wp2.episode_id = $1
 						 )`,
 						canonEpID, canonicalID, de.id)
 					// Delete any remaining dup watch_progress (conflict cases)
 					_, _ = tx.Exec(ctx,
 						`DELETE FROM watch_progress WHERE episode_id = $1`, de.id)
+					// Re-point the episode's OTHER children before it goes.
+					// Deleting the duplicate episode cascades
+					// recommendation_watch_events and episode_recaps away, and
+					// nulls watch_parties.episode_id and
+					// recap_conversation_turns.up_to_episode_id — so a live party
+					// came out of a merge as a show with no episode, which
+					// rehydrate.go then reloads pointing at nothing.
+					if err := repointEpisodeChildren(ctx, tx, canonEpID, de.id); err != nil {
+						return err
+					}
 					// Delete the duplicate episode
 					_, err = tx.Exec(ctx, `DELETE FROM tv_episodes WHERE id = $1`, de.id)
 					if err != nil {
@@ -414,12 +458,18 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 	}
 
 	// Reassign watch_progress for the media item (non-episode entries)
+	// profile_id is part of the collision key here too — the unique index is
+	// idx_watch_progress_user_profile_media ON (user_id, profile_id, media_item_id)
+	// WHERE episode_id IS NULL. See the episode variant above for what omitting it
+	// destroyed.
 	_, _ = tx.Exec(ctx,
 		`UPDATE watch_progress SET media_item_id = $1
 		 WHERE media_item_id = $2 AND episode_id IS NULL
 		 AND NOT EXISTS (
 		   SELECT 1 FROM watch_progress wp2
-		   WHERE wp2.user_id = watch_progress.user_id AND wp2.media_item_id = $1 AND wp2.episode_id IS NULL
+		   WHERE wp2.user_id = watch_progress.user_id
+		     AND wp2.profile_id = watch_progress.profile_id
+		     AND wp2.media_item_id = $1 AND wp2.episode_id IS NULL
 		 )`,
 		canonicalID, duplicateID)
 	// Delete any remaining dup watch_progress
@@ -470,6 +520,68 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 	_, _ = tx.Exec(ctx,
 		`DELETE FROM external_ids WHERE media_item_id = $1`, duplicateID)
 
+	// Everything below was NOT re-parented before, and the final DELETE's
+	// ON DELETE CASCADE therefore destroyed it. media_items has 19 cascade
+	// children; this function handled 8 of them, and the other 11 arrived in
+	// migrations written after it — the classic drift. The loss was silent,
+	// unlogged and unrecoverable, and it took user data with it: a watchlist
+	// entry and a 5-star rating on the duplicate both went to zero across a
+	// merge, confirmed by running it.
+	//
+	// The loop is DRIVEN by mergeChildren. An earlier version kept that list
+	// purely as a cross-check, which a review defeated in one line: adding an
+	// entry turned the drift guard green while every row in the new table was
+	// still destroyed. A classification that does not cause handling is a
+	// comment, not a guard.
+	//
+	// Policy on a collision, matching what watch_progress does: the CANONICAL
+	// row wins and the duplicate's is dropped. These are per-profile opinions
+	// and the canonical item is the one the user keeps seeing.
+	for _, m := range mergeChildren {
+		if m.bespoke {
+			continue // handled by the hand-written walk above
+		}
+		if len(m.keyCols) == 0 {
+			// No unique index involves media_item_id, so nothing can collide and
+			// every row moves. watch_parties matters most here: it can be a LIVE
+			// room, and deleting it dropped every participant mid-session.
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`UPDATE %s SET media_item_id = $1 WHERE media_item_id = $2`, m.table),
+				canonicalID, duplicateID); err != nil {
+				return fmt.Errorf("reassign %s: %w", m.table, err)
+			}
+			continue
+		}
+		// recap_conversations owns recap_conversation_turns/_requests, so the
+		// duplicate's conversation cannot simply be dropped on a collision —
+		// that takes a person's whole Q&A thread with it. Move the children onto
+		// the surviving conversation first.
+		if m.table == "recap_conversations" {
+			if err := mergeRecapConversationChildren(ctx, tx, canonicalID, duplicateID); err != nil {
+				return err
+			}
+		}
+		conds := make([]string, 0, len(m.keyCols))
+		for _, c := range m.keyCols {
+			conds = append(conds, fmt.Sprintf("c.%[1]s = t.%[1]s", c))
+		}
+		// Identifiers come from the compile-time table above, never caller input,
+		// so interpolating them cannot carry untrusted SQL.
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %[1]s t SET media_item_id = $1
+			 WHERE t.media_item_id = $2
+			   AND NOT EXISTS (
+			     SELECT 1 FROM %[1]s c
+			     WHERE c.media_item_id = $1 AND %[2]s
+			   )`, m.table, strings.Join(conds, " AND ")), canonicalID, duplicateID); err != nil {
+			return fmt.Errorf("reassign %s: %w", m.table, err)
+		}
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE media_item_id = $1`, m.table), duplicateID); err != nil {
+			return fmt.Errorf("drop colliding %s: %w", m.table, err)
+		}
+	}
+
 	// Finally, delete the duplicate media item.
 	_, err = tx.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, duplicateID)
 	if err != nil {
@@ -477,6 +589,301 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 	}
 
 	return tx.Commit(ctx)
+}
+
+// mergeRecapConversationChildren moves a duplicate conversation's turns and
+// requests onto the canonical conversation for the same profile, so that the
+// collision policy ("canonical wins") costs only the empty container and not the
+// person's Q&A history.
+//
+// recap_conversations is not a per-profile opinion like a rating: it OWNS
+// recap_conversation_turns and recap_conversation_requests, both ON DELETE
+// CASCADE from its id. Dropping the duplicate's conversation therefore destroyed
+// the thread, and the surviving canonical conversation could well be empty —
+// confirmed by running it: 3 turns on the duplicate, 0 on the canonical, 0 after.
+//
+// Both children are UNIQUE (conversation_id, request_id), so a turn whose
+// request_id the surviving conversation already has is genuinely the same turn
+// and is left to cascade.
+func mergeRecapConversationChildren(ctx context.Context, tx pgx.Tx, canonicalID, duplicateID int64) error {
+	for _, table := range []string{"recap_conversation_turns", "recap_conversation_requests"} {
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %[1]s t SET conversation_id = canon.id
+			 FROM recap_conversations dup
+			 JOIN recap_conversations canon
+			   ON canon.media_item_id = $1 AND canon.profile_id = dup.profile_id
+			 WHERE dup.media_item_id = $2
+			   AND t.conversation_id = dup.id
+			   AND NOT EXISTS (
+			     SELECT 1 FROM %[1]s c
+			     WHERE c.conversation_id = canon.id AND c.request_id = t.request_id
+			   )`, table), canonicalID, duplicateID); err != nil {
+			return fmt.Errorf("move %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// mergeChildStrategy says how MergeMediaItems handles one ON DELETE CASCADE child
+// of media_items.
+type mergeChildStrategy struct {
+	table string
+	// keyCols is the table's unique key MINUS media_item_id, in FULL. It must be
+	// complete: a partial key does not error, it silently decides that another
+	// profile's or parent's row is a collision and deletes it. That mistake has
+	// been made twice in this function — on recently_surfaced_items and on
+	// watch_progress, where omitting profile_id destroyed a kid profile's watch
+	// history. Empty means no unique index involves media_item_id, so every row
+	// moves with a plain UPDATE and nothing is dropped.
+	keyCols []string
+	// keyPredicate mirrors a PARTIAL unique index's WHERE clause. watch_progress
+	// is the only child with partial unique indexes, and it has two — which is
+	// also why the schema guard must NOT filter on indpred IS NULL, as an earlier
+	// version did, since that excluded the one table with the bug.
+	//
+	// It is documentation ONLY, and the generic loops REFUSE an entry that
+	// declares one (see mergeChildStrategyError). That refusal is the point: the
+	// loops do not apply the predicate, so a partial-keyed table added to the
+	// generic path would get a collision check that ignores the index's WHERE
+	// clause and would therefore delete another profile's row — exactly the
+	// watch_progress bug, reintroduced. A review demonstrated that live. Both
+	// current predicate-bearing entries are bespoke, with the condition
+	// hand-written into their own SQL. If a generic table ever needs one, teach
+	// the loops to apply it FIRST; failing loudly beats a silent wrong answer.
+	keyPredicate string
+	// bespoke marks children the hand-written walk earlier in MergeMediaItems
+	// handles because they need more than a re-parent: the season/episode tree is
+	// recursed, and watch_progress is re-pointed per episode. Their keyCols are
+	// still declared here so the schema guard verifies them, but the generic loop
+	// skips them.
+	bespoke bool
+	// episodeCol is the column referencing tv_episodes, for mergeEpisodeChildren
+	// only. It is NOT uniform — most tables use episode_id but the recap tables
+	// use up_to_episode_id — and assuming otherwise raised "column episode_id
+	// does not exist" at runtime, caught by the behavioural test rather than by
+	// the compiler. TestMergeMediaItemsCoversEveryEpisodeChild checks each value
+	// against the actual foreign-key column in pg_constraint.
+	episodeCol string
+	why        string
+}
+
+// mergeChildren is every ON DELETE CASCADE child of media_items and what a merge
+// owes it. The generic loop in MergeMediaItems iterates this, so adding an entry
+// HANDLES the table rather than merely labelling it.
+//
+// TestMergeMediaItemsCoversEveryCascadeChild fails when the live schema has a
+// cascade child this list lacks or vice versa;
+// TestMergeMediaItemsKeyColumnsMatchTheSchema checks every keyCols/keyPredicate
+// against pg_index; and TestMergeMediaItemsPreservesUserDataOnEveryChild derives
+// its seed set from this list, so a new entry with no test row fails too.
+//
+// Only DIRECT children belong here. episode_files, for instance, cascades from
+// tv_episodes rather than media_items: it is re-parented with its episode by the
+// bespoke walk and is not this list's business. The guard reads the direct
+// children out of pg_constraint and rejects anything else, which is how
+// episode_files came off this list in the first place.
+var mergeChildren = []mergeChildStrategy{
+	// Bespoke: the catalog tree, and the progress and metadata hanging off it.
+	{table: "media_files", bespoke: true, why: "re-parented: the playable files are the point of the merge"},
+	{table: "tv_seasons", keyCols: []string{"season_number"}, bespoke: true, why: "re-parented: season tree is recursed"},
+	{table: "tv_episodes", bespoke: true, why: "re-parented: walked with its season"},
+	{table: "watch_progress", keyCols: []string{"user_id", "profile_id"}, keyPredicate: "episode_id IS NULL", bespoke: true, why: "re-parented per item and per episode: how far a person got"},
+	{table: "artwork", keyCols: []string{"art_type", "source", "remote_path"}, bespoke: true, why: "re-parented: posters/backdrops"},
+	{table: "media_cast", keyCols: []string{"person_id", "role_type", "character"}, bespoke: true, why: "re-parented: cast/crew"},
+	{table: "media_genres", keyCols: []string{"genre_id"}, bespoke: true, why: "re-parented via ON CONFLICT DO NOTHING"},
+	{table: "external_ids", keyCols: []string{"provider"}, bespoke: true, why: "re-parented via ON CONFLICT DO NOTHING"},
+
+	// Generic, collision-checked: what a person or an admin created.
+	{table: "watchlist_items", keyCols: []string{"watchlist_id"}, why: "a person put this on a list"},
+	{table: "collection_items", keyCols: []string{"collection_id"}, why: "an admin curated this collection"},
+	{table: "user_ratings", keyCols: []string{"profile_id"}, why: "a person's own star rating"},
+	{table: "item_feedback", keyCols: []string{"profile_id"}, why: "a person's like/dislike signal"},
+	{table: "taste_seeds", keyCols: []string{"profile_id"}, why: "onboarding taste picks feed the recommender"},
+	{table: "recently_surfaced_items", keyCols: []string{"profile_id", "surface"}, why: "suppresses re-showing the same title"},
+	// Also cascades from tv_episodes, so recaps on a duplicate episode the
+	// canonical already had are gone with that episode before this runs — inherent
+	// to collapsing two episode rows into one.
+	{table: "episode_recaps", keyCols: []string{"up_to_episode_id"}, why: "generated recaps cost LLM calls to rebuild"},
+	{table: "recap_conversations", keyCols: []string{"profile_id"}, why: "a person's recap Q&A thread; its turns are moved first"},
+
+	// Generic, no collision possible: media_item_id is in no unique index.
+	{table: "watch_parties", why: "re-parented: may be a LIVE room with participants in it"},
+	{table: "recommendation_impressions", why: "re-parented: recommender training/telemetry history"},
+	{table: "recommendation_watch_events", why: "re-parented: recommender outcome history"},
+}
+
+// mergeEpisodeChildren is every child of tv_episodes that must be re-pointed when
+// the merge collapses a duplicate episode into the canonical one, together with
+// what happens if it is not.
+//
+// The cascades lose the row outright; the SET NULLs are worse than they look. An
+// active watch party silently became a show with NO episode, and
+// internal/watchparty/rehydrate.go reads EpisodeID straight off that row at boot
+// — routine here, because the box auto-deploys.
+//
+// TestMergeMediaItemsCoversEveryEpisodeChild keys this off pg_constraint the same
+// way mergeChildren is keyed, so a new child of tv_episodes cannot drift in either.
+var mergeEpisodeChildren = []mergeChildStrategy{
+	{table: "episode_files", episodeCol: "episode_id", bespoke: true, why: "moved by the walk before the dup episode is deleted (CASCADE)"},
+	{table: "watch_progress", episodeCol: "episode_id", keyCols: []string{"user_id", "profile_id"}, keyPredicate: "episode_id IS NOT NULL", bespoke: true, why: "moved by the walk, per episode (CASCADE)"},
+	// Plain UPDATE, deliberately. Its key is (media_item_id, up_to_episode_id) and
+	// at this point the row's media_item_id is still the DUPLICATE's, so a
+	// collision check here could only ever compare the row against itself — a
+	// no-op that read like protection (a review caught it). The target pair
+	// (duplicateID, canonEpID) should be free, since canonEpID belongs to the
+	// canonical item — but that is a data-consistency expectation, not a
+	// constraint, so treat it as "fails loudly if wrong" rather than as
+	// arithmetic: a row pairing the duplicate item with a canonical episode would
+	// raise 23505 on this checked tx.Exec and roll the whole merge back, leaving
+	// both items in place. That is the right trade here. The genuine collision,
+	// against the canonical's own recap for that episode, is resolved by the
+	// mergeChildren pass afterwards, which is keyed correctly.
+	{table: "episode_recaps", episodeCol: "up_to_episode_id", why: "re-pointed; CASCADE would drop the generated recap"},
+	{table: "recommendation_watch_events", episodeCol: "episode_id", why: "re-pointed; CASCADE would drop the outcome history"},
+	{table: "watch_parties", episodeCol: "episode_id", why: "re-pointed; SET NULL would leave a live party on no episode"},
+	{table: "recap_conversation_turns", episodeCol: "up_to_episode_id", why: "re-pointed; SET NULL would lose which episode the turn was about"},
+}
+
+// mergeChildStrategyError reports a spec entry the generic loops cannot honour.
+// Called at the top of MergeMediaItems so a bad entry fails the first merge
+// loudly instead of quietly destroying rows.
+//
+// The refused shape is a non-bespoke entry carrying a keyPredicate: the loops
+// build their collision check from keyCols alone, so the partial index's WHERE
+// clause would be ignored and rows outside it treated as collisions and deleted.
+// TestMergeChildrenSpecIsHonourable pins the same rule statically.
+func mergeChildStrategyError(specs ...[]mergeChildStrategy) error {
+	for _, list := range specs {
+		for _, m := range list {
+			if m.bespoke || m.keyPredicate == "" {
+				continue
+			}
+			return fmt.Errorf(
+				"merge child %q declares keyPredicate %q but is not bespoke: the generic loop does not apply predicates, so its collision check would ignore the partial index and delete rows it does not cover",
+				m.table, m.keyPredicate)
+		}
+	}
+	return nil
+}
+
+// mergeChildPartialKeyError asks the LIVE schema whether any generic-path child
+// carries a PARTIAL unique index over the column that path re-writes, and refuses
+// the merge if one does.
+//
+// mergeChildStrategyError above catches only the DECLARED half of this hazard: an
+// entry that states a keyPredicate the generic loops cannot apply. The undeclared
+// half is the dangerous one and nothing caught it. A review registered a table
+// with a partial unique index and simply left keyPredicate blank; the spec then
+// looked complete, the loop built its collision check from keyCols alone, and the
+// merge DELETED a duplicate row the index does not even cover — the watch_progress
+// bug one door along, silent, at runtime.
+//
+// The spec cannot see that, by construction: partiality is a property of the
+// schema, not of the list. So the schema is asked, on every merge, and a
+// partial-keyed child cannot reach the generic path AT ALL — declared or not.
+// Teaching the loops to apply predicates is the fix if a table ever needs one.
+//
+// TestMergeMediaItemsKeyColumnsMatchTheSchema pins the same property, but it is an
+// integration test that skips without TEST_DATABASE_URL; this check runs wherever
+// the merge does.
+//
+// Refusing when the introspection query itself fails is deliberate. It runs before
+// the transaction, handleDuplicateMetadata logs and leaves both items in place, and
+// a schema we could not read is not a licence to run nineteen DELETEs. The query is
+// one round trip against the catalogs and is deliberately NOT cached: a merge is
+// rare (an enrichment collision), and a cache would answer from a schema that may
+// no longer be the one about to be modified.
+func (q *Queries) mergeChildPartialKeyError(ctx context.Context) error {
+	var tables, cols []string
+	// Entries with NO keyCols are checked too, deliberately. They take the plain
+	// UPDATE, which cannot delete anything — but a partial unique index on
+	// (media_item_id) alone would make that UPDATE raise 23505 and abort the
+	// merge, and more to the point the claim above is that a partial-keyed child
+	// cannot reach the generic path AT ALL. Filtering them out made the claim
+	// false for one shape; the check is a single round trip, so it covers both.
+	add := func(specs []mergeChildStrategy, colFor func(mergeChildStrategy) string) {
+		for _, m := range specs {
+			if m.bespoke {
+				continue
+			}
+			tables = append(tables, m.table)
+			cols = append(cols, colFor(m))
+		}
+	}
+	add(mergeChildren, func(mergeChildStrategy) string { return "media_item_id" })
+	add(mergeEpisodeChildren, func(m mergeChildStrategy) string { return m.episodeCol })
+	if len(tables) == 0 {
+		return nil
+	}
+
+	rows, err := q.pool.Query(ctx, `
+		SELECT spec.tbl, spec.col, pg_get_expr(i.indpred, i.indrelid)
+		FROM unnest($1::text[], $2::text[]) AS spec(tbl, col)
+		JOIN pg_class c ON c.relname = spec.tbl
+		JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+		JOIN pg_index i ON i.indrelid = c.oid
+		WHERE i.indisunique
+		  AND i.indpred IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1 FROM pg_attribute a
+		    WHERE a.attrelid = i.indrelid
+		      AND a.attnum = ANY(i.indkey)
+		      AND a.attname = spec.col
+		  )`, tables, cols)
+	if err != nil {
+		return fmt.Errorf("merge child partial-key check: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var table, col, pred string
+		if err := rows.Scan(&table, &col, &pred); err != nil {
+			return fmt.Errorf("merge child partial-key check: %w", err)
+		}
+		return fmt.Errorf(
+			"merge child %q has a PARTIAL unique index over %s with predicate %s, but is on the generic path: "+
+				"the generic collision check ignores the predicate and would delete rows the index does not cover. "+
+				"Handle it bespoke, or teach the generic loops to apply keyPredicate",
+			table, col, pred)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("merge child partial-key check: %w", err)
+	}
+	return nil
+}
+
+// repointEpisodeChildren moves the non-bespoke children of a duplicate episode
+// onto the canonical episode, before the duplicate episode is deleted.
+func repointEpisodeChildren(ctx context.Context, tx pgx.Tx, canonEpID, dupEpID int64) error {
+	for _, m := range mergeEpisodeChildren {
+		if m.bespoke {
+			continue
+		}
+		if m.episodeCol == "" {
+			return fmt.Errorf("mergeEpisodeChildren entry %q declares no episodeCol", m.table)
+		}
+		if len(m.keyCols) == 0 {
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`UPDATE %[1]s SET %[2]s = $1 WHERE %[2]s = $2`, m.table, m.episodeCol),
+				canonEpID, dupEpID); err != nil {
+				return fmt.Errorf("re-point %s: %w", m.table, err)
+			}
+			continue
+		}
+		conds := make([]string, 0, len(m.keyCols))
+		for _, c := range m.keyCols {
+			conds = append(conds, fmt.Sprintf("c.%[1]s = t.%[1]s", c))
+		}
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %[1]s t SET %[2]s = $1
+			 WHERE t.%[2]s = $2
+			   AND NOT EXISTS (
+			     SELECT 1 FROM %[1]s c
+			     WHERE c.%[2]s = $1 AND %[3]s
+			   )`, m.table, m.episodeCol, strings.Join(conds, " AND ")), canonEpID, dupEpID); err != nil {
+			return fmt.Errorf("re-point %s: %w", m.table, err)
+		}
+	}
+	return nil
 }
 
 // HasTMDBMetadata checks whether a media item already has TMDB metadata populated.
@@ -552,7 +959,64 @@ func (q *Queries) UpdateEpisodeMetadata(ctx context.Context, u *models.EpisodeMe
 	return err
 }
 
+// metadataProgressExpr is when an item last made metadata PROGRESS: the more
+// recent of "metadata was stored" (last_metadata) and "a provider was asked and
+// answered" (last_metadata_attempt, migration 059). Postgres GREATEST ignores
+// NULL operands and yields NULL only when every operand is NULL, so this is
+// NULL for exactly the never-touched items — which is what puts them at the
+// head of the queue under NULLS FIRST.
+//
+// Both the WHERE and the ORDER BY of GetStaleMetadataItems read this one
+// expression, as does FindMediaItemByTitle's Attempted flag, so the scanner and
+// the refresh queue cannot disagree about what "already dealt with" means.
+//
+// Sharing this constant with a test does NOT pin that the production query uses
+// it — a test that builds its own predicate from the constant stays green when
+// the query body is changed to something else, which is the "a case must fail
+// for the RIGHT reason" trap from the check-library-paths post-mortem. The
+// rotation is therefore pinned end-to-end, through GetStaleMetadataItems itself,
+// by TestGetStaleMetadataItemsRotatesPastAttemptedItems.
+// metadataProgressFor is where that expression is WRITTEN — once. An earlier
+// version had a second literal copy for the aliased form while its comment
+// claimed there was only one definition, so a change to the constant would have
+// left the qualified copy silently behind.
+func metadataProgressFor(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return fmt.Sprintf("GREATEST(%[1]slast_metadata, %[1]slast_metadata_attempt)", alias)
+}
+
+var metadataProgressExpr = metadataProgressFor("")
+
 // GetStaleMetadataItems returns items whose metadata is older than maxAge or was never fetched.
+//
+// Ordering and selection go through metadataProgressExpr rather than
+// last_metadata alone. Ordering on last_metadata meant an item no provider has
+// an entry for — last_metadata NULL for ever, because UpdateMediaMetadata is
+// never reached for it — held a permanent place at the head of a
+// NULLS-FIRST-ordered LIMIT 100. Once a library accumulated 100 such items the
+// refresh pass re-read the same 100 on every tick and no other item in the
+// catalog was ever refreshed again. Counting the ATTEMPT as progress lets those
+// items fall back into the normal maxAge rotation.
+//
+// Every nullable column in the projection is COALESCEd. media_items.year,
+// overview, rating, runtime_minutes and content_rating are all nullable, while
+// the models.MediaItem fields they land in are plain int/string/float64 — so a
+// single row with any one of them NULL failed the whole query ("cannot scan NULL
+// into *int") and RefreshStaleMetadata returned an error having enriched
+// NOTHING. Because un-enriched rows sort FIRST here, one such row at the head of
+// the queue disabled metadata refresh for the entire catalog, permanently and
+// silently.
+//
+// No current application write path produces those NULLs — UpsertMediaItem
+// inserts the Go zero values (0 / "") and UpdateMediaMetadata only ever sets
+// fields it has values for — so this is latent robustness rather than the proven
+// cause of #510. It stops being latent as soon as anyone touches the catalog
+// with hand-written SQL, which this repo's own runbooks prescribe
+// (docs/moving-media-paths.md) and which is exactly how #510 was remediated.
+// The zero values are already the codebase's "unknown" sentinels for these
+// fields (all are omitempty, and the enricher writes year back via nilIfZero).
 func (q *Queries) GetStaleMetadataItems(ctx context.Context, maxAge time.Duration) ([]*models.StaleMediaItem, error) {
 	cutoff := time.Now().Add(-maxAge)
 	rows, err := q.pool.Query(ctx, `
@@ -561,8 +1025,8 @@ func (q *Queries) GetStaleMetadataItems(ctx context.Context, maxAge time.Duratio
 		       COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
 		       added_at, updated_at, tmdb_id, last_metadata
 		FROM media_items
-		WHERE last_metadata IS NULL OR last_metadata < $1
-		ORDER BY last_metadata ASC NULLS FIRST
+		WHERE `+metadataProgressExpr+` IS NULL OR `+metadataProgressExpr+` < $1
+		ORDER BY `+metadataProgressExpr+` ASC NULLS FIRST, id ASC
 		LIMIT 100`, cutoff)
 	if err != nil {
 		return nil, err
@@ -582,11 +1046,118 @@ func (q *Queries) GetStaleMetadataItems(ctx context.Context, maxAge time.Duratio
 	return items, rows.Err()
 }
 
+// UnattemptedShow is a show whose enrichment has never been attempted, together
+// with one of its episode file paths so the caller can still find a sibling .nfo.
+type UnattemptedShow struct {
+	Item     *models.MediaItem
+	FilePath string
+}
+
+// GetUnattemptedShowsForLibrary returns the library's shows that have made no
+// metadata progress at all — neither stored nor attempted — and that still have
+// at least one episode file on record.
+//
+// This exists because the scanner's per-file path could not reach them. processFile
+// returns early when a file's hash is unchanged, BEFORE it consults
+// FindMediaItemByTitle, and the #510 state is precisely "every episode file was
+// recorded and flushed, then the deferred enrichment pass was cancelled" — so on
+// the next scan every file is unchanged and the enrichment latch is never
+// evaluated. The latch was therefore unreachable in the exact state it was written
+// for unless the show happened to gain a new or modified file. A round-5 review
+// caught that; ScanLibrary now asks this question once per scan instead.
+//
+// The EXISTS clause matters: a show with no episode files is swept by
+// DeleteEmptyMediaItems on the next scan that walks cleanly and discovers
+// anything, so enriching it would spend provider calls on a row that is going
+// away. (That sweep runs in phase 1c, BEFORE this query — so such a row is one
+// scan from removal, not already gone.) The predicate here mirrors
+// DeleteEmptyMediaItems' own.
+//
+// limit is MANDATORY and bounds the provider cost of one sweep. The selection is
+// "no metadata PROGRESS", and the attempt stamp is (correctly) gated on the
+// provider having answered, so a show whose enrichment reliably ERRORS never
+// acquires progress and is eligible on every scan for ever — an invalid TMDB key
+// puts every show in a library in that class. Unbounded, that hands back exactly
+// the per-scan search-plus-retry-plus-embed cost the progress latch exists to
+// avoid, and hands it back for all scans rather than only scans that bring a
+// file. ORDER BY mi.id makes WHICH shows a bounded sweep covers deterministic,
+// the same trade GetStaleMetadataItems' tiebreaker makes.
+func (q *Queries) GetUnattemptedShowsForLibrary(ctx context.Context, libraryID int64, limit int) ([]UnattemptedShow, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("get unattempted shows: limit must be positive, got %d", limit)
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT mi.id, mi.library_id, mi.type, mi.title, mi.sort_title, COALESCE(mi.year, 0),
+		       COALESCE((
+		         SELECT ef.path FROM episode_files ef
+		         JOIN tv_episodes te ON te.id = ef.episode_id
+		         WHERE te.media_item_id = mi.id
+		         ORDER BY ef.id LIMIT 1
+		       ), '')
+		FROM media_items mi
+		WHERE mi.library_id = $1
+		  AND mi.type = 'show'
+		  AND `+metadataProgressFor("mi")+` IS NULL
+		  AND EXISTS (
+		    SELECT 1 FROM tv_episodes te
+		    JOIN episode_files ef ON ef.episode_id = te.id
+		    WHERE te.media_item_id = mi.id
+		  )
+		ORDER BY mi.id
+		LIMIT $2`, libraryID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get unattempted shows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UnattemptedShow
+	for rows.Next() {
+		item := &models.MediaItem{}
+		var path string
+		if err := rows.Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title,
+			&item.SortTitle, &item.Year, &path); err != nil {
+			return nil, fmt.Errorf("scan unattempted show: %w", err)
+		}
+		out = append(out, UnattemptedShow{Item: item, FilePath: path})
+	}
+	return out, rows.Err()
+}
+
 // TouchLastMetadata bumps the last_metadata timestamp for an item without changing any data.
 // Used by smart diffing when TMDB reports no changes since last fetch.
 func (q *Queries) TouchLastMetadata(ctx context.Context, mediaItemID int64) error {
 	_, err := q.pool.Exec(ctx,
 		`UPDATE media_items SET last_metadata = NOW() WHERE id = $1`, mediaItemID)
+	return err
+}
+
+// TouchMetadataAttempt records that a provider was asked about this item and
+// answered, whether or not the answer contained a usable match.
+//
+// It deliberately does NOT touch last_metadata: that column means "metadata was
+// stored", and RefreshStaleMetadata's smart diffing hands it to TMDB's changes
+// API, which is only meaningful for an item that really was matched. The two
+// facts are combined at read time by metadataProgressExpr.
+//
+// Only the SEARCH-based path (Enricher.EnrichMediaItem) stamps this. A failure
+// to reach the provider at all must NOT be recorded as an attempt, or one TMDB
+// outage during a scan would defer every item it touched by a full refresh
+// interval.
+//
+// Updates zero rows, without error, when the item has just been merged away by
+// handleDuplicateMetadata — the canonical row survives carrying its own
+// last_metadata, so nothing is owed. That is the same no-op the SetMatchStatus
+// calls beside the stamp have always performed on that path.
+//
+// The one case where it is not harmless: handleDuplicateMetadata swallows a
+// FAILED MergeMediaItems and still reports the duplicate as handled, so the
+// surviving row gets stamped attempted with nothing stored. The scanner's latch
+// then leaves it alone permanently and only the refresh rotation can reach it.
+// Pre-existing stranding, newly reachable now that the latch consults attempts;
+// recorded in CLAUDE.md's known limits.
+func (q *Queries) TouchMetadataAttempt(ctx context.Context, mediaItemID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE media_items SET last_metadata_attempt = NOW() WHERE id = $1`, mediaItemID)
 	return err
 }
 
@@ -1461,6 +2032,13 @@ func (q *Queries) GetMediaGenres(ctx context.Context, mediaItemID int64) ([]stri
 }
 
 // GetMediaItemEnriched returns a media item with all TMDB-enriched fields.
+//
+// The five nullable columns are COALESCEd for the same reason as everywhere else
+// in this package: they land in non-nullable models.MediaItem fields, so one NULL
+// fails the whole query. This one is reachable — MetadataHandler.GetEnriched calls
+// it on any authenticated request and returns a bare 500 — and it sits directly
+// beside GetMediaItem, which was fixed first. A round-5 review found it after six
+// others had been done, which is the "assume adjacent, not novel" lesson again.
 func (q *Queries) GetMediaItemEnriched(ctx context.Context, id int64) (*models.MediaItemEnriched, error) {
 	row := q.pool.QueryRow(ctx, `
 		SELECT id, library_id, type, title, sort_title,

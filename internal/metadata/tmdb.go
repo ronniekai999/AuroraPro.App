@@ -56,6 +56,13 @@ type TMDBClient struct {
 	apiKey     string
 	language   string // ISO 639-1 language code, e.g. "en", "de", "ja"
 	httpClient *http.Client
+	// baseURL defaults to tmdbBaseURL and exists so in-package tests can point the
+	// client at an httptest server (they assign it directly; there is deliberately
+	// no production setter). Unexported and written only by NewTMDBClient, so it is
+	// not admin- or config-reachable: the real base URL stays a compile-time
+	// constant, keeping the same discipline as the per-host-key rule in CLAUDE.md's
+	// LLM section.
+	baseURL string
 
 	// Token-bucket rate limiter
 	mu        sync.Mutex
@@ -72,6 +79,7 @@ func NewTMDBClient(apiKey, language string) *TMDBClient {
 	return &TMDBClient{
 		apiKey:   apiKey,
 		language: language,
+		baseURL:  tmdbBaseURL,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -122,7 +130,11 @@ func (c *TMDBClient) get(ctx context.Context, path string, params url.Values) ([
 		params.Set("language", c.language)
 	}
 
-	reqURL := fmt.Sprintf("%s%s?%s", tmdbBaseURL, path, params.Encode())
+	base := c.baseURL
+	if base == "" {
+		base = tmdbBaseURL
+	}
+	reqURL := fmt.Sprintf("%s%s?%s", base, path, params.Encode())
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {

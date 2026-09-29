@@ -231,8 +231,146 @@ retry:
   not deletion evidence.
 - Fix `episode_files ... ON CONFLICT ... episode_id = EXCLUDED.episode_id`
   separately first; quick-hash changes can otherwise re-parent episodes.
-- Preserve NULL-year handling in `FindMediaItemByTitle` before relying on it.
+- `FindMediaItemByTitle` no longer projects `year` at all — its projection was
+  narrowed to the four columns the scanner reads — so the NULL-year scan error
+  is gone without the upsert's `COALESCE(year, 0)` keying moving. Re-check that
+  before relying on it.
 - Use `docs/moving-media-paths.md` for the current manual procedure.
+
+### Merging duplicate media items
+
+`MergeMediaItems` ends in `DELETE FROM media_items WHERE id = duplicate`, and
+`media_items` has 19 `ON DELETE CASCADE` children. Anything not re-parented
+first is destroyed silently. It handled 8; the other 11 arrived in later
+migrations. Code in `internal/db/queries_phase2.go`, tests in
+`queries_merge_children_test.go` (all `TEST_DATABASE_URL`-gated).
+
+- `mergeChildren` DRIVES the generic loop. A classification that does not cause
+  handling is a comment, and a list used only as a cross-check was defeated by
+  adding one line. `bespoke: true` is the one shape the loop does not handle, so
+  the behavioural test seeds a row for all 19 including those.
+- A collision key is the FULL unique key minus `media_item_id`. A partial key
+  does not error; it judges another profile's or parent's row a collision and
+  deletes it. Got wrong twice — `recently_surfaced_items`, and `watch_progress`
+  on both the item and episode paths, which destroyed a kid profile's history.
+- A partial-keyed child cannot reach the generic path, declared or not.
+  `mergeChildStrategyError` refuses a declared `keyPredicate`;
+  `mergeChildPartialKeyError` asks the live schema on every merge and refuses an
+  undeclared one, including when the introspection query itself fails. The
+  schema-reading test is not enough — it does not run where the merge does.
+- Three drift guards (`media_items`, `tv_episodes`, `tv_seasons`), all covering
+  CASCADE and SET NULL. The SET NULLs are the nastier half: a stripped
+  `watch_parties.episode_id` leaves a live room on no episode, and
+  `internal/watchparty/rehydrate.go` reads it at boot.
+- `episodeCol` is data, pinned against `pg_constraint`: the recap tables use
+  `up_to_episode_id`, not `episode_id`.
+- `episode_recaps` is re-pointed with a plain UPDATE because a collision check
+  there can only compare the row against itself. The target pair being free is a
+  data expectation, not a constraint — violated, it raises 23505 and rolls the
+  merge back. `recap_conversations` is a container: its turns move first, or the
+  empty survivor's win destroys a person's whole Q&A thread.
+- A self-merge is a no-op. Without the guard every collision check matches the
+  row against itself, nothing moves, and the DELETEs strip the item's own data.
+- Added statements return their errors; the pre-existing ones swallow them. On
+  abort, both items are left in place, which beats destroying data.
+- `mergeRecapConversationChildren` moves turns onto the surviving conversation
+  for the SAME profile. Drop that one predicate and the join has two candidates
+  and picks arbitrarily, so one person's private Q&A lands in another's — a
+  disclosure, not a misplacement. A review showed the single-profile test could
+  not see it, and a two-profile test that relies on which candidate Postgres
+  picks is a coin toss; the pinning test gives the OTHER profile the only
+  canonical conversation, so the wrong answer is the only one available.
+- Known gaps: recaps on a colliding duplicate EPISODE still die with it;
+  `watch_parties.media_title`/`media_poster` stay denormalized;
+  `handleDuplicateMetadata` swallows a merge error and reports the duplicate
+  handled — including a refusal from `mergeChildPartialKeyError`, so a
+  transient catalog-read failure stamps the surviving duplicate as attempted
+  and leaves it to the rotation; nothing locks the duplicate row, so a
+  concurrently inserted child is still cascaded away; `media_cast`'s
+  nullable-`character` check over-keeps; the recap move's `NOT EXISTS` de-dup
+  is unpinned (without it a repeated `request_id` raises 23505 and rolls the
+  merge back, so it fails loudly).
+
+### Enrichment recovery for never-attempted items (issue #510, migration 059)
+
+A TV show whose row exists but whose enrichment never ran used to be permanently
+stuck: the deferred TV pass runs after `wg.Wait()`, abandons its queue on
+`ctx.Err()`, and `scanContext()` hands it the server lifecycle context, so any
+restart mid-scan produces the state.
+
+- `metadataProgressExpr` = `GREATEST(last_metadata, last_metadata_attempt)` is
+  the one definition of "already dealt with"; the aliased form comes from the
+  same `metadataProgressFor`. `last_metadata` means STORED, the attempt column
+  means ASKED AND ANSWERED. Do not collapse them: the refresh queue's smart diff
+  hands `last_metadata` to TMDB's changes API.
+- The attempt stamp is gated on `err == nil`. Stamping failures would let one
+  outage defer every item it touched by a refresh interval.
+- Two recovery paths divide the work FOR SHOWS: the scanner sweeps rows never
+  attempted, the rotation owns everything already attempted. Movies reach the
+  same state and are recovered by the rotation alone.
+- The sweep runs ONCE PER SCAN, not from the per-file path. `processFile`
+  returns early on an unchanged hash, and the #510 state is exactly "every file
+  recorded, then the deferred pass cancelled" — so the per-file latch is
+  unreachable there. Keep both; the latch covers a show that gains files first.
+- The sweep is bounded twice: a mandatory positive `limit` (100) and a
+  per-library interval (1h, process-local). Selection is "no progress" while the
+  stamp needs an answer, so a reliably ERRORING show stays eligible for ever —
+  unbounded, an invalid TMDB key re-searched and re-embedded the whole library
+  on every fsnotify-triggered scan. The limit also stops a scan-unrelated sweep
+  starving the episode backfills that run after it.
+- Exclude shows with no episode files: `DeleteEmptyMediaItems` (phase 1c, before
+  the sweep) removes them on the next clean scan.
+- A show that matched nothing reads as `match_status='matched'` with a NULL
+  `tmdb_id`, so it is invisible to `GetItemsNeedingReview` and the AI re-match
+  backfill. The rotation is its only path; do not cite that pipeline instead.
+- Sharing `metadataProgressExpr` with a test does not pin that the query uses
+  it. The rotation is pinned end-to-end through `GetStaleMetadataItems`, the
+  stamp gate behaviourally against a fake TMDB (the test assigns the unexported
+  `tmdb.baseURL`; there is no exported seam), and the sweep by real
+  `ScanLibrary` runs — deleting the sweep block used to fail no test anywhere.
+- The sweep runs LAST in the deferred pass, after the per-file fulls AND the
+  episode backfills, and is kept in its own slice to make that true. It is the
+  one part not derived from the scan's delta, and a backfill is only ever
+  signalled in the scan that FIRST sees the file — so a cancellation during a
+  sweep queued ahead of them dropped a signal that is never raised again. The
+  rotation is only a PARTIAL net for that: its smart diffing skips a show
+  outright when it has a `last_metadata` and a `tmdb_id` and TMDB reports no
+  upstream change, and a locally added file is not one — so for the MATCHED
+  class, which is the common one, those episodes stay bare permanently. Not
+  every backfill-eligible show: eligibility is `Attempted`, which is either
+  progress column, so an asked-and-unmatched show has both NULL and the rotation
+  does re-enrich it.
+  The sweep's shows cannot also hold a backfill entry (a backfill needs the row
+  ATTEMPTED, the sweep selects rows that are not, and progress only moves
+  forwards), so the ordering costs no redundant pass.
+  `TestScanLibraryRunsTheRecoverySweepAfterTheEpisodeBackfills` pins it; moving
+  the loop back to the front left the whole suite green.
+- The sweep's rate limit is claimed under `requeueMu`, and that exclusivity is
+  pinned through `Scanner.testHookInRequeueClaim` rather than by racing
+  goroutines. A 16-goroutine stress test passed EVERY run with the mutex deleted
+  at `GOMAXPROCS=1`, `-race` included — the detector is right to stay quiet,
+  since `sync.Map` is race-safe and this is a logical check-then-set — so a
+  guard can survive its own mutation entirely on a single-CPU runner. The hook
+  is a FIELD, not a package variable: as a global it fired for every `Scanner`,
+  and a `t.Parallel()` anywhere in the package turned it into a false failure
+  whose second "caller" was an unrelated `ScanLibrary` holding the mutex.
+- Known gaps: deterministically erroring items are bounded, not fixed, and the
+  process-local interval re-arms on every deploy; a scan and the background
+  refresh can enrich one row concurrently with nothing serialising them — and
+  the two queues now select the SAME rows in the same order by construction
+  (`NULLS FIRST` puts the no-progress set at the rotation's head, `id ASC`
+  orders it, and the sweep uses the same predicate and `ORDER BY id`), so for a
+  single-library install the overlap is the common case rather than a
+  coincidence; `enrichSeasons`' error is discarded, so a show whose episode pass
+  failed is still stamped attempted and the scanner latch then excludes it; a
+  failed merge strands a row; `UpdateMediaMetadata` always stamps
+  `last_metadata`, so the admin refresh endpoint can write a stored-claim for an
+  unmatchable show; `tv_episodes` has no index on `media_item_id` and the sweep
+  query joins on it twice (pre-existing shape, amortised by the hourly limit);
+  and the sweep claims its rate-limit slot up front but now does its work last,
+  so a scan cancelled before reaching it has spent the interval for nothing —
+  bounded only by the slot being process-local, so the restart that caused the
+  cancellation re-arms it.
 
 ### Nullable database columns
 

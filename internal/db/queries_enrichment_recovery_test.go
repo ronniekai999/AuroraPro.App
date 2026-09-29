@@ -243,6 +243,14 @@ func TestSingleItemReadsSurviveNullColumns(t *testing.T) {
 	}
 	assertUnknownSentinels(t, "GetMediaItem", item)
 
+	// FindMediaItemByTitle no longer projects the nullable columns at all: the
+	// #510 enrichment work narrowed it to the four fields the scanner reads
+	// (id, added_at, updated_at, and whether the row has made metadata progress),
+	// which removes this defect class from that query by construction rather than
+	// by COALESCE. There are therefore no sentinels to assert here — the property
+	// that remains is that an all-NULL row does not fail the lookup, and that is
+	// covered by TestFindMediaItemByTitleHandlesNullYear in
+	// queries_enrichment_latch_test.go.
 	byTitle, err := q.FindMediaItemByTitle(ctx, lib, "movie", token)
 	if err != nil {
 		t.Fatalf("FindMediaItemByTitle: %v", err)
@@ -250,7 +258,6 @@ func TestSingleItemReadsSurviveNullColumns(t *testing.T) {
 	if byTitle == nil {
 		t.Fatal("FindMediaItemByTitle returned no row for the fixture")
 	}
-	assertUnknownSentinels(t, "FindMediaItemByTitle", byTitle)
 
 	enriched, err := q.GetMediaItemEnriched(ctx, id)
 	if err != nil {

@@ -927,6 +927,10 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	}
 	offset := (page.Page - 1) * page.PerPage
 
+	// The nullable columns are handled INSIDE dedupCTE, which COALESCEs and
+	// aliases them; this projection reads those aliases, so it needs no second
+	// COALESCE. A branch of the #510 work briefly added one here and it was pure
+	// noise — see the NULL-scan section in CLAUDE.md, which states the rule.
 	dataQuery := dedupCTE + fmt.Sprintf(
 		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, d.year,
 		        d.overview, d.rating, d.runtime_minutes, d.content_rating,
@@ -963,32 +967,62 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 	return items, total, nil
 }
 
+// FoundMediaItem is the narrow projection FindMediaItemByTitle returns: the
+// identity fields the scanner needs to adopt an existing row, plus whether that
+// row has ever actually had metadata written to it.
+//
+// Deliberately NOT models.MediaItem: the scanner only ever reads
+// ID/AddedAt/UpdatedAt off this result, so the wide projection was carrying
+// eleven columns nobody looked at, and every one of them a column this query
+// then had to keep NULL-safe.
+//
+// It is NOT the fix for the NULL-year scan error. That was already closed on the
+// base branch, by COALESCEing the wide projection; narrowing it removes the
+// columns rather than the NULLs, and nothing about UpsertMediaItem's
+// COALESCE(year, 0) keying moves either way. Do not read this as a second fix
+// for the same bug — an earlier version of this comment did, and stating a
+// defect the code never had is how the next reader mis-reasons about it.
+type FoundMediaItem struct {
+	ID        int64
+	AddedAt   time.Time
+	UpdatedAt time.Time
+	// Attempted reports whether this row has ever made metadata PROGRESS:
+	// either metadata was stored (last_metadata) or a provider was asked and
+	// answered (last_metadata_attempt). It reads the same metadataProgressExpr
+	// the refresh queue orders on, so the scanner and the queue cannot disagree
+	// about what "already dealt with" means.
+	//
+	// "Stored" alone would be the wrong test. It cannot distinguish "enrichment
+	// never ran" — the #510 state, which must be re-queued — from "enrichment
+	// ran and no provider has an entry for this title", which must NOT be, or
+	// every scan that brings a file re-pays a TMDB search, a TVDB search, an
+	// embed and possibly an LLM re-match for a show that will never match.
+	// Progress covers both: a scan interrupted before its deferred TV pass
+	// leaves BOTH columns NULL, so the #510 rows still recover, while an
+	// answered-but-unmatched show is left to the refresh queue's rotation.
+	Attempted bool
+}
+
 // FindMediaItemByTitle finds an existing media item by (library_id, type, title)
 // regardless of year. Used by the scanner under the per-show lock to resolve the
 // canonical item even after enrichment has changed its year (which breaks the
 // UpsertMediaItem ON CONFLICT path that includes COALESCE(year, 0)).
 // Returns nil, nil if no matching item exists.
-func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*models.MediaItem, error) {
-	item := &models.MediaItem{}
+func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*FoundMediaItem, error) {
+	found := &FoundMediaItem{}
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
-		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
-		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, added_at, updated_at, `+metadataProgressExpr+` IS NOT NULL
 		 FROM media_items WHERE library_id = $1 AND type = $2 AND title = $3
 		 ORDER BY id ASC LIMIT 1`,
 		libraryID, mediaType, title,
-	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
-		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
-		&item.PosterPath, &item.BackdropPath,
-		&item.AddedAt, &item.UpdatedAt,
-	)
+	).Scan(&found.ID, &found.AddedAt, &found.UpdatedAt, &found.Attempted)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find media item by title: %w", err)
 	}
-	return item, nil
+	return found, nil
 }
 
 func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem, error) {
@@ -1244,6 +1278,16 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 	// Cross-library deduplication: same DISTINCT ON pattern as GetMediaItems.
 	// Among duplicates sharing a tmdb_id, pick the item with the richest
 	// metadata, then order the deduped set by added_at DESC.
+	//
+	// The nullable columns are COALESCEd and aliased inside the CTE below, so the
+	// outer SELECT reads those aliases and needs no second COALESCE. One lesson
+	// from finding this query's NULL defect is worth keeping, though: with a
+	// single all-NULL row present this was the only query in the SUITE that
+	// broke, and that was briefly mistaken for evidence that the others were
+	// unreachable. A test sweep is not a reachability argument.
+	//
+	// The richness CASEs below read the raw columns and each already collapses
+	// NULL and zero identically, so ranking is unaffected either way.
 	//
 	// m.type is part of the dedup key because TMDB's movie and TV id spaces are
 	// INDEPENDENT: movie 100 and tv 100 both exist and are unrelated titles.

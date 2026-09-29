@@ -675,13 +675,32 @@ func main() {
 		embedItem(ctx, item)
 	}
 
-	// New episode files added to an already-matched show skip the full
-	// enrichment path (the canonical row exists), so their episode rows would
-	// never receive TMDB titles/overviews/stills. The backfill reuses the
-	// show's existing tmdb match and re-runs only the season/episode pass.
-	// Unmatched shows are intentionally left alone — they are already in the
-	// flagged/needs_review pipeline, and re-searching TMDB on every
-	// incremental scan would churn their match state.
+	// New episode files added to a show that has already been enriched OR
+	// attempted skip the full enrichment path, so their episode rows would never
+	// receive TMDB titles/overviews/stills. The backfill reuses the show's
+	// existing tmdb match and re-runs only the season/episode pass.
+	//
+	// Shows that were attempted and matched nothing are intentionally left to
+	// this path: re-searching TMDB on every incremental scan would churn their
+	// match state and re-pay a search and an embed for a title no provider has an
+	// entry for. Recovering those is the periodic RefreshStaleMetadata rotation's
+	// job — and it is their ONLY recovery path, which is worth being precise
+	// about because it is easy to assume otherwise:
+	//
+	// A show whose best candidate scored below MATCH_REVIEW_THRESHOLD (or that
+	// returned no results at all) gets no SetMatchStatus write, and
+	// media_items.match_status DEFAULTs to 'matched' (migration 007) while
+	// UpsertMediaItem never sets it. So it reads as 'matched' with a NULL
+	// tmdb_id: invisible to GetItemsNeedingReview and to the AI re-match backfill,
+	// both of which filter on match_status = 'needs_review'. There is no
+	// flagged/needs_review safety net for this class. The rotation is it.
+	//
+	// A show never attempted at all is a different case and IS re-queued for a
+	// full pass by the scanner: that is the state a scan interrupted before its
+	// deferred TV enrichment leaves behind, and before #510 it was permanent.
+	// Note that re-queue happens once per scan in ScanLibrary, not from the
+	// per-file path — processFile returns early on an unchanged hash, and in that
+	// state every file IS unchanged.
 	scanner.OnEpisodeBackfill = func(ctx context.Context, item *models.MediaItem, seasons []int) {
 		matched, err := enricher.BackfillEpisodeMetadata(ctx, item.ID, seasons)
 		if err != nil {

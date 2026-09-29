@@ -23,13 +23,45 @@ import (
 
 const batchFlushSize = 100
 
+// requeueUnattemptedLimit caps how many never-attempted shows one scan re-queues
+// for a full enrichment pass, and requeueSweepInterval caps how often a library is
+// swept at all. Both bound the same hazard, from different directions.
+//
+// The sweep selects shows with no metadata PROGRESS, and the attempt stamp is
+// gated on the provider having ANSWERED (see Enricher.EnrichMediaItem — stamping a
+// failure would let one TMDB outage defer the whole catalog by a refresh
+// interval). So a show whose enrichment reliably ERRORS never acquires progress
+// and stays eligible for ever. With an absent or invalid TMDB key that is EVERY
+// show in the library. Each eligible show costs up to a TMDB search plus a
+// year-less retry — those with tmdb.go's 4 attempts and ~7s of backoff on
+// network errors, 429 and 5xx — a TVDB search where TVDB is enabled, and an
+// unconditional embed, because cmd/aurora's OnNewItem calls embedItem whether or
+// not enrichment errored. The invalid-key headline is the CHEAPEST member of the
+// class, not the worst: a 401 returns at once and enrichShow gives up on the
+// first search error, so neither the year-less retry nor the TVDB fallback runs
+// and the embed is the expensive half. The unreachable-provider and sustained-429
+// cases are where the retries and backoff actually land. The watcher fires on fsnotify
+// with a 30-second dedup window, so an *arr-fed library can scan every ~30s: left
+// unbounded this re-searched and re-embedded a whole library, continuously. That
+// is precisely the cost the per-file latch's own comment gives as the reason to
+// read PROGRESS rather than STORED, so handing it back here would have undone the
+// thing it was added to protect.
+//
+// 100 matches GetStaleMetadataItems' window, and clears the 80-show library that
+// produced #510 in a single sweep.
+const (
+	requeueUnattemptedLimit = 100
+	requeueSweepInterval    = time.Hour
+)
+
 type pendingEnrichItem struct {
 	item     *models.MediaItem
 	filePath string
-	// episodeBackfillOnly marks a show whose canonical row already existed
-	// (so full enrichment is skipped) but which gained new episode files this
-	// scan. Only the episode-level metadata pass runs for these — otherwise
-	// episodes added to an already-enriched show stay bare forever.
+	// episodeBackfillOnly marks a show whose canonical row already existed AND
+	// had already been enriched or attempted (so full enrichment is skipped) but
+	// which gained new episode files this scan. Only the episode-level metadata
+	// pass runs for these — otherwise episodes added to an already-enriched show
+	// stay bare forever.
 	episodeBackfillOnly bool
 	// season is the season number of the new episode file (backfill entries
 	// only). Collected per show so the backfill fetches just the touched
@@ -59,6 +91,30 @@ func addPendingBackfill(m map[int64]*episodeBackfillEntry, item *models.MediaIte
 	}
 }
 
+// addPendingFull appends a full-enrichment signal, at most once per show.
+// Returns the (possibly unchanged) slice. Caller holds the map's lock.
+//
+// Deduping here mirrors addPendingBackfill, and became necessary when the
+// enrichment latch moved from "does this row exist" to "has this row made
+// metadata progress": a show not yet attempted now takes the full-enrichment
+// branch for EVERY one of its new files, where previously only the file that
+// created the row could. enrichNewItem would dedup them anyway via
+// s.enrichedItems, but the slice would otherwise grow one entry per file
+// (thousands on a large library) and the "enriching TV shows full=N" log would
+// count files rather than shows.
+//
+// Keeping the FIRST entry per show is deliberate, not incidental: enrichNewItem
+// reads that entry's filePath to find a sibling .nfo (FindNFO), so first-wins
+// preserves the pre-change behaviour of consulting the .nfo beside the file that
+// created the row.
+func addPendingFull(seen map[int64]struct{}, pending []*pendingEnrichItem, p *pendingEnrichItem) []*pendingEnrichItem {
+	if _, dup := seen[p.item.ID]; dup {
+		return pending
+	}
+	seen[p.item.ID] = struct{}{}
+	return append(pending, p)
+}
+
 // sortedSeasons returns the entry's touched seasons in ascending order.
 func (e *episodeBackfillEntry) sortedSeasons() []int {
 	out := make([]int, 0, len(e.seasons))
@@ -86,6 +142,51 @@ type Scanner struct {
 	// Stored as an atomic pointer so that resetting between scans is safe even when
 	// a concurrent scan of a different library has workers still reading the old map.
 	enrichedItems atomic.Pointer[sync.Map]
+
+	// requeueSweptAt records when each library was last swept for shows whose
+	// enrichment never ran, so the sweep is rate-limited rather than run on every
+	// scan (see requeueSweepInterval). Process-local by design: it is a recovery
+	// sweep, and a restart re-arming it is the behaviour a restart should have,
+	// since an interrupted scan is exactly what a restart causes.
+	requeueSweptAt sync.Map // map[int64]time.Time
+
+	// requeueSweepEvery is requeueSweepInterval, overridable in tests.
+	requeueSweepEvery time.Duration
+
+	// testHookInRequeueClaim, when non-nil, runs inside dueForRequeueSweep's
+	// critical section, between reading the previous sweep time and writing the
+	// new one. Nil in production; one nil-compare per sweep.
+	//
+	// It is a FIELD, not a package variable, because dueForRequeueSweep is a
+	// method and the test drives one Scanner: as a global it fired for every
+	// Scanner in the process, and a review showed that a `t.Parallel()` on any
+	// other test in this package turned the exclusivity test into a FALSE FAILURE
+	// — the second "caller" in its claim window was an unrelated ScanLibrary,
+	// which then blocked holding requeueMu. Scoping it removes that, and removes a
+	// mutable global from a production file.
+	//
+	// The seam exists because this property cannot be tested by racing goroutines
+	// and hoping. A review deleted the mutex and ran a 16-goroutine, 200-round
+	// stress test: it passed every run at GOMAXPROCS=1 with and without -race (the
+	// race detector is right to stay quiet — sync.Map is race-safe and this is a
+	// logical check-then-set, not a data race), and still passed a substantial
+	// fraction of runs on four cores. Rates vary by machine; the load-bearing part
+	// is that a guard can survive its own mutation entirely on a single-CPU runner.
+	// The hook lets the test interleave two callers deterministically instead, the
+	// way tmdb.baseURL lets the enricher test drive a fake provider.
+	testHookInRequeueClaim func()
+
+	// requeueMu makes dueForRequeueSweep's check-and-claim atomic. sync.Map has no
+	// compare-and-swap for this shape, and ScanLibrary does not itself enforce
+	// TryStartScan, so two scans of one library could otherwise both claim the
+	// slot and both sweep. Every call site today DOES take TryStartScan first
+	// (cmd/aurora, the two media handlers and the request handler — the watcher
+	// reaches ScanLibrary through cmd/aurora's onChange closure, not directly), so
+	// this is a defensive leaf lock rather than a fix for a live race. An earlier
+	// version of this comment claimed the watcher called ScanLibrary directly; it
+	// does not, and a wrong reachability claim in a comment is the thing this
+	// repo's ledger warns about, not the lock.
+	requeueMu sync.Mutex
 
 	// showLocks provides per-show serialization during scanning.
 	// Key: "libraryID:showTitle" (lowercased).
@@ -126,9 +227,10 @@ type Scanner struct {
 
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
 	s := &Scanner{
-		cfg:      cfg,
-		queries:  queries,
-		progress: make(map[int64]*models.ScanProgress),
+		cfg:               cfg,
+		queries:           queries,
+		progress:          make(map[int64]*models.ScanProgress),
+		requeueSweepEvery: requeueSweepInterval,
 	}
 	s.enrichedItems.Store(&sync.Map{})
 	return s
@@ -164,7 +266,11 @@ func (s *Scanner) TryStartScan(libraryID int64) bool {
 func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progressCb func(*models.ScanProgress)) error {
 	now := time.Now()
 
-	// Retrieve the progress entry (set by TryStartScan or create one for direct callers like watcher)
+	// Retrieve the progress entry, or create one. Every caller today takes
+	// TryStartScan first (cmd/aurora — including the watcher's onChange closure —
+	// the two media handlers and the request handler), so the fallback is
+	// defensive. This comment used to name the watcher as a direct caller, which
+	// it is not; the requeueMu note above retracts the same claim.
 	s.mu.Lock()
 	progress, exists := s.progress[lib.ID]
 	if !exists || progress.Status != models.ScanRunning {
@@ -204,8 +310,13 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	}
 
 	// Reset per-scan dedup tracker so each scan starts fresh.
-	// Uses atomic pointer swap so concurrent scans of other libraries
-	// that still reference the old map are not affected.
+	//
+	// The atomic pointer swap keeps this memory-safe under a concurrent scan, but
+	// it does NOT isolate the two: enrichNewItem and backfillEpisodeMetadata
+	// Load() on every call, so a scan of another library starting here wipes the
+	// dedup map a scan already running is still reading. The consequence is a
+	// redundant enrichment, not lost data. Pre-existing — but the deferred pass is
+	// longer now that the recovery sweep feeds it, so the window is wider.
 	s.enrichedItems.Store(&sync.Map{})
 
 	slog.Info("scan started", "library", lib.Name, "id", lib.ID, "paths", lib.Paths)
@@ -338,11 +449,14 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Local per-scan collections for deferred TV enrichment.
 	// TV show enrichment is deferred until all files are processed so that
 	// all season/episode rows exist when enrichSeasons() runs. Full
-	// enrichments (new shows) and episode backfills (existing shows that
-	// gained files) are kept apart: backfills dedup per show at enqueue,
-	// and running the fulls first is structural, not an ordering pass.
+	// enrichments (shows not yet enriched or attempted — a new show, or one
+	// whose earlier scan was interrupted before this pass) and episode
+	// backfills (already-dealt-with shows that gained files) are kept apart:
+	// both dedup per show at enqueue, and running the fulls first is
+	// structural, not an ordering pass.
 	var pendingMu sync.Mutex
 	var pendingTVEnrich []*pendingEnrichItem
+	pendingFullSeen := make(map[int64]struct{})
 	pendingBackfill := make(map[int64]*episodeBackfillEntry)
 
 	for _, fp := range allFiles {
@@ -369,7 +483,7 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 				if pending.episodeBackfillOnly {
 					addPendingBackfill(pendingBackfill, pending.item, pending.season)
 				} else {
-					pendingTVEnrich = append(pendingTVEnrich, pending)
+					pendingTVEnrich = addPendingFull(pendingFullSeen, pendingTVEnrich, pending)
 				}
 				pendingMu.Unlock()
 			}
@@ -405,22 +519,92 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Flush remaining batched files
 	s.flushBatches(ctx)
 
+	// Shows that have never been ATTEMPTED are re-queued here, not just from
+	// processFile.
+	//
+	// This is load-bearing, not a belt-and-braces extra. processFile returns early
+	// when a file's hash is unchanged, BEFORE it consults FindMediaItemByTitle — and
+	// the #510 state is precisely "every episode file was recorded and flushed, then
+	// the deferred pass below was cancelled", because files flush per file while the
+	// pass runs after wg.Wait(). So on the next scan every file is unchanged, the
+	// enrichment latch is never evaluated, and the per-file path cannot recover the
+	// very state it was written for unless the show happens to gain a new or modified
+	// file. A review caught that after the latch had already been through three
+	// rounds; asking the question once per scan is what makes the scanner's half of
+	// the recovery real rather than conditional.
+	//
+	// Skipped when the walk found nothing: that is the transient-mount shape
+	// pruneDeletedFiles refuses to act on, and it is no better a moment to spend
+	// provider calls.
+	//
+	// BOUNDED twice over — see requeueUnattemptedLimit and requeueSweepInterval.
+	//
+	// It is also kept in its OWN slice rather than appended to pendingTVEnrich,
+	// because it is the one part of the deferred pass that is not derived from
+	// this scan's delta. Queued ahead of the backfills it would spend the scan's
+	// remaining window on recovery work and, on a cancellation, take every
+	// episode backfill down with it — and a backfill is only ever signalled in the
+	// scan that FIRST sees the file, so a dropped one is not merely delayed. The
+	// rotation is only a PARTIAL safety net here: RefreshStaleMetadata's smart
+	// diffing skips a show outright when it has a last_metadata AND a tmdb_id AND
+	// HasTVChanged reports no upstream change, and a locally added episode file is
+	// not an upstream change. That is the MATCHED class — the common one, and the
+	// one whose episodes would stay bare permanently. It is not every
+	// backfill-eligible show: eligibility is `Attempted`, which is either progress
+	// column, so a show asked-and-unmatched has last_metadata and tmdb_id NULL and
+	// the rotation does re-enrich it. An earlier version of this comment said the
+	// first two hold "by definition", which is the wrong half of that
+	// distinction. A review found the ordering; a later one found that this is
+	// what it costs. The sweep runs LAST for the same reason it is capped.
+	var sweptTVEnrich []*pendingEnrichItem
+	if lib.Type == models.LibraryShows && len(allFiles) > 0 && ctx.Err() == nil && s.dueForRequeueSweep(lib.ID) {
+		unattempted, err := s.queries.GetUnattemptedShowsForLibrary(ctx, lib.ID, requeueUnattemptedLimit)
+		if err != nil {
+			slog.Warn("could not list shows awaiting enrichment", "library", lib.Name, "error", err)
+		} else if len(unattempted) > 0 {
+			// The same seen-set as the per-file fulls, so a show this scan already
+			// queued is not enriched twice — and so the sweep cannot displace a
+			// scan-derived entry, which carries the .nfo-bearing file path.
+			pendingMu.Lock()
+			for _, u := range unattempted {
+				sweptTVEnrich = addPendingFull(pendingFullSeen, sweptTVEnrich,
+					&pendingEnrichItem{item: u.Item, filePath: u.FilePath})
+			}
+			pendingMu.Unlock()
+			if len(sweptTVEnrich) > 0 {
+				slog.Info("re-queued shows whose enrichment never ran",
+					"library", lib.Name, "shows", len(sweptTVEnrich),
+					"capped_at", requeueUnattemptedLimit)
+			}
+		}
+	}
+
 	// Enrich TV shows after all files are processed.
 	// All season/episode rows now exist in the DB, so enrichSeasons() can
 	// populate every episode with TMDB metadata (titles, overviews, stills).
-	if len(pendingTVEnrich) > 0 || len(pendingBackfill) > 0 {
+	if len(pendingTVEnrich) > 0 || len(pendingBackfill) > 0 || len(sweptTVEnrich) > 0 {
 		slog.Info("enriching TV shows",
-			"full", len(pendingTVEnrich), "episode_backfills", len(pendingBackfill))
+			"full", len(pendingTVEnrich), "episode_backfills", len(pendingBackfill),
+			"recovery_sweep", len(sweptTVEnrich))
 		// Fulls run before backfills: a full enrichment covers the
 		// backfill's work and marks the show in the shared per-scan dedup
-		// map, so backfillEpisodeMetadata skips shows enriched this scan
-		// (a show gets BOTH kinds of entry when its first file created the
-		// row and later files found it existing).
+		// map, so backfillEpisodeMetadata skips shows enriched this scan.
+		//
+		// A show getting BOTH kinds of entry used to be the normal case (its
+		// first file created the row, later files found it existing). Since the
+		// latch reads metadata PROGRESS, files behind the one that created the
+		// row see a row with both columns still NULL and take the full branch
+		// too, where they are deduped — so "both kinds" now needs progress to
+		// appear mid-scan, i.e. the background RefreshStaleMetadata goroutine or
+		// an admin manual match landing between two of this scan's files. Rare,
+		// still reachable, and the ordering is what keeps it from costing a
+		// redundant backfill.
 		interrupted := false
 		for i, p := range pendingTVEnrich {
 			if ctx.Err() != nil {
 				slog.Warn("TV enrichment interrupted by context cancellation",
-					"completed", i, "remaining", len(pendingTVEnrich)-i+len(pendingBackfill))
+					"completed", i,
+					"remaining", len(pendingTVEnrich)-i+len(pendingBackfill)+len(sweptTVEnrich))
 				interrupted = true
 				break
 			}
@@ -437,6 +621,21 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 				s.backfillEpisodeMetadata(ctx, b.item, b.sortedSeasons())
 				done++
 			}
+		}
+		// The recovery sweep goes last: everything above is work this scan's own
+		// files asked for, and recovering a show that has been stuck since some
+		// earlier scan must not be what stops that work from happening. The
+		// sweep's shows cannot also hold a backfill entry — a backfill needs the
+		// row to have been ATTEMPTED and the sweep selects rows that have not,
+		// and progress only moves forwards — so ordering them after costs no
+		// redundant pass.
+		for i, p := range sweptTVEnrich {
+			if ctx.Err() != nil {
+				slog.Warn("enrichment recovery sweep interrupted by context cancellation",
+					"completed", i, "remaining", len(sweptTVEnrich)-i)
+				break
+			}
+			s.enrichNewItem(ctx, p.item, p.filePath)
 		}
 	}
 
@@ -455,6 +654,36 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	)
 
 	return nil
+}
+
+// dueForRequeueSweep reports whether this library's never-attempted shows may be
+// swept now, and claims the slot if so.
+//
+// Claiming BEFORE the query, and regardless of what it returns, is deliberate: the
+// cost being rate-limited is the enrichment the sweep queues, and a sweep that
+// errored or found nothing must not leave the next scan a free pass. The trade is
+// that a #510 state arising just after a sweep waits up to requeueSweepInterval for
+// the scanner's half; RefreshStaleMetadata's rotation covers it in the meantime,
+// and never-attempted rows sort to the head of that queue.
+//
+// A zero requeueSweepEvery disables the rate limit (tests).
+func (s *Scanner) dueForRequeueSweep(libraryID int64) bool {
+	if s.requeueSweepEvery <= 0 {
+		return true
+	}
+	s.requeueMu.Lock()
+	defer s.requeueMu.Unlock()
+	now := time.Now()
+	if prev, ok := s.requeueSweptAt.Load(libraryID); ok {
+		if at, ok := prev.(time.Time); ok && now.Sub(at) < s.requeueSweepEvery {
+			return false
+		}
+	}
+	if s.testHookInRequeueClaim != nil {
+		s.testHookInRequeueClaim()
+	}
+	s.requeueSweptAt.Store(libraryID, now)
+	return true
 }
 
 // showLockKey returns the per-show lock for a given library+title combination.
@@ -565,8 +794,48 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 			item.ID = existing.ID
 			item.AddedAt = existing.AddedAt
 			item.UpdatedAt = existing.UpdatedAt
-			// The item already exists, so no enrichment needed.
-			needsEnrichment = false
+			// Latch off enrichment when this row has already been DEALT WITH,
+			// not merely when it exists.
+			//
+			// "Exists ⇒ dealt with" holds for movies, which enrich inline in
+			// this same function, so a movie row cannot outlive its enrichment
+			// call. It does NOT hold for TV: the enrichment is deferred to the
+			// pass after wg.Wait(), and that pass abandons everything still
+			// queued the moment ctx is cancelled. Since scanContext() is the
+			// SERVER lifecycle context, any restart mid-scan — and this box
+			// auto-deploys on a 5-minute timer — leaves shows whose row was
+			// created but whose enrichment never ran.
+			//
+			// Treating those as done made the damage permanent: no later rescan
+			// could ever re-queue them for a full pass, so they kept NULL
+			// tmdb_id/genres/content_rating for ever and could only pick up
+			// episodeBackfillOnly, which touches episode rows and not the
+			// show's own metadata. Issue #510.
+			//
+			// Note this branch is only REACHED for a new or changed file —
+			// processFile returns early above on an unchanged hash — so it is not
+			// by itself enough to recover the #510 state, where every file is
+			// already recorded. ScanLibrary asks the same question once per scan
+			// for exactly that reason; see the re-queue block after wg.Wait().
+			//
+			// "Dealt with" is metadata PROGRESS (stored OR attempted), not
+			// stored metadata. Stored-only would re-queue a full search for
+			// every show no provider has an entry for, on every scan that
+			// brings one of its files: a TMDB search plus a year-less retry, a
+			// TVDB search where TVDB is enabled, and an unconditional embed
+			// (embedItem has no already-embedded guard). Those shows are the
+			// refresh queue's job — it now rotates them rather than re-reading
+			// them for ever — and this branch's job is only the never-attempted
+			// ones, which is exactly the interrupted-scan state since it leaves
+			// BOTH columns NULL.
+			//
+			// Note what this does NOT avoid, since an earlier draft claimed it:
+			// an LLM re-match is enqueued only for a score at or above the
+			// review threshold, and if the detail fetch then fails the helper
+			// returns a non-nil error, so no attempt is stamped and this latch
+			// does not hold the row back either. That case costs the same under
+			// both latches.
+			needsEnrichment = !existing.Attempted
 		}
 	}
 
