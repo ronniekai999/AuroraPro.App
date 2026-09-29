@@ -72,7 +72,7 @@ After merging duplicates there are **13 high, 35 medium, and 29 low** findings, 
 7. CASTS-1 and CASTS-2: casting mid-title from a shared session; hardware decode for cast copies.
 8. PARTY-2: "Play for all" starts the room before anyone has loaded the next episode.
 9. FF-1: VAAPI writes an invalid H.264/HEVC level.
-10. CASTS-3 and CASTC-7: stop starting encoders nobody watches. Pre-warm one quality level for a cast, and stop the local player's playlist polling when a cast connects. The general paused-player case (X-3) needs a design change and is in Phase 2.
+10. CASTS-3 and CASTC-7: stop starting encoders nobody watches. Give a cast copy a single quality level (1080p or below) instead of pre-warming every rung, and stop the local player's playlist polling when a cast connects. The general paused-player case (X-3) needs a design change and is in Phase 2.
 
 ## 2. Remediation plan
 
@@ -95,8 +95,10 @@ The hardware-encoder fixes (WP5, WP15) need an Intel, AMD, or NVIDIA box to veri
 - **Casting:** while casting, report `recvToAbsSec(remote.currentTime)`. When the receiver reports FINISHED, write completion before advancing or stopping, and flush once when the cast ends.
 - **Seek base:** keep a logical absolute playhead across same-viewing rebuilds. Use it for relative seeks, the scrub slider, and audio switches while the new session resolves.
 - **Listeners after an error:** the play effect already clears `errorMsg` when a new target arrives (`VideoPlayer.tsx:2481`). That runs too late: the target-keyed listener effect (`:4930`) runs in the same commit, before `<video>` is back in the DOM, and never re-runs. Either:
-  - clear `errorMsg` when the player closes (the `!target` branch at `:2431`), or during render; or
-  - bind the media listeners to the element through a callback ref.
+  - bind the media listeners to the element through a callback ref; or
+  - reset `errorMsg` during render when the target identity changes.
+
+  Clearing it only when the player closes (the `!target` branch at `:2431`) fixes the reported error-then-Back path, but not a target replaced while the error screen is showing. For example, a party media change calls `setPlayerTarget` directly, with no null target in between.
 - **Pause intent:** preserve it through keepalive and direct-play recovery, the way `rebuildAtTarget` already does.
 - **Stranded sessions:** do not pass the abort signal to `createSession`. `lib/prewarm.ts:253-258` already explains why.
 - **Completion and flushing:**
@@ -105,13 +107,13 @@ The hardware-encoder fixes (WP5, WP15) need an Intel, AMD, or NVIDIA box to veri
   - Skip reports when there is no trusted duration.
 - **Regression suite:** `VideoPlayer.tsx:64-67` says the component cannot be mounted in jsdom. It can: the review mounted it with a fake hls.js and a fake Cast SDK. Adopt that harness as the regression suite.
 
-**WP2 · Cast session control (SPA). Closes CASTC-2, 3, 4, 5, 7, 10, 11, 12. About 3–4 days.**
+**WP2 · Cast session control (SPA). Closes CASTC-2, 3, 4, 5, 10, 11, 12, and CASTC-7 for non-carrier rungs (the carrier rung needs WP8 or WP9). About 3–4 days.**
 - **Close gates:** tell App "casting" (`remoteActive`) for its close gates, not `minimized && remoteActive`. Bind the pause-while-casting effect to the current `<video>` element.
 - **Stop control:** when a cast is connected but there is no player target (after a reload), render a minimal widget with Stop. It can take the title from the receiver's media metadata.
 - **Failed seek:** if re-pointing the receiver after a seek fails, leave the receiver on its current media and show a toast. Only an end-of-media advance should stop the cast.
 - **Audio and volume while casting:** an audio-track change re-points the receiver, or the menu is disabled with a reason. Volume and mute go through `RemotePlayerController`.
 - **Local encoder:** call `hls.stopLoad()` when the cast connects and `startLoad()` if playback falls back to local.
-  - Once polling stops, today's idle reaper stops the local session's rungs after 75 s.
+  - Once polling stops, today's idle reaper stops the local session's rungs 75–105 s later (it sweeps every 30 s). Rungs still priming are skipped until they are ready, and when no cast copy is made, the rungs the receiver itself pulls from correctly stay alive.
   - Exception: the subtitle-carrier rung is exempt from reaping (`streaming.go:2492`). For titles with embedded text subtitles, one local encoder keeps running until WP9 moves subtitle extraction out of the video encoder, or WP8 changes the reaper.
 - **Smaller fixes:**
   - Record the cast token's expiry only once the load succeeds.
@@ -228,14 +230,14 @@ The hardware-encoder fixes (WP5, WP15) need an Intel, AMD, or NVIDIA box to veri
   - MediaError code 4 on a remux tries the transcode fallback.
   - Codes 2 and 3 trigger one rebuild at the playhead.
 
-**WP15 · Make hardware encoding reachable from the installer. Closes OPS-1, OPS-2, TECH-01, and TECH-12. About 1–2 days, plus a test install per distro family.**
+**WP15 · Make hardware encoding reachable from the installer. Closes OPS-1, OPS-2, TECH-01, and TECH-12's backend-selection half (WP5 covers its levels and keyframes). About 1–2 days, plus a test install per distro family.**
 - **Sample config:** correct `configs/aurora.yaml`'s `max_sessions: 0 = unlimited` comment (OPS-2).
 - **GPU access:** add `aurora` to `render`/`video` (`SupplementaryGroups=` in `aurora.service`) and install the VA-API drivers.
 - **FFmpeg version:** warn when FFmpeg is older than 6.1. Ubuntu 22.04's 4.4.2 disables input pacing.
 - **Fedora:** handle `ffmpeg-free`, which has no libx264, with RPM Fusion as opt-in.
 - **Intel backend:** choose it by which pipeline tier its startup probe proved.
 
-**WP16 · PGS subtitles in the browser. Closes SUB-PGS (TECH-09). About 3–4 days.**
+**WP16 · PGS subtitles in the browser. Closes SUB-PGS (TECH-09). About 2–3 days, reusing WP9's extraction.**
 - Extract the track with `-c:s copy -f sup` into the subtitle cache, reusing WP9's single-flight.
 - Render it with libpgs over the `<video>`, applying the session's start offset.
 
@@ -338,7 +340,7 @@ The hardware-encoder fixes (WP5, WP15) need an Intel, AMD, or NVIDIA box to veri
   - the time and scrubber are frozen, and the play/pause state is wrong;
   - the saved volume is ignored;
   - there are no skip pills, no next-up card, no auto-advance, and no fullscreen tracking.
-- **Fix (S):** WP1. Clear the error on close, or bind listeners through a callback ref. Clearing it on the next target is what the code already does.
+- **Fix (S):** WP1. Bind the listeners through a callback ref, or reset the error during render on a target change. Clearing it on the next target is what the code already does, and clearing it only on close misses a target replaced mid-error (a party media change).
 
 **H6 · WEB-4: session recovery starts a paused player playing.**
 - **Confidence:** confirmed with a harness, including a control case that behaves correctly.
@@ -449,7 +451,7 @@ Where two reviewers found the same defect, the row gives both IDs.
 | ID | Sev | Finding | Where | Fix · WP |
 |---|---|---|---|---|
 | LIFE-2 | M | Session folders from an unclean exit are never removed, and the disk cap doesn't count them. A normal restart during playback also lets recovering clients create sessions after cleanup. | `streaming.go:1969-2092`, `:2532-2548`; `cmd/aurora/main.go:1104-1107` | Clear at startup; refuse creates after `Close` (S) · WP3 |
-| LIFE-3 / CASTS-3 | M | The caps limit sessions, not encoders. A member can run rungs × 3 encoders. Every cast pre-warms all rungs, including a 2160p H.264 level 5.1 rung only the Chromecast with Google TV and Google TV Streamer can decode. Unready rungs can't be reaped. | `streaming.go:2936-2956`; `phase2_handlers.go:1500-1515` | Pre-warm one rung (S) · WP4; running-encoder cap (M) · WP8 |
+| LIFE-3 / CASTS-3 | M | The caps limit sessions, not encoders. A member can run rungs × 3 encoders. Every cast pre-warms all rungs, including a 2160p H.264 level 5.1 rung only the Chromecast with Google TV and Google TV Streamer can decode. Unready rungs can't be reaped. | `streaming.go:2936-2956`; `phase2_handlers.go:1500-1515` | Single-rung cast copy, no all-rung pre-warm (S) · WP4; running-encoder cap (M) · WP8 |
 | X-3 | M | The idle reaper can't stop a paused player's encoder. hls.js reloads a playlist without `ENDLIST` even while paused (`hls.js/src/controller/base-playlist-controller.ts:225`), and every poll refreshes `lastFetch` (`streaming.go:3416`). It only ever reaps rungs the player switched away from, and never the subtitle-carrier rung (`:2492`). A naive "count segment fetches only" fix would loop, because every playlist poll relaunches a reaped rung (`:4760` → `:3427`). | `streaming.go:2459-2513` | Change the resume trigger together with the activity signal (M, design first) · WP8 |
 | LIFE-4 | L | Disk-cap eviction decides on a stale `lastAccess` snapshot, so a viewer who just resumed can be evicted. | `streaming.go:2532-2573` | Re-read under the lock (S) · WP3 |
 | LIFE-5 | L | A readiness timeout marks the rung failed but leaves FFmpeg running; the rung then 500s until EOF or delete. HDR readiness budgets (130–180 s) exceed the 120 s `WriteTimeout` (`cmd/aurora/main.go:1017`), and the HLS handlers never extend it. | `streaming.go:4607-4612`, `:4773-4793`, `:1908-1924` | Cancel on timeout; extend the deadline or cap the budget (S) · WP3 |
