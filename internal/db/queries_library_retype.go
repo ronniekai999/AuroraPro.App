@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -42,10 +45,11 @@ import (
 type RetypeCasualty struct {
 	Table string `json:"table"`
 	Rows  int64  `json:"rows"`
-	// Why is the same one-line description the merge code carries for this
-	// table, so the preview says what the rows MEAN rather than naming a table
-	// an admin has no reason to recognise.
-	Why string `json:"why"`
+	// Why names what the rows ARE, in an admin's terms, so the preview does not
+	// just list tables nobody has a reason to recognise. Empty for a table with
+	// no entry in retypeCasualtyNoun — the UI then shows the name alone, which
+	// is worse prose but never a false statement.
+	Why string `json:"why,omitempty"`
 }
 
 // RetypePreview is everything a retype would delete, counted before anything is
@@ -78,19 +82,139 @@ func mediaTypeForLibrary(t models.LibraryType) (models.MediaType, error) {
 	}
 }
 
+// cascadeEdge is one ON DELETE CASCADE foreign key: deleting a row of Parent
+// takes with it every row of Child whose ChildCol matches the parent's ParentCol.
+type cascadeEdge struct {
+	Child, ChildCol, Parent, ParentCol string
+}
+
+// cascadeEdgesFrom reads every single-column ON DELETE CASCADE foreign key in
+// the public schema. The graph is walked in Go rather than in one recursive CTE
+// because a table can be reachable by SEVERAL paths — skip_markers hangs off
+// both media_files and episode_files, watch_progress off both media_items and
+// tv_episodes — and those rows must be counted once, not once per path.
+//
+// Multi-column foreign keys are excluded. None exist in this schema today, and
+// a predicate built from one column of a composite key would silently over-count
+// rather than fail; if one is ever added, this under-reports it and the guard in
+// TestRetypeCascadeClosureCoversTheWholeSchema is what says so.
+func (q *Queries) cascadeEdgesFrom(ctx context.Context) ([]cascadeEdge, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT c.conrelid::regclass::text, a.attname::text,
+		       c.confrelid::regclass::text, af.attname::text
+		FROM pg_constraint c
+		JOIN unnest(c.conkey)  WITH ORDINALITY k(attnum, ord)  ON true
+		JOIN unnest(c.confkey) WITH ORDINALITY fk(attnum, ord) ON fk.ord = k.ord
+		JOIN pg_attribute a  ON a.attrelid = c.conrelid  AND a.attnum = k.attnum
+		JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = fk.attnum
+		WHERE c.contype = 'f' AND c.confdeltype = 'c'
+		  AND array_length(c.conkey, 1) = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("read cascade edges: %w", err)
+	}
+	defer rows.Close()
+	var out []cascadeEdge
+	for rows.Next() {
+		var e cascadeEdge
+		if err := rows.Scan(&e.Child, &e.ChildCol, &e.Parent, &e.ParentCol); err != nil {
+			return nil, fmt.Errorf("scan cascade edge: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// doomedRowsPredicate renders the WHERE clause matching every row of `table`
+// that a retype destroys, as the OR of its incoming cascade edges. Recursive,
+// because a grandchild's parents are themselves defined by their own parents,
+// and cycle-guarded by `path` (the schema has none today; a future one would
+// otherwise hang here rather than fail).
+//
+// media_items is the base case and the only place the query parameters appear.
+// Table and column names come from pg_constraint — never from user input — and
+// are quoted anyway so a future reader does not have to re-derive that.
+func doomedRowsPredicate(table string, edges []cascadeEdge, path map[string]bool) (string, bool) {
+	if table == "media_items" {
+		return "library_id = $1 AND type <> $2", true
+	}
+	if path[table] {
+		return "", false
+	}
+	path[table] = true
+	defer delete(path, table)
+
+	var terms []string
+	for _, e := range edges {
+		if e.Child != table {
+			continue
+		}
+		parentPred, ok := doomedRowsPredicate(e.Parent, edges, path)
+		if !ok {
+			continue
+		}
+		terms = append(terms, fmt.Sprintf("%s IN (SELECT %s FROM %s WHERE %s)",
+			quoteIdent(e.ChildCol), quoteIdent(e.ParentCol), quoteIdent(e.Parent), parentPred))
+	}
+	if len(terms) == 0 {
+		return "", false
+	}
+	return strings.Join(terms, " OR "), true
+}
+
+// quoteIdent renders a table or column name for interpolation. Every name here
+// comes from pg_constraint, never from a request — but the file builds SQL with
+// fmt.Sprintf, and "trust me, it came from the catalog" is not something a
+// future reader should have to re-derive from three call sites up. Sanitize
+// makes it self-evident and costs nothing.
+func quoteIdent(s string) string { return pgx.Identifier{s}.Sanitize() }
+
+// retypeCasualtyNoun names what a table's rows ARE, in the admin's terms.
+//
+// Deliberately NOT mergeChildren's `why`, which this used to borrow: those
+// strings describe what a MERGE does, and ten of them begin "re-parented:" — so
+// the one screen whose whole job is to say what is about to be destroyed was
+// telling an admin their live watch party would be "re-parented". A review
+// caught it. A table with no entry here shows its name alone, which is worse
+// prose but never a false statement.
+var retypeCasualtyNoun = map[string]string{
+	"media_files":                 "playable movie files (the files on disk are untouched)",
+	"tv_seasons":                  "season rows",
+	"tv_episodes":                 "episode rows",
+	"episode_files":               "playable episode files (the files on disk are untouched)",
+	"watch_progress":              "how far people got, per person and per episode",
+	"watchlist_items":             "watchlist entries",
+	"user_ratings":                "star ratings people gave",
+	"item_feedback":               "like/dislike signals that train the recommender",
+	"taste_seeds":                 "onboarding taste picks",
+	"collection_items":            "memberships in curated collections",
+	"recently_surfaced_items":     "records of what has already been shown",
+	"recap_conversations":         "people's recap Q&A threads",
+	"recap_conversation_turns":    "the questions and answers in those threads",
+	"recap_conversation_requests": "pending and completed recap questions",
+	"episode_recaps":              "generated recaps (each cost an LLM call)",
+	"artwork":                     "posters and backdrops",
+	"media_cast":                  "cast and crew links",
+	"media_genres":                "genre links",
+	"external_ids":                "provider id links",
+	"watch_parties":               "watch party rooms, including any that are LIVE right now",
+	"recommendation_impressions":  "recommender telemetry",
+	"recommendation_watch_events": "recommender outcome history",
+	"skip_markers":                "detected intro/recap/credits markers",
+	"skip_marker_analysis":        "intro/credits detection results",
+}
+
 // PreviewLibraryRetype counts what changing the library's type would destroy.
 // Read-only.
 //
-// The casualty list is DERIVED from mergeChildren rather than hand-written, and
-// that is the point: mergeChildren is already pinned against pg_constraint by a
-// drift guard, so a future ON DELETE CASCADE child of media_items cannot appear
-// without landing in that list — and therefore cannot be silently absent from
-// this preview. A hand-maintained list here would go stale exactly the way
-// MergeMediaItems' did, and the cost of being wrong is an admin confirming a
-// deletion whose size they were told incorrectly.
-//
-// episode_files is counted separately because it cascades from tv_episodes
-// rather than from media_items, so it is deliberately NOT in mergeChildren.
+// The table list is derived from pg_constraint at query time — the TRANSITIVE
+// cascade closure of media_items, not just its direct children. An earlier
+// version drove it off mergeChildren plus one hand-coded exception for
+// episode_files, and a review showed that silently omitted skip_markers,
+// skip_marker_analysis and recap_conversation_turns: a person's whole recap Q&A
+// thread was destroyed without appearing in the preview at all, while the
+// comment here claimed nothing could be missing. mergeChildren is pinned against
+// pg_constraint for DIRECT children only, so it could never have carried the
+// second hop. Asking the schema removes the class rather than the instance.
 func (q *Queries) PreviewLibraryRetype(ctx context.Context, libraryID int64, target models.LibraryType) (*RetypePreview, error) {
 	wantMedia, err := mediaTypeForLibrary(target)
 	if err != nil {
@@ -120,34 +244,49 @@ func (q *Queries) PreviewLibraryRetype(ctx context.Context, libraryID int64, tar
 		return p, nil
 	}
 
-	doomed := `SELECT id FROM media_items WHERE library_id = $1 AND type <> $2`
-	for _, m := range mergeChildren {
+	edges, err := q.cascadeEdgesFrom(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("preview retype: %w", err)
+	}
+	tables := map[string]bool{}
+	for _, e := range edges {
+		tables[e.Child] = true
+	}
+	names := make([]string, 0, len(tables))
+	for t := range tables {
+		names = append(names, t)
+	}
+	sort.Strings(names)
+
+	for _, t := range names {
+		// media_items is a cascade child of libraries, so it is in its own
+		// closure. It is already reported as ItemsToDelete; listing it again as
+		// a casualty would double it in an admin's head.
+		if t == "media_items" {
+			continue
+		}
+		pred, ok := doomedRowsPredicate(t, edges, map[string]bool{})
+		if !ok {
+			continue // not reachable from media_items
+		}
 		var n int64
 		if err := q.pool.QueryRow(ctx, fmt.Sprintf(
-			`SELECT COUNT(*) FROM %s WHERE media_item_id IN (%s)`, m.table, doomed),
+			`SELECT COUNT(*) FROM %s WHERE %s`, quoteIdent(t), pred),
 			libraryID, wantMedia).Scan(&n); err != nil {
-			return nil, fmt.Errorf("preview retype: count %s: %w", m.table, err)
+			return nil, fmt.Errorf("preview retype: count %s: %w", t, err)
 		}
 		if n > 0 {
-			p.Casualties = append(p.Casualties, RetypeCasualty{Table: m.table, Rows: n, Why: m.why})
+			p.Casualties = append(p.Casualties, RetypeCasualty{
+				Table: t, Rows: n, Why: retypeCasualtyNoun[t],
+			})
 		}
-	}
-
-	var episodeFiles int64
-	if err := q.pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT COUNT(*) FROM episode_files ef
-		JOIN tv_episodes te ON te.id = ef.episode_id
-		WHERE te.media_item_id IN (%s)`, doomed), libraryID, wantMedia).Scan(&episodeFiles); err != nil {
-		return nil, fmt.Errorf("preview retype: count episode_files: %w", err)
-	}
-	if episodeFiles > 0 {
-		p.Casualties = append(p.Casualties, RetypeCasualty{
-			Table: "episode_files", Rows: episodeFiles,
-			Why: "cascades from tv_episodes; re-created by the rescan",
-		})
 	}
 	return p, nil
 }
+
+// ErrLibraryGone means the library disappeared between the caller's lookup and
+// the transaction. Callers turn it into a 404 rather than a misleading success.
+var ErrLibraryGone = errors.New("library no longer exists")
 
 // ErrRetypeCountMismatch is returned when the catalog moved between the preview
 // and the confirm. The caller turns it into a 409.
@@ -169,6 +308,13 @@ func (e *ErrRetypeCountMismatch) Error() string {
 // window this exists to close. A scan finishing, a file landing, or a second
 // admin acting between the preview and the confirm all change what gets deleted,
 // and an admin who approved "80 titles" must not silently get 400.
+//
+// It covers the ITEM count only, not the casualty counts the preview also
+// showed. Between preview and confirm, playback, ratings and watchlist adds can
+// change how many child rows go while the item count is unchanged, and this
+// proceeds. Widening the interlock to every casualty would refuse the operation
+// any time somebody watched something, which is most of the time; the honest
+// answer is that the titles are what is pinned, and the runbook says so.
 //
 // SELECT ... FOR UPDATE on the library row serialises two concurrent retypes of
 // the same library; the scan slot the caller holds covers scans.
@@ -196,7 +342,11 @@ func (q *Queries) RetypeLibrary(ctx context.Context, libraryID int64, target mod
 	if err := tx.QueryRow(ctx,
 		`SELECT id FROM libraries WHERE id = $1 FOR UPDATE`, libraryID).Scan(&exists); err != nil {
 		if err == pgx.ErrNoRows {
-			return 0, nil
+			// A distinguishable sentinel, not (0, nil). The library can be
+			// deleted between the handler's lookup and this transaction, and
+			// reporting that as "succeeded, deleted nothing" made the handler
+			// answer 200 and launch a rescan of a library that no longer exists.
+			return 0, ErrLibraryGone
 		}
 		return 0, fmt.Errorf("retype: lock library: %w", err)
 	}
@@ -215,6 +365,19 @@ func (q *Queries) RetypeLibrary(ctx context.Context, libraryID int64, target mod
 		`DELETE FROM media_items WHERE library_id = $1 AND type <> $2`, libraryID, wantMedia)
 	if err != nil {
 		return 0, fmt.Errorf("retype: purge items: %w", err)
+	}
+	// Belt and braces, and cheap. The recount above is only atomic with the
+	// DELETE because the FOR UPDATE on the library row conflicts with the
+	// FOR KEY SHARE that media_items' library_id foreign key takes on that same
+	// row, so a concurrent insert into this library BLOCKS. That is a real
+	// guarantee and a review confirmed it holds under load — but it rests on a
+	// lock interaction nothing in the code names, and a future reader
+	// "correcting" FOR UPDATE to the semantically tidier FOR NO KEY UPDATE would
+	// silently turn the interlock into a best-effort check, because that lock
+	// does NOT conflict with key-share. Comparing what was actually deleted
+	// makes the guarantee hold whatever the lock does, and it is testable.
+	if tag.RowsAffected() != expectedItems {
+		return 0, &ErrRetypeCountMismatch{Expected: expectedItems, Actual: tag.RowsAffected()}
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE libraries SET type = $2, updated_at = NOW() WHERE id = $1`,

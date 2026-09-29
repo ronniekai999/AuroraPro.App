@@ -143,6 +143,10 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := h.queries.RetypeLibrary(r.Context(), lib.ID, target, expected)
 	if err != nil {
+		if errors.Is(err, db.ErrLibraryGone) {
+			writeError(w, http.StatusNotFound, "library not found")
+			return
+		}
 		var mismatch *db.ErrRetypeCountMismatch
 		if errors.As(err, &mismatch) {
 			writeError(w, http.StatusConflict, mismatch.Error()+" — re-run the preview and confirm the new figure")
@@ -153,8 +157,10 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.activity != nil {
-		claims := auth.GetClaims(r.Context())
+	// Guarded like MediaHandler.DeleteItem's. A panic here would land AFTER the
+	// purge has committed and BEFORE slotUsed is set: a purged catalog, no
+	// rescan, and a library stuck holding its scan slot.
+	if claims := auth.GetClaims(r.Context()); h.activity != nil && claims != nil {
 		h.activity.LogLibraryRetyped(r.Context(), claims.UserID, lib.ID, lib.Name,
 			string(lib.Type), string(target), deleted)
 	}
@@ -167,6 +173,34 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 	// what the scanner branches on.
 	rescan := *lib
 	rescan.Type = target
+
+	// Re-point the WATCHER at the new value before anything else can scan.
+	//
+	// This is not tidiness. Watcher.WatchLibrary stores the *models.Library it
+	// was handed as a SNAPSHOT, and it is only ever called at boot and on
+	// library creation — so both the periodic tick and the fsnotify debounce go
+	// on passing the pre-retype value to ScanLibrary, which branches on
+	// lib.Type rather than re-reading the database. Without this, the first
+	// file event or periodic tick after a successful retype re-scans the library
+	// under the OLD parser and re-creates exactly the state this whole operation
+	// exists to remove: wrong-typed rows whose files sit in the table that type
+	// implies, unreachable by any later prune because pruneDeletedFiles branches
+	// on the same isTV. A review demonstrated it end to end.
+	//
+	// NoteExternalScan tells the watcher a scan is already running so its timer
+	// does not immediately fire a second one on top of ours.
+	if h.watcher != nil {
+		if err := h.watcher.WatchLibrary(h.scanContext(), &rescan); err != nil {
+			// Not fatal: the purge is committed and the rescan below still runs
+			// with the right type. What is lost is fsnotify coverage until the
+			// next restart — worth a loud line, not a failed request.
+			slog.Error("library retyped but re-watching failed; file events for it will use the old type until restart",
+				"library", rescan.Name, "library_id", rescan.ID, "error", err)
+		} else {
+			h.watcher.NoteExternalScan(rescan.ID)
+		}
+	}
+
 	slotUsed = true
 	go func() {
 		ctx := h.scanContext()

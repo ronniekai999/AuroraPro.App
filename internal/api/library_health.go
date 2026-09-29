@@ -29,9 +29,10 @@ const (
 	// one with eighty and no matches is a defect.
 	libraryHealthMinItems = 10
 	// libraryHealthMaxMatchedPct is the rate at or below which a library is
-	// reported. Deliberately very low: at 5% an eighty-item library has to
-	// match four titles to stay quiet, and a genuinely obscure collection
-	// normally clears that easily while a mis-typed one sits at exactly zero.
+	// reported. Deliberately very low: the rule is AT-or-below, so an
+	// eighty-item library has to match FIVE titles to stay quiet (four is
+	// exactly 5% and still reports). A genuinely obscure collection normally
+	// clears that easily while a mis-typed one sits at exactly zero.
 	libraryHealthMaxMatchedPct = 5
 )
 
@@ -68,9 +69,17 @@ type LibraryHealthReport struct {
 func libraryHealthReport(tallies []db.LibraryMatchHealth, scanning func(int64) bool) LibraryHealthReport {
 	rep := LibraryHealthReport{Libraries: make([]LibraryHealthRow, 0, len(tallies))}
 
+	// A library mid-scan is excluded from the install-wide tally as well as from
+	// its own warning, and that second half was missing. Freshly scanned rows
+	// have no tmdb_id until the deferred enrichment pass finishes, so a library
+	// being scanned for the first time reliably reads as starved — and on a
+	// two-library install that flipped the whole report to "check your TMDB key"
+	// AND suppressed the real per-library warning on the mis-typed one. The exact
+	// failure this report exists to prevent, caused by the guard meant to avoid
+	// false alarms. A review demonstrated it.
 	eligible, starved := 0, 0
 	for _, t := range tallies {
-		if t.Items < libraryHealthMinItems {
+		if t.Items < libraryHealthMinItems || scanning(t.LibraryID) {
 			continue
 		}
 		eligible++
@@ -133,6 +142,18 @@ func libraryTypeWarning(t db.LibraryMatchHealth) string {
 		t.Items, t.Matched, other, t.Type)
 }
 
+// reportCovers reports whether the given library is in this report at all, so a
+// scan-scoped log line is not written on behalf of a library the report does not
+// mention.
+func reportCovers(rep LibraryHealthReport, libraryID int64) bool {
+	for _, l := range rep.Libraries {
+		if l.LibraryID == libraryID {
+			return true
+		}
+	}
+	return false
+}
+
 // ScanProgressSource is the slice of the scanner LibraryHealthReportFor needs.
 // Narrow on purpose: the report only ever asks whether a library is mid-scan.
 type ScanProgressSource interface {
@@ -163,6 +184,12 @@ func LibraryHealthReportFor(tallies []db.LibraryMatchHealth, s ScanProgressSourc
 func LogLibraryHealth(rep LibraryHealthReport, only int64) int {
 	n := 0
 	if rep.InstallWarning != "" {
+		// Scoped like the per-library lines. Without this, every scan of every
+		// library re-wrote the install warning, which is how a line stops being
+		// read. `only` is the library whose scan just finished; 0 means all.
+		if only != 0 && !reportCovers(rep, only) {
+			return 0
+		}
 		slog.Warn("library metadata matching looks broken install-wide",
 			"detail", rep.InstallWarning)
 		return 1

@@ -397,8 +397,11 @@ The report (`GET /api/admin/library-health`, plus one log line per scan from
   indistinguishable, and suppressing would silence exactly the single-library
   install whose one library is mis-typed. A false warning costs a look at a
   settings page; a false all-clear costs what #510 cost.
-- A library mid-scan is never warned about: a partial tally warns and then
-  resolves itself, and a warning that fires during every scan stops being read.
+- A library mid-scan is excluded from its own warning AND from the install-wide
+  tally. The second half was missing: freshly scanned rows have no `tmdb_id`
+  until enrichment finishes, so a first scan reads as starved, and on a
+  two-library install that flipped the report to "check your TMDB key" and
+  silenced the real warning on the mis-typed library beside it.
 - Report only. Admin-gated and NOT on `/api/libraries`, which is member-visible.
 
 The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
@@ -415,14 +418,40 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
   library row — checking outside would leave the window it exists to close.
 - `expected_items` is a POINTER. Zero is a legitimate approval, so as a plain
   int64 an omitted interlock and an approved zero are the same value.
-- The casualty list is DERIVED from `mergeChildren`, which a drift guard already
-  pins against `pg_constraint`, so a future cascade child cannot be silently
-  absent from what an admin is shown. `episode_files` is counted separately
-  because it cascades from `tv_episodes`.
+- The casualty list is the TRANSITIVE cascade closure of `media_items`, read
+  from `pg_constraint` at query time. It was derived from `mergeChildren` plus
+  one hand-coded exception, and a review showed that silently omitted
+  `skip_markers`, `skip_marker_analysis` and `recap_conversation_turns` — a
+  person's whole recap Q&A thread destroyed without appearing in the preview,
+  while the comment claimed nothing could be missing. `mergeChildren` is pinned
+  for DIRECT children only, so it could never have carried the second hop. A
+  table reachable by several paths is counted ONCE (`skip_markers` hangs off
+  both `media_files` and `episode_files`); the one blind spot is multi-column
+  cascade keys, which `TestRetypeCascadeClosureCoversTheWholeSchema` fails on
+  if one ever becomes reachable.
+- The casualty descriptions are the retype's own, never `mergeChildren`'s `why`.
+  Those describe a MERGE — ten of nineteen begin "re-parented:" — so the one
+  screen whose job is to say what is about to be destroyed was telling an admin
+  their live watch party would be re-parented.
 - The scan slot is claimed before anything is touched and handed to the rescan,
   so the library is never unlocked in between. A refused retype releases it via
   `ReleaseScanSlot`, which frees an UNUSED claim only — otherwise a refusal
   leaves the library reading as scanning for the life of the process.
+- The WATCHER is re-pointed at the new library value before the rescan.
+  `WatchLibrary` stores the `*models.Library` it was handed as a SNAPSHOT and is
+  called only at boot and on library creation, so the periodic tick and the
+  fsnotify debounce keep passing the pre-retype value to `ScanLibrary`, which
+  branches on `lib.Type` rather than re-reading the database. Without this the
+  first file event after a retype re-scans under the OLD parser and re-creates
+  the exact phantom state the operation exists to remove. A review demonstrated
+  it end to end.
+- The count interlock covers the ITEM count only, not the casualty counts shown
+  beside it. Widening it would refuse the operation any time anyone watched
+  something. It is also belt-and-braces now: `RowsAffected` is compared after
+  the DELETE, because the recount's atomicity rests on `FOR UPDATE` conflicting
+  with
+  the FK's `FOR KEY SHARE` on the same row — real, load-tested by a review, and
+  silently lost if anyone "corrects" it to `FOR NO KEY UPDATE`.
 - Calling it with the type the library already has is the repair path, not a
   no-op: it purges rows whose type disagrees with the library's, which is the
   state hand-written SQL leaves behind.
@@ -435,8 +464,10 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
 
 Known gaps: the retype is not reversible and there is no undo; the rescan is
 fire-and-forget, so a failure after the purge commits leaves an empty library
-until someone scans again; and the report's thresholds are reasoned, not
-calibrated against real installs.
+until someone scans again; the purge holds the `libraries` row lock for its
+duration, which blocks `media_items` inserts for that library (measured ~7s for
+80k items); and the report's thresholds are reasoned, not calibrated against
+real installs.
 
 ### Nullable database columns
 

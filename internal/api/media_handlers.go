@@ -350,7 +350,15 @@ func (h *LibraryHandler) Health(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read library health")
 		return
 	}
-	writeJSON(w, http.StatusOK, LibraryHealthReportFor(tallies, h.scanner))
+	// h.scanner is a *library.Scanner, so passing it straight in wraps a nil
+	// pointer in a NON-nil interface and the adapter's `s == nil` check misses
+	// it. Narrow it here instead. Production always sets the field; tests build
+	// handlers without one.
+	var progress ScanProgressSource
+	if h.scanner != nil {
+		progress = h.scanner
+	}
+	writeJSON(w, http.StatusOK, LibraryHealthReportFor(tallies, progress))
 }
 
 func (h *LibraryHandler) ScanStatus(w http.ResponseWriter, r *http.Request) {

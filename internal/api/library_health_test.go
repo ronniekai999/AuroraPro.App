@@ -192,9 +192,14 @@ func TestLibraryHealthReportKeepsEveryLibraryInThePayload(t *testing.T) {
 }
 
 // A nil scanner must not be read as "everything is scanning" (which would
-// silence the report entirely) nor panic. The handler and the scan hook both
-// pass a concrete scanner today, but LibraryHealthReportFor is the only adapter
-// and tests construct handlers without one.
+// silence the report entirely) nor panic.
+//
+// Note what this does NOT cover, because an earlier version of this comment
+// claimed it did: an untyped nil is not the shape the handler could produce. A
+// *library.Scanner that happens to be nil wraps into a NON-nil interface, so the
+// adapter's nil check misses it and the call nil-derefs — a review demonstrated
+// exactly that. The handler narrows the pointer before calling, which is the
+// real fix; this pins only the adapter's own contract.
 func TestLibraryHealthReportForTreatsANilScannerAsIdle(t *testing.T) {
 	rep := LibraryHealthReportFor([]db.LibraryMatchHealth{
 		tally(8, models.LibraryMovies, 80, 0),
@@ -252,5 +257,51 @@ func TestLogLibraryHealthWritesOneLinePerFlaggedLibrary(t *testing.T) {
 	busy := LibraryHealthReportFor(tallies, fakeProgress{running: map[int64]bool{8: true, 9: true}})
 	if n := LogLibraryHealth(busy, 0); n != 0 {
 		t.Errorf("logged %d lines while the libraries were mid-scan, want 0", n)
+	}
+}
+
+// The install-wide verdict must not be driven by a library that is mid-scan.
+// Freshly scanned rows have no tmdb_id until the deferred enrichment pass
+// finishes, so a first scan reliably looks starved — and on a two-library
+// install that flipped the report to "check your TMDB key" and silenced the real
+// warning on the mis-typed library beside it.
+func TestLibraryHealthMidScanLibrariesDoNotDriveTheInstallVerdict(t *testing.T) {
+	tallies := []db.LibraryMatchHealth{
+		tally(8, models.LibraryMovies, 80, 0), // the #510 library, idle
+		tally(9, models.LibraryShows, 40, 0),  // scanning for the first time
+	}
+	rep := libraryHealthReport(tallies, func(id int64) bool { return id == 9 })
+
+	if rep.InstallWarning != "" {
+		t.Errorf("a mid-scan library was counted toward the install-wide verdict: %q", rep.InstallWarning)
+	}
+	if rep.Libraries[0].Warning == "" {
+		t.Error("the mis-typed library's warning was suppressed by a scan running on a DIFFERENT library — this is the exact failure the report exists to prevent")
+	}
+	if rep.Libraries[1].Warning != "" {
+		t.Errorf("the mid-scan library was warned about directly: %q", rep.Libraries[1].Warning)
+	}
+
+	// With both idle it IS install-wide, so the exclusion is not just switching
+	// the verdict off.
+	idle := libraryHealthReport(tallies, noneScanning)
+	if idle.InstallWarning == "" {
+		t.Error("two idle starved libraries did not raise the install-level warning")
+	}
+}
+
+// The install line is scoped like the per-library ones. Without that, every scan
+// of every library re-wrote it.
+func TestLogLibraryHealthScopesTheInstallLineToo(t *testing.T) {
+	rep := LibraryHealthReportFor([]db.LibraryMatchHealth{
+		tally(1, models.LibraryMovies, 400, 0),
+		tally(2, models.LibraryShows, 80, 0),
+	}, fakeProgress{})
+
+	if n := LogLibraryHealth(rep, 1); n != 1 {
+		t.Errorf("logged %d lines for a library the report covers, want 1", n)
+	}
+	if n := LogLibraryHealth(rep, 404); n != 0 {
+		t.Errorf("logged %d lines on behalf of a library the report does not mention, want 0", n)
 	}
 }

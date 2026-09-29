@@ -575,23 +575,36 @@ function UpdatePanel() {
 // in between (a scan finished, another admin acted) the server answers 409 and
 // nothing happens, so the number an admin approves is the number that goes.
 function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void }) {
-  const target: 'movie' | 'show' = lib.type === 'movie' ? 'show' : 'movie'
+  // BOTH targets are offered, including the one the library already claims.
+  //
+  // Offering only the opposite type made the documented repair path unreachable
+  // — and on the exact state the runbook is written for it offered the action
+  // that UNDOES the fix. After a hand-applied `UPDATE libraries SET type='show'`
+  // with movie rows still present, the only button was "Change to Movies", whose
+  // preview correctly reported 0 items to delete ("nothing to delete") and whose
+  // confirm set the library back to movie. A review found it.
+  const [target, setTarget] = useState<'movie' | 'show' | null>(null)
   const [preview, setPreview] = useState<RetypePreview | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const open = async () => {
+  const open = async (t: 'movie' | 'show') => {
     setBusy(true)
-    try { setPreview(await previewLibraryRetype(lib.id, target)) }
-    catch (e) { window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown')) }
+    try { setTarget(t); setPreview(await previewLibraryRetype(lib.id, t)) }
+    catch (e) {
+      setTarget(null)
+      window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown'))
+    }
     finally { setBusy(false) }
   }
 
+  const close = () => { setPreview(null); setTarget(null) }
+
   const confirm = async () => {
-    if (!preview) return
+    if (!preview || !target) return
     setBusy(true)
     try {
       const res = await retypeLibrary(lib.id, target, preview.items_to_delete)
-      setPreview(null)
+      close()
       window.alert(`Deleted ${res.items_deleted} item(s) and started a rescan.`)
       onDone()
     } catch (e) {
@@ -602,14 +615,23 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
 
   if (!preview) {
     return (
-      <button
-        onClick={() => void open()}
-        disabled={busy}
-        title={`Change this library to ${target === 'show' ? 'TV Shows' : 'Movies'}`}
-        className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
-      >
-        {busy ? 'Checking…' : `Change to ${target === 'show' ? 'TV' : 'Movies'}`}
-      </button>
+      <div className="flex gap-2 mt-2">
+        {(['movie', 'show'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => void open(t)}
+            disabled={busy}
+            title={t === lib.type
+              ? `Re-apply ${t === 'show' ? 'TV Shows' : 'Movies'}: purges any catalog rows that disagree with the library's type, then rescans`
+              : `Change this library to ${t === 'show' ? 'TV Shows' : 'Movies'}`}
+            className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+          >
+            {busy ? 'Checking…' : t === lib.type
+              ? `Re-apply ${t === 'show' ? 'TV' : 'Movies'}`
+              : `Change to ${t === 'show' ? 'TV' : 'Movies'}`}
+          </button>
+        ))}
+      </div>
     )
   }
 
@@ -621,7 +643,7 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
       <p className="text-white/70 text-xs mt-2">
         This deletes {preview.items_to_delete} catalog item(s) and everything attached to them,
         then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item(s) already of the target type are kept. `}
-        The files on disk are not touched.
+        The files on disk are not touched. There is no undo.
       </p>
       {preview.casualties && preview.casualties.length > 0 && (
         <ul className="mt-2 space-y-0.5">
@@ -644,7 +666,7 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
           {busy ? 'Working…' : 'Delete and rescan'}
         </button>
         <button
-          onClick={() => setPreview(null)}
+          onClick={close}
           disabled={busy}
           className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
         >

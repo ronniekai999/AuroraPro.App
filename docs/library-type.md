@@ -54,20 +54,35 @@ the library. You are shown exactly what will be deleted — the item count, and
 each kind of attached record with a count — before anything happens. Nothing is
 deleted until you confirm.
 
-If the catalog changes between the preview and your confirmation (a scan
-finishes, another admin acts), the change is **refused** rather than applied to
-a different number of rows than you approved. Re-open the preview and confirm
-the new figure.
+If the **number of titles** changes between the preview and your confirmation
+(a scan finishes, another admin acts), the change is **refused** rather than
+applied to a different number of titles than you approved. Re-open the preview
+and confirm the new figure.
+
+That interlock covers the title count, not the attached-record counts beside it.
+Someone watching an episode or rating a film between the preview and your
+confirmation changes how many of those records go without changing the title
+count, and the change proceeds. Widening the check to every one of them would
+refuse the operation any time anyone was using the server.
 
 The rescan starts automatically. Expect it to take as long as a normal scan of
 that library, plus metadata lookups for everything it rediscovers.
 
 ### The same-type repair
 
-Choosing the type a library already has is not a no-op. It purges any rows whose
-type disagrees with the library's and rescans. That is the state hand-written
-SQL leaves behind — `UPDATE libraries SET type` without the matching delete —
-and this is how to finish it.
+Both types are offered, including the one the library already claims — the
+button reads **Re-apply** rather than **Change to** for that one.
+
+Choosing it is not a no-op. It purges any rows whose type disagrees with the
+library's and rescans. That is the state hand-written SQL leaves behind —
+`UPDATE libraries SET type` without the matching delete — and re-applying the
+type the library already has is how to finish the job.
+
+Do not reach for the *other* button in that state. On a library already marked
+`show` but still full of movie rows, "Change to Movies" is a legitimate action
+with a legitimate preview (it has nothing to delete, because no rows disagree
+with `movie`) — and confirming it puts the library back to `movie`, undoing the
+correction.
 
 ### What is not preserved
 
@@ -106,6 +121,11 @@ what it is about to delete and refuses with 409 if they differ.
 
 - **There is no undo.** The deleted rows are gone; only the files on disk and
   whatever the rescan can derive from them come back.
+- **More is deleted than titles.** The preview enumerates it — watch progress,
+  watchlist entries, ratings, recap threads and their questions and answers,
+  detected intro/credits markers, collection memberships — by walking the
+  database's own cascade graph rather than a list in the code. Read it before
+  confirming; it is the only place those counts appear.
 - **The rescan is fire-and-forget.** If it fails after the purge has committed,
   the library is empty until you scan it again. The purge itself is one
   transaction and either lands completely or not at all.

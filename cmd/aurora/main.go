@@ -230,14 +230,19 @@ func main() {
 		// the report skips a library mid-scan, since a partial tally warns and
 		// then resolves itself. Failures here are swallowed: a diagnostic must
 		// never be able to fail a scan.
-		go func(libID int64) {
+		// bgWorker, not a bare `go`: the watcher callback twenty lines below
+		// carries the note explaining that untracked goroutines are what
+		// produced the 2026-07-30 "closed pool" incident, and this one outlives
+		// the scan that spawned it.
+		libID := lib.ID
+		bgWorker(func() {
 			tallies, err := queries.GetLibraryMatchHealth(ctx)
 			if err != nil {
-				slog.Debug("library health check skipped", "error", err)
+				slog.Warn("library health check failed", "library_id", libID, "error", err)
 				return
 			}
 			api.LogLibraryHealth(api.LibraryHealthReportFor(tallies, scanner), libID)
-		}(lib.ID)
+		})
 	}
 
 	// Notification pipeline (see docs/push.md): one dispatcher owns persist →

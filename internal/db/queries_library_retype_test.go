@@ -128,8 +128,16 @@ func TestPreviewLibraryRetypeCountsWhatWouldBeDestroyed(t *testing.T) {
 	got := map[string]int64{}
 	for _, c := range p.Casualties {
 		got[c.Table] = c.Rows
+		// The description must describe DESTRUCTION. It used to be borrowed
+		// verbatim from mergeChildren, where ten of the nineteen entries begin
+		// "re-parented:" because that is what a MERGE does — so the one screen
+		// whose job is to say what is about to be destroyed told an admin their
+		// live watch party would be re-parented. A review caught it.
 		if c.Why == "" {
 			t.Errorf("casualty %s carries no description; a table name alone tells an admin nothing", c.Table)
+		}
+		if strings.Contains(c.Why, "re-parented") || strings.Contains(c.Why, "merge") {
+			t.Errorf("casualty %s is described in the MERGE's terms (%q); these rows are being deleted, not moved", c.Table, c.Why)
 		}
 		if c.Rows == 0 {
 			t.Errorf("casualty %s listed with 0 rows; zero-row tables must be omitted or they bury the lines that matter", c.Table)
@@ -139,6 +147,121 @@ func TestPreviewLibraryRetypeCountsWhatWouldBeDestroyed(t *testing.T) {
 		if got[want] != 1 {
 			t.Errorf("casualties[%s] = %d, want 1 — this is user data the retype destroys and the preview must say so", want, got[want])
 		}
+	}
+}
+
+// The transitive closure is the point. An earlier version counted only DIRECT
+// children of media_items plus one hand-coded exception, and a review showed
+// that silently omitted skip_markers, skip_marker_analysis and
+// recap_conversation_turns — a person's whole recap Q&A thread destroyed without
+// appearing in the preview, while the comment claimed nothing could be missing.
+func TestPreviewLibraryRetypeCountsGrandchildrenNotJustDirectChildren(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	f := seedRetypeFixture(t, q, 1)
+	doomed := f.movieIDs[0]
+
+	// media_files -> skip_markers / skip_marker_analysis: two hops.
+	var fileID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO media_files (media_item_id, path, file_hash, size_bytes)
+		 VALUES ($1,$2,'h',1) RETURNING id`, doomed, "/tmp/retype-"+randomSuffix(t)+".mkv").Scan(&fileID); err != nil {
+		t.Fatalf("insert media_files: %v", err)
+	}
+	if _, err := q.pool.Exec(ctx,
+		`INSERT INTO skip_markers (media_file_id, kind, start_ms, end_ms, detector)
+		 VALUES ($1,'intro',0,30000,'manual')`, fileID); err != nil {
+		t.Fatalf("insert skip_markers: %v", err)
+	}
+
+	// recap_conversations -> recap_conversation_turns: the one CLAUDE.md singles
+	// out as a person's private thread.
+	var convID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO recap_conversations (profile_id, media_item_id, generation_epoch)
+		 VALUES ($1,$2,1) RETURNING id`, f.profileID, doomed).Scan(&convID); err != nil {
+		t.Fatalf("insert recap_conversations: %v", err)
+	}
+	var reqID string
+	if err := q.pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&reqID); err != nil {
+		t.Fatalf("uuid: %v", err)
+	}
+	if _, err := q.pool.Exec(ctx,
+		`INSERT INTO recap_conversation_turns
+		   (conversation_id, request_id, question, answer,
+		    boundary_season, boundary_episode, boundary_title, grounding_mode)
+		 VALUES ($1,$2::uuid,'q','a',1,1,'t','grounded')`, convID, reqID); err != nil {
+		t.Fatalf("insert recap_conversation_turns: %v", err)
+	}
+
+	p, err := q.PreviewLibraryRetype(ctx, f.libID, models.LibraryShows)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	named := map[string]int64{}
+	for _, c := range p.Casualties {
+		named[c.Table] = c.Rows
+	}
+	for _, want := range []string{"skip_markers", "recap_conversation_turns"} {
+		if named[want] != 1 {
+			t.Errorf("casualties[%s] = %d, want 1 — it cascades transitively and an admin is approving its destruction without being told", want, named[want])
+		}
+	}
+
+	// And the counts are real: confirm and the rows are gone.
+	if _, err := q.RetypeLibrary(ctx, f.libID, models.LibraryShows, p.ItemsToDelete); err != nil {
+		t.Fatalf("retype: %v", err)
+	}
+	for _, tbl := range []string{"skip_markers", "recap_conversation_turns"} {
+		if n := countWhere(t, q, `SELECT COUNT(*) FROM `+tbl); n != 0 {
+			t.Errorf("%d rows remain in %s after the retype; the preview counted rows that do not actually go", n, tbl)
+		}
+	}
+}
+
+// A table reachable by TWO cascade paths must be counted ONCE. skip_markers
+// hangs off both media_files and episode_files; watch_progress off both
+// media_items and tv_episodes. Summing per path would overstate what an admin is
+// about to lose, which is a different way of telling them the wrong number.
+func TestPreviewLibraryRetypeCountsMultiPathTablesOnce(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	f := seedRetypeFixture(t, q, 1)
+	doomed := f.movieIDs[0]
+
+	var seasonID, epID int64
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO tv_seasons (media_item_id, season_number) VALUES ($1,1) RETURNING id`,
+		doomed).Scan(&seasonID); err != nil {
+		t.Fatalf("insert season: %v", err)
+	}
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO tv_episodes (season_id, media_item_id, episode_number) VALUES ($1,$2,1) RETURNING id`,
+		seasonID, doomed).Scan(&epID); err != nil {
+		t.Fatalf("insert episode: %v", err)
+	}
+	// watch_progress reachable via media_item_id AND episode_id, in one row.
+	if _, err := q.pool.Exec(ctx,
+		`INSERT INTO watch_progress (user_id, profile_id, media_item_id, episode_id, position_ms, duration_ms)
+		 VALUES ($1,$2,$3,$4,1000,2000)`, f.ownerID, f.profileID, doomed, epID); err != nil {
+		t.Fatalf("insert episode watch_progress: %v", err)
+	}
+
+	p, err := q.PreviewLibraryRetype(ctx, f.libID, models.LibraryShows)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	var wp int64
+	for _, c := range p.Casualties {
+		if c.Table == "watch_progress" {
+			wp = c.Rows
+		}
+	}
+	// The fixture puts one item-level row on this item; the episode row above is
+	// the second. Both are real, and neither is double-counted.
+	actual := countWhere(t, q, `SELECT COUNT(*) FROM watch_progress WHERE media_item_id = $1`, doomed)
+	if wp != actual {
+		t.Errorf("preview reports %d watch_progress rows, the table holds %d — a table reachable by two cascade paths must be counted once", wp, actual)
 	}
 }
 
@@ -336,8 +459,106 @@ func TestRetypeLibraryRejectsUnknownTypesAndMissingLibraries(t *testing.T) {
 	if err != nil || p != nil {
 		t.Errorf("preview of a missing library returned (%v, %v), want (nil, nil)", p, err)
 	}
+	// A vanished library is a DISTINGUISHABLE error, not a quiet success. The
+	// library can be deleted between the handler's lookup and this transaction,
+	// and reporting that as "deleted nothing" made the handler answer 200 and
+	// launch a rescan of a library that no longer exists.
 	deleted, err := q.RetypeLibrary(ctx, 0, models.LibraryShows, 0)
-	if err != nil || deleted != 0 {
-		t.Errorf("retype of a missing library returned (%d, %v), want (0, nil)", deleted, err)
+	if !errors.Is(err, ErrLibraryGone) {
+		t.Errorf("retype of a missing library returned (%d, %v), want ErrLibraryGone", deleted, err)
+	}
+	if deleted != 0 {
+		t.Errorf("retype of a missing library reported %d deletions", deleted)
+	}
+}
+
+// TestRetypeCascadeClosureCoversTheWholeSchema is the drift guard for the
+// preview's table list.
+//
+// The list is derived from pg_constraint at query time, which is what makes the
+// "cannot go stale" claim true — but the derivation has one documented blind
+// spot: it takes single-column foreign keys only. There are none of any other
+// shape today. If one is ever added, a predicate built from one column of a
+// composite key would silently OVER-count rather than fail, so this fails
+// instead and says what to do about it.
+func TestRetypeCascadeClosureCoversTheWholeSchema(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+
+	edges, err := q.cascadeEdgesFrom(ctx)
+	if err != nil {
+		t.Fatalf("edges: %v", err)
+	}
+	if len(edges) == 0 {
+		t.Fatal("no cascade edges found at all — the query is wrong, not the schema")
+	}
+
+	// Reachability from media_items over the single-column cascade edges the
+	// preview actually walks.
+	depth := map[string]int{"media_items": 0}
+	for changed := true; changed; {
+		changed = false
+		for _, e := range edges {
+			if d, ok := depth[e.Parent]; ok {
+				if cur, seen := depth[e.Child]; !seen || d+1 < cur {
+					depth[e.Child] = d + 1
+					changed = true
+				}
+			}
+		}
+	}
+
+	// The one documented blind spot: cascadeEdgesFrom takes single-column
+	// foreign keys only. A composite one is harmless as long as its PARENT is
+	// out of reach of media_items — the schema has exactly one today
+	// (recommendation_impressions -> recommendation_slates, which hangs off
+	// user_profiles). One whose parent IS reachable would make its child's rows
+	// doomed by a path the preview does not walk, so the admin would be told a
+	// number smaller than the truth.
+	rows, err := q.pool.Query(ctx, `
+		SELECT c.conrelid::regclass::text, c.confrelid::regclass::text, c.conname
+		FROM pg_constraint c
+		WHERE c.contype = 'f' AND c.confdeltype = 'c'
+		  AND array_length(c.conkey, 1) > 1`)
+	if err != nil {
+		t.Fatalf("query composite cascade keys: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var child, parent, name string
+		if err := rows.Scan(&child, &parent, &name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, reachable := depth[parent]; reachable {
+			t.Errorf("%s cascades from %s by a MULTI-COLUMN foreign key (%s), and %s is reachable from media_items. cascadeEdgesFrom skips composite keys, so the retype preview under-reports those rows. Teach doomedRowsPredicate to build a multi-column predicate before relying on it.",
+				child, parent, name, parent)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+
+	// And the closure really does reach past the first hop — stopping at direct
+	// children is the defect this replaced, so a schema where that no longer
+	// matters means this guard has stopped proving anything.
+	deepest := 0
+	for _, d := range depth {
+		if d > deepest {
+			deepest = d
+		}
+	}
+	if deepest < 2 {
+		t.Errorf("the deepest cascade path from media_items is %d hop(s); the preview used to stop at 1, so this guard needs a schema deeper than that to mean anything", deepest)
+	}
+	// The three the review found missing, by name.
+	for _, want := range []string{"skip_markers", "skip_marker_analysis", "recap_conversation_turns"} {
+		d, ok := depth[want]
+		if !ok {
+			t.Errorf("%s is no longer reachable from media_items by cascade; if that is deliberate, this guard needs updating", want)
+			continue
+		}
+		if d < 2 {
+			t.Errorf("%s is now a DIRECT child (depth %d); it was the grandchild case this guard was built for", want, d)
+		}
 	}
 }
