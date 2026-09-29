@@ -57,6 +57,8 @@ import {
   listFlaggedItems,
   listLibraries,
   getLibraryHealth,
+  previewLibraryRetype,
+  retypeLibrary,
   listPendingApprovals,
   listRooms,
   manualMatch,
@@ -79,6 +81,7 @@ import {
   type EmbeddingStatus,
   type Library,
   type LibraryHealthReport,
+  type RetypePreview,
   type LLMSettings,
   type LLMTestResult,
   type LogEntry,
@@ -562,6 +565,96 @@ function UpdatePanel() {
   )
 }
 
+// Changing a library's type. Deliberately its own component and its own
+// two-step flow rather than a select on the row: this DELETES every catalog row
+// of the old type — watch progress, watchlist entries and ratings with them —
+// and then rescans from disk. A dropdown that saved on change would look like
+// renaming the library.
+//
+// The preview's items_to_delete is echoed back on confirm. If the catalog moved
+// in between (a scan finished, another admin acted) the server answers 409 and
+// nothing happens, so the number an admin approves is the number that goes.
+function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void }) {
+  const target: 'movie' | 'show' = lib.type === 'movie' ? 'show' : 'movie'
+  const [preview, setPreview] = useState<RetypePreview | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const open = async () => {
+    setBusy(true)
+    try { setPreview(await previewLibraryRetype(lib.id, target)) }
+    catch (e) { window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown')) }
+    finally { setBusy(false) }
+  }
+
+  const confirm = async () => {
+    if (!preview) return
+    setBusy(true)
+    try {
+      const res = await retypeLibrary(lib.id, target, preview.items_to_delete)
+      setPreview(null)
+      window.alert(`Deleted ${res.items_deleted} item(s) and started a rescan.`)
+      onDone()
+    } catch (e) {
+      // A 409 here is the interlock doing its job, and the message says so.
+      window.alert('Change failed: ' + (e instanceof Error ? e.message : 'unknown'))
+    } finally { setBusy(false) }
+  }
+
+  if (!preview) {
+    return (
+      <button
+        onClick={() => void open()}
+        disabled={busy}
+        title={`Change this library to ${target === 'show' ? 'TV Shows' : 'Movies'}`}
+        className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+      >
+        {busy ? 'Checking…' : `Change to ${target === 'show' ? 'TV' : 'Movies'}`}
+      </button>
+    )
+  }
+
+  return (
+    <div className="w-full mt-3 p-3 rounded-lg bg-red-500/[0.07] border border-red-500/20">
+      <p className="text-red-200 text-xs font-medium">
+        Change “{preview.library_name}” from {preview.current_type} to {preview.target_type}?
+      </p>
+      <p className="text-white/70 text-xs mt-2">
+        This deletes {preview.items_to_delete} catalog item(s) and everything attached to them,
+        then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item(s) already of the target type are kept. `}
+        The files on disk are not touched.
+      </p>
+      {preview.casualties && preview.casualties.length > 0 && (
+        <ul className="mt-2 space-y-0.5">
+          {preview.casualties.map(c => (
+            <li key={c.table} className="text-amber-200/90 text-xs">
+              {c.rows} × <span className="font-mono">{c.table}</span> — {c.why}
+            </li>
+          ))}
+        </ul>
+      )}
+      {preview.items_to_delete === 0 && (
+        <p className="text-white/50 text-xs mt-2">Nothing to delete — this only changes the type and rescans.</p>
+      )}
+      <div className="flex gap-2 mt-3">
+        <button
+          onClick={() => void confirm()}
+          disabled={busy}
+          className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-200 text-xs rounded disabled:opacity-50"
+        >
+          {busy ? 'Working…' : 'Delete and rescan'}
+        </button>
+        <button
+          onClick={() => setPreview(null)}
+          disabled={busy}
+          className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function AdminLibrariesTab() {
   const [items, setItems] = useState<Library[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -643,6 +736,7 @@ function AdminLibrariesTab() {
           {h?.warning && (
             <p className="mt-2 text-amber-300/90 text-xs leading-relaxed">{h.warning}</p>
           )}
+          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} />
           </div>
           )
         })}

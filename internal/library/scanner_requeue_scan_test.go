@@ -417,3 +417,51 @@ func TestDueForRequeueSweepClaimsTheSlotOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseScanSlotFreesAnUnusedClaimButNeverCancelsWork pins the slot
+// release the library-retype action depends on.
+//
+// Retype claims the scan slot before it touches anything, because a scan running
+// through the purge would be writing rows into the library as they are deleted
+// and would then keep walking it under the old parser. But the retype can be
+// REFUSED after that claim — a stale count, a rolled-back transaction — and
+// without a release the library reads as ScanRunning for the life of the
+// process: no scan would ever start, and the #510 health report would treat it
+// as busy and stay silent about it. A guard that jams the thing it guards.
+func TestReleaseScanSlotFreesAnUnusedClaimButNeverCancelsWork(t *testing.T) {
+	s := NewScanner(config.ScannerConfig{}, nil)
+
+	if !s.TryStartScan(1) {
+		t.Fatal("first claim refused")
+	}
+	if s.TryStartScan(1) {
+		t.Fatal("the slot was claimable twice; it is not exclusive")
+	}
+	s.ReleaseScanSlot(1)
+	if !s.TryStartScan(1) {
+		t.Error("the slot was not released, so this library can never be scanned again in this process")
+	}
+
+	// Idempotent, and harmless on a library that was never claimed.
+	s.ReleaseScanSlot(1)
+	s.ReleaseScanSlot(999)
+	if !s.TryStartScan(999) {
+		t.Error("releasing an unclaimed library broke its slot")
+	}
+
+	// It releases an UNUSED claim; it does not cancel a scan that has started
+	// doing work. Otherwise a retype refused after a concurrent scan began would
+	// quietly hand that scan's slot away and let a second scan start beside it.
+	s.ReleaseScanSlot(2)
+	if !s.TryStartScan(2) {
+		t.Fatal("claim refused")
+	}
+	s.mu.Lock()
+	s.progress[2].TotalFiles = 120
+	s.progress[2].ScannedFiles = 7
+	s.mu.Unlock()
+	s.ReleaseScanSlot(2)
+	if s.TryStartScan(2) {
+		t.Error("a scan that had already started walking files had its slot released; two scans of one library could then run at once")
+	}
+}

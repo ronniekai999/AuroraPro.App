@@ -1695,6 +1695,49 @@ export async function getLibraryHealth(signal?: AbortSignal): Promise<LibraryHea
   return res || { libraries: [] }
 }
 
+// Changing a library's type (#510). Two calls, always in this order.
+//
+// This is a PURGE and a rescan, not a field edit: everything of the wrong type
+// is deleted — watch progress, watchlist entries and ratings with it — the type
+// is changed, and the library is walked again from disk under the right parser.
+// A bare type edit is worse than useless, because the existing rows keep the old
+// type with their files in the wrong table, where no later prune can reach them.
+//
+// `items_to_delete` from the preview MUST be echoed back to the confirm call.
+// The server refuses if the catalog moved in between, so an admin who approved
+// 80 titles can never silently get 400.
+export interface RetypeCasualty {
+  table: string
+  rows: number
+  /** Plain-language description of what those rows are. */
+  why: string
+}
+export interface RetypePreview {
+  library_id: number
+  library_name: string
+  current_type: 'movie' | 'show'
+  target_type: 'movie' | 'show'
+  items_to_delete: number
+  items_kept: number
+  /** Only tables that actually lose rows; absent when nothing is lost. */
+  casualties?: RetypeCasualty[]
+}
+export async function previewLibraryRetype(
+  id: number, type: 'movie' | 'show', signal?: AbortSignal,
+): Promise<RetypePreview> {
+  return apiFetch<RetypePreview>(
+    `/api/libraries/${id}/retype/preview?type=${encodeURIComponent(type)}`, { signal },
+  ) as Promise<RetypePreview>
+}
+export async function retypeLibrary(
+  id: number, type: 'movie' | 'show', expectedItems: number,
+): Promise<{ items_deleted: number }> {
+  return apiFetch<{ items_deleted: number }>(`/api/libraries/${id}/retype`, {
+    method: 'POST',
+    body: { type, expected_items: expectedItems },
+  }) as Promise<{ items_deleted: number }>
+}
+
 // Unified Active Streams row. Transcode-backed and direct-play-backed
 // streams arrive on the same array tagged with `kind` so the admin
 // Sessions tab can render them together. Fields that don't apply to

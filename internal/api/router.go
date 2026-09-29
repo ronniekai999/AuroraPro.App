@@ -827,6 +827,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 					r.Delete("/{id}", libH.Delete)
 					r.Post("/{id}/scan", libH.Scan)
 					r.Get("/{id}/scan/status", libH.ScanStatus)
+					// Changing a library's type (#510). Two calls on
+					// purpose: the preview is read-only and says what
+					// would be destroyed, the POST echoes back the count
+					// it was shown and is refused if the catalog moved
+					// since. This is a PURGE and a rescan, not a field
+					// edit — a bare UPDATE of the type leaves every
+					// existing row the wrong type with its files in the
+					// wrong table, unreachable by any later prune.
+					r.Get("/{id}/retype/preview", libH.RetypePreview)
+					r.Post("/{id}/retype", libH.Retype)
 				})
 			})
 

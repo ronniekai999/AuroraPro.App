@@ -372,6 +372,72 @@ restart mid-scan produces the state.
   bounded only by the slot being process-local, so the restart that caused the
   cancellation re-arms it.
 
+### Library type: the report and the retype (issue #510)
+
+A library created with the wrong type is the defect behind #510. The owner's "TV
+Shows" library was `type='movie'`, so `isTV := lib.Type == models.LibraryShows`
+sent all 80 series through `ParseMoviePath`, stored them as
+`media_items.type='movie'` with their files in `media_files`, and searched them
+against TMDB's MOVIE index. Nothing matched, nothing surfaced it, and every scan
+reported success. Code: `internal/db/queries_library_health.go` and
+`queries_library_retype.go`, `internal/api/library_health.go` and
+`library_retype.go`, SPA `AdminLibrariesTab` / `RetypeLibraryButton`.
+
+The report (`GET /api/admin/library-health`, plus one log line per scan from
+`OnScanComplete`):
+
+- "Matched" is `tmdb_id`, never `match_status`. That column DEFAULTs to
+  `'matched'` and `UpsertMediaItem` never writes it, so every row this report
+  exists to find reads as matched with a NULL `tmdb_id`.
+- Flags a library at or below a 5% match rate with at least 10 titles. When
+  EVERY eligible library is starved it raises ONE install-level warning naming
+  the provider instead — that pattern is a bad TMDB key, and per-library type
+  warnings would send an admin the wrong way.
+- That suppression needs TWO eligible libraries. With one, the explanations are
+  indistinguishable, and suppressing would silence exactly the single-library
+  install whose one library is mis-typed. A false warning costs a look at a
+  settings page; a false all-clear costs what #510 cost.
+- A library mid-scan is never warned about: a partial tally warns and then
+  resolves itself, and a warning that fires during every scan stops being read.
+- Report only. Admin-gated and NOT on `/api/libraries`, which is member-visible.
+
+The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
+
+- It is a PURGE and a rescan, never a field edit. A bare `UPDATE libraries SET
+  type` is actively harmful: existing rows keep the old type, their files stay
+  in the wrong table, and `pruneDeletedFiles` branches on the same `isTV`, so
+  those
+  `media_files` rows become unreachable by any later prune. Permanent phantoms
+  on top of a catalog that still reads as the old type.
+- Two calls. The preview is read-only and counts casualties; the confirm echoes
+  `items_to_delete` back and the transaction REFUSES on a mismatch (409). The
+  recount happens inside the transaction after `SELECT ... FOR UPDATE` on the
+  library row — checking outside would leave the window it exists to close.
+- `expected_items` is a POINTER. Zero is a legitimate approval, so as a plain
+  int64 an omitted interlock and an approved zero are the same value.
+- The casualty list is DERIVED from `mergeChildren`, which a drift guard already
+  pins against `pg_constraint`, so a future cascade child cannot be silently
+  absent from what an admin is shown. `episode_files` is counted separately
+  because it cascades from `tv_episodes`.
+- The scan slot is claimed before anything is touched and handed to the rescan,
+  so the library is never unlocked in between. A refused retype releases it via
+  `ReleaseScanSlot`, which frees an UNUSED claim only — otherwise a refusal
+  leaves the library reading as scanning for the life of the process.
+- Calling it with the type the library already has is the repair path, not a
+  no-op: it purges rows whose type disagrees with the library's, which is the
+  state hand-written SQL leaves behind.
+- `libraries.type` also carries a CHECK constraint (movie|show). That is a real
+  backstop but it fires INSIDE the transaction, after the DELETE; the Go-side
+  type check is what stops `type <> <garbage>` matching every row.
+- Deliberate non-goal: nothing is preserved across a retype. Re-parenting a
+  movie row's history onto a show row is the premise the withdrawn repointing
+  work proved false, and guessing wrong loses data silently instead of loudly.
+
+Known gaps: the retype is not reversible and there is no undo; the rescan is
+fire-and-forget, so a failure after the purge commits leaves an empty library
+until someone scans again; and the report's thresholds are reasoned, not
+calibrated against real installs.
+
 ### Nullable database columns
 
 Go scalar fields use zero values as unknown sentinels. Queries projecting
