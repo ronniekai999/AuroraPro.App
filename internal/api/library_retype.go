@@ -11,6 +11,7 @@ import (
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/models"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 )
@@ -141,7 +142,17 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	deleted, err := h.queries.RetypeLibrary(r.Context(), lib.ID, target, expected)
+	// The purge runs on the SERVER-lifecycle context, not the request's.
+	//
+	// The route carries middleware.Timeout(60s), which cancels r.Context(). A
+	// DELETE cascading across the whole closure scales with library size, and a
+	// cancellation racing Commit is ambiguous: the handler would answer 500
+	// while the purge may have landed, leaving slotUsed false — so no rescan —
+	// on the one endpoint in the repo with no undo. Moving the multi-minute
+	// watcher walk off this route last round did not cover the DELETE, which is
+	// the part that actually scales. It still ends at shutdown, so this is not
+	// context.Background().
+	deleted, err := h.queries.RetypeLibrary(h.scanContext(), lib.ID, target, expected)
 	if err != nil {
 		if errors.Is(err, db.ErrLibraryGone) {
 			writeError(w, http.StatusNotFound, "library not found")
@@ -200,20 +211,39 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 		// the most destructive endpoint in the repo could report a gateway
 		// failure for an operation that had already deleted the catalog. Same
 		// ordering as Create now: goroutine first, walk inside it.
-		if h.watcher != nil {
-			if err := h.watcher.WatchLibrary(ctx, &rescan); err != nil {
-				// WatchLibrary returns before it touches w.watching, so the OLD
-				// entry survives — holding the pre-retype snapshot and still
-				// feeding the old type to onChange. Leaving it is worse than
-				// having no watch at all, so drop it and say so.
-				h.watcher.UnwatchLibrary(rescan.ID)
-				slog.Error("library retyped but re-watching failed; dropped the stale watch, so file events for it are unwatched until restart",
-					"library", rescan.Name, "library_id", rescan.ID, "error", err)
-			} else {
-				h.watcher.NoteExternalScan(rescan.ID)
-			}
+		// A concurrent Delete unwatches and then removes the library; without
+		// this check the re-point below would re-install a watch for a row that
+		// no longer exists, and periodicScanLoop would scan a deleted library
+		// every interval for the life of the process.
+		if still, err := h.queries.GetLibrary(ctx, rescan.ID); err != nil || still == nil {
+			slog.Info("library disappeared during retype; skipping re-watch and rescan",
+				"library_id", rescan.ID)
+			return
 		}
 
+		if h.watcher != nil {
+			// WatchLibrary now installs the entry even when file-event watching
+			// cannot start, so the library keeps its periodic tick with the
+			// CURRENT value. That is the whole point of the sentinel: an earlier
+			// version dropped the watch on failure, which also dropped the
+			// library out of periodic scanning — worse than documented, and
+			// exactly the case where the rescan below is most likely to have
+			// failed too.
+			err := h.watcher.WatchLibrary(ctx, &rescan)
+			switch {
+			case errors.Is(err, library.ErrFSWatchUnavailable):
+				slog.Warn("library retyped; file-event watching unavailable, periodic scans still cover it",
+					"library", rescan.Name, "library_id", rescan.ID, "error", err)
+			case err != nil:
+				slog.Error("library retyped but re-watching failed",
+					"library", rescan.Name, "library_id", rescan.ID, "error", err)
+			}
+			h.watcher.NoteExternalScan(rescan.ID)
+		}
+
+		if h.onRescanProgressForTest != nil {
+			h.onRescanProgressForTest()
+		}
 		_ = h.scanner.ScanLibrary(ctx, &rescan, func(p *models.ScanProgress) {
 			h.hub.Broadcast(ws.EventScanProgress, p)
 			// Mirror Create's completion fan-out: without it the SPA never

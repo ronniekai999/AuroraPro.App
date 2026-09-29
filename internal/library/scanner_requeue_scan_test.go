@@ -465,3 +465,40 @@ func TestReleaseScanSlotFreesAnUnusedClaimButNeverCancelsWork(t *testing.T) {
 		t.Error("a scan that had already started walking files had its slot released; two scans of one library could then run at once")
 	}
 }
+
+// TestWatchLibraryKeepsPeriodicScanningWhenFileWatchingFails pins the
+// degradation path, because the alternative it replaced was worse than the
+// documentation said.
+//
+// w.watching is not just the fsnotify registry — periodicScanLoop iterates it to
+// decide which libraries get the periodic tick. So returning early when
+// fsnotify.NewWatcher() fails dropped the library out of AUTOMATIC SCANNING
+// ENTIRELY, not just out of file events. For the retype that made the choice
+// "keep a stale snapshot that rescans under the wrong type" versus "never scan
+// this library again", and a review measured the second half: after an unwatch,
+// a 60ms periodic tick fired nothing for a second.
+//
+// installWatch is therefore what both paths go through, and this asserts a
+// library registered without an fsnotify watcher is still visible to the tick.
+func TestWatchLibraryKeepsPeriodicScanningWhenFileWatchingFails(t *testing.T) {
+	w := NewWatcher(config.ScannerConfig{}, nil, func(*models.Library) {})
+	t.Cleanup(w.StopAll)
+
+	lib := &models.Library{ID: 77, Name: "degraded", Type: models.LibraryShows, Paths: []string{t.TempDir()}}
+	w.installWatch(context.Background(), lib, nil)
+
+	got := w.WatchedLibrary(77)
+	if got == nil {
+		t.Fatal("a library registered without file watching is invisible to the watcher, so periodicScanLoop will never scan it again")
+	}
+	if got.Type != models.LibraryShows {
+		t.Errorf("registered value carries type %q, want %q", got.Type, models.LibraryShows)
+	}
+
+	// And the copy is a copy: Paths is a slice, so a shallow one would alias the
+	// snapshot periodicScanLoop hands ScanLibrary.
+	got.Paths[0] = "/mutated"
+	if again := w.WatchedLibrary(77); again.Paths[0] == "/mutated" {
+		t.Error("WatchedLibrary returned a shallow copy; a caller writing Paths[i] corrupts what the watcher scans")
+	}
+}

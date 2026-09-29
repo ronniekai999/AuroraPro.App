@@ -438,15 +438,19 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
   `ReleaseScanSlot`, which frees an UNUSED claim only — otherwise a refusal
   leaves the library reading as scanning for the life of the process.
 - The WATCHER is re-pointed at the new library value, inside the rescan
-  goroutine and ahead of the scan — never inline in the handler.
+  goroutine and ahead of the scan — never inline in the handler, and the
+  ORDERING is pinned through `onRescanProgressForTest` because polling for the
+  final state cannot see it (an empty tree rescans in milliseconds).
   `WatchLibrary` walks every library path with `filepath.WalkDir`, which
   `LibraryHandler.Create` carries a post-mortem comment about because doing it
   synchronously caused 504s; inline, that put a multi-minute walk AFTER a
   committed purge on a 60s route, so the most destructive endpoint in the repo
   could report a gateway failure for work it had already done. On failure the
-  old watch is DROPPED (`UnwatchLibrary`), because `WatchLibrary` returns before
-  it touches `w.watching` and the surviving entry would keep feeding the old
-  type.
+  entry is installed ANYWAY with the current value and `WatchLibrary` returns
+  `ErrFSWatchUnavailable`. `w.watching` is also what `periodicScanLoop`
+  iterates, so the previous behaviour — return early, or drop the stale entry —
+  took the library out of automatic scanning entirely, not just out of file
+  events. That is the state where the rescan is most likely to have failed too.
   `WatchLibrary` stores the `*models.Library` it was handed as a SNAPSHOT and is
   called only at boot and on library creation, so the periodic tick and the
   fsnotify debounce keep passing the pre-retype value to `ScanLibrary`, which
@@ -455,13 +459,19 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
   the exact phantom state the operation exists to remove. A review demonstrated
   it end to end; `Watcher.WatchedLibrary` exists so the next one can assert it
   from outside the package.
+- The purge transaction runs on the SERVER-lifecycle context, not the request's.
+  The route carries a 60s timeout and the DELETE scales with library size; a
+  cancellation racing `Commit` is ambiguous, so the handler would answer 500
+  with no rescan launched while the purge may have landed.
 - The count interlock covers the ITEM count only, not the casualty counts shown
   beside it. Widening it would refuse the operation any time anyone watched
   something. It is also belt-and-braces now: `RowsAffected` is compared after
   the DELETE, because the recount's atomicity rests on `FOR UPDATE` conflicting
-  with
-  the FK's `FOR KEY SHARE` on the same row — real, load-tested by a review, and
-  silently lost if anyone "corrects" it to `FOR NO KEY UPDATE`.
+  with the FK's `FOR KEY SHARE` on the same row — real, load-tested by a review,
+  and silently lost if anyone "corrects" it to `FOR NO KEY UPDATE`. The
+  `FOR UPDATE` itself is pinned by NOTHING: replacing it with a plain `SELECT`
+  passes every test, and the outcome stays safe only because `RowsAffected`
+  turns the over-delete into a 409 rollback.
 - Calling it with the type the library already has is the repair path, not a
   no-op: it purges rows whose type disagrees with the library's, which is the
   state hand-written SQL leaves behind.
@@ -478,10 +488,14 @@ until someone scans again; the purge holds the `libraries` row lock for its
 duration, which blocks `media_items` inserts for that library; the preview runs
 one count per affected table and is not instant on a large library, and a
 timeout there makes the confirm unreachable since it needs the preview's number;
-the preview enumerates DELETIONS only, so a `SET NULL` side effect (a watch
-party on a KEPT title losing an episode that belonged to a removed one) goes
-unreported; and the report's thresholds are reasoned, not calibrated against
-real installs.
+the preview enumerates DELETIONS only, so the two `SET NULL` side effects go
+unreported (a watch party on a KEPT title losing an episode that belonged to a
+removed one, and the same for a recap turn's episode boundary); live watch
+parties are deleted underneath `internal/watchparty`'s in-memory manager, which
+is not notified, so participants stay connected to a room whose row is gone; the
+rescan goroutine is a bare `go` like `Create`'s and `Scan`'s, so shutdown does
+not wait for it and `addDirRecursive` ignores its context; and the report's
+thresholds are reasoned, not calibrated against real installs.
 
 ### Nullable database columns
 

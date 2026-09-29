@@ -35,6 +35,15 @@ type LibraryHandler struct {
 	// Optional — nil falls back to Background, which is the pre-existing
 	// behaviour and keeps tests that build the handler directly working.
 	rootCtx context.Context
+
+	// onRescanProgressForTest fires in the retype's rescan goroutine, after the
+	// watcher re-point and immediately before ScanLibrary. Nil in production.
+	//
+	// It exists because the ORDERING is the property, and polling for the final
+	// state cannot see it: the rescan of an empty tree finishes in milliseconds,
+	// so moving the re-point after the scan passes a poll either way. A review
+	// showed that mutation surviving.
+	onRescanProgressForTest func()
 }
 
 // SetRootContext wires the server-lifecycle context. Mirrors SetDispatcher:

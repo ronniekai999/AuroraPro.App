@@ -305,11 +305,36 @@ func TestRetypeHandlerRePointsTheWatcher(t *testing.T) {
 		t.Fatalf("precondition: watcher holds %v, want a movie library", got)
 	}
 
+	// Capture what the watcher held when the SCAN first reported progress. The
+	// ordering — re-point, then scan — is what the code comment and CLAUDE.md
+	// both make load-bearing, and polling for the final state cannot see it: an
+	// empty temp dir scans in milliseconds, so moving the re-point after
+	// ScanLibrary passes a poll either way. A review showed that mutation
+	// surviving.
+	typeAtFirstProgress := make(chan models.LibraryType, 1)
 	h := NewLibraryHandler(q, s, ws.NewHub(nil), w, nil)
+	h.onRescanProgressForTest = func() {
+		if held := w.WatchedLibrary(libID); held != nil {
+			select {
+			case typeAtFirstProgress <- held.Type:
+			default:
+			}
+		}
+	}
+
 	rec := httptest.NewRecorder()
 	h.Retype(rec, retypeReq(t, http.MethodPost, "/x", `{"type":"show","expected_items":2}`, libID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case got := <-typeAtFirstProgress:
+		if got != models.LibraryShows {
+			t.Errorf("the scan started while the watcher still held %q; the re-point must precede ScanLibrary, or a file event during the scan queues another one under the old parser", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rescan never reported progress")
 	}
 
 	// The re-point runs in the rescan goroutine — deliberately off the request

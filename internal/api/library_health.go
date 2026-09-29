@@ -154,7 +154,14 @@ func libraryTypeWarning(t db.LibraryMatchHealth) string {
 func libraryIsStarved(rep LibraryHealthReport, libraryID int64) bool {
 	for _, l := range rep.Libraries {
 		if l.LibraryID == libraryID {
-			return l.Items >= libraryHealthMinItems && belowMatchThreshold(l.LibraryMatchHealth)
+			// Mirrors the eligibility rule at the top of libraryHealthReport,
+			// INCLUDING the mid-scan exclusion. Without that a library excluded
+			// from the verdict could still authorise the install-level line —
+			// reachable when a new scan starts between ScanComplete and the
+			// tally fetch.
+			return !l.Scanning &&
+				l.Items >= libraryHealthMinItems &&
+				belowMatchThreshold(l.LibraryMatchHealth)
 		}
 	}
 	return false

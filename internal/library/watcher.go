@@ -2,9 +2,12 @@ package library
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -184,9 +187,21 @@ func (w *Watcher) periodicScanLoop(ticker *time.Ticker) {
 func (w *Watcher) WatchLibrary(ctx context.Context, lib *models.Library) error {
 	// Build the fsnotify watcher and register all directories first — no
 	// shared state is touched here, so no lock is needed.
+	//
+	// A failure here does NOT abandon the library. w.watching is also what
+	// periodicScanLoop iterates, so returning early left the library out of the
+	// periodic tick as well as out of file watching — and for a caller replacing
+	// an existing entry (the retype), the choice was between keeping a stale
+	// snapshot that rescans under the wrong type and dropping the library from
+	// automatic scanning entirely. Neither is right. The entry is installed with
+	// the CURRENT value either way; only the fsnotify half is lost, and the
+	// sentinel says exactly that.
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		w.installWatch(ctx, lib, nil)
+		slog.Warn("file-event watching unavailable; library still scans on the periodic tick",
+			"library", lib.Name, "id", lib.ID, "error", err)
+		return fmt.Errorf("%w: %v", ErrFSWatchUnavailable, err)
 	}
 	for _, rootPath := range lib.Paths {
 		if err := addDirRecursive(watcher, rootPath); err != nil {
@@ -194,6 +209,22 @@ func (w *Watcher) WatchLibrary(ctx context.Context, lib *models.Library) error {
 		}
 	}
 
+	watchCtx, lw := w.installWatch(ctx, lib, watcher)
+	slog.Info("file watcher started", "library", lib.Name, "id", lib.ID)
+	go w.watchLoop(watchCtx, watcher, lw)
+
+	return nil
+}
+
+// ErrFSWatchUnavailable means file-event watching could not be started, but the
+// library IS registered and will still be scanned on the periodic tick with the
+// value passed in. Callers should not treat it as "not watched".
+var ErrFSWatchUnavailable = errors.New("file-event watching unavailable")
+
+// installWatch atomically swaps this library's watch entry. Split out so the
+// fsnotify-less path registers the library exactly the same way, which is what
+// keeps the periodic tick working when file watching cannot start.
+func (w *Watcher) installWatch(ctx context.Context, lib *models.Library, _ *fsnotify.Watcher) (context.Context, *libraryWatch) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	lw := &libraryWatch{
 		library: lib,
@@ -214,11 +245,7 @@ func (w *Watcher) WatchLibrary(ctx context.Context, lib *models.Library) error {
 	}
 	w.watching[lib.ID] = lw
 	w.mu.Unlock()
-
-	slog.Info("file watcher started", "library", lib.Name, "id", lib.ID)
-	go w.watchLoop(watchCtx, watcher, lw)
-
-	return nil
+	return watchCtx, lw
 }
 
 // WatchedLibrary returns a COPY of the library value the watcher currently holds
@@ -238,6 +265,11 @@ func (w *Watcher) WatchedLibrary(libraryID int64) *models.Library {
 		return nil
 	}
 	cp := *lw.library
+	// Paths is a slice: a shallow copy aliases the watcher's live snapshot, so a
+	// caller writing cp.Paths[i] would corrupt what periodicScanLoop hands
+	// ScanLibrary. Cheap to clone, and it makes "COPY" true rather than
+	// true-of-the-scalars.
+	cp.Paths = slices.Clone(lw.library.Paths)
 	return &cp
 }
 

@@ -217,10 +217,18 @@ func TestPreviewLibraryRetypeCountsGrandchildrenNotJustDirectChildren(t *testing
 	if _, err := q.RetypeLibrary(ctx, f.libID, models.LibraryShows, p.ItemsToDelete); err != nil {
 		t.Fatalf("retype: %v", err)
 	}
-	for _, tbl := range []string{"skip_markers", "recap_conversation_turns"} {
-		if n := countWhere(t, q, `SELECT COUNT(*) FROM `+tbl); n != 0 {
-			t.Errorf("%d rows remain in %s after the retype; the preview counted rows that do not actually go", n, tbl)
-		}
+	// Scoped to this fixture's rows, not catalog-wide. An unscoped COUNT here
+	// fails on any unrelated row in those tables and reports it as "the preview
+	// counted rows that do not actually go" — blaming production code for test
+	// pollution. A review inserted one unrelated skip_markers row and got
+	// exactly that.
+	if n := countWhere(t, q,
+		`SELECT COUNT(*) FROM skip_markers WHERE media_file_id = $1`, fileID); n != 0 {
+		t.Errorf("%d skip_markers rows remain after the retype; the preview counted rows that do not actually go", n)
+	}
+	if n := countWhere(t, q,
+		`SELECT COUNT(*) FROM recap_conversation_turns WHERE conversation_id = $1`, convID); n != 0 {
+		t.Errorf("%d recap_conversation_turns rows remain after the retype; the preview counted rows that do not actually go", n)
 	}
 }
 

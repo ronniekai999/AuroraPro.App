@@ -131,9 +131,14 @@ what it is about to delete and refuses with 409 if they differ.
   cascade graph rather than a list in the code. Read it before confirming; it is
   the only place those counts appear.
 - **The preview lists deletions, not every side effect.** If a library holds
-  both types at once, a watch party on a title you are KEEPING can lose its
-  episode (the column is nulled rather than the row deleted) when that episode
-  belongs to a title being removed. Nothing reports that.
+  both types at once, two things on titles you are KEEPING can lose an episode
+  reference — a watch party, and a recap conversation turn's episode boundary —
+  when that episode belongs to a title being removed. The column is nulled
+  rather than the row deleted, and nothing reports it.
+- **A live watch party is deleted out from under the running room.** Its
+  participants stay connected to a room whose database row is gone; the server
+  is not notified. The preview does say how many rooms go, and flags that some
+  may be live.
 - **The preview runs one count per affected table.** On a very large library it
   is not instant, and if it times out the confirm cannot be made at all, because
   it needs the number the preview returns.
