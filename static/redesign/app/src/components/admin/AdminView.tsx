@@ -649,7 +649,7 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
         <ul className="mt-2 space-y-0.5">
           {preview.casualties.map(c => (
             <li key={c.table} className="text-amber-200/90 text-xs">
-              {c.rows} × <span className="font-mono">{c.table}</span> — {c.why}
+              {c.rows} × <span className="font-mono">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
             </li>
           ))}
         </ul>

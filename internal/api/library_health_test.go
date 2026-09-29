@@ -292,16 +292,36 @@ func TestLibraryHealthMidScanLibrariesDoNotDriveTheInstallVerdict(t *testing.T) 
 
 // The install line is scoped like the per-library ones. Without that, every scan
 // of every library re-wrote it.
+//
+// The first version of this test probed a library id that did not EXIST for its
+// negative case, so it passed against a guard that did nothing — the guard asked
+// whether the library was in the report, and the report carries every library. A
+// review caught it. The negative case here is a real library in the report that
+// simply is not starved, which is the case the guard has to decide.
 func TestLogLibraryHealthScopesTheInstallLineToo(t *testing.T) {
 	rep := LibraryHealthReportFor([]db.LibraryMatchHealth{
-		tally(1, models.LibraryMovies, 400, 0),
-		tally(2, models.LibraryShows, 80, 0),
+		tally(1, models.LibraryMovies, 400, 0), // starved
+		tally(2, models.LibraryShows, 80, 0),   // starved
+		// Too few titles to judge, so it is NOT starved and does not stop the
+		// install-wide verdict — but it IS in the report, which is what the
+		// broken guard could not distinguish.
+		tally(3, models.LibraryMovies, 5, 0),
 	}, fakeProgress{})
 
+	if rep.InstallWarning == "" {
+		t.Fatal("precondition: two starved libraries should raise the install warning")
+	}
 	if n := LogLibraryHealth(rep, 1); n != 1 {
-		t.Errorf("logged %d lines for a library the report covers, want 1", n)
+		t.Errorf("logged %d lines after a scan of a starved library, want 1 — that is the moment the line is worth reading", n)
+	}
+	if n := LogLibraryHealth(rep, 3); n != 0 {
+		t.Errorf("logged %d lines after a scan of a library that is not starved, want 0; the install line must not be re-written on every scan of every library", n)
 	}
 	if n := LogLibraryHealth(rep, 404); n != 0 {
 		t.Errorf("logged %d lines on behalf of a library the report does not mention, want 0", n)
+	}
+	// A full sweep (the endpoint) always reports it.
+	if n := LogLibraryHealth(rep, 0); n != 1 {
+		t.Errorf("logged %d lines for a full sweep, want 1", n)
 	}
 }

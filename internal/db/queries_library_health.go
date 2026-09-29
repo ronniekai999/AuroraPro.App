@@ -17,8 +17,9 @@ import (
 // GET /api/media?type=show. Nothing surfaced that, and the state survived
 // repeated scans looking entirely healthy from the outside.
 //
-// ItemsMissingFiles is carried because a library whose paths are wrong produces
-// a similar tally for an unrelated reason, and the two want different remedies.
+// Note it carries no files-vs-metadata distinction: a library whose PATHS are
+// wrong produces a similar tally for an unrelated reason, and this cannot tell
+// the two apart. The warning text says so rather than pretending otherwise.
 type LibraryMatchHealth struct {
 	LibraryID int64              `json:"library_id"`
 	Name      string             `json:"name"`

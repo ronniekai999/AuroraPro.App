@@ -157,9 +157,11 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guarded like MediaHandler.DeleteItem's. A panic here would land AFTER the
-	// purge has committed and BEFORE slotUsed is set: a purged catalog, no
-	// rescan, and a library stuck holding its scan slot.
+	// Guarded like MediaHandler.DeleteItem's. A panic here lands AFTER the purge
+	// has committed and BEFORE the rescan is launched: a purged catalog, no
+	// rescan, and a watcher still holding the old type. (The scan slot itself is
+	// fine — the defer above runs during unwinding; an earlier version of this
+	// comment claimed otherwise.)
 	if claims := auth.GetClaims(r.Context()); h.activity != nil && claims != nil {
 		h.activity.LogLibraryRetyped(r.Context(), claims.UserID, lib.ID, lib.Name,
 			string(lib.Type), string(target), deleted)
@@ -174,38 +176,56 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 	rescan := *lib
 	rescan.Type = target
 
-	// Re-point the WATCHER at the new value before anything else can scan.
-	//
-	// This is not tidiness. Watcher.WatchLibrary stores the *models.Library it
-	// was handed as a SNAPSHOT, and it is only ever called at boot and on
-	// library creation — so both the periodic tick and the fsnotify debounce go
-	// on passing the pre-retype value to ScanLibrary, which branches on
-	// lib.Type rather than re-reading the database. Without this, the first
-	// file event or periodic tick after a successful retype re-scans the library
-	// under the OLD parser and re-creates exactly the state this whole operation
-	// exists to remove: wrong-typed rows whose files sit in the table that type
-	// implies, unreachable by any later prune because pruneDeletedFiles branches
-	// on the same isTV. A review demonstrated it end to end.
-	//
-	// NoteExternalScan tells the watcher a scan is already running so its timer
-	// does not immediately fire a second one on top of ours.
-	if h.watcher != nil {
-		if err := h.watcher.WatchLibrary(h.scanContext(), &rescan); err != nil {
-			// Not fatal: the purge is committed and the rescan below still runs
-			// with the right type. What is lost is fsnotify coverage until the
-			// next restart — worth a loud line, not a failed request.
-			slog.Error("library retyped but re-watching failed; file events for it will use the old type until restart",
-				"library", rescan.Name, "library_id", rescan.ID, "error", err)
-		} else {
-			h.watcher.NoteExternalScan(rescan.ID)
-		}
-	}
-
 	slotUsed = true
 	go func() {
 		ctx := h.scanContext()
+
+		// Re-point the WATCHER at the new value, before the rescan and OFF the
+		// request path.
+		//
+		// Why it must happen at all: Watcher.WatchLibrary stores the
+		// *models.Library it is handed as a SNAPSHOT, and it is only ever called
+		// at boot and on library creation — so the periodic tick and the
+		// fsnotify debounce go on passing the pre-retype value to ScanLibrary,
+		// which branches on lib.Type rather than re-reading the database.
+		// Without this the first file event after a retype re-scans under the
+		// OLD parser and re-creates the phantom state this operation exists to
+		// remove. A review demonstrated that end to end.
+		//
+		// Why it must NOT happen inline: WatchLibrary calls addDirRecursive
+		// (filepath.WalkDir) over every library path, which takes minutes on a
+		// large tree — LibraryHandler.Create carries the post-mortem comment for
+		// exactly that, having caused 504s. Doing it in the handler put a
+		// multi-minute walk AFTER a committed purge on a 60s-timeout route, so
+		// the most destructive endpoint in the repo could report a gateway
+		// failure for an operation that had already deleted the catalog. Same
+		// ordering as Create now: goroutine first, walk inside it.
+		if h.watcher != nil {
+			if err := h.watcher.WatchLibrary(ctx, &rescan); err != nil {
+				// WatchLibrary returns before it touches w.watching, so the OLD
+				// entry survives — holding the pre-retype snapshot and still
+				// feeding the old type to onChange. Leaving it is worse than
+				// having no watch at all, so drop it and say so.
+				h.watcher.UnwatchLibrary(rescan.ID)
+				slog.Error("library retyped but re-watching failed; dropped the stale watch, so file events for it are unwatched until restart",
+					"library", rescan.Name, "library_id", rescan.ID, "error", err)
+			} else {
+				h.watcher.NoteExternalScan(rescan.ID)
+			}
+		}
+
 		_ = h.scanner.ScanLibrary(ctx, &rescan, func(p *models.ScanProgress) {
 			h.hub.Broadcast(ws.EventScanProgress, p)
+			// Mirror Create's completion fan-out: without it the SPA never
+			// learns the rescan re-populated the library it just emptied.
+			if p.Status == models.ScanComplete {
+				h.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
+					"library_id":   rescan.ID,
+					"library_name": rescan.Name,
+					"new_items":    p.NewFiles,
+					"action":       "retype_rescan_completed",
+				})
+			}
 		})
 	}()
 

@@ -221,6 +221,26 @@ func (w *Watcher) WatchLibrary(ctx context.Context, lib *models.Library) error {
 	return nil
 }
 
+// WatchedLibrary returns a COPY of the library value the watcher currently holds
+// for this id, or nil when it is not watched.
+//
+// The copy matters and so does the existence of this accessor. WatchLibrary
+// stores the *models.Library it is handed as a snapshot, and that snapshot is
+// what periodicScanLoop and the fsnotify debounce hand to ScanLibrary — which
+// branches on lib.Type rather than re-reading the database. So an operation that
+// changes a library's type has to re-point the watcher, and until this existed
+// there was no way to assert from outside the package that it had.
+func (w *Watcher) WatchedLibrary(libraryID int64) *models.Library {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	lw, ok := w.watching[libraryID]
+	if !ok || lw.library == nil {
+		return nil
+	}
+	cp := *lw.library
+	return &cp
+}
+
 // UnwatchLibrary stops watching a library.
 func (w *Watcher) UnwatchLibrary(libraryID int64) {
 	w.mu.Lock()

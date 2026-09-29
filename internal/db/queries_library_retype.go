@@ -46,9 +46,16 @@ type RetypeCasualty struct {
 	Table string `json:"table"`
 	Rows  int64  `json:"rows"`
 	// Why names what the rows ARE, in an admin's terms, so the preview does not
-	// just list tables nobody has a reason to recognise. Empty for a table with
-	// no entry in retypeCasualtyNoun — the UI then shows the name alone, which
-	// is worse prose but never a false statement.
+	// just list tables nobody has a reason to recognise.
+	//
+	// Every table in the cascade closure has one, and
+	// TestRetypeCasualtyNounsCoverTheWholeClosure fails when a new table appears
+	// without it — the closure is derived from the schema, so table DISCOVERY
+	// cannot go stale, but the words an admin reads are hand-written and can.
+	// Two tables were already missing (party_invites, watch_party_participants)
+	// and the preview rendered them with a dangling em-dash. The field stays
+	// omitempty and the UI degrades to the bare table name, because a missing
+	// description should never be worse than a wrong one.
 	Why string `json:"why,omitempty"`
 }
 
@@ -89,26 +96,36 @@ type cascadeEdge struct {
 }
 
 // cascadeEdgesFrom reads every single-column ON DELETE CASCADE foreign key in
-// the public schema. The graph is walked in Go rather than in one recursive CTE
+// the public schema. relname, not regclass::text: the latter schema-qualifies or
+// pre-quotes a name that is not on the search path, which quoteIdent would then
+// double-quote into invalid SQL. The graph is walked in Go rather than in one recursive CTE
 // because a table can be reachable by SEVERAL paths — skip_markers hangs off
 // both media_files and episode_files, watch_progress off both media_items and
 // tv_episodes — and those rows must be counted once, not once per path.
 //
-// Multi-column foreign keys are excluded. None exist in this schema today, and
-// a predicate built from one column of a composite key would silently over-count
-// rather than fail; if one is ever added, this under-reports it and the guard in
-// TestRetypeCascadeClosureCoversTheWholeSchema is what says so.
+// Multi-column foreign keys are excluded. The schema has exactly ONE
+// (recommendation_impressions -> recommendation_slates), and it is harmless here
+// only because recommendation_slates hangs off user_profiles and is unreachable
+// from media_items — not because none exists, which an earlier version of this
+// comment claimed. A predicate built from one column of a composite key would
+// silently under-report rather than fail, so
+// TestRetypeCascadeClosureCoversTheWholeSchema fails if a composite key whose
+// parent IS reachable ever appears.
 func (q *Queries) cascadeEdgesFrom(ctx context.Context) ([]cascadeEdge, error) {
 	rows, err := q.pool.Query(ctx, `
-		SELECT c.conrelid::regclass::text, a.attname::text,
-		       c.confrelid::regclass::text, af.attname::text
+		SELECT ch.relname::text, a.attname::text,
+		       pt.relname::text, af.attname::text
 		FROM pg_constraint c
 		JOIN unnest(c.conkey)  WITH ORDINALITY k(attnum, ord)  ON true
 		JOIN unnest(c.confkey) WITH ORDINALITY fk(attnum, ord) ON fk.ord = k.ord
 		JOIN pg_attribute a  ON a.attrelid = c.conrelid  AND a.attnum = k.attnum
 		JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = fk.attnum
+		JOIN pg_class pt ON pt.oid = c.confrelid
+		JOIN pg_class ch ON ch.oid = c.conrelid
+		JOIN pg_namespace n ON n.oid = ch.relnamespace
 		WHERE c.contype = 'f' AND c.confdeltype = 'c'
-		  AND array_length(c.conkey, 1) = 1`)
+		  AND array_length(c.conkey, 1) = 1
+		  AND n.nspname = 'public'`)
 	if err != nil {
 		return nil, fmt.Errorf("read cascade edges: %w", err)
 	}
@@ -201,10 +218,21 @@ var retypeCasualtyNoun = map[string]string{
 	"recommendation_watch_events": "recommender outcome history",
 	"skip_markers":                "detected intro/recap/credits markers",
 	"skip_marker_analysis":        "intro/credits detection results",
+	"party_invites":               "watch party invitations people sent or received",
+	"watch_party_participants":    "who is in a watch party room",
 }
 
 // PreviewLibraryRetype counts what changing the library's type would destroy.
 // Read-only.
+//
+// It enumerates DELETIONS only. Two foreign keys into this closure are ON DELETE
+// SET NULL rather than CASCADE — watch_parties.episode_id and
+// recap_conversation_turns.up_to_episode_id — so a row on a KEPT item that
+// points at a DOOMED item's episode survives with that column nulled, and the
+// preview says nothing about it. That is a live watch party left on no episode,
+// which CLAUDE.md's merge section calls the nastier half. It needs a library
+// holding both types at once to happen at all, which is why it is recorded
+// rather than built; a review found it and it is in the runbook's known limits.
 //
 // The table list is derived from pg_constraint at query time — the TRANSITIVE
 // cascade closure of media_items, not just its direct children. An earlier
@@ -359,6 +387,10 @@ func (q *Queries) RetypeLibrary(ctx context.Context, libraryID int64, target mod
 	}
 	if actual != expectedItems {
 		return 0, &ErrRetypeCountMismatch{Expected: expectedItems, Actual: actual}
+	}
+
+	if q.testHookInRetypeTxn != nil {
+		q.testHookInRetypeTxn()
 	}
 
 	tag, err := tx.Exec(ctx,

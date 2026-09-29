@@ -1709,8 +1709,12 @@ export async function getLibraryHealth(signal?: AbortSignal): Promise<LibraryHea
 export interface RetypeCasualty {
   table: string
   rows: number
-  /** Plain-language description of what those rows are. */
-  why: string
+  /**
+   * Plain-language description of what those rows are. Optional: the server
+   * omits it for a table it has no wording for, and the UI then shows the bare
+   * table name rather than a dangling separator.
+   */
+  why?: string
 }
 export interface RetypePreview {
   library_id: number

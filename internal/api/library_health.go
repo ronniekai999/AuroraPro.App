@@ -142,13 +142,19 @@ func libraryTypeWarning(t db.LibraryMatchHealth) string {
 		t.Items, t.Matched, other, t.Type)
 }
 
-// reportCovers reports whether the given library is in this report at all, so a
-// scan-scoped log line is not written on behalf of a library the report does not
-// mention.
-func reportCovers(rep LibraryHealthReport, libraryID int64) bool {
+// libraryIsStarved reports whether this library is one of the ones dragging the
+// install-wide verdict down.
+//
+// It replaces a `reportCovers` helper that did nothing at all: it asked whether
+// the library was IN the report, and the report carries every library, so the
+// guard always fell through and the install line was still written on every
+// completed scan of every library — exactly what it claimed to have fixed. Its
+// test passed only because the negative case probed an id that did not exist. A
+// review caught both.
+func libraryIsStarved(rep LibraryHealthReport, libraryID int64) bool {
 	for _, l := range rep.Libraries {
 		if l.LibraryID == libraryID {
-			return true
+			return l.Items >= libraryHealthMinItems && belowMatchThreshold(l.LibraryMatchHealth)
 		}
 	}
 	return false
@@ -184,10 +190,17 @@ func LibraryHealthReportFor(tallies []db.LibraryMatchHealth, s ScanProgressSourc
 func LogLibraryHealth(rep LibraryHealthReport, only int64) int {
 	n := 0
 	if rep.InstallWarning != "" {
-		// Scoped like the per-library lines. Without this, every scan of every
-		// library re-wrote the install warning, which is how a line stops being
-		// read. `only` is the library whose scan just finished; 0 means all.
-		if only != 0 && !reportCovers(rep, only) {
+		// Scoped, so the line is not re-written on every scan of every library —
+		// which is how a warning stops being read. `only` is the library whose
+		// scan just finished; 0 means a full sweep (the endpoint), which always
+		// reports.
+		//
+		// The test is whether THAT library is itself starved. A scan finishing on
+		// a library that matches nothing is exactly the moment the line is worth
+		// reading, and it says the right thing: this library has no matches, and
+		// so does everything else, so look at the provider rather than at this
+		// library's type.
+		if only != 0 && !libraryIsStarved(rep, only) {
 			return 0
 		}
 		slog.Warn("library metadata matching looks broken install-wide",

@@ -274,3 +274,60 @@ func TestRetypeHandlerIsA404ForAMissingLibrary(t *testing.T) {
 		})
 	}
 }
+
+// TestRetypeHandlerRePointsTheWatcher is the pin for the defect a review
+// demonstrated end to end, and which nothing in the branch covered: the handler
+// built its test watcher as nil, so deleting the whole re-point block left the
+// suite green.
+//
+// Watcher.WatchLibrary stores the *models.Library it is handed as a SNAPSHOT,
+// and it is only ever called at boot and on library creation. Both the periodic
+// tick and the fsnotify debounce pass that snapshot to ScanLibrary, which
+// branches on lib.Type rather than re-reading the database — so without a
+// re-point the first file event after a successful retype re-scans under the OLD
+// parser and re-creates the wrong-typed rows the purge just removed, with their
+// files in the table that type implies, unreachable by pruneDeletedFiles.
+func TestRetypeHandlerRePointsTheWatcher(t *testing.T) {
+	q, pool := retypeHandlerDB(t)
+	libID := seedRetypeLibrary(t, pool, 2)
+	s := library.NewScanner(config.ScannerConfig{FFprobePath: "/nonexistent/ffprobe", Workers: 1}, q)
+	w := library.NewWatcher(config.ScannerConfig{}, s, func(*models.Library) {})
+	t.Cleanup(w.StopAll)
+
+	lib, err := q.GetLibrary(context.Background(), libID)
+	if err != nil || lib == nil {
+		t.Fatalf("read library: %v", err)
+	}
+	if err := w.WatchLibrary(context.Background(), lib); err != nil {
+		t.Fatalf("seed watch: %v", err)
+	}
+	if got := w.WatchedLibrary(libID); got == nil || got.Type != models.LibraryMovies {
+		t.Fatalf("precondition: watcher holds %v, want a movie library", got)
+	}
+
+	h := NewLibraryHandler(q, s, ws.NewHub(nil), w, nil)
+	rec := httptest.NewRecorder()
+	h.Retype(rec, retypeReq(t, http.MethodPost, "/x", `{"type":"show","expected_items":2}`, libID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// The re-point runs in the rescan goroutine — deliberately off the request
+	// path, because WatchLibrary walks every library path and doing that inline
+	// after a committed purge is what caused 504s on LibraryHandler.Create.
+	deadline := time.Now().Add(10 * time.Second)
+	var held *models.Library
+	for time.Now().Before(deadline) {
+		held = w.WatchedLibrary(libID)
+		if held != nil && held.Type == models.LibraryShows {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if held == nil {
+		t.Fatal("the library is no longer watched at all after a retype")
+	}
+	if held.Type != models.LibraryShows {
+		t.Errorf("the watcher still holds type %q after a retype to show; the next file event or periodic tick would re-scan under the old parser and re-create the state the purge just removed", held.Type)
+	}
+}

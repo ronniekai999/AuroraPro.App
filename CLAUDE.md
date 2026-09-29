@@ -437,14 +437,24 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
   so the library is never unlocked in between. A refused retype releases it via
   `ReleaseScanSlot`, which frees an UNUSED claim only — otherwise a refusal
   leaves the library reading as scanning for the life of the process.
-- The WATCHER is re-pointed at the new library value before the rescan.
+- The WATCHER is re-pointed at the new library value, inside the rescan
+  goroutine and ahead of the scan — never inline in the handler.
+  `WatchLibrary` walks every library path with `filepath.WalkDir`, which
+  `LibraryHandler.Create` carries a post-mortem comment about because doing it
+  synchronously caused 504s; inline, that put a multi-minute walk AFTER a
+  committed purge on a 60s route, so the most destructive endpoint in the repo
+  could report a gateway failure for work it had already done. On failure the
+  old watch is DROPPED (`UnwatchLibrary`), because `WatchLibrary` returns before
+  it touches `w.watching` and the surviving entry would keep feeding the old
+  type.
   `WatchLibrary` stores the `*models.Library` it was handed as a SNAPSHOT and is
   called only at boot and on library creation, so the periodic tick and the
   fsnotify debounce keep passing the pre-retype value to `ScanLibrary`, which
   branches on `lib.Type` rather than re-reading the database. Without this the
   first file event after a retype re-scans under the OLD parser and re-creates
   the exact phantom state the operation exists to remove. A review demonstrated
-  it end to end.
+  it end to end; `Watcher.WatchedLibrary` exists so the next one can assert it
+  from outside the package.
 - The count interlock covers the ITEM count only, not the casualty counts shown
   beside it. Widening it would refuse the operation any time anyone watched
   something. It is also belt-and-braces now: `RowsAffected` is compared after
@@ -465,8 +475,12 @@ The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
 Known gaps: the retype is not reversible and there is no undo; the rescan is
 fire-and-forget, so a failure after the purge commits leaves an empty library
 until someone scans again; the purge holds the `libraries` row lock for its
-duration, which blocks `media_items` inserts for that library (measured ~7s for
-80k items); and the report's thresholds are reasoned, not calibrated against
+duration, which blocks `media_items` inserts for that library; the preview runs
+one count per affected table and is not instant on a large library, and a
+timeout there makes the confirm unreachable since it needs the preview's number;
+the preview enumerates DELETIONS only, so a `SET NULL` side effect (a watch
+party on a KEPT title losing an episode that belonged to a removed one) goes
+unreported; and the report's thresholds are reasoned, not calibrated against
 real installs.
 
 ### Nullable database columns

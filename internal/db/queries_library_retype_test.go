@@ -133,6 +133,11 @@ func TestPreviewLibraryRetypeCountsWhatWouldBeDestroyed(t *testing.T) {
 		// "re-parented:" because that is what a MERGE does — so the one screen
 		// whose job is to say what is about to be destroyed told an admin their
 		// live watch party would be re-parented. A review caught it.
+		//
+		// Coverage of the whole closure is pinned separately by
+		// TestRetypeCasualtyNounsCoverTheWholeClosure; this fixture only reaches
+		// the tables it seeds, so asserting emptiness here would pass whenever a
+		// missing noun happened to be on a table it does not touch.
 		if c.Why == "" {
 			t.Errorf("casualty %s carries no description; a table name alone tells an admin nothing", c.Table)
 		}
@@ -559,6 +564,90 @@ func TestRetypeCascadeClosureCoversTheWholeSchema(t *testing.T) {
 		}
 		if d < 2 {
 			t.Errorf("%s is now a DIRECT child (depth %d); it was the grandchild case this guard was built for", want, d)
+		}
+	}
+}
+
+// The RowsAffected comparison is the belt to the recount's braces, and nothing
+// pinned it: a review deleted it and every package stayed green.
+//
+// The recount IS atomic with the DELETE, but only because `SELECT ... FOR UPDATE`
+// on the library row conflicts with the `FOR KEY SHARE` that media_items'
+// library_id foreign key takes on that same row, so a concurrent INSERT into the
+// library blocks. That is a real guarantee and a review load-tested it — but it
+// is a lock interaction the SQL does not name, and it does NOT cover an UPDATE
+// that flips an existing row's type into the doomed set. This test drives that
+// second case directly, because it is the one the lock cannot reach.
+func TestRetypeLibraryRefusesWhenTheDeleteItselfDisagrees(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	f := seedRetypeFixture(t, q, 2)
+
+	// The admin previewed 2. Flip the correctly-typed row into the doomed set
+	// INSIDE the transaction, after the recount and before the DELETE, so the
+	// recount cannot be what catches it. That window is unreachable by racing:
+	// FOR UPDATE on the library row blocks concurrent INSERTs, and the one writer
+	// it does not block — an UPDATE of an existing row's type — has no production
+	// caller to race against. Hence the seam.
+	q.testHookInRetypeTxn = func() {
+		if _, err := q.pool.Exec(context.Background(),
+			`UPDATE media_items SET type = 'movie' WHERE id = $1`, f.showID); err != nil {
+			t.Errorf("flip type inside the transaction: %v", err)
+		}
+	}
+	t.Cleanup(func() { q.testHookInRetypeTxn = nil })
+
+	_, err := q.RetypeLibrary(ctx, f.libID, models.LibraryShows, 2)
+	var mismatch *ErrRetypeCountMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("retype deleting 3 rows on an approval for 2 returned %v, want a count mismatch", err)
+	}
+	if n := countWhere(t, q, `SELECT COUNT(*) FROM media_items WHERE library_id = $1`, f.libID); n != 3 {
+		t.Errorf("%d items remain after a refused retype, want 3 — the refusal must roll the DELETE back", n)
+	}
+	var typ models.LibraryType
+	if err := q.pool.QueryRow(ctx, `SELECT type FROM libraries WHERE id = $1`, f.libID).Scan(&typ); err != nil {
+		t.Fatalf("read type: %v", err)
+	}
+	if typ != models.LibraryMovies {
+		t.Errorf("library type changed to %q despite the refusal", typ)
+	}
+}
+
+// The closure is derived from the schema, so table DISCOVERY cannot go stale.
+// The words an admin reads are hand-written and can: two tables (party_invites,
+// watch_party_participants) were already missing when a review checked, and the
+// preview rendered them as "1 × party_invites — " with a dangling em-dash. Watch
+// party invitations are user-facing data.
+func TestRetypeCasualtyNounsCoverTheWholeClosure(t *testing.T) {
+	q := requireIntegrationDB(t)
+	edges, err := q.cascadeEdgesFrom(context.Background())
+	if err != nil {
+		t.Fatalf("edges: %v", err)
+	}
+	reachable := map[string]bool{"media_items": true}
+	for changed := true; changed; {
+		changed = false
+		for _, e := range edges {
+			if reachable[e.Parent] && !reachable[e.Child] {
+				reachable[e.Child] = true
+				changed = true
+			}
+		}
+	}
+	for table := range reachable {
+		if table == "media_items" {
+			continue // reported as items_to_delete, never as a casualty
+		}
+		if retypeCasualtyNoun[table] == "" {
+			t.Errorf("%s is destroyed by a retype but has no entry in retypeCasualtyNoun, so the preview lists a bare table name an admin has no reason to recognise. Add one saying what those rows ARE.", table)
+		}
+	}
+	// And no stale entries, which would mean the map is describing something the
+	// retype no longer touches.
+	for table := range retypeCasualtyNoun {
+		if !reachable[table] {
+			t.Errorf("retypeCasualtyNoun describes %s, which is no longer destroyed by a retype", table)
 		}
 	}
 }

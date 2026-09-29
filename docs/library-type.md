@@ -20,8 +20,11 @@ The same warning is written to the server log once per scan, so you can find it
 without opening the UI:
 
 ```bash
-journalctl -u aurora | grep 'almost no metadata matches'
+journalctl -u aurora | grep -E 'almost no metadata matches|broken install-wide'
 ```
+
+The second pattern is the install-level line, which is worded differently
+because it means something different — see below.
 
 Read the warning before acting on it. A near-zero match rate has three common
 causes and this check cannot tell them apart:
@@ -123,9 +126,17 @@ what it is about to delete and refuses with 409 if they differ.
   whatever the rescan can derive from them come back.
 - **More is deleted than titles.** The preview enumerates it — watch progress,
   watchlist entries, ratings, recap threads and their questions and answers,
-  detected intro/credits markers, collection memberships — by walking the
-  database's own cascade graph rather than a list in the code. Read it before
-  confirming; it is the only place those counts appear.
+  detected intro/credits markers, collection memberships, and watch party rooms
+  with their invitations and participants — by walking the database's own
+  cascade graph rather than a list in the code. Read it before confirming; it is
+  the only place those counts appear.
+- **The preview lists deletions, not every side effect.** If a library holds
+  both types at once, a watch party on a title you are KEEPING can lose its
+  episode (the column is nulled rather than the row deleted) when that episode
+  belongs to a title being removed. Nothing reports that.
+- **The preview runs one count per affected table.** On a very large library it
+  is not instant, and if it times out the confirm cannot be made at all, because
+  it needs the number the preview returns.
 - **The rescan is fire-and-forget.** If it fails after the purge has committed,
   the library is empty until you scan it again. The purge itself is one
   transaction and either lands completely or not at all.
