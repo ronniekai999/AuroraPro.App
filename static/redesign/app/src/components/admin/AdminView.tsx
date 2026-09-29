@@ -56,6 +56,9 @@ import {
   listAdminUsers,
   listFlaggedItems,
   listLibraries,
+  getLibraryHealth,
+  previewLibraryRetype,
+  retypeLibrary,
   listPendingApprovals,
   listRooms,
   manualMatch,
@@ -77,6 +80,8 @@ import {
   type AIRematchJobStatus,
   type EmbeddingStatus,
   type Library,
+  type LibraryHealthReport,
+  type RetypePreview,
   type LLMSettings,
   type LLMTestResult,
   type LogEntry,
@@ -560,6 +565,118 @@ function UpdatePanel() {
   )
 }
 
+// Changing a library's type. Deliberately its own component and its own
+// two-step flow rather than a select on the row: this DELETES every catalog row
+// of the old type — watch progress, watchlist entries and ratings with them —
+// and then rescans from disk. A dropdown that saved on change would look like
+// renaming the library.
+//
+// The preview's items_to_delete is echoed back on confirm. If the catalog moved
+// in between (a scan finished, another admin acted) the server answers 409 and
+// nothing happens, so the number an admin approves is the number that goes.
+function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void }) {
+  // BOTH targets are offered, including the one the library already claims.
+  //
+  // Offering only the opposite type made the documented repair path unreachable
+  // — and on the exact state the runbook is written for it offered the action
+  // that UNDOES the fix. After a hand-applied `UPDATE libraries SET type='show'`
+  // with movie rows still present, the only button was "Change to Movies", whose
+  // preview correctly reported 0 items to delete ("nothing to delete") and whose
+  // confirm set the library back to movie. A review found it.
+  const [target, setTarget] = useState<'movie' | 'show' | null>(null)
+  const [preview, setPreview] = useState<RetypePreview | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const open = async (t: 'movie' | 'show') => {
+    setBusy(true)
+    try { setTarget(t); setPreview(await previewLibraryRetype(lib.id, t)) }
+    catch (e) {
+      setTarget(null)
+      window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown'))
+    }
+    finally { setBusy(false) }
+  }
+
+  const close = () => { setPreview(null); setTarget(null) }
+
+  const confirm = async () => {
+    if (!preview || !target) return
+    setBusy(true)
+    try {
+      const res = await retypeLibrary(lib.id, target, preview.items_to_delete)
+      close()
+      window.alert(`Deleted ${res.items_deleted} item(s) and started a rescan.`)
+      onDone()
+    } catch (e) {
+      // A 409 here is the interlock doing its job, and the message says so.
+      window.alert('Change failed: ' + (e instanceof Error ? e.message : 'unknown'))
+    } finally { setBusy(false) }
+  }
+
+  if (!preview) {
+    return (
+      <div className="flex gap-2 mt-2">
+        {(['movie', 'show'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => void open(t)}
+            disabled={busy}
+            title={t === lib.type
+              ? `Re-apply ${t === 'show' ? 'TV Shows' : 'Movies'}: purges any catalog rows that disagree with the library's type, then rescans`
+              : `Change this library to ${t === 'show' ? 'TV Shows' : 'Movies'}`}
+            className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+          >
+            {busy ? 'Checking…' : t === lib.type
+              ? `Re-apply ${t === 'show' ? 'TV' : 'Movies'}`
+              : `Change to ${t === 'show' ? 'TV' : 'Movies'}`}
+          </button>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="w-full mt-3 p-3 rounded-lg bg-red-500/[0.07] border border-red-500/20">
+      <p className="text-red-200 text-xs font-medium">
+        Change “{preview.library_name}” from {preview.current_type} to {preview.target_type}?
+      </p>
+      <p className="text-white/70 text-xs mt-2">
+        This deletes {preview.items_to_delete} catalog item(s) and everything attached to them,
+        then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item(s) already of the target type are kept. `}
+        The files on disk are not touched. There is no undo.
+      </p>
+      {preview.casualties && preview.casualties.length > 0 && (
+        <ul className="mt-2 space-y-0.5">
+          {preview.casualties.map(c => (
+            <li key={c.table} className="text-amber-200/90 text-xs">
+              {c.rows} × <span className="font-mono">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
+            </li>
+          ))}
+        </ul>
+      )}
+      {preview.items_to_delete === 0 && (
+        <p className="text-white/50 text-xs mt-2">Nothing to delete — this only changes the type and rescans.</p>
+      )}
+      <div className="flex gap-2 mt-3">
+        <button
+          onClick={() => void confirm()}
+          disabled={busy}
+          className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-200 text-xs rounded disabled:opacity-50"
+        >
+          {busy ? 'Working…' : 'Delete and rescan'}
+        </button>
+        <button
+          onClick={close}
+          disabled={busy}
+          className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function AdminLibrariesTab() {
   const [items, setItems] = useState<Library[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -567,11 +684,19 @@ function AdminLibrariesTab() {
   const [newName, setNewName] = useState('')
   const [newType, setNewType] = useState<'movie' | 'show'>('movie')
   const [newPaths, setNewPaths] = useState('')
+  // Metadata-match health (#510). Fetched alongside the list rather than folded
+  // into it because /api/libraries is member-visible and this is not. A failure
+  // here is swallowed: it is a diagnostic, and losing it must not take the
+  // libraries list down with it.
+  const [health, setHealth] = useState<LibraryHealthReport | null>(null)
   const reload = useCallback(async () => {
     try { setItems(await listLibraries()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+    try { setHealth(await getLibraryHealth()) }
+    catch { setHealth(null) }
   }, [])
   useEffect(() => { void reload() }, [reload])
+  const healthFor = (id: number) => health?.libraries.find(h => h.library_id === id)
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
@@ -606,16 +731,37 @@ function AdminLibrariesTab() {
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
-        {items && items.map(lib => (
-          <div key={lib.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
+        {health?.install_warning && (
+          <div className="mb-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+            <p className="text-amber-200 text-xs">{health.install_warning}</p>
+          </div>
+        )}
+        {items && items.map(lib => {
+          const h = healthFor(lib.id)
+          return (
+          <div key={lib.id} className="py-3 border-b border-white/[0.04] last:border-0">
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
-              <p className="text-white/40 text-xs truncate">{lib.type} · {lib.paths.join(', ')}</p>
+              <p className="text-white/40 text-xs truncate">
+                {lib.type} · {lib.paths.join(', ')}
+                {h && h.items > 0 && (
+                  <span className={h.warning ? 'text-amber-300' : ''}>
+                    {' · '}{h.matched}/{h.items} matched ({h.matched_pct}%)
+                  </span>
+                )}
+              </p>
             </div>
             <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Scan</button>
             <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
           </div>
-        ))}
+          {h?.warning && (
+            <p className="mt-2 text-amber-300/90 text-xs leading-relaxed">{h.warning}</p>
+          )}
+          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} />
+          </div>
+          )
+        })}
       </div>
     </div>
   )

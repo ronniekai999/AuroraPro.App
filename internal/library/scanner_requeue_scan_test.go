@@ -417,3 +417,88 @@ func TestDueForRequeueSweepClaimsTheSlotOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseScanSlotFreesAnUnusedClaimButNeverCancelsWork pins the slot
+// release the library-retype action depends on.
+//
+// Retype claims the scan slot before it touches anything, because a scan running
+// through the purge would be writing rows into the library as they are deleted
+// and would then keep walking it under the old parser. But the retype can be
+// REFUSED after that claim — a stale count, a rolled-back transaction — and
+// without a release the library reads as ScanRunning for the life of the
+// process: no scan would ever start, and the #510 health report would treat it
+// as busy and stay silent about it. A guard that jams the thing it guards.
+func TestReleaseScanSlotFreesAnUnusedClaimButNeverCancelsWork(t *testing.T) {
+	s := NewScanner(config.ScannerConfig{}, nil)
+
+	if !s.TryStartScan(1) {
+		t.Fatal("first claim refused")
+	}
+	if s.TryStartScan(1) {
+		t.Fatal("the slot was claimable twice; it is not exclusive")
+	}
+	s.ReleaseScanSlot(1)
+	if !s.TryStartScan(1) {
+		t.Error("the slot was not released, so this library can never be scanned again in this process")
+	}
+
+	// Idempotent, and harmless on a library that was never claimed.
+	s.ReleaseScanSlot(1)
+	s.ReleaseScanSlot(999)
+	if !s.TryStartScan(999) {
+		t.Error("releasing an unclaimed library broke its slot")
+	}
+
+	// It releases an UNUSED claim; it does not cancel a scan that has started
+	// doing work. Otherwise a retype refused after a concurrent scan began would
+	// quietly hand that scan's slot away and let a second scan start beside it.
+	s.ReleaseScanSlot(2)
+	if !s.TryStartScan(2) {
+		t.Fatal("claim refused")
+	}
+	s.mu.Lock()
+	s.progress[2].TotalFiles = 120
+	s.progress[2].ScannedFiles = 7
+	s.mu.Unlock()
+	s.ReleaseScanSlot(2)
+	if s.TryStartScan(2) {
+		t.Error("a scan that had already started walking files had its slot released; two scans of one library could then run at once")
+	}
+}
+
+// TestWatchLibraryKeepsPeriodicScanningWhenFileWatchingFails pins the
+// degradation path, because the alternative it replaced was worse than the
+// documentation said.
+//
+// w.watching is not just the fsnotify registry — periodicScanLoop iterates it to
+// decide which libraries get the periodic tick. So returning early when
+// fsnotify.NewWatcher() fails dropped the library out of AUTOMATIC SCANNING
+// ENTIRELY, not just out of file events. For the retype that made the choice
+// "keep a stale snapshot that rescans under the wrong type" versus "never scan
+// this library again", and a review measured the second half: after an unwatch,
+// a 60ms periodic tick fired nothing for a second.
+//
+// installWatch is therefore what both paths go through, and this asserts a
+// library registered without an fsnotify watcher is still visible to the tick.
+func TestWatchLibraryKeepsPeriodicScanningWhenFileWatchingFails(t *testing.T) {
+	w := NewWatcher(config.ScannerConfig{}, nil, func(*models.Library) {})
+	t.Cleanup(w.StopAll)
+
+	lib := &models.Library{ID: 77, Name: "degraded", Type: models.LibraryShows, Paths: []string{t.TempDir()}}
+	w.installWatch(context.Background(), lib, nil)
+
+	got := w.WatchedLibrary(77)
+	if got == nil {
+		t.Fatal("a library registered without file watching is invisible to the watcher, so periodicScanLoop will never scan it again")
+	}
+	if got.Type != models.LibraryShows {
+		t.Errorf("registered value carries type %q, want %q", got.Type, models.LibraryShows)
+	}
+
+	// And the copy is a copy: Paths is a slice, so a shallow one would alias the
+	// snapshot periodicScanLoop hands ScanLibrary.
+	got.Paths[0] = "/mutated"
+	if again := w.WatchedLibrary(77); again.Paths[0] == "/mutated" {
+		t.Error("WatchedLibrary returned a shallow copy; a caller writing Paths[i] corrupts what the watcher scans")
+	}
+}

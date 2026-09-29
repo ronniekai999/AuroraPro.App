@@ -263,6 +263,22 @@ func (s *Scanner) TryStartScan(libraryID int64) bool {
 	return true
 }
 
+// ReleaseScanSlot gives back a slot claimed by TryStartScan when the work it was
+// claimed for never started. Without it a caller that claims the slot and then
+// fails (a refused retype, a transaction rollback) leaves the library reading as
+// ScanRunning for the life of the process — no scan would start, and the health
+// report would treat it as busy and stay silent about it.
+//
+// Idempotent, and deliberately a no-op when a scan is actually running: this
+// releases an UNUSED claim, it does not cancel work.
+func (s *Scanner) ReleaseScanSlot(libraryID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.progress[libraryID]; ok && p.Status == models.ScanRunning && p.ScannedFiles == 0 && p.TotalFiles == 0 {
+		p.Status = models.ScanIdle
+	}
+}
+
 func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progressCb func(*models.ScanProgress)) error {
 	now := time.Now()
 

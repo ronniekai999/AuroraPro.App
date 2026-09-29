@@ -30,6 +30,20 @@ func marshalTracks(audio []models.AudioTrack, subtitle []models.SubtitleTrack) (
 
 type Queries struct {
 	pool *pgxpool.Pool
+
+	// testHookInRetypeTxn, when non-nil, runs inside RetypeLibrary's transaction
+	// between the recount and the DELETE. Nil in production; a FIELD rather than
+	// a package variable so it is scoped to the Queries a test built, and so a
+	// parallel test cannot see another's hook.
+	//
+	// It exists because the window it opens cannot be reached by racing: the
+	// transaction holds FOR UPDATE on the library row, which blocks concurrent
+	// INSERTs into that library, and the one writer it does NOT block — an UPDATE
+	// flipping an existing row's type into the doomed set — has no production
+	// caller to race against. Without a seam the RowsAffected guard is only ever
+	// reached through the recount, which catches the same case first, so
+	// deleting the guard left every package green.
+	testHookInRetypeTxn func()
 }
 
 func NewQueries(pool *pgxpool.Pool) *Queries {

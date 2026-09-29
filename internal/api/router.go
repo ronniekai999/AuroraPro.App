@@ -827,6 +827,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 					r.Delete("/{id}", libH.Delete)
 					r.Post("/{id}/scan", libH.Scan)
 					r.Get("/{id}/scan/status", libH.ScanStatus)
+					// Changing a library's type (#510). Two calls on
+					// purpose: the preview is read-only and says what
+					// would be destroyed, the POST echoes back the count
+					// it was shown and is refused if the catalog moved
+					// since. This is a PURGE and a rescan, not a field
+					// edit — a bare UPDATE of the type leaves every
+					// existing row the wrong type with its files in the
+					// wrong table, unreachable by any later prune.
+					r.Get("/{id}/retype/preview", libH.RetypePreview)
+					r.Post("/{id}/retype", libH.Retype)
 				})
 			})
 
@@ -1128,6 +1138,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/settings", adminH.UpdateSettings)
 				r.Get("/logs", adminH.Logs)
 				r.Get("/flagged", adminH.FlaggedItems)
+				// Per-library metadata-match rates, and a warning for the
+				// ones that look mis-typed (#510). Mounted HERE and not
+				// beside the other library routes on purpose: GET
+				// /api/libraries is member-visible (the browse tabs read
+				// it), and item counts plus a diagnosis of what is wrong
+				// with the server are not. Report only — it changes nothing.
+				r.Get("/library-health", libH.Health)
 				// AI re-matcher (migration 026 + internal/matching).
 				// POST is fire-and-forget — the LLM sweep runs in a
 				// detached goroutine outside the 60s admin timeout

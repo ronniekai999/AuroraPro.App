@@ -10,6 +10,8 @@ history rather than in the working tree once their decision has been made.
   GitHub issue reporter.
 - [`moving-media-paths.md`](moving-media-paths.md) — safely move an existing
   library without discarding catalog-linked history.
+- [`library-type.md`](library-type.md) — spot a library created with the wrong
+  type, and change it.
 - [`push.md`](push.md) — Web Push behavior, controls, rotation, and retention.
 - [`server-testing.md`](server-testing.md) — exercise a deployed server over
   HTTPS.

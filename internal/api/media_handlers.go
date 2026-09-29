@@ -35,6 +35,15 @@ type LibraryHandler struct {
 	// Optional — nil falls back to Background, which is the pre-existing
 	// behaviour and keeps tests that build the handler directly working.
 	rootCtx context.Context
+
+	// onRescanProgressForTest fires in the retype's rescan goroutine, after the
+	// watcher re-point and immediately before ScanLibrary. Nil in production.
+	//
+	// It exists because the ORDERING is the property, and polling for the final
+	// state cannot see it: the rescan of an empty tree finishes in milliseconds,
+	// so moving the re-point after the scan passes a poll either way. A review
+	// showed that mutation surviving.
+	onRescanProgressForTest func()
 }
 
 // SetRootContext wires the server-lifecycle context. Mirrors SetDispatcher:
@@ -333,6 +342,32 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"message": "scan started"})
+}
+
+// Health reports each library's metadata-match rate and warns about the ones
+// that look mis-typed. Admin-only, and mounted under /api/admin rather than
+// beside the other library routes because GET /api/libraries is NOT admin-gated
+// — every signed-in member reads it to render the browse tabs, and per-library
+// item counts plus a diagnosis of what is wrong with the server are not theirs.
+//
+// Report only. It never changes a library; correcting one destroys catalog rows
+// and has its own explicit action.
+func (h *LibraryHandler) Health(w http.ResponseWriter, r *http.Request) {
+	tallies, err := h.queries.GetLibraryMatchHealth(r.Context())
+	if err != nil {
+		slog.Error("library health query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to read library health")
+		return
+	}
+	// h.scanner is a *library.Scanner, so passing it straight in wraps a nil
+	// pointer in a NON-nil interface and the adapter's `s == nil` check misses
+	// it. Narrow it here instead. Production always sets the field; tests build
+	// handlers without one.
+	var progress ScanProgressSource
+	if h.scanner != nil {
+		progress = h.scanner
+	}
+	writeJSON(w, http.StatusOK, LibraryHealthReportFor(tallies, progress))
 }
 
 func (h *LibraryHandler) ScanStatus(w http.ResponseWriter, r *http.Request) {

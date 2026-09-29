@@ -1670,6 +1670,78 @@ export async function scanLibrary(id: number): Promise<void> {
   await apiFetch(`/api/libraries/${id}/scan`, { method: 'POST' })
 }
 
+// Per-library metadata-match health (#510). Admin-only, and deliberately NOT on
+// /api/libraries: that endpoint is member-visible (the browse tabs read it) and
+// item counts plus a diagnosis of what is wrong with the server are not.
+// Report only — nothing here changes a library.
+export interface LibraryHealthRow {
+  library_id: number
+  name: string
+  type: 'movie' | 'show'
+  items: number
+  matched: number
+  matched_pct: number
+  scanning: boolean
+  /** Absent when the library needs no attention. */
+  warning?: string
+}
+export interface LibraryHealthReport {
+  libraries: LibraryHealthRow[]
+  /** Set INSTEAD of per-library warnings when the whole install is starved. */
+  install_warning?: string
+}
+export async function getLibraryHealth(signal?: AbortSignal): Promise<LibraryHealthReport> {
+  const res = await apiFetch<LibraryHealthReport>('/api/admin/library-health', { signal })
+  return res || { libraries: [] }
+}
+
+// Changing a library's type (#510). Two calls, always in this order.
+//
+// This is a PURGE and a rescan, not a field edit: everything of the wrong type
+// is deleted — watch progress, watchlist entries and ratings with it — the type
+// is changed, and the library is walked again from disk under the right parser.
+// A bare type edit is worse than useless, because the existing rows keep the old
+// type with their files in the wrong table, where no later prune can reach them.
+//
+// `items_to_delete` from the preview MUST be echoed back to the confirm call.
+// The server refuses if the catalog moved in between, so an admin who approved
+// 80 titles can never silently get 400.
+export interface RetypeCasualty {
+  table: string
+  rows: number
+  /**
+   * Plain-language description of what those rows are. Optional: the server
+   * omits it for a table it has no wording for, and the UI then shows the bare
+   * table name rather than a dangling separator.
+   */
+  why?: string
+}
+export interface RetypePreview {
+  library_id: number
+  library_name: string
+  current_type: 'movie' | 'show'
+  target_type: 'movie' | 'show'
+  items_to_delete: number
+  items_kept: number
+  /** Only tables that actually lose rows; absent when nothing is lost. */
+  casualties?: RetypeCasualty[]
+}
+export async function previewLibraryRetype(
+  id: number, type: 'movie' | 'show', signal?: AbortSignal,
+): Promise<RetypePreview> {
+  return apiFetch<RetypePreview>(
+    `/api/libraries/${id}/retype/preview?type=${encodeURIComponent(type)}`, { signal },
+  ) as Promise<RetypePreview>
+}
+export async function retypeLibrary(
+  id: number, type: 'movie' | 'show', expectedItems: number,
+): Promise<{ items_deleted: number }> {
+  return apiFetch<{ items_deleted: number }>(`/api/libraries/${id}/retype`, {
+    method: 'POST',
+    body: { type, expected_items: expectedItems },
+  }) as Promise<{ items_deleted: number }>
+}
+
 // Unified Active Streams row. Transcode-backed and direct-play-backed
 // streams arrive on the same array tagged with `kind` so the admin
 // Sessions tab can render them together. Fields that don't apply to

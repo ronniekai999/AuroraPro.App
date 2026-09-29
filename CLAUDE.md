@@ -372,6 +372,131 @@ restart mid-scan produces the state.
   bounded only by the slot being process-local, so the restart that caused the
   cancellation re-arms it.
 
+### Library type: the report and the retype (issue #510)
+
+A library created with the wrong type is the defect behind #510. The owner's "TV
+Shows" library was `type='movie'`, so `isTV := lib.Type == models.LibraryShows`
+sent all 80 series through `ParseMoviePath`, stored them as
+`media_items.type='movie'` with their files in `media_files`, and searched them
+against TMDB's MOVIE index. Nothing matched, nothing surfaced it, and every scan
+reported success. Code: `internal/db/queries_library_health.go` and
+`queries_library_retype.go`, `internal/api/library_health.go` and
+`library_retype.go`, SPA `AdminLibrariesTab` / `RetypeLibraryButton`.
+
+The report (`GET /api/admin/library-health`, plus one log line per scan from
+`OnScanComplete`):
+
+- "Matched" is `tmdb_id`, never `match_status`. That column DEFAULTs to
+  `'matched'` and `UpsertMediaItem` never writes it, so every row this report
+  exists to find reads as matched with a NULL `tmdb_id`.
+- Flags a library at or below a 5% match rate with at least 10 titles. When
+  EVERY eligible library is starved it raises ONE install-level warning naming
+  the provider instead — that pattern is a bad TMDB key, and per-library type
+  warnings would send an admin the wrong way.
+- That suppression needs TWO eligible libraries. With one, the explanations are
+  indistinguishable, and suppressing would silence exactly the single-library
+  install whose one library is mis-typed. A false warning costs a look at a
+  settings page; a false all-clear costs what #510 cost.
+- A library mid-scan is excluded from its own warning AND from the install-wide
+  tally. The second half was missing: freshly scanned rows have no `tmdb_id`
+  until enrichment finishes, so a first scan reads as starved, and on a
+  two-library install that flipped the report to "check your TMDB key" and
+  silenced the real warning on the mis-typed library beside it.
+- Report only. Admin-gated and NOT on `/api/libraries`, which is member-visible.
+
+The retype (`GET /{id}/retype/preview?type=`, `POST /{id}/retype`):
+
+- It is a PURGE and a rescan, never a field edit. A bare `UPDATE libraries SET
+  type` is actively harmful: existing rows keep the old type, their files stay
+  in the wrong table, and `pruneDeletedFiles` branches on the same `isTV`, so
+  those
+  `media_files` rows become unreachable by any later prune. Permanent phantoms
+  on top of a catalog that still reads as the old type.
+- Two calls. The preview is read-only and counts casualties; the confirm echoes
+  `items_to_delete` back and the transaction REFUSES on a mismatch (409). The
+  recount happens inside the transaction after `SELECT ... FOR UPDATE` on the
+  library row — checking outside would leave the window it exists to close.
+- `expected_items` is a POINTER. Zero is a legitimate approval, so as a plain
+  int64 an omitted interlock and an approved zero are the same value.
+- The casualty list is the TRANSITIVE cascade closure of `media_items`, read
+  from `pg_constraint` at query time. It was derived from `mergeChildren` plus
+  one hand-coded exception, and a review showed that silently omitted
+  `skip_markers`, `skip_marker_analysis` and `recap_conversation_turns` — a
+  person's whole recap Q&A thread destroyed without appearing in the preview,
+  while the comment claimed nothing could be missing. `mergeChildren` is pinned
+  for DIRECT children only, so it could never have carried the second hop. A
+  table reachable by several paths is counted ONCE (`skip_markers` hangs off
+  both `media_files` and `episode_files`); the one blind spot is multi-column
+  cascade keys, which `TestRetypeCascadeClosureCoversTheWholeSchema` fails on
+  if one ever becomes reachable.
+- The casualty descriptions are the retype's own, never `mergeChildren`'s `why`.
+  Those describe a MERGE — ten of nineteen begin "re-parented:" — so the one
+  screen whose job is to say what is about to be destroyed was telling an admin
+  their live watch party would be re-parented.
+- The scan slot is claimed before anything is touched and handed to the rescan,
+  so the library is never unlocked in between. A refused retype releases it via
+  `ReleaseScanSlot`, which frees an UNUSED claim only — otherwise a refusal
+  leaves the library reading as scanning for the life of the process.
+- The WATCHER is re-pointed at the new library value, inside the rescan
+  goroutine and ahead of the scan — never inline in the handler, and the
+  ORDERING is pinned through `onRescanProgressForTest` because polling for the
+  final state cannot see it (an empty tree rescans in milliseconds).
+  `WatchLibrary` walks every library path with `filepath.WalkDir`, which
+  `LibraryHandler.Create` carries a post-mortem comment about because doing it
+  synchronously caused 504s; inline, that put a multi-minute walk AFTER a
+  committed purge on a 60s route, so the most destructive endpoint in the repo
+  could report a gateway failure for work it had already done. On failure the
+  entry is installed ANYWAY with the current value and `WatchLibrary` returns
+  `ErrFSWatchUnavailable`. `w.watching` is also what `periodicScanLoop`
+  iterates, so the previous behaviour — return early, or drop the stale entry —
+  took the library out of automatic scanning entirely, not just out of file
+  events. That is the state where the rescan is most likely to have failed too.
+  `WatchLibrary` stores the `*models.Library` it was handed as a SNAPSHOT and is
+  called only at boot and on library creation, so the periodic tick and the
+  fsnotify debounce keep passing the pre-retype value to `ScanLibrary`, which
+  branches on `lib.Type` rather than re-reading the database. Without this the
+  first file event after a retype re-scans under the OLD parser and re-creates
+  the exact phantom state the operation exists to remove. A review demonstrated
+  it end to end; `Watcher.WatchedLibrary` exists so the next one can assert it
+  from outside the package.
+- The purge transaction runs on the SERVER-lifecycle context, not the request's.
+  The route carries a 60s timeout and the DELETE scales with library size; a
+  cancellation racing `Commit` is ambiguous, so the handler would answer 500
+  with no rescan launched while the purge may have landed.
+- The count interlock covers the ITEM count only, not the casualty counts shown
+  beside it. Widening it would refuse the operation any time anyone watched
+  something. It is also belt-and-braces now: `RowsAffected` is compared after
+  the DELETE, because the recount's atomicity rests on `FOR UPDATE` conflicting
+  with the FK's `FOR KEY SHARE` on the same row — real, load-tested by a review,
+  and silently lost if anyone "corrects" it to `FOR NO KEY UPDATE`. The
+  `FOR UPDATE` itself is pinned by NOTHING: replacing it with a plain `SELECT`
+  passes every test, and the outcome stays safe only because `RowsAffected`
+  turns the over-delete into a 409 rollback.
+- Calling it with the type the library already has is the repair path, not a
+  no-op: it purges rows whose type disagrees with the library's, which is the
+  state hand-written SQL leaves behind.
+- `libraries.type` also carries a CHECK constraint (movie|show). That is a real
+  backstop but it fires INSIDE the transaction, after the DELETE; the Go-side
+  type check is what stops `type <> <garbage>` matching every row.
+- Deliberate non-goal: nothing is preserved across a retype. Re-parenting a
+  movie row's history onto a show row is the premise the withdrawn repointing
+  work proved false, and guessing wrong loses data silently instead of loudly.
+
+Known gaps: the retype is not reversible and there is no undo; the rescan is
+fire-and-forget, so a failure after the purge commits leaves an empty library
+until someone scans again; the purge holds the `libraries` row lock for its
+duration, which blocks `media_items` inserts for that library; the preview runs
+one count per affected table and is not instant on a large library, and a
+timeout there makes the confirm unreachable since it needs the preview's number;
+the preview enumerates DELETIONS only, so the two `SET NULL` side effects go
+unreported (a watch party on a KEPT title losing an episode that belonged to a
+removed one, and the same for a recap turn's episode boundary); live watch
+parties are deleted underneath `internal/watchparty`'s in-memory manager, which
+is not notified, so participants stay connected to a room whose row is gone; the
+rescan goroutine is a bare `go` like `Create`'s and `Scan`'s, so shutdown does
+not wait for it and `addDirRecursive` ignores its context; and the report's
+thresholds are reasoned, not calibrated against real installs.
+
 ### Nullable database columns
 
 Go scalar fields use zero values as unknown sentinels. Queries projecting

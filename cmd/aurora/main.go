@@ -219,6 +219,30 @@ func main() {
 	bgWorker(func() { skipWorker.Run(ctx) })
 	scanner.OnScanComplete = func(lib *models.Library) {
 		skipWorker.TriggerSweep()
+
+		// Say something when a library finishes a scan with essentially no
+		// metadata matches. This is the half of the #510 report an operator
+		// actually sees: the admin endpoint is a page somebody has to think to
+		// visit, and the mis-typed library sat there through repeated
+		// SUCCESSFUL scans because nothing ever mentioned it.
+		//
+		// Report only, and deliberately after the scan rather than during it —
+		// the report skips a library mid-scan, since a partial tally warns and
+		// then resolves itself. Failures here are swallowed: a diagnostic must
+		// never be able to fail a scan.
+		// bgWorker, not a bare `go`: the watcher callback twenty lines below
+		// carries the note explaining that untracked goroutines are what
+		// produced the 2026-07-30 "closed pool" incident, and this one outlives
+		// the scan that spawned it.
+		libID := lib.ID
+		bgWorker(func() {
+			tallies, err := queries.GetLibraryMatchHealth(ctx)
+			if err != nil {
+				slog.Warn("library health check failed", "library_id", libID, "error", err)
+				return
+			}
+			api.LogLibraryHealth(api.LibraryHealthReportFor(tallies, scanner), libID)
+		})
 	}
 
 	// Notification pipeline (see docs/push.md): one dispatcher owns persist →

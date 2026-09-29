@@ -154,6 +154,24 @@ func (a *ActivityLogger) LogLibraryDeleted(ctx context.Context, userID int64, li
 	})
 }
 
+// LogLibraryRetyped records a library's type being changed, which purges every
+// catalog row of the old type. The counts live in Details because the rows they
+// describe are gone by the time anyone reads this — the same reason
+// LogMediaDeleted carries a title rather than an FK.
+func (a *ActivityLogger) LogLibraryRetyped(ctx context.Context, userID, libraryID int64, name, from, to string, itemsDeleted int64) {
+	a.log(ctx, &models.ActivityEntry{
+		UserID:    &userID,
+		EventType: "library_retyped",
+		Details: map[string]interface{}{
+			"library_id":    libraryID,
+			"library_name":  name,
+			"from_type":     from,
+			"to_type":       to,
+			"items_deleted": itemsDeleted,
+		},
+	})
+}
+
 // LogMediaDeleted records an admin removing a media item (show/movie) from the
 // catalog via the manual "remove from library" action. The media row is gone
 // after this fires, so the id/title live in Details rather than as an FK
