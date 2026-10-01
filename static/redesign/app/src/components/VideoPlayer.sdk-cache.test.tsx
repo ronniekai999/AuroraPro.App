@@ -709,3 +709,105 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
   })
 })
+
+describe('Receiver LOAD ownership across recreated media generations', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete (window as { cast?: unknown }).cast
+    delete (window as { chrome?: unknown }).chrome
+  })
+  it.each(['heartbeat', 'relative', 'terminal'].flatMap(surface => [false, true].map(recreated => ({ surface, recreated }))))('requires incoming third ACK evidence on $surface even when retired Media is recreated=$recreated', async ({ surface, recreated }) => {
+    const uri = 'http://localhost:3000/api/stream/direct/media/10?token=same-second-cast-token'
+    const make = (id: number, time: number) => {
+      const listeners = new Set<(alive: boolean) => void>()
+      const media: CastMediaSession = { mediaSessionId: id, media: { contentId: uri, contentType: 'video/mp4' }, playerState: 'PAUSED', currentTime: time, getEstimatedTime() { return this.currentTime! }, addUpdateListener: l => { listeners.add(l) }, removeUpdateListener: l => { listeners.delete(l) } }
+      return { media, listeners, emit: (alive = true) => { for (const l of [...listeners]) l(alive) } }
+    }
+    const first = make(2, 600), second = make(3, 800), prior = make(1, 550), incoming = make(4, 900)
+    const items = [prior.media]
+    // Public CAF returns the first media without an idleReason. Finished
+    // media still delivers its terminal update through its own listener.
+    const actualGet = () => items.find(media => !media.idleReason) ?? null
+    const sdk = installFakeSdk(), session = sdk.makeSession()
+    const setMedia = (media: CastMediaSession | null) => { items.splice(0, items.length, ...media ? [media] : []) }
+    session.getMediaSession = actualGet
+    sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200, headers: { 'Content-Type': 'video/mp4' } })))
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    vi.mocked(createDirectCastToken).mockResolvedValue({ url: uri, token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+    let ack1!: () => void, ack2!: () => void
+    const wait1 = new Promise<void>(resolve => { ack1 = resolve }), wait2 = new Promise<void>(resolve => { ack2 = resolve })
+    vi.mocked(session.loadMedia).mockImplementationOnce(async request => {
+      expect(request.currentTime).toBe(600)
+      setMedia(first.media)
+      Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, mediaInfo: first.media.media, playerState: 'PAUSED', isPaused: true, currentTime: 600, canSeek: true })
+      sdk.emitRemoteChange()
+      await wait1
+    }).mockImplementationOnce(async request => {
+      expect(request.currentTime).toBe(800)
+      setMedia(second.media)
+      sdk.emitRemoteChange()
+      await wait2
+    }).mockImplementationOnce(async request => {
+      expect(request.currentTime).toBe(900)
+      setMedia(null)
+      Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: false, currentTime: 0, playerState: 'IDLE', mediaInfo: null })
+      sdk.emitRemoteChange()
+    })
+    const seek = vi.fn(), ended = vi.fn(() => false)
+    const element = (resume: number, profile: number) => <VideoPlayer target={{ ...movie, resumePositionMs: resume * 1000 }} profileId={profile} onClose={() => {}} onSeekRebuild={seek} onEnded={ended}/>
+    const view = render(element(600, 7)); await settle()
+    const button = screen.getByRole('button', { name: 'Cast' })
+    fireEvent.click(button); fireEvent.click(button); fireEvent.click(button); await settle()
+    expect(session.loadMedia).toHaveBeenCalledTimes(1)
+    view.rerender(element(800, 9)); await settle(); fireEvent.canPlay(document.querySelector('video')!); await settle()
+    await act(async () => { ack1() }); await settle()
+    expect(session.loadMedia).toHaveBeenCalledTimes(2)
+    view.rerender(element(900, 11)); await settle(); fireEvent.canPlay(document.querySelector('video')!); await settle()
+    await act(async () => { ack2() }); await settle()
+    expect(session.loadMedia).toHaveBeenCalledTimes(3)
+    expect(actualGet()).toBeNull()
+    // The legacy SDK's terminated-id cache entry is removed. A delayed status
+    // for that id creates a NEW public Media and appends it to the empty list.
+    const late = recreated ? make(2, 600) : first
+    setMedia(late.media)
+    Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, currentTime: 600, playerState: 'PAUSED', isPaused: true, mediaInfo: late.media.media })
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { sdk.emitRemoteChange('currentTime', 600); vi.advanceTimersByTime(10000) }); await settle()
+    expect.soft(reportProgress).not.toHaveBeenCalled()
+    if (surface === 'relative') {
+      fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+      expect.soft(sdk.getRemotePlayer()!.currentTime).toBe(600)
+      expect.soft(seek).not.toHaveBeenCalled()
+    }
+    if (surface === 'terminal') {
+      late.media.playerState = 'IDLE'; late.media.idleReason = 'FINISHED'
+      await act(async () => { late.emit(false); sdk.emitRemoteChange() }); await settle()
+      expect.soft(ended).not.toHaveBeenCalled()
+      expect.soft(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 11 }), expect.anything())
+      // A false completion necessarily stops casting; inspect it separately
+      // instead of pretending the subsequent healthy snapshot is still live.
+      if (ended.mock.calls.length) return
+    }
+    setMedia(incoming.media)
+    Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, currentTime: 900, playerState: 'PAUSED', isPaused: true, mediaInfo: incoming.media.media })
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { sdk.emitRemoteChange() }); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect.soft(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 900000, profile_id: 11 }), expect.any(AbortSignal))
+    if (surface === 'relative') {
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+      expect.soft(sdk.getRemotePlayer()!.currentTime).toBe(910)
+    }
+    if (surface === 'terminal') {
+      vi.mocked(reportProgress).mockClear()
+      incoming.media.playerState = 'IDLE'; incoming.media.idleReason = 'FINISHED'; incoming.media.currentTime = 0
+      await act(async () => { incoming.emit(false); sdk.emitRemoteChange() }); await settle()
+      expect.soft(ended).toHaveBeenCalledOnce()
+      expect.soft(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 11 }), expect.any(AbortSignal))
+      expect.soft(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 7 }), expect.anything())
+      expect.soft(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 9 }), expect.anything())
+    }
+  })
+})
