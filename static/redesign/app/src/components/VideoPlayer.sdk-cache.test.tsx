@@ -935,3 +935,121 @@ describe('Latest rejected same-URI receiver terminal cleanup', () => {
     },
   )
 })
+
+describe('Successful retry excludes the acknowledged generation before its failed predecessor', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete (window as { cast?: unknown }).cast
+    delete (window as { chrome?: unknown }).chrome
+  })
+  it.each([false, true].flatMap(terminal =>
+    [false, true].flatMap(injectStale =>
+      ['preACK', 'postACK'].map(stalePhase => ({ terminal, injectStale, stalePhase })),
+    ),
+  ))(
+    'rejects prior ACK clock and terminal=$terminal, stale=$injectStale at $stalePhase', async ({ terminal, injectStale, stalePhase }) => {
+      const uri = 'http://localhost:3000/api/stream/direct/media/10?token=same-second'
+      const listeners = new Map<number, Set<(alive: boolean) => void>>()
+      const makeMedia = (id: number, currentTime: number): CastMediaSession => ({
+        mediaSessionId: id, media: { contentId: uri, contentType: 'video/mp4' }, playerState: 'PAUSED', currentTime, idleReason: null,
+        addUpdateListener: listener => {
+          if (!listeners.has(id)) listeners.set(id, new Set())
+          listeners.get(id)!.add(listener)
+        },
+        removeUpdateListener: listener => { listeners.get(id)?.delete(listener) },
+        getEstimatedTime() { return this.currentTime! },
+      })
+      const items = [makeMedia(1, 600)]
+      const actualGet = () => items.find(media => !media.idleReason) ?? null
+      const sdk = installFakeSdk(); const session = sdk.makeSession(); const ended = vi.fn(async () => true)
+      session.getMediaSession = actualGet
+      sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
+      vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+      vi.mocked(createDirectCastToken).mockResolvedValue({ url: uri, token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))
+      let firstACK!: () => void; let newestACK!: () => void
+      const received: CastMediaSession[] = []
+      vi.mocked(session.loadMedia).mockImplementation(async request => {
+        const current = makeMedia(received.length + 2, request.currentTime!)
+        received.push(current)
+        if (received.length === 3) {
+          // The retry ACK precedes its first incoming Media status.
+          items.splice(0, items.length)
+          Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: false, mediaInfo: null, currentTime: 0, playerState: 'IDLE' })
+          sdk.emitRemoteChange()
+          await new Promise<void>(resolve => { newestACK = resolve })
+          return
+        }
+        items.splice(0, items.length, current)
+        Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, mediaInfo: current.media, currentTime: current.currentTime, playerState: 'PAUSED', isPaused: true, canSeek: true })
+        sdk.emitRemoteChange()
+        if (received.length === 1) await new Promise<void>(resolve => { firstACK = resolve })
+        else throw { code: 'timeout', description: 'Second LOAD reached the TV but ACK timed out' }
+      })
+      const old = { ...movie, resumePositionMs: 600000 }; const next = { ...movie, resumePositionMs: 900000 }
+      const element = (target = old, profileId = 7) => <VideoPlayer target={target} profileId={profileId} onClose={() => {}} onEnded={ended} />
+      const view = render(element()); await settle()
+      const button = screen.getByRole('button', { name: 'Cast' })
+      fireEvent.click(button); fireEvent.click(button); fireEvent.click(button); await settle()
+      expect(session.loadMedia).toHaveBeenCalledTimes(1)
+      view.rerender(element(next, 9)); await settle()
+      fireEvent.canPlay(document.querySelector('video')!); await settle()
+      await act(async () => { firstACK() }); await settle()
+      expect(session.loadMedia).toHaveBeenCalledTimes(3)
+      expect(received.map(media => media.currentTime)).toEqual([600, 900, 900])
+      const retired = makeMedia(2, 600)
+      const publishOlder = async () => {
+        items.splice(0, items.length, retired)
+        Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, mediaInfo: retired.media, currentTime: 600, playerState: 'PAUSED', isPaused: true })
+        await act(async () => { sdk.emitRemoteChange() }); await settle()
+      }
+      if (injectStale && stalePhase === 'preACK') await publishOlder()
+      await act(async () => { newestACK() }); await settle()
+      await act(async () => { vi.advanceTimersByTime(3100) }); await settle()
+      if (!injectStale) expect(actualGet()).toBeNull()
+      if (injectStale && stalePhase === 'postACK') await publishOlder()
+      vi.mocked(reportProgress).mockClear()
+      await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+      expect.soft(reportProgress).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+      const seek = sdk.getRemoteController()!.seek
+      seek.mockClear()
+      if (injectStale) {
+        fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+        expect.soft(seek).not.toHaveBeenCalled()
+        expect.soft(sdk.getRemotePlayer()!.currentTime).toBe(600)
+        if (terminal) {
+          retired.playerState = 'IDLE'; retired.idleReason = 'FINISHED'
+          Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: false, mediaInfo: null, currentTime: 0, playerState: 'IDLE' })
+          await act(async () => {
+            for (const listener of [...listeners.get(2) ?? []]) listener(false)
+            sdk.emitRemoteChange()
+          }); await settle()
+          expect.soft(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 9 }), expect.anything())
+        }
+        expect.soft(ended).not.toHaveBeenCalled()
+      }
+      items.splice(0, items.length, received[2])
+      Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, mediaInfo: received[2].media, currentTime: 900, playerState: 'PAUSED', isPaused: true })
+      await act(async () => { sdk.emitRemoteChange() }); await settle()
+      vi.mocked(reportProgress).mockClear()
+      await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+      expect.soft(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 900000, profile_id: 9 }), expect.any(AbortSignal))
+      fireEvent.mouseMove(screen.getByRole('dialog', { name: 'Playing Movie' }), { clientX: 100, clientY: 100 }); await settle()
+      seek.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+      expect.soft(seek).toHaveBeenCalledOnce()
+      expect.soft(sdk.getRemotePlayer()!.currentTime).toBe(910)
+      vi.mocked(reportProgress).mockClear()
+      received[2].playerState = 'IDLE'; received[2].idleReason = 'FINISHED'; received[2].currentTime = 0
+      Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: false, mediaInfo: null, currentTime: 0, playerState: 'IDLE' })
+      await act(async () => {
+        for (const listener of [...listeners.get(4) ?? []]) listener(false)
+        sdk.emitRemoteChange()
+      }); await settle()
+      expect.soft(ended).toHaveBeenCalledOnce()
+      expect.soft(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 9 }), expect.any(AbortSignal))
+      expect.soft(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 7 }), expect.anything())
+    },
+  )
+})
