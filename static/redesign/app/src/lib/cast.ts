@@ -279,6 +279,9 @@ export interface CastRemoteState {
   // RemotePlayer events (including volume/mute) only resample, never advance
   // it. New/unsupported Media instances start at 0 and inherit no evidence.
   mediaStatusSeq?: number
+  // Explicit FINISHED/CANCELLED of the latest rejected, positively observed
+  // LOAD generation. It permits cleanup only, never clocks or completion.
+  failedLoadTerminal?: boolean
   // A RemotePlayer is bound to an active receiver session.
   isConnected: boolean
   // The receiver has media loaded (false during launch / between items).
@@ -341,6 +344,7 @@ export function useCast(
     contentId: null,
     clockContentId: null,
     mediaStatusSeq: 0,
+    failedLoadTerminal: false,
     isConnected: false,
     isMediaLoaded: false,
     isPaused: false,
@@ -380,7 +384,18 @@ export function useCast(
     outgoing: MediaGeneration | null
     current: MediaGeneration | null
   } | null>(null)
+  const rejectedMediaLoadRef = useRef<{
+    session: CastSessionInstance
+    contentId: string
+    generation: MediaGeneration
+  } | null>(null)
+  const isLatestRejectedGeneration = useCallback((session: CastSessionInstance, generation: MediaGeneration, contentId?: string): boolean => {
+    const rejected = rejectedMediaLoadRef.current
+    return Boolean(rejected && rejected.session === session && rejected.contentId === contentId &&
+      sameMediaGeneration(rejected.generation, generation))
+  }, [])
   const generationIsAssociated = useCallback((session: CastSessionInstance, generation: MediaGeneration, contentId?: string): boolean => {
+    if (isLatestRejectedGeneration(session, generation, contentId)) return false
     const association = mediaLoadAssociationRef.current
     if (!association) return true
     if (association.session !== session) return false
@@ -394,7 +409,7 @@ export function useCast(
     if (!['PLAYING', 'PAUSED', 'BUFFERING', 'IDLE'].includes(generation.media.playerState ?? '')) return false
     association.current = generation
     return true
-  }, [])
+  }, [isLatestRejectedGeneration])
 
   // Pending "confirm the disconnect" timer + the last publicly-reported
   // connected value, both read/written by refresh() (see its comment) to
@@ -650,9 +665,12 @@ export function useCast(
       }
       const captureTerminal = (session: CastSessionInstance, media: CastMediaSession, revision: number) => {
         const contentId = media.media?.contentId
+        const generation = mediaGeneration(media)
+        const rejectedTerminal = isLatestRejectedGeneration(session, generation, contentId) &&
+          (media.idleReason === 'FINISHED' || media.idleReason === 'CANCELLED')
         if (media.playerState !== 'IDLE' || !media.idleReason || !contentId ||
-          !generationIsAssociated(session, mediaGeneration(media), contentId)) return false
-        terminal = { session, generation: mediaGeneration(media), contentId, playerState: 'IDLE', idleReason: media.idleReason, revision }
+          (!generationIsAssociated(session, generation, contentId) && !rejectedTerminal)) return false
+        terminal = { session, generation, contentId, playerState: 'IDLE', idleReason: media.idleReason, revision }
         return true
       }
       clearTrackedMediaRef.current = () => {
@@ -661,9 +679,10 @@ export function useCast(
         closedMedia = null
         watchedMediaRef.current = null
         mediaLoadAssociationRef.current = null
+        rejectedMediaLoadRef.current = null
         retiredMediaRef.current = new WeakMap()
         retiredMediaIdsRef.current = null
-        setRemote(prev => ({ ...prev, contentId: null, clockContentId: null, mediaStatusSeq: 0,
+        setRemote(prev => ({ ...prev, contentId: null, clockContentId: null, mediaStatusSeq: 0, failedLoadTerminal: false,
           playerState: null, idleReason: null, isConnected: false, isMediaLoaded: false }))
       }
       const bindMedia = (session: CastSessionInstance, media: CastMediaSession) => {
@@ -687,6 +706,19 @@ export function useCast(
             } catch { return }
             binding.alive = alive
             binding.revision = ++mediaStatusSeqRef.current
+            // Genuine healthy status for the acknowledged generation retires
+            // a rejected replacement's cleanup exception. A volume/mute
+            // resample cannot reach this callback or restore that ownership.
+            const acknowledged = mediaLoadAssociationRef.current
+            if (alive && rejectedMediaLoadRef.current?.session === session && acknowledged?.session === session &&
+              acknowledged.current && sameMediaGeneration(acknowledged.current, mediaGeneration(media)) &&
+              media.media?.contentId === acknowledged.contentId &&
+              (media.playerState === 'PLAYING' || media.playerState === 'PAUSED')) {
+              try {
+                const clock = typeof media.getEstimatedTime === 'function' ? media.getEstimatedTime() : media.currentTime
+                if (typeof clock === 'number' && Number.isFinite(clock) && clock >= 0) rejectedMediaLoadRef.current = null
+              } catch { /* an unavailable clock cannot prove recovery */ }
+            }
             if (!alive || (media.playerState === 'IDLE' && media.idleReason)) {
               closedMedia = { generation: mediaGeneration(media), revision: binding.revision }
               captureTerminal(session, media, binding.revision)
@@ -731,6 +763,7 @@ export function useCast(
           let contentId: string | null = player.mediaInfo?.contentId ?? null
           let clockContentId: string | null = null
           let mediaStatusSeq = 0
+          let failedLoadTerminal = false
           let hasSession = false
           let currentTime = player.currentTime || 0
           // RemotePlayer's state can still belong to an outgoing item while
@@ -744,7 +777,8 @@ export function useCast(
             const activeMedia = session?.getMediaSession() ?? null
             if (session && activeMedia) {
               const associated = generationIsAssociated(session, mediaGeneration(activeMedia), activeMedia.media?.contentId)
-              if (associated && (!closedMedia || !sameMediaGeneration(closedMedia.generation, mediaGeneration(activeMedia)))) {
+              const rejected = isLatestRejectedGeneration(session, mediaGeneration(activeMedia), activeMedia.media?.contentId)
+              if ((associated || rejected) && (!closedMedia || !sameMediaGeneration(closedMedia.generation, mediaGeneration(activeMedia)))) {
                 terminal = null
                 closedMedia = null
                 watchedMediaRef.current = { session, media: activeMedia }
@@ -775,11 +809,14 @@ export function useCast(
             const mediaId = terminalStatus?.contentId ?? mediaSession?.media?.contentId
             const associated = Boolean(session && mediaSession && generationIsAssociated(session,
               terminalStatus?.generation ?? mediaGeneration(mediaSession), mediaId))
+            failedLoadTerminal = Boolean(session && mediaSession && mediaState === 'IDLE' &&
+              (idleReason === 'FINISHED' || idleReason === 'CANCELLED') &&
+              isLatestRejectedGeneration(session, terminalStatus?.generation ?? mediaGeneration(mediaSession), mediaId))
             // A successful repeated-URI LOAD can precede the new Media status.
             // The outgoing Media remains coherent, but belongs to the prior
             // load: neither its clock nor terminal state proves the new item.
-            if (!associated) idleReason = null
-            if (associated && typeof mediaState === 'string') {
+            if (!associated && !failedLoadTerminal) idleReason = null
+            if ((associated || failedLoadTerminal) && typeof mediaState === 'string') {
               isPaused = mediaState === 'PAUSED'
               if (typeof mediaId === 'string' && mediaId.length > 0) playerState = mediaState
             }
@@ -800,6 +837,7 @@ export function useCast(
             contentId,
             clockContentId,
             mediaStatusSeq,
+            failedLoadTerminal,
             isConnected: hasSession && !!player.isConnected,
             isMediaLoaded: hasSession && !!player.isMediaLoaded,
             isPaused,
@@ -883,7 +921,7 @@ export function useCast(
       mounted = false
       cleanup()
     }
-  }, [generationIsAssociated])
+  }, [generationIsAssociated, isLatestRejectedGeneration])
 
   // Load the CURRENT media (from loadRef) onto the EXISTING cast session —
   // no device picker. This is the second half of start(), factored out so the
@@ -1032,6 +1070,7 @@ export function useCast(
       outgoing: outgoingMedia ? mediaGeneration(outgoingMedia) : null,
       current: null as MediaGeneration | null,
     }
+    rejectedMediaLoadRef.current = null
     mediaLoadAssociationRef.current = association
     sampleRemoteRef.current?.()
     try {
@@ -1044,7 +1083,10 @@ export function useCast(
       console.info('[Aurora Cast] loadMedia resolved — receiver should now be playing')
     } catch (rawErr) {
       if (mediaLoadAssociationRef.current === association) {
-        if (association.current) retireMediaGeneration(session, association.current)
+        if (association.current) {
+          rejectedMediaLoadRef.current = { session, contentId: association.contentId, generation: association.current }
+          retireMediaGeneration(session, association.current)
+        }
         mediaLoadAssociationRef.current = previousAssociation
         sampleRemoteRef.current?.()
       }

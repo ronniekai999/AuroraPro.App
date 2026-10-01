@@ -608,6 +608,71 @@ describe('CAF filters terminal Media from its public getter', () => {
     await act(async()=>{await latestCast!.loadCurrent()})
     expect(latestCast!.remote).toMatchObject({clockContentId:incoming.media.media!.contentId,playerState:'PAUSED',currentTime:900})
   })
+  for(const reason of ['FINISHED','CANCELLED']) for(const genericFirst of [false,true]) it(`delivers latest rejected same-URI ${reason} solely for cleanup (ANY first=${genericFirst})`,async()=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    const candidate=statusMedia(current.media.media!.contentId)
+    candidate.media.mediaSessionId=9;candidate.media.currentTime=850
+    session.loadMedia=vi.fn(async()=>{
+      setItems([candidate.media]);sdk.emitRemoteChange()
+      throw{code:'timeout'}
+    })
+    await act(async()=>{await expect(latestCast!.loadCurrent()).rejects.toBeInstanceOf(CastMediaLoadError)})
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null})
+    act(()=>candidate.emit());act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,failedLoadTerminal:false})
+    candidate.media.playerState='IDLE';candidate.media.idleReason=reason
+    if(genericFirst)act(()=>sdk.emitRemoteChange())
+    act(()=>candidate.emit(false));act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({contentId:candidate.media.media!.contentId,clockContentId:null,
+      playerState:'IDLE',idleReason:reason,failedLoadTerminal:true})
+  })
+  it('retires failed-terminal cleanup at a newer actual LOAD without restoring the failed clock',async()=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    const failed=statusMedia(current.media.media!.contentId)
+    failed.media.mediaSessionId=9
+    session.loadMedia=vi.fn(async()=>{setItems([failed.media]);sdk.emitRemoteChange();throw{code:'timeout'}})
+    await act(async()=>{await expect(latestCast!.loadCurrent()).rejects.toBeInstanceOf(CastMediaLoadError)})
+    let ack!:()=>void
+    session.loadMedia=vi.fn(async()=>new Promise<void>(resolve=>{ack=resolve}))
+    let loading!:Promise<void>
+    await act(async()=>{loading=latestCast!.loadCurrent();await Promise.resolve();await Promise.resolve();await Promise.resolve()})
+    expect(session.loadMedia).toHaveBeenCalledOnce()
+    failed.media.playerState='IDLE';failed.media.idleReason='FINISHED'
+    act(()=>failed.emit(false));act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null,failedLoadTerminal:false})
+    const incoming=statusMedia(current.media.media!.contentId)
+    incoming.media.mediaSessionId=10;incoming.media.currentTime=900
+    setItems([incoming.media]);act(()=>sdk.emitRemoteChange())
+    await act(async()=>{ack();await loading})
+    expect(latestCast!.remote).toMatchObject({clockContentId:incoming.media.media!.contentId,playerState:'PAUSED',currentTime:900,failedLoadTerminal:false})
+    setItems([failed.media]);act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null,failedLoadTerminal:false})
+  })
+  it('retires failed-terminal cleanup only after genuine healthy committed-generation recovery',async()=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    const failed=statusMedia(current.media.media!.contentId)
+    failed.media.mediaSessionId=9
+    session.loadMedia=vi.fn(async()=>{setItems([failed.media]);sdk.emitRemoteChange();throw{code:'timeout'}})
+    await act(async()=>{await expect(latestCast!.loadCurrent()).rejects.toBeInstanceOf(CastMediaLoadError)})
+    setItems([current.media]);act(()=>sdk.emitRemoteChange())
+    act(()=>current.emit()) // genuine post-rejection committed status
+    expect(latestCast!.remote).toMatchObject({clockContentId:current.media.media!.contentId,playerState:'PAUSED',failedLoadTerminal:false})
+    setItems([failed.media]);act(()=>sdk.emitRemoteChange())
+    failed.media.playerState='IDLE';failed.media.idleReason='CANCELLED'
+    act(()=>failed.emit(false));act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null,failedLoadTerminal:false})
+  })
+  it('does not invent a failed generation from a URL when none was observed during LOAD',async()=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    session.loadMedia=vi.fn(async()=>{throw{code:'timeout'}})
+    await act(async()=>{await expect(latestCast!.loadCurrent()).rejects.toBeInstanceOf(CastMediaLoadError)})
+    const unknown=statusMedia(current.media.media!.contentId)
+    unknown.media.mediaSessionId=9
+    setItems([unknown.media]);act(()=>sdk.emitRemoteChange())
+    unknown.media.playerState='IDLE';unknown.media.idleReason='FINISHED'
+    act(()=>unknown.emit(false));act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null,failedLoadTerminal:false})
+  })
   it('clears terminal status and listeners on permanent disconnect without ANY_CHANGE',async()=>{
     const{sdk,current}=await pausedLoad()
     act(()=>sdk.setSession(null))
