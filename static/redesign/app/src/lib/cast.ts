@@ -357,6 +357,12 @@ export function useCast(
   // exactly the class of bug this file has spent several rounds fixing.
   const prevUpdateSeqRef = useRef(0)
   const mediaStatusSeqRef = useRef(0)
+  const sampleRemoteRef = useRef<(() => void) | null>(null)
+  const mediaLoadAssociationRef = useRef<{
+    contentId: string
+    outgoingMedia: CastMediaSession | null
+    outgoingId: number | null
+  } | null>(null)
 
   // Pending "confirm the disconnect" timer + the last publicly-reported
   // connected value, both read/written by refresh() (see its comment) to
@@ -666,11 +672,21 @@ export function useCast(
             // never pairing its URI with separately mirrored player fields.
             const mediaState = mediaSession?.playerState
             const mediaId = mediaSession?.media?.contentId
-            if (typeof mediaState === 'string') {
+            const association = mediaLoadAssociationRef.current
+            const id = mediaSession?.mediaSessionId
+            const associated = !association || mediaId !== association.contentId ||
+              association.outgoingMedia === null ||
+              (association.outgoingId !== null && typeof id === 'number' && Number.isFinite(id)
+                ? id !== association.outgoingId : mediaSession !== association.outgoingMedia)
+            // A successful repeated-URI LOAD can precede the new Media status.
+            // The outgoing Media remains coherent, but belongs to the prior
+            // load: neither its clock nor terminal state proves the new item.
+            if (!associated) idleReason = null
+            if (associated && typeof mediaState === 'string') {
               isPaused = mediaState === 'PAUSED'
               if (typeof mediaId === 'string' && mediaId.length > 0) playerState = mediaState
             }
-            if (mediaSession && mediaBinding?.alive !== false && typeof mediaId === 'string' && mediaId.length > 0 &&
+            if (associated && mediaSession && mediaBinding?.alive !== false && typeof mediaId === 'string' && mediaId.length > 0 &&
               (mediaState === 'PLAYING' || mediaState === 'PAUSED')) {
               // The SDK recommends getEstimatedTime over its sporadically
               // updated currentTime. Older shapes can use their own clock;
@@ -699,6 +715,7 @@ export function useCast(
             updateSeq: (prevUpdateSeqRef.current += 1),
           })
         }
+        sampleRemoteRef.current = onRemoteChange
         remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
         onRemoteChange()
       } catch (e) {
@@ -707,6 +724,7 @@ export function useCast(
       }
 
       cleanup = () => {
+        sampleRemoteRef.current = null
         detachMedia()
         try {
           ctx.removeEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
@@ -908,11 +926,25 @@ export function useCast(
       request.activeTrackIds = [load.activeTextTrackIndex]
     }
 
+    // Capture at the actual LOAD boundary, after picker/token/self-test work:
+    // the picker may have joined a TV that was already playing this same URI.
+    const previousAssociation = mediaLoadAssociationRef.current
+    let outgoingMedia: CastMediaSession | null = null
+    try { outgoingMedia = session.getMediaSession() } catch { /* unavailable SDK shape */ }
+    const outgoingId = outgoingMedia?.mediaSessionId
+    mediaLoadAssociationRef.current = {
+      contentId: load.contentUrl,
+      outgoingMedia,
+      outgoingId: typeof outgoingId === 'number' && Number.isFinite(outgoingId) ? outgoingId : null,
+    }
+    sampleRemoteRef.current?.()
     try {
       await session.loadMedia(request)
+      sampleRemoteRef.current?.()
       // eslint-disable-next-line no-console
       console.info('[Aurora Cast] loadMedia resolved — receiver should now be playing')
     } catch (rawErr) {
+      mediaLoadAssociationRef.current = previousAssociation
       const e = rawErr as { code?: string; description?: string; details?: unknown } & Error
       // eslint-disable-next-line no-console
       console.error('[Aurora Cast] loadMedia failed:', {
