@@ -1380,7 +1380,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castReceiverIdentityIsTrusted = useCallback((): boolean => {
     const c = castRef.current
     const committedId = castCommittedContentIdRef.current
-    if (!committedId || castLoadsInFlightRef.current > 0) return false
+    if (!committedId || castLoadsInFlightRef.current > 0 || c.remote.failedLoadTerminal) return false
     // A later SDK update for an old rejected item must not reopen its clock
     // domain, including after a successful retry or recovery.
     if (c.remote.contentId && c.remote.contentId !== committedId) return false
@@ -1926,6 +1926,22 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // is loading. The retry's ACK/rejection must decide ownership first.
       if (c.remote.playerState === 'IDLE' && castLoadsInFlightRef.current > 0) {
         scheduleLoadSettleRecheck()
+        return
+      }
+      // A rejected LOAD can reuse the acknowledged URL while the receiver
+      // creates another Media generation. Its explicit terminal signal owns
+      // cleanup only; it cannot complete the committed title or outlive a
+      // newer logical LOAD/recovery merely because the URL is identical.
+      if (c.remote.failedLoadTerminal && c.remote.playerState === 'IDLE') {
+        if (failed?.active && failed.recoveryMediaStatusSeq === null && contentId === failed.contentId &&
+          (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED')) {
+          if (castLoadIsSettling()) {
+            scheduleLoadSettleRecheck()
+            return
+          }
+          castHasPlayedRef.current = false
+          c.stop()
+        }
         return
       }
       // Late terminal events for an outgoing/rejected item cannot end the

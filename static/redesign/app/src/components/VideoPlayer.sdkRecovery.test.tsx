@@ -481,3 +481,88 @@ describe('VideoPlayer ignores recreated retired Media session IDs', () => {
     expect(ended).toHaveBeenCalledOnce()
   })
 })
+
+describe('VideoPlayer latest rejected same-URI attempt cleanup',()=>{
+ for(const reason of ['FINISHED','CANCELLED'] as const)for(const recovery of ['none','sdk-retry','token-preflight','committed-status'] as const)for(const anyFirst of [false,true])it(`stops only latest rejected ${reason}, recovery=${recovery}, ANY first=${anyFirst}`,async()=>{
+   const newerRetry=recovery==='sdk-retry'||recovery==='token-preflight'
+   const uri='http://localhost:3000/api/stream/direct/media/10?token=same-second'
+   const listeners=new Map<number,Set<(alive:boolean)=>void>>()
+   const makeMedia=(id:number):CastMediaSession=>({mediaSessionId:id,media:{contentId:uri,contentType:'video/mp4'},playerState:'PAUSED',currentTime:600,idleReason:null,
+     addUpdateListener:l=>{if(!listeners.has(id))listeners.set(id,new Set());listeners.get(id)!.add(l)},removeUpdateListener:l=>{listeners.get(id)?.delete(l)},getEstimatedTime(){return this.currentTime!}})
+   const items=[makeMedia(1)],actualGet=()=>items.find(media=>!media.idleReason)??null
+   const sdk=installFakeSdk(),session=sdk.makeSession(),ended=vi.fn(async()=>false),close=vi.fn()
+   session.getMediaSession=actualGet;session.endSession=vi.fn(session.endSession)
+   sdk.setRequestSessionImpl(async()=>{sdk.setSession(session);sdk.triggerReconnect();return undefined})
+   vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+   const directToken={url:uri,token:'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x',expires_at:9999999999}
+   vi.mocked(createDirectCastToken).mockResolvedValue(directToken)
+   vi.stubGlobal('fetch',vi.fn(async()=>new Response('',{status:200})))
+   let firstAck!:()=>void,newestAck!:()=>void,releaseToken!:()=>void;const received:CastMediaSession[]=[]
+   session.loadMedia=vi.fn(async()=>{
+     const current=makeMedia(received.length+2);received.push(current);items.splice(0,items.length,current)
+     Object.assign(sdk.getRemotePlayer()!,{isConnected:true,isMediaLoaded:true,mediaInfo:current.media,currentTime:600,playerState:'PAUSED',isPaused:true,canSeek:true})
+     sdk.emitRemoteChange()
+     if(received.length===1)await new Promise<void>(r=>{firstAck=r})
+     else if(received.length===2)throw {code:'timeout',description:'LOAD reached the TV but ACK timed out'}
+     else await new Promise<void>(r=>{newestAck=r})
+   })
+   render(<VideoPlayer target={{...movie,resumePositionMs:600000}} onClose={close} onEnded={ended}/>)
+   await settle();const button=screen.getByRole('button',{name:'Cast'})
+   fireEvent.click(button);fireEvent.click(button);await settle()
+   expect(session.loadMedia).toHaveBeenCalledTimes(1)
+   await act(async()=>{firstAck()});await settle();expect(session.loadMedia).toHaveBeenCalledTimes(2)
+   await act(async()=>{vi.advanceTimersByTime(3100)});await settle()
+   expect(session.endSession).not.toHaveBeenCalled()
+   fireEvent.click(screen.getByRole('button',{name:'Expand player'}));await settle()
+   await act(async()=>{for(const listener of [...listeners.get(3)??[]])listener(true);sdk.emitRemoteChange({field:'volumeLevel',value:0.7})});await settle()
+   fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle()
+   expect(session.loadMedia).toHaveBeenCalledTimes(2)
+   if(newerRetry){
+     if(recovery==='token-preflight')vi.mocked(createDirectCastToken).mockImplementationOnce(async()=>new Promise(resolve=>{releaseToken=()=>resolve(directToken)}))
+     fireEvent.keyDown(screen.getByRole('slider',{name:'Seek'}),{key:'Home'});await settle()
+     expect(session.loadMedia).toHaveBeenCalledTimes(recovery==='token-preflight'?2:3)
+     items.splice(0,items.length,received[1])
+   }else if(recovery==='committed-status'){
+     items.splice(0,items.length,received[0])
+     await act(async()=>{sdk.emitRemoteChange();for(const listener of [...listeners.get(2)??[]])listener(true)});await settle()
+     fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle()
+     expect(sdk.getRemotePlayer()!.currentTime).toBe(610)
+     items.splice(0,items.length,received[1])
+   }
+   const current=received[1];current.playerState='IDLE';current.idleReason=reason
+   expect(actualGet()).toBeNull()
+   Object.assign(sdk.getRemotePlayer()!,{isMediaLoaded:false,mediaInfo:null,currentTime:0,playerState:'IDLE'})
+   await act(async()=>{if(anyFirst)sdk.emitRemoteChange();for(const listener of [...listeners.get(3)??[]])listener(false);sdk.emitRemoteChange({field:'isMuted',value:true})});await settle()
+   expect(ended).not.toHaveBeenCalled()
+   if(newerRetry){
+     expect(session.endSession).not.toHaveBeenCalled()
+     if(recovery==='token-preflight'){
+       await act(async()=>{vi.advanceTimersByTime(3100)});await settle()
+       expect(session.endSession).not.toHaveBeenCalled();expect(ended).not.toHaveBeenCalled()
+       await act(async()=>{releaseToken()});await settle()
+       expect(session.loadMedia).toHaveBeenCalledTimes(3)
+     }
+     items.splice(0,items.length,received[2])
+     Object.assign(sdk.getRemotePlayer()!,{isMediaLoaded:true,mediaInfo:received[2].media,currentTime:600,playerState:'PAUSED'})
+     await act(async()=>{sdk.emitRemoteChange();newestAck()});await settle()
+     await act(async()=>{vi.advanceTimersByTime(3100)});await settle()
+     expect(session.endSession).not.toHaveBeenCalled()
+     received[2].playerState='IDLE';received[2].idleReason='FINISHED'
+     Object.assign(sdk.getRemotePlayer()!,{isMediaLoaded:false,mediaInfo:null,currentTime:0,playerState:'IDLE'})
+     await act(async()=>{for(const listener of [...listeners.get(4)??[]])listener(false);sdk.emitRemoteChange()});await settle()
+     expect(ended).toHaveBeenCalledOnce()
+   }else if(recovery==='committed-status'){
+     expect(session.endSession).not.toHaveBeenCalled()
+     const committed=received[0]
+     items.splice(0,items.length,committed)
+     Object.assign(sdk.getRemotePlayer()!,{isMediaLoaded:true,mediaInfo:committed.media,currentTime:600,playerState:'PAUSED'})
+     await act(async()=>{sdk.emitRemoteChange()});await settle()
+     committed.playerState='IDLE';committed.idleReason='FINISHED'
+     Object.assign(sdk.getRemotePlayer()!,{isMediaLoaded:false,mediaInfo:null,currentTime:0,playerState:'IDLE'})
+     await act(async()=>{for(const listener of [...listeners.get(2)??[]])listener(false);sdk.emitRemoteChange()});await settle()
+     expect(ended).toHaveBeenCalledOnce()
+   }
+   expect(session.endSession).toHaveBeenCalledOnce()
+   expect(close).toHaveBeenCalledOnce()
+ })
+})
