@@ -11,7 +11,7 @@ const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
     status: { supported: true, available: true, connected: false, settling: false, deviceName: 'TV' },
-    remote: { contentId: null as string | null, clockContentId: null as string | null, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
+    remote: { contentId: null as string | null, clockContentId: null as string | null, mediaStatusSeq: 0, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
     start: vi.fn(), stop: vi.fn(), loadCurrent: vi.fn(), seek: vi.fn(), playOrPause: vi.fn(),
   },
   hls: [] as Array<{ emit: (name: string, data?: unknown) => void }>,
@@ -66,7 +66,7 @@ async function mockReceiverLoad(at?: number) {
   const load = await fake.getter?.(at) as { contentUrl: string; startTime?: number } | null | undefined
   if (load) Object.assign(fake.cast.remote, {
     contentId: load.contentUrl, clockContentId: load.contentUrl, currentTime: load.startTime ?? 0, isMediaLoaded: true,
-    isPaused: false, playerState: 'PLAYING', updateSeq: fake.cast.remote.updateSeq + 1,
+    isPaused: false, playerState: 'PLAYING', updateSeq: fake.cast.remote.updateSeq + 1, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1,
   })
 }
 function RebuildHarness({ onSeek = vi.fn(), onAudio = vi.fn(), party }: { onSeek?: (seconds: number) => void; onAudio?: (index: number, resumeMs: number) => void; party?: PartySync }) {
@@ -78,7 +78,7 @@ function RebuildHarness({ onSeek = vi.fn(), onAudio = vi.fn(), party }: { onSeek
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); vi.clearAllMocks(); fake.hls.length = 0; localStorage.clear()
   Object.assign(fake.cast.status, { connected: false, settling: false })
-  Object.assign(fake.cast.remote, { contentId: null, clockContentId: null, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
+  Object.assign(fake.cast.remote, { contentId: null, clockContentId: null, mediaStatusSeq: 0, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
   fake.cast.start.mockReset().mockImplementation(async () => { await mockReceiverLoad(); fake.cast.status.connected = true })
   fake.cast.loadCurrent.mockReset().mockImplementation(mockReceiverLoad)
   // Reset one-shot responses too: a failed adversarial case must not change
@@ -653,10 +653,10 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
 
   it('retains loaded exact-URI identity evidence during settlement for a quiet later FINISHED', async () => {
     const { view, element, ended } = await renew()
-    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, playerState: 'PLAYING', isMediaLoaded: true, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, playerState: 'PLAYING', isMediaLoaded: true, updateSeq: 3, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     expect(reportProgress).not.toHaveBeenCalled()
-    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 0, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, updateSeq: 4 })
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 0, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, updateSeq: 4, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     expect(ended).not.toHaveBeenCalled()
     await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
@@ -666,7 +666,7 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
 
   it('restores progress and FINISHED after fresh identity proves the acknowledged media survived', async () => {
     const { view, element, ended } = await renew()
-    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, updateSeq: 3, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
@@ -765,7 +765,7 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     Object.assign(fake.cast.remote, { contentId: null, currentTime: 25, updateSeq: 4 }); view.rerender(element()); await settle()
     await poll(3)
     expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
-    Object.assign(fake.cast.remote, { contentId: firstURL, clockContentId: firstURL, currentTime: 500, updateSeq: 5 }); view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { contentId: firstURL, clockContentId: firstURL, currentTime: 500, updateSeq: 5, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 }); view.rerender(element()); await settle()
     await poll(4)
     // The failed LOAD's fresh token was never acknowledged; the outgoing
     // URL is still expired, so this safe correction renews at canonical701.
@@ -851,7 +851,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
   })
   it.each(['button', 'keyboard', 'slider arrow', 'slider page'])('restores the proven source clock for a relative %s seek after healthy identity recovery', async mode => {
     const { view, element, seek } = await failedSoloLoad()
-    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     seek.mockClear(); fake.cast.loadCurrent.mockClear()
@@ -877,7 +877,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     expectAbsoluteSeekActions(seek, [])
     // A fresh loaded, exact-URI healthy snapshot restores both progress and actions.
-    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5 })
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
@@ -895,7 +895,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     expectAbsoluteSeekActions(seek, [])
-    Object.assign(fake.cast.remote, { clockContentId: oldURL, updateSeq: 4 })
+    Object.assign(fake.cast.remote, { clockContentId: oldURL, updateSeq: 4, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))

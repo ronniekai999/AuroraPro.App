@@ -962,10 +962,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // the identity of an in-flight receiver load.
   const castProgressLoadRef = useRef<{ context: CastProgressContext | null } | null>(null)
   const castProgressContextRef = useRef<CastProgressContext | null>(null)
+  // One completion per acknowledged load, including PAUSED acknowledgements
+  // that never published a PLAYING snapshot before explicit FINISHED.
+  const castFinishedProgressContextRef = useRef<CastProgressContext | null>(null)
   // A receiver LOAD can take effect even when its ACK times out. Keep the
   // outgoing identity/sample, but distrust subsequent clocks and FINISHED
   // until a later ACK or fresh media identity proves their association.
-  const castProgressFailureRef = useRef<{ contentId: string; updateSeq: number; healthyIdentitySeq?: number } | null>(null)
+  const castProgressFailureRef = useRef<{ contentId: string; mediaStatusSeq: number; healthyMediaStatusSeq?: number } | null>(null)
   const lastCastProgressRef = useRef<CastProgressSample | null>(null)
   const castProgressGenerationRef = useRef(0)
   const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -1079,6 +1082,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castTokenExpRef.current = 0
     castProgressLoadRef.current = null
     castProgressContextRef.current = null
+    castFinishedProgressContextRef.current = null
     castProgressFailureRef.current = null
     lastCastProgressRef.current = null
     castProgressGenerationRef.current += 1
@@ -1433,6 +1437,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // yet the receiver DID take this load. Never keep the prior item's
         // progress context after that acknowledgement.
         castProgressContextRef.current = progressLoad.context
+        castFinishedProgressContextRef.current = null
         castProgressFailureRef.current = null
         lastCastProgressRef.current = null
         castProgressGenerationRef.current += 1
@@ -1473,7 +1478,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         }
       } catch (e) {
         if (e instanceof CastMediaLoadError && progressGeneration === castProgressGenerationRef.current) {
-          castProgressFailureRef.current = { contentId: e.contentId, updateSeq: castRef.current.remote.updateSeq }
+          castProgressFailureRef.current = {
+            contentId: e.contentId,
+            // Capture at the actual SDK rejection; React may not have rendered
+            // the last media-status callback yet. Generic ANY_CHANGE events
+            // can only resample cached Media and never supply recovery proof.
+            mediaStatusSeq: e.mediaStatusSeq ?? castRef.current.remote.mediaStatusSeq ?? 0,
+          }
           // Invalidate an older completion/advance awaiting its progress write
           // too. Token/setup failures never disturbed the acknowledged media.
           castProgressGenerationRef.current += 1
@@ -1517,12 +1528,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (context.contentId && c.remote.contentId && c.remote.contentId !== context.contentId) return false
     const failure = castProgressFailureRef.current
     if (!failure) return true
-    const healthyIdentity = c.remote.updateSeq > failure.updateSeq && !!context.contentId && c.remote.contentId === context.contentId &&
+    const statusSeq = c.remote.mediaStatusSeq
+    const healthyIdentity = typeof statusSeq === 'number' && statusSeq > failure.mediaStatusSeq &&
+      !!context.contentId && c.remote.contentId === context.contentId &&
       c.remote.clockContentId === context.contentId && Number.isFinite(c.remote.currentTime) && c.remote.currentTime >= 0 &&
       c.remote.isMediaLoaded && (c.remote.playerState === 'PLAYING' || c.remote.playerState === 'PAUSED')
     // Capture positive evidence even during settlement. A rapid FINISHED
     // can follow this loaded state before actions are allowed again.
-    if (healthyIdentity) failure.healthyIdentitySeq = c.remote.updateSeq
+    if (healthyIdentity) failure.healthyMediaStatusSeq = statusSeq
     if (!c.status.connected || c.status.settling || castLoadIsSettling()) return false
     if (healthyIdentity) {
       castProgressFailureRef.current = null
@@ -1530,7 +1543,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     // This proves a terminal media identity, not a usable receiver clock.
     // IDLE/unloaded/error metadata alone can never recover a failed LOAD.
-    return failure.healthyIdentitySeq !== undefined && c.remote.updateSeq > failure.healthyIdentitySeq &&
+    return failure.healthyMediaStatusSeq !== undefined && typeof statusSeq === 'number' && statusSeq > failure.healthyMediaStatusSeq &&
       c.remote.contentId === context.contentId && c.remote.playerState === 'IDLE' && c.remote.idleReason === 'FINISHED'
   }
   const castReceiverClockIsTrusted = (): boolean => {
@@ -2008,10 +2021,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const failedAttemptEnded = castProgressFailureRef.current?.contentId === c.remote.contentId &&
         (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED')
       if (c.remote.playerState === 'IDLE' && context?.contentId && c.remote.contentId && c.remote.contentId !== context.contentId && !failedAttemptEnded) return
+      if (c.remote.playerState === 'IDLE' && c.remote.idleReason === 'FINISHED' && context && castFinishedProgressContextRef.current === context) return
+      const exactAcknowledgedTerminal = c.remote.playerState === 'IDLE' && (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED') &&
+        !!context?.contentId && c.remote.contentId === context.contentId
+      const acknowledgedTerminal = exactAcknowledgedTerminal && castProgressIdentityIsTrusted()
       if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
       // Our own load ends the old media session; that IDLE is not the title
       // finishing. See castLoadIsSettling.
-      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
+      if ((castHasPlayedRef.current || exactAcknowledgedTerminal) && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
         // A REAL end-of-media can land in this window too — a re-anchor within
         // a few seconds of the end of the file — and the receiver goes quiet
         // afterwards, so nothing would re-run this effect and the cast would
@@ -2045,7 +2062,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         )
         return
       }
-      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE') {
+      if ((castHasPlayedRef.current || acknowledgedTerminal) && c.remote.playerState === 'IDLE') {
         // De-arm synchronously so a re-render mid-advance can't re-enter here.
         castHasPlayedRef.current = false
         // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
@@ -2063,6 +2080,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             stopCastWithProgress()
             return
           }
+          if (reason === 'FINISHED') castFinishedProgressContextRef.current = context
           // Arm BEFORE the async advance so the next session's epoch bump (which
           // is network-bound and always lands later) can never beat the flag.
           castAdvancePendingRef.current = true
