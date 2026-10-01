@@ -433,6 +433,87 @@ describe('useCast genuine Media status revisions', () => {
   })
 })
 
+describe('useCast actual LOAD media generation association', () => {
+  function mountGeneration(withId = true) {
+    const sdk = installFakeSdk()
+    const source = statusMedia()
+    if (withId) source.media.mediaSessionId = 7
+    let current: CastMediaSession = source.media
+    const session = sdk.makeSession()
+    session.getMediaSession = () => current
+    sdk.setSession(session)
+    render(<Harness currentLoad={() => ({
+      contentUrl: source.media.media!.contentId, contentType: 'application/x-mpegURL', startTime: 800,
+    })} />)
+    act(() => sdk.triggerReconnect())
+    Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, isConnected: true })
+    act(() => sdk.emitRemoteChange())
+    return { sdk, source, session, setMedia: (media: CastMediaSession) => { current = media } }
+  }
+
+  it('refuses the cached outgoing clock and terminal state after a repeated-URI ACK', async () => {
+    const { sdk, source } = mountGeneration()
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(latestCast!.remote).toMatchObject({ contentId: source.media.media!.contentId, clockContentId: null, playerState: null })
+    source.media.currentTime = 501
+    act(() => sdk.emitRemoteChange()) // volume event resamples cached clock
+    act(() => source.emit()) // genuine status still belongs to the outgoing generation
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    source.media.playerState = 'IDLE'
+    source.media.idleReason = 'FINISHED'
+    act(() => source.emit(false))
+    expect(latestCast!.remote).toMatchObject({ clockContentId: null, playerState: null, idleReason: null })
+  })
+
+  it('accepts a new mediaSessionId with the same URI even when PAUSED evidence precedes ACK', async () => {
+    const { source, session, setMedia } = mountGeneration()
+    const incoming = statusMedia(source.media.media!.contentId)
+    incoming.media.mediaSessionId = 8
+    incoming.media.currentTime = 800
+    session.loadMedia = vi.fn(async () => { setMedia(incoming.media) })
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(latestCast!.remote).toMatchObject({
+      contentId: source.media.media!.contentId, clockContentId: source.media.media!.contentId,
+      currentTime: 800, playerState: 'PAUSED',
+    })
+    incoming.media.playerState = 'IDLE'
+    incoming.media.idleReason = 'FINISHED'
+    act(() => incoming.emit(false))
+    expect(latestCast!.remote).toMatchObject({ playerState: 'IDLE', idleReason: 'FINISHED', clockContentId: null })
+  })
+
+  it('accepts a distinct Media instance when legacy SDK shapes omit mediaSessionId', async () => {
+    const { source, session, setMedia } = mountGeneration(false)
+    const incoming = statusMedia(source.media.media!.contentId)
+    incoming.media.currentTime = 800
+    session.loadMedia = vi.fn(async () => { setMedia(incoming.media) })
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(latestCast!.remote).toMatchObject({ currentTime: 800, clockContentId: source.media.media!.contentId, playerState: 'PAUSED' })
+  })
+
+  it('does not accept a different wrapper with the same known mediaSessionId', async () => {
+    const { source, session, setMedia } = mountGeneration()
+    const outgoingWrapper = statusMedia(source.media.media!.contentId)
+    outgoingWrapper.media.mediaSessionId = source.media.mediaSessionId
+    session.loadMedia = vi.fn(async () => { setMedia(outgoingWrapper.media) })
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(latestCast!.remote).toMatchObject({ clockContentId: null, playerState: null })
+  })
+
+  it('restores the prior generation association after rejection so actual committed status can recover', async () => {
+    const { sdk, source, session } = mountGeneration()
+    session.loadMedia = vi.fn(async () => { throw { code: 'timeout' } })
+    await act(async () => { await expect(latestCast!.loadCurrent()).rejects.toBeInstanceOf(CastMediaLoadError) })
+    source.media.currentTime = 502
+    act(() => source.emit())
+    expect(latestCast!.remote).toMatchObject({
+      mediaStatusSeq: 1, clockContentId: source.media.media!.contentId, playerState: 'PAUSED', currentTime: 502,
+    })
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+  })
+})
+
 describe('useCast receiver LOAD outcome contract', () => {
   const load: CastLoadArgs = { contentUrl: 'https://example.com/attempt.m3u8?token=cast', contentType: 'application/x-mpegURL' }
   it('identifies only an actual receiver LOAD rejection with the attempted content ID', async () => {

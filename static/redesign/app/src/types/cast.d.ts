@@ -152,6 +152,7 @@ declare global {
   // its own identity, state and clock together; optional fields are absent
   // in some SDK/device shapes, where clock consumers must decline proof.
   interface CastMediaSession {
+    mediaSessionId?: number
     media?: CastMediaInfo | null
     currentTime?: number
     playerState?: string | null
