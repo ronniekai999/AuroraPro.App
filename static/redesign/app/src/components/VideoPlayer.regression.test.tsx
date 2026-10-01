@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
-import { createSession, getStreamInfo, keepalive } from '@/lib/streaming'
+import { createCastToken, createSession, getStreamInfo, keepalive } from '@/lib/streaming'
 import { markWatched, reportProgress } from '@/lib/api'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -293,4 +293,126 @@ describe('WEB regressions through the real VideoPlayer', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
   })
 
+})
+
+describe('Independent adversarial timing checks', () => {
+  it('keeps the direct-play logical position through paused audio reload before canplay', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    const audio = vi.fn(); render(<RebuildHarness onAudio={audio} />); await settle()
+    fireEvent.canPlay(video()); await settle(); video().currentTime = 80; video().pause()
+    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    // The new file is not loadable yet; the resume listener is still pending.
+    expect(video().currentTime).toBe(0)
+    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /English/ })); await settle()
+    expect(audio.mock.calls).toEqual([[1, 80000], [0, 80000]])
+  })
+  it('rebinds party broadcasts after a direct target replacement while an error is visible', async () => {
+    vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('session cap'))
+    const requestPause = vi.fn()
+    const baseParty: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause, requestSeek: vi.fn() }
+    const view = render(<VideoPlayer target={movie} party={baseParty} onClose={() => {}} />); await settle()
+    expect(screen.getByText('session cap')).toBeInTheDocument()
+    const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }
+    const nextParty = { ...baseParty, partyMediaItemId: 2 }
+    view.rerender(<VideoPlayer target={next} party={nextParty} onClose={() => {}} />); await bootHls()
+    requestPause.mockClear(); video().currentTime = 80; video().pause(); await settle()
+    expect(requestPause).toHaveBeenCalledWith(80000)
+  })
+})
+
+
+describe('Independent cast acknowledgement race', () => {
+  it('keeps receiver progress on the item acknowledged across a local retarget', async () => {
+    const oldEpisode = { ...movie, fileType: 'episode' as const, episodeId: 11, title: 'A' }
+    const nextEpisode = { ...oldEpisode, fileId: 20, episodeId: 12, title: 'B' }
+    const thirdEpisode = { ...oldEpisode, fileId: 30, episodeId: 13, title: 'C' }
+    const loaded = deferred<void>(); const loads: unknown[] = []
+    fake.cast.loadCurrent.mockImplementation(async (at?: number) => {
+      loads.push(await fake.getter?.(at)); await loaded.promise
+    })
+    let view: ReturnType<typeof render>
+    const ended = vi.fn(async () => { view.rerender(element(nextEpisode)); return true })
+    const element = (target: PlayTarget) => <VideoPlayer target={target} profileId={7} onClose={() => {}} onEnded={ended} />
+    view = render(element(oldEpisode)); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element(oldEpisode)); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0, updateSeq: 1 })
+    view.rerender(element(oldEpisode)); await settle()
+    expect(loads).toEqual([expect.objectContaining({ title: 'B' })])
+    // While the receiver is loading B, the party retargets the sender to C.
+    view.rerender(element(thirdEpisode)); await settle()
+    Object.assign(fake.cast.remote, { playerState: 'PLAYING', idleReason: null, currentTime: 12, updateSeq: 2 })
+    loaded.resolve(); await settle(); view.rerender(element(thirdEpisode)); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ episode_id: 12, position_ms: 112000 }), expect.any(AbortSignal))
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0, updateSeq: 3 })
+    view.rerender(element(thirdEpisode)); await settle()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ episode_id: 12, position_ms: 1000000 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce() // A advanced; B must not advance C.
+    expect(fake.cast.stop).toHaveBeenCalledOnce()
+  })
+})
+
+
+describe('Independent paused direct fallback', () => {
+  it('keeps an early direct-play transcode recovery paused', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    function FallbackHarness() {
+      const [target, setTarget] = useState(movie)
+      return <VideoPlayer target={target} profileId={7} onClose={() => {}} onFallbackToTranscode={resume => {
+        setTarget(current => ({ ...current, forceTranscode: true, resumePositionMs: resume }))
+      }} />
+    }
+    render(<FallbackHarness />); await settle(); fireEvent.canPlay(video()); await settle()
+    video().currentTime = 80; video().pause(); play.mockClear()
+    Object.defineProperty(video(), 'error', { value: { code: 2 }, configurable: true })
+    fireEvent.error(video()); await settle(); await bootHls()
+    expect(video().paused).toBe(true); expect(play).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('Independent missing cast anchor', () => {
+  it('does not infer a progress conversion from the local anchor without start_sec', async () => {
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+    const target = { ...movie, resumePositionMs: 200000 }
+    const element = () => <VideoPlayer target={target} profileId={7} onClose={() => {}} />
+    const view = render(element()); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element()); await settle(); fake.cast.remote.currentTime = 30
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+  })
+})
+
+it('binds the guest mirror to the replacement element after an error', async () => {
+  vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('session cap'))
+  const party: PartySync = { isHost: false, currentUserId: 2, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+  const view = render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await settle()
+  const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }
+  const nextParty = { ...party, partyMediaItemId: 2 }
+  view.rerender(<VideoPlayer target={next} party={nextParty} onClose={() => {}} />); await bootHls()
+  Object.assign(nextParty.tickRef, { current: { abs_ms: 0, server_now_ms: Date.now(), receivedAtMs: Date.now(), running: true, rev: 1 } })
+  video().pause(); play.mockClear()
+  await act(async () => { vi.advanceTimersByTime(250) }); await settle()
+  expect(video().paused).toBe(false); expect(play).toHaveBeenCalledOnce()
+})
+
+it.each([null, -1, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid receiver progress anchor %s', async anchor => {
+  vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: anchor as number })
+  const target = { ...movie, resumePositionMs: 200000 }
+  const element = () => <VideoPlayer target={target} profileId={7} onClose={() => {}} />
+  const view = render(element()); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+  view.rerender(element()); await settle(); fake.cast.remote.currentTime = 30
+  await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+  expect(reportProgress).not.toHaveBeenCalled()
+})
+
+it('applies relative seek intent made during a paused direct resume before canplay', async () => {
+  vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+  const audio = vi.fn(); render(<RebuildHarness onAudio={audio} />); await settle(); fireEvent.canPlay(video()); await settle()
+  video().currentTime = 80; video().pause()
+  fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+  fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+  fireEvent.canPlay(video()); await settle()
+  expect(video().currentTime).toBe(90); expect(video().paused).toBe(true)
 })

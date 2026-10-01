@@ -2870,7 +2870,12 @@ func (h *ProgressHandler) ContinueWatching(w http.ResponseWriter, r *http.Reques
 
 		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profileID, limit)
 	} else {
-		items, err = h.queries.GetContinueWatching(r.Context(), claims.UserID, limit)
+		profile, profileErr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+		if profileErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
+			return
+		}
+		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profile.ID, limit)
 	}
 
 	if err != nil {

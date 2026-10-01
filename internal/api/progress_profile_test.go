@@ -308,3 +308,56 @@ func TestEpisodeResumeAndNextUpUseActingProfile(t *testing.T) {
 		t.Fatalf("show resume: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestContinueWatchingOmittedProfileUsesActingProfile(t *testing.T) {
+	f := newProgressFixture(t, true)
+	f.seedRows(t)
+	ctx := context.Background()
+	// A second item is visible only in the default profile's history, ensuring
+	// omitted query params cannot return a mixed rail or deduplicate to it.
+	var otherMedia int64
+	if err := f.pool.QueryRow(ctx, `INSERT INTO media_items (library_id,type,title,sort_title) SELECT library_id,'movie','Default only','default only' FROM media_items WHERE id=$1 RETURNING id`, f.media).Scan(&otherMedia); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.q.UpsertWatchProgress(ctx, &models.WatchProgress{UserID: f.user, ProfileID: f.defaultProfile, MediaItemID: otherMedia, PositionMs: 4000, DurationMs: 10000}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProgressHandler(f.q, nil)
+	check := func(refresh int64, path string, wantProfile int64, wantItems int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.ContinueWatching(w, f.request(http.MethodGet, path, "", refresh))
+		var items []models.ContinueWatchingItem
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &items) != nil || len(items) != wantItems {
+			t.Fatalf("rail %s: %d %s", path, w.Code, w.Body.String())
+		}
+		for _, item := range items {
+			if item.ProfileID != wantProfile {
+				t.Fatalf("rail exposed profile %d, want %d: %s", item.ProfileID, wantProfile, w.Body.String())
+			}
+		}
+	}
+	check(f.refresh, "/api/progress/continue-watching", f.childProfile, 1)
+	check(0, "/api/progress/continue-watching", f.defaultProfile, 2)
+	check(0, fmt.Sprintf("/api/progress/continue-watching?profile_id=%d", f.childProfile), f.childProfile, 1)
+	w := httptest.NewRecorder()
+	h.ContinueWatching(w, f.request(http.MethodGet, fmt.Sprintf("/api/progress/continue-watching?profile_id=%d", f.foreignProfile), "", f.refresh))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("foreign rail: %d %s", w.Code, w.Body.String())
+	}
+	// Ownership validation also applies to corrupted acting-session bindings.
+	if _, err := f.pool.Exec(ctx, `UPDATE refresh_tokens SET active_profile_id=$1 WHERE id=$2`, f.foreignProfile, f.refresh); err != nil {
+		t.Fatal(err)
+	}
+	check(f.refresh, "/api/progress/continue-watching", f.defaultProfile, 2)
+}
+
+func TestContinueWatchingWithoutPersistentProfileIsEmpty(t *testing.T) {
+	f := newProgressFixture(t, false)
+	h := NewProgressHandler(f.q, nil)
+	w := httptest.NewRecorder()
+	h.ContinueWatching(w, f.request(http.MethodGet, "/api/progress/continue-watching", "", 0))
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Fatalf("OAuth rail: %d %s", w.Code, w.Body.String())
+	}
+}

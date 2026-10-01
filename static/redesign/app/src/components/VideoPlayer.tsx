@@ -958,7 +958,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
   const progressBindingRef = useRef({ target, profileId })
   progressBindingRef.current = { target, profileId }
-  const castPendingProgressRef = useRef<CastProgressContext | null>(null)
+  // Progress describes what loadMedia acknowledged, independently of which
+  // local target is currently being shown. A party retarget must not erase
+  // the identity of an in-flight receiver load.
+  const castProgressLoadRef = useRef<{ context: CastProgressContext | null } | null>(null)
   const castProgressContextRef = useRef<CastProgressContext | null>(null)
   const lastCastProgressRef = useRef<CastProgressSample | null>(null)
   const castProgressGenerationRef = useRef(0)
@@ -1065,7 +1068,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadedMediaRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
-    castPendingProgressRef.current = null
+    castProgressLoadRef.current = null
     castProgressContextRef.current = null
     lastCastProgressRef.current = null
     castProgressGenerationRef.current += 1
@@ -1137,6 +1140,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Captured BEFORE any await, so a target change during the mint is
     // detectable at promotion time.
     const loadEpoch = castTargetEpochRef.current
+    const progressLoad = castProgressLoadRef.current
     const progressContext = {
       target,
       profileId: progressBindingRef.current.profileId ?? undefined,
@@ -1191,7 +1195,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // clone with a large anchor (a binge crossing an auto-advance), and a
       // carried-over value would offset every later conversion.
       castPendingStartSecRef.current = 0
-      castPendingProgressRef.current = { ...progressContext, startSec: 0 }
+      if (progressLoad) progressLoad.context = { ...progressContext, startSec: 0 }
       castPendingEpochRef.current = loadEpoch
       // No transcode session backs this cast. Tell the tracker so explicitly:
       // committing it has to CLEAR the committed slot, or a cast that moves
@@ -1263,7 +1267,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       ? Math.max(0, rawStartSec)
       : Math.max(0, startSecRef.current ?? 0)
     castPendingStartSecRef.current = castStartSec
-    castPendingProgressRef.current = { ...progressContext, startSec: castStartSec }
+    // The legacy transport fallback above is not proof of the receiver's
+    // source anchor. Unknown/invalid anchors suspend progress for this load.
+    if (progressLoad && typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0) {
+      progressLoad.context = { ...progressContext, startSec: resp.start_sec }
+    }
     castPendingEpochRef.current = loadEpoch
     return {
       contentUrl: absoluteUrl(resp.playlist),
@@ -1402,10 +1410,22 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
       void flushCastProgressRef.current()
+      const progressLoad = { context: null as CastProgressContext | null }
+      const progressGeneration = castProgressGenerationRef.current
+      castProgressLoadRef.current = progressLoad
       castLoadsInFlightRef.current += 1
       try {
         await op()
         castSessionRef.current?.commit()
+        if (progressGeneration === castProgressGenerationRef.current) {
+          // A local target change can reject the transport/sync anchor below,
+          // yet the receiver DID take this load. Never keep the prior item's
+          // progress context after that acknowledgement. Cast end invalidates
+          // this generation so a late load cannot resurrect a stopped cast.
+          castProgressContextRef.current = progressLoad.context
+          lastCastProgressRef.current = null
+          castProgressGenerationRef.current += 1
+        }
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
         // this media. A getter that ran but whose load then failed must not
@@ -1417,9 +1437,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // a failed load re-point every abs→receiver conversion at a session
           // nothing is playing.
           castStartSecRef.current = castPendingStartSecRef.current
-          castProgressContextRef.current = castPendingProgressRef.current
-          lastCastProgressRef.current = null
-          castProgressGenerationRef.current += 1
           // Seed the host's comparison baseline with what this load MAKES the
           // receiver do, so the arms can tell that apart from what a person
           // does — without suppressing either.
@@ -1464,7 +1481,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // pending media the getter did not anchor, which is the exact failure
         // the nullable design exists to prevent.
         castPendingStartSecRef.current = null
-        castPendingProgressRef.current = null
+        if (castProgressLoadRef.current === progressLoad) castProgressLoadRef.current = null
       }
     })
     castLoadGateRef.current = run.catch(() => { /* keep the chain alive */ })
@@ -2091,7 +2108,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Leaving the anchor unknown is what makes both branches decline instead.
     castTargetEpochRef.current += 1
     castPendingMediaRef.current = null
-    castPendingProgressRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
@@ -2830,14 +2846,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           }
           mediaErrorFallbackTriedRef.current = true
           setStatus(statusMsg)
+          const absoluteSec = resumeAtMs === undefined ? readLocalAbsoluteSec() : Math.max(0, resumeAtMs / 1000)
+          prepareLocalReplacement(absoluteSec, videoRef.current)
           closeAndCleanup()
-          onFallbackToTranscode(resumeAtMs)
+          onFallbackToTranscode(Math.round(absoluteSec * 1000))
           return true
         }
         // Current absolute playback position in ms (REAL-file timeline —
         // adds back the session's -ss offset), for fallback resume points.
-        const currentPositionMs = (vid: HTMLVideoElement): number =>
-          Math.max(0, Math.floor((vid.currentTime + (startSecRef.current ?? 0)) * 1000))
+        const currentPositionMs = (): number => Math.max(0, Math.floor(readLocalAbsoluteSec() * 1000))
 
         // forceTranscode also bypasses DIRECT PLAY (2026-07 review): the
         // MEDIA_ERROR fallback below re-emits the target with
@@ -2897,12 +2914,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // most browsers. Declared unconditionally so the cleanup below
           // can always removeEventListener (a no-op if never added).
           const onCanPlayResume = () => {
-            vid.currentTime = resumeSec
+            if (cancelled) return
+            // A scrub made while the file was opening may have superseded the
+            // original resume point. The pending logical clock owns that seek.
+            vid.currentTime = logicalAbsoluteSecRef.current
             // The element's clock is authoritative from here, including when
             // the user scrubs back to 0 — so stop offering the resume point
             // as a cast fallback (issue #503).
             if (directCastRef.current) directCastRef.current.pendingResumeSec = 0
             vid.removeEventListener('canplay', onCanPlayResume)
+            void completeTargetPlaybackBoot(vid)
           }
           if (resumeSec > 0) {
             vid.addEventListener('canplay', onCanPlayResume)
@@ -2953,7 +2974,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             if (cancelled) return
             const e = vid.error
             console.warn('[Aurora direct-play] media error code', e?.code, '—', e?.message)
-            const positionMs = currentPositionMs(vid)
+            const positionMs = currentPositionMs()
             // Detach these listeners BEFORE closeAndCleanup(): it calls
             // vid.load() on an empty src, which can re-queue an error
             // event and re-enter this handler (same pattern as the
@@ -2988,7 +3009,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           }
           // Booted: either preserve a seek-rebuild pause or re-enable host
           // broadcasts immediately before the intended play.
-          await completeTargetPlaybackBoot(vid)
+          // A resumed direct file keeps its logical position/readiness until
+          // canplay applies the deferred seek. A second audio pick during that
+          // window must not capture the freshly loaded element's zero clock.
+          if (resumeSec === 0) await completeTargetPlaybackBoot(vid)
           // A direct-play target has no HLS session, but since issue #503 it
           // is still castable when the receiver can decode the file itself
           // (castLoadGetter's direct branch mints a file-scoped token). Bump
@@ -3666,7 +3690,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             lastFatalMediaAt = vid.currentTime
             if (
               stream.decision === 'direct_stream' &&
-              tryFallbackToTranscode('Remux failed — retrying with transcode…', currentPositionMs(vid))
+              tryFallbackToTranscode('Remux failed — retrying with transcode…', currentPositionMs())
             ) {
               // One-shot guard + teardown live in tryFallbackToTranscode.
               return
@@ -3988,7 +4012,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // AirPlay is NOT part of this gate: the local <video> IS the AirPlay-
     // mirrored source, so this effect keeps driving it during AirPlay too.
     if (partyControlsMedia && cast.status.connected) return
-    const vid = videoRef.current
+    const vid = videoElement
     if (!vid) return
 
     // Map abs_ms (source) → hls.js currentTime (HLS-relative seconds).
@@ -4447,7 +4471,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // otherwise the bail check would only be re-evaluated on the next
   // unrelated re-bind, briefly running both sync effects at once.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
+  }, [target, videoElement, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
 
   // M10 Phase 4 (receiver extension, issue #461 follow-up) — party sync
   // while a Chromecast receiver is the active playback surface. Mutually
@@ -5508,6 +5532,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // teardown + stream-info + reload; the skip-marker path already had
     // exactly this exemption (2026-07 review).
     if (deliveryModeRef.current === 'direct') {
+      if (!playerReadyRef.current) {
+        logicalAbsoluteSecRef.current = targetSec
+        setCurrentSec(targetSec)
+        broadcastHostPartySeek()
+        return
+      }
       try {
         vid.currentTime = localSec
         broadcastHostPartySeek()
