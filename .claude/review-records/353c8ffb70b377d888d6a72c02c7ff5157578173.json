@@ -1,0 +1,10 @@
+{
+  "sha": "353c8ffb70b377d888d6a72c02c7ff5157578173",
+  "verdict": "clean",
+  "summary": "Reviewed full cast diff at 353c8ff against bf995002. No actionable defects. All prior findings, 14 independent inverse probes, 893 frontend tests and Chromium audit pass; unchanged backend reuses independent full DB/media/race/geometry evidence. Physical receivers and GPU output remain unverified.",
+  "reviewer": "/root/review_cast_first",
+  "findings": "0",
+  "diff_digest": "aa630f54b4b09d62e1de4a40f215a8f11301373deca4829ec0341a598458c97a",
+  "branch": "fix/playback-cast-first",
+  "recorded_at": "2026-10-01T07:07:15Z"
+}
