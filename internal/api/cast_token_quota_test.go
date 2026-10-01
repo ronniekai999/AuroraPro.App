@@ -81,6 +81,7 @@ func TestCreateCastToken_CastSafeSessionUnaffectedByCap(t *testing.T) {
 	fakeFFmpegForAPITest(t)
 	tm, err := streaming.NewTranscodeManager(t.TempDir(), config.TranscodeConfig{
 		SegmentFormat:      "fmp4",
+		Profiles:           []string{"1080p"},
 		MaxSessionsPerUser: 1,
 	})
 	if err != nil {
@@ -92,6 +93,7 @@ func TestCreateCastToken_CastSafeSessionUnaffectedByCap(t *testing.T) {
 		streaming.SessionOpts{
 			Remux:           false, // full transcode → H.264 + CODECS attribute
 			AudioCodecOut:   "aac",
+			SourceFPS:       30,
 			AudioTrackIndex: -1,
 		},
 	)
@@ -119,5 +121,34 @@ func TestCreateCastToken_CastSafeSessionUnaffectedByCap(t *testing.T) {
 	playlist, _ := resp["playlist"].(string)
 	if !strings.Contains(playlist, src.ID) {
 		t.Errorf("cast-safe playlist %q should reference the original session %q", playlist, src.ID)
+	}
+}
+
+func TestCreateCastToken_ReplacementAtQuotaPreservesCommittedCopy(t *testing.T) {
+	fakeFFmpegForAPITest(t)
+	tm, err := streaming.NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4", MaxSessionsPerUser: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tm.Close()
+	src, err := tm.CreateSession(7, "testuser", "/library/movie.mkv", 1920, 1080, streaming.SessionOpts{Remux: true, RemuxAudioCopy: true, SourceVideoCodec: "h264", AudioCodecOut: "aac", SourceFPS: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &StreamHandler{transcode: tm, authSvc: auth.NewService(config.AuthConfig{JWTSecret: "test-secret-that-is-at-least-32-chars-long-yes"})}
+	first := castTokenJSON(t, h, src.ID, "at=1800")
+	copyID := strings.Split(strings.TrimPrefix(first["playlist"].(string), "/api/stream/hls/"), "/")[0]
+	rr := httptest.NewRecorder()
+	h.CreateCastToken(rr, castTokenRequest(t, src.ID, "at=2400", &auth.JWTClaims{UserID: 7, Username: "testuser", Role: "user"}))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	for _, id := range []string{src.ID, copyID} {
+		if _, ok := tm.GetSession(id); !ok {
+			t.Fatalf("quota failure destroyed session %s", id)
+		}
+	}
+	if rows := tm.ListSessions(); len(rows) != 2 {
+		t.Fatalf("quota allowance changed: %+v", rows)
 	}
 }

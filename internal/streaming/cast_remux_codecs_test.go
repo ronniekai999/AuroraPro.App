@@ -190,6 +190,8 @@ func TestCloneForCast_TranscodeReusedUnchanged(t *testing.T) {
 		SourceHeight:    1080,
 		Remux:           false, // transcode → emits H.264 + CODECS string
 		AudioCodecOut:   "aac",
+		SourceFPS:       30,
+		Profiles:        []QualityProfile{AllProfiles["1080p"]},
 		AudioTrackIndex: -1,
 		BurnSubIndex:    -1,
 		BurnSubRelIndex: -1,

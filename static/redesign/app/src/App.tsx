@@ -2168,10 +2168,9 @@ export default function App() {
   // mid-lookup can't get stomped by a stale resolve.
   const playerTargetRef = useRef<PlayTarget | null>(null)
   playerTargetRef.current = playerTarget
-  // Whether the open player has minimized itself to the cast/AirPlay widget.
-  // While minimized, Escape / back must NOT unmount it — that would tear down
-  // the streaming session feeding the receiver and kill the cast.
-  const playerMinimizedRef = useRef(false)
+  // Remote playback ownership, independent of whether its controls are expanded.
+  // Escape / navigation must keep its source session and Stop control mounted.
+  const playerRemoteActiveRef = useRef(false)
 
   // M10 Phase 4 — watch party state.
   // 2026-05-25 — pass user.id so the hook can scope its last-party
@@ -2824,7 +2823,7 @@ export default function App() {
     if (shouldClosePlayerOnPathChange(
       previousPathname,
       location.pathname,
-      playerMinimizedRef.current,
+      playerRemoteActiveRef.current,
     )) {
       // Covers browser Back/Forward and direct router navigation. Passing true
       // also dismisses a party lifecycle whose async resolver has not produced
@@ -3092,12 +3091,12 @@ export default function App() {
     setSearchQuery('')
     // Close the player on nav so the URL and rendered state stay in
     // sync (matters for programmatic history.replaceState calls).
-    // EXCEPTION: when the player is minimized to the cast/AirPlay widget,
+    // While a cast/AirPlay receiver is active,
     // keep it mounted — navigating away from the show must NOT tear down an
     // active cast. The widget (rendered as a root-level sibling, outside the
     // swapped <main> view) persists and the receiver keeps playing until the
     // user stops it or the media ends. Mirrors the Escape gate above.
-    if (!playerMinimizedRef.current) closePlayer(true)
+    if (!playerRemoteActiveRef.current) closePlayer(true)
     rememberScroll(location.key)
     navigate(`/${v}`)
   }, [view, navigate, closePlayer, location.key])
@@ -3130,7 +3129,7 @@ export default function App() {
     // would tear down the cast's stream and leave the widget driving a
     // different title than the TV. The cast persists across navigation by
     // design — the user stops it from the widget first.
-    if (playerMinimizedRef.current) {
+    if (playerRemoteActiveRef.current) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
@@ -3233,7 +3232,7 @@ export default function App() {
     if (!prewarmEnabled()) return
     // Don't pre-warm while casting — handlePlay refuses to start new local
     // playback in that state, so a warm would never be consumed.
-    if (playerMinimizedRef.current) return
+    if (playerRemoteActiveRef.current) return
 
     const startSec = resumeItem && resumeItem.position_ms > 0
       ? Math.floor(resumeItem.position_ms / 1000)
@@ -3343,10 +3342,10 @@ export default function App() {
         // palette without ALSO triggering the page-level back/etc.
         // navigation here.
         if (paletteOpen) return
-        // While the player is minimized to the cast/AirPlay widget, Escape
+        // While a cast/AirPlay receiver is active, Escape
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
-        if ((playerTarget || playerLoading) && !playerMinimizedRef.current) closePlayer(true)
+        if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
         else if (searchOpen) closeSearch()
         else if (view === 'detail') handleBack()
       }
@@ -4586,7 +4585,7 @@ export default function App() {
   const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
     // Don't start a new playback while a cast/AirPlay session is active (see
     // handlePlay) — make the user stop the cast from the widget first.
-    if (playerMinimizedRef.current) {
+    if (playerRemoteActiveRef.current) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
@@ -4973,7 +4972,7 @@ export default function App() {
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
   const handlePlayFile = useCallback((m: Media, fileId: number) => {
-    if (playerMinimizedRef.current) {
+    if (playerRemoteActiveRef.current) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
@@ -5222,7 +5221,7 @@ export default function App() {
     if (!selectedMedia) return
     // Don't start a new playback while a cast/AirPlay session is active (see
     // handlePlay) — make the user stop the cast from the widget first.
-    if (playerMinimizedRef.current) {
+    if (playerRemoteActiveRef.current) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
@@ -6257,7 +6256,7 @@ export default function App() {
         onEnded={handlePlaybackEnded}
         onPartyAdvance={handlePartyAdvance}
         isAdmin={user.role === 'admin'}
-        onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
+        onRemoteActiveChange={(active) => { playerRemoteActiveRef.current = active }}
         onSurfaceChange={setPlayerSurface}
         onToast={addToast}
         onClose={() => {

@@ -40,6 +40,8 @@ declare global {
     duration?: number
     tracks?: CastTrack[]
     metadata?: unknown
+    hlsSegmentFormat?: 'TS' | 'FMP4'
+    hlsVideoSegmentFormat?: 'MPEG2_TS' | 'FMP4'
   }
 
   interface CastLoadRequest {

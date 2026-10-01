@@ -303,9 +303,10 @@ interface VideoPlayerProps {
   // server broadcast is what actually re-points every client, host
   // included. Only wired for the host — guests never see the card.
   onPartyAdvance?: () => Promise<'advanced' | 'end' | 'failed'>
-  // Reports whether the player has collapsed to the cast/AirPlay control
-  // widget, so the parent can suppress Escape/back-to-close while casting.
+  // Presentation only. Close/navigation gates use onRemoteActiveChange,
+  // because expanding the widget does not end the receiver's playback.
   onMinimizedChange?: (minimized: boolean) => void
+  onRemoteActiveChange?: (active: boolean) => void
   // Aurora Stage Phase 7b (D5). Reports which surface the player is presenting
   // so the parent can dim + inert the app behind the theater box. 'theater' is
   // the only value that needs anything from the parent — fullscreen covers the
@@ -521,7 +522,7 @@ async function attemptPlay(
 // button being the usual last click before sitting back) stranded focus
 // inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
-export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
+export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange, onRemoteActiveChange,
   onSurfaceChange, isAdmin, onToast }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -1197,6 +1198,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return {
       contentUrl: absoluteUrl(resp.playlist),
       contentType: 'application/x-mpegURL',
+      segmentFormat: resp.segment_format,
       title: target.title,
       subtitle: target.subtitle,
       // An HLS session's playlist is anchor-relative: the server FFmpeg-`-ss`'d
@@ -1490,6 +1492,36 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // keyboard effect deps are [target]; App's Escape gate reads a ref).
   const minimizedRef = useRef(false)
   minimizedRef.current = minimizedActive
+
+  // Remote ownership survives expanding the controls and a resumed Cast
+  // session without a local target. Report before App's navigation effects.
+  useLayoutEffect(() => {
+    onRemoteActiveChange?.(remoteActive)
+  }, [remoteActive, onRemoteActiveChange])
+
+  const hlsStoppedForCastRef = useRef<Hls | null>(null)
+  useEffect(() => {
+    const hls = hlsRef.current
+    if (!hls) return
+    if (cast.status.connected) {
+      hls.stopLoad()
+      hlsStoppedForCastRef.current = hls
+    } else if (hlsStoppedForCastRef.current === hls) {
+      hlsStoppedForCastRef.current = null
+      // AirPlay still plays from the local element and must keep loading.
+      // A confirmed Chromecast stop closes the player below. Only resume
+      // this loader when playback actually returns to a local surface.
+      if (target && (partyControlsMedia || airplayActive)) {
+        // stopLoad also aborts an in-flight master request; startLoad alone
+        // cannot restart that loader when no manifest was parsed yet.
+        if (hls.levels.length === 0 && hls.url) hls.loadSource(hls.url)
+        hls.startLoad()
+      }
+    }
+  }, [cast.status.connected, target, partyControlsMedia, airplayActive])
+  // With playlist polling stopped, ordinary local rungs are reaped after
+  // their idle window. Embedded-text subtitle carriers remain exempt until
+  // separate extraction / the reaper redesign (WP9/WP8) is implemented.
 
   // While a Cast session is connected, pause local playback. The
   // receiver runs its own copy of the stream; running the local
@@ -2379,6 +2411,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       try { qoeRef.current?.noteThroughput(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
       try { hlsRef.current.destroy() } catch { /* defensive */ }
       hlsRef.current = null
+      hlsStoppedForCastRef.current = null
     }
     // Suspend the QoE element listeners across the teardown below. Removing
     // the src and calling load() can re-queue an `error` event on an empty
@@ -3081,6 +3114,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         }
 
         const hls = new Hls({
+          autoStartLoad: !castRef.current.status.connected,
           enableWorker: true,
           lowLatencyMode: false,
           // Issue #433 — every seek past the buffer rebuilds the session
@@ -3154,6 +3188,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           },
         })
         hlsRef.current = hls
+        if (castRef.current.status.connected) hlsStoppedForCastRef.current = hls
         hls.loadSource(masterUrl)
         hls.attachMedia(vid)
 
@@ -3270,6 +3305,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           }
         })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (castRef.current.status.connected) hls.stopLoad()
           qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
             try { vid.currentTime = resumeSec } catch { /* defensive */ }
@@ -3423,6 +3459,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         })
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (cancelled) return
+          // A trailing local request must not restart playlist loading while
+          // the receiver is the playback surface.
+          if (castRef.current.status.connected) { hls.stopLoad(); return }
           // Up-switch stall containment, second trigger (see
           // rebuildAtPlayheadForLaggingLevel and levelLagsPlayhead). hls.js
           // reports a starved buffer once per stall as this non-fatal error
@@ -3463,7 +3502,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 // before the first fragment was ever requested. Passing
                 // the element's current time keeps the restart anchored
                 // where playback actually is.
-                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh', 'network') }
+                if (!castRef.current.status.connected) {
+                  try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh', 'network') }
+                }
               } else {
                 failPlayback('Session expired. Please sign in again.', 'network')
               }
@@ -5289,12 +5330,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // for casting, so they can't reliably describe what the receiver's
     // independent fetch has actually reached — an in-window-vs-rebuild
     // decision here can't be trusted the way it can for local playback.
-    // Rebuilding unconditionally is a few seconds slower than an in-window
-    // seek would be, but it's the only option that's provably correct: a
-    // fresh session anchored exactly at targetSec, with the receiver
-    // re-pointed at it via castAdvancePendingRef + the existing
-    // castReloadEpoch reload effect — the same machinery next-episode
-    // auto-advance already uses to re-point a live receiver.
+    // Re-pointing the receiver at a copy anchored near targetSec avoids an
+    // unproven in-window seek while retaining the committed cast until the
+    // replacement succeeds.
     if (cast.status.connected) {
       // DIRECT PLAY (issue #503, which made this reachable at all). The
       // receiver holds the whole file and seeks it natively over byte ranges,
@@ -5326,14 +5364,22 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         seekCastSafelyRef.current(targetSec)
         return
       }
-      castAdvancePendingRef.current = true
-      if (rebuildAtTarget()) return
-      // rebuildAtTarget succeeding is the NORMAL outcome here, for an HLS
-      // delivery and equally for a 'resolving'/'idle' one with a target
-      // replacement in flight. Reaching past it means onSeekRebuild was not
-      // wired: undo the arm and fall through to the ordinary paths below so
-      // the seek at least does SOMETHING rather than silently no-op.
-      castAdvancePendingRef.current = false
+      // Replace only the receiver copy. Rebuilding the paused browser too
+      // requires an extra slot and tears down the old local anchor before a
+      // load succeeds. The server can make a private copy near targetSec
+      // from this session; the tracker releases the old copy only on commit.
+      const seekEpoch = castTargetEpochRef.current
+      void runCastLoad(() => {
+        if (castTargetEpochRef.current !== seekEpoch) return Promise.reject(new Error('Playback changed'))
+        return castRef.current.loadCurrent(targetSec)
+      })
+        .then(() => {
+          if (castTargetEpochRef.current === seekEpoch) broadcastHostPartySeek()
+        })
+        .catch(() => {
+          if (castTargetEpochRef.current === seekEpoch) flashCastError('Could not seek on the TV. Try again or stop casting.')
+        })
+      return
     }
 
     // A target replacement clears sessionId before stream-info/createSession
@@ -5389,7 +5435,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       vid.currentTime = localSec
       broadcastHostPartySeek()
     } catch { /* defensive */ }
-  }, [bufferedSec, party, target, onSeekRebuild, cast.status.connected, partyControlsMedia])
+  }, [bufferedSec, party, target, onSeekRebuild, cast.status.connected, partyControlsMedia, flashCastError])
 
   // Med-fix (2026-05-29) — ref mirror of seekToRealSec so the
   // keyboard-shortcut effect (registered once per `target`, with an
@@ -5871,7 +5917,34 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return () => window.clearTimeout(id)
   }, [nextUpPhase])
 
-  if (!target) return null
+  if (!target) {
+    if (!cast.status.connected) return null
+    // The SDK can rejoin a receiver after reload before App has any target.
+    // Avoid inventing its anchor/title identity: expose a minimal Stop path.
+    return (
+      <div
+        className="fixed bottom-4 left-4 z-[70] w-72 max-w-[calc(100vw-2rem)] rounded-2xl bg-zinc-900/95 backdrop-blur ring-1 ring-white/10 shadow-2xl p-3 text-white"
+        role="dialog"
+        aria-label="Cast controls"
+      >
+        <div className="flex items-center gap-2">
+          <Cast size={16} className="text-purple-400 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium truncate">{cast.remote.title || 'Casting'}</p>
+            <p className="text-[11px] text-white/50 truncate">Casting to {cast.status.deviceName ?? 'device'}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { cast.stop(); onClose() }}
+            aria-label="Stop casting"
+            className="p-1.5 rounded-full hover:bg-white/10 text-white/80 hover:text-red-400 transition-colors"
+          >
+            <StopCircle size={18} />
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   // Smart Skip — which skippable window is the playhead inside right
   // now? Intro/recap pills on any file; the credits pill only for

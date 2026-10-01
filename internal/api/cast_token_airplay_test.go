@@ -32,7 +32,18 @@ func fakeFFmpegForAPITest(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte(`#!/bin/sh
+for arg do
+ case "$arg" in
+  */stream.m3u8)
+   printf '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg_00000.ts\n#EXT-X-ENDLIST\n' > "$arg"
+   printf 'segment' > "${arg%/*}/seg_00000.ts"
+   exit 0
+   ;;
+ esac
+done
+exit 1
+`), 0o755); err != nil {
 		t.Fatalf("write ffmpeg stub: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

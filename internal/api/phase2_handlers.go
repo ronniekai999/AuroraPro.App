@@ -1458,11 +1458,9 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// original (Dolby audio, non-H.264 video) fails on the receiver in ways
 	// the sender cannot detect (silent audio, indefinite spinner), so the
 	// "no worse than pre-guard" fallback was actually worse than an honest,
-	// actionable error. NON-quota clone failures keep the logged fallback:
-	// those are transient/unexpected (disk, FFmpeg), the original session
-	// may well be cast-safe anyway (clone not needed for H.264+AAC), and
-	// failing the whole cast on an unexpected clone error would regress
-	// sessions that previously worked.
+	// actionable error. Other failures also refuse the load: casting a source
+	// that needed a clone would discard the compatibility/position guarantees
+	// and can replace a healthy receiver with unplayable media.
 	//
 	// Exception — for_airplay=true: this is an AirPlay / native-HLS token
 	// request (pre-baking a URL for vid.src so Apple TV can authenticate HLS
@@ -1492,26 +1490,25 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 				writeSessionCreateError(w, claims.UserID, cloneErr)
 				return
 			}
-			slog.Warn("cast: clone failed, casting original session",
+			slog.Warn("cast: clone failed, preserving current receiver media",
 				"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
+			writeError(w, http.StatusServiceUnavailable, "cast stream unavailable; current cast was not replaced")
+			return
 		} else {
 			castSessionID = castSession.ID
 		}
-		// Pre-warm every quality variant so the Chromecast Default Media
-		// Receiver's ABR bandwidth probe hits a ready FFmpeg process rather
-		// than a cold start. Without this, the receiver probes 480p first,
-		// the FFmpeg for that tier hasn't started yet (browser was watching
-		// a different quality), and the ~2s readiness wait puts Shaka into
-		// an error-recovery polling loop that prevents playback (#355).
-		if cs, ok := h.transcode.GetSession(castSessionID); ok {
-			for _, p := range cs.Profiles {
-				p, cs := p, cs
-				go func() {
-					if _, err := h.transcode.EnsureVariant(cs, p.Name, cs.StartSec); err != nil {
-						slog.Debug("cast: pre-warm variant", "session_id", castSessionID, "profile", p.Name, "error", err)
-					}
-				}()
+		cs, ok := h.transcode.GetSession(castSessionID)
+		if !ok || cs == nil {
+			writeError(w, http.StatusServiceUnavailable, "cast stream unavailable")
+			return
+		}
+		if err := h.transcode.WarmCastSession(r.Context(), cs); err != nil {
+			slog.Warn("cast: stream startup failed", "session_id", castSessionID, "error", err)
+			if castSessionID != sessionID {
+				h.transcode.StopSession(castSessionID)
 			}
+			writeError(w, http.StatusServiceUnavailable, "cast stream unavailable; current cast was not replaced")
+			return
 		}
 	}
 
@@ -1558,6 +1555,10 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	}
 	if cs, ok := h.transcode.GetSession(castSessionID); ok && cs != nil {
 		resp["start_sec"] = cs.StartSec
+		resp["segment_format"] = "ts"
+		if cs.FMP4 {
+			resp["segment_format"] = "fmp4"
+		}
 	} else {
 		slog.Warn("cast: session vanished before start_sec could be read; omitting it",
 			"cast_session", castSessionID, "user_id", claims.UserID)

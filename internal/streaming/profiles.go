@@ -20,6 +20,9 @@ type QualityProfile struct {
 	DeclaredVideoBPS int    `json:"-"`
 	HLSBandwidth     int    `json:"bandwidth"` // BANDWIDTH attribute: video + audio
 	CodecString      string `json:"-"`         // HLS CODECS attribute; empty = omitted
+	// Cast copies compute their level from the actual dimensions, frame rate,
+	// and VBV limits. Ordinary browser ladders retain their existing policy.
+	CastH264LevelIDC int `json:"-"`
 }
 
 // AllProfiles defines all supported quality tiers.

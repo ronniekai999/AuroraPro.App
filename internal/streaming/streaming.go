@@ -1053,9 +1053,6 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 		// cast clones always use TS segments even when the server default is fMP4.
 		ForceTS: true,
 	}
-	if needsVideoTranscode {
-		opts.SourceVideoCodec = ""
-	}
 	if src.BurnSubIndex >= 0 || src.BurnSubExternal != "" {
 		opts.BurnIn = &BurnInOpts{
 			SubIndex:     src.BurnSubIndex,
@@ -1070,7 +1067,7 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 // CloneForCast returns the session whose playlist should be handed to a Cast
 // receiver for sessionID. Returns the original session unchanged ONLY when it
 // is already cast-safe (a TRANSCODE session emitting H.264 video + AAC audio,
-// no subtitle tracks, whose master playlist carries a CODECS attribute). Creates
+// no subtitle tracks, with one supported rung and a nearby anchor). Creates
 // and returns a new clone when any condition fails:
 //   - Audio is Dolby (AC-3/E-AC-3): clone downmixes to stereo AAC — receiver
 //     Dolby support cannot be probed reliably.
@@ -1086,6 +1083,9 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 //     SUBTITLES rendition group — it accepts the LoadRequest but never begins
 //     decoding (issue #328). A subtitle-free clone avoids this; castCloneOpts
 //     intentionally omits SubtitleTracks.
+//   - A sender before or >30 seconds beyond the source anchor, or a local
+//     ladder with several/unsupported rungs: create an isolated receiver
+//     window and one <=1080p30 H.264/AAC output, without altering the browser.
 //
 // The clone is owned by userID so cast-token access checks pass.
 //
@@ -1124,13 +1124,23 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	// Any session with subtitle tracks needs a clone so the cast manifest is
 	// subtitle-free (issue #328). castCloneOpts intentionally omits SubtitleTracks.
 	needsSubsClone := len(src.SubtitleTracks) > 0
-	if !needsAudioClone && !needsVideoTranscode && !needsSubsClone {
+	// A shared encoder must never move underneath its browser. Clone when
+	// the receiver needs a different window, or when ABR could select a cold
+	// or unsupported rung. Copies have one supported, pre-warmed rung.
+	needsAnchorClone := atSec >= 0 && (atSec < src.StartSec || atSec-src.StartSec > 30)
+	needsLadderClone := len(src.Profiles) != 1
+	if !needsLadderClone {
+		_, supported := castH264Level(src.Profiles[0], src.SourceFPS)
+		needsLadderClone = !supported
+	}
+	if !needsAudioClone && !needsVideoTranscode && !needsSubsClone && !needsAnchorClone && !needsLadderClone {
 		return src, nil
 	}
 	src.variantMu.Lock()
 	disableHWDecode := src.swDecodeFallback
 	src.variantMu.Unlock()
 	cloneOpts := castCloneOpts(src, needsVideoTranscode, disableHWDecode)
+	cloneOpts.Remux = false // all copies carry a bounded H.264/AAC output
 	cloneOpts.StartSec = castCloneAnchorSec(src.StartSec, atSec)
 	// Record where the clone came from so the admin surface can pair the two
 	// rows a cast produces (see TranscodeSession.castCloneOf). Carried through
@@ -1145,6 +1155,7 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
 		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
 		"source_video_codec", src.SourceVideoCodec, "subtitle_tracks_dropped", needsSubsClone,
+		"anchor_clone", needsAnchorClone, "ladder_clone", needsLadderClone,
 		"source_start_sec", src.StartSec, "requested_at_sec", atSec, "clone_start_sec", clone.StartSec)
 	return clone, nil
 }
@@ -1597,6 +1608,9 @@ type TranscodeSession struct {
 	// (1080p60 → 4.2, 2160p60 → 5.2) in both the encoder args and the
 	// master playlist CODECS attribute.
 	SourceFPS float64 `json:"-"`
+	// CastOutputFPS caps only a private receiver copy; SourceFPS remains the
+	// original probe value used for diagnostics and hardware decode planning.
+	CastOutputFPS float64 `json:"-"`
 	// VideoCodecOut is the video codec this session's TRANSCODE output
 	// carries: "h264" (default) or "hevc" (2026-08 review item #5, gated
 	// server-side on a probed HEVC encoder + fMP4 segments). Drives the
@@ -2716,8 +2730,7 @@ type SessionOpts struct {
 	// Cast clones deliberately do NOT inherit it (castCloneOpts): the
 	// ceiling describes the sender's link, and the receiver — a Chromecast
 	// on the home LAN while the phone that cast to it is on cellular — is on
-	// its own. The clone keeps the sender's transcode SHAPE (a source forced
-	// to transcode by the ceiling still transcodes) with the full ladder.
+	// its own. The clone uses a single supported receiver rung instead.
 	MaxBitrate int64
 }
 
@@ -2783,6 +2796,14 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	}
 
 	profiles := ResolveProfiles(tm.enabledProfiles, sourceWidth, sourceHeight)
+	if len(opts) > 0 && opts[0].CastCloneOf != "" {
+		p, err := resolveCastProfile(profiles, sourceWidth, sourceHeight, castOutputFPS(opts[0].SourceFPS))
+		if err != nil {
+			os.RemoveAll(outputDir)
+			return nil, err
+		}
+		profiles = []QualityProfile{p}
+	}
 
 	// In remux mode, we only need one "profile" at the source resolution
 	// since codec copy can't change resolution
@@ -2838,6 +2859,9 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		// structural rather than incidental.
 		if o.CastCloneOf != sessionID {
 			session.castCloneOf = o.CastCloneOf
+		}
+		if session.castCloneOf != "" {
+			session.CastOutputFPS = castOutputFPS(o.SourceFPS)
 		}
 		if o.ForceTS {
 			session.FMP4 = false
@@ -2908,6 +2932,9 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		}
 		for i := range profiles {
 			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
+			if profiles[i].CastH264LevelIDC > 0 {
+				profiles[i].CodecString = fmt.Sprintf("avc1.6400%02x,mp4a.40.2", profiles[i].CastH264LevelIDC)
+			}
 			profiles[i].HLSBandwidth = profiles[i].LadderBandwidth(audioBits)
 		}
 		session.Profiles = profiles
@@ -4261,6 +4288,10 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// keyframe forcing and audio args below are codec-agnostic, shared
 		// with the H.264 path.
 		hevcOut := session.VideoCodecOut == "hevc"
+		outputFPS := session.SourceFPS
+		if session.CastOutputFPS > 0 {
+			outputFPS = session.CastOutputFPS
+		}
 		if decodeFullGPU {
 			// Tier-2 zero-copy (2026-07): decode, scale (and VAAPI HDR
 			// tonemap) all operate on GPU frames delivered by
@@ -4273,7 +4304,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			if hevcOut {
 				args = append(args, tm.hwAccel.FullGPUHEVCEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
 			} else {
-				args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
+				args = append(args, castEncoderArgs(tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap, outputFPS), p, outputFPS, tm.hwAccel.Type)...)
 			}
 		} else {
 			// Video encoder (hardware-accelerated or software). When
@@ -4284,7 +4315,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			if hevcOut {
 				encoderArgs = tm.hwAccel.HEVCEncoderArgs(p.Width, p.Height, session.SourceFPS)
 			} else {
-				encoderArgs = tm.hwAccel.VideoEncoderArgs(p.Width, p.Height, session.SourceFPS)
+				encoderArgs = tm.hwAccel.VideoEncoderArgs(p.Width, p.Height, outputFPS)
 			}
 
 			// HDR-to-SDR tonemapping: inject before subtitle burn-in so tonemap
@@ -4298,7 +4329,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 				encoderArgs = injectBurnInFilter(encoderArgs, session)
 			}
 
-			args = append(args, encoderArgs...)
+			args = append(args, castEncoderArgs(encoderArgs, p, outputFPS, tm.hwAccel.Type)...)
 		}
 
 		// Bitrate control

@@ -522,6 +522,8 @@ export interface CastTokenResponse {
   // Optional only for the transition: a server that predates the field leaves
   // the caller with the old assumption, which is what it had anyway.
   start_sec?: number
+  // Actual output container, including the shared-session / AirPlay paths.
+  segment_format?: 'ts' | 'fmp4'
 }
 
 export async function createCastToken(
