@@ -1,24 +1,26 @@
 # Playback, transcoding, and casting review (September 2026)
 
-**Status:** plan. Nothing described here is fixed yet.
-**Reviewed:** commit `390d02e`, 2026-09-29.
+**Status:** verified backlog and phased release plan; **0 of 77 findings fixed on main**.
+**Original review:** commit `390d02e`, 2026-09-29.
+**Follow-up:** 2026-09-30; main `bf995002fbd9d2f158714120dbde0295df67e4bf` (verification details in §9).
 **Scope:**
 - **Server:** `internal/streaming`, the stream and cast handlers in `internal/api`, cast tokens in `internal/auth`, and the watch-party sync engine (`internal/watchparty`, `internal/api/party_ws_v3_*`).
 - **SPA:** `VideoPlayer.tsx`, `lib/cast*.ts`, `lib/streaming.ts`, `lib/partyPlayer.ts`, `hooks/useParty.tsx`.
 - **Native:** the macOS client's playback layer.
 
-When the work packages below have landed, delete this file. It stays in Git history, per [`docs/README.md`](README.md).
+When required fixes have landed and optional enhancements have an implement/defer decision, delete this file. It stays in Git history, per [`docs/README.md`](README.md).
 
 ## Contents
 
 1. [Summary](#1-summary)
-2. [Remediation plan](#2-remediation-plan)
+2. [Remediation plan](#2-remediation-plan--release-small-increments)
 3. [High-severity findings](#3-high-severity-findings)
 4. [Medium and low findings](#4-medium-and-low-findings)
 5. [Technology stack](#5-technology-stack)
 6. [Known gaps from CLAUDE.md](#6-known-gaps-from-claudemd)
 7. [Checked and sound, or refuted](#7-checked-and-sound-or-refuted)
 8. [Method and limits](#8-method-and-limits)
+9. [Follow-up verification and decisions](#9-follow-up-verification-and-decisions-2026-09-30)
 
 **Severity**
 - **High:** a common playback, cast, or party path fails, hangs, or loses data; or the issue is privacy-relevant.
@@ -40,7 +42,7 @@ Estimates include tests but not review rounds.
 
 ## 1. Summary
 
-After merging duplicates there are **13 high, 35 medium, and 29 low** findings, and nothing critical. There is no authentication bypass and no catalog data loss. The worst data problem is watch progress filed under the wrong profile.
+After merging duplicates there are **13 high, 35 medium, and 29 low** findings, and nothing critical. The follow-up checked every row: all remain open on the pinned main revision. The revised §2 releases small slices, beginning with deploy-safe scheduled parties, profile attribution, and stable HLS numbering; it does not wait for a 20–25-day batch. There is no authentication bypass and no catalog data loss. The worst data problem is watch progress filed under the wrong profile.
 
 **Where the defects are.** Most high findings are in the SPA's state machines (the player, the cast widget, and party sync) and in cast and session plumbing. The FFmpeg core is not where they cluster. The decision engine behaves as its tests say. The failures sit at its edges:
 - **Facts the scanner never records:** rotation, interlacing, the `hev1` tag, commentary flags, and WebM-ness.
@@ -74,215 +76,240 @@ After merging duplicates there are **13 high, 35 medium, and 29 low** findings, 
 9. FF-1: VAAPI writes an invalid H.264/HEVC level.
 10. CASTS-3 and CASTC-7: stop starting encoders nobody watches. Give a cast copy a single quality level (1080p or below) instead of pre-warming every rung, and stop the local player's playlist polling when a cast connects. The general paused-player case (X-3) needs a design change and is in Phase 2.
 
-## 2. Remediation plan
+## 2. Remediation plan — release small increments
 
-Each work package (WP) is sized for one branch and PR under [`dev-workflow.md`](dev-workflow.md). Architectural items (WP17, and WP18's custom receiver) get their own isolated PRs. Every fix lands with a test that fails before the fix. [Method](#8-method-and-limits) describes the reproductions built during this review; rebuild them as permanent tests.
+The goal is an initial corrective release in **2–4 developer-days**, followed by
+small releases as each cluster clears its gates. These are estimates for
+implementation and regression tests, **excluding independent review, hardware
+availability, and the unresolved baseline HDR failure**. They are not promised
+calendar dates or a claim that the entire backlog takes less work. The original
+20–25-day Phase 1 bundled too many unrelated changes before its first release.
 
-Work-package estimates are in developer-days, because most packages bundle several S items. Totals:
-- **Phase 1:** about 20–25 developer-days.
-- **Phase 2:** about 30–40.
-- **Phase 3:** dominated by WP17 (3–6+ weeks) and the custom receiver (2–3 weeks).
+Keep WP1–WP19 as traceability IDs, but split them into the PR-sized slices below.
+Each slice branches from the latest `main`; contained changes with the same
+failure path may share a PR. Dependencies land before dependent slices. Different
+subsystems can be developed concurrently in separate branches when people are
+available; do not combine their review or deployment gates.
 
-The hardware-encoder fixes (WP5, WP15) need an Intel, AMD, or NVIDIA box to verify. The production server has no GPU.
+### Release gates for every slice
 
-### Phase 1: confirmed defects with small fixes (about 20–25 developer-days)
+Follow [`dev-workflow.md`](dev-workflow.md): investigate and cite the root cause;
+branch; implement a regression that fails on the old behavior; build and test;
+obtain a fresh-context, independent adversarial review of the final diff; resolve
+all high/critical findings; record the verdict against the exact reviewed commit;
+open the PR; squash-merge a clean change and delete its branch; update the notes.
+Architectural or unsafe changes remain isolated and use the workflow's human
+review path if their risks cannot be cleared. The review-record tooling is
+advisory, as documented in CLAUDE.md.
 
-**WP1 · Player state and watch progress (SPA, plus one server change). Closes WEB-1, 2, 3, 4, 5, 6, 7, 9, 11. About 3–4 days (nine S items).**
-- **Profile:** send `profile_id` on every heartbeat. On the server:
-  - When no `profile_id` is sent, use the acting profile if `ResolveActingProfile` returns a real one (ID > 0).
-  - Otherwise keep today's `GetDefaultProfile` lookup and its create-on-demand path. `ResolveActingProfile` returns a synthetic ID-0 profile when an account has none (`internal/db/queries_phase4.go:144`), and OAuth sign-ups rely on the create path because `watch_progress.profile_id` is NOT NULL.
-  - Fix the context-menu *Mark as Watched* and *clear progress* calls the same way (`App.tsx:2308`, `:2326`).
-- **Casting:** while casting, report `recvToAbsSec(remote.currentTime)`. When the receiver reports FINISHED, write completion before advancing or stopping, and flush once when the cast ends.
-- **Seek base:** keep a logical absolute playhead across same-viewing rebuilds. Use it for relative seeks, the scrub slider, and audio switches while the new session resolves.
-- **Listeners after an error:** the play effect already clears `errorMsg` when a new target arrives (`VideoPlayer.tsx:2481`). That runs too late: the target-keyed listener effect (`:4930`) runs in the same commit, before `<video>` is back in the DOM, and never re-runs. Either:
-  - bind the media listeners to the element through a callback ref; or
-  - reset `errorMsg` during render when the target identity changes.
+- `go build ./...` and `go test -count=1 ./...` must pass. Restore the HDR baseline
+  first; do not waive its failure or classify it as environmental without evidence.
+- Run affected lifecycle and concurrency tests under `-race`. Use an isolated
+  PostgreSQL test database for profile writes, shutdown/rehydration, quotas, and
+  migrations. A skipped database test is not a passing acceptance check.
+- For SPA changes, run `npm test` and `npm run audit` with Playwright Chromium
+  installed. Component regressions must mount the actual player with fake media,
+  hls.js, and Cast SDK objects; pure-helper tests cannot catch lost DOM listeners.
+- Close a device-dependent finding only after the relevant real-device check.
+  A code fix can land with an explicit outstanding device-validation item; it
+  cannot be labeled device-verified. A GPU lane does not hold up CPU-only fixes.
+- After merge, use the authorized admin deploy/test loop or the ordinary updater
+  and smoke test. Verify the deployed revision, retain the prior working binary
+  and SPA assets, and record results and rollback instructions in the slice's PR.
+  This planning change does not deploy anything.
 
-  Clearing it only when the player closes (the `!target` branch at `:2431`) fixes the reported error-then-Back path, but not a target replaced while the error screen is showing. For example, a party media change calls `setPlayerTarget` directly, with no null target in between.
-- **Pause intent:** preserve it through keepalive and direct-play recovery, the way `rebuildAtTarget` already does.
-- **Stranded sessions:** do not pass the abort signal to `createSession`. `lib/prewarm.ts:253-258` already explains why.
-- **Completion and flushing:**
-  - Mark the outgoing episode watched on a solo advance.
-  - Flush progress on `pause`, `seeked`, close, and `pagehide` (`fetch(…, {keepalive: true})`).
-  - Skip reports when there is no trusted duration.
-- **Regression suite:** `VideoPlayer.tsx:64-67` says the component cannot be mounted in jsdom. It can: the review mounted it with a fake hls.js and a fake Cast SDK. Adopt that harness as the regression suite.
+**Closure evidence:** each ID needs a fixing PR/commit, a before/after regression,
+the final independent-review verdict, and its applicable deployed/device check.
+Track implementation and validation separately. No ID is closed by this plan.
 
-**WP2 · Cast session control (SPA). Closes CASTC-2, 3, 4, 5, 10, 11, 12, and CASTC-7 for non-carrier rungs (the carrier rung needs WP8 or WP9). About 3–4 days.**
-- **Close gates:** tell App "casting" (`remoteActive`) for its close gates, not `minimized && remoteActive`. Bind the pause-while-casting effect to the current `<video>` element.
-- **Stop control:** when a cast is connected but there is no player target (after a reload), render a minimal widget with Stop. It can take the title from the receiver's media metadata.
-- **Failed seek:** if re-pointing the receiver after a seek fails, leave the receiver on its current media and show a toast. Only an end-of-media advance should stop the cast.
-- **Audio and volume while casting:** an audio-track change re-points the receiver, or the menu is disabled with a reason. Volume and mute go through `RemotePlayerController`.
-- **Local encoder:** call `hls.stopLoad()` when the cast connects and `startLoad()` if playback falls back to local.
-  - Once polling stops, today's idle reaper stops the local session's rungs 75–105 s later (it sweeps every 30 s). Rungs still priming are skipped until they are ready, and when no cast copy is made, the rungs the receiver itself pulls from correctly stay alive.
-  - Exception: the subtitle-carrier rung is exempt from reaping (`streaming.go:2492`). For titles with embedded text subtitles, one local encoder keeps running until WP9 moves subtitle extraction out of the video encoder, or WP8 changes the reaper.
-- **Smaller fixes:**
-  - Record the cast token's expiry only once the load succeeds.
-  - Load media for sessions started from Chrome's own cast menu.
-  - Map `load_media_failed` in the error table (currently `load_failed`), and toast when a reload fails.
+### Phase 0 · Establish a usable baseline
 
-**WP3 · HLS session lifecycle (Go). Closes LIFE-1, 2, 4, 5. About 2 days.**
-- **Playlist numbering:** drop `-start_number` whenever `+append_list` can parse the existing playlist; FFmpeg then continues numbering by itself (verified contiguous across two resumes). Extend `TestPlaybackMatrix_ReapAndResumeRejoinsTheTimeline` to assert sequence 0 and an unchanged filename-to-sequence mapping across two resumes.
-  - **Backstop:** serve `#EXT-X-MEDIA-SEQUENCE` equal to the first listed segment's file number, so a segment's sequence number always equals its file number. Forcing 0 would be wrong in the one case that keeps `-start_number`: an unreadable playlist, where FFmpeg writes a fresh one listing only new segments.
-- **Stale folders:** clear the transcode folder at startup, before the hardware-decode probe creates its `.hwprobe-*` subfolder. Make `CreateSession` refuse after `Close`.
-- **Disk cap:** re-read `LastAccess` under the lock when choosing what to evict.
-- **Readiness timeout:** cancel FFmpeg when it fires, or let a late playlist clear the error. Either extend the write deadline in the HLS handlers or keep the readiness budget under the server's 120 s `WriteTimeout`.
+This is a gate, not a multi-week preparation project. Keep it limited to the
+currently failing path and the harness required by the first fixes.
 
-**WP4 · Casting, server side. Closes CASTS-1, 2, 3, 4, 6, 7, CASTC-8, and the cast part of LIFE-3. About 3–4 days.**
-- **Mid-title casts:** `CloneForCast` should also create a copy when `atSec` is before the session anchor or more than about 30 s after it. The shared session itself is still never re-anchored. Update the two tests that pin today's shape.
-- **Hardware decode:** keep `SourceVideoCodec` on cast copies. Delete `streaming.go:1056-1058` and flip `eac3_passthrough_test.go:307-309`.
-- **Pre-warming:** start only the quality level (rung) the receiver begins on, not every rung. That alone may re-open #355 on the receiver's first up-switch. Better: give a cast copy a single rung at 1080p or below. First- to third-generation Chromecasts and the Ultra stop at H.264 level 4.1/4.2, and a single rung leaves no up-switch to go wrong.
-- **Segment format:** when no cast copy is made, either make one when the source session is fMP4, or return the segment format and set `hlsSegmentFormat`/`hlsVideoSegmentFormat` in the sender. Google documents an unspecified format as treated as Transport Stream.
-- **Leases:** skip `MarkCastHeld` for HEAD requests. Before answering 429, reclaim the caller's own leased sessions that have been idle past the normal timeout.
-- **H.264 level:** compute it from macroblocks per frame and per second (H.264 Table A-1), not from rung height.
+- Investigate `TestPlaybackMatrix_MasterCodecsMatchSegments/transcode_hdr_tonemapped_to_sdr`, which fails with FFmpeg 7.1.5 in this
+  verification. Preserve full stderr; establish whether the fixture, filter
+  pipeline, or supported FFmpeg build is responsible. Fix the proven cause in
+  its own contained PR before claiming the build/test gate is green.
+- Rebuild the review's uncommitted probes as regressions **alongside the slice
+  that needs them**. Do not wait for a universal player-harness rewrite or a
+  complete device lab before starting small fixes.
+- Arrange PostgreSQL plus a Chromecast and Safari/iOS test window early.
+  Obtain Intel/AMD/NVIDIA hardware only for the hardware lane that needs it.
 
-**WP5 · Encoder arguments (Go). Closes FF-1, 2 (the same defect as SUB-4), 3, 6, 8, 9, 10, and DEC-11. About 3–4 days, plus time on real Intel/AMD/NVIDIA hardware.**
-- **Levels:**
-  - VAAPI: pass the integer `level_idc`, as the QSV path already does.
-  - `hevc_qsv`: pass idc/3 and `-tier main`.
-  - Pin it with a test that checks every emitted level against the encoder's named constants.
-- **Keyframes:**
-  - QSV: `-forced_idr 1` plus `-g`/`-keyint_min` = ceil(segment duration × fps).
-  - AMF: `-g`/`-keyint_min`, plus `-forced_idr 1` on FFmpeg 9 or later.
-- **Rotation:** read it at probe time and swap width and height for 90°/270° before building the rungs (quality ladder). WP10 stores the field; probing at session creation is a stopgap.
-- **Bitmap burn-in:** overlay first and scale second. Label the filter-graph output and map it in place of `0:v:0`, in all three variants.
-- **GPU tonemap:** give the `tonemap_vaapi` probe sample mastering-display metadata, or delete the tier. Fix DEC-11's `tonemap_gpu` label in the same change: it can't fire today because the probe never passes, and fixing the probe makes it reachable.
-- **Comments:** correct the `-avoid_negative_ts` comments. Do not move the flag after `-i` without changing `X-TIMESTAMP-MAP` in the same commit.
-- **Zero-copy tier:** add a chroma-subsampling check.
+### Phase 1 · Protect scheduled parties, profiles, and resumed playback
 
-**WP6 · Watch party (Go and SPA). Closes PARTY-1, 2, 6, 7, 8, 9, 10, and OPS-3. About 3–4 days.**
-- **Shutdown:** skip parties with `StartedAt == nil && ScheduledStartAt != nil`. Cancel their timers and close their connections, but don't end them in the database or send `party-ended`.
-  - Seed a rehydrated party's `StateRevision` from something monotonic across restarts.
-  - Add a database-gated test: create a scheduled party, call `m1.Shutdown()`, then `m2.Rehydrate`, and assert the party is present. After this fix the CLAUDE.md invariant is true again.
-- **Host recovery:** gate it on `!isPartyEpisodeMismatch` (already in `lib/partyPlayer.ts` with a table test), or mark it fired and pause locally when the advance is sent. Extract the inline host-recovery condition (`VideoPlayer.tsx:4235-4240`) into `lib/partyPlayer.ts` and give it its own table test.
-- **Guest pause:** for non-hosts, ignore `request-pause`'s `at_ms` (use `CurrentAbsMs`) or clamp it to a few seconds.
-- **Smaller fixes:**
-  - Age out stale seeks.
-  - Debounce host seeks, and give time sync its own rate-limit bucket.
-  - Clear `pendingSyncIntentRef` on join and on both teardown paths.
-  - Bound `initial_position_ms`, and reject a null `to_ms`.
-  - Use one per-party `time.AfterFunc` for the host-close grace period.
-  - Delete the unused `v3RequestPlayPayload` (OPS-3).
+**First release: 2–4 developer-days plus gates.** Three small PRs, with the
+scheduled-party change deployed first. Do not wait for all of WP1, WP3, or WP6.
 
-**WP7 · Subtitle quick fixes (Go and SPA). Closes SUB-2, 3, 6, 9, 10, 11, and DEC-6 (the same defect as SUB-5). About 3 days.**
-- **Inline HLS subtitles:** admit a track only if `IsTextSubtitle` accepts it (an allowlist), so TTML, teletext, and ARIB tracks can no longer abort the launch.
-- **Timestamp map:** emit `X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000` in TS mode. Cues and video share the `-copyts` file clock.
-- **Sidecar encodings:** sniff the byte-order mark and handle UTF-16. Fall back to Windows-1252 when the text isn't valid UTF-8, and pass `-sub_charenc` to FFmpeg conversions.
-- **ASS → WebVTT:** add a post-pass that drops `\p` vector drawings and escapes `&`, `<`, and `>`.
-- **Sidecar matching:** separator-aware and case-insensitive. Parse `forced`, `sdh`, and `cc`, plus ISO 639 language codes.
-- **Playlist rules:** make each `NAME` unique and allow at most one `DEFAULT=YES` in the SUBTITLES group.
-- **TS-mode promotion:** the SPA reads `remux` from the session response, so the sidecar cue shift matches the session that actually runs.
+| Slice / branch | IDs and original package | Change and acceptance |
+|---|---|---|
+| 1A · `fix/party-restart-survival` | PARTY-1 · WP6a | Preserve scheduled, unstarted parties on graceful shutdown; cancel their timers and close connections without ending/deleting their DB rows or emitting `party-ended`. Fix the reconnect revision contract too. A real DB test must call `m1.Shutdown()` before `m2.RehydrateScheduledParties()` and reuse a client's pre-restart revision floor. Active parties keep their existing shutdown policy. |
+| 1B · `fix/progress-active-profile` | WEB-1 · WP1a; DEC-8 · WP11a | Send `profile_id` on heartbeat, Mark as Watched, and Clear Progress; validate ownership. When omitted, prefer a real acting profile, retaining default-profile creation for synthetic ID 0 / OAuth sign-ups. Apply the rating ceiling to stream-info and use the same missing/blocked 404 wording. Verify two profiles on one account, a no-profile account, a foreign profile ID, and opt-in shared history. |
+| 1C · `fix/hls-resume-numbering` | LIFE-1 · WP3a | When `append_list` can read the prior playlist, omit `-start_number`; preserve each existing filename-to-sequence mapping across two resumes. Retain the unreadable-playlist fallback and serve a media sequence matching its first listed filename. Exercise both TS and fMP4, remux and transcode, crash and reap. |
 
-### Phase 2: robustness, source facts, quality (about 30–40 developer-days)
+**Why 1A goes first:** the updater restarts the server. Before PARTY-1 is fixed,
+deploying any other repair ends all scheduled parties. Test reconnect and timer
+deduplication before using a deploy as the verification of another slice. This
+restores persistence; it does not reconstruct parties already ended by a deploy.
+Likewise, correcting WEB-1 does not automatically reassign historic progress:
+there is no reliable record of which profile originally watched it.
 
-**WP8 · Encoder budget. Closes X-3, LIFE-3, and FF-7. About 4–6 days (X-3 needs a design pass first).**
-- **Paused players (X-3).** Counting only segment fetches as activity is *not enough on its own*:
-  - `ServeVariantPlaylist` calls `EnsureVariant` on every playlist poll (`streaming.go:4760`), and its reaped branch relaunches the encoder (`:3427-3437`).
-  - A paused hls.js player that keeps polling would therefore get a reap, a relaunch (about 3 s later), and a re-reap 75 s after that. The encoder keeps running at 4× with a burst on each relaunch, and a discontinuity is appended every cycle.
-  - Change the resume trigger together with the activity signal: resume on a segment request, or on a poll only when the client's last fetched segment is near the published edge.
-  - Decide what happens to the subtitle-carrier exemption (`:2492`). WP9's separate subtitle extraction removes the need for it.
-- **Encoder cap:** cap *running encoders* per user and globally in `startVariantImpl`, by reaping or refusing the oldest idle rung.
-- **Encoder fallback:** add a software-encode fallback for when FFmpeg's stderr blames the encoder (an NVENC session cap, an oversized frame).
+### Phase 2 · Make common local playback and party advance dependable
 
-**WP9 · Subtitle extraction service. Closes SUB-1, SUB-7 (the same defect as FF-4), and SUB-8. About 4–5 days.**
-- Only one extraction per output path runs at a time (single-flight).
-- Write to a temporary file and rename it on success.
-- Run on the server's lifetime context, and give extraction its own concurrency gate. `GetStreamInfo` and `CreateSession` must never wait behind a 10-minute extraction.
-- Burn-in reads the cached extracted track instead of demuxing the whole container.
-- Build inline subtitle playlists server-side on the video segment grid (WP17 makes this simpler). Once subtitles no longer ride inside a video encoder, no rung needs the reaper's subtitle-carrier exemption.
+**Rolling releases: 3–5 developer-days plus gates.** Depend on Phase 1's profile
+fix for all new progress writers. The three slices can ship separately.
 
-**WP10 · Record the source facts decisions need (migration and rescan). Closes DEC-1, DEC-4, DEC-5 (the same defect as FF-5), FF-6, DEC-WebM, and TECH-14. About 4–6 days.**
-- **What ffprobe already returns:** the same ffprobe call already gives `codec_tag_string`, `field_order`, rotation, the `comment`/`visual_impaired`/`hearing_impaired` dispositions, `level`, and the Dolby Vision configuration record. Store them.
-- **WebM:** detect it by extension or DocType instead of folding `matroska,webm` into `mkv`.
-- **Then:**
-  - Keep commentary and audio-description tracks out of automatic selection.
-  - Remux `hev1` MP4s (retagging to `hvc1`) for Apple clients.
-  - Deinterlace with `bwdif`, `yadif_cuda`, or `deinterlace_vaapi`.
-  - Make the quality ladder rotation-aware.
-  - Direct-play WebM in browsers.
+| Slice / branch | IDs and original package | Change and acceptance |
+|---|---|---|
+| 2A · `fix/player-rebuild-state` | WEB-2, WEB-3, WEB-4, WEB-6 · WP1b | Keep a logical absolute playhead through same-viewing rebuilds; preserve pause intent for keepalive and direct-play recovery. Bind media, AirPlay, and cast-pause listeners to the current DOM element. Do not abort `createSession`; receive and delete superseded sessions with a generation guard. Mount regressions for two rapid +10 s seeks, a second audio pick, error→Back→new title, a party target replaced while an error is visible, paused recovery, and a delayed create response after close. |
+| 2B · `fix/player-progress-completion` | WEB-7, WEB-9, WEB-11 · WP1b | Mark the outgoing solo episode watched and flush progress on pause, seeked, close, target change, and pagehide. Preserve the outgoing target/profile in async writes. Use a trusted whole-file duration; never infer completion from a growing EVENT playlist. Use authenticated `fetch` with `keepalive` for pagehide; its delivery is best-effort. Test paused scrubs, a target switch during a write, absent duration, and episode completion. |
+| 2C · `fix/player-party-recovery` | WEB-8, WEB-10 · WP14a; PARTY-2, PARTY-6 · WP6b | Route dead-session 404/410 through bounded recovery and preserve pause. Give native HLS one controlled rebuild for codes 2/3 and remux→transcode fallback for code 4. Gate host recovery on episode identity, pausing/suppressing old-title broadcasts during advance. Use the canonical room position for a guest pause. Test a removed session, slow next-episode resolution, and a guest trying to move the room through pause. |
 
-**WP11 · Decision and capability fixes. Closes DEC-2, 3, 7, 8, 9, 10. About 3–4 days.**
-- **Audio on direct play:** pass `audio_track_index` to stream-info. Withhold direct play when the requested track isn't the one the player starts with, and remux to select it.
-- **Safari:** emit `hls_js` only when hls.js will actually be used, sharing the `usesNativeHls` predicate. Probe `ManagedMediaSource` when `MediaSource` is absent, as on iPhone.
-- **Chroma-aware capabilities:** add an `hevc_rext` probe and use the stored `video_profile`.
-- **Streaming info:** check the rating ceiling in `GetStreamInfo`, and use the same 404 wording for blocked and missing files.
-- **Telemetry:** fix the reason-code label (DEC-9). The QoE tonemap label (DEC-11) moves to WP5.
-- **Activity log:** log `stream_started` once per viewing, not once per range request.
+Safari native-HLS behavior still needs Safari/iOS validation. Split the native
+recovery implementation from the hls.js upgrade so a library/configuration change
+does not obscure the behavioral regression.
 
-**WP12 · Party sync robustness. Closes PARTY-3, 4, 5. About 6–8 days (each is M).**
-- **Episode changes:** re-target the player from state, keyed on (media item, episode), with retry. Pause and skip corrections while the episode doesn't match.
-- **End of media:** a casting host sends `requestPause` with the last position before stopping. The server auto-pauses at the known duration. Guests never call `play()` on an element that has ended.
-- **Host drift:** reconcile the host with a gentle, rate-only correction, or report stalls so the server re-anchors. For a casting host, compare the TV against the party's projected position over several polls, not poll to poll.
+### Phase 3 · Keep casting controllable and reduce wasted encoding
 
-**WP13 · Stream token lifetime. Closes CASTC-9 (the same defect as CASTS-5), CASTS-4, and DEC-12. About 2–3 days.**
-- A session-bound cast token stays valid while its session is alive, up to a hard cap such as 24 h after issue.
-- File-bound tokens are re-minted before they expire.
-- AirPlay mints its token at hand-off, not when the local session starts.
-- The macOS client re-mints on a 401.
-- `docs/native-client-caps.md` documents the cast-token authentication path.
+**Rolling releases: 5–8 developer-days plus gates.** Ship sender control and
+progress first; device testing determines when cast-delivery changes close.
 
-**WP14 · hls.js upgrade and error handling. Closes TECH-04, WEB-8, WEB-10. About 2–3 days.**
-- **Upgrade and config:**
-  - Move from 1.6.17 to 1.7.3.
-  - Replace the deprecated `*LoadingTimeOut` and `*LoadingMaxRetry` options with `playlistLoadPolicy`/`fragLoadPolicy`, with a long time-to-first-byte for cold rungs.
-  - Set `abrSwitchInterval` to 10–20 s (each up-switch can start an encoder), and set `errorPenaltyExpireMs`.
-- **Dead sessions:** route a 404 or 410 on a dead session to the keepalive rebuild instead of the retry budget.
-- **Safari native-HLS parity:**
-  - MediaError code 4 on a remux tries the transcode fallback.
-  - Codes 2 and 3 trigger one rebuild at the playhead.
+| Slice / branch | IDs and original package | Change and acceptance |
+|---|---|---|
+| 3A · `fix/cast-control-lifecycle` | CASTC-2, CASTC-3, CASTC-4, CASTC-5, CASTC-10, CASTC-11, CASTC-12 · WP2a | Gate App close/navigation on `remoteActive`, independently of widget expansion. Render a Stop widget for a resumed cast without a local target. On a failed seek replacement, keep the committed receiver media and show a toast. Disable unsupported audio switching with an explanation until replacement is implemented; route volume/mute to the receiver. Commit expiry only after successful load, handle Chrome-menu sessions, and map `load_media_failed`. Test expand→Escape/Back, reload→Stop, failure/quota paths, target replacement, and stop→start. |
+| 3B · `fix/cast-progress-and-local-polling` | WEB-5 / CASTC-1 · WP1c; CASTC-7 · WP2b | Report absolute receiver time using the acknowledged `start_sec`; write FINISHED completion before advance/stop and flush disconnect once. Keep local progress reporting for AirPlay, whose element remains the source. Stop hls.js loading for Chromecast and restart it only if returning locally. Assert no duplicate writer or wrong-title completion and that ordinary unused rungs are reaped. The subtitle-carrier exception remains explicitly open until WP9/WP8. |
+| 3C · `fix/cast-anchored-single-rung` | CASTS-1, CASTS-2, CASTS-3 / LIFE-3 (cast part), CASTC-8, CASTS-7 · WP4a | Clone an otherwise safe shared session when the sender is before its anchor or far beyond the available window; never re-anchor a session other viewers use. Retain `SourceVideoCodec` on copies. Give each new cast copy one supported H.264/AAC rung at 1080p or below, rather than merely removing pre-warm. Compute its level from width, height, macroblocks/sec, and applicable bitrate limits. Return the actual segment format; retain TS as fallback and test declared fMP4 on devices. A shared local ABR session must not have its ladder narrowed underneath its browser. |
+| 3D · `fix/cast-lease-accounting` | CASTS-4, CASTS-6 · WP4b | HEAD must not acquire/extend a cast lease. Reclaim only the caller's demonstrably idle leased sessions before quota refusal. Test active-TV retention, abandoned native-HLS tabs, all profiles sharing the account quota, and a still-active shared session. |
 
-**WP15 · Make hardware encoding reachable from the installer. Closes OPS-1, OPS-2, TECH-01, and TECH-12's backend-selection half (WP5 covers its levels and keyframes). About 1–2 days, plus a test install per distro family.**
-- **Sample config:** correct `configs/aurora.yaml`'s `max_sessions: 0 = unlimited` comment (OPS-2).
-- **GPU access:** add `aurora` to `render`/`video` (`SupplementaryGroups=` in `aurora.service`) and install the VA-API drivers.
-- **FFmpeg version:** warn when FFmpeg is older than 6.1. Ubuntu 22.04's 4.4.2 disables input pacing.
-- **Fedora:** handle `ffmpeg-free`, which has no libx264, with RPM Fusion as opt-in.
-- **Intel backend:** choose it by which pipeline tier its startup probe proved.
+**Quota correction to the original CASTC-4 guidance:** do not delete the working
+cast copy before a replacement load succeeds. Design a bounded, quota-aware
+replacement/reservation path, or refuse the operation visibly while keeping
+playback and control. An extra unbounded session allowance is not the fix. The
+tracker already has pending/committed slots and tests for retaining live media
+when a load fails; preserve that contract.
 
-**WP16 · PGS subtitles in the browser. Closes SUB-PGS (TECH-09). About 2–3 days, reusing WP9's extraction.**
-- Extract the track with `-c:s copy -f sup` into the subtitle cache, reusing WP9's single-flight.
-- Render it with libpgs over the `<video>`, applying the session's start offset.
+CASTC-8's missing format field is real, but Google's current receiver reference
+says it is required for **MPL**, whereas Shaka is now the default. Therefore a
+specific Shaka failure cannot be asserted solely from the missing field. Declare
+the actual format and test the target firmware; do not enable fMP4 globally on
+the strength of the migration announcement.
 
-### Phase 3: architecture and stack upgrades
+### Hardware lane · Release independently when hardware checks pass
 
-**WP17 · VOD playlist model (TECH-03). Effort L for transcode rungs; XL including remux, subtitles, and cast/party cleanup.**
-- **How it works:**
-  - The server generates a full-length VOD playlist up front (`#EXT-X-PLAYLIST-TYPE:VOD` plus `#EXT-X-ENDLIST`, from the database duration) on a fixed 6 s grid with forced keyframes.
-  - When a segment is requested, the encoder restarts at it if needed (`-ss N·6 -start_number N -copyts`, `-hls_flags temp_file`).
-  - Subtitles are one whole-file WebVTT per track, or sliced by the server on the video grid.
-  - This is Jellyfin's `DynamicHlsPlaylistGenerator` / `DynamicHlsController` model.
-- **What it retires:**
-  - The HLS up-switch stall (a CLAUDE.md known gap).
-  - Rebuilding the session to seek past the encoded edge.
-  - Receivers treating the stream as live. Google's receiver decides live versus VOD only by `#EXT-X-ENDLIST`. For live it allows seeking only "from the beginning of the newest list until a three target duration from the end".
-  - CASTS-1's class of bug, SUB-6/SUB-7, and a lot of SPA workaround code: `startPosition: 0`, the injected `EXT-X-START`, the `liveSyncPosition` patch, and per-rung edge tracking.
-- **Rollout:** ship it behind `transcode.playlist_model: vod|event`, with EVENT as the rollback.
-- **Risks:** audio/video continuity where the encoder restarts (see #348 and #431); sources that don't start at timestamp 0; disk growth from scattered segments.
+**WP5 + WP15: 4–7 developer-days plus real hardware/installer checks.** This can
+start during Phase 1, but must not block useful CPU-only releases.
 
-**WP18 · Chromecast: stop re-encoding what the device can play (TECH-05, then 06, then 07). Effort M plus S; then L.**
-- **CODECS for remuxes:** store the H.264 level (WP10) and emit CODECS on remux playlists. H.264 at 1080p or below and level 4.1 or below can then be cast without a video transcode.
-- **fMP4 pilot:** try fMP4 cast copies with `hlsSegmentFormat`/`hlsVideoSegmentFormat = FMP4` declared, on current firmware. Re-test the #328 subtitle-rendition stall under Shaka.
-- **Subtitles:** set `textTrackStyle`, and side-load subtitles from a WebVTT route authenticated by cast token (closes CASTC-6).
-- **After WP17: one custom Web Receiver,** hosted centrally for every Aurora server.
-  - It could choose codecs per device with `canDisplayType`, covering HEVC, VP9, AV1, Dolby Vision, and E-AC-3 passthrough.
-  - It could report load and decode errors to the sender over a `urn:x-cast:` channel.
-  - It could save progress and renew tokens from the receiver, and carry watch-party sync messages.
-- **Receiver costs:** keep the Default Media Receiver as the fallback, and let forks override the app ID. Registration costs $5 and needs HTTPS hosting, and the project then owns the receiver's uptime.
+- **FF-1:** numeric VAAPI `level_idc` on every CPU-chain and zero-copy H.264/HEVC
+  path; QSV HEVC uses the correct scale and Main tier. Validate emitted SPS and
+  playlist CODECS together, not just a string-argument test. Keep FF-1 high for
+  affected supported deployments even though the owner's box has no GPU.
+- **FF-3:** QSV IDR/GOP controls; AMF GOP controls and `forced_idr` only when the
+  installed encoder exposes it. Probe feature support rather than relying only
+  on an FFmpeg major-version guess. Verify independently decodable segment starts
+  at 23.976/29.97/59.94 fps and across a restart.
+- **FF-2 / SUB-4:** one labeled bitmap-overlay output, mapped once; overlay at
+  the source geometry before scaling, with the CPU/GPU transition handled. Test
+  output stream count, positioning on downscaled rungs, and VAAPI initialization.
+- **FF-8 + DEC-11:** fix mastering-display metadata in the tonemap probe and
+  record the actual selected decode/filter plan in QoE in the same PR.
+- **FF-10:** reject unproven 4:2:2/4:4:4 zero-copy paths.
+- **FF-9:** correct timestamp comments only. Moving `-avoid_negative_ts` changes
+  timing and requires its own combined video/subtitle continuity proof.
+- **OPS-1, OPS-2, TECH-01, TECH-12:** grant GPU device access via available
+  `render`/`video` groups, install suitable drivers by distro, check access as the
+  service user, and select Intel's backend by the pipeline proven at startup.
+  Keep RPM Fusion opt-in. Correct the cap comment; warn for old FFmpeg and missing
+  encoders. Optional groups must not make CPU-only services fail to start.
 
-**WP19 · Tonemapping and HDR metadata (TECH-11, needs TECH-14). Effort M.**
-- Tier the tonemapper:
-  1. `tonemap_vaapi`, with WP5's probe fix.
-  2. On NVIDIA: jellyfin-ffmpeg's CUDA tonemap, or libplacebo.
-  3. On AMD: libplacebo over Vulkan.
-  4. jellyfin-ffmpeg's `tonemapx`, a fast CPU filter.
-  5. `zscale`.
-- Send Dolby Vision profile 5 only to tiers that understand Dolby Vision.
-- On the CPU-only production box only `tonemapx` helps, and that needs TECH-02's build.
+### Phase 4 · Release compatibility and efficiency by capability
 
-**Pilots and later:**
-- **TECH-02 (M):** a pinned FFmpeg build (jellyfin-ffmpeg 8.1.x from its apt repo, or a BtbN *release* build) with a configurable binary path.
-- **TECH-10 (M):** JASSUB for ASS subtitles. Needs `'wasm-unsafe-eval'` in the CSP and font extraction.
-- **TECH-16 (L):** a libmpv engine on macOS for HDR and Dolby Vision titles.
-- **TECH-17 (M):** seek-preview thumbnails from keyframe-only sprite sheets, served as WebVTT.
-- **TECH-18 (S, optional):** CMCD v2 telemetry in header mode.
+This replaces the original 30–40-day batch with separate deliverables. The
+following estimates are per slice; the phase is **not** one release gate.
+
+| Slice | Scope / IDs | Dependency and acceptance |
+|---|---|---|
+| 4A · Lifecycle hygiene (1–2 days) | WP3b: LIFE-2, LIFE-4, LIFE-5 | Serialize shutdown against creation; remove only stale owned session folders before the hardware-probe folder is made. Recheck eviction access under the lock. Cancel timed-out FFmpeg and align handler deadlines with readiness. Test creates racing Close, activity during measurement, and timeout cleanup. Startup cleanup must not touch another process's active workspace. |
+| 4B · Text-subtitle compatibility (2–3 days) | WP7: SUB-2, SUB-3, SUB-6, SUB-9, SUB-10, SUB-11, DEC-6 / SUB-5 | Use the text allowlist; normalize BOM/charset handling; sanitize ASS drawing/text conversion; match sidecars by separators and language/forced/SDH flags; unique rendition names and one default. Return actual remux status. Test both segment formats and nonzero anchors; TS timestamp mapping must agree with the preserved source clock. |
+| 4C · Player library (1–2 days) | WP14b: TECH-04 | Pin hls.js 1.7.3 and its lockfile, migrate to load policies, and bound ABR switching/error penalties. Re-run the established player/cast/party regressions, cold-rung timeout cases, frontend audit, and Safari fallback. Upgrade separately from state-machine repairs. Slower switching mitigates encoder churn; it does not close the up-switch stall. |
+| 4D · Decision and protocol cleanup (2–3 days) | WP11b: DEC-2, DEC-3, DEC-7, DEC-9, DEC-10 / CASTS-8; WP6c: PARTY-7, PARTY-8, PARTY-9, PARTY-10, OPS-3 | Split decision and party changes into their own PRs. Honor a requested audio track by remuxing when the native file default differs. Share the actual native-HLS predicate and probe ManagedMediaSource. Fail closed on unproven chroma/depth combinations. Log direct playback once per registry viewing. Age stale seeks; debounce host intents without dropping the final seek; separate time-sync rate limits; clear buffered intents on join and teardown; validate positions/null seek; replace host-close sleepers with cancellable timers. |
+| 4E · Source facts, then individual consumers (metadata 2–3 days; consumers 1–3 each) | WP10 / TECH-14: DEC-1, DEC-4, DEC-5 / FF-5, FF-6, DEC-WebM | Add backward-compatible fields for codec tag, level/profile, rotation, interlacing, audio dispositions, and DV metadata. Keep unknown values conservative. Bump the scanner/probe version or use a bounded metadata backfill so unchanged-file hashes cannot skip the new facts. Ship WebM identification/direct play, commentary exclusion, rotation, `hev1`→`hvc1` retagging, and deinterlacing separately. Prefer an explicitly requested commentary track over the automatic-selection filter. Confirm Apple behavior on devices. |
+| 4F · Extraction service (4–5 days) | WP9: SUB-1, SUB-7 / FF-4, SUB-8; remainder of CASTC-7 / X-3's carrier case | Separate the extraction gate from probes; single-flight by fingerprinted output path; write temporary output and atomically rename only on success. Work belongs to a bounded server-lifetime job, not the first request. Cancel on shutdown and bound cache/concurrency. Generate subtitle playlists on the video grid, including sparse/empty tracks. Burn text from the cache. Test one client cancelling while another waits, source mutation, ten-minute extraction not blocking playback, and carrier removal/reaping. |
+| 4G · Encoder budget (4–6 days) | WP8: X-3, LIFE-3 (global/user encoder part), FF-7 | Design the activity signal **and** wake trigger together. Playlist polling by a paused client must not repeatedly reap/relaunch. Resume on real demand near/beyond the available edge, with generation guards and fairness. Bound running and priming encoders globally/per user; return a usable quota error; test old-FFmpeg pacing. Add a bounded software-encode fallback for encoder-specific failures. Prefer WP9 before removing the carrier exemption. |
+| 4H · Party convergence (4–6 days) | WP12: PARTY-3, PARTY-4, PARTY-5 | Retarget from authoritative state keyed by media and episode, with retry, and suppress corrections while identities mismatch. Pause the room at a known EOF before a casting host disconnects; never replay an ended guest element. Reconcile host stalls against projected room time over multiple samples, separating TV scrubs from drift. Test lost media-change, failed lookup, host stall, EOF, and late join. No dependency on VOD or a custom receiver. |
+| 4I · Token lifecycle (2–4 days plus design/review) | WP13: CASTC-9 / CASTS-5, DEC-12; AirPlay part of CASTS-4 | Isolate the auth contract change. Session-bound validity must require a live authorized session, token-version revocation, and a hard lifetime bound; do not accept arbitrary expired JWTs. File tokens remain file-scoped and bounded. Mint/refresh for AirPlay handoff, and implement native renewal through the actual AVPlayer/VLC playback path, preserving position/pause. Test uninterrupted >4 h playback, TV-remote resume, logout, deleted session, abandoned tabs, and native 401 recovery. Correct the native auth contract. |
+| 4J · Browser bitmap subtitles (PGS pilot 3–5 days; VobSub separately estimated) | WP16 / TECH-09: SUB-PGS | Reuse WP9 for bounded `.sup` extraction and adopt libpgs for **PGS only**. Test seek/rebuild offsets, worker cleanup, canvas alignment, memory, and supported fullscreen/PiP paths. Add a tested burn-in fallback for VobSub and surfaces that cannot carry a canvas overlay; finish FF-2 first. Browser canvas rendering does not deliver subtitles to Chromecast or AirPlay. |
+| 4K · Cast efficiency and text tracks (3–5 days plus devices) | WP18a: TECH-05, TECH-06, CASTC-6 | After reliable source profile/level facts (4E), emit CODECS from the actual remuxed bytes and pilot H.264/AAC remux casting within receiver limits. Do not guess a CODECS string. Pilot declared fMP4 per device generation with TS fallback. Add a narrow file/session-scoped, token-authenticated WebVTT receiver route and credential-less CORS only there; pass text tracks and style. Retest #328 before enabling inline subtitle groups. |
+
+Ship 4E's WebM and safe cast-remux work early once their prerequisites are ready:
+they avoid full video encodes on the CPU-only production server. They do not need
+VOD, GPU tonemapping, or a custom receiver. Keep 4F, 4G, and 4I isolated because
+they change resource ownership or authorization contracts.
+
+### Phase 5 · Isolated architecture and optional enhancements
+
+These are pilots with their own acceptance gates, not dependencies for the
+corrective releases above. Retain the current CLI/HLS/hls.js/WebKit/AVPlayer +
+VLCKit stack while shipping the repairs.
+
+1. **WP17 / TECH-03 — VOD pilot, transcode only first (3–6+ weeks).** Design a
+   stable segment identity/timeline and on-demand scheduler, then opt-in behind
+   `transcode.playlist_model: event|vod`, with EVENT as default and rollback.
+   A 6 s grid plus forced keyframes is viable for transcodes; a stream-copy
+   remux cannot be forced to that grid. Remux needs an actual keyframe index or
+   a separate proven continuity strategy. Prove duration, nonzero/negative PTS,
+   init-segment identity, A/V continuity, two rapid seeks, cross-rung alignment,
+   concurrent consumers, cancellation, disk bounds, and missing-segment waits.
+   Requests must not thrash encoders or return permanent 404s for future segments.
+   Pilot subtitles/remux and cast/party integration afterward. Do not remove SPA
+   workarounds or claim known gaps closed until the corresponding device paths
+   have passed. VOD duration/ENDLIST alone does not guarantee correct casting.
+2. **WP18b / TECH-07 — custom receiver (2–3+ weeks after design).** Defer until
+   the DMR pilots establish a concrete remaining need. A receiver error channel
+   and direct→HLS fallback merit a separate slice; advanced codec selection,
+   receiver-owned progress/token renewal, and party messages are later slices.
+   It need not wait for every VOD consumer, but validate the stream contract it
+   actually uses. Keep DMR fallback, configurable app ID, central HTTPS hosting,
+   registration/uptime ownership, and fork support explicit.
+3. **TECH-02 + WP19 / TECH-11 — binary and HDR pilots.** Introduce configurable
+   FFmpeg/ffprobe paths consistently across scan, extraction, probes, and encode
+   before piloting a pinned build. Jellyfin `v8.1.3-1` now has a published release;
+   verify package provenance and installation/rollback rather than changing the
+   distro default wholesale. Tier tonemapping by measured capability, and admit
+   Dolby Vision profile 5 only to a proven DV-aware path. CPU `tonemapx` can help
+   the owner's box if the selected build supplies it. GPU tiers need device tests.
+4. **TECH-10 — JASSUB ASS pilot.** Depend on bounded extraction, font delivery,
+   worker cleanup, and the minimum CSP adjustment; keep notices and a WebVTT or
+   burn-in fallback. Do not roll a new renderer into basic charset repairs.
+5. **TECH-16 — libmpv macOS pilot.** Keep AVPlayer + stable VLCKit; evaluate HDR/DV
+   benefit, package/license compatibility, signing, lifecycle, and maintenance in
+   its own design. Reverify engine capability declarations if adopted.
+6. **TECH-17 / TECH-18 — thumbnails and optional CMCD.** Ship thumbnail sprites +
+   WebVTT after their CPU/storage cost is bounded. CMCD header mode is optional;
+   measure value and receiver/CORS compatibility and preserve private cache
+   behavior. Neither delays bug fixes.
+
+**TECH-08, TECH-13, TECH-15:** retain WebKit AirPlay, existing AAC/downmix and
+Dolby policy, and FFmpeg subprocess orchestration. Optional multichannel AAC or
+Opus experiments need their own capability/device checks. No library replacement
+is needed to deliver the first four phases.
+
+### Rollout and rollback
+
+Deploy one cleared slice or a small group of cleared dependent slices. Verify
+local playback/seek/resume, a second profile's progress, and scheduled-party
+survival on every corrective release; add cast, subtitle, or party scenarios for
+the paths changed. Record startup errors, startup time, stalls, active encoder
+count, session 429s, and completion writes against the prior version. Worsening
+playback, cross-profile writes, lost parties, or orphaned casts triggers rollback.
+Experimental delivery/renderer/HDR paths stay opt-in until their matrix passes.
+
+Keep additive metadata migrations readable by the rollback binary, and retain
+the old delivery mode during pilots. A binary rollback cannot recover historic
+misattributed progress or parties already ended. The ledger in §9 remains open
+until its evidence is recorded; delete this planning document only after all
+required work lands and optional proposals receive an explicit implement/defer
+decision, with durable contracts retained in their normal documentation.
 
 ## 3. High-severity findings
 
@@ -486,7 +513,7 @@ Where two reviewers found the same defect, the row gives both IDs.
 
 | ID | Sev | Finding | Where | Fix · WP |
 |---|---|---|---|---|
-| SUB-PGS | M | PGS and VobSub subtitles cannot be shown in the web player at all. The comment at `VideoPlayer.tsx:2582` points to a burn-in path that no client uses. | `VideoPlayer.tsx:2575-2587` | libpgs (M) · WP16 |
+| SUB-PGS | M | PGS and VobSub subtitles cannot be shown in the web player at all. The comment at `VideoPlayer.tsx:2582` points to a burn-in path that no client uses. | `VideoPlayer.tsx:2575-2587` | libpgs for PGS; separate VobSub/surface fallback (M) · WP16 |
 | SUB-1 | M | Concurrent extractions of one track aren't coalesced, and a cancelled request deletes the surviving request's output. Extractions hold gate slots for up to 10 minutes, and `GetStreamInfo`/`CreateSession` wait on the same gate, so playback starts stall server-wide. | `subtitles.go:386-418`; `phase2_handlers.go:44-66`, `:2547-2566` | Single-flight, temp file plus rename, separate gate (M) · WP9 |
 | SUB-2 | M | TTML, teletext, and ARIB tracks get `-c:s webvtt`, which aborts the launch. That spends the rung's only restart (or flips the session to software decode) and drops every inline subtitle. The `IsTextSubtitle` allowlist has no production caller. | `phase2_handlers.go:1784-1796`; `subtitles.go:1086` | Use the allowlist (S) · WP7 |
 | SUB-3 | M | Non-UTF-8 sidecars break: accented cp1252 `.ass` lines are silently dropped, cp1252 `.srt` shows U+FFFD, and UTF-16 `.srt` produces zero cues. | `subtitles.go:795-901`, `:467` | BOM and charset handling (S) · WP7 |
@@ -501,11 +528,11 @@ Where two reviewers found the same defect, the row gives both IDs.
 
 | ID | Sev | Finding | Where | Fix · WP |
 |---|---|---|---|---|
-| CASTC-4 | M | A failed seek re-point stops a healthy cast and closes the player silently. A re-point needs 3 concurrent sessions against a per-user cap of 3. | `VideoPlayer.tsx:5298-5337`, `:1956-1966`; `lib/castSession.ts:120-142` | Keep the receiver on failure; release the old copy first (S/M) · WP2 |
+| CASTC-4 | M | A failed seek re-point stops a healthy cast and closes the player silently. A re-point needs 3 concurrent sessions against a per-user cap of 3. | `VideoPlayer.tsx:5298-5337`, `:1956-1966`; `lib/castSession.ts:120-142` | Preserve committed media; bounded replacement or visible refusal (S/M) · WP2 |
 | CASTC-5 | M | Changing the audio track while casting never reaches the TV and starts a stray local transcode; volume and mute act on the local element. | `VideoPlayer.tsx:6146-6165` | Re-point or disable; `RemotePlayerController` (S) · WP2 |
 | CASTC-6 | M | Soft subtitles never reach the receiver. `castLoadGetter` passes no `textTracks`, and the subtitle route is cookie-only and not in the receiver CORS list. | `VideoPlayer.tsx:1137-1157`, `:1197-1216`; `internal/api/cors.go:28-31` | Token-authenticated VTT route (M) · WP18 |
 | CASTC-7 | M | The local HLS session keeps encoding to EOF throughout every cast (see X-3). | `VideoPlayer.tsx:1509-1537` | `stopLoad()` on connect lets today's reaper stop non-carrier rungs (S) · WP2; the subtitle-carrier rung needs WP8/WP9 |
-| CASTC-8 | M | When no cast copy is made, the receiver gets fMP4 with no format declared, and Google documents an unspecified format as treated as TS. `TestCloneForCast_TranscodeReusedUnchanged` only uses a TS fixture. | `streaming.go:1127` vs `:1051-1054`; `lib/cast.ts:762-763` | Copy when fMP4, or declare the format (S) · WP4 |
+| CASTC-8 | M | When no cast copy is made, the receiver gets fMP4 with no format declared. Current receiver documentation makes the field requirement MPL-specific; a Shaka failure from this alone remains unproven. `TestCloneForCast_TranscodeReusedUnchanged` only uses a TS fixture. | `streaming.go:1127` vs `:1051-1054`; `lib/cast.ts:762-763` | Declare the actual format and device-test; retain TS fallback (S) · WP4 |
 | CASTC-9 / CASTS-5 | M | Cast tokens expire 4 h after mint. `resumeCast` and `seekCastSafely` renew an expired token on a resume or seek, but nothing renews it during uninterrupted playback, and a resume from the TV remote bypasses renewal. The AirPlay token is minted when the local session starts (`VideoPlayer.tsx:2933`), so a hand-off more than 4 h later fails at once. Safari's own local playback is *not* affected: an expired cast token isn't promoted, and the cookie takes over (`router.go:253-260`). | `internal/auth/auth.go:213-217`; `VideoPlayer.tsx:1419-1455` | Session-bound validity or proactive renewal (M) · WP13 |
 | CASTS-4 | M | Every Safari/iOS local playback gets the 30-minute cast lease. Abandoned tabs then hold the 3 per-user slots (shared by all profiles), so the next seek, title, or cast gets 429. | `phase2_handlers.go:1302-1326`; `VideoPlayer.tsx:2915-2939` | Reclaim the caller's idle leased sessions before 429 (S–M) · WP4/WP13 |
 | CASTC-10 | L | The cast token's expiry is recorded at mint, not when the load succeeds. | `VideoPlayer.tsx:1118`, `:1170` | S · WP2 |
@@ -547,7 +574,7 @@ Where two reviewers found the same defect, the row gives both IDs.
 
 ## 5. Technology stack
 
-Versions and statuses come from the stack research's primary-source checks on 2026-09-29. A separate reviewer re-confirmed three of them: hls.js 1.7.3, the Cast receiver's switch to Shaka, and FFmpeg 9.0's release. It could not confirm a jellyfin-ffmpeg 8.1.3 release, so the table says 8.1.x.
+The original stack research used primary sources on 2026-09-29. The follow-up in §9 rechecked hls.js 1.7.3, the Cast Shaka migration, FFmpeg n9.0, and renderer packages, and confirmed Jellyfin FFmpeg v8.1.3-1 is now published. §2 and §9 qualify the segment-format conclusion, PGS/VobSub scope, and architectural adoption gates.
 
 | ID | Area | Today | Verdict | Effort | Why |
 |---|---|---|---|---|---|
@@ -556,7 +583,7 @@ Versions and statuses come from the stack research's primary-source checks on 20
 | TECH-04 | Web player | hls.js 1.6.17 | **Keep hls.js; upgrade to 1.7.3** and move to load policies (WP14) | S | 1.7 brings `abrSwitchInterval`, a `capLevelToPlayerSize` fix and a live-reload fix. Shaka 5.2 and Video.js 8.24 / v10-RC are not better for this app. |
 | TECH-05, TECH-06, TECH-07 | Chromecast | Default Media Receiver; cast copies forced to TS, H.264, and stereo AAC; every remux re-encoded | **Update:** CODECS on remux playlists, a declared segment format, and an fMP4 pilot. **Later:** one central custom receiver (WP18). | M + S; L | Google made Shaka the receiver's default HLS player on 2026-05-18, and MPL "will no longer receive critical updates". The force-TS rule was formed under MPL. |
 | TECH-08 | AirPlay | WebKit AirPlay plus native HLS | **Keep** | — | The Remote Playback API has limited availability and can't cast hls.js/MSE playback. |
-| TECH-09, TECH-10 | Subtitles | WebVTT; server burn-in (which no client triggers) | **Adopt** libpgs 0.9.0 for PGS (WP16). **Pilot** JASSUB 2.5.16 for ASS. | M each | PGS is unusable in the browser today. ASS styling and positioning are flattened. |
+| TECH-09, TECH-10 | Subtitles | WebVTT; server burn-in (which no client triggers) | **Pilot** libpgs 0.9.0 for PGS (WP16); VobSub needs a separate fallback. **Pilot** JASSUB 2.5.16 for ASS. | M each | PGS is unusable in the browser today. ASS styling and positioning are flattened. |
 | TECH-11 | HDR → SDR | CPU `zscale` + `hable` after scaling; GPU `tonemap_vaapi` only on the zero-copy path, and its probe never passes (FF-8) | **Tier it** (WP19) | M | This is the heaviest CPU job; Aurora adds 90 s to the startup budget for it. Dolby Vision profile 5 is unhandled. |
 | TECH-12 | Hardware pipelines | Per-backend flags built by hand, with real test encodes at startup | **Keep**, fix levels and keyframes (WP5), and choose Intel's backend by the tier it proved. No Vulkan encode and no AV1 output yet. | S | QSV has no zero-copy path and no GPU tonemap here. Vulkan Video encode is still behind flags or regressed on Mesa. |
 | TECH-13 | Audio | FFmpeg's built-in AAC encoder, explicit downmix, AC-3 5.1, E-AC-3 copied into fMP4 | **Keep.** Optional pilot: multichannel AAC or Opus in fMP4. | — | libfdk_aac can't be redistributed with a GPL build, and gains little at 192k stereo. |
@@ -579,7 +606,7 @@ Versions and statuses come from the stack research's primary-source checks on 20
 | Documented gap | Status after this review | Addressed by |
 |---|---|---|
 | Direct-play casting: receiver rejection isn't reliably detected; failed attempts can close the player; refusal doesn't fall back to HLS; no real-device test | Still open. CASTC-4 is the same "stop on failure" policy on the seek path. | WP2 (policy), WP18 custom receiver (error channel), device checklist (§8) |
-| Midstream and party casting: no real-device coverage or encoded-edge signal; reload-based resume isn't broadcast; shared-session and authoritative-host corrections can't re-anchor; party media changes can leave a receiver on the previous item | Still open. CASTS-1 is a concrete instance on the shared path; PARTY-3 is the guest-player twin of the last point. | WP4 (making shared sessions re-anchorable), WP12, WP17 |
+| Midstream and party casting: no real-device coverage or encoded-edge signal; reload-based resume isn't broadcast; shared-session and authoritative-host corrections can't re-anchor; party media changes can leave a receiver on the previous item | Still open. CASTS-1 is a concrete instance on the shared path; PARTY-3 is the guest-player twin of the last point. | WP4 (isolated cast copies with appropriate anchors), WP12, WP17 |
 | HLS quality up-switch can stall (no cross-rendition encoded-edge contract) | Still open. LIFE-1 makes a return to a reaped rung worse than documented, and reviewers found no containment on the receiver path. | WP3 (LIFE-1), WP14 (`abrSwitchInterval`), WP17 |
 | Native-client direct play | No gap listed. DEC-12 (token renewal and the contract's auth section) is new. | WP13 |
 
@@ -610,7 +637,9 @@ Versions and statuses come from the stack research's primary-source checks on 20
 
 ## 8. Method and limits
 
-**How the review was done**
+**How the original review was done**
+
+The follow-up is documented separately in §9; the reviewer counts and temporary probes below describe the original review.
 - Eight independent, read-only reviewers each took one slice:
   - HLS lifecycle
   - FFmpeg arguments
@@ -646,3 +675,209 @@ Versions and statuses come from the stack research's primary-source checks on 20
 5. **DEC-3:** in TS mode (`transcode.segment_format: ts`), an HEVC MKV with AAC audio in Safari on macOS and iOS.
 6. **CASTC-3:** reload the page mid-cast and confirm the SDK resumes the session.
 7. **OPS-1:** on a fresh Intel or AMD install, check `id aurora` and whether the startup test encode passes.
+
+## 9. Follow-up verification and decisions (2026-09-30)
+
+### What is fixed on main
+
+**None of this review's findings has a landed fix.** The remote `main` revision
+was verified as `bf995002fbd9d2f158714120dbde0295df67e4bf`. Compared with the
+reviewed `390d02e`, its only changes are this document, the docs index, and a
+review record. There are no application, test, migration, installer, or dependency
+changes between those revisions. The count is correct: **13 high + 35 medium +
+29 low = 77 distinct finding rows**, with duplicate reviewer IDs counted once.
+
+This follow-up checked the implementation mechanisms for all 77 rows and the
+stack proposals. It does **not** repeat the original review's uncommitted
+reproductions, establish production deployment state, or certify real receiver,
+GPU, macOS, or PostgreSQL behavior. The reported root causes remain actionable;
+device-dependent outcomes stay conditional. Existing passing tests do not close
+an ID, and several explicitly preserve the problematic expectations.
+
+### Executed checks
+
+| Check | Result and interpretation |
+|---|---|
+| Remote main / history | `git fetch origin main` and remote ref lookup agree on `bf995002`; reviewed behavior is unchanged. This proves merge state, not the live server's deployed revision. |
+| Go build | `go build ./...` passes with the project's Go 1.26.5 toolchain. |
+| Full Go suite | `go test -count=1 ./...` fails in `TestPlaybackMatrix_MasterCodecsMatchSegments/transcode_hdr_tonemapped_to_sdr`, using Debian FFmpeg 7.1.5. The isolated rerun fails too (FFmpeg exit 187, no video output, external-library error / encoder not opened). Root cause is not established; Phase 0 must resolve it. |
+| Frontend unit suite | `npm ci` then `npm test`: **52 files / 838 tests pass**, with the existing hls.js 1.6.17 lockfile. These do not exercise all the listed player/cast state-machine defects. |
+| Race checks | `go test -race -count=1 ./internal/watchparty ./internal/auth ./internal/api` passes. A targeted streaming race run covering resume, drain, cast, variant, timestamp, decode, level, and subtitle tests also passes. These do not close the missing regressions or skipped DB cases. |
+| LIFE-1 reproduction | FFmpeg 7.1.5 EVENT/TS probe: four original files 0–3 are renumbered to sequences 4–7 on resume with `append_list` + `start_number=4`; the next files are 8–9. A second resume renumbers again. Omitting `start_number` preserves sequence 0 and produces contiguous files 4–5, then 6–7. This reproduces the muxer defect and supports the proposed fix; the permanent regression must cover fMP4 and the actual server path too. |
+| Missing verification | `TEST_DATABASE_URL` is not configured; DB-gated tests are skipped. No real Chromecast, Safari/iOS, AirPlay, GPU, or macOS playback checks were performed. Frontend audit is a required gate for future SPA code changes, not run for this documentation-only edit. |
+
+The failure of the existing HDR test is an additional **verification blocker**,
+not an invented 78th confirmed root cause. Preserve the failing evidence and
+investigate before asserting a clean release baseline.
+
+### Agreement and corrections
+
+The main diagnosis is sound: state, timeline, profile, cast-session, and resource
+ownership defects deserve early repairs. Keep the basic technology stack. The
+severity counts should not be read as a requirement to hold every unrelated fix
+until all 77 issues are resolved; each released diff must clear the team's review
+gate and its own dependencies, with residual backlog stated explicitly.
+
+These changes to the original recommendations matter:
+
+1. **Preserve a healthy cast on replacement failure.** Releasing its old copy
+   before the new receiver load succeeds contradicts this requirement. Existing
+   `castSession.test.ts` cases intentionally retain the committed copy when a
+   pending mint/load is abandoned. Use bounded quota-aware replacement or a
+   visible refusal, not premature deletion.
+2. **PGS and VobSub require different solutions.** libpgs 0.9.0 describes itself
+   as a PGS renderer and consumes `.sup`; adopting it cannot close VobSub or TV
+   subtitles. Budget the fallback and surface-specific validation explicitly.
+3. **Shaka changes the format-field conclusion.** Google confirms the default
+   HLS migration on May 18, 2026. Its current receiver MediaInformation reference
+   says segment-format fields are required for MPL. Missing fields remain a
+   sender-contract gap, but a Shaka stall caused by their absence is unproven.
+   Retest #328/#355 and firmware, retaining TS fallback until demonstrated safe.
+4. **VOD is a direction, not a mechanical fixed-grid conversion.** Forced
+   keyframes cannot impose a 6 s grid on stream-copy remuxes. Establish source
+   timing, keyframe indexes, init identity, scheduler concurrency, and disk bounds
+   before promising the architectural bug family is retired. Ship a transcode-only
+   opt-in pilot first.
+5. **Token lifetime is an auth-contract change.** Preserve scope, revocation,
+   ownership, hard bounds, and receiver independence. A frontend remint alone
+   does not update URLs already held by the TV; native renewal must actually
+   reach AVPlayer/VLC. Keep this PR isolated.
+6. **Prioritize deployments that cannot destroy schedules.** PARTY-1's shutdown
+   fix precedes the first corrective deploy. Profile repair precedes any new cast
+   or completion writer. Neither repair can infer and reconstruct old damage.
+7. **Split metadata capture from consumers.** Add fields/backfill once, then ship
+   WebM, audio selection, rotation, Apple retagging, and deinterlacing individually.
+   Do not hold CPU savings for Dolby Vision/GPU work or a wholesale rescan.
+
+### Finding-by-finding ledger
+
+All entries below are **open**. `C` means the current code supports the mechanism
+and the remedy is accepted with §2's constraints; it is not a new reproduction.
+`R` adds a reproduction in this follow-up. `D` means an implementation gap was
+checked but its platform-dependent outcome needs validation. `A` requires a
+correction to the proposed scope or claimed outcome. Exact code locations remain
+in §3/§4 and refer to unchanged application code at the pinned main revision.
+Phase assignments are implementation order, not closure evidence.
+
+| ID | Verification / remaining proof | Slice |
+|---|---|---|
+| LIFE-1 | R — append/start-number defect reproduced across two resumes; server/fMP4 regression still needed. | 1C |
+| WEB-1 | C — heartbeat and card calls omit profile; resolver uses default. Keep real-profile creation fallback. | 1B |
+| WEB-5 / CASTC-1 | C — sole writer skips the locally paused cast surface; FINISHED does not write completion. | 3B |
+| WEB-2 | C — rebuild resets clock/base before relative seek/audio reads; keep logical absolute position. | 2A |
+| WEB-3 | C — error removes video; target-only listeners do not rebind when the element returns. | 2A |
+| WEB-4 | C — recovery rebuild calls omit the preserved-pause intent. | 2A |
+| CASTC-2 | C — App close gate receives minimized-and-remote rather than remote-active. | 3A |
+| CASTC-3 | D — connected state with no target renders no Stop control; real SDK resume still needs a device. | 3A |
+| CASTS-1 | D — early shared-session return ignores sender anchor; the receiver's exact failure mode is untested. | 3C |
+| CASTS-2 | D — cast options clear source codec before decode selection; GPU performance/outcome untested here. | 3C / hardware |
+| FF-1 | D — VAAPI receives dotted x.0 despite numeric/named-idc options; QSV HEVC scale/tier also mismatches. Confirm SPS/device decode. | hardware |
+| PARTY-1 | C — Shutdown ends every party; rehydration selects active rows and restarts revision at 1. Existing restart test omits Shutdown. | 1A |
+| PARTY-2 | C — host recovery checks series identity but not episode identity during media-change. | 2C |
+| LIFE-2 | C — constructor does not remove stale session trees; CreateSession lacks a closed-manager guard. | 4A |
+| LIFE-3 / CASTS-3 | C — caps count sessions, while cast mint starts every profile. Cast and general encoder caps are distinct closures. | 3C + 4G |
+| X-3 | C — playlist fetch refreshes activity and wakes reaped rungs; changing activity alone causes a loop. Carrier case remains separate. | 4G / 4F |
+| LIFE-4 | C — eviction skips by a snapshot timestamp even after reacquiring the manager lock. | 4A |
+| LIFE-5 | C — readiness timer stores an error without cancelling the process; HDR budget exceeds server write timeout. | 4A |
+| FF-3 | D — QSV/AMF lack emitted IDR/GOP controls; segment behavior needs installed-encoder/hardware tests. | hardware |
+| FF-6 | C — probe/ladder lacks rotation; test actual output geometry and level after storing it. | 4E |
+| DEC-5 / FF-5 | C — field order and deinterlace stage are absent; validate cadence as well as visual combing. | 4E |
+| FF-2 / SUB-4 | C — unlabeled overlay output coexists with original video map; CPU scale precedes overlay. Prove one output on GPU paths too. | hardware / before 4J |
+| FF-7 | C — retry changes decode fallback while retaining failing hardware encoder selection. | 4G |
+| FF-8 | D — HDR sample lacks mastering-display data needed by the intended VAAPI tonemap probe; test a real capable GPU. | hardware |
+| FF-9 | C — timestamp option precedes input; comments overclaim output normalization. Keep current timing until jointly proved. | hardware / comments |
+| FF-10 | C — zero-copy gate models depth but not subsampling; fail closed on unproven chroma. | hardware |
+| CASTS-7 | C — level helper takes height/FPS, not width/macroblock load; high-FPS/portrait declarations need coverage. | 3C |
+| DEC-1 | C — dispositions are discarded and compatible non-default audio can be commentary. Respect explicit user selection. | 4E |
+| DEC-2 | C — direct-play resolution does not honor the audio picker index; remux selection must be explicit. | 4D |
+| DEC-3 | D — capability reports hls.js independently of the actual native path; ManagedMediaSource is not probed. Validate Safari TS. | 4D |
+| DEC-4 | D — codec tag is not stored, so `hev1` direct play is not gated; Apple device outcome remains conditional. | 4E |
+| DEC-6 / SUB-5 | C — TS promotion changes the session but client retains decision-time remux state. | 4B |
+| DEC-WebM | C — first ffprobe format name normalizes WebM to MKV; VPx/AV1 cannot then use their direct path. | 4E |
+| DEC-7 | C — Main10 capability covers greater depth/chroma; ordinary H.264 guard also lacks subsampling checks. | 4D |
+| DEC-8 | C — stream-info lacks the ceiling check and blocked/missing errors differ. Metadata boundary merits Phase 1. | 1B |
+| DEC-9 | C — reason selection classifies unsupported HEVC Main10 as bit depth even without HEVC capability. | 4D |
+| DEC-10 / CASTS-8 | C — non-HEAD direct requests log before registry touch, so repeated ranges produce repeated starts. | 4D |
+| DEC-11 | C — QoE infers GPU tonemap from available capability instead of the selected path; coupled to FF-8. | hardware |
+| DEC-12 | C — contract specifies a Bearer path; native direct playback mints a bounded URL with no renewal path. | 4I |
+| SUB-PGS | A — browser bitmap support is absent; libpgs fixes PGS only, with VobSub and remote surfaces still separate. | 4J + 4K |
+| SUB-1 | C — extraction writes the shared final path under a request context and shares the probe gate. | 4F |
+| SUB-2 | C — creation excludes only known bitmap codecs, not unsupported text/data codecs; allowlist unused there. | 4B |
+| SUB-3 | C — SRT scanner/FFmpeg conversions have no BOM/charset normalization. | 4B |
+| SUB-6 | C — TS timestamp map uses initial PTS with LOCAL 0 while cues retain the source clock; validate nonzero anchors. | 4B |
+| SUB-7 / FF-4 | C — subtitle muxer is cue-driven rather than aligned to the video grid; sparse-track native validation still needed. | 4F |
+| SUB-8 | C — embedded text burn-in demuxes the source during filter initialization; cache it outside playback start. | 4F |
+| SUB-9 | C — FFmpeg ASS conversion has no drawing/escaping post-pass. | 4B |
+| SUB-10 | C — raw prefix matching accepts neighboring episode basenames and last suffix becomes language. | 4B |
+| SUB-11 | C — rendition loop independently emits title/default, with no group uniqueness/exclusivity enforcement. | 4B |
+| CASTC-4 | A — seek arms the advance-style load effect whose failure stops the cast; preserve committed media and quota safety. | 3A |
+| CASTC-5 | C — audio callback rebuilds local media; volume/mute still target the local element. | 3A |
+| CASTC-6 | C — sender omits text tracks and browser subtitle route lacks receiver auth/CORS. | 4K |
+| CASTC-7 | C — cast effect pauses video without stopping HLS loading; carrier exemption prevents complete savings. | 3B + 4F/4G |
+| CASTC-8 | A — shared fMP4 has no declaration; Shaka failure from this alone is not established by current Google docs. | 3C / 4K |
+| CASTC-9 / CASTS-5 | D — default token lifetime is 4 h with renewal only on sender operations; uninterrupted/TV playback needs testing. | 4I |
+| CASTS-4 | C — native HLS assigns a token URL locally and cast-auth asset requests mark the 30-minute lease. | 3D + 4I |
+| CASTC-10 | C — expiry is mutated inside load getter before receiver acknowledgement. | 3A |
+| CASTC-11 | C — SDK session-state callbacks refresh only; stopped state is cleared by the app's start path. | 3A |
+| CASTC-12 | C — error map uses `load_failed`; asynchronous reload failure is console-only. | 3A |
+| CASTS-6 | C — session access marks cast-held without a HEAD guard. | 3D |
+| PARTY-3 | C — authoritative state updates alone do not retarget; event resolution can be missed or return without retry. | 4H |
+| PARTY-4 | C — casting FINISHED path stops/advances without canonical EOF pause; guest clock remains running. | 4H |
+| PARTY-5 | C — local host skips reconciliation; casting host compares successive samples rather than accumulated clock drift. | 4H |
+| PARTY-6 | C — allowed guest pause accepts a bounded but arbitrary position; canonical position required for non-hosts. | 2C |
+| PARTY-7 | C — a newly bound guest consumes retained explicit-seek state without an age check. | 4D |
+| PARTY-8 | C — arrow repeats send seeks and share the sync-intent/time-probe rate budget. | 4D |
+| PARTY-9 | C — join/teardown clear clock refs without clearing the buffered sync intent. | 4D |
+| PARTY-10 | C — creation paths accept unbounded positions, numeric null seek becomes 0, and host-close work lacks cancellation. | 4D |
+| WEB-6 | C — create request is abortable while server session creation is detached from that cancellation. | 2A |
+| WEB-7 | C — solo advance lacks the outgoing episode's explicit completion write present in party advance. | 2B |
+| WEB-8 | D — dead-session errors exhaust network retry before the independent keepalive timer may rebuild; timing untested here. | 2C |
+| WEB-9 | C — missing real duration uses current playlist duration plus anchor, allowing false sticky completion. | 2B |
+| WEB-10 | C — native error code 4 is terminal and 2/3 do not get hls.js-style fallback/rebuild. | 2C |
+| WEB-11 | C — interval cleanup only stops the timer; no pause/seeked/close/pagehide flush. | 2B |
+| OPS-1 | D — user creation/unit omit GPU groups/drivers; distro/device permissions and Fedora encoders need real installs. | hardware |
+| OPS-2 | C — sample says unlimited while defaults are 8 global / 3 per user. | hardware / docs |
+| OPS-3 | C — `v3RequestPlayPayload` has no consumer. Remove alongside protocol cleanup. | 4D |
+
+### Known gaps outside the numbered inventory
+
+These remain open too; a partial mitigation is not complete architectural closure.
+
+| Gap from CLAUDE.md | Decision / acceptance |
+|---|---|
+| Direct-cast rejection, closing on refusal, and no direct→HLS fallback | 3A separates failed attempt from a healthy cast; 4K pilots bounded fallback for supported DMR failures. Undetectable receiver decode/load errors remain for WP18b's error channel and real-device coverage. |
+| Party reload-based resume not broadcast | 4H must cover reload/resume and role changes; a minimal Stop widget alone does not restore party host authority. |
+| Shared/authoritative-host cast correction cannot safely re-anchor | 3C/4H must use an isolated cast copy or defer visibly, preserving shared-session anchors and acknowledging each load before broadcasts. |
+| Party media change leaves receiver on the previous item | 4H reconciles authoritative episode identity on the receiver as well as the browser; test missed events and failed loads. |
+| Cross-rendition produced-edge contract / ABR up-switch stall | Single-rung cast copies contain the receiver case; 4C reduces churn. Browser closure still needs WP17 or an explicitly proved edge/availability design. |
+
+### Enhancement decisions and primary sources
+
+The §5 table covers TECH-01 through TECH-18. All have a disposition in §2:
+keep the present CLI/player/native stack; upgrade hls.js; release source facts,
+safe remux, and subtitle fixes incrementally; pilot VOD/HDR/new renderers;
+defer a custom receiver until remaining need is measured; make CMCD optional.
+Enhancements are recommendations, not claims of implementation.
+
+- [hls.js 1.7.3 release](https://github.com/video-dev/hls.js/releases/tag/v1.7.3)
+  and [npm metadata](https://registry.npmjs.org/hls.js/1.7.3) support the upgrade.
+- [Google Cast release notes](https://developers.google.com/cast/docs/release-notes)
+  and [Shaka migration](https://developers.google.com/cast/docs/web_receiver/shaka_migration)
+  confirm the May 18 default change and later rollout fixes; firmware regression
+  history strengthens the case for a pilot.
+- [Receiver MediaInformation](https://developers.google.com/cast/docs/reference/web_receiver/cast.framework.messages.MediaInformation)
+  qualifies segment-format requirements as MPL-specific.
+  [Sender MediaInfo](https://developers.google.com/cast/docs/reference/web_sender/chrome.cast.media.MediaInfo)
+  exposes both format fields.
+- [libpgs](https://github.com/Arcus92/libpgs-js) / [package 0.9.0](https://registry.npmjs.org/libpgs/0.9.0)
+  confirm PGS scope; [JASSUB 2.5.16](https://registry.npmjs.org/jassub/2.5.16)
+  confirms the ASS pilot's package/license metadata.
+- [Jellyfin FFmpeg v8.1.3-1](https://github.com/jellyfin/jellyfin-ffmpeg/releases/tag/v8.1.3-1)
+  is published, resolving the original review's version uncertainty.
+- [FFmpeg n9.0 release tag](https://github.com/FFmpeg/FFmpeg/tree/n9.0)
+  exists. Still probe the exact installed encoder/options; release existence
+  does not establish host drivers, hardware, or subtitle support.
+
+Keep the original legal/distribution constraints and stable VLCKit policy.
+No license, optional renderer, or device support is established merely by a
+package version existing. See §2 for the acceptance required before adoption.
