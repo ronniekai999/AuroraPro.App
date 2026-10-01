@@ -912,13 +912,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
   const castPendingContentIdRef = useRef<string | null>(null)
   const castCommittedContentIdRef = useRef<string | null>(null)
-  // LOAD may ACK before CAF publishes the new media's clock. Sequence alone
-  // is insufficient: ANY_CHANGE also fires for volume and mute mutations.
-  // A receiver without contentId must deliver a changed clock at
-  // the requested start before its clock is paired with the new anchor.
-  const castAcknowledgedStatusRef = useRef<{
-    updateSeq: number; currentTime: number; requestedStartTime: number | null; clockAssociated: boolean
-  } | null>(null)
   const castOwnerProfileId = profileId ?? undefined
   const castOwnerBindingRef = useRef({ target, profileId: castOwnerProfileId })
   castOwnerBindingRef.current = { target, profileId: castOwnerProfileId }
@@ -1041,7 +1034,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadedMediaRef.current = null
     castPendingContentIdRef.current = null
     castCommittedContentIdRef.current = null
-    castAcknowledgedStatusRef.current = null
     castPendingOwnerRef.current = null
     castCommittedOwnerRef.current = null
     castTokenExpRef.current = 0
@@ -1393,7 +1385,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const failed = castFailedLoadRef.current
     if (!failed?.clockUncertain) return true
     if (!c.status.connected || c.status.settling) return false
-    const healthy = c.remote.isMediaLoaded &&
+    const healthy = c.remote.isMediaLoaded && c.remote.clockContentId === committedId &&
       (c.remote.playerState === 'PLAYING' || c.remote.playerState === 'PAUSED')
     if (healthy && c.remote.updateSeq > failed.updateSeq && c.remote.contentId === committedId) {
       failed.clockRecoverySeq = c.remote.updateSeq
@@ -1411,29 +1403,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castReceiverClockIsTrusted = useCallback((): boolean => {
     const c = castRef.current
     const remote = c.remote
-    const acknowledgedStatus = castAcknowledgedStatusRef.current
     if (!c.status.connected || c.status.settling || castStartSecRef.current === null ||
-      !castReceiverOwnsTarget() || !acknowledgedStatus || !remote.isMediaLoaded ||
+      !castReceiverOwnsTarget() || !remote.isMediaLoaded ||
       !Number.isFinite(remote.currentTime) || remote.currentTime < 0 ||
       (remote.playerState !== 'PLAYING' && remote.playerState !== 'PAUSED') ||
       !castReceiverIdentityIsTrusted()) return false
-    if (remote.contentId === castCommittedContentIdRef.current) {
-      // Strong media identity works even when its status arrived before ACK.
-      acknowledgedStatus.clockAssociated = true
-      return true
-    }
-    if (acknowledgedStatus.clockAssociated) return true
-    if (remote.updateSeq <= acknowledgedStatus.updateSeq ||
-      remote.currentTime === acknowledgedStatus.currentTime) return false
-    // A legacy receiver needs a clock witness near the requested LOAD start,
-    // rather than ordinary outgoing playback drift or an unrelated event.
-    // The fixed tolerance permits a few seconds of playback before delivery;
-    // elapsed settlement never widens it or blesses an unchanged snapshot.
-    const requested = acknowledgedStatus.requestedStartTime
-    if (requested === null || !Number.isFinite(requested) ||
-      Math.abs(remote.currentTime - requested) > 5) return false
-    acknowledgedStatus.clockAssociated = true
-    return true
+    // Only the SDK's same-Media URI/state/clock sample establishes this
+    // timeline. Separate RemotePlayer fields, sequence changes and a clock
+    // near the requested LOAD position cannot prove media association.
+    return Boolean(castCommittedContentIdRef.current &&
+      remote.clockContentId === castCommittedContentIdRef.current)
   }, [castReceiverIdentityIsTrusted, castReceiverOwnsTarget])
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
@@ -1452,15 +1431,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // epoch-gated below, so the old title cannot drive the new party.
         if (castPendingContentIdRef.current) {
           castCommittedContentIdRef.current = castPendingContentIdRef.current
-          const acknowledgedRemote = castRef.current.remote
-          castAcknowledgedStatusRef.current = {
-            updateSeq: acknowledgedRemote.updateSeq, currentTime: acknowledgedRemote.currentTime,
-            requestedStartTime: castPendingStartTimeRef.current,
-            clockAssociated: acknowledgedRemote.contentId === castPendingContentIdRef.current &&
-              acknowledgedRemote.isMediaLoaded && Number.isFinite(acknowledgedRemote.currentTime) &&
-              acknowledgedRemote.currentTime >= 0 &&
-              (acknowledgedRemote.playerState === 'PLAYING' || acknowledgedRemote.playerState === 'PAUSED'),
-          }
           castCommittedOwnerRef.current = castPendingOwnerRef.current
           if (castPendingTokenExpRef.current !== null) castTokenExpRef.current = castPendingTokenExpRef.current
         }
@@ -1947,6 +1917,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const contentId = c.remote.contentId
       const otherItem = Boolean(contentId && castCommittedContentIdRef.current &&
         contentId !== castCommittedContentIdRef.current)
+      // Late terminal events for an outgoing/rejected item cannot end the
+      // acknowledged replacement. A just-rejected attempted item can finish
+      // or be cancelled without completing/advancing the committed title.
+      if (otherItem && c.remote.playerState === 'IDLE') {
+        if (failed?.active && failed.recoverySeq === null &&
+          contentId === failed.contentId &&
+          (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED')) {
+          castHasPlayedRef.current = false
+          c.stop()
+        }
+        return
+      }
       // Recovery evidence may arrive during our load's settling window and
       // then go quiet. Retain it and recheck instead of requiring a new CAF
       // event after the deadline. A newer load failure replaces this latch.
@@ -1956,15 +1938,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       }
       if (failed && c.remote.playerState === 'IDLE') {
         const reason = c.remote.idleReason
-        // Comparing with the committed URI handles failed A, failed B, then
-        // late A without retaining an unbounded collection of failed URIs.
-        if (otherItem && reason !== 'CANCELLED') {
-          if (failed.active && failed.recoverySeq === null && contentId === failed.contentId && reason === 'FINISHED') {
-            castHasPlayedRef.current = false
-            c.stop()
-          }
-          return
-        }
         // FINISHED after an unacknowledged replacement is terminal, but it
         // cannot complete/advance the prior committed title. Explicit TV
         // cancellation remains actionable regardless of media identity.
@@ -1988,11 +1961,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // update. CAF variants without identity still recover through this
         // state transition; a successful LOAD also clears active uncertainty.
         if (failed?.clockUncertain && c.remote.isMediaLoaded &&
+          c.remote.clockContentId === castCommittedContentIdRef.current &&
           c.remote.updateSeq > failed.updateSeq && contentId === castCommittedContentIdRef.current) {
           failed.clockRecoverySeq = c.remote.updateSeq
         }
         if (failed?.active && c.remote.isMediaLoaded && c.remote.updateSeq > failed.updateSeq &&
-          (contentId === castCommittedContentIdRef.current ||
+          ((contentId === castCommittedContentIdRef.current && c.remote.clockContentId === contentId) ||
             (!contentId && failed.idleSeq !== null && c.remote.updateSeq > failed.idleSeq))) {
           failed.recoverySeq = c.remote.updateSeq
           if (castLoadIsSettling()) scheduleLoadSettleRecheck()
