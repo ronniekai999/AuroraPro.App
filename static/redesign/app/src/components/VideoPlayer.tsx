@@ -917,10 +917,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // token. The hook awaits this after the device picker resolves,
   // so a dismissed picker does not waste a token.
   //
-  // castTokenExpRef records the minted token's expiry (Unix seconds)
+  // castTokenExpRef records the acknowledged token's expiry (Unix seconds)
   // so resumeCast can tell when the URL the receiver holds has gone
   // stale during a long pause (see below).
   const castTokenExpRef = useRef(0)
+  const castPendingTokenExpRef = useRef<number | null>(null)
   // Which session the RECEIVER is streaming — usually a cast-safe clone the
   // server made of ours (CloneForCast clones for ANY subtitle track, so this
   // is the normal path), sometimes ours verbatim when no clone was needed.
@@ -950,6 +951,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
   const progressBindingRef = useRef({ target, profileId })
   progressBindingRef.current = { target, profileId }
+  const castProgressOwnerIsCurrent = (context: CastProgressContext | null): boolean => {
+    const { target: liveTarget, profileId: liveProfileId } = progressBindingRef.current
+    return !!context && !!liveTarget && context.target.mediaItemId === liveTarget.mediaItemId &&
+      context.target.fileId === liveTarget.fileId && context.target.fileType === liveTarget.fileType &&
+      context.target.episodeId === liveTarget.episodeId && context.profileId === (liveProfileId ?? undefined)
+  }
   // Progress describes what loadMedia acknowledged, independently of which
   // local target is currently being shown. A party retarget must not erase
   // the identity of an in-flight receiver load.
@@ -958,7 +965,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // A receiver LOAD can take effect even when its ACK times out. Keep the
   // outgoing identity/sample, but distrust subsequent clocks and FINISHED
   // until a later ACK or fresh media identity proves their association.
-  const castProgressFailureRef = useRef<{ updateSeq: number } | null>(null)
+  const castProgressFailureRef = useRef<{ updateSeq: number; healthyIdentitySeq?: number } | null>(null)
   const lastCastProgressRef = useRef<CastProgressSample | null>(null)
   const castProgressGenerationRef = useRef(0)
   const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -1017,8 +1024,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // "don't"; the display surfaces (the expanded transport bar and the
   // minimized widget) fall back to the raw receiver reading with an explicit
   // `??` so the guess is visible where it is made.
-  const recvToAbsSec = (recvSec: number): number | null =>
-    castStartSecRef.current === null ? null : Math.max(0, recvSec) + castStartSecRef.current
+  const recvToAbsSec = (recvSec: number): number | null => {
+    const anchor = castStartSecRef.current
+    if (anchor === null || !Number.isFinite(recvSec) || recvSec < 0 ||
+        !castProgressOwnerIsCurrent(castProgressContextRef.current) || !castReceiverClockIsTrusted()) return null
+    return recvSec + anchor
+  }
   // How many times this cast has been re-anchored (see castResyncAction), and
   // how many consecutive polls a correction has failed to land. Per-cast, not
   // per-load: a re-anchor is itself a load, so resetting on load would hand
@@ -1064,6 +1075,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadedMediaRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
+    castPendingTokenExpRef.current = null
+    castTokenExpRef.current = 0
     castProgressLoadRef.current = null
     castProgressContextRef.current = null
     castProgressFailureRef.current = null
@@ -1185,7 +1198,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         return null
       }
       castMintFailedRef.current = false
-      castTokenExpRef.current = direct.expires_at
+      castPendingTokenExpRef.current = direct.expires_at
       const contentUrl = absoluteUrl(direct.url)
       // Direct play has no `-ss` anchor at all: the file is served whole and
       // the receiver's clock IS the absolute source position. Recording 0
@@ -1236,7 +1249,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // lands somewhere its encoder will not reach for minutes (issue #172's
     // shape, reached from the other direction).
     const resp = await createCastToken(sid, { atSec: desiredAbsSec })
-    castTokenExpRef.current = resp.expires_at
+    castPendingTokenExpRef.current = resp.expires_at
     castSessionRef.current?.notePending(castSessionIdFromPlaylist(resp.playlist))
     castPendingMediaRef.current = { kind: 'session', sessionId: sid }
     // Defense-in-depth: confirm the server actually gave us a
@@ -1249,29 +1262,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // source rather than letting it propagate to the receiver.
     assertCastScopedToken(resp.token)
     const contentUrl = absoluteUrl(resp.playlist)
-    // The anchor of the session the receiver will actually stream. It is the
-    // LOCAL session's only when the server decided no clone was needed; a
-    // clone gets its own, near desiredAbsSec. A server that predates the field
-    // always shared the local session's domain, so that is the fallback.
-    const rawStartSec = resp.start_sec ?? (startSecRef.current ?? 0)
-    // Number.isFinite for the same reason partyTargetAbsSec carries one: NaN
-    // reads as in-tolerance to every downstream comparison, so a malformed
-    // anchor would silently report a converged receiver and let a host
-    // broadcast NaN as the party's position. Fall back to the local anchor,
-    // which is what a sender assumed before this field existed.
-    const castStartSec = Number.isFinite(rawStartSec)
-      ? Math.max(0, rawStartSec)
-      : Math.max(0, startSecRef.current ?? 0)
+    // Only a valid response anchor proves the receiver's source timeline.
+    // Older servers retain their legacy LOAD startTime fallback, but that
+    // guess cannot authorize later progress, relative seeks or party sync.
+    const castStartSec = typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0
+      ? resp.start_sec : null
     castPendingStartSecRef.current = castStartSec
-    // The legacy transport fallback above is not proof of the receiver's
-    // source anchor. Keep acknowledged media identity for FINISHED, while
-    // unknown/invalid anchors suspend receiver clock-based progress.
+    const loadStartSec = castStartSec ?? Math.max(0, startSecRef.current ?? 0)
+    // Media identity still authorizes explicit FINISHED with unknown clock.
     if (progressLoad) {
       progressLoad.context = {
         ...progressContext,
         contentId: contentUrl,
-        startSec: typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0
-          ? resp.start_sec : null,
+        startSec: castStartSec,
       }
     }
     castPendingEpochRef.current = loadEpoch
@@ -1293,7 +1296,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // by connecting and buffering forever rather than erroring. Adding the
       // anchor instead of subtracting it — the original #172 — does the same
       // thing for the same reason.
-      startTime: recordPendingStartTime(castAbsToReceiverSec(desiredAbsSec, castStartSec)),
+      startTime: recordPendingStartTime(castAbsToReceiverSec(desiredAbsSec, loadStartSec)),
     }
   }, [target])
   // Why the current target cannot be cast, or null if it can (issue #503).
@@ -1415,6 +1418,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const progressLoad = { context: null as CastProgressContext | null }
       const progressGeneration = castProgressGenerationRef.current
       castProgressLoadRef.current = progressLoad
+      castPendingTokenExpRef.current = null
       castLoadsInFlightRef.current += 1
       try {
         await op()
@@ -1432,6 +1436,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         castProgressFailureRef.current = null
         lastCastProgressRef.current = null
         castProgressGenerationRef.current += 1
+        // A failed mint/LOAD must leave the expiry of the receiver's actual
+        // acknowledged URL intact, so an expired outgoing URL remains retryable.
+        if (castPendingTokenExpRef.current !== null) castTokenExpRef.current = castPendingTokenExpRef.current
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
         // this media. A getter that ran but whose load then failed must not
@@ -1493,6 +1500,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // pending media the getter did not anchor, which is the exact failure
         // the nullable design exists to prevent.
         castPendingStartSecRef.current = null
+        castPendingTokenExpRef.current = null
         if (castProgressLoadRef.current === progressLoad) castProgressLoadRef.current = null
       }
     })
@@ -1509,21 +1517,36 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (context.contentId && c.remote.contentId && c.remote.contentId !== context.contentId) return false
     const failure = castProgressFailureRef.current
     if (!failure) return true
+    const healthyIdentity = c.remote.updateSeq > failure.updateSeq && !!context.contentId && c.remote.contentId === context.contentId &&
+      c.remote.isMediaLoaded && (c.remote.playerState === 'PLAYING' || c.remote.playerState === 'PAUSED')
+    // Capture positive evidence even during settlement. A rapid FINISHED
+    // can follow this loaded state before actions are allowed again.
+    if (healthyIdentity) failure.healthyIdentitySeq = c.remote.updateSeq
     if (!c.status.connected || c.status.settling || castLoadIsSettling()) return false
-    if (c.remote.updateSeq <= failure.updateSeq || !context.contentId || c.remote.contentId !== context.contentId) return false
-    castProgressFailureRef.current = null
-    return true
+    if (healthyIdentity) {
+      castProgressFailureRef.current = null
+      return true
+    }
+    // This proves a terminal media identity, not a usable receiver clock.
+    // IDLE/unloaded/error metadata alone can never recover a failed LOAD.
+    return failure.healthyIdentitySeq !== undefined && c.remote.updateSeq > failure.healthyIdentitySeq &&
+      c.remote.contentId === context.contentId && c.remote.playerState === 'IDLE' && c.remote.idleReason === 'FINISHED'
+  }
+  const castReceiverClockIsTrusted = (): boolean => {
+    const context = castProgressContextRef.current
+    const c = castRef.current
+    return !!context && context.startSec !== null && Number.isFinite(context.startSec) && context.startSec >= 0 &&
+      c.status.connected && !c.status.settling && castLoadsInFlightRef.current === 0 && c.remote.isMediaLoaded &&
+      c.remote.playerState !== 'IDLE' && Number.isFinite(c.remote.currentTime) && c.remote.currentTime >= 0 &&
+      castProgressIdentityIsTrusted()
   }
   const snapshotCastProgress = (): CastProgressSample | null => {
     const c = castRef.current
     const context = castProgressContextRef.current
     if (!context || context.startSec === null || !c.status.connected || c.status.settling || castLoadIsSettling()) return null
-    if (!castProgressIdentityIsTrusted()) return null
-    if (!Number.isFinite(c.remote.currentTime) || c.remote.currentTime < 0) return null
-    if (!c.remote.isMediaLoaded && c.remote.playerState !== 'IDLE') return null
-    // IDLE often clears currentTime. Preserve the last position unless CAF
-    // positively says FINISHED, whose explicit completion write is below.
-    if (c.remote.playerState === 'IDLE') return lastCastProgressRef.current
+    if (!castReceiverClockIsTrusted()) return null
+    // IDLE/unloaded readings are declined by the clock gate. Stop and
+    // FINISHED flush the last trusted sample or explicit completion below.
     return { context, positionSec: c.remote.currentTime + context.startSec }
   }
   const writeProgress = (sample: CastProgressSample, completed = false): Promise<void> => {
@@ -1581,6 +1604,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castRef.current.stop()
   }
   useEffect(() => {
+    castProgressIdentityIsTrusted()
     const sample = snapshotCastProgress()
     if (sample) lastCastProgressRef.current = sample
     // All bindings are acknowledged-load refs, not the currently rendered
@@ -1611,7 +1635,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return true
   }
   const castResumeAbsSec = (): number | null => {
-    if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) {
+    const receiverAbsSec = recvToAbsSec(castRef.current.remote.currentTime)
+    if (receiverAbsSec !== null) return receiverAbsSec
+    if (partyControlsMediaRef.current) {
       // Retrying a failed party LOAD must follow the canonical room, never
       // the receiver clock whose media/anchor association is still unknown.
       const p = partySyncRef.current
@@ -1619,7 +1645,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (!p || !liveTarget || isPartyEpisodeMismatch(p.partyEpisodeId, liveTarget.episodeId)) return null
       return partyTargetAbsSec(p.tickRef.current, p.isPlaying, p.clockOffsetRef?.current ?? 0, Date.now())
     }
-    return recvToAbsSec(castRef.current.remote.currentTime)
+    // Solo retry may use the last proven source sample, but only for the
+    // same acknowledged media and currently selected profile. Retargeting
+    // must not apply an outgoing title's resume point to a new load getter.
+    const sample = lastCastProgressRef.current
+    if (!sample || sample.context !== castProgressContextRef.current || !castProgressOwnerIsCurrent(sample.context) ||
+        !Number.isFinite(sample.positionSec) || sample.positionSec < 0) return null
+    return sample.positionSec
   }
   const resumeCast = () => {
     if (cast.remote.isPaused && isCastTokenExpired()) {
@@ -1649,11 +1681,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // `targetRecvSec` is on the RECEIVER's clock, like everything that reads
   // cast.remote.currentTime; the renewal path converts before delegating.
   const seekCastSafely = (targetRecvSec: number) => {
+    if (!castReceiverClockIsTrusted() || !castProgressOwnerIsCurrent(castProgressContextRef.current) ||
+        castStartSecRef.current === null || !Number.isFinite(targetRecvSec) || targetRecvSec < 0) return
     if (isCastTokenExpired()) {
       const atAbsSec = recvToAbsSec(targetRecvSec)
-      // Same reasoning as resumeCast: with no anchor there is no correct
-      // position to re-mint at, so issue the raw seek rather than reload
-      // somewhere invented.
       if (atAbsSec !== null) { reloadCastAtAbsSec(atAbsSec); return }
     }
     castRef.current.seek(targetRecvSec)
@@ -2026,14 +2057,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             const generation = castProgressGenerationRef.current
             const endedContext = castProgressContextRef.current
             await flushCastProgress(reason === 'FINISHED')
-            const liveTarget = progressBindingRef.current.target
             if (generation !== castProgressGenerationRef.current || !castRef.current.status.connected || !castProgressIdentityIsTrusted()) return
             // Never advance the local next episode when the receiver finished
             // a prior item (a party retarget or a load that has not landed).
-            if (!endedContext || !liveTarget ||
-                endedContext.target.fileId !== liveTarget.fileId ||
-                endedContext.target.fileType !== liveTarget.fileType ||
-                endedContext.target.episodeId !== liveTarget.episodeId) {
+            if (!castProgressOwnerIsCurrent(endedContext)) {
               castAdvancePendingRef.current = false
               c.stop()
               return
@@ -4745,7 +4772,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // which is the #172 hang this machinery exists to close, produced by the
       // machinery itself. 'correcting' rather than 'blocked': nothing is
       // wrong, we are simply mid-move.
-      if (castLoadsInFlightRef.current > 0 || !castProgressIdentityIsTrusted()) return 'correcting'
+      if (!castReceiverClockIsTrusted() || !castProgressOwnerIsCurrent(castProgressContextRef.current) || castStartSecRef.current === null) return 'correcting'
       const decision = castResyncAction({
         receiverSec,
         targetAbsSec,
@@ -4802,7 +4829,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // refresh()) — c.remote is frozen at its pre-blip reading, not
         // live. Corrective actions here (party position broadcasts) must
         // wait for it to resolve rather than react to stale data.
-        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castProgressIdentityIsTrusted()) {
+        if (!castReceiverClockIsTrusted() || !castProgressOwnerIsCurrent(castProgressContextRef.current) || castStartSecRef.current === null) {
           hostWasGatedRef.current = true
           // Distinguish WHY we are gated. A settling blip (a Wi-Fi hiccup, a
           // disconnect debounce) leaves the receiver on the same media at the
@@ -5049,7 +5076,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // (including currentTime, which the drift check below compares
       // against the party's continuously-advancing server position) is
       // frozen and stale while a disconnect is pending confirmation.
-      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castProgressIdentityIsTrusted()) {
+      if (!castReceiverClockIsTrusted() || !castProgressOwnerIsCurrent(castProgressContextRef.current) || castStartSecRef.current === null) {
         guestWasGatedRef.current = true
         return
       }
@@ -5539,7 +5566,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // receiver actually took (castLoadedMediaRef, promoted only by a
       // resolved loadMedia) rather than inferring it. Anything else falls
       // through to the rebuild below, which re-points the receiver properly.
-      if (castLoadedIsDirectFor(castLoadedMediaRef.current, target)) {
+      if (castLoadedIsDirectFor(castLoadedMediaRef.current, target) && castReceiverClockIsTrusted() && castProgressOwnerIsCurrent(castProgressContextRef.current)) {
         broadcastHostPartySeek()
         // targetSec is ABSOLUTE and seekCastSafely takes RECEIVER seconds; the
         // two coincide here and only here. castLoadedIsDirectFor is true only
@@ -5761,7 +5788,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // rather than scrub somewhere invented.
           const delta = e.key === 'ArrowLeft' ? -10 : 10
           if (castConnectedNow) {
-            if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) break
             const baseAbsSec = recvToAbsSec(c.remote.currentTime)
             if (baseAbsSec !== null) seekToRealSecRef.current(baseAbsSec + delta)
             break
@@ -7039,7 +7065,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   // them costs. A cast whose anchor we don't know has no
                   // correct target, so the control no-ops rather than guess.
                   if (cast.status.connected) {
-                    if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) return
                     const baseAbsSec = recvToAbsSec(cast.remote.currentTime)
                     if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
                     return

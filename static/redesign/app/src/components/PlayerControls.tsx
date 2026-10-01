@@ -253,13 +253,20 @@ export function PlayerControls(props: PlayerControlsProps) {
                 e.stopPropagation()
                 onSeek(Math.min(durationSec, Math.max(0, sec)))
               }
+              const relative = (deltaSec: number) => {
+                e.preventDefault()
+                e.stopPropagation()
+                // Let the active transport convert its own trusted clock.
+                // Display seconds may be only a raw receiver fallback.
+                onSeekRelative(Math.min(durationSec, Math.max(0, displaySec + deltaSec)) - displaySec)
+              }
               switch (e.key) {
-                case 'ArrowLeft': abs(displaySec - 10); break
-                case 'ArrowRight': abs(displaySec + 10); break
+                case 'ArrowLeft': relative(-10); break
+                case 'ArrowRight': relative(10); break
                 // PageUp/PageDown are the APG "large step". A minute matches
                 // the ±10s arrows' ratio to a typical 45-90 minute runtime.
-                case 'PageDown': abs(displaySec - 60); break
-                case 'PageUp': abs(displaySec + 60); break
+                case 'PageDown': relative(-60); break
+                case 'PageUp': relative(60); break
                 case 'Home': abs(0); break
                 case 'End': abs(durationSec); break
               }

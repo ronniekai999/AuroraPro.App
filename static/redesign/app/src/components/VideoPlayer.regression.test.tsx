@@ -163,6 +163,22 @@ describe('WEB regressions through the real VideoPlayer', () => {
     finalWrite.resolve(); await settle(); expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
   })
 
+  it.each(['with FINISHED', 'during the completion write'])('saves outgoing completion without advancing a newly selected profile changed %s', async timing => {
+    const ended = vi.fn(() => false)
+    const element = (profileId: number) => <VideoPlayer target={movie} profileId={profileId} onClose={() => {}} onEnded={ended} />
+    const view = render(element(7)); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element(7)); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    const finalWrite = deferred<void>()
+    vi.mocked(reportProgress).mockImplementation(() => finalWrite.promise)
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0, updateSeq: 1 })
+    view.rerender(element(timing === 'with FINISHED' ? 9 : 7)); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
+    if (timing === 'during the completion write') { view.rerender(element(9)); await settle() }
+    finalWrite.resolve(); await settle()
+    expect(ended).not.toHaveBeenCalled(); expect(fake.cast.stop).toHaveBeenCalledOnce()
+    expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 9 }), expect.anything())
+  })
+
   it('explicitly marks FINISHED watched when source duration is unknown', async () => {
     vi.mocked(getStreamInfo).mockResolvedValue(info('transcode', 0) as Awaited<ReturnType<typeof getStreamInfo>>)
     const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} />
@@ -447,8 +463,8 @@ describe('Second independent adversarial review', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
     expect(loaded).toEqual(expect.objectContaining({ startTime: 90 }))
   })
-  it('saves FINISHED completion even when the acknowledged response omitted its anchor', async () => {
-    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+  it.each([undefined, NaN, -5])('saves explicit FINISHED completion with acknowledged but unproven anchor %s', async start_sec => {
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec })
     const ended = vi.fn(() => false)
     const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} onEnded={ended} />
     const view = render(element()); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
@@ -541,7 +557,8 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
   async function renew(failure: 'receiver' | 'mint' = 'receiver') {
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: firstURL, token, expires_at: 1, start_sec: 100 })
     const ended = vi.fn(() => false)
-    const element = (target: PlayTarget = oldEpisode, profileId = 7) => <VideoPlayer target={target} profileId={profileId} onClose={() => {}} onEnded={ended} />
+    const seek = vi.fn()
+    const element = (target: PlayTarget = oldEpisode, profileId = 7) => <VideoPlayer target={target} profileId={profileId} onClose={() => {}} onEnded={ended} onSeekRebuild={seek} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
     view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
@@ -563,7 +580,7 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
     view.rerender(element()); await settle()
     expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: 600000, episode_id: 11, profile_id: 7 }), expect.any(AbortSignal))
     vi.mocked(reportProgress).mockClear()
-    return { view, element, ended }
+    return { view, element, ended, seek }
   }
 
   it('does not apply a previous acknowledged anchor after a receiver LOAD timeout changed its clock', async () => {
@@ -606,10 +623,26 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
   })
 
   it('keeps the old clock valid when a token mint fails before receiver LOAD', async () => {
-    const { view, element } = await renew('mint')
+    const { view, element, seek } = await renew('mint')
     Object.assign(fake.cast.remote, { currentTime: 510, updateSeq: 2 }); view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, episode_id: 11, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(seek).toHaveBeenCalledWith(620)
+  })
+
+  it('retains loaded exact-URI identity evidence during settlement for a quiet later FINISHED', async () => {
+    const { view, element, ended } = await renew()
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 510, playerState: 'PLAYING', isMediaLoaded: true, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 0, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    expect(ended).not.toHaveBeenCalled()
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 7, episode_id: 11 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce()
   })
 
   it('restores progress and FINISHED after fresh identity proves the acknowledged media survived', async () => {
@@ -715,7 +748,10 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
     Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, updateSeq: 5 }); view.rerender(element()); await settle()
     await poll(4)
-    expect(fake.cast.seek).toHaveBeenCalledWith(601)
+    // The failed LOAD's fresh token was never acknowledged; the outgoing
+    // URL is still expired, so this safe correction renews at canonical701.
+    expect(fake.cast.loadCurrent).toHaveBeenCalledWith(701)
+    expect(fake.cast.seek).not.toHaveBeenCalled()
   })
 
   it('does not renew from the failed receiver clock on keyboard resume when no party tick is available', async () => {
@@ -727,5 +763,173 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
     expect(fake.cast.playOrPause).toHaveBeenCalledOnce()
     expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestPlay).not.toHaveBeenCalled()
+  })
+})
+
+describe('Receiver clock proof for relative actions and resume', () => {
+  const token = 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x'
+  const oldURL = 'http://localhost:3000/api/stream/hls/solo-old/master.m3u8?token=cast'
+  async function failedSoloLoad(failedTokenExpiry = 1, armEnd = true) {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const seek = vi.fn()
+    const ended = vi.fn(() => false)
+    const element = (selectedTarget = target, profileId = 7) => <VideoPlayer target={selectedTarget} profileId={profileId} onClose={() => {}} onSeekRebuild={seek} onEnded={ended} />
+    if (!armEnd) fake.cast.remote.playerState = 'PAUSED'
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/solo-old/master.m3u8?token=cast', token, expires_at: 1, start_sec: 100 })
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 500, isPaused: true, updateSeq: 1 })
+    view.rerender(element()); await settle()
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/solo-failed/master.m3u8?token=cast', token, expires_at: failedTokenExpiry, start_sec: 580 })
+    fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
+      const loaded = await fake.getter?.(at) as { contentUrl: string; startTime: number }
+      expect(at).toBe(600); expect(loaded.startTime).toBe(20)
+      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, currentTime: 20, isPaused: false, playerState: armEnd ? 'PLAYING' : 'BUFFERING', updateSeq: 2 })
+      throw new CastMediaLoadError('LOAD timed out after receiver replaced the media', loaded.contentUrl)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    fake.cast.loadCurrent.mockClear(); seek.mockClear()
+    return { view, element, seek, target, ended }
+  }
+  it.each(['button', 'keyboard', 'slider arrow', 'slider page'])('declines an unacknowledged solo receiver clock for a relative %s seek', async mode => {
+    const { seek } = await failedSoloLoad()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+    else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
+    else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: mode === 'slider arrow' ? 'ArrowRight' : 'PageUp' })
+    await settle()
+    expect(seek).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+  })
+  it.each(['button', 'keyboard'])('retries an expired solo URL at its bound trusted source position on %s resume', async mode => {
+    // A freshly minted token whose receiver LOAD failed cannot mask the
+    // expiry of the outgoing acknowledged URL.
+    const { view, element } = await failedSoloLoad(9999999999)
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 3 }); view.rerender(element()); await settle()
+    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Play' }))
+    else {
+      fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+      fireEvent.keyDown(document, { key: 'k' })
+    }
+    await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledOnce()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledWith(600)
+  })
+  it.each(['target', 'profile'])('declines a cached solo resume point after the selected %s changes', async changed => {
+    const { view, element, target } = await failedSoloLoad()
+    const selectedTarget = changed === 'target' ? { ...target, fileId: 20, mediaItemId: 2 } : target
+    const selectedProfile = changed === 'profile' ? 9 : 7
+    view.rerender(element(selectedTarget, selectedProfile)); await bootHls()
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 3 }); view.rerender(element(selectedTarget, selectedProfile)); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).toHaveBeenCalledOnce()
+  })
+  it.each(['button', 'keyboard', 'slider arrow', 'slider page'])('restores the proven source clock for a relative %s seek after healthy identity recovery', async mode => {
+    const { view, element, seek } = await failedSoloLoad()
+    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+    else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
+    else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: mode === 'slider arrow' ? 'ArrowRight' : 'PageUp' })
+    await settle()
+    expect(seek).toHaveBeenCalledOnce(); expect(seek).toHaveBeenCalledWith(mode === 'slider page' ? 670 : 620)
+  })
+  it('keeps unloaded matching-URI IDLE/error and later identity-less PAUSED clocks untrusted', async () => {
+    // A receiver joined directly in PAUSED has not armed automatic end-of-media
+    // handling. This exercises progress/action proof independently of Stop.
+    const { view, element, seek } = await failedSoloLoad(9999999999, false)
+    vi.mocked(reportProgress).mockClear()
+    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 20, playerState: 'IDLE', idleReason: 'ERROR', isMediaLoaded: false, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { contentId: null, currentTime: 25, playerState: 'PAUSED', idleReason: null, isMediaLoaded: true, isPaused: true, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(seek).not.toHaveBeenCalled()
+    // A fresh loaded, exact-URI healthy snapshot restores both progress and actions.
+    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(seek).toHaveBeenCalledWith(620)
+  })
+  it.each([undefined, NaN, -5])('does not authorize party relative seeks with an acknowledged but unproven start_sec=%s', async anchor => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const party: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: false, rev: 1, hlsStartSec: 0, tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() } }, seekRef: { current: null }, helloAbsMsRef: { current: 600000 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+    const seek = vi.fn()
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/unknown-anchor/master.m3u8?token=cast', token, expires_at: 9999999999, start_sec: anchor })
+    const element = () => <VideoPlayer target={target} profileId={7} party={party} onClose={() => {}} onSeekRebuild={seek} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-anchor/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'PageUp' }); await settle()
+    expect(seek).not.toHaveBeenCalled()
+    expect(party.requestSeek).not.toHaveBeenCalled()
+  })
+  it.each([undefined, NaN, -5])('declines solo relative buttons, keyboard and slider actions with unproven anchor %s', async start_sec => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const seek = vi.fn()
+    const element = () => <VideoPlayer target={target} profileId={7} onClose={() => {}} onSeekRebuild={seek} />
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/solo-unknown/master.m3u8?token=cast', token, expires_at: 9999999999, start_sec })
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/solo-unknown/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'ArrowRight' }); await settle()
+    expect(seek).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+  })
+  it.each([undefined, NaN, -5].flatMap(anchor => [false, true].map(inParty => ({ anchor, inParty }))))('resumes with unproven anchor $anchor only from a canonical party when inParty=$inParty', async ({ anchor, inParty }) => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const party: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: false, rev: 1, hlsStartSec: 0, tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() } }, seekRef: { current: null }, helloAbsMsRef: { current: 600000 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+    const firstURL = 'http://localhost:3000/api/stream/hls/resume-unknown/master.m3u8?token=cast'
+    const retryURL = 'http://localhost:3000/api/stream/hls/resume-proven/master.m3u8?token=cast'
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: firstURL, token, expires_at: 1, start_sec: anchor })
+    const element = () => <VideoPlayer target={target} profileId={7} party={inParty ? party : undefined} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, isPaused: true, playerState: 'PAUSED', updateSeq: 1 })
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    if (inParty) vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    if (!inParty) {
+      expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).toHaveBeenCalledOnce()
+    } else {
+      expect(fake.cast.loadCurrent).toHaveBeenCalledWith(600)
+      Object.assign(fake.cast.remote, { contentId: retryURL, currentTime: 15, isPaused: false, playerState: 'PLAYING', updateSeq: 2 })
+      view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+      expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 605000, profile_id: 7 }), expect.any(AbortSignal))
+    }
+  })
+})
+
+describe('Party polling with an unproven receiver anchor', () => {
+  it.each([undefined, NaN, -5].flatMap(anchor => [true, false].map(isHost => ({ anchor, isHost }))))('declines host/guest clock conversions for isHost=$isHost with acknowledged anchor $anchor', async ({ anchor, isHost }) => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const party: PartySync = { isHost, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() } }, seekRef: { current: null }, helloAbsMsRef: { current: 600000 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/unknown-poll-anchor/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: anchor })
+    const element = () => <VideoPlayer target={target} profileId={7} party={party} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-poll-anchor/master.m3u8?token=cast', currentTime: 20, isPaused: false, updateSeq: 1 })
+    view.rerender(element()); await settle()
+    for (let i = 0; i < 3; i++) {
+      party.tickRef.current = { abs_ms: 600000, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() }
+      await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+    }
+    expect(fake.cast.seek).not.toHaveBeenCalled()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled()
   })
 })
