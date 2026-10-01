@@ -385,6 +385,8 @@ export function useCast(
     session: CastSessionInstance
     contentId: string
     outgoing: MediaGeneration | null
+    previousAcknowledged: MediaGeneration | null
+    acknowledged: boolean
     current: MediaGeneration | null
   } | null>(null)
   const rejectedMediaLoadRef = useRef<{
@@ -405,6 +407,7 @@ export function useCast(
     if (contentId !== association.contentId) return true
     if (association.current) return sameMediaGeneration(association.current, generation)
     if (association.outgoing && sameMediaGeneration(association.outgoing, generation)) return false
+    if (association.previousAcknowledged && sameMediaGeneration(association.previousAcknowledged, generation)) return false
     const retired = retiredMediaRef.current.get(generation.media)
     if (retired?.session === session && retired.id === generation.id) return false
     if (generation.id !== null && retiredMediaIdsRef.current?.session === session &&
@@ -1076,6 +1079,13 @@ export function useCast(
       session,
       contentId: load.contentUrl,
       outgoing: outgoingMedia ? mediaGeneration(outgoingMedia) : null,
+      // After a rejected LOAD the TV may still expose its failed generation,
+      // while our committed association owns a different Media. Neither can
+      // prove this retry's new media, including before its ACK. This exclusion
+      // is temporary until success so a rejected retry can recover the old ACK.
+      previousAcknowledged: previousAssociation?.session === session && previousAssociation.acknowledged
+        ? previousAssociation.current : null,
+      acknowledged: false,
       current: null as MediaGeneration | null,
     }
     rejectedMediaLoadRef.current = null
@@ -1083,8 +1093,10 @@ export function useCast(
     sampleRemoteRef.current?.()
     try {
       await session.loadMedia(request)
-      if (mediaLoadAssociationRef.current === association && association.outgoing) {
-        retireMediaGeneration(session, association.outgoing)
+      if (mediaLoadAssociationRef.current === association) {
+        association.acknowledged = true
+        if (association.outgoing) retireMediaGeneration(session, association.outgoing)
+        if (association.previousAcknowledged) retireMediaGeneration(session, association.previousAcknowledged)
       }
       sampleRemoteRef.current?.()
       // eslint-disable-next-line no-console
