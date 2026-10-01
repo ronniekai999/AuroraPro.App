@@ -318,8 +318,14 @@ func (f mediaFixture) generate(outPath string) error {
 	case "libx265":
 		// x265 takes its keyframe interval through the param blob, and prints
 		// a banner per run without log-level:none.
-		args = append(args, "-x265-params",
-			fmt.Sprintf("keyint=%d:min-keyint=%d:scenecut=0:log-level=none", f.GOP, f.GOP))
+		params := fmt.Sprintf("keyint=%d:min-keyint=%d:scenecut=0:log-level=none", f.GOP, f.GOP)
+		if f.HDR {
+			// Set encoder VUI too: with some libx265 builds the CLI colour
+			// flags alone leave decoded frames' primaries/transfer unknown,
+			// so zscale cannot transform this purported HDR fixture.
+			params += ":colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"
+		}
+		args = append(args, "-x265-params", params)
 		args = append(args, "-tag:v", "hvc1")
 	case "libsvtav1":
 		// Preset 12 is SVT-AV1's fastest; fixtures are about existing, not
@@ -382,14 +388,16 @@ func (f mediaFixture) writeSidecar(outPath string) (string, error) {
 
 // probedStream is the subset of ffprobe's stream output the matrix asserts on.
 type probedStream struct {
-	CodecName     string
-	CodecType     string
-	PixFmt        string
-	ColorTransfer string
-	Width         int
-	Height        int
-	Channels      int
-	Profile       string
+	CodecName      string
+	CodecType      string
+	PixFmt         string
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	Width          int
+	Height         int
+	Channels       int
+	Profile        string
 }
 
 // probeStreams runs ffprobe and returns every stream in the file.
@@ -402,14 +410,16 @@ func probeStreams(t *testing.T, path string) []probedStream {
 	}
 	var parsed struct {
 		Streams []struct {
-			CodecName     string `json:"codec_name"`
-			CodecType     string `json:"codec_type"`
-			PixFmt        string `json:"pix_fmt"`
-			ColorTransfer string `json:"color_transfer"`
-			Width         int    `json:"width"`
-			Height        int    `json:"height"`
-			Channels      int    `json:"channels"`
-			Profile       string `json:"profile"`
+			CodecName      string `json:"codec_name"`
+			CodecType      string `json:"codec_type"`
+			PixFmt         string `json:"pix_fmt"`
+			ColorTransfer  string `json:"color_transfer"`
+			ColorPrimaries string `json:"color_primaries"`
+			ColorSpace     string `json:"color_space"`
+			Width          int    `json:"width"`
+			Height         int    `json:"height"`
+			Channels       int    `json:"channels"`
+			Profile        string `json:"profile"`
 		} `json:"streams"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
@@ -418,17 +428,39 @@ func probeStreams(t *testing.T, path string) []probedStream {
 	streams := make([]probedStream, 0, len(parsed.Streams))
 	for _, s := range parsed.Streams {
 		streams = append(streams, probedStream{
-			CodecName:     s.CodecName,
-			CodecType:     s.CodecType,
-			PixFmt:        s.PixFmt,
-			ColorTransfer: s.ColorTransfer,
-			Width:         s.Width,
-			Height:        s.Height,
-			Channels:      s.Channels,
-			Profile:       s.Profile,
+			CodecName:      s.CodecName,
+			CodecType:      s.CodecType,
+			PixFmt:         s.PixFmt,
+			ColorTransfer:  s.ColorTransfer,
+			ColorPrimaries: s.ColorPrimaries,
+			ColorSpace:     s.ColorSpace,
+			Width:          s.Width,
+			Height:         s.Height,
+			Channels:       s.Channels,
+			Profile:        s.Profile,
 		})
 	}
 	return streams
+}
+
+func TestMediaFixture_HDRSignallingInBitstream(t *testing.T) {
+	path := (mediaFixture{VideoCodec: "hevc", PixFmt: "yuv420p10le", HDR: true}).build(t)
+	// Strip container metadata. These must be HEVC SPS/VUI attributes, since
+	// the tonemap filter sees decoded frames rather than MP4/MKV colour tags.
+	raw := filepath.Join(t.TempDir(), "hdr.hevc")
+	out, err := exec.Command("ffmpeg", "-v", "error", "-i", path,
+		"-map", "0:v:0", "-c:v", "copy", "-f", "hevc", raw).CombinedOutput()
+	if err != nil {
+		t.Fatalf("extract HDR bitstream: %v\n%s", err, out)
+	}
+	streams := probeStreams(t, raw)
+	if len(streams) != 1 {
+		t.Fatalf("HDR bitstream has %d streams, want one", len(streams))
+	}
+	got := streams[0]
+	if got.ColorPrimaries != "bt2020" || got.ColorTransfer != "smpte2084" || got.ColorSpace != "bt2020nc" {
+		t.Fatalf("HDR fixture lacks BT.2020/PQ VUI: %+v", got)
+	}
 }
 
 // probeFormatName returns ffprobe's format_name for a file (e.g.
