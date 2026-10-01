@@ -641,3 +641,91 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 605000, episode_id: 11, profile_id: 7 }), expect.any(AbortSignal))
   })
 })
+
+describe('Party casting ignores an unacknowledged receiver clock', () => {
+  const token = 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x'
+  const firstURL = 'http://localhost:3000/api/stream/hls/party-first/master.m3u8?token=cast'
+  async function rejectPartyLoad(isHost: boolean) {
+    const party: PartySync = {
+      isHost, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null,
+      isPlaying: !isHost, rev: 1, hlsStartSec: 0,
+      tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() } },
+      seekRef: { current: null }, helloAbsMsRef: { current: 600000 },
+      requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn(),
+    }
+    const onSeek = vi.fn()
+    const element = () => <VideoPlayer target={movie} profileId={7} party={party} onClose={() => {}} onSeekRebuild={onSeek} />
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: firstURL, token, expires_at: 1, start_sec: 100 })
+    fake.cast.start.mockImplementation(async () => {
+      await fake.getter?.()
+      Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, isPaused: isHost, updateSeq: 1 })
+      fake.cast.status.connected = true
+    })
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 2 }); view.rerender(element()); await settle()
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/party-failed/master.m3u8?token=cast', token, expires_at: isHost ? 1 : 9999999999, start_sec: 580 })
+    fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
+      const loaded = await fake.getter?.(at) as { contentUrl: string; startTime: number }
+      expect(loaded.startTime).toBe(20)
+      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, currentTime: 20, isPaused: false, updateSeq: 3 })
+      throw new CastMediaLoadError('receiver LOAD timed out', loaded.contentUrl)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    view.rerender(element()); await settle()
+    vi.mocked(party.requestPlay).mockClear(); vi.mocked(party.requestPause).mockClear(); vi.mocked(party.requestSeek).mockClear()
+    fake.cast.seek.mockClear(); fake.cast.playOrPause.mockClear(); fake.cast.loadCurrent.mockClear()
+    return { party, onSeek, element, view }
+  }
+
+  it('keeps host canonical position and relative controls quiet until a safe party retry ACK', async () => {
+    const { party, onSeek, view, element } = await rejectPartyLoad(true)
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestPlay).not.toHaveBeenCalled()
+    expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); fireEvent.keyDown(document, { key: 'ArrowRight' }); await settle()
+    expect(onSeek).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 4 }); view.rerender(element()); await settle()
+    const retryURL = 'http://localhost:3000/api/stream/hls/party-retry/master.m3u8?token=cast'
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenLastCalledWith(600)
+    Object.assign(fake.cast.remote, { contentId: retryURL, currentTime: 10, isPaused: true, updateSeq: 5 }); view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(4000) }); await settle()
+    vi.mocked(party.requestPause).mockClear()
+    Object.assign(fake.cast.remote, { currentTime: 20, updateSeq: 6 }); view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+    expect(party.requestPause).toHaveBeenCalledWith(610000)
+  })
+
+  it('keeps guest drift/mirror corrections quiet until fresh acknowledged identity returns', async () => {
+    const { party, view, element } = await rejectPartyLoad(false)
+    const poll = async (count: number) => {
+      for (let i = 0; i < count; i++) {
+        party.tickRef.current = { abs_ms: 700000, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() }
+        await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+      }
+    }
+    await poll(10)
+    expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: null, currentTime: 25, updateSeq: 4 }); view.rerender(element()); await settle()
+    await poll(3)
+    expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, updateSeq: 5 }); view.rerender(element()); await settle()
+    await poll(4)
+    expect(fake.cast.seek).toHaveBeenCalledWith(601)
+  })
+
+  it('does not renew from the failed receiver clock on keyboard resume when no party tick is available', async () => {
+    const { party, view, element } = await rejectPartyLoad(true)
+    party.tickRef.current = null
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 4 }); view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.keyDown(document, { key: 'k' }); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    expect(fake.cast.playOrPause).toHaveBeenCalledOnce()
+    expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestPlay).not.toHaveBeenCalled()
+  })
+})

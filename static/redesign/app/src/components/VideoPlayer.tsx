@@ -1610,13 +1610,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       .finally(() => { castReloadInFlightRef.current = false })
     return true
   }
+  const castResumeAbsSec = (): number | null => {
+    if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) {
+      // Retrying a failed party LOAD must follow the canonical room, never
+      // the receiver clock whose media/anchor association is still unknown.
+      const p = partySyncRef.current
+      const liveTarget = progressBindingRef.current.target
+      if (!p || !liveTarget || isPartyEpisodeMismatch(p.partyEpisodeId, liveTarget.episodeId)) return null
+      return partyTargetAbsSec(p.tickRef.current, p.isPlaying, p.clockOffsetRef?.current ?? 0, Date.now())
+    }
+    return recvToAbsSec(castRef.current.remote.currentTime)
+  }
   const resumeCast = () => {
     if (cast.remote.isPaused && isCastTokenExpired()) {
       // Unknown anchor: a reload would have to guess where to resume, and
       // guessing wrong on a renewal restarts the film somewhere else. Fall
       // through to a plain resume, which at worst 401s the way it did before
       // the renewal path existed.
-      const atAbsSec = recvToAbsSec(cast.remote.currentTime)
+      const atAbsSec = castResumeAbsSec()
       if (atAbsSec !== null) {
         // A renewal re-mints, and the server re-anchors the clone near the
         // requested position — so the receiver's own clock jumps for the same
@@ -4734,7 +4745,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // which is the #172 hang this machinery exists to close, produced by the
       // machinery itself. 'correcting' rather than 'blocked': nothing is
       // wrong, we are simply mid-move.
-      if (castLoadsInFlightRef.current > 0) return 'correcting'
+      if (castLoadsInFlightRef.current > 0 || !castProgressIdentityIsTrusted()) return 'correcting'
       const decision = castResyncAction({
         receiverSec,
         targetAbsSec,
@@ -4791,7 +4802,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // refresh()) — c.remote is frozen at its pre-blip reading, not
         // live. Corrective actions here (party position broadcasts) must
         // wait for it to resolve rather than react to stale data.
-        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castProgressIdentityIsTrusted()) {
           hostWasGatedRef.current = true
           // Distinguish WHY we are gated. A settling blip (a Wi-Fi hiccup, a
           // disconnect debounce) leaves the receiver on the same media at the
@@ -5038,7 +5049,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // (including currentTime, which the drift check below compares
       // against the party's continuously-advancing server position) is
       // frozen and stale while a disconnect is pending confirmation.
-      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castProgressIdentityIsTrusted()) {
         guestWasGatedRef.current = true
         return
       }
@@ -5721,7 +5732,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         case 'k':
           e.preventDefault()
           if (castConnectedNow) {
-            const atAbsSec = recvToAbsSec(c.remote.currentTime)
+            const atAbsSec = castResumeAbsSec()
             if (c.remote.isPaused && isCastTokenExpired() && atAbsSec !== null) {
               hostCorrectionSuppressRef.current()
               reloadCastAtAbsSec(atAbsSec)
@@ -5750,6 +5761,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // rather than scrub somewhere invented.
           const delta = e.key === 'ArrowLeft' ? -10 : 10
           if (castConnectedNow) {
+            if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) break
             const baseAbsSec = recvToAbsSec(c.remote.currentTime)
             if (baseAbsSec !== null) seekToRealSecRef.current(baseAbsSec + delta)
             break
@@ -7027,6 +7039,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   // them costs. A cast whose anchor we don't know has no
                   // correct target, so the control no-ops rather than guess.
                   if (cast.status.connected) {
+                    if (partyControlsMediaRef.current && !castProgressIdentityIsTrusted()) return
                     const baseAbsSec = recvToAbsSec(cast.remote.currentTime)
                     if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
                     return
