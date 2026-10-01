@@ -2037,7 +2037,10 @@ func parseMaxBPS(raw string) int64 {
 	return clampMaxBPS(v)
 }
 
-// parseResolution parses "1920x1080" into width, height. Returns 1920x1080 as default.
+// parseResolution preserves the library probe's geometry. Missing or malformed
+// metadata is unknown (0x0), never an invented source size: receiver eligibility
+// needs the real aspect ratio. CreateSession applies the browser ladder fallback
+// separately, without turning it into a source fact.
 func parseResolution(res string) (int, int) {
 	parts := strings.SplitN(res, "x", 2)
 	if len(parts) == 2 {
@@ -2047,7 +2050,7 @@ func parseResolution(res string) (int, int) {
 			return w, h
 		}
 	}
-	return 1920, 1080 // safe default
+	return 0, 0
 }
 
 // GetStreamInfo returns stream decision info so the frontend knows how to play a file.

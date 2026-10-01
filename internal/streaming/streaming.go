@@ -1113,6 +1113,9 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	if !ok || src == nil {
 		return nil, fmt.Errorf("session not found")
 	}
+	if src.SourceWidth <= 0 || src.SourceHeight <= 0 {
+		return nil, fmt.Errorf("source dimensions are required for casting")
+	}
 	needsAudioClone := CastNeedsStereoClone(src.AudioCodecOut)
 	// A remux session needs an H.264 transcode clone for cast whether its video
 	// is non-H.264 (CastNeedsVideoTranscode) OR H.264 (CastRemuxNeedsTranscode):
@@ -1128,11 +1131,7 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	// the receiver needs a different window, or when ABR could select a cold
 	// or unsupported rung. Copies have one supported, pre-warmed rung.
 	needsAnchorClone := atSec >= 0 && (atSec < src.StartSec || atSec-src.StartSec > 30)
-	needsLadderClone := len(src.Profiles) != 1
-	if !needsLadderClone {
-		_, supported := castH264Level(src.Profiles[0], src.SourceFPS)
-		needsLadderClone = !supported
-	}
+	needsLadderClone := !castSharedProfileSupported(src)
 	if !needsAudioClone && !needsVideoTranscode && !needsSubsClone && !needsAnchorClone && !needsLadderClone {
 		return src, nil
 	}
@@ -2795,7 +2794,15 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 			"file", filepath.Base(filePath))
 	}
 
-	profiles := ResolveProfiles(tm.enabledProfiles, sourceWidth, sourceHeight)
+	// Browser playback retains its historical ladder when old library rows
+	// have no geometry. Keep this fallback out of SourceWidth/SourceHeight:
+	// scaling still follows the file's aspect ratio, so these guesses cannot
+	// establish that a shared stream is within a Cast receiver's bounds.
+	profileWidth, profileHeight := sourceWidth, sourceHeight
+	if sourceWidth <= 0 || sourceHeight <= 0 {
+		profileWidth, profileHeight = 1920, 1080
+	}
+	profiles := ResolveProfiles(tm.enabledProfiles, profileWidth, profileHeight)
 	if len(opts) > 0 && opts[0].CastCloneOf != "" {
 		p, err := resolveCastProfile(profiles, sourceWidth, sourceHeight, castOutputFPS(opts[0].SourceFPS))
 		if err != nil {
@@ -2810,8 +2817,8 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	if len(opts) > 0 && opts[0].Remux {
 		profiles = []QualityProfile{{
 			Name:         "source",
-			Width:        sourceWidth,
-			Height:       sourceHeight,
+			Width:        profileWidth,
+			Height:       profileHeight,
 			HLSBandwidth: 20000000, // Conservative bandwidth hint for remux
 		}}
 	}

@@ -197,6 +197,7 @@ func TestCloneForCast_TranscodeReusedUnchanged(t *testing.T) {
 		BurnSubRelIndex: -1,
 		// SubtitleTracks: nil — no subs, so no clone needed
 	}
+	src.Profiles[0].CodecString = "avc1.640028,mp4a.40.2"
 	tm.mu.Lock()
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()

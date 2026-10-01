@@ -26,7 +26,7 @@ func castH264Level(p QualityProfile, fps float64) (int, bool) {
 	maxRate, rateOK := parseBitrateSpec(p.MaxRate)
 	buffer, bufferOK := parseBitrateSpec(p.BufSize)
 	if p.Width <= 0 || p.Height <= 0 || p.Width > 1920 || p.Height > 1080 ||
-		fps <= 0 || fps > castMaxFPS || math.IsNaN(fps) || !rateOK || !bufferOK {
+		fps <= 0 || fps > castMaxFPS || math.IsNaN(fps) || !rateOK || !bufferOK || maxRate <= 0 || buffer <= 0 {
 		return 0, false
 	}
 	frameMB := ((p.Width + 15) / 16) * ((p.Height + 15) / 16)
@@ -44,6 +44,42 @@ func castH264Level(p QualityProfile, fps float64) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// A nominal rung label is insufficient for sharing a browser's encoder. Its
+// scale=W:-2 output must match the declared geometry, and both the actual
+// encoder level policy and CODECS must cover the geometry, rate and VBV.
+// A private cast copy fixes any mismatch without changing the local ladder.
+func castSharedProfileSupported(s *TranscodeSession) bool {
+	if len(s.Profiles) != 1 || s.SourceWidth <= 0 || s.SourceHeight <= 0 || s.Remux {
+		return false
+	}
+	p := s.Profiles[0]
+	fps := s.SourceFPS
+	if s.CastOutputFPS > 0 {
+		fps = s.CastOutputFPS
+	}
+	requiredLevel, supported := castH264Level(p, fps)
+	if !supported {
+		return false
+	}
+	// FFmpeg rounds an inferred -2 height to the nearest multiple of two;
+	// ResolveProfiles floors it. Refuse sharing when those differ, rather
+	// than declaring a smaller or differently shaped output to the receiver.
+	if p.CastH264LevelIDC == 0 {
+		actualHeight := 2 * math.Round(float64(p.Width)*float64(s.SourceHeight)/float64(s.SourceWidth)/2)
+		if actualHeight != float64(p.Height) {
+			return false
+		}
+	}
+	encoderLevel := p.CastH264LevelIDC
+	if encoderLevel == 0 {
+		encoderLevel = h264LevelIDC(p.Height, fps)
+	}
+	if encoderLevel < requiredLevel || encoderLevel > 41 {
+		return false
+	}
+	return p.CodecString == fmt.Sprintf("avc1.6400%02x,mp4a.40.2", encoderLevel)
 }
 
 func resolveCastProfile(profiles []QualityProfile, sourceWidth, sourceHeight int, fps float64) (QualityProfile, error) {
@@ -115,31 +151,52 @@ func (tm *TranscodeManager) WarmCastSession(ctx context.Context, s *TranscodeSes
 	if len(s.Profiles) != 1 {
 		return fmt.Errorf("cast session must have one quality profile")
 	}
-	v, err := tm.EnsureVariant(s, s.Profiles[0].Name, s.StartSec)
-	if err != nil {
-		return err
-	}
-	s.variantMu.Lock()
-	ready := v.Ready
-	s.variantMu.Unlock()
 	// Leave room to write a useful failure inside the server's 120s deadline.
-	timer := time.NewTimer(min(tm.readinessTimeout(s), 90*time.Second))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return fmt.Errorf("cast stream not ready")
-	case <-ready:
+	// All launches share this budget; a crash must not reset the deadline.
+	startupCtx, cancel := context.WithTimeout(ctx, min(tm.readinessTimeout(s), 90*time.Second))
+	defer cancel()
+	for {
+		if err := startupCtx.Err(); err != nil {
+			return fmt.Errorf("cast stream not ready: %w", err)
+		}
+		if _, ok := tm.GetSession(s.ID); !ok {
+			return fmt.Errorf("cast session ended during startup")
+		}
+		v, err := tm.EnsureVariant(s, s.Profiles[0].Name, s.StartSec)
+		if err != nil {
+			return err
+		}
+		s.variantMu.Lock()
+		ready := v.Ready
+		s.variantMu.Unlock()
+		select {
+		case <-startupCtx.Done():
+			return fmt.Errorf("cast stream not ready: %w", startupCtx.Err())
+		case <-ready:
+		}
+		if err := startupCtx.Err(); err != nil {
+			return fmt.Errorf("cast stream not ready: %w", err)
+		}
+		s.variantMu.Lock()
+		sameGeneration := v.Ready == ready
+		err, exited := v.Err, ffmpegDone(v)
+		s.variantMu.Unlock()
+		if !sameGeneration {
+			continue
+		}
+		if err != nil {
+			if exited {
+				// EnsureVariant owns the bounded restart budget, including
+				// one hardware-decode fallback on THIS copy. Do not discard
+				// the candidate after its first decode-init crash, otherwise
+				// each new copy would repeat the same hardware failure.
+				continue
+			}
+			return err
+		}
+		if _, ok := tm.GetSession(s.ID); !ok {
+			return fmt.Errorf("cast session ended during startup")
+		}
+		return nil
 	}
-	s.variantMu.Lock()
-	err = v.Err
-	s.variantMu.Unlock()
-	if err != nil {
-		return err
-	}
-	if _, ok := tm.GetSession(s.ID); !ok {
-		return fmt.Errorf("cast session ended during startup")
-	}
-	return nil
 }

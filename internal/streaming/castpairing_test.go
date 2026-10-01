@@ -92,6 +92,7 @@ func TestCloneForCast_SharedSessionIsNotMarkedAsItsOwnClone(t *testing.T) {
 		BurnSubIndex:    -1,
 		BurnSubRelIndex: -1,
 	}
+	src.Profiles[0].CodecString = "avc1.640028,mp4a.40.2"
 	tm.mu.Lock()
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()

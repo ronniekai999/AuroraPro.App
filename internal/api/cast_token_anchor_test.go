@@ -11,6 +11,7 @@ package api
 // has produced seconds.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -254,6 +255,13 @@ func TestCreateCastToken_ReportsActualFormatAndOneReadyRung(t *testing.T) {
 func TestCreateCastToken_FailedWarmDoesNotLeakCopyOrReplaceOriginal(t *testing.T) {
 	h, tm := castAnchorHandler(t)
 	src := castAnchorSource(t, tm, 0)
+	committed, err := tm.CloneForCast(7, "testuser", src.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.WarmCastSession(context.Background(), committed); err != nil {
+		t.Fatal(err)
+	}
 	// A real startup failure, not quota. Fail closed and clean up only the
 	// unpublished receiver copy; never offer the incompatible original URL.
 	fakeDir := t.TempDir()
@@ -269,7 +277,13 @@ func TestCreateCastToken_FailedWarmDoesNotLeakCopyOrReplaceOriginal(t *testing.T
 	if _, ok := tm.GetSession(src.ID); !ok {
 		t.Fatal("startup failure deleted caller's original session")
 	}
-	if rows := tm.ListSessions(); len(rows) != 1 {
+	if _, ok := tm.GetSession(committed.ID); !ok {
+		t.Fatal("failed replacement deleted the committed copy")
+	}
+	if _, err := os.Stat(filepath.Join(committed.OutputDir, committed.Profiles[0].Name, "stream.m3u8")); err != nil {
+		t.Fatalf("failed replacement removed committed media: %v", err)
+	}
+	if rows := tm.ListSessions(); len(rows) != 2 {
 		t.Fatalf("unpublished cast leaked: %+v", rows)
 	}
 }
