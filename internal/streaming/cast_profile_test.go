@@ -102,7 +102,7 @@ func TestCloneForCast_SharedOutputMustMeetItsSignallingAndGeometry(t *testing.T)
 			if src.StartSec != 600 || fmt.Sprint(src.Profiles) != fmt.Sprint(before) {
 				t.Fatalf("cast altered local output: %+v", src.Profiles)
 			}
-			if tc.wantClone && (!castSharedProfileSupported(got) || got.StartSec != 595) {
+			if tc.wantClone && (!castSharedProfileSupported(got, tm.hwAccel) || got.StartSec != 595) {
 				t.Fatalf("private output not supported/anchored: %+v", got.Profiles)
 			}
 		})
@@ -225,7 +225,7 @@ func TestCastCopyPlaybackProducesOneSupportedRung(t *testing.T) {
 				t.Fatalf("unexpected ladder: %+v", clone.Profiles)
 			}
 			p := clone.Profiles[0]
-			if !castSharedProfileSupported(clone) || p.CodecString != fmt.Sprintf("avc1.6400%02x,mp4a.40.2", p.CastH264LevelIDC) {
+			if !castSharedProfileSupported(clone, tm.hwAccel) || p.CodecString != fmt.Sprintf("avc1.6400%02x,mp4a.40.2", p.CastH264LevelIDC) {
 				t.Fatalf("unsupported/misdeclared copy: %+v", p)
 			}
 			segment := firstMediaSegment(t, filepath.Join(clone.OutputDir, p.Name))
@@ -514,6 +514,68 @@ func TestCastSoftwarePresetsProduceDeclaredHighProfile(t *testing.T) {
 				if !strings.HasPrefix(copy.Profiles[0].CodecString, "avc1.64") || stream.Profile != "High" {
 					t.Errorf("cast CODECS %s and emitted profile %s disagree", copy.Profiles[0].CodecString, stream.Profile)
 				}
+			}
+		})
+	}
+}
+
+func TestCastSharedSoftwarePresetMatchesProducedProfile(t *testing.T) {
+	requireFFmpeg(t)
+	for _, preset := range []string{"ultrafast", "superfast", "veryfast"} {
+		t.Run(preset, func(t *testing.T) {
+			path := (mediaFixture{Container: "mkv", VideoCodec: "h264", AudioCodec: "aac", Width: 1280, Height: 720, FPS: 30, DurationSec: 2}).build(t)
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "ts", Profiles: []string{"720p"}, HWAccel: "none", HWDecode: "off", HEVCOutput: "off", SoftwarePreset: preset})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(tm.Close)
+			src, err := tm.CreateSession(1, "viewer", path, 1280, 720, SessionOpts{SourceVideoCodec: "h264", SourceVideoPixFmt: "yuv420p", SourceFPS: 30, AudioCodecOut: "aac"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprint(src.Profiles)
+			candidate, err := tm.CloneForCast(1, "viewer", src.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe := func(s *TranscodeSession) probedStream {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				if err := tm.WarmCastSession(ctx, s); err != nil {
+					t.Fatal(err)
+				}
+				v, err := tm.EnsureVariant(s, s.Profiles[0].Name, s.StartSec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				waitForFFmpegExit(t, s, v, 15*time.Second)
+				for _, stream := range probeStreams(t, firstMediaSegment(t, v.OutputDir)) {
+					if stream.CodecType == "video" {
+						return stream
+					}
+				}
+				t.Fatal("cast output has no video stream")
+				return probedStream{}
+			}
+			local := probe(src)
+			cast := local
+			if candidate != src {
+				cast = probe(candidate)
+			}
+			t.Logf("preset %s: shared=%t declared=%s actual=%s local=%s", preset, candidate == src, candidate.Profiles[0].CodecString, cast.Profile, local.Profile)
+			if !strings.HasPrefix(candidate.Profiles[0].CodecString, "avc1.64") || cast.Profile != "High" {
+				t.Errorf("receiver CODECS %s and produced %s disagree", candidate.Profiles[0].CodecString, cast.Profile)
+			}
+			wantClone := preset == "ultrafast"
+			if (candidate != src) != wantClone {
+				t.Errorf("clone=%t want %t for preset %s", candidate != src, wantClone, preset)
+			}
+			if src.StartSec != 0 || fmt.Sprint(src.Profiles) != before {
+				t.Fatal("cast narrowed or changed the local encoder")
+			}
+			if wantClone && (local.Profile != "Constrained Baseline" || candidate.Profiles[0].CastH264LevelIDC == 0) {
+				t.Errorf("private High policy must preserve ordinary ultrafast output: local=%s candidate=%+v", local.Profile, candidate.Profiles)
 			}
 		})
 	}

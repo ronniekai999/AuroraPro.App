@@ -1131,7 +1131,7 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	// the receiver needs a different window, or when ABR could select a cold
 	// or unsupported rung. Copies have one supported, pre-warmed rung.
 	needsAnchorClone := atSec >= 0 && (atSec < src.StartSec || atSec-src.StartSec > 30)
-	needsLadderClone := !castSharedProfileSupported(src)
+	needsLadderClone := !castSharedProfileSupported(src, tm.hwAccel)
 	if !needsAudioClone && !needsVideoTranscode && !needsSubsClone && !needsAnchorClone && !needsLadderClone {
 		return src, nil
 	}

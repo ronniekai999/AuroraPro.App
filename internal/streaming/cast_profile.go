@@ -50,7 +50,7 @@ func castH264Level(p QualityProfile, fps float64) (int, bool) {
 // scale=W:-2 output must match the declared geometry, and both the actual
 // encoder level policy and CODECS must cover the geometry, rate and VBV.
 // A private cast copy fixes any mismatch without changing the local ladder.
-func castSharedProfileSupported(s *TranscodeSession) bool {
+func castSharedProfileSupported(s *TranscodeSession, encoder HWAccelInfo) bool {
 	if len(s.Profiles) != 1 || s.SourceWidth <= 0 || s.SourceHeight <= 0 || s.Remux {
 		return false
 	}
@@ -67,6 +67,14 @@ func castSharedProfileSupported(s *TranscodeSession) bool {
 	// ResolveProfiles floors it. Refuse sharing when those differ, rather
 	// than declaring a smaller or differently shaped output to the receiver.
 	if p.CastH264LevelIDC == 0 {
+		// Ordinary libx264 ultrafast disables High-only tools despite its
+		// -profile:v high ceiling. Its Baseline SPS cannot prove the High
+		// CODECS declaration. Use a private rung with explicit 8x8dct instead;
+		// the browser's preset, ladder and encoder remain unchanged.
+		if (encoder.Type == HWAccelNone || encoder.Type == "") &&
+			encoder.policy().softwarePresetFor(encoder.SWPreset) == "ultrafast" {
+			return false
+		}
 		actualHeight := 2 * math.Round(float64(p.Width)*float64(s.SourceHeight)/float64(s.SourceWidth)/2)
 		if actualHeight != float64(p.Height) {
 			return false
