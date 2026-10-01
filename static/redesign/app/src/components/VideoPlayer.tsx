@@ -1523,6 +1523,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const context = castProgressContextRef.current
     if (!context) return false
     const c = castRef.current
+    // A terminal frame from a rejected LOAD only authorizes receiver cleanup;
+    // a repeated URL cannot make it the acknowledged item's completion.
+    if (c.remote.failedLoadTerminal) return false
     // Reject a positively identified different item even after recovery. A
     // delayed status from the failed LOAD must not reopen its clock domain.
     if (context.contentId && c.remote.contentId && c.remote.contentId !== context.contentId) return false
@@ -2016,19 +2019,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const evaluate = () => {
       const c = castRef.current
       const context = castProgressContextRef.current
+      const failedLoadTerminal = c.remote.failedLoadTerminal === true && c.remote.playerState === 'IDLE' &&
+        castProgressFailureRef.current?.contentId === c.remote.contentId
       // An outgoing status may arrive after the replacement LOAD ACK.
       // Its terminal event cannot finish or stop the acknowledged new media.
       const failedAttemptEnded = castProgressFailureRef.current?.contentId === c.remote.contentId &&
         (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED')
-      if (c.remote.playerState === 'IDLE' && context?.contentId && c.remote.contentId && c.remote.contentId !== context.contentId && !failedAttemptEnded) return
-      if (c.remote.playerState === 'IDLE' && c.remote.idleReason === 'FINISHED' && context && castFinishedProgressContextRef.current === context) return
+      if (c.remote.playerState === 'IDLE' && context?.contentId && c.remote.contentId && c.remote.contentId !== context.contentId && !failedAttemptEnded && !failedLoadTerminal) return
+      if (!failedLoadTerminal && c.remote.playerState === 'IDLE' && c.remote.idleReason === 'FINISHED' && context && castFinishedProgressContextRef.current === context) return
       const exactAcknowledgedTerminal = c.remote.playerState === 'IDLE' && (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED') &&
         !!context?.contentId && c.remote.contentId === context.contentId
       const acknowledgedTerminal = exactAcknowledgedTerminal && castProgressIdentityIsTrusted()
       if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
       // Our own load ends the old media session; that IDLE is not the title
       // finishing. See castLoadIsSettling.
-      if ((castHasPlayedRef.current || exactAcknowledgedTerminal) && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
+      if ((castHasPlayedRef.current || exactAcknowledgedTerminal || failedLoadTerminal) && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
         // A REAL end-of-media can land in this window too — a re-anchor within
         // a few seconds of the end of the file — and the receiver goes quiet
         // afterwards, so nothing would re-run this effect and the cast would
@@ -2060,6 +2065,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             ? CAST_LOAD_SETTLE_MS
             : Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50,
         )
+        return
+      }
+      if (failedLoadTerminal) {
+        // The SDK positively identified the latest rejected generation's
+        // terminal. Even a PAUSED attempt can end before PLAYING is observed.
+        // Older terminals must wait out any newer logical/in-flight load.
+        castHasPlayedRef.current = false
+        castAdvancePendingRef.current = false
+        stopCastWithProgress()
         return
       }
       if ((castHasPlayedRef.current || acknowledgedTerminal) && c.remote.playerState === 'IDLE') {
@@ -2185,7 +2199,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       clearFallbackTimer()
       clearLoadSettleRecheck()
     }
-  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
+  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq, cast.remote.failedLoadTerminal])
 
   // A new title is a new convergence problem, and the state describing the old
   // one must not outlive it.
