@@ -267,6 +267,10 @@ export interface CastRemoteState {
   // The receiver's media identity, when CAF supplies it. Older SDK/device
   // shapes may omit it; end handling retains its reason-based fallback.
   contentId?: string | null
+  // Non-null only when currentTime/playerState/isPaused were sampled from
+  // the same chrome.cast.media.Media instance that owns this content ID.
+  // RemotePlayer property mutations and URI-only updates are not clock proof.
+  clockContentId?: string | null
   // A RemotePlayer is bound to an active receiver session.
   isConnected: boolean
   // The receiver has media loaded (false during launch / between items).
@@ -320,6 +324,7 @@ export function useCast(
   })
   const [remote, setRemote] = useState<CastRemoteState>({
     contentId: null,
+    clockContentId: null,
     isConnected: false,
     isMediaLoaded: false,
     isPaused: false,
@@ -597,20 +602,49 @@ export function useCast(
           // permissive "finished" by the player's advance gate).
           let idleReason: string | null = null
           let contentId: string | null = player.mediaInfo?.contentId ?? null
+          let clockContentId: string | null = null
+          let currentTime = player.currentTime || 0
+          // RemotePlayer's state can still belong to an outgoing item while
+          // Media already identifies its replacement. Do not fabricate that
+          // identity/state pair when the Media itself has no usable state.
+          let playerState: string | null = null
+          let isPaused = !!player.isPaused
           try {
             const mediaSession = ctx.getCurrentSession()?.getMediaSession()
             idleReason = mediaSession?.idleReason ?? null
             contentId = mediaSession?.media?.contentId ?? contentId
+            // CAF may update its Media identity before RemotePlayer's clock.
+            // Read the state and estimated clock from this ONE Media object,
+            // never pairing its URI with separately mirrored player fields.
+            const mediaState = mediaSession?.playerState
+            const mediaId = mediaSession?.media?.contentId
+            if (typeof mediaState === 'string') {
+              isPaused = mediaState === 'PAUSED'
+              if (typeof mediaId === 'string' && mediaId.length > 0) playerState = mediaState
+            }
+            if (mediaSession && typeof mediaId === 'string' && mediaId.length > 0 &&
+              (mediaState === 'PLAYING' || mediaState === 'PAUSED')) {
+              // The SDK recommends getEstimatedTime over its sporadically
+              // updated currentTime. Older shapes can use their own clock;
+              // an invalid/throwing estimator never falls back to stale data.
+              const mediaTime = typeof mediaSession.getEstimatedTime === 'function'
+                ? mediaSession.getEstimatedTime() : mediaSession.currentTime
+              if (typeof mediaTime === 'number' && Number.isFinite(mediaTime) && mediaTime >= 0) {
+                currentTime = mediaTime
+                clockContentId = mediaId
+              }
+            }
           } catch { /* defensive — SDK shape varies across builds */ }
           setRemote({
             contentId,
+            clockContentId,
             isConnected: !!player.isConnected,
             isMediaLoaded: !!player.isMediaLoaded,
-            isPaused: !!player.isPaused,
+            isPaused,
             canSeek: !!player.canSeek,
-            currentTime: player.currentTime || 0,
+            currentTime,
             duration: player.duration || 0,
-            playerState: player.playerState ?? null,
+            playerState,
             idleReason,
             updateSeq: (prevUpdateSeqRef.current += 1),
           })
