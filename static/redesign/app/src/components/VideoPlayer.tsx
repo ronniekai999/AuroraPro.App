@@ -498,10 +498,12 @@ async function attemptPlay(
   muteFallback: boolean,
   onMutedAutostart: () => void,
   canPlay: () => boolean,
+  rejectUnwantedPlayback: () => boolean,
 ): Promise<void> {
   if (!canPlay()) return
   try {
     await vid.play()
+    if (!canPlay()) rejectUnwantedPlayback()
     return
   } catch (error) {
     // Only an autoplay-policy refusal warrants muted retry. AbortError means
@@ -513,6 +515,7 @@ async function attemptPlay(
     vid.muted = true
     await vid.play()
     if (canPlay()) onMutedAutostart()
+    else if (rejectUnwantedPlayback()) vid.muted = prevMuted
   } catch {
     // Still blocked (or play() raced a teardown). Restore the prior mute
     // state so we don't leave a paused element silently muted with no
@@ -723,6 +726,49 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // load getter) and from effects whose dep arrays deliberately stay coarse,
   // both of which would otherwise capture a stale value.
   const partyControlsMediaRef = useRef(false)
+  const applyingRemoteUntilRef = useRef<number>(0)
+  // A play() promise and its DOM event can both arrive after a newer Pause.
+  // Keep ownership until the automatic attempt settles; manual controls
+  // supersede it so an old completion cannot stop a later explicit Play.
+  const localPlayIntentRef = useRef<{
+    video: HTMLVideoElement
+    source: 'automatic' | 'manual'
+    canPlay: () => boolean
+  } | null>(null)
+  const pauseUnwantedAutomaticPlay = useCallback((vid: HTMLVideoElement) => {
+    const intent = localPlayIntentRef.current
+    if (intent?.video !== vid || intent.source !== 'automatic' || intent.canPlay()) return false
+    applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + 150)
+    try { if (!vid.paused) vid.pause() } catch { /* defensive */ }
+    return true
+  }, [])
+  const attemptAutomaticPlay = useCallback(async (
+    vid: HTMLVideoElement,
+    muteFallback: boolean,
+    canPlay: () => boolean,
+  ) => {
+    const intent = { video: vid, source: 'automatic' as const, canPlay }
+    localPlayIntentRef.current = intent
+    try {
+      await attemptPlay(vid, muteFallback, () => setAutoStartedMuted(true),
+        () => localPlayIntentRef.current === intent && canPlay(),
+        () => localPlayIntentRef.current === intent && pauseUnwantedAutomaticPlay(vid))
+    } finally {
+      if (localPlayIntentRef.current === intent) localPlayIntentRef.current = null
+    }
+  }, [pauseUnwantedAutomaticPlay])
+  const toggleLocalPlayback = useCallback((vid: HTMLVideoElement) => {
+    if (!vid.paused) {
+      localPlayIntentRef.current = null
+      vid.pause()
+      return
+    }
+    const intent = { video: vid, source: 'manual' as const, canPlay: () => true }
+    localPlayIntentRef.current = intent
+    void vid.play().catch(() => { /* defensive */ }).finally(() => {
+      if (localPlayIntentRef.current === intent) localPlayIntentRef.current = null
+    })
+  }, [])
   const completePlaybackBoot = useCallback(async (
     vid: HTMLVideoElement,
     preservePause: boolean,
@@ -736,8 +782,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       return
     }
     playerReadyRef.current = true
-    await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true), canPlay)
-  }, [])
+    await attemptAutomaticPlay(vid, partyActiveRef.current, canPlay)
+  }, [attemptAutomaticPlay])
   const [fullscreen, setFullscreen] = useState(false)
   // Controls visibility — true when paused, or recently
   // mouse-moved, or first 2s after mount. Auto-fades after 3s of
@@ -3782,7 +3828,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // pattern extends with `Math.max(prev, now+150)` so every apply
   // pushes the gate forward; broadcasts inside the gate are silently
   // dropped, and the gate is naturally cleared by wall-clock time.
-  const applyingRemoteUntilRef = useRef<number>(0)
   const isApplyingRemote = () => Date.now() < applyingRemoteUntilRef.current
   const extendSuppression = (ms = 150) => {
     applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + ms)
@@ -3841,7 +3886,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       if (vid.playbackRate !== 1) vid.playbackRate = 1
       return true
     }
-    holdOutgoingEpisode()
+    if (!holdOutgoingEpisode()) pauseUnwantedAutomaticPlay(vid)
 
     // Map abs_ms (source) → hls.js currentTime (HLS-relative seconds).
     // The session's start_sec is the FFmpeg -ss offset; hls time 0
@@ -3929,7 +3974,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // against stale state in between.
     let driftRebuildInFlight = false
     const id = window.setInterval(() => {
-      if (holdOutgoingEpisode() || !matchesPartyEpisode()) return
+      if (holdOutgoingEpisode() || pauseUnwantedAutomaticPlay(vid) || !matchesPartyEpisode()) return
       const dbg = isSyncDebugEnabled()
       const explicitSeek = party.seekRef.current
       if (explicitSeek && !shouldApplyExplicitPartySeek(explicitSeek.by, party.currentUserId)) {
@@ -4050,7 +4095,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // #334 — muted fallback so a guest whose browser blocks sounded
         // autoplay still joins the timeline (muted) instead of sitting
         // paused and drifting; the "Tap for sound" pill restores audio.
-        void attemptPlay(vid, true, () => setAutoStartedMuted(true), () =>
+        void attemptAutomaticPlay(vid, true, () =>
           videoRef.current === vid && playerReadyRef.current && matchesPartyEpisode() &&
           partySyncRef.current?.isPlaying === true)
       } else if (!party.isPlaying && !vid.paused) {
@@ -4201,17 +4246,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // — also bail out if the host's local player is on a different
     // media than the party's; broadcasting from the wrong content
     // would corrupt the party's currentTimeMs.
-    const hostShouldBroadcast = () =>
+    const hostShouldBroadcast = (explicitPlay = false) =>
       party.isHost &&
       // Never broadcast while the player is still (re)booting:
       // startSecRef is 0 and currentTime snaps to 0 during boot, so a transient
       // 'seeked'/'pause' would otherwise propagate abs_ms=0 to the whole party.
       playerReadyRef.current &&
-      !isApplyingRemote() &&
+      (!isApplyingRemote() || explicitPlay) &&
       matchesPartyEpisode()
     const onPlay = () => {
-      if (holdOutgoingEpisode()) return
-      if (!hostShouldBroadcast()) return
+      if (holdOutgoingEpisode() || pauseUnwantedAutomaticPlay(vid) || vid.paused) return
+      const intent = localPlayIntentRef.current
+      if (!hostShouldBroadcast(intent?.video === vid && intent.source === 'manual')) return
       hostBroadcastRecoveryFiredRef.current = true
       party.requestPlay()
     }
@@ -5545,8 +5591,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             }
             break
           }
-          if (vid.paused) void vid.play().catch(() => { /* defensive */ })
-          else vid.pause()
+          toggleLocalPlayback(vid)
           break
         case 'ArrowLeft':
         case 'ArrowRight': {
@@ -5980,8 +6025,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (cast.status.connected) { resumeCast(); return }
     const v = videoRef.current
     if (!v) return
-    if (v.paused) void v.play().catch(() => { /* defensive */ })
-    else v.pause()
+    toggleLocalPlayback(v)
   }
   const widgetStopAndClose = () => {
     if (cast.status.connected) cast.stop()
@@ -6441,8 +6485,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   showControlsTemporarily()
                   const vid = videoRef.current
                   if (!vid) return
-                  if (vid.paused) void vid.play().catch(() => { /* defensive */ })
-                  else vid.pause()
+                  toggleLocalPlayback(vid)
                 }}
               />
               {/* #334 — "Tap for sound" affordance. Shown only when we
@@ -6816,8 +6859,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   if (cast.status.connected) { resumeCast(); return }
                   const vid = videoRef.current
                   if (!vid) return
-                  if (vid.paused) void vid.play().catch(() => { /* defensive */ })
-                  else vid.pause()
+                  toggleLocalPlayback(vid)
                 }}
                 onSeek={seekToRealSec}
                 onSeekRelative={(delta) => {

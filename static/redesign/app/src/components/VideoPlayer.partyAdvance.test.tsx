@@ -139,6 +139,97 @@ it('a newer canonical Pause wins over the host advance while its boot is pending
   expect(party.requestPlay).not.toHaveBeenCalled()
 })
 
+it.each([false, true])('a delayed successful boot play respects a newer canonical Pause (muted fallback: %s)', async mutedFallback => {
+  let finishPlay!: () => void
+  if (mutedFallback) play.mockRejectedValueOnce(new DOMException('Autoplay policy refused sounded playback', 'NotAllowedError'))
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    const element = this
+    paused.set(element, false)
+    return new Promise<void>(resolve => {
+      finishPlay = () => { element.dispatchEvent(new Event('play')); resolve() }
+    })
+  })
+  let party = host({ partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = () => <VideoPlayer target={nextEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, rev: 3, isPlaying: false }
+  view.rerender(player()); await settle()
+  finishPlay(); await settle()
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  expect(party.requestPause).not.toHaveBeenCalled()
+  expect(video().paused).toBe(true)
+  expect(video().muted).toBe(false)
+  expect(screen.queryByRole('button', { name: /sound/i })).toBeNull()
+})
+
+it('revalidates async boot success without an event and ignores its later queued play event', async () => {
+  const completion = deferred<void>()
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    return completion.promise
+  })
+  let party = host({ partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = () => <VideoPlayer target={nextEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, rev: 3, isPlaying: false }
+  view.rerender(player()); await settle()
+  completion.resolve(); await settle()
+  expect(video().paused).toBe(true)
+  fireEvent.play(video())
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  expect(party.requestPause).not.toHaveBeenCalled()
+  // An actual host click must still work inside the stale-echo suppression
+  // window created by that rejected automatic play.
+  fireEvent.click(video())
+  await settle()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+})
+
+it('a newer explicit host Play supersedes the pending boot so its completion cannot pause the host', async () => {
+  const completion = deferred<void>()
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    return completion.promise
+  })
+  let party = host({ partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = () => <VideoPlayer target={nextEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, rev: 3, isPlaying: false }
+  view.rerender(player()); await settle()
+  await act(async () => { vi.advanceTimersByTime(250) })
+  expect(video().paused).toBe(true)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Play' }))
+  await settle()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+  completion.resolve(); await settle()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+})
+
+it('host-role recovery cannot broadcast an automatic boot superseded by Pause', async () => {
+  const completion = deferred<void>()
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    return completion.promise
+  })
+  let party = host({ isHost: false, partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = () => <VideoPlayer target={nextEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, isHost: true, rev: 3, isPlaying: false }
+  view.rerender(player()); await settle()
+  expect(video().paused).toBe(true)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  completion.resolve(); await settle()
+  expect(party.requestPlay).not.toHaveBeenCalled()
+})
+
 it('a slow outgoing-episode boot cannot autoplay after the room has moved', async () => {
   const pending = deferred<Awaited<ReturnType<typeof getStreamInfo>>>()
   vi.mocked(getStreamInfo).mockImplementation(() => pending.promise)
