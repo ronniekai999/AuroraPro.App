@@ -1,0 +1,10 @@
+{
+  "sha": "e4bba20b129bc97e2043af68800e10dc5a5efd2e",
+  "verdict": "clean",
+  "summary": "Independent complete final Web/SDK diff against bf995002 found no actionable defects. 55 public CAF and real-player adversarial probes, 1083 frontend tests and Chromium audit passed. Profile ownership, absolute seeks, DOM listeners, pause recovery and cast progress/completion data flows checked. Applicable independent PG/media/profile-race evidence retained for unchanged backend. Physical devices remain unverified; combined integration requires separate review.",
+  "reviewer": "/root/review_web_first",
+  "findings": "0",
+  "diff_digest": "1ed9de7699f461521b44c82d96b7555139b9a83f933448be577960424d6af3f4",
+  "branch": "fix/playback-web-first",
+  "recorded_at": "2026-10-01T12:23:53Z"
+}
