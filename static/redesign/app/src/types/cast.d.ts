@@ -156,6 +156,8 @@ declare global {
     currentTime?: number
     playerState?: string | null
     getEstimatedTime?: () => number
+    addUpdateListener?: (listener: (isAlive: boolean) => void) => void
+    removeUpdateListener?: (listener: (isAlive: boolean) => void) => void
     // Why playback went IDLE: 'FINISHED' on natural end-of-media,
     // 'CANCELLED'/'INTERRUPTED' on a user stop or media switch, 'ERROR' on
     // failure. Null/undefined until the media has gone idle at least once.

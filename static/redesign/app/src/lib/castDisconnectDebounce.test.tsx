@@ -281,6 +281,158 @@ afterEach(async () => {
   latestCast = null
 })
 
+function statusMedia(contentId = 'https://example.com/committed.m3u8') {
+  const listeners = new Set<(alive: boolean) => void>()
+  const media: CastMediaSession = {
+    media: { contentId, contentType: 'application/x-mpegURL' },
+    playerState: 'PAUSED', currentTime: 500, idleReason: null,
+    addUpdateListener: vi.fn((listener) => { listeners.add(listener) }),
+    removeUpdateListener: vi.fn((listener) => { listeners.delete(listener) }),
+  }
+  media.getEstimatedTime = vi.fn(() => media.currentTime!)
+  return { media, listeners, emit: (alive = true) => { for (const listener of [...listeners]) listener(alive) } }
+}
+
+describe('useCast genuine Media status revisions', () => {
+  function mountMedia() {
+    const sdk = installFakeSdk()
+    const source = statusMedia()
+    let media: CastMediaSession | null = source.media
+    const session = sdk.makeSession()
+    session.getMediaSession = () => media
+    sdk.setSession(session)
+    const view = render(<Harness currentLoad={() => ({
+      contentUrl: 'https://example.com/replacement.m3u8', contentType: 'application/x-mpegURL',
+    })} />)
+    act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()!
+    player.isMediaLoaded = true
+    player.isConnected = true
+    act(() => sdk.emitRemoteChange())
+    return { sdk, source, session, view, setMedia: (value: CastMediaSession | null) => { media = value } }
+  }
+
+  it('does not freshen cached Media status on generic property or estimator updates', () => {
+    const { sdk, source } = mountMedia()
+    expect(latestCast!.remote.mediaStatusSeq).toBe(0)
+    act(() => source.emit())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    const genericSeq = latestCast!.remote.updateSeq
+    source.media.currentTime = 501 // estimated elapsed time; no MEDIA_STATUS
+    act(() => sdk.emitRemoteChange())
+    act(() => sdk.emitRemoteChange()) // e.g. volume and mute
+    expect(latestCast!.remote.updateSeq).toBe(genericSeq + 2)
+    expect(latestCast!.remote.currentTime).toBe(501)
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+  })
+
+  it('publishes a true receiver update without needing a RemotePlayer ANY_CHANGE', () => {
+    const { source } = mountMedia()
+    source.media.currentTime = 600
+    act(() => source.emit())
+    expect(latestCast!.remote).toMatchObject({
+      mediaStatusSeq: 1, contentId: source.media.media!.contentId,
+      clockContentId: source.media.media!.contentId, currentTime: 600, playerState: 'PAUSED',
+    })
+  })
+
+  it('gives each replacement Media its own revision and ignores removed or stale callbacks', () => {
+    const { sdk, source, setMedia } = mountMedia()
+    act(() => source.emit())
+    const oldCallback = [...source.listeners][0]
+    const next = statusMedia('https://example.com/next.m3u8')
+    setMedia(next.media)
+    act(() => oldCallback(true)) // pointer switched before ANY_CHANGE
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    act(() => sdk.emitRemoteChange())
+    expect(source.listeners.size).toBe(0)
+    expect(latestCast!.remote.mediaStatusSeq).toBe(0)
+    act(() => oldCallback(true))
+    expect(latestCast!.remote.mediaStatusSeq).toBe(0)
+    act(() => next.emit())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(2)
+  })
+
+  it('revokes healthy clock proof on false callbacks while preserving genuine terminal status', () => {
+    const { sdk, source } = mountMedia()
+    act(() => source.emit(false))
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    source.media.playerState = 'IDLE'
+    source.media.idleReason = 'FINISHED'
+    act(() => source.emit(false))
+    expect(latestCast!.remote).toMatchObject({
+      mediaStatusSeq: 2, contentId: source.media.media!.contentId,
+      clockContentId: null, playerState: 'IDLE', idleReason: 'FINISHED',
+    })
+  })
+
+  it('detaches current Media on null and unmount, ignoring delayed callbacks', () => {
+    const { sdk, source, setMedia, view } = mountMedia()
+    const oldCallback = [...source.listeners][0]
+    setMedia(null)
+    act(() => sdk.emitRemoteChange())
+    expect(source.listeners.size).toBe(0)
+    expect(latestCast!.remote.mediaStatusSeq).toBe(0)
+    setMedia(source.media)
+    act(() => sdk.emitRemoteChange())
+    view.unmount()
+    expect(source.listeners.size).toBe(0)
+    const before = latestCast!.remote.updateSeq
+    act(() => oldCallback(true))
+    expect(latestCast!.remote.updateSeq).toBe(before)
+  })
+
+  it('keeps unsupported Media listener shapes at zero revision', () => {
+    const { sdk, source } = mountMedia()
+    delete source.media.addUpdateListener
+    delete source.media.removeUpdateListener
+    const legacy: CastMediaSession = { ...source.media }
+    const session = sdk.makeSession()
+    session.getMediaSession = () => legacy
+    sdk.setSession(session)
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(0)
+    expect(latestCast!.remote.clockContentId).toBe(legacy.media!.contentId)
+  })
+
+  it('captures the actual rejection watermark even if React has not published an earlier status yet', async () => {
+    const { sdk, source, session } = mountMedia()
+    session.loadMedia = vi.fn(async () => {
+      source.emit() // real status before rejection, batched in the same act
+      throw { code: 'timeout' }
+    })
+    let error: unknown
+    await act(async () => {
+      try { await latestCast!.loadCurrent() } catch (e) { error = e }
+    })
+    expect(error).toBeInstanceOf(CastMediaLoadError)
+    expect((error as CastMediaLoadError).mediaStatusSeq).toBe(1)
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.mediaStatusSeq).toBe((error as CastMediaLoadError).mediaStatusSeq)
+    act(() => source.emit())
+    expect(latestCast!.remote.mediaStatusSeq).toBeGreaterThan((error as CastMediaLoadError).mediaStatusSeq!)
+  })
+
+  it('does not accept Media updates during a pending disconnect freeze', () => {
+    const { sdk, source } = mountMedia()
+    act(() => source.emit())
+    const before = latestCast!.remote.updateSeq
+    act(() => sdk.triggerBlip())
+    act(() => source.emit())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    expect(latestCast!.remote.updateSeq).toBe(before)
+    act(() => sdk.triggerReconnect())
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    act(() => source.emit())
+    expect(latestCast!.remote.mediaStatusSeq).toBe(2)
+  })
+})
+
 describe('useCast receiver LOAD outcome contract', () => {
   const load: CastLoadArgs = { contentUrl: 'https://example.com/attempt.m3u8?token=cast', contentType: 'application/x-mpegURL' }
   it('identifies only an actual receiver LOAD rejection with the attempted content ID', async () => {

@@ -49,10 +49,14 @@ const SELF_TEST_TIMEOUT_MS = 5000
 // receiver media, so callers must not treat those errors as media outcomes.
 export class CastMediaLoadError extends Error {
   readonly contentId: string
-  constructor(message: string, contentId: string) {
+  // SDK watermark captured at rejection, before React can publish a status
+  // update that was received earlier in the same turn.
+  readonly mediaStatusSeq?: number
+  constructor(message: string, contentId: string, mediaStatusSeq?: number) {
     super(message)
     this.name = 'CastMediaLoadError'
     this.contentId = contentId
+    this.mediaStatusSeq = mediaStatusSeq
   }
 }
 
@@ -271,6 +275,10 @@ export interface CastRemoteState {
   // the same chrome.cast.media.Media instance that owns this content ID.
   // RemotePlayer property mutations and URI-only updates are not clock proof.
   clockContentId?: string | null
+  // This Media instance's last genuine addUpdateListener revision. Generic
+  // RemotePlayer events (including volume/mute) only resample, never advance
+  // it. New/unsupported Media instances start at 0 and inherit no evidence.
+  mediaStatusSeq?: number
   // A RemotePlayer is bound to an active receiver session.
   isConnected: boolean
   // The receiver has media loaded (false during launch / between items).
@@ -325,6 +333,7 @@ export function useCast(
   const [remote, setRemote] = useState<CastRemoteState>({
     contentId: null,
     clockContentId: null,
+    mediaStatusSeq: 0,
     isConnected: false,
     isMediaLoaded: false,
     isPaused: false,
@@ -344,6 +353,7 @@ export function useCast(
   // the whole `remote` object and reading stale state out of a closure is
   // exactly the class of bug this file has spent several rounds fixing.
   const prevUpdateSeqRef = useRef(0)
+  const mediaStatusSeqRef = useRef(0)
 
   // Pending "confirm the disconnect" timer + the last publicly-reported
   // connected value, both read/written by refresh() (see its comment) to
@@ -572,6 +582,38 @@ export function useCast(
       // expose the framework before RemotePlayer is constructible.
       let remoteController: CastRemotePlayerController | null = null
       let onRemoteChange: (() => void) | null = null
+      let mediaBinding: {
+        media: CastMediaSession
+        listener: (alive: boolean) => void
+        revision: number
+        alive: boolean
+      } | null = null
+      const detachMedia = () => {
+        const previous = mediaBinding
+        mediaBinding = null
+        try { previous?.media.removeUpdateListener?.(previous.listener) } catch { /* best effort */ }
+      }
+      const bindMedia = (media: CastMediaSession | null) => {
+        if (mediaBinding?.media === media) return
+        detachMedia()
+        if (!media || typeof media.addUpdateListener !== 'function' ||
+          typeof media.removeUpdateListener !== 'function') return
+        const binding = {
+          media,
+          revision: 0,
+          alive: true,
+          listener: (alive: boolean) => {
+            if (!mounted || mediaBinding !== binding || disconnectTimerRef.current != null) return
+            // A replaced Media's delayed callback must not freshen its successor.
+            try { if (ctx.getCurrentSession()?.getMediaSession() !== media) return } catch { return }
+            binding.alive = alive
+            binding.revision = ++mediaStatusSeqRef.current
+            onRemoteChange?.()
+          },
+        }
+        mediaBinding = binding
+        try { media.addUpdateListener(binding.listener) } catch { detachMedia() }
+      }
       try {
         const player = new fw.RemotePlayer()
         remoteController = new fw.RemotePlayerController(player)
@@ -603,6 +645,7 @@ export function useCast(
           let idleReason: string | null = null
           let contentId: string | null = player.mediaInfo?.contentId ?? null
           let clockContentId: string | null = null
+          let mediaStatusSeq = 0
           let currentTime = player.currentTime || 0
           // RemotePlayer's state can still belong to an outgoing item while
           // Media already identifies its replacement. Do not fabricate that
@@ -610,7 +653,9 @@ export function useCast(
           let playerState: string | null = null
           let isPaused = !!player.isPaused
           try {
-            const mediaSession = ctx.getCurrentSession()?.getMediaSession()
+            const mediaSession = ctx.getCurrentSession()?.getMediaSession() ?? null
+            bindMedia(mediaSession)
+            mediaStatusSeq = mediaBinding?.revision ?? 0
             idleReason = mediaSession?.idleReason ?? null
             contentId = mediaSession?.media?.contentId ?? contentId
             // CAF may update its Media identity before RemotePlayer's clock.
@@ -622,7 +667,7 @@ export function useCast(
               isPaused = mediaState === 'PAUSED'
               if (typeof mediaId === 'string' && mediaId.length > 0) playerState = mediaState
             }
-            if (mediaSession && typeof mediaId === 'string' && mediaId.length > 0 &&
+            if (mediaSession && mediaBinding?.alive !== false && typeof mediaId === 'string' && mediaId.length > 0 &&
               (mediaState === 'PLAYING' || mediaState === 'PAUSED')) {
               // The SDK recommends getEstimatedTime over its sporadically
               // updated currentTime. Older shapes can use their own clock;
@@ -638,6 +683,7 @@ export function useCast(
           setRemote({
             contentId,
             clockContentId,
+            mediaStatusSeq,
             isConnected: !!player.isConnected,
             isMediaLoaded: !!player.isMediaLoaded,
             isPaused,
@@ -657,6 +703,7 @@ export function useCast(
       }
 
       cleanup = () => {
+        detachMedia()
         try {
           ctx.removeEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
           ctx.removeEventListener(fw.CastContextEventType.SESSION_STATE_CHANGED, onSessionState)
@@ -870,7 +917,7 @@ export function useCast(
       // Same robust mapping as requestSession — handles bare-string and
       // structured rejections alike so a load failure never degrades to
       // a bare "loadMedia: unknown".
-      throw new CastMediaLoadError(describeCastError(rawErr), load.contentUrl)
+      throw new CastMediaLoadError(describeCastError(rawErr), load.contentUrl, mediaStatusSeqRef.current)
     }
   }
 
