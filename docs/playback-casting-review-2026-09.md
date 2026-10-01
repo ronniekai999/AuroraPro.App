@@ -3,6 +3,7 @@
 **Status:** verified backlog and phased release plan; **0 of 77 findings fixed on main**.
 **Original review:** commit `390d02e`, 2026-09-29.
 **Follow-up:** 2026-09-30; main `bf995002fbd9d2f158714120dbde0295df67e4bf` (verification details in §9).
+**Implementation follow-up:** 2026-10-01; first-priority draft candidates and outstanding validation in §10.
 **Scope:**
 - **Server:** `internal/streaming`, the stream and cast handlers in `internal/api`, cast tokens in `internal/auth`, and the watch-party sync engine (`internal/watchparty`, `internal/api/party_ws_v3_*`).
 - **SPA:** `VideoPlayer.tsx`, `lib/cast*.ts`, `lib/streaming.ts`, `lib/partyPlayer.ts`, `hooks/useParty.tsx`.
@@ -21,6 +22,7 @@ When required fixes have landed and optional enhancements have an implement/defe
 7. [Checked and sound, or refuted](#7-checked-and-sound-or-refuted)
 8. [Method and limits](#8-method-and-limits)
 9. [Follow-up verification and decisions](#9-follow-up-verification-and-decisions-2026-09-30)
+10. [First-priority implementation follow-up](#10-first-priority-implementation-follow-up-2026-10-01)
 
 **Severity**
 - **High:** a common playback, cast, or party path fails, hangs, or loses data; or the issue is privacy-relevant.
@@ -74,14 +76,16 @@ After merging duplicates there are **13 high, 35 medium, and 29 low** findings, 
 7. CASTS-1 and CASTS-2: casting mid-title from a shared session; hardware decode for cast copies.
 8. PARTY-2: "Play for all" starts the room before anyone has loaded the next episode.
 9. FF-1: VAAPI writes an invalid H.264/HEVC level.
-10. CASTS-3 and CASTC-7: stop starting encoders nobody watches. Give a cast copy a single quality level (1080p or below) instead of pre-warming every rung, and stop the local player's playlist polling when a cast connects. The general paused-player case (X-3) needs a design change and is in Phase 2.
+10. CASTS-3 and CASTC-7: stop starting encoders nobody watches. Give a cast copy a single quality level (1080p or below) instead of pre-warming every rung, and stop the local player's playlist polling when a cast connects. The general paused-player case (X-3) needs a design change and is in slice 4G.
 
 ## 2. Remediation plan — release small increments
 
 The goal is an initial corrective release in **2–4 developer-days**, followed by
 small releases as each cluster clears its gates. These are estimates for
-implementation and regression tests, **excluding independent review, hardware
-availability, and the unresolved baseline HDR failure**. They are not promised
+implementation and regression tests, **excluding independent review and hardware
+availability**. The baseline HDR failure was traced to the fixture during the
+first-priority implementation (§10); its repair must accompany those releases.
+These estimates are not promised
 calendar dates or a claim that the entire backlog takes less work. The original
 20–25-day Phase 1 bundled too many unrelated changes before its first release.
 
@@ -127,10 +131,10 @@ Track implementation and validation separately. No ID is closed by this plan.
 This is a gate, not a multi-week preparation project. Keep it limited to the
 currently failing path and the harness required by the first fixes.
 
-- Investigate `TestPlaybackMatrix_MasterCodecsMatchSegments/transcode_hdr_tonemapped_to_sdr`, which fails with FFmpeg 7.1.5 in this
-  verification. Preserve full stderr; establish whether the fixture, filter
-  pipeline, or supported FFmpeg build is responsible. Fix the proven cause in
-  its own contained PR before claiming the build/test gate is green.
+- The initial `TestPlaybackMatrix_MasterCodecsMatchSegments/transcode_hdr_tonemapped_to_sdr`
+  failure with FFmpeg 7.1.5 was traced to missing BT.2020/PQ signalling in the
+  fixture's raw HEVC bitstream (§10). Include the contained fixture repair and
+  raw-bitstream regression before claiming the build/test gate is green.
 - Rebuild the review's uncommitted probes as regressions **alongside the slice
   that needs them**. Do not wait for a universal player-harness rewrite or a
   complete device lab before starting small fixes.
@@ -881,3 +885,169 @@ Enhancements are recommendations, not claims of implementation.
 Keep the original legal/distribution constraints and stable VLCKit policy.
 No license, optional renderer, or device support is established merely by a
 package version existing. See §2 for the acceptance required before adoption.
+
+## 10. First-priority implementation follow-up (2026-10-01)
+
+The three implementation lanes cover all 15 unique items in the **Do these first** block: web,
+casting, and the remaining lifecycle/party/encoder bugs. Independent read-only
+reviewers follow `dev-workflow.md`; review findings return to implementation and
+the resulting complete diff is reviewed again. Candidate branches are not
+evidence that a fix has landed on `main` or reached the running server.
+All four draft code PRs pass their GitHub build/test and review-record checks
+on the published revisions. Device and deployment validation remains separate.
+
+### Restored test baseline
+
+The HDR failure recorded in §9 came from the test fixture: its raw HEVC stream
+did not carry the BT.2020 primaries and SMPTE 2084 transfer needed by zscale.
+The fixture now sets `colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc`
+in x265 and checks the extracted raw bitstream with ffprobe. Production
+tonemapping is unchanged. The shared fixture repair is included with the
+candidate releases.
+
+Verification now uses Go 1.26.5, FFmpeg 7.1.5, Chromium, and isolated PostgreSQL
+17/pgvector databases with all 60 migrations applied. `AURORA_REQUIRE_MEDIA_TESTS=1`
+and `TEST_DATABASE_URL` make media and database checks run instead of silently
+skipping them. Full uncached Go build/tests and frontend test/audit gates have
+passed on the candidate branches. Exact content commits and independent verdicts
+are recorded separately below.
+
+### First corrective release
+
+[PR #519 — scheduled-party restart survival](https://github.com/ronniekai999/AuroraPro.App/pull/519)
+is a draft candidate for PARTY-1. The exact content commit
+`58d2c03c2ae19a07da3c022c2cb45a75e53f9f23` received a clean independent
+review; its [review record](https://github.com/ronniekai999/AuroraPro.App/blob/b934594abf8b77ad6518f9737386fa5c8bf8ae64/.claude/review-records/58d2c03c2ae19a07da3c022c2cb45a75e53f9f23.json) and GitHub checks pass. Real database tests cover
+Shutdown → Rehydrate, retained durable rows, cancelled timers, socket shutdown,
+and the existing active-party policy. The frontend reconnect test covers the
+new revision floor and stale messages from a replaced socket.
+
+Deploy this slice before subsequent playback releases, whose updater also
+restarts the server. A production restart/reconnect smoke test remains required.
+No merge or deployment is claimed here.
+
+### Lifecycle, party advancement, and encoder levels
+
+[PR #520](https://github.com/ronniekai999/AuroraPro.App/pull/520) is the next
+draft candidate for LIFE-1, PARTY-2, and FF-1. The complete content commit
+`cc99798d2966f1cda49f0bf00f6d891180d4fb5a` received a clean independent
+review; its [review record](https://github.com/ronniekai999/AuroraPro.App/blob/5f5a3704643d44dc671989a215a6631b5b8e246e/.claude/review-records/cc99798d2966f1cda49f0bf00f6d891180d4fb5a.json) and all GitHub checks pass. Verification includes the full database/media
+Go suite, 858 frontend tests, Chromium audit, real TS/fMP4 remux/transcode resume
+matrices, native encoder-option parsing, and twelve independent party regressions.
+Fast retarget, delayed Play/Pause ordering, and subsequent manual Play are covered.
+Actual VAAPI/QSV-produced output still needs hardware validation. Release after
+the scheduled-party survival slice; no merge or deployment is claimed.
+
+### Casting controls and bounded copies
+
+[PR #521](https://github.com/ronniekai999/AuroraPro.App/pull/521) is the draft
+candidate for CASTC-2, CASTC-3, CASTC-7, CASTS-1, CASTS-2, and CASTS-3. The
+complete final content commit `3004844799f02d8456a6fc5b6e51cf7c5e4ca3b4` received
+a clean independent review from `/root/review_cast_first`; all 51 independent
+public CAF ownership/terminal/recovery probes pass. The [review record](https://github.com/ronniekai999/AuroraPro.App/blob/b45318ba35c59b5bdedba0b40285fac727c07faa/.claude/review-records/3004844799f02d8456a6fc5b6e51cf7c5e4ca3b4.json)
+is committed separately from the reviewed code. Go build and the full database/media suite, affected
+race checks, thirty source-geometry race iterations, 1,011 frontend tests,
+213 focused cases (101 SDK, 32 real-hook player, and 80 mounted player),
+TypeScript, and Chromium audit pass.
+Independent raw SPS checks confirm profile/compatibility/level bytes agree with the served playlist
+across six software presets, including ultrafast.
+
+Remote controls survive expansion and a targetless reconnect. Chromecast stops
+local HLS polling while AirPlay retains its local source. Shared anchors and
+ladders remain intact; unsafe sessions get a private bounded H.264/AAC rung with
+source decode facts and matching geometry/level/CODECS. Unknown source geometry
+refuses the Chromecast session token. Receiver identity, owner, anchor, and token
+expiry promote only on LOAD acknowledgement; failed replacements retain controls
+and committed resources, while unproven clocks stay blocked. Late acknowledgements
+cannot advance a newly selected title or profile.
+
+Receiver clocks require one coherent Media object and a positively associated
+generation. Generic volume/mute events cannot restore failed-load trust from
+cached media. A genuine post-rejection healthy status can restore the committed
+generation; a successful retry also needs coherent incoming Media evidence
+before its new anchor can convert a clock.
+Already-retired Media IDs cannot supply a later same-URI load's clock or
+completion even when the legacy SDK recreates their objects. Numeric ID reuse
+in another CastSession remains valid. Ordinary ultrafast shared output uses a
+private High-profile cast rung; proven shared presets keep sharing and the
+local encoder keeps its original settings. Terminal callbacks remain actionable
+when CAF filters ended Media out of its
+active getter, and explicit Stop releases the listener without relying on a
+subsequent generic event. A latest observed rejected Media generation has
+terminal-only cleanup proof, never progress or completion authority. New loads
+and genuine committed-media recovery retire that proof; retry preparation
+blocks old cleanup. When a failed load exposes a different outgoing Media,
+the next retry excludes both that generation and the prior acknowledged one.
+Successful ACK retires both; rejection preserves prior acknowledged recovery.
+Real-hook regressions cover old clock/end frames before and after ACK, genuine
+incoming progress/completion, and recovery after a rejected retry.
+
+Release after scheduled-party survival and the web lane's profile-aware cast
+progress. Physical receivers and GPU-produced output remain unverified. The
+subtitle-carrier reaper exception and general paused-player encoder policy remain
+open. The combined player changes require their own review; this branch alone
+does not implement the web progress writer. No merge or deployment is claimed.
+
+### Profile attribution and web playback
+
+[PR #522 — profile progress and playback state](https://github.com/ronniekai999/AuroraPro.App/pull/522)
+is the web draft candidate for WEB-1 through WEB-5, including the duplicated CASTC-1.
+The complete final content commit `e4bba20b129bc97e2043af68800e10dc5a5efd2e`
+received a clean independent review from `/root/review_web_first`; all 55
+independent public CAF/real-player adversarial probes pass. The [review record](https://github.com/ronniekai999/AuroraPro.App/blob/9e55270133dcea7c443ae29582cbf81ad9ac6135/.claude/review-records/e4bba20b129bc97e2043af68800e10dc5a5efd2e.json)
+is committed separately from the reviewed code. Go build, the full PostgreSQL/media suite,
+profile/API race checks, 1,083 frontend tests, 254 focused cases (116 mounted
+player, 68 real-hook player, and 70 SDK), TypeScript, and Chromium audit pass.
+The final real-hook suite reproduces four stale prior-generation clock/end
+failures against the previous frozen revision; earlier baseline runs reproduced
+the terminal, generation, and targetless-heartbeat defects.
+
+Progress reads and writes use the acting profile with ownership validation.
+Logical absolute seeks, paused recovery, and current DOM listeners survive
+replacement and error/Back flows. Cast progress and completion stay attached
+to the acknowledged outgoing title/profile, including when local navigation
+clears the target; unknown resumed ownership declines writes. Clock conversion
+requires a valid acknowledged anchor and coherent current Media evidence.
+Completion is recorded before advancing, and a changed local title cannot
+inherit the outgoing title's terminal event. The shared SDK fixes above are
+included in this lane too.
+
+Release after scheduled-party survival and before any new cast progress
+writer. Physical Chromecast and Safari/AirPlay remain unverified. No merge or
+deployment is claimed.
+
+### Combined verification and release sequence
+
+The complete [combined source tree](https://github.com/ronniekai999/AuroraPro.App/tree/5008cacaffb85a10d7fdafb351eb3f6373717507) at
+`5008cacaffb85a10d7fdafb351eb3f6373717507` received a **clean** independent review from
+`/root/review_first_integration`, covering the complete 47-file final diff,
+surrounding contracts/lifecycles, and manual player unions. Its exact-content
+[review record](https://github.com/ronniekai999/AuroraPro.App/blob/6b374122283e073dfaa90ff90355120848c1b16a/.claude/review-records/5008cacaffb85a10d7fdafb351eb3f6373717507.json)
+is committed separately from the reviewed code. All
+1,219 frontend tests across 59 files, TypeScript, Go build, and Chromium audit
+pass. The full uncached PostgreSQL/media Go suite passes with the identical
+backend sources; affected API/watch-party/streaming race checks also pass.
+This includes the manual unions where party play ownership, web logical clocks,
+cast transport, failed-load recovery/terminal cleanup, and outgoing completion
+share the player. Applicable full uncached database/media and race results are
+retained for backend sources that are byte-identical to the validated revision.
+The final frontend suite, audit, and embedded-asset Go build ran after the last
+content change.
+
+Independent verification passed 26 public CAF/player cases, 173 SDK cases,
+343 player/party cases, and the completed-A/failed-B completion boundary.
+Eight new retry-ownership probes fail on the prior revision and pass here;
+both genuine recovery inverses pass on each. Actual FFmpeg SPS probes confirm
+truthful private ultrafast output and valid superfast/veryfast sharing.
+These independent checks supplement the mandatory gates above.
+
+The code PRs overlap in the player, shared sender, and fixture repair. Apply the
+shared changes once, resolve conflicts using the final reviewed integration tree,
+and rerun the affected gates and independent review after rebasing or merging
+changes. An earlier verdict does not cover a changed PR diff.
+
+Ship PR #519 first, then PR #522 and PR #520 as their gates
+clear, then PR #521 with the profile-aware progress writer in place. Keep each
+release's database/device smoke checks and rollback from §2. A passing combined
+candidate does not establish production deployment, physical receiver support,
+or closure of the other findings. Main remains the pinned revision above.
