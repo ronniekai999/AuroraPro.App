@@ -573,6 +573,41 @@ describe('CAF filters terminal Media from its public getter', () => {
     act(()=>incoming.emit(false))
     expect(latestCast!.remote).toMatchObject({playerState:'IDLE',idleReason:'FINISHED',clockContentId:null})
   })
+  it.each([false,true])('rejects a recreated retired Media ID before incoming evidence (terminal first=%s)',async terminalFirst=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    session.loadMedia=vi.fn(async()=>{setItems([])}) // id 9 ACK precedes its status
+    await act(async()=>{await latestCast!.loadCurrent()})
+    const recreated=statusMedia(current.media.media!.contentId)
+    recreated.media.mediaSessionId=7;recreated.media.currentTime=600
+    setItems([recreated.media]);act(()=>sdk.emitRemoteChange())
+    if(!terminalFirst){
+      expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null})
+      expect(recreated.listeners.size).toBe(0)
+    }
+    recreated.media.playerState='IDLE';recreated.media.idleReason='FINISHED'
+    act(()=>recreated.emit(false));act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null})
+    const incoming=statusMedia(current.media.media!.contentId)
+    incoming.media.mediaSessionId=9;incoming.media.currentTime=900
+    setItems([incoming.media]);act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({clockContentId:incoming.media.media!.contentId,playerState:'PAUSED',currentTime:900})
+    incoming.media.playerState='IDLE';incoming.media.idleReason='FINISHED'
+    act(()=>incoming.emit(false))
+    expect(latestCast!.remote).toMatchObject({playerState:'IDLE',idleReason:'FINISHED',clockContentId:null})
+  })
+  it('allows retired numeric IDs to be reused by a different Cast session',async()=>{
+    const{sdk,current}=await pausedLoad()
+    const session=sdk.makeSession('Another room'), outgoing=statusMedia(current.media.media!.contentId)
+    outgoing.media.mediaSessionId=6
+    const incoming=statusMedia(current.media.media!.contentId)
+    incoming.media.mediaSessionId=7;incoming.media.currentTime=900
+    let media=outgoing.media
+    session.getMediaSession=()=>media.idleReason?null:media
+    session.loadMedia=vi.fn(async()=>{media=incoming.media})
+    sdk.setSession(session)
+    await act(async()=>{await latestCast!.loadCurrent()})
+    expect(latestCast!.remote).toMatchObject({clockContentId:incoming.media.media!.contentId,playerState:'PAUSED',currentTime:900})
+  })
   it('clears terminal status and listeners on permanent disconnect without ANY_CHANGE',async()=>{
     const{sdk,current}=await pausedLoad()
     act(()=>sdk.setSession(null))
