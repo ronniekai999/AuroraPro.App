@@ -230,7 +230,7 @@ func TestFullGPUEncoderArgs(t *testing.T) {
 	va := vaapiFull()
 	sdr := va.FullGPUEncoderArgs(1920, 1080, false, 0)
 	assertContains(t, sdr, "-c:v", "h264_vaapi")
-	assertContains(t, sdr, "-level", "4.0")
+	assertContains(t, sdr, "-level", "40")
 	assertContainsVF(t, sdr, "scale_vaapi=w=1920:h=-2:format=nv12")
 
 	hdr := va.FullGPUEncoderArgs(1920, 1080, true, 0)

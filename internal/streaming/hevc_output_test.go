@@ -126,7 +126,8 @@ func TestHEVCEncoderArgs_Backends(t *testing.T) {
 	qsv := HWAccelInfo{Type: HWAccelQSV}
 	args = qsv.HEVCEncoderArgs(1920, 1080, 0)
 	assertContains(t, args, "-c:v", "hevc_qsv")
-	assertContains(t, args, "-level", "120") // numeric idc, like h264_qsv
+	assertContains(t, args, "-level", "40") // Intel's level × 10, not HEVC's × 30
+	assertContains(t, args, "-tier", "main")
 	assertContains(t, args, "-tag:v", "hvc1")
 
 	va := HWAccelInfo{Type: HWAccelVAAPI, DevicePath: "/dev/dri/renderD128"}

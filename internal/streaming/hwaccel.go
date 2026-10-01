@@ -444,7 +444,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int, fps float64) []string {
 			dev = findDRIDevice()
 		}
 		vf := fmt.Sprintf("format=nv12,hwupload,scale_vaapi=w=%d:h=-2", width)
-		args := []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "h264_vaapi", "-level", level}
+		args := []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "h264_vaapi", "-level", strconv.Itoa(h264LevelIDC(height, fps))}
 		// Until the quality policy existed this family had no quality knob at
 		// all — on the most common self-hosted GPU. Balanced still emits
 		// nothing (driver default), so the default path is unchanged.
@@ -477,9 +477,9 @@ func h264Profile(height int) string {
 
 // h264LevelIDC returns the H.264 level_idc for a given output height and
 // source frame rate — the SINGLE source of truth from which every rendering
-// derives: the dotted form for libx264/NVENC/VAAPI/AMF (-level "4.0"), the
-// numeric form for h264_qsv (level_idc integer — QSV has no named dotted
-// constants; "4.0" silently evaluates to 4 there), and the two-hex-digit
+// derives: the dotted form for libx264/NVENC/AMF (-level "4.0"), the
+// numeric form for h264_qsv and h264_vaapi (level_idc integer — "4.0"
+// silently evaluates to 4 rather than 40), and the two-hex-digit
 // form for the master playlist's CODECS attribute (hlsCodecString). One
 // table means the encoder constraint and the advertised capability can
 // never drift apart.
@@ -542,7 +542,8 @@ func h264LevelIDC(height int, fps float64) int {
 }
 
 // h264Level renders the level in the dotted form ("4.0") accepted by
-// libx264 (string option) and by NVENC/VAAPI/AMF (named constants).
+// libx264 (string option) and by NVENC/AMF (named constants). VAAPI/QSV
+// instead receive numeric level_idc; VAAPI's named x.0 levels omit the .0.
 func h264Level(height int, fps float64) string {
 	idc := h264LevelIDC(height, fps)
 	return fmt.Sprintf("%d.%d", idc/10, idc%10)
@@ -677,8 +678,8 @@ func hevcLevelIDC(height int, fps float64) int {
 }
 
 // hevcLevel renders the level in the dotted form ("4.0") accepted by
-// libx265/NVENC/VAAPI/AMF. QSV gets the raw idc integer (no named dotted
-// constants — same quirk as h264_qsv).
+// libx265/NVENC/AMF. VAAPI receives the numeric HEVC level_idc (level × 30),
+// while QSV expects the Intel level scale (level × 10).
 func hevcLevel(height int, fps float64) string {
 	idc := hevcLevelIDC(height, fps)
 	return fmt.Sprintf("%d.%d", idc/30, (idc%30)/3)
@@ -704,7 +705,7 @@ func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
 			"-profile:v", "main", "-level", level, "-vf", scale, "-tag:v", "hvc1"}
 	case HWAccelQSV:
 		return []string{"-c:v", "hevc_qsv", "-preset", h.policy().qsvPreset(),
-			"-profile:v", "main", "-level", strconv.Itoa(hevcLevelIDC(height, fps)), "-vf", scale, "-tag:v", "hvc1"}
+			"-profile:v", "main", "-level", strconv.Itoa(hevcLevelIDC(height, fps) / 3), "-tier", "main", "-vf", scale, "-tag:v", "hvc1"}
 	case HWAccelVAAPI:
 		dev := h.DevicePath
 		if dev == "" {
@@ -712,7 +713,7 @@ func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
 		}
 		vf := fmt.Sprintf("format=nv12,hwupload,scale_vaapi=w=%d:h=-2", width)
 		args := []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "hevc_vaapi",
-			"-level", level, "-tag:v", "hvc1"}
+			"-level", strconv.Itoa(hevcLevelIDC(height, fps)), "-tag:v", "hvc1"}
 		return append(args, h.policy().vaapiCompressionArgs()...)
 	case HWAccelAMF:
 		return []string{"-c:v", "hevc_amf", "-quality", h.policy().amfQuality(),
