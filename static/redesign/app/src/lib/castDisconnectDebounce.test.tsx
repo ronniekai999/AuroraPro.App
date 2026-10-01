@@ -27,7 +27,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useEffect } from 'react'
 import { act, render, screen } from '@testing-library/react'
-import { useCast, type CastLoadArgs } from './cast'
+import { CastMediaLoadError, useCast, type CastLoadArgs } from './cast'
 
 const CAST_STATE = {
   NO_DEVICES_AVAILABLE: 'NO_DEVICES_AVAILABLE',
@@ -44,6 +44,7 @@ class FakeRemotePlayer implements CastRemotePlayer {
   currentTime = 0
   duration = 0
   playerState: string | null = null
+  mediaInfo: CastMediaInfo | null = null
 }
 
 class FakeRemotePlayerController implements CastRemotePlayerController {
@@ -273,6 +274,67 @@ afterEach(async () => {
   delete (window as { cast?: unknown }).cast
   delete (window as { chrome?: unknown }).chrome
   latestCast = null
+})
+
+describe('useCast receiver LOAD outcome contract', () => {
+  const load: CastLoadArgs = { contentUrl: 'https://example.com/attempt.m3u8?token=cast', contentType: 'application/x-mpegURL' }
+  it('identifies only an actual receiver LOAD rejection with the attempted content ID', async () => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    session.loadMedia = vi.fn(async () => { throw { code: 'load_failed' } })
+    sdk.setSession(session)
+    render(<Harness currentLoad={() => load} />)
+    act(() => sdk.triggerReconnect())
+    let error: unknown
+    await act(async () => {
+      try { await latestCast!.loadCurrent() } catch (e) { error = e }
+    })
+    expect(error).toBeInstanceOf(CastMediaLoadError)
+    expect((error as CastMediaLoadError).contentId).toBe(load.contentUrl)
+    expect(session.loadMedia).toHaveBeenCalledOnce()
+    expect(connected()).toBe('true')
+  })
+  it('keeps token and missing-session failures distinct from receiver LOAD failures', async () => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    sdk.setSession(session)
+    const mintError = new Error('token mint failed')
+    render(<Harness currentLoad={() => { throw mintError }} />)
+    act(() => sdk.triggerReconnect())
+    let error: unknown
+    await act(async () => {
+      try { await latestCast!.loadCurrent() } catch (e) { error = e }
+    })
+    expect(error).toBe(mintError)
+    expect(error).not.toBeInstanceOf(CastMediaLoadError)
+    expect(session.loadMedia).not.toHaveBeenCalled()
+    sdk.setSession(null)
+    await act(async () => {
+      try { await latestCast!.loadCurrent() } catch (e) { error = e }
+    })
+    expect((error as Error).message).toBe('cast session not established')
+    expect(error).not.toBeInstanceOf(CastMediaLoadError)
+  })
+  it('samples receiver identity atomically with the idle reason and tolerates missing fields', () => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    const media: CastMediaInfo = { contentId: 'https://example.com/failed.m3u8', contentType: 'application/x-mpegURL' }
+    session.getMediaSession = () => ({ idleReason: 'ERROR', media })
+    sdk.setSession(session)
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()!
+    player.playerState = 'IDLE'
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({ contentId: media.contentId, playerState: 'IDLE', idleReason: 'ERROR' })
+    session.getMediaSession = () => ({ idleReason: null })
+    player.mediaInfo = { ...media, contentId: 'https://example.com/player-info.m3u8' }
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.contentId).toBe(player.mediaInfo.contentId)
+    player.mediaInfo = null
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.contentId).toBeNull()
+  })
 })
 
 describe('useCast disconnect debounce', () => {

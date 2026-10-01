@@ -116,6 +116,7 @@ declare global {
     duration: number
     playerState: string | null
     title?: string | null
+    mediaInfo?: CastMediaInfo | null
   }
 
   interface CastRemotePlayerController {
@@ -147,10 +148,10 @@ declare global {
     endSession(stopCasting: boolean): void
   }
 
-  // The receiver's current media session (chrome.cast.media.Media). We only
-  // read idleReason: the RemotePlayer exposes playerState ('IDLE') but NOT why
-  // it went idle, and that distinction lives here.
+  // The receiver's current media session (chrome.cast.media.Media). Sample
+  // its optional identity and idleReason with RemotePlayer.playerState.
   interface CastMediaSession {
+    media?: CastMediaInfo | null
     // Why playback went IDLE: 'FINISHED' on natural end-of-media,
     // 'CANCELLED'/'INTERRUPTED' on a user stop or media switch, 'ERROR' on
     // failure. Null/undefined until the media has gone idle at least once.

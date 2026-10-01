@@ -44,6 +44,18 @@ export const CAST_NO_MEDIA_ERROR = 'no media to cast'
 // never hold the load open.
 const SELF_TEST_TIMEOUT_MS = 5000
 
+// Only a receiver LOAD rejection can produce an IDLE event for a failed
+// replacement. Token minting and SDK/session setup fail before disturbing
+// receiver media, so callers must not treat those errors as media outcomes.
+export class CastMediaLoadError extends Error {
+  readonly contentId: string
+  constructor(message: string, contentId: string) {
+    super(message)
+    this.name = 'CastMediaLoadError'
+    this.contentId = contentId
+  }
+}
+
 // describeCastError turns a Cast SDK rejection into a human-readable
 // message. The CAF Sender is maddeningly inconsistent about its reject
 // shape: requestSession()/loadMedia() may reject with a structured
@@ -252,6 +264,9 @@ export interface CastStatus {
 // the sender UI (the minimized cast control widget) can show + drive what's
 // playing on the TV.
 export interface CastRemoteState {
+  // The receiver's media identity, when CAF supplies it. Older SDK/device
+  // shapes may omit it; end handling retains its reason-based fallback.
+  contentId?: string | null
   // A RemotePlayer is bound to an active receiver session.
   isConnected: boolean
   // The receiver has media loaded (false during launch / between items).
@@ -304,6 +319,7 @@ export function useCast(
     deviceName: null,
   })
   const [remote, setRemote] = useState<CastRemoteState>({
+    contentId: null,
     isConnected: false,
     isMediaLoaded: false,
     isPaused: false,
@@ -580,10 +596,14 @@ export function useCast(
           // can be null between items; default to null then (treated as a
           // permissive "finished" by the player's advance gate).
           let idleReason: string | null = null
+          let contentId: string | null = player.mediaInfo?.contentId ?? null
           try {
-            idleReason = ctx.getCurrentSession()?.getMediaSession()?.idleReason ?? null
+            const mediaSession = ctx.getCurrentSession()?.getMediaSession()
+            idleReason = mediaSession?.idleReason ?? null
+            contentId = mediaSession?.media?.contentId ?? contentId
           } catch { /* defensive — SDK shape varies across builds */ }
           setRemote({
+            contentId,
             isConnected: !!player.isConnected,
             isMediaLoaded: !!player.isMediaLoaded,
             isPaused: !!player.isPaused,
@@ -816,7 +836,7 @@ export function useCast(
       // Same robust mapping as requestSession — handles bare-string and
       // structured rejections alike so a load failure never degrades to
       // a bare "loadMedia: unknown".
-      throw new Error(describeCastError(rawErr))
+      throw new CastMediaLoadError(describeCastError(rawErr), load.contentUrl)
     }
   }
 
