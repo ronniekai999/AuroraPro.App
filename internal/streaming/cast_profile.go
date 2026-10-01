@@ -141,6 +141,13 @@ func castEncoderArgs(args []string, p QualityProfile, fps float64, accel HWAccel
 	if !profileSet {
 		args = append(args, "-profile:v", "high")
 	}
+	if accel == HWAccelNone {
+		// x264's profile option is a ceiling, not a promise to emit High.
+		// ultrafast disables High-only tools and otherwise emits constrained
+		// baseline SPS despite our High CODECS. Enable its 8x8 transform only
+		// for the private cast rung so every supported preset signals High.
+		args = append(args, "-8x8dct", "1")
+	}
 	return append(args, "-r:v", strconv.FormatFloat(fps, 'f', -1, 64))
 }
 

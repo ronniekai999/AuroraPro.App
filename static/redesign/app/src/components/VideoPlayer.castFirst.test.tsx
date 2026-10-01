@@ -10,7 +10,7 @@ const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
     status: { supported: true, available: true, connected: false, settling: false, deviceName: 'TV' },
-    remote: { title: 'Receiver title', contentId: null as string | null, clockContentId: null as string | null, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
+    remote: { title: 'Receiver title', contentId: null as string | null, clockContentId: null as string | null, mediaStatusSeq: 0, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
     start: vi.fn(), stop: vi.fn(), loadCurrent: vi.fn(), seek: vi.fn(), playOrPause: vi.fn(),
   },
   hls: [] as Array<{ emit: (name: string, data?: unknown) => void; startLoad: ReturnType<typeof vi.fn>; stopLoad: ReturnType<typeof vi.fn>; options: { autoStartLoad: boolean }; loadSource: ReturnType<typeof vi.fn> }>,
@@ -59,7 +59,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); vi.clearAllMocks(); fake.hls.length = 0; localStorage.clear()
   fake.getter = null
   Object.assign(fake.cast.status, { connected: false, settling: false })
-  Object.assign(fake.cast.remote, { title: 'Receiver title', contentId: null, clockContentId: null, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
+  Object.assign(fake.cast.remote, { title: 'Receiver title', contentId: null, clockContentId: null, mediaStatusSeq: 0, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
   fake.cast.stop.mockReset()
   fake.cast.start.mockReset(); fake.cast.loadCurrent.mockReset()
   vi.mocked(createCastToken).mockReset().mockResolvedValue({ ...castTokenFor('cast-copy', 100), segment_format: 'fmp4' })
@@ -223,7 +223,7 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce()
     expect(deleteSession).toHaveBeenCalledWith('recovered-copy')
   })
-  it('recovers error handling after an identity-less receiver resumes the committed media', async () => {
+  it('keeps failed LOAD recovery suspended on identity-less receiver updates', async () => {
     const { view, element, ended } = await connectedCast()
     rejectReplacement('ERROR', 'missing')
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
@@ -231,7 +231,7 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     view.rerender(element()); await settle()
     Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'ERROR', updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
-    expect(fake.cast.stop).toHaveBeenCalledOnce(); expect(ended).not.toHaveBeenCalled()
+    expect(fake.cast.stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
   })
   for (const reason of ['FINISHED', 'CANCELLED']) {
     it(`handles a later ${reason} after a rejected LOAD without advancing uncertain media`, async () => {
@@ -303,7 +303,7 @@ it('Review: committed receiver recovery inside the settling window restores genu
   const committedId = fake.cast.remote.contentId
   rejectReplacement('ERROR')
   fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle()
-  Object.assign(fake.cast.remote, {contentId: committedId, clockContentId: committedId, playerState: 'PAUSED', idleReason: null, isMediaLoaded: true, isPaused: true, updateSeq: fake.cast.remote.updateSeq + 1 })
+  Object.assign(fake.cast.remote, {contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, playerState: 'PAUSED', idleReason: null, isMediaLoaded: true, isPaused: true, updateSeq: fake.cast.remote.updateSeq + 1 })
   view.rerender(element()); await settle()
   await advanceLoadWindow()
   Object.assign(fake.cast.remote, {contentId: committedId, playerState: 'IDLE', idleReason: 'ERROR', isMediaLoaded: false, updateSeq: fake.cast.remote.updateSeq + 1 })
@@ -345,7 +345,7 @@ describe('Rejected LOAD identity and clock recovery', () => {
     }
     expect(fake.cast.stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
     expect(deleteSession).not.toHaveBeenCalledWith('retry-ack')
-    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, playerState: 'PLAYING', idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
+    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, playerState: 'PLAYING', idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
     Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'ERROR', updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
@@ -358,7 +358,7 @@ describe('Rejected LOAD identity and clock recovery', () => {
       const committedId = fake.cast.remote.contentId
       rejectReplacement('ERROR')
       fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle()
-      Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
+      Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
       view.rerender(element()); await settle()
       Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: reason, updateSeq: fake.cast.remote.updateSeq + 1 })
       view.rerender(element()); await settle(); await advanceLoadWindow()
@@ -477,7 +477,7 @@ describe('Rejected LOAD identity and clock recovery', () => {
     expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
     Object.assign(fake.cast.remote, { contentId: null, updateSeq: 3 }); view.rerender(element()); await settle(); await poll(3)
     expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
-    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, currentTime: 500, updateSeq: 4 }); view.rerender(element()); await settle(); await poll(4)
+    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, currentTime: 500, updateSeq: 4 }); view.rerender(element()); await settle(); await poll(4)
     expect(fake.cast.loadCurrent.mock.calls.at(-1)?.[0]).toBeCloseTo(701, 0)
     expect(fake.cast.seek).not.toHaveBeenCalled()
   })
@@ -585,7 +585,7 @@ it('Independent 6c: a loaded committed paused recovery legitimately restores rel
   const committedId=fake.cast.remote.contentId
   rejectReplacement('ERROR','committed')
   fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle();view.rerender(element());await settle();await advanceLoadWindow()
-  Object.assign(fake.cast.remote,{contentId:committedId,clockContentId:committedId,playerState:'PAUSED',idleReason:null,isMediaLoaded:true,isPaused:true,currentTime:50,updateSeq:fake.cast.remote.updateSeq+1})
+  Object.assign(fake.cast.remote,{contentId:committedId,clockContentId:committedId,mediaStatusSeq:fake.cast.remote.mediaStatusSeq+1,playerState:'PAUSED',idleReason:null,isMediaLoaded:true,isPaused:true,currentTime:50,updateSeq:fake.cast.remote.updateSeq+1})
   view.rerender(element());await settle();fake.cast.loadCurrent.mockClear()
   fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle()
   expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(160)
@@ -599,7 +599,7 @@ describe('Acknowledged receiver ownership and expiry', () => {
     const committedId = fake.cast.remote.contentId
     rejectReplacement('ERROR', 'committed')
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
-    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, currentTime: 500, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
+    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, currentTime: 500, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
     fake.cast.loadCurrent.mockClear(); fake.cast.playOrPause.mockClear()
     vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('renewed-ack', 585))
@@ -648,7 +648,7 @@ describe('Acknowledged receiver ownership and expiry', () => {
     const committedId = fake.cast.remote.contentId
     rejectReplacement('ERROR')
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle()
-    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, currentTime: 50, updateSeq: fake.cast.remote.updateSeq + 1 })
+    Object.assign(fake.cast.remote, { contentId: committedId, clockContentId: committedId, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1, playerState: 'PAUSED', isPaused: true, isMediaLoaded: true, idleReason: null, currentTime: 50, updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
     Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'ERROR', isMediaLoaded: false, updateSeq: fake.cast.remote.updateSeq + 1 })
     view.rerender(element()); await settle()
@@ -957,4 +957,38 @@ it('Independent 051 recovery inverse: coherent Media PAUSED clock delivered befo
   fake.cast.loadCurrent.mockClear()
   fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle()
   expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(670)
+})
+
+for(const reason of ['FINISHED','CANCELLED'] as const) it(`Independent 4cf retry terminal: the previous rejected ${reason} cannot stop a newer in-flight LOAD`,async()=>{
+  const {view,element,ended}=await connectedCast()
+  rejectReplacement('ERROR')
+  fireEvent.click(screen.getByRole('button',{name:'Skip forward 10 seconds'}));await settle();view.rerender(element());await settle();await advanceLoadWindow()
+  const failedURI=fake.cast.remote.contentId
+  vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('pending-newer-retry',645))
+  let incomingURI!:string;let ack!:()=>void
+  fake.cast.loadCurrent.mockImplementationOnce(async(at?:number)=>{
+    const load=await fake.getter?.(at) as CastLoadArgs
+    incomingURI=load.contentUrl
+    await new Promise<void>(resolve=>{ack=resolve})
+  })
+  fireEvent.keyDown(screen.getByRole('slider',{name:'Seek'}),{key:'End'});await settle()
+  expect(incomingURI).toContain('pending-newer-retry')
+  Object.assign(fake.cast.remote,{contentId:failedURI,clockContentId:null,playerState:'IDLE',idleReason:reason,isMediaLoaded:false,updateSeq:fake.cast.remote.updateSeq+1})
+  view.rerender(element());await settle()
+  const stopsBeforeACK=fake.cast.stop.mock.calls.length
+  Object.assign(fake.cast.remote,{contentId:incomingURI,clockContentId:incomingURI,currentTime:355,playerState:'PLAYING',idleReason:null,isMediaLoaded:true,updateSeq:fake.cast.remote.updateSeq+1})
+  await act(async()=>{ack()});await settle();view.rerender(element());await settle();await advanceLoadWindow()
+  expect(ended).not.toHaveBeenCalled();expect(stopsBeforeACK).toBe(0);expect(fake.cast.stop).not.toHaveBeenCalled()
+})
+for(const reason of ['FINISHED','CANCELLED'] as const) it(`Independent 4cf first ACK terminal: acknowledged ${reason} works without an earlier PLAYING clock`,async()=>{
+  fake.cast.start.mockImplementationOnce(async()=>{
+    const load=await fake.getter?.() as CastLoadArgs
+    fake.cast.status.connected=true
+    Object.assign(fake.cast.remote,{contentId:load.contentUrl,clockContentId:null,playerState:null,isMediaLoaded:true,updateSeq:1})
+  })
+  const {view,element,ended}=await connectedCast();await advanceLoadWindow()
+  Object.assign(fake.cast.remote,{clockContentId:null,playerState:'IDLE',idleReason:reason,isMediaLoaded:false,updateSeq:2})
+  view.rerender(element());await settle();await advanceLoadWindow()
+  expect(ended).toHaveBeenCalledTimes(reason==='FINISHED'?1:0)
+  expect(fake.cast.stop).toHaveBeenCalledOnce()
 })

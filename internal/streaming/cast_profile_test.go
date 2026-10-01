@@ -141,6 +141,13 @@ func TestCastEncoderArgsAgreeWithDeclaredOutput(t *testing.T) {
 			hw := HWAccelInfo{Type: accel}
 			args := castEncoderArgs(hw.VideoEncoderArgs(p.Width, p.Height, 30), p, 30, accel)
 			assertContains(t, args, "-profile:v", "high")
+			if accel == HWAccelNone {
+				assertContains(t, args, "-8x8dct", "1")
+				browserArgs := hw.VideoEncoderArgs(p.Width, p.Height, 30)
+				if got := castEncoderArgs(browserArgs, QualityProfile{}, 30, accel); strings.Join(got, " ") != strings.Join(browserArgs, " ") {
+					t.Fatalf("cast policy changed ordinary browser encoder: %v", got)
+				}
+			}
 			assertContains(t, args, "-r:v", "30")
 			if strings.Contains(strings.Join(args, " "), ":-2") || strings.Contains(strings.Join(args, " "), "h=-2") {
 				t.Fatalf("cast scaler must use declared geometry: %v", args)
@@ -465,5 +472,49 @@ func TestCastWarmStoppedCopyDoesNotStartDetachedEncoder(t *testing.T) {
 	}
 	if _, ok := tm.GetSession(src.ID); !ok {
 		t.Fatal("stopping the candidate altered the source")
+	}
+}
+
+func TestCastSoftwarePresetsProduceDeclaredHighProfile(t *testing.T) {
+	requireFFmpeg(t)
+	for _, preset := range []string{"ultrafast", "superfast", "veryfast"} {
+		t.Run(preset, func(t *testing.T) {
+			source := (mediaFixture{VideoCodec: "h264", Width: 640, Height: 360, FPS: 30, DurationSec: 1}).build(t)
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{HWAccel: "none", HWDecode: "off", SoftwarePreset: preset, Profiles: []string{"1080p"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(tm.Close)
+			src, err := tm.CreateSession(1, "review", source, 640, 360, SessionOpts{Remux: true, RemuxAudioCopy: true, SourceVideoCodec: "h264", SourceVideoPixFmt: "yuv420p", SourceFPS: 30})
+			if err != nil {
+				t.Fatal(err)
+			}
+			copy, err := tm.CloneForCast(1, "review", src.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if copy == src {
+				t.Fatal("expected private encoder copy")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := tm.WarmCastSession(ctx, copy); err != nil {
+				t.Fatal(err)
+			}
+			v, err := tm.EnsureVariant(copy, copy.Profiles[0].Name, copy.StartSec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streams := probeStreams(t, firstMediaSegment(t, v.OutputDir))
+			for _, stream := range streams {
+				if stream.CodecType != "video" {
+					continue
+				}
+				t.Logf("preset %s: declared %s; actual %+v", preset, copy.Profiles[0].CodecString, stream)
+				if !strings.HasPrefix(copy.Profiles[0].CodecString, "avc1.64") || stream.Profile != "High" {
+					t.Errorf("cast CODECS %s and emitted profile %s disagree", copy.Profiles[0].CodecString, stream.Profile)
+				}
+			}
+		})
 	}
 }
