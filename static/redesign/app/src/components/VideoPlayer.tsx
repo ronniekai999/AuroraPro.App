@@ -912,6 +912,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
   const castPendingContentIdRef = useRef<string | null>(null)
   const castCommittedContentIdRef = useRef<string | null>(null)
+  // LOAD may ACK before CAF publishes the new media's clock. Sequence alone
+  // is insufficient: ANY_CHANGE also fires for volume and mute mutations.
+  // A receiver without contentId must deliver a changed clock at
+  // the requested start before its clock is paired with the new anchor.
+  const castAcknowledgedStatusRef = useRef<{
+    updateSeq: number; currentTime: number; requestedStartTime: number | null; clockAssociated: boolean
+  } | null>(null)
   const castOwnerProfileId = profileId ?? undefined
   const castOwnerBindingRef = useRef({ target, profileId: castOwnerProfileId })
   castOwnerBindingRef.current = { target, profileId: castOwnerProfileId }
@@ -1034,6 +1041,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadedMediaRef.current = null
     castPendingContentIdRef.current = null
     castCommittedContentIdRef.current = null
+    castAcknowledgedStatusRef.current = null
     castPendingOwnerRef.current = null
     castCommittedOwnerRef.current = null
     castTokenExpRef.current = 0
@@ -1401,10 +1409,31 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return true
   }, [castLoadIsSettling])
   const castReceiverClockIsTrusted = useCallback((): boolean => {
-    const remote = castRef.current.remote
-    return castStartSecRef.current !== null && castReceiverOwnsTarget() && remote.isMediaLoaded &&
-      Number.isFinite(remote.currentTime) && remote.currentTime >= 0 &&
-      (remote.playerState === 'PLAYING' || remote.playerState === 'PAUSED') && castReceiverIdentityIsTrusted()
+    const c = castRef.current
+    const remote = c.remote
+    const acknowledgedStatus = castAcknowledgedStatusRef.current
+    if (!c.status.connected || c.status.settling || castStartSecRef.current === null ||
+      !castReceiverOwnsTarget() || !acknowledgedStatus || !remote.isMediaLoaded ||
+      !Number.isFinite(remote.currentTime) || remote.currentTime < 0 ||
+      (remote.playerState !== 'PLAYING' && remote.playerState !== 'PAUSED') ||
+      !castReceiverIdentityIsTrusted()) return false
+    if (remote.contentId === castCommittedContentIdRef.current) {
+      // Strong media identity works even when its status arrived before ACK.
+      acknowledgedStatus.clockAssociated = true
+      return true
+    }
+    if (acknowledgedStatus.clockAssociated) return true
+    if (remote.updateSeq <= acknowledgedStatus.updateSeq ||
+      remote.currentTime === acknowledgedStatus.currentTime) return false
+    // A legacy receiver needs a clock witness near the requested LOAD start,
+    // rather than ordinary outgoing playback drift or an unrelated event.
+    // The fixed tolerance permits a few seconds of playback before delivery;
+    // elapsed settlement never widens it or blesses an unchanged snapshot.
+    const requested = acknowledgedStatus.requestedStartTime
+    if (requested === null || !Number.isFinite(requested) ||
+      Math.abs(remote.currentTime - requested) > 5) return false
+    acknowledgedStatus.clockAssociated = true
+    return true
   }, [castReceiverIdentityIsTrusted, castReceiverOwnsTarget])
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
@@ -1423,6 +1452,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // epoch-gated below, so the old title cannot drive the new party.
         if (castPendingContentIdRef.current) {
           castCommittedContentIdRef.current = castPendingContentIdRef.current
+          const acknowledgedRemote = castRef.current.remote
+          castAcknowledgedStatusRef.current = {
+            updateSeq: acknowledgedRemote.updateSeq, currentTime: acknowledgedRemote.currentTime,
+            requestedStartTime: castPendingStartTimeRef.current,
+            clockAssociated: acknowledgedRemote.contentId === castPendingContentIdRef.current &&
+              acknowledgedRemote.isMediaLoaded && Number.isFinite(acknowledgedRemote.currentTime) &&
+              acknowledgedRemote.currentTime >= 0 &&
+              (acknowledgedRemote.playerState === 'PLAYING' || acknowledgedRemote.playerState === 'PAUSED'),
+          }
           castCommittedOwnerRef.current = castPendingOwnerRef.current
           if (castPendingTokenExpRef.current !== null) castTokenExpRef.current = castPendingTokenExpRef.current
         }

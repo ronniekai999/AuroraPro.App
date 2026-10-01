@@ -647,3 +647,191 @@ describe('Acknowledged receiver ownership and expiry', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
   })
 })
+
+describe('Successful ACK and receiver status association', () => {
+  async function renewWithOutgoingStatus(inParty = false, identifyOutgoing = false, incomingBeforeAck: false | 'exact' | 'missing' = false) {
+    const target = { ...movie, resumePositionMs: 600000 }
+    const party: PartySync = {
+      isHost: true, currentUserId: 7, partyMediaItemId: 1, partyEpisodeId: null,
+      isPlaying: false, rev: 1, hlsStartSec: 0,
+      tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() } },
+      seekRef: { current: null }, helloAbsMsRef: { current: 600000 },
+      requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn(),
+    }
+    const first = castTokenFor('ack-old', 100); first.expires_at = 1
+    const next = castTokenFor('ack-new', 580)
+    const firstId = `http://localhost:3000${first.playlist}`
+    const nextId = `http://localhost:3000${next.playlist}`
+    vi.mocked(createCastToken).mockResolvedValueOnce(first)
+    fake.cast.start.mockImplementationOnce(async () => {
+      const load = await fake.getter?.() as CastLoadArgs
+      expect(load.startTime).toBe(500)
+      fake.cast.status.connected = true
+      Object.assign(fake.cast.remote, { contentId: identifyOutgoing ? firstId : null, currentTime: 499, playerState: 'PLAYING', isPaused: false, updateSeq: 1 })
+    })
+    const ended = vi.fn(async () => false)
+    const element = () => <VideoPlayer target={target} onClose={() => {}} onEnded={ended} party={inParty ? party : undefined} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    // The first load has already delivered a fresh, healthy receiver status.
+    // Only the renewal below deliberately withholds its new status past ACK.
+    Object.assign(fake.cast.remote, { currentTime: 500, playerState: 'PAUSED', isPaused: true, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    let acknowledge!: () => void
+    vi.mocked(createCastToken).mockResolvedValueOnce(next)
+    fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
+      const load = await fake.getter?.(at) as CastLoadArgs
+      expect(at).toBe(600); expect(load.startTime).toBe(20)
+      if (incomingBeforeAck) {
+        Object.assign(fake.cast.remote, { contentId: incomingBeforeAck === 'exact' ? nextId : null, currentTime: 20, playerState: 'PLAYING', isPaused: false, updateSeq: fake.cast.remote.updateSeq + 1 })
+      }
+      await new Promise<void>(resolve => { acknowledge = resolve })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    // LOAD succeeds before CAF publishes the incoming media status. The
+    // unchanged PAUSED@500 snapshot still belongs to the outgoing anchor100.
+    await act(async () => { acknowledge() }); await settle(); view.rerender(element()); await settle()
+    fake.cast.loadCurrent.mockClear(); fake.cast.seek.mockClear()
+    vi.mocked(party.requestPause).mockClear(); vi.mocked(party.requestSeek).mockClear(); vi.mocked(party.requestPlay).mockClear()
+    return { view, element, party, ended, firstId, nextId }
+  }
+
+  for (const mode of ['button', 'keyboard', 'slider'] as const) {
+    it(`declines ${mode} relative input against an unchanged outgoing optional-identity status after ACK`, async () => {
+      await renewWithOutgoingStatus()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+      const skip = () => {
+        if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+        else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
+        else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'ArrowRight' })
+      }
+      skip(); await settle()
+      expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+      await advanceLoadWindow()
+      skip(); await settle()
+      // Elapsed load settlement alone cannot make the same status a new clock.
+      expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+    })
+  }
+
+  it('keeps host broadcasts and corrections quiet until the incoming media status arrives', async () => {
+    const { party } = await renewWithOutgoingStatus(true)
+    await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+    expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled()
+    await act(async () => { vi.advanceTimersByTime(6000) }); await settle()
+    expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled()
+    expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+  })
+
+  it('does not let volume-only ANY_CHANGE sequences bless the unchanged outgoing clock', async () => {
+    const { view, element } = await renewWithOutgoingStatus()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    // useCast increments updateSeq for volume/mute mutations too, although
+    // none of the media/clock fields in its atomic snapshot have changed.
+    for (let i = 0; i < 3; i++) {
+      fake.cast.remote.updateSeq += 1; view.rerender(element()); await settle(); await advanceLoadWindow()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+      expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+    }
+  })
+
+  it('does not let a delayed outgoing PLAYING clock become the incoming anchored clock', async () => {
+    const { view, element } = await renewWithOutgoingStatus()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    Object.assign(fake.cast.remote, { currentTime: 500.1, playerState: 'PLAYING', isPaused: false, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+  })
+
+  it('also declines an existing TV clock discovered during the initial device picker', async () => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('picker-new', 100))
+    fake.cast.start.mockImplementationOnce(async () => {
+      const load = await fake.getter?.() as CastLoadArgs
+      expect(load.startTime).toBe(100)
+      // The pre-picker sender was disconnected. requestSession joined a TV
+      // already playing another item, whose cached clock outlives this ACK.
+      fake.cast.status.connected = true
+      Object.assign(fake.cast.remote, { contentId: null, playerState: 'PAUSED', isPaused: true, currentTime: 500, updateSeq: 1 })
+    })
+    const element = () => <VideoPlayer target={target} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    Object.assign(fake.cast.remote, { playerState: 'PLAYING', isPaused: false, currentTime: 500.1, updateSeq: 2 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { currentTime: 100, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(210)
+  })
+
+  for (const identity of ['exact', 'missing'] as const) {
+    it(`restores correct relative conversion with a fresh healthy ${identity} incoming status`, async () => {
+      const { view, element, nextId } = await renewWithOutgoingStatus()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+      Object.assign(fake.cast.remote, { contentId: identity === 'exact' ? nextId : null, currentTime: 20, playerState: 'PLAYING', isPaused: false, updateSeq: fake.cast.remote.updateSeq + 1 })
+      view.rerender(element()); await settle()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+      expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(610)
+    })
+  }
+
+  it('accepts an exact healthy incoming URI whose status arrived before its ACK', async () => {
+    await renewWithOutgoingStatus(false, false, 'exact')
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(610)
+  })
+
+  it('retains healthy exact URI evidence acknowledged before a later snapshot omits its URI', async () => {
+    const { view, element } = await renewWithOutgoingStatus(false, false, 'exact')
+    Object.assign(fake.cast.remote, { contentId: null, currentTime: 20, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(610)
+  })
+
+  it('does not associate a legacy unchanged clock near the request through volume or state-only updates', async () => {
+    const { view, element } = await renewWithOutgoingStatus(false, false, 'missing')
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fake.cast.remote.updateSeq += 1; view.rerender(element()); await settle(); await advanceLoadWindow()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { playerState: 'PAUSED', isPaused: true, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { currentTime: 20.25, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(610.25)
+  })
+
+  it('keeps acknowledged identity-only FINISHED independent of healthy clock association', async () => {
+    const { view, element, ended } = await renewWithOutgoingStatus()
+    // No incoming healthy clock snapshot ever arrived. Explicit completion
+    // can still belong to the acknowledged media without a usable clock.
+    Object.assign(fake.cast.remote, { contentId: null, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+  })
+
+  it('declines a known outgoing URI even after newer updates and restores controls for the incoming URI', async () => {
+    const { view, element, firstId, nextId } = await renewWithOutgoingStatus(false, true)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    Object.assign(fake.cast.remote, { contentId: firstId, currentTime: 500, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: nextId, currentTime: 20, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledExactlyOnceWith(610)
+  })
+})
