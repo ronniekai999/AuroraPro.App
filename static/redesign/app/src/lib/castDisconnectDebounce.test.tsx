@@ -83,7 +83,12 @@ function installFakeSdk() {
   const makeSession = (deviceName = 'Living Room'): CastSessionInstance => ({
     getCastDevice: () => ({ friendlyName: deviceName }),
     loadMedia: vi.fn(async () => undefined),
-    getMediaSession: () => ({ idleReason: null }),
+    getMediaSession: () => ({
+      idleReason: null,
+      media: remoteController?.player.mediaInfo ?? { contentId: 'https://example.com/current.mp4', contentType: 'video/mp4' },
+      playerState: remoteController?.player.playerState ?? null,
+      currentTime: remoteController?.player.currentTime,
+    }),
     endSession: () => {
       // Genuinely asynchronous, matching the real SDK (its whole reason for
       // existing here): SESSION_STATE_CHANGED fires on a later microtask,
@@ -319,7 +324,7 @@ describe('useCast receiver LOAD outcome contract', () => {
     const sdk = installFakeSdk()
     const session = sdk.makeSession()
     const media: CastMediaInfo = { contentId: 'https://example.com/failed.m3u8', contentType: 'application/x-mpegURL' }
-    session.getMediaSession = () => ({ idleReason: 'ERROR', media })
+    session.getMediaSession = () => ({ idleReason: 'ERROR', media, playerState: 'IDLE' })
     sdk.setSession(session)
     render(<Harness />)
     act(() => sdk.triggerReconnect())
@@ -334,6 +339,99 @@ describe('useCast receiver LOAD outcome contract', () => {
     player.mediaInfo = null
     act(() => sdk.emitRemoteChange())
     expect(latestCast!.remote.contentId).toBeNull()
+  })
+})
+
+describe('Coherent Media receiver clock contract', () => {
+  const outgoing: CastMediaInfo = { contentId: 'https://example.com/outgoing.m3u8', contentType: 'application/x-mpegURL' }
+  const incoming: CastMediaInfo = { contentId: 'https://example.com/incoming.m3u8', contentType: 'application/x-mpegURL' }
+
+  function sample(media: CastMediaSession | null) {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    session.getMediaSession = vi.fn(() => media)
+    sdk.setSession(session)
+    render(<Harness />); act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()!
+    Object.assign(player, { isConnected: true, isMediaLoaded: true, mediaInfo: outgoing, currentTime: 500, playerState: 'PLAYING', isPaused: false })
+    vi.mocked(session.getMediaSession).mockClear()
+    act(() => sdk.emitRemoteChange())
+    expect(session.getMediaSession).toHaveBeenCalledOnce()
+    return { sdk, session, player }
+  }
+
+  it('does not pair a new Media URI with the outgoing RemotePlayer clock or state', () => {
+    sample({ media: incoming, idleReason: null })
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, currentTime: 500, playerState: null, clockContentId: null })
+  })
+
+  it('keeps clock proof scoped to the actual Media instance across receiver LOAD acknowledgement', async () => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    let media: CastMediaSession = { media: outgoing, playerState: 'PAUSED', currentTime: 500 }
+    session.getMediaSession = () => media
+    sdk.setSession(session)
+    render(<Harness currentLoad={() => ({ contentUrl: incoming.contentId, contentType: incoming.contentType, startTime: 15 })} />)
+    act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()!
+    Object.assign(player, { isConnected: true, isMediaLoaded: true, mediaInfo: outgoing, currentTime: 500, playerState: 'PLAYING', isPaused: false })
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.clockContentId).toBe(outgoing.contentId)
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(latestCast!.remote.clockContentId).toBe(outgoing.contentId)
+    media = { media: incoming, idleReason: null }
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, currentTime: 500, playerState: null, clockContentId: null })
+    media = { media: incoming, playerState: 'PAUSED', getEstimatedTime: () => 15 }
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, clockContentId: incoming.contentId, currentTime: 15, playerState: 'PAUSED', isPaused: true })
+    expect(player.currentTime).toBe(500); expect(player.mediaInfo?.contentId).toBe(outgoing.contentId)
+  })
+
+  it('uses the estimated clock and state of the same Media instance, including paused state', () => {
+    const media: CastMediaSession = { media: incoming, playerState: 'PAUSED', currentTime: 15, idleReason: null }
+    media.getEstimatedTime = vi.fn(function(this: CastMediaSession) { expect(this).toBe(media); return 17 })
+    sample(media)
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, clockContentId: incoming.contentId, currentTime: 17, playerState: 'PAUSED', isPaused: true })
+  })
+
+  it.each([0, 15])('uses the same Media own currentTime %s when the estimator is unavailable', currentTime => {
+    sample({ media: incoming, playerState: 'PLAYING', currentTime })
+    expect(latestCast!.remote).toMatchObject({ clockContentId: incoming.contentId, currentTime, playerState: 'PLAYING', isPaused: false })
+  })
+
+  it.each([NaN, Infinity, -1, undefined])('declines invalid estimated time %s without falling back to its old currentTime', estimatedTime => {
+    sample({ media: incoming, playerState: 'PLAYING', currentTime: 15, getEstimatedTime: () => estimatedTime as number })
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    expect(latestCast!.remote.currentTime).toBe(500)
+  })
+
+  it('declines a throwing estimator even when another clock field is present', () => {
+    sample({ media: incoming, playerState: 'PLAYING', currentTime: 15, getEstimatedTime: () => { throw new Error('SDK estimator unavailable') } })
+    expect(latestCast!.remote.clockContentId).toBeNull()
+  })
+
+  it.each(['IDLE', 'BUFFERING', null])('does not prove a clock for unhealthy or unknown Media state %s', playerState => {
+    sample({ media: incoming, playerState, currentTime: 15, idleReason: playerState === 'IDLE' ? 'FINISHED' : null })
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    expect(latestCast!.remote.playerState).toBe(playerState)
+  })
+
+  it('preserves coherent identity-only FINISHED while its clock is unavailable', () => {
+    sample({ media: incoming, playerState: 'IDLE', idleReason: 'FINISHED' })
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, playerState: 'IDLE', idleReason: 'FINISHED', clockContentId: null })
+  })
+
+  it.each([null, { currentTime: 15, playerState: 'PAUSED' }, { media: incoming, currentTime: 15 }])('declines clock proof when identity or state is unavailable', media => {
+    sample(media)
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    expect(latestCast!.remote.playerState).toBeNull()
+  })
+
+  it('does not invent a terminal state when Media identity is newer than the mirrored RemotePlayer IDLE', () => {
+    const { sdk, player } = sample({ media: incoming, idleReason: 'FINISHED' })
+    player.playerState = 'IDLE'; act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({ contentId: incoming.contentId, playerState: null, clockContentId: null })
   })
 })
 
