@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
-import { createCastToken, createSession, getStreamInfo, keepalive } from '@/lib/streaming'
+import { createCastToken, createDirectCastToken, createSession, deleteSession, getStreamInfo, keepalive } from '@/lib/streaming'
 import { markWatched, reportProgress } from '@/lib/api'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -415,4 +415,119 @@ it('applies relative seek intent made during a paused direct resume before canpl
   fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
   fireEvent.canPlay(video()); await settle()
   expect(video().currentTime).toBe(90); expect(video().paused).toBe(true)
+})
+
+describe('Second independent adversarial review', () => {
+  it('records progress when CAF publishes an update before initial connection is established', async () => {
+    const picker = deferred<void>()
+    fake.cast.start.mockImplementation(async () => {
+      await picker.promise
+      await fake.getter?.()
+      fake.cast.status.connected = true
+    })
+    const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    fake.cast.remote.updateSeq++
+    view.rerender(element()); await settle()
+    picker.resolve(); await settle(); view.rerender(element()); await settle()
+    fake.cast.remote.currentTime = 30; fake.cast.remote.updateSeq++
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 130000, profile_id: 7 }), expect.any(AbortSignal))
+  })
+  it('casts from the latest logical seek before direct resume canplay', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    render(<RebuildHarness />); await settle(); fireEvent.canPlay(video()); await settle()
+    video().currentTime = 80; video().pause()
+    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    let loaded: unknown
+    fake.cast.start.mockImplementation(async () => { loaded = await fake.getter?.(); fake.cast.status.connected = true })
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    expect(loaded).toEqual(expect.objectContaining({ startTime: 90 }))
+  })
+  it('saves FINISHED completion even when the acknowledged response omitted its anchor', async () => {
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+    const ended = vi.fn(() => false)
+    const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} onEnded={ended} />
+    const view = render(element()); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0, updateSeq: 1 })
+    view.rerender(element()); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, duration_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce()
+  })
+
+  it.each(['disconnect', 'Stop'])('invalidates a slow initial mint after a real cast %s', async mode => {
+    const mint = deferred<Awaited<ReturnType<typeof createCastToken>>>()
+    vi.mocked(createCastToken).mockReturnValueOnce(mint.promise)
+    fake.cast.start.mockImplementation(async () => {
+      fake.cast.status.connected = true
+      await fake.getter?.()
+    })
+    const ended = vi.fn()
+    const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} onEnded={ended} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element()); await settle() // A real connection was established.
+    if (mode === 'Stop') fireEvent.click(screen.getByRole('button', { name: 'Stop and close' }))
+    fake.cast.status.connected = false; fake.cast.remote.updateSeq++
+    if (mode === 'disconnect') { view.rerender(element()); await settle() }
+    // The stopped receiver's mint/load settles after its end. Stop invalidates
+    // synchronously, even before connected=false is rendered.
+    mint.resolve({ playlist: '/api/stream/hls/ended-clone/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: 100 })
+    await settle(); view.rerender(element()); await settle()
+    expect(deleteSession).toHaveBeenCalledWith('ended-clone')
+    // Rejoining a receiver with no acknowledged load must not resurrect that
+    // old identity or keep the orphan clone alive.
+    fake.cast.status.connected = true
+    Object.assign(fake.cast.remote, { currentTime: 30, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    expect(keepalive).not.toHaveBeenCalledWith('ended-clone')
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(markWatched).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
+  })
+
+  it('marks unknown-duration FINISHED on the acknowledged profile/item without an anchor', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode', 0) as Awaited<ReturnType<typeof getStreamInfo>>)
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: -1 })
+    const old = { ...movie, fileType: 'episode' as const, episodeId: 11 }
+    const next = { ...old, fileId: 20, episodeId: 12 }
+    const ended = vi.fn()
+    const element = (target: PlayTarget, profileId: number) => <VideoPlayer target={target} profileId={profileId} onClose={() => {}} onEnded={ended} />
+    const view = render(element(old, 7)); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    view.rerender(element(old, 7)); await settle()
+    fake.cast.remote.currentTime = 30
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    view.rerender(element(next, 9)); await bootHls()
+    const finalWrite = deferred<{}>(); vi.mocked(markWatched).mockReturnValueOnce(finalWrite.promise)
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0, updateSeq: 1 })
+    view.rerender(element(next, 9)); await settle()
+    expect(markWatched).toHaveBeenCalledWith(1, { profile_id: 7, episode_id: 11 }, expect.any(AbortSignal))
+    expect(fake.cast.stop).not.toHaveBeenCalled()
+    finalWrite.resolve({}); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 7, episode_id: 11, position_ms: 0, duration_ms: 0 }), expect.any(AbortSignal))
+    expect(ended).not.toHaveBeenCalled(); expect(fake.cast.stop).toHaveBeenCalledOnce()
+  })
+
+  it('casts an exact pending direct zero seek made while its token mint is in flight', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    render(<RebuildHarness />); await settle(); fireEvent.canPlay(video()); await settle()
+    video().currentTime = 80; video().pause()
+    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    const mint = deferred<Awaited<ReturnType<typeof createDirectCastToken>>>()
+    vi.mocked(createDirectCastToken).mockReturnValueOnce(mint.promise)
+    let loaded: unknown
+    fake.cast.start.mockImplementation(async () => { loaded = await fake.getter?.(); fake.cast.status.connected = true })
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    for (let i = 0; i < 8; i++) fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    await settle(); expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuenow', '0')
+    mint.resolve({ url: '/api/stream/direct/media/10?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 }); await settle()
+    expect(loaded).toEqual(expect.objectContaining({ startTime: 0 }))
+  })
 })

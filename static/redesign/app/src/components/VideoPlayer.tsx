@@ -241,7 +241,9 @@ type CastProgressContext = {
   target: PlayTarget
   profileId?: number
   durationSec: number
-  startSec: number
+  // Acknowledged media identity is enough for FINISHED completion. Receiver
+  // clock samples additionally require a verified source anchor.
+  startSec: number | null
 }
 type CastProgressSample = { context: CastProgressContext; positionSec: number }
 
@@ -589,19 +591,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // later and on a different stack, can read the decision that was in force
   // when this target booted. Null whenever the current target is not
   // direct-play, which is what makes it safe to consult unconditionally.
-  const directCastRef = useRef<
-    | (DirectCastTarget & {
-        // Where this target should START if the receiver is handed it before
-        // the local element has taken its resume seek. Direct play defers
-        // that seek to a `canplay` listener, so vid.currentTime is still 0
-        // for as long as the file takes to open — and the Cast button is
-        // live throughout. Casting then started a partially-watched movie
-        // from the beginning. Zeroed once the local seek lands, after which
-        // the element's own clock is authoritative.
-        pendingResumeSec: number
-      })
-    | null
-  >(null)
+  const directCastRef = useRef<DirectCastTarget | null>(null)
   const startSecRef = useRef<number>(0)
   // Per-play listener cleanup for <video> event handlers registered by ANY
   // delivery path — direct play's error/resume/subtitle listeners AND the
@@ -1215,17 +1205,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         title: target.title,
         subtitle: target.subtitle,
         // Direct play has no resume offset folded into its timeline —
-        // start_sec is a transcode concept — so the element's clock IS the
-        // absolute source position, the same reading the HLS branch documents
-        // below for its start_sec==0 case. The one moment that clock is NOT
-        // authoritative is before the deferred resume seek has landed, when
-        // it still reads 0 on a partially-watched title; pendingResumeSec
-        // covers exactly that window and is zeroed the moment the seek lands.
+        // start_sec is a transcode concept. readLocalAbsoluteSec uses the
+        // pending logical position until canplay applies its seek, including
+        // a later scrub made while the replacement file was opening.
         //
         // With no anchor to subtract, the absolute position IS the startTime.
         startTime: recordPendingStartTime(castStartAbsSec(
           atAbsSec,
-          (videoRef.current?.currentTime ?? 0) || dc.pendingResumeSec,
+          readLocalAbsoluteSec(),
           target.episodeId,
         )),
       }
@@ -1233,7 +1220,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // The local element's position in ABSOLUTE source seconds: its own clock
     // is relative to the LOCAL session's `-ss` anchor, which is not the cast
     // session's.
-    const localAbsSec = (videoRef.current?.currentTime ?? 0) + (startSecRef.current ?? 0)
+    const localAbsSec = readLocalAbsoluteSec()
     const desiredAbsSec = castStartAbsSec(atAbsSec, localAbsSec, target.episodeId)
     // Tell the server where we are so it can anchor a cast-safe clone near
     // this position instead of inheriting the local session's anchor. Without
@@ -1268,9 +1255,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       : Math.max(0, startSecRef.current ?? 0)
     castPendingStartSecRef.current = castStartSec
     // The legacy transport fallback above is not proof of the receiver's
-    // source anchor. Unknown/invalid anchors suspend progress for this load.
-    if (progressLoad && typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0) {
-      progressLoad.context = { ...progressContext, startSec: resp.start_sec }
+    // source anchor. Keep acknowledged media identity for FINISHED, while
+    // unknown/invalid anchors suspend receiver clock-based progress.
+    if (progressLoad) {
+      progressLoad.context = {
+        ...progressContext,
+        startSec: typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0
+          ? resp.start_sec : null,
+      }
     }
     castPendingEpochRef.current = loadEpoch
     return {
@@ -1416,16 +1408,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       castLoadsInFlightRef.current += 1
       try {
         await op()
-        castSessionRef.current?.commit()
-        if (progressGeneration === castProgressGenerationRef.current) {
-          // A local target change can reject the transport/sync anchor below,
-          // yet the receiver DID take this load. Never keep the prior item's
-          // progress context after that acknowledgement. Cast end invalidates
-          // this generation so a late load cannot resurrect a stopped cast.
-          castProgressContextRef.current = progressLoad.context
-          lastCastProgressRef.current = null
-          castProgressGenerationRef.current += 1
+        if (progressGeneration !== castProgressGenerationRef.current) {
+          // A genuine disconnect/Stop can precede a slow mint/load ACK. It
+          // must not revive tracking or retain a newly minted orphan clone.
+          castSessionRef.current?.abandon()
+          return
         }
+        castSessionRef.current?.commit()
+        // A local target change can reject the transport/sync anchor below,
+        // yet the receiver DID take this load. Never keep the prior item's
+        // progress context after that acknowledgement.
+        castProgressContextRef.current = progressLoad.context
+        lastCastProgressRef.current = null
+        castProgressGenerationRef.current += 1
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
         // this media. A getter that ran but whose load then failed must not
@@ -1491,7 +1486,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const snapshotCastProgress = (): CastProgressSample | null => {
     const c = castRef.current
     const context = castProgressContextRef.current
-    if (!context || !c.status.connected || c.status.settling || castLoadIsSettling()) return null
+    if (!context || context.startSec === null || !c.status.connected || c.status.settling || castLoadIsSettling()) return null
     if (!Number.isFinite(c.remote.currentTime) || c.remote.currentTime < 0) return null
     if (!c.remote.isMediaLoaded && c.remote.playerState !== 'IDLE') return null
     // IDLE often clears currentTime. Preserve the last position unless CAF
@@ -1547,7 +1542,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const stopCastWithProgress = () => {
     // Capture before stop can clear the SDK reading; network writes must not
     // delay the user's transport control, including during an outage.
-    void flushCastProgress()
+    endCastTracking()
     castRef.current.stop()
   }
   useEffect(() => {
@@ -1864,6 +1859,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // to (movie, autoplay off, party, series end), we stop — which routes through
   // the Chromecast-end effect below and closes the player (the prior behavior).
   const castHasPlayedRef = useRef(false)
+  // RemotePlayer can publish updates while requestSession is still showing
+  // the device picker. Those connected=false snapshots are not cast ends.
+  const castTrackingConnectedRef = useRef(false)
   // True from the moment we decide to advance until the receiver has been
   // re-pointed at the next episode. Gates the reload effect so unrelated
   // session reboots (audio-track switch, seek-rebuild) don't reload the cast.
@@ -2001,6 +1999,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       }
     }
 
+    const wasConnected = castTrackingConnectedRef.current
+    castTrackingConnectedRef.current = cast.status.connected
     if (!cast.status.connected) {
       // Cast gone: disarm every flag so a stale advance can't survive a
       // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
@@ -2017,7 +2017,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // The receiver is playing nothing now, so no later scrub may assume it
       // is still on our direct file, and no anchor or correction budget from
       // the finished cast may leak into the next one.
-      endCastTracking()
+      if (wasConnected) endCastTracking()
       return
     }
     // settling: a disconnect debounce just resolved and remote hasn't been
@@ -2907,7 +2907,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               audioCodec: stream.audio_codec_out,
               resolution: stream.resolution,
             }),
-            pendingResumeSec: resumeSec,
           }
           // Wait for canplay so the resume seek lands inside a buffered
           // range — seeking before the metadata is parsed is a no-op on
@@ -2918,10 +2917,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             // A scrub made while the file was opening may have superseded the
             // original resume point. The pending logical clock owns that seek.
             vid.currentTime = logicalAbsoluteSecRef.current
-            // The element's clock is authoritative from here, including when
-            // the user scrubs back to 0 — so stop offering the resume point
-            // as a cast fallback (issue #503).
-            if (directCastRef.current) directCastRef.current.pendingResumeSec = 0
             vid.removeEventListener('canplay', onCanPlayResume)
             void completeTargetPlaybackBoot(vid)
           }
