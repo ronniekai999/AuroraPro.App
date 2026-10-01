@@ -800,6 +800,17 @@ func (q *Queries) DeleteWatchProgress(ctx context.Context, userID, mediaItemID i
 	return err
 }
 
+// DeleteWatchProgressForProfile clears only the selected profile's row. The
+// handler validates ownership; user_id remains in the predicate as defense in
+// depth. Keep the default-profile wrapper for legacy internal callers.
+func (q *Queries) DeleteWatchProgressForProfile(ctx context.Context, userID, profileID, mediaItemID int64, episodeID *int64) error {
+	_, err := q.pool.Exec(ctx,
+		`DELETE FROM watch_progress WHERE user_id = $1 AND profile_id = $2
+		 AND media_item_id = $3 AND episode_id IS NOT DISTINCT FROM $4`,
+		userID, profileID, mediaItemID, episodeID)
+	return err
+}
+
 func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit int) ([]models.ContinueWatchingItem, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
