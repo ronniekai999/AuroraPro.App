@@ -727,6 +727,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // both of which would otherwise capture a stale value.
   const partyControlsMediaRef = useRef(false)
   const applyingRemoteUntilRef = useRef<number>(0)
+  const automaticPauseUntilRef = useRef<number>(0)
   // A play() promise and its DOM event can both arrive after a newer Pause.
   // Keep ownership until the automatic attempt settles; manual controls
   // supersede it so an old completion cannot stop a later explicit Play.
@@ -738,8 +739,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const pauseUnwantedAutomaticPlay = useCallback((vid: HTMLVideoElement) => {
     const intent = localPlayIntentRef.current
     if (intent?.video !== vid || intent.source !== 'automatic' || intent.canPlay()) return false
-    applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + 150)
-    try { if (!vid.paused) vid.pause() } catch { /* defensive */ }
+    if (!vid.paused) {
+      automaticPauseUntilRef.current = Math.max(automaticPauseUntilRef.current, Date.now() + 150)
+      try { vid.pause() } catch { /* defensive */ }
+    }
     return true
   }, [])
   const attemptAutomaticPlay = useCallback(async (
@@ -2420,6 +2423,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // teardown effect's cleanup doesn't change identity across renders
   // (which would trigger spurious cleanup runs).
   const closeAndCleanup = useCallback(() => {
+    // A reused video node belongs to the next delivery after teardown. An
+    // outgoing play promise must not hold its owner or pause-echo window.
+    localPlayIntentRef.current = null
+    automaticPauseUntilRef.current = 0
     // hls.js teardown — destroy() detaches the media source and
     // releases the worker thread. Skipping this leaks the segment
     // buffer; running it twice is a no-op.
@@ -3828,7 +3835,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // pattern extends with `Math.max(prev, now+150)` so every apply
   // pushes the gate forward; broadcasts inside the gate are silently
   // dropped, and the gate is naturally cleared by wall-clock time.
-  const isApplyingRemote = () => Date.now() < applyingRemoteUntilRef.current
+  const isApplyingRemote = () => Date.now() < Math.max(applyingRemoteUntilRef.current, automaticPauseUntilRef.current)
   const extendSuppression = (ms = 150) => {
     applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + ms)
   }

@@ -163,7 +163,7 @@ it.each([false, true])('a delayed successful boot play respects a newer canonica
   expect(screen.queryByRole('button', { name: /sound/i })).toBeNull()
 })
 
-it('revalidates async boot success without an event and ignores its later queued play event', async () => {
+it.each([0, 1_000])('revalidates async boot success and ignores its queued play event after %d ms', async eventDelay => {
   const completion = deferred<void>()
   play.mockImplementationOnce(function(this: HTMLMediaElement) {
     paused.set(this, false)
@@ -177,6 +177,7 @@ it('revalidates async boot success without an event and ignores its later queued
   view.rerender(player()); await settle()
   completion.resolve(); await settle()
   expect(video().paused).toBe(true)
+  await act(async () => { vi.advanceTimersByTime(eventDelay) })
   fireEvent.play(video())
   expect(party.requestPlay).not.toHaveBeenCalled()
   expect(party.requestPause).not.toHaveBeenCalled()
@@ -228,6 +229,62 @@ it('host-role recovery cannot broadcast an automatic boot superseded by Pause', 
   expect(party.requestPlay).not.toHaveBeenCalled()
   completion.resolve(); await settle()
   expect(party.requestPlay).not.toHaveBeenCalled()
+})
+
+it('a fast replacement boot broadcasts while the outgoing autoplay abort finishes', async () => {
+  let rejectPlay!: (error: Error) => void
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    this.dispatchEvent(new Event('play'))
+    return new Promise<void>((_resolve, reject) => { rejectPlay = reject })
+  })
+  let party = host()
+  const player = (target: PlayTarget) => <VideoPlayer target={target} party={party} onClose={() => {}} />
+  const view = render(player(oldEpisode))
+  await bootHls()
+  const outgoingVideo = video()
+  vi.mocked(party.requestPlay).mockClear()
+  party = { ...party, partyEpisodeId: 12, isPlaying: false, rev: 2 }
+  view.rerender(player(nextEpisode))
+  rejectPlay(new DOMException('The play() request was interrupted by pause()', 'AbortError'))
+  await settle()
+  await act(async () => { vi.advanceTimersByTime(50) })
+  await bootHls()
+  expect(video()).toBe(outgoingVideo)
+  expect(video().paused).toBe(false)
+  await act(async () => { vi.advanceTimersByTime(500) })
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+  expect(party.requestPause).not.toHaveBeenCalled()
+})
+
+it('a fast replacement retires an actual automatic Pause and ignores the outgoing successful promise', async () => {
+  const completion = deferred<void>()
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    return completion.promise
+  })
+  let party = host({ partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = (target: PlayTarget) => <VideoPlayer target={target} party={party} onClose={() => {}} />
+  const view = render(player(nextEpisode))
+  await bootHls()
+  const outgoingVideo = video()
+  party = { ...party, rev: 3, isPlaying: false }
+  view.rerender(player(nextEpisode)); await settle()
+  await act(async () => { vi.advanceTimersByTime(250) })
+  expect(video().paused).toBe(true)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  const followingEpisode = { ...nextEpisode, fileId: 30, episodeId: 13, episodeNumber: 3, partyPlayOnBootRevision: 4 }
+  party = { ...party, partyEpisodeId: 13, rev: 4, isPlaying: false }
+  view.rerender(player(followingEpisode)); await settle()
+  await act(async () => { vi.advanceTimersByTime(50) })
+  await bootHls()
+  expect(video()).toBe(outgoingVideo)
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+  completion.resolve(); await settle()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+  expect(party.requestPause).not.toHaveBeenCalled()
 })
 
 it('a slow outgoing-episode boot cannot autoplay after the room has moved', async () => {
