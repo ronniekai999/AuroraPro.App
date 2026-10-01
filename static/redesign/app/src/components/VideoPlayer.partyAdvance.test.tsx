@@ -180,3 +180,79 @@ it('still recovers a legitimate initial host-role race on the matching episode',
   view.rerender(player()); await settle()
   expect(party.requestPlay).toHaveBeenCalledOnce()
 })
+
+it('does not restart the outgoing episode when pausing aborts a pending autoplay', async () => {
+  let rejectPlay!: (error: Error) => void
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    this.dispatchEvent(new Event('play'))
+    return new Promise<void>((_resolve, reject) => { rejectPlay = reject })
+  })
+  let party = host()
+  const player = () => <VideoPlayer target={oldEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  vi.mocked(party.requestPlay).mockClear()
+  party = { ...party, partyEpisodeId: 12, isPlaying: false, rev: 2 }
+  view.rerender(player()); await settle()
+  expect(video().paused).toBe(true)
+  rejectPlay(new DOMException('The play() request was interrupted by pause()', 'AbortError'))
+  await settle()
+  expect(play).toHaveBeenCalledOnce()
+  expect(video().paused).toBe(true)
+  expect(video().muted).toBe(false)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+  // Hold throughout the pending lookup even if another browser callback
+  // starts the old element without emitting a play event.
+  paused.set(video(), false)
+  await act(async () => { vi.advanceTimersByTime(250) })
+  expect(video().paused).toBe(true)
+})
+
+it('rejects a delayed muted retry after the boot target has become the outgoing episode', async () => {
+  let rejectPlay!: (error: Error) => void
+  play.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectPlay = reject }))
+  let party = host()
+  const player = () => <VideoPlayer target={oldEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, partyEpisodeId: 12, isPlaying: false, rev: 2 }
+  view.rerender(player()); await settle()
+  rejectPlay(new DOMException('Autoplay policy refused sounded playback', 'NotAllowedError'))
+  await settle()
+  expect(play).toHaveBeenCalledOnce()
+  expect(video().paused).toBe(true)
+  expect(video().muted).toBe(false)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+})
+
+it('still retries a current party autoplay-policy refusal with muted playback', async () => {
+  play.mockRejectedValueOnce(new DOMException('Autoplay policy refused sounded playback', 'NotAllowedError'))
+  const party = host()
+  render(<VideoPlayer target={oldEpisode} party={party} onClose={() => {}} />)
+  await bootHls()
+  expect(play).toHaveBeenCalledTimes(2)
+  expect(video().paused).toBe(false)
+  expect(video().muted).toBe(true)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+})
+
+it.each([
+  { partyEpisodeId: null, targetEpisodeId: 11 },
+  { partyEpisodeId: undefined, targetEpisodeId: 11 },
+  { partyEpisodeId: 11, targetEpisodeId: undefined },
+])('preserves host authority when either episode ID is unknown: %j', async ids => {
+  const party = host({ partyEpisodeId: ids.partyEpisodeId, isPlaying: false })
+  render(<VideoPlayer target={{ ...oldEpisode, episodeId: ids.targetEpisodeId }} party={party} onClose={() => {}} />)
+  await bootHls()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+})
+
+it('boots unrelated local content while joined to a party on another series', async () => {
+  const party = host({ isPlaying: false })
+  render(<VideoPlayer target={{ ...oldEpisode, mediaItemId: 2, episodeId: 21 }} party={party} onClose={() => {}} />)
+  await bootHls()
+  expect(video().paused).toBe(false)
+  expect(party.requestPlay).not.toHaveBeenCalled()
+})

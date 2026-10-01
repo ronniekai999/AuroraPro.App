@@ -497,19 +497,22 @@ async function attemptPlay(
   vid: HTMLVideoElement,
   muteFallback: boolean,
   onMutedAutostart: () => void,
+  canPlay: () => boolean,
 ): Promise<void> {
+  if (!canPlay()) return
   try {
     await vid.play()
     return
-  } catch {
-    // NotAllowedError (sounded autoplay refused) or a teardown race.
-    if (!muteFallback) return // leave it to the user's explicit play
+  } catch (error) {
+    // Only an autoplay-policy refusal warrants muted retry. AbortError means
+    // pause/load interrupted playback; retrying would undo that newer intent.
+    if (!muteFallback || (error as { name?: unknown })?.name !== 'NotAllowedError' || !canPlay()) return
   }
   const prevMuted = vid.muted
   try {
     vid.muted = true
     await vid.play()
-    onMutedAutostart()
+    if (canPlay()) onMutedAutostart()
   } catch {
     // Still blocked (or play() raced a teardown). Restore the prior mute
     // state so we don't leave a paused element silently muted with no
@@ -723,6 +726,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const completePlaybackBoot = useCallback(async (
     vid: HTMLVideoElement,
     preservePause: boolean,
+    canPlay: () => boolean,
   ) => {
     if (preservePause) {
       // Keep broadcasts gated while enforcing pause. Most browsers are already
@@ -732,7 +736,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       return
     }
     playerReadyRef.current = true
-    await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
+    await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true), canPlay)
   }, [])
   const [fullscreen, setFullscreen] = useState(false)
   // Controls visibility — true when paused, or recently
@@ -2458,11 +2462,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       preservePause: preservePauseAfterBoot,
       partyRevision: seekBootIntent?.partyRevision ?? partySyncRef.current?.rev ?? null,
     }
-    const completeTargetPlaybackBoot = (vid: HTMLVideoElement) => {
+    const resolveCurrentBootPause = () => {
       const liveParty = partySyncRef.current
       const partyControlsMedia = Boolean(liveParty) &&
         (liveParty?.partyMediaItemId === undefined || liveParty.partyMediaItemId === target.mediaItemId)
-      const resolvedPause = isPartyEpisodeMismatch(liveParty?.partyEpisodeId, target.episodeId) || resolvePlaybackBootPause(
+      return (partyControlsMedia && isPartyEpisodeMismatch(liveParty?.partyEpisodeId, target.episodeId)) || resolvePlaybackBootPause(
         preservePauseAfterBoot,
         seekBootIntent !== null || target.partyPlayOnBootRevision !== undefined,
         target.partyRecoveryBoot === true,
@@ -2471,11 +2475,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         seekBootIntent?.partyRevision ?? target.partyPlayOnBootRevision ?? null,
         liveParty?.rev ?? null,
       )
+    }
+    const completeTargetPlaybackBoot = (vid: HTMLVideoElement) => {
+      const resolvedPause = resolveCurrentBootPause()
       inFlightPauseIntentRef.current = {
         preservePause: resolvedPause,
-        partyRevision: liveParty?.rev ?? seekBootIntent?.partyRevision ?? null,
+        partyRevision: partySyncRef.current?.rev ?? seekBootIntent?.partyRevision ?? null,
       }
-      return completePlaybackBoot(vid, resolvedPause)
+      return completePlaybackBoot(vid, resolvedPause, () =>
+        !cancelled && videoRef.current === vid && !resolveCurrentBootPause())
     }
     let cancelled = false
     const ac = new AbortController()
@@ -3821,14 +3829,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const matchesPartyEpisode = () => {
       const live = partySyncRef.current
       return (live?.partyMediaItemId === undefined || live.partyMediaItemId === target.mediaItemId) &&
-        (live?.partyEpisodeId === undefined || (live.partyEpisodeId ?? undefined) === target.episodeId)
+        !isPartyEpisodeMismatch(live?.partyEpisodeId, target.episodeId)
     }
     // A media-change echo arrives before App resolves the next file. Pause
     // the old episode without broadcasting its position to the new room.
-    if (party.partyMediaItemId === target.mediaItemId &&
-        isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId)) {
-      vid.pause()
+    const holdOutgoingEpisode = () => {
+      const live = partySyncRef.current
+      if (live?.partyMediaItemId !== target.mediaItemId ||
+          !isPartyEpisodeMismatch(live.partyEpisodeId, target.episodeId)) return false
+      if (!vid.paused) vid.pause()
+      if (vid.playbackRate !== 1) vid.playbackRate = 1
+      return true
     }
+    holdOutgoingEpisode()
 
     // Map abs_ms (source) → hls.js currentTime (HLS-relative seconds).
     // The session's start_sec is the FFmpeg -ss offset; hls time 0
@@ -3916,7 +3929,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // against stale state in between.
     let driftRebuildInFlight = false
     const id = window.setInterval(() => {
-      if (!matchesPartyEpisode()) return
+      if (holdOutgoingEpisode() || !matchesPartyEpisode()) return
       const dbg = isSyncDebugEnabled()
       const explicitSeek = party.seekRef.current
       if (explicitSeek && !shouldApplyExplicitPartySeek(explicitSeek.by, party.currentUserId)) {
@@ -4037,7 +4050,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // #334 — muted fallback so a guest whose browser blocks sounded
         // autoplay still joins the timeline (muted) instead of sitting
         // paused and drifting; the "Tap for sound" pill restores audio.
-        void attemptPlay(vid, true, () => setAutoStartedMuted(true))
+        void attemptPlay(vid, true, () => setAutoStartedMuted(true), () =>
+          videoRef.current === vid && playerReadyRef.current && matchesPartyEpisode() &&
+          partySyncRef.current?.isPlaying === true)
       } else if (!party.isPlaying && !vid.paused) {
         extendSuppression(150)
         vid.pause()
@@ -4195,6 +4210,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       !isApplyingRemote() &&
       matchesPartyEpisode()
     const onPlay = () => {
+      if (holdOutgoingEpisode()) return
       if (!hostShouldBroadcast()) return
       hostBroadcastRecoveryFiredRef.current = true
       party.requestPlay()
