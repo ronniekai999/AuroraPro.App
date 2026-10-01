@@ -57,6 +57,11 @@ async function settle() { await act(async () => { for (let i = 0; i < 15; i++) a
 async function bootHls() { await settle(); await act(async () => { fake.hls.at(-1)!.emit('MANIFEST_PARSED') }); await settle() }
 function video() { return document.querySelector('video')! }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
+function expectAbsoluteSeekActions(rebuild: ReturnType<typeof vi.fn>, expectedSec: number[]) {
+  // The web lane rebuilds the local target; the integrated cast transport
+  // can instead replace the receiver's HLS load. Both take source seconds.
+  expect([...rebuild.mock.calls, ...fake.cast.loadCurrent.mock.calls].map(([seconds]) => seconds)).toEqual(expectedSec)
+}
 function RebuildHarness({ onSeek = vi.fn(), onAudio = vi.fn(), party }: { onSeek?: (seconds: number) => void; onAudio?: (index: number, resumeMs: number) => void; party?: PartySync }) {
   const [target, setTarget] = useState(movie)
   return <VideoPlayer target={target} onClose={() => {}} profileId={7} party={party}
@@ -628,8 +633,9 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, episode_id: 11, profile_id: 7 }), expect.any(AbortSignal))
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
-    expect(seek).toHaveBeenCalledWith(620)
+    expectAbsoluteSeekActions(seek, [620])
   })
 
   it('retains loaded exact-URI identity evidence during settlement for a quiet later FINISHED', async () => {
@@ -796,11 +802,12 @@ describe('Receiver clock proof for relative actions and resume', () => {
   it.each(['button', 'keyboard', 'slider arrow', 'slider page'])('declines an unacknowledged solo receiver clock for a relative %s seek', async mode => {
     const { seek } = await failedSoloLoad()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
     else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
     else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: mode === 'slider arrow' ? 'ArrowRight' : 'PageUp' })
     await settle()
-    expect(seek).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+    expectAbsoluteSeekActions(seek, []); expect(fake.cast.seek).not.toHaveBeenCalled()
   })
   it.each(['button', 'keyboard'])('retries an expired solo URL at its bound trusted source position on %s resume', async mode => {
     // A freshly minted token whose receiver LOAD failed cannot mask the
@@ -830,11 +837,12 @@ describe('Receiver clock proof for relative actions and resume', () => {
     Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
     view.rerender(element()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
     else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
     else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: mode === 'slider arrow' ? 'ArrowRight' : 'PageUp' })
     await settle()
-    expect(seek).toHaveBeenCalledOnce(); expect(seek).toHaveBeenCalledWith(mode === 'slider page' ? 670 : 620)
+    expectAbsoluteSeekActions(seek, [mode === 'slider page' ? 670 : 620])
   })
   it('keeps unloaded matching-URI IDLE/error and later identity-less PAUSED clocks untrusted', async () => {
     // A receiver joined directly in PAUSED has not armed automatic end-of-media
@@ -848,15 +856,17 @@ describe('Receiver clock proof for relative actions and resume', () => {
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
-    expect(seek).not.toHaveBeenCalled()
+    expectAbsoluteSeekActions(seek, [])
     // A fresh loaded, exact-URI healthy snapshot restores both progress and actions.
     Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
-    expect(seek).toHaveBeenCalledWith(620)
+    expectAbsoluteSeekActions(seek, [620])
   })
   it.each([undefined, NaN, -5])('does not authorize party relative seeks with an acknowledged but unproven start_sec=%s', async anchor => {
     const target = { ...movie, resumePositionMs: 200000 }
@@ -869,10 +879,11 @@ describe('Receiver clock proof for relative actions and resume', () => {
     Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-anchor/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
     view.rerender(element()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
     fireEvent.keyDown(document, { key: 'ArrowRight' })
     fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'PageUp' }); await settle()
-    expect(seek).not.toHaveBeenCalled()
+    expectAbsoluteSeekActions(seek, [])
     expect(party.requestSeek).not.toHaveBeenCalled()
   })
   it.each([undefined, NaN, -5])('declines solo relative buttons, keyboard and slider actions with unproven anchor %s', async start_sec => {
@@ -885,10 +896,11 @@ describe('Receiver clock proof for relative actions and resume', () => {
     Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/solo-unknown/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
     view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
     fireEvent.keyDown(document, { key: 'ArrowRight' })
     fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'ArrowRight' }); await settle()
-    expect(seek).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+    expectAbsoluteSeekActions(seek, []); expect(fake.cast.seek).not.toHaveBeenCalled()
   })
   it.each([undefined, NaN, -5].flatMap(anchor => [false, true].map(inParty => ({ anchor, inParty }))))('resumes with unproven anchor $anchor only from a canonical party when inParty=$inParty', async ({ anchor, inParty }) => {
     const target = { ...movie, resumePositionMs: 200000 }
