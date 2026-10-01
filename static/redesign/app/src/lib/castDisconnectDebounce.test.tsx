@@ -353,20 +353,20 @@ describe('useCast genuine Media status revisions', () => {
     expect(latestCast!.remote.mediaStatusSeq).toBe(2)
   })
 
-  it('revokes healthy clock proof on false callbacks while preserving genuine terminal status', () => {
+  it('revokes healthy clock proof and detaches a dead Media on its false callback', () => {
     const { sdk, source } = mountMedia()
+    const staleCallback = [...source.listeners][0]
     act(() => source.emit(false))
     expect(latestCast!.remote.mediaStatusSeq).toBe(1)
     expect(latestCast!.remote.clockContentId).toBeNull()
+    expect(source.listeners.size).toBe(0)
     act(() => sdk.emitRemoteChange())
     expect(latestCast!.remote.clockContentId).toBeNull()
     source.media.playerState = 'IDLE'
     source.media.idleReason = 'FINISHED'
-    act(() => source.emit(false))
-    expect(latestCast!.remote).toMatchObject({
-      mediaStatusSeq: 2, contentId: source.media.media!.contentId,
-      clockContentId: null, playerState: 'IDLE', idleReason: 'FINISHED',
-    })
+    act(() => staleCallback(false))
+    expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+    expect(latestCast!.remote.idleReason).toBeNull()
   })
 
   it('detaches current Media on null and unmount, ignoring delayed callbacks', () => {
@@ -511,6 +511,75 @@ describe('useCast actual LOAD media generation association', () => {
     })
     act(() => sdk.emitRemoteChange())
     expect(latestCast!.remote.mediaStatusSeq).toBe(1)
+  })
+})
+
+describe('CAF filters terminal Media from its public getter', () => {
+  async function pausedLoad() {
+    const sdk=installFakeSdk(), session=sdk.makeSession(), outgoing=statusMedia()
+    outgoing.media.mediaSessionId=7
+    let items=[outgoing.media]
+    // Public CAF 1.0.15 returns the first legacy session.media entry without
+    // idleReason; FINISHED/CANCELLED/ERROR Media are filtered out immediately.
+    session.getMediaSession=()=>items.find(media=>!media.idleReason)??null
+    sdk.setSession(session)
+    render(<Harness currentLoad={()=>({contentUrl:outgoing.media.media!.contentId,contentType:'application/x-mpegURL',startTime:800})}/> )
+    act(()=>sdk.triggerReconnect())
+    Object.assign(sdk.getRemotePlayer()!,{isConnected:true,isMediaLoaded:true})
+    act(()=>sdk.emitRemoteChange())
+    const current=statusMedia(outgoing.media.media!.contentId)
+    current.media.mediaSessionId=8;current.media.currentTime=800
+    session.loadMedia=vi.fn(async()=>{items=[current.media]})
+    await act(async()=>{await latestCast!.loadCurrent()})
+    return{sdk,session,outgoing,current,setItems:(media:CastMediaSession[])=>{items=media}}
+  }
+  for(const reason of ['FINISHED','CANCELLED','ERROR']) for(const beforeCallback of [false,true]) {
+    it(`preserves current ${reason} through a null getter and later generic events (ANY_CHANGE first=${beforeCallback})`,async()=>{
+      const{sdk,session,current}=await pausedLoad()
+      current.media.playerState='IDLE';current.media.idleReason=reason
+      expect(session.getMediaSession()).toBeNull()
+      if(beforeCallback)act(()=>sdk.emitRemoteChange())
+      act(()=>current.emit(false))
+      expect(current.listeners.size).toBe(0)
+      expect(latestCast!.remote).toMatchObject({contentId:current.media.media!.contentId,playerState:'IDLE',idleReason:reason,clockContentId:null,mediaStatusSeq:1})
+      act(()=>sdk.emitRemoteChange()) // e.g. volume/mute after the terminal callback
+      expect(latestCast!.remote).toMatchObject({playerState:'IDLE',idleReason:reason,clockContentId:null,mediaStatusSeq:1})
+    })
+  }
+  it('cannot credit a buffered outgoing terminal to a new same-URI ACK',async()=>{
+    const{sdk,session,current,setItems}=await pausedLoad()
+    current.media.playerState='IDLE';current.media.idleReason='FINISHED'
+    act(()=>current.emit(false))
+    session.loadMedia=vi.fn(async()=>undefined) // ACK precedes the new Media
+    await act(async()=>{await latestCast!.loadCurrent()})
+    expect(latestCast!.remote).toMatchObject({playerState:null,idleReason:null,clockContentId:null})
+    const incoming=statusMedia(current.media.media!.contentId)
+    incoming.media.mediaSessionId=9;incoming.media.currentTime=900
+    setItems([incoming.media]);act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote).toMatchObject({playerState:'PAUSED',currentTime:900,clockContentId:incoming.media.media!.contentId})
+  })
+  it('excludes a known older generation even before a new repeated-URI ACK acquires Media evidence',async()=>{
+    const{sdk,session,outgoing,current,setItems}=await pausedLoad()
+    session.loadMedia=vi.fn(async()=>{setItems([outgoing.media])})
+    await act(async()=>{await latestCast!.loadCurrent()})
+    expect(latestCast!.remote).toMatchObject({clockContentId:null,playerState:null,idleReason:null})
+    const incoming=statusMedia(current.media.media!.contentId)
+    incoming.media.mediaSessionId=9;incoming.media.currentTime=900
+    setItems([incoming.media]);act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote.currentTime).toBe(900)
+    setItems([outgoing.media]);act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    setItems([incoming.media]);incoming.media.playerState='IDLE';incoming.media.idleReason='FINISHED'
+    act(()=>incoming.emit(false))
+    expect(latestCast!.remote).toMatchObject({playerState:'IDLE',idleReason:'FINISHED',clockContentId:null})
+  })
+  it('clears terminal status and listeners on permanent disconnect without ANY_CHANGE',async()=>{
+    const{sdk,current}=await pausedLoad()
+    act(()=>sdk.setSession(null))
+    act(()=>sdk.triggerBlip())
+    act(()=>{vi.advanceTimersByTime(4000)})
+    expect(current.listeners.size).toBe(0)
+    expect(latestCast!.remote).toMatchObject({playerState:null,idleReason:null,clockContentId:null,isMediaLoaded:false})
   })
 })
 
@@ -946,5 +1015,46 @@ describe('useCast disconnect debounce', () => {
 
     expect(connected()).toBe('false')
     expect(playerState()).toBe('IDLE')
+  })
+})
+
+describe('Independent c44 positive generation ownership and disconnect cleanup', () => {
+  async function setup() {
+    const sdk=installFakeSdk(), initial=statusMedia(), session=sdk.makeSession()
+    initial.media.mediaSessionId=7
+    let media:CastMediaSession|null=initial.media
+    session.getMediaSession=()=>media
+    sdk.setSession(session)
+    render(<Harness currentLoad={()=>({contentUrl:initial.media.media!.contentId,contentType:'application/x-mpegURL',startTime:800})}/> )
+    act(()=>sdk.triggerReconnect())
+    Object.assign(sdk.getRemotePlayer()!,{isConnected:true,isMediaLoaded:true})
+    act(()=>sdk.emitRemoteChange())
+    return{sdk,initial,session,setMedia:(next:CastMediaSession|null)=>{media=next}}
+  }
+  it('ignores an older same-URI Media clock and FINISHED after two newer LOAD ACKs',async()=>{
+    const{sdk,initial,session,setMedia}=await setup()
+    const second=statusMedia(initial.media.media!.contentId);second.media.mediaSessionId=8;second.media.currentTime=800
+    session.loadMedia=vi.fn(async()=>{setMedia(second.media)})
+    await act(async()=>{await latestCast!.loadCurrent()})
+    expect(latestCast!.remote.currentTime).toBe(800)
+    const third=statusMedia(initial.media.media!.contentId);third.media.mediaSessionId=9;third.media.currentTime=900
+    session.loadMedia=vi.fn(async()=>{setMedia(third.media)})
+    await act(async()=>{await latestCast!.loadCurrent()})
+    expect(latestCast!.remote.currentTime).toBe(900)
+    // A delayed status for the already known first generation is not the third ACK.
+    setMedia(initial.media)
+    act(()=>sdk.emitRemoteChange())
+    expect(latestCast!.remote.clockContentId).toBeNull()
+    initial.media.playerState='IDLE';initial.media.idleReason='FINISHED'
+    act(()=>initial.emit(false))
+    expect(latestCast!.remote.playerState).toBeNull()
+    expect(latestCast!.remote.idleReason).toBeNull()
+  })
+  it('detaches the public Media listener on explicit Stop even without ANY_CHANGE',async()=>{
+    const{initial}=await setup()
+    expect(initial.listeners.size).toBe(1)
+    await act(async()=>{latestCast!.stop();await Promise.resolve();await Promise.resolve()})
+    expect(latestCast!.status.connected).toBe(false)
+    expect(initial.listeners.size).toBe(0)
   })
 })
