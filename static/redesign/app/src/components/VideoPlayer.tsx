@@ -165,9 +165,8 @@ export interface PartySync {
   // episode is documented (App.tsx) as taking seconds, long enough for a
   // stale-but-matching-series `target` to read as a genuine backward gap
   // and trigger a session rebuild of the wrong file. Only used to gate
-  // that one check; deliberately NOT folded into the existing H3
-  // mediaItemId guard used elsewhere in this file, which intentionally
-  // stays series-level for content unrelated to this specific race.
+  // rebuild, local mirroring and host broadcast checks, so the prior
+  // episode cannot move the room while the next target resolves.
   // Typed to admit `null` (not just `undefined`) because that's the REAL
   // runtime value for a no-episode party: the server always includes
   // episode_id in party-state, serializing an absent one as JSON null
@@ -236,6 +235,10 @@ export interface PlayTarget {
   // Marks targets created by party auto-open/media-change resolution. Those
   // network-bound boots re-check canonical play/pause state when they finish.
   partyRecoveryBoot?: boolean
+  // The host's explicit "Play for all" intent at the media-change revision.
+  // It resumes the new episode after boot, until a newer canonical state
+  // supersedes it. It never gives the outgoing episode broadcast authority.
+  partyPlayOnBootRevision?: number
 }
 
 interface VideoPlayerProps {
@@ -2459,13 +2462,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const liveParty = partySyncRef.current
       const partyControlsMedia = Boolean(liveParty) &&
         (liveParty?.partyMediaItemId === undefined || liveParty.partyMediaItemId === target.mediaItemId)
-      const resolvedPause = resolvePlaybackBootPause(
+      const resolvedPause = isPartyEpisodeMismatch(liveParty?.partyEpisodeId, target.episodeId) || resolvePlaybackBootPause(
         preservePauseAfterBoot,
-        seekBootIntent !== null,
+        seekBootIntent !== null || target.partyPlayOnBootRevision !== undefined,
         target.partyRecoveryBoot === true,
         partyControlsMedia,
         liveParty?.isPlaying ?? null,
-        seekBootIntent?.partyRevision ?? null,
+        seekBootIntent?.partyRevision ?? target.partyPlayOnBootRevision ?? null,
         liveParty?.rev ?? null,
       )
       inFlightPauseIntentRef.current = {
@@ -3815,6 +3818,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const vid = videoRef.current
     if (!vid) return
 
+    const matchesPartyEpisode = () => {
+      const live = partySyncRef.current
+      return (live?.partyMediaItemId === undefined || live.partyMediaItemId === target.mediaItemId) &&
+        (live?.partyEpisodeId === undefined || (live.partyEpisodeId ?? undefined) === target.episodeId)
+    }
+    // A media-change echo arrives before App resolves the next file. Pause
+    // the old episode without broadcasting its position to the new room.
+    if (party.partyMediaItemId === target.mediaItemId &&
+        isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId)) {
+      vid.pause()
+    }
+
     // Map abs_ms (source) → hls.js currentTime (HLS-relative seconds).
     // The session's start_sec is the FFmpeg -ss offset; hls time 0
     // corresponds to that offset in the source file.
@@ -3901,6 +3916,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // against stale state in between.
     let driftRebuildInFlight = false
     const id = window.setInterval(() => {
+      if (!matchesPartyEpisode()) return
       const dbg = isSyncDebugEnabled()
       const explicitSeek = party.seekRef.current
       if (explicitSeek && !shouldApplyExplicitPartySeek(explicitSeek.by, party.currentUserId)) {
@@ -4177,9 +4193,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // 'seeked'/'pause' would otherwise propagate abs_ms=0 to the whole party.
       playerReadyRef.current &&
       !isApplyingRemote() &&
-      (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)
+      matchesPartyEpisode()
     const onPlay = () => {
       if (!hostShouldBroadcast()) return
+      hostBroadcastRecoveryFiredRef.current = true
       party.requestPlay()
     }
     const onPause = () => {
@@ -4234,7 +4251,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // (new movie/episode), so a single recovery per player-bind.
     if (party.isHost && playerReadyRef.current && !vid.paused && !party.isPlaying && !isApplyingRemote() &&
         !hostBroadcastRecoveryFiredRef.current &&
-        (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)) {
+        matchesPartyEpisode()) {
       hostBroadcastRecoveryFiredRef.current = true
       party.requestPlay()
     }
@@ -4271,7 +4288,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // otherwise the bail check would only be re-evaluated on the next
   // unrelated re-bind, briefly running both sync effects at once.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
+  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, party?.partyEpisodeId, cast.status.connected])
 
   // M10 Phase 4 (receiver extension, issue #461 follow-up) — party sync
   // while a Chromecast receiver is the active playback surface. Mutually
@@ -5221,6 +5238,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     const broadcastHostPartySeek = () => {
       if (!isPartyControllingThisMedia || !party?.isHost) return
+      if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target?.episodeId)) return
       // Broadcast from the user intent itself. Depending solely on the DOM
       // `seeked` echo is racy: hls.js may snap an out-of-window assignment
       // back before that event, leaving the canonical party position behind.
@@ -6287,6 +6305,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   // The steady-state drift loop has the same guard at
                   // VideoPlayer.tsx ~941; mirror it here.
                   if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
+                  if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
                   // Apply same clock-offset + extrapolation logic as
                   // the steady-state drift loop so a manual click
                   // lands on EXACTLY where the loop is targeting.

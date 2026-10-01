@@ -3487,6 +3487,7 @@ export default function App() {
               // player's existing host-broadcast recovery fire request-play,
               // which resumes the whole room. Guests still boot paused and
               // follow that broadcast, exactly as they do for any host play.
+              partyPlayOnBootRevision: selfAdvanced ? p.rev : undefined,
               pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
@@ -3513,6 +3514,7 @@ export default function App() {
               title: titleDetail?.title ?? 'Untitled',
               partyRecoveryBoot: true,
               // Same self-advance rule as the episode branch above.
+              partyPlayOnBootRevision: selfAdvanced ? p.rev : undefined,
               pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
