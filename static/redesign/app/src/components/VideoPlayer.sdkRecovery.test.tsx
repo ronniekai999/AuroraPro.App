@@ -404,3 +404,80 @@ describe('VideoPlayer serialized repeated-URI LOADs use the new Media generation
 function castTokenFor(id: string, startSec = 200): Awaited<ReturnType<typeof createCastToken>> {
   return { playlist: `/api/stream/hls/${id}/master.m3u8?token=cast`, token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: startSec, segment_format: 'ts' }
 }
+
+describe('VideoPlayer ignores recreated retired Media session IDs', () => {
+  it('rejects an older recreated clock and FINISHED, then accepts the genuine incoming generation', async () => {
+    const uri = 'http://localhost:3000/api/stream/direct/media/10?token=same-second'
+    const makeMedia = (id: number, time: number) => {
+      const listeners = new Set<(alive: boolean) => void>()
+      const media: CastMediaSession = {
+        mediaSessionId: id, media: { contentId: uri, contentType: 'video/mp4' },
+        playerState: 'PAUSED', currentTime: time, idleReason: null,
+        addUpdateListener: listener => { listeners.add(listener) },
+        removeUpdateListener: listener => { listeners.delete(listener) },
+        getEstimatedTime() { return this.currentTime! },
+      }
+      return { media, emit: (alive = true) => { for (const listener of [...listeners]) listener(alive) } }
+    }
+    const active = [makeMedia(1, 600).media]
+    const sdk = installFakeSdk(), session = sdk.makeSession()
+    // Public CAF filters out Media whose idleReason is already set.
+    session.getMediaSession = () => active.find(media => !media.idleReason) ?? null
+    sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
+    vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
+    vi.mocked(createDirectCastToken).mockResolvedValue({ url: uri, token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))
+    let ack!: () => void
+    const seekSpy = vi.spyOn(FakeRemotePlayerController.prototype, 'seek')
+    const received: ReturnType<typeof makeMedia>[] = []
+    session.loadMedia = vi.fn(async request => {
+      const incoming = makeMedia(received.length + 2, request.currentTime!)
+      received.push(incoming)
+      if (received.length === 3) {
+        active.splice(0, active.length) // id 4 ACK precedes its first status
+        Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: false, mediaInfo: null, currentTime: 0, playerState: 'IDLE' })
+      } else {
+        active.splice(0, active.length, incoming.media)
+        Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, mediaInfo: incoming.media.media,
+          currentTime: request.currentTime, playerState: 'PAUSED', isPaused: true, canSeek: true })
+      }
+      sdk.emitRemoteChange()
+      if (received.length === 1) await new Promise<void>(resolve => { ack = resolve })
+    })
+    const old = { ...movie, resumePositionMs: 600000 }, next = { ...movie, resumePositionMs: 900000 }
+    const ended = vi.fn(async () => true)
+    const element = (target = old, profileId = 7) => <VideoPlayer target={target} profileId={profileId} onClose={() => {}} onEnded={ended} />
+    const view = render(element()); await settle()
+    const button = screen.getByRole('button', { name: 'Cast' })
+    fireEvent.click(button); fireEvent.click(button); fireEvent.click(button); await settle()
+    expect(session.loadMedia).toHaveBeenCalledTimes(1)
+    view.rerender(element(next, 9)); await settle()
+    fireEvent.canPlay(document.querySelector('video')!); await settle()
+    await act(async () => { ack() }); await settle()
+    expect(session.loadMedia).toHaveBeenCalledTimes(3)
+    expect(received.map(m => m.media.currentTime)).toEqual([600, 900, 900])
+    await act(async () => { vi.advanceTimersByTime(3100) }); await settle()
+    expect(session.getMediaSession()).toBeNull()
+    const late = makeMedia(2, 600) // Legacy sender recreates evicted older id 2.
+    active.push(late.media)
+    Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, mediaInfo: late.media.media, currentTime: 600, playerState: 'PAUSED', isPaused: true })
+    await act(async () => { sdk.emitRemoteChange() }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.mouseMove(screen.getByRole('dialog', { name: 'Playing Movie' }), { clientX: 100, clientY: 100 }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(seekSpy).not.toHaveBeenCalled()
+    expect(sdk.getRemotePlayer()!.currentTime).toBe(600)
+    late.media.playerState = 'IDLE'; late.media.idleReason = 'FINISHED'
+    await act(async () => { late.emit(false); sdk.emitRemoteChange() }); await settle()
+    expect(ended).not.toHaveBeenCalled()
+    const incoming = received[2]
+    active.splice(0, active.length, incoming.media)
+    Object.assign(sdk.getRemotePlayer()!, { isMediaLoaded: true, mediaInfo: incoming.media.media, currentTime: 900, playerState: 'PAUSED', isPaused: true })
+    await act(async () => { sdk.emitRemoteChange() }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expect(sdk.getRemotePlayer()!.currentTime).toBe(910)
+    incoming.media.playerState = 'IDLE'; incoming.media.idleReason = 'FINISHED'
+    await act(async () => { incoming.emit(false) }); await settle()
+    expect(ended).toHaveBeenCalledOnce()
+  })
+})
