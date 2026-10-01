@@ -367,9 +367,16 @@ export function useCast(
   const sampleRemoteRef = useRef<(() => void) | null>(null)
   const clearTrackedMediaRef = useRef<(() => void) | null>(null)
   const watchedMediaRef = useRef<{ session: CastSessionInstance; media: CastMediaSession } | null>(null)
-  // Weak keys remember retired SDK objects without retaining a history of
-  // every loaded Media for the lifetime of the player.
+  // Legacy sender can recreate an evicted Media object for an old session ID.
+  // Remember numeric IDs for this Cast session as well as weak object keys
+  // for SDKs that omit them; release both histories when the session ends.
   const retiredMediaRef = useRef(new WeakMap<CastMediaSession, { session: CastSessionInstance; id: number | null }>())
+  const retiredMediaIdsRef = useRef<{ session: CastSessionInstance; ids: Set<number> } | null>(null)
+  const retireMediaGeneration = (session: CastSessionInstance, generation: MediaGeneration) => {
+    retiredMediaRef.current.set(generation.media, { session, id: generation.id })
+    if (retiredMediaIdsRef.current?.session !== session) retiredMediaIdsRef.current = { session, ids: new Set() }
+    if (generation.id !== null) retiredMediaIdsRef.current.ids.add(generation.id)
+  }
   const mediaLoadAssociationRef = useRef<{
     session: CastSessionInstance
     contentId: string
@@ -385,6 +392,8 @@ export function useCast(
     if (association.outgoing && sameMediaGeneration(association.outgoing, generation)) return false
     const retired = retiredMediaRef.current.get(generation.media)
     if (retired?.session === session && retired.id === generation.id) return false
+    if (generation.id !== null && retiredMediaIdsRef.current?.session === session &&
+      retiredMediaIdsRef.current.ids.has(generation.id)) return false
     if (!['PLAYING', 'PAUSED', 'BUFFERING', 'IDLE'].includes(generation.media.playerState ?? '')) return false
     association.current = generation
     return true
@@ -656,6 +665,7 @@ export function useCast(
         watchedMediaRef.current = null
         mediaLoadAssociationRef.current = null
         retiredMediaRef.current = new WeakMap()
+        retiredMediaIdsRef.current = null
         setRemote(prev => ({ ...prev, contentId: null, clockContentId: null, mediaStatusSeq: 0,
           playerState: null, idleReason: null, isConnected: false, isMediaLoaded: false }))
       }
@@ -1035,14 +1045,14 @@ export function useCast(
     try {
       await session.loadMedia(request)
       if (mediaLoadAssociationRef.current === association && association.outgoing) {
-        retiredMediaRef.current.set(association.outgoing.media, { session, id: association.outgoing.id })
+        retireMediaGeneration(session, association.outgoing)
       }
       sampleRemoteRef.current?.()
       // eslint-disable-next-line no-console
       console.info('[Aurora Cast] loadMedia resolved — receiver should now be playing')
     } catch (rawErr) {
       if (mediaLoadAssociationRef.current === association) {
-        if (association.current) retiredMediaRef.current.set(association.current.media, { session, id: association.current.id })
+        if (association.current) retireMediaGeneration(session, association.current)
         mediaLoadAssociationRef.current = previousAssociation
         sampleRemoteRef.current?.()
       }
