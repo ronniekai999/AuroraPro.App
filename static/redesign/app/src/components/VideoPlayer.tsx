@@ -78,6 +78,7 @@ import {
   CAST_NOTHING_TO_CAST,
   CAST_NO_MEDIA_ERROR,
   CAST_UNSUPPORTED_DIRECT_FORMAT,
+  CastMediaLoadError,
   RECONNECT_SETTLE_MS,
   absoluteUrl,
   assertCastScopedToken,
@@ -908,6 +909,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // to every guest.
   const castPendingMediaRef = useRef<CastLoadedMedia | null>(null)
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
+  const castPendingContentIdRef = useRef<string | null>(null)
+  const castCommittedContentIdRef = useRef<string | null>(null)
+  // A failed receiver LOAD may leave its own IDLE/error indefinitely. That
+  // event must retain the prior committed copy and controls for retry, rather
+  // than becoming a stop once the ordinary 2.5s load window expires. Keep the
+  // failed identity after recovery so a late event cannot end the new item.
+  const castFailedLoadRef = useRef<{ contentId: string; active: boolean; idleSeq: number | null } | null>(null)
   // The last direct-cast attempt failed to mint its token. Without this the
   // failure fell through to the no-media sentinel's generic wording — "wait
   // for the title to start playing" — which is untrue and unactionable when
@@ -1004,6 +1012,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castSessionRef.current?.end()
     castPendingMediaRef.current = null
     castLoadedMediaRef.current = null
+    castPendingContentIdRef.current = null
+    castCommittedContentIdRef.current = null
+    castFailedLoadRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
@@ -1135,8 +1146,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         fileId: dc.fileId,
         fileType: dc.fileType,
       }
+      const contentId = absoluteUrl(direct.url)
+      castPendingContentIdRef.current = contentId
       return {
-        contentUrl: absoluteUrl(direct.url),
+        contentUrl: contentId,
         // Gated by castDirectPlaySupported, which admits only MP4.
         contentType: 'video/mp4',
         title: target.title,
@@ -1195,8 +1208,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       : Math.max(0, startSecRef.current ?? 0)
     castPendingStartSecRef.current = castStartSec
     castPendingEpochRef.current = loadEpoch
+    const contentId = absoluteUrl(resp.playlist)
+    castPendingContentIdRef.current = contentId
     return {
-      contentUrl: absoluteUrl(resp.playlist),
+      contentUrl: contentId,
       contentType: 'application/x-mpegURL',
       segmentFormat: resp.segment_format,
       title: target.title,
@@ -1332,6 +1347,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadsInFlightRef.current > 0 || Date.now() < castLoadSettleUntilMsRef.current
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
+      const before = castRef.current
+      const hadReceiverMedia = before.status.connected &&
+        (castLoadedMediaRef.current !== null || before.remote.isMediaLoaded)
       castLoadsInFlightRef.current += 1
       try {
         await op()
@@ -1342,6 +1360,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // move it.
         if (castPendingMediaRef.current && castPendingEpochRef.current === castTargetEpochRef.current) {
           castLoadedMediaRef.current = castPendingMediaRef.current
+          castCommittedContentIdRef.current = castPendingContentIdRef.current
           // Same proof, same moment: the anchor belongs to the media the
           // receiver just took. Promoting it at mint time instead would have
           // a failed load re-point every abs→receiver conversion at a session
@@ -1368,22 +1387,26 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             }
           }
         }
+        if (castFailedLoadRef.current) {
+          castFailedLoadRef.current.active = false
+          if (castFailedLoadRef.current.contentId === castCommittedContentIdRef.current) {
+            castFailedLoadRef.current = null
+          }
+        }
       } catch (e) {
+        if (hadReceiverMedia && e instanceof CastMediaLoadError) {
+          castFailedLoadRef.current = { contentId: e.contentId, active: true, idleSeq: null }
+        }
         castSessionRef.current?.abandon()
         throw e
       } finally {
         castLoadsInFlightRef.current = Math.max(0, castLoadsInFlightRef.current - 1)
-        // In `finally`, deliberately, and NOT only on success. A rejected
-        // loadMedia is the one throw site that has already disturbed the
-        // receiver: the LOAD tore down its previous media session before
-        // failing, so it reports IDLE with INTERRUPTED or ERROR just as a
-        // successful one does. Arming only on success left that IDLE
-        // unsuppressed — the player closes on a half-watched film, or the
-        // room advances an episode, because a load FAILED. The other three
-        // throw sites (SDK not ready, no session, no media) disturb nothing
-        // and pay only a few seconds of suppressed end-of-media detection.
+        // Both successful and rejected LOADs generate state changes. The
+        // window bounds ordinary startup settling; castFailedLoadRef owns a
+        // rejected replacement's persistent IDLE separately from this timer.
         castLoadSettleUntilMsRef.current = Date.now() + CAST_LOAD_SETTLE_MS
         castPendingMediaRef.current = null
+        castPendingContentIdRef.current = null
         castPendingStartTimeRef.current = null
         // null, not 0 — see castStartSecRef. Unreachable today (the only
         // reader is guarded by castPendingMediaRef), but 0 here would mean
@@ -1784,7 +1807,41 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // stale snapshot from whenever this effect instance was created.
     const evaluate = () => {
       const c = castRef.current
-      if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
+      const failed = castFailedLoadRef.current
+      const contentId = c.remote.contentId
+      const failedItem = Boolean(failed && contentId && contentId === failed.contentId &&
+        contentId !== castCommittedContentIdRef.current)
+      if (failed && c.remote.playerState === 'IDLE') {
+        const reason = c.remote.idleReason
+        // FINISHED after an unacknowledged replacement is terminal, but it
+        // cannot complete/advance the prior committed title. Explicit TV
+        // cancellation remains actionable regardless of media identity.
+        if (failed.active && reason === 'FINISHED' &&
+          (!contentId || contentId !== castCommittedContentIdRef.current)) {
+          castHasPlayedRef.current = false
+          c.stop()
+          return
+        }
+        // After successful recovery, a delayed IDLE from the rejected item
+        // describes neither the committed media nor a new receiver stop.
+        if (!failed.active && failedItem && reason !== 'CANCELLED') return
+        if (failed.active && (reason === 'ERROR' || reason === 'INTERRUPTED' || reason === null) &&
+          (!contentId || contentId === failed.contentId || contentId === castCommittedContentIdRef.current)) {
+          failed.idleSeq = c.remote.updateSeq
+          return
+        }
+      }
+      if (c.remote.playerState === 'PLAYING' || c.remote.playerState === 'PAUSED') {
+        // The receiver has moved out of the failed IDLE on a genuine later
+        // update. CAF variants without identity still recover through this
+        // state transition; a successful LOAD also clears active uncertainty.
+        if (failed?.active && failed.idleSeq !== null && c.remote.updateSeq > failed.idleSeq &&
+          !castLoadIsSettling() && (!contentId || contentId === castCommittedContentIdRef.current)) {
+          failed.active = false
+        }
+        if (c.remote.playerState === 'PLAYING') castHasPlayedRef.current = true
+        return
+      }
       // Our own load ends the old media session; that IDLE is not the title
       // finishing. See castLoadIsSettling.
       if (castHasPlayedRef.current && c.remote.playerState === 'IDLE' && castLoadIsSettling()) {
@@ -1957,6 +2014,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Leaving the anchor unknown is what makes both branches decline instead.
     castTargetEpochRef.current += 1
     castPendingMediaRef.current = null
+    castPendingContentIdRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0

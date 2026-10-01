@@ -6,7 +6,41 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/aurora-media/aurora/internal/streaming"
 )
+
+// Legacy session creation starts the fake encoder asynchronously. Read its
+// locked exit snapshot before TempDir cleanup, rather than letting the stub
+// write a playlist while its executable/output directories are being removed.
+func awaitCastGeometryFixtureEncoders(t *testing.T, tm *streaming.TranscodeManager) {
+	t.Helper()
+	t.Cleanup(func() {
+		defer tm.StopAllSessions()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			running := false
+			for _, row := range tm.ListSessions() {
+				diag, ok := tm.DiagnoseSession(row.ID)
+				if !ok {
+					continue
+				}
+				for _, v := range diag.Variants {
+					running = running || (v.Started && !v.Exited)
+				}
+			}
+			if !running {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Error("cast geometry fixture encoder did not exit before teardown")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}
 
 func TestCastSourceResolutionParsingDoesNotInventFacts(t *testing.T) {
 	for _, raw := range []string{"", "unknown", "1920x", "0x1080", "1920x0", "-640x1280", "1920x1080x30"} {
@@ -55,6 +89,7 @@ func TestCreateCastToken_SourceGeometryProvenanceAcrossSessionHandlers(t *testin
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					h, tm := castAnchorHandler(t, "1080p")
+					awaitCastGeometryFixtureEncoders(t, tm)
 					h.queries = f.q
 					var req *http.Request
 					var handler func(http.ResponseWriter, *http.Request)

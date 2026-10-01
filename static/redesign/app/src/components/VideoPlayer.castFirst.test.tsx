@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive, createCastToken, deleteSession } from '@/lib/streaming'
 import { markWatched, reportProgress } from '@/lib/api'
+import { CastMediaLoadError, type CastLoadArgs } from '@/lib/cast'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
     status: { supported: true, available: true, connected: false, settling: false, deviceName: 'TV' },
-    remote: { title: 'Receiver title', isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
+    remote: { title: 'Receiver title', contentId: null as string | null, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
     start: vi.fn(), stop: vi.fn(), loadCurrent: vi.fn(), seek: vi.fn(), playOrPause: vi.fn(),
   },
   hls: [] as Array<{ emit: (name: string, data?: unknown) => void; startLoad: ReturnType<typeof vi.fn>; stopLoad: ReturnType<typeof vi.fn>; options: { autoStartLoad: boolean }; loadSource: ReturnType<typeof vi.fn> }>,
@@ -58,9 +59,18 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); vi.clearAllMocks(); fake.hls.length = 0; localStorage.clear()
   fake.getter = null
   Object.assign(fake.cast.status, { connected: false, settling: false })
-  Object.assign(fake.cast.remote, { title: 'Receiver title', isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
-  fake.cast.start.mockImplementation(async () => { await fake.getter?.(); fake.cast.status.connected = true })
-  fake.cast.loadCurrent.mockImplementation(async (at?: number) => { if (!await fake.getter?.(at)) throw new Error('CAST_NO_MEDIA_ERROR') })
+  Object.assign(fake.cast.remote, { title: 'Receiver title', contentId: null, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
+  fake.cast.stop.mockReset()
+  fake.cast.start.mockImplementation(async () => {
+    const load = await fake.getter?.() as CastLoadArgs | null
+    fake.cast.status.connected = true
+    fake.cast.remote.contentId = load?.contentUrl ?? null
+  })
+  fake.cast.loadCurrent.mockImplementation(async (at?: number) => {
+    const load = await fake.getter?.(at) as CastLoadArgs | null
+    if (!load) throw new Error('CAST_NO_MEDIA_ERROR')
+    Object.assign(fake.cast.remote, { contentId: load.contentUrl, playerState: 'PLAYING', idleReason: null, isMediaLoaded: true, updateSeq: fake.cast.remote.updateSeq + 1 })
+  })
   vi.mocked(getStreamInfo).mockResolvedValue(info() as Awaited<ReturnType<typeof getStreamInfo>>)
   vi.mocked(createSession).mockImplementation(async request => ({ session_id: `session-${fake.hls.length}`, master_playlist: '/api/stream/session/master.m3u8', start_sec: request.start_sec ?? 0 } as Awaited<ReturnType<typeof createSession>>))
   vi.mocked(keepalive).mockResolvedValue('ok')
@@ -75,6 +85,31 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(4)
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+
+function castTokenFor(id: string, startSec = 200): Awaited<ReturnType<typeof createCastToken>> {
+  return { playlist: `/api/stream/hls/${id}/master.m3u8?token=cast`, token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: startSec, segment_format: 'ts' }
+}
+async function connectedCast() {
+  const close = vi.fn(), ended = vi.fn(async () => false)
+  const element = () => <VideoPlayer target={movie} onClose={close} onEnded={ended} />
+  const view = render(element()); await bootHls()
+  fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+  fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+  return { view, element, close, ended }
+}
+function rejectReplacement(reason: string | null, identity: 'failed' | 'committed' | 'missing' = 'failed') {
+  const committed = fake.cast.remote.contentId
+  vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('failed-copy'))
+  fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
+    const load = await fake.getter?.(at) as CastLoadArgs
+    Object.assign(fake.cast.remote, {
+      contentId: identity === 'failed' ? load.contentUrl : identity === 'committed' ? committed : null,
+      playerState: 'IDLE', idleReason: reason, isMediaLoaded: false, updateSeq: fake.cast.remote.updateSeq + 1,
+    })
+    throw new CastMediaLoadError('Receiver LOAD failed', load.contentUrl)
+  })
+}
+async function advanceLoadWindow() { await act(async () => { vi.advanceTimersByTime(3100) }); await settle() }
 
 describe('Cast first-release regressions through VideoPlayer', () => {
   it('offers a working Stop control for an SDK-resumed cast without a local target', async () => {
@@ -146,4 +181,75 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     expect(createSession).toHaveBeenCalledOnce(); expect(deleteSession).not.toHaveBeenCalledWith('cast-copy')
     expect(screen.getByText(/Could not seek on the TV/)).toBeInTheDocument()
   })
+  for (const reason of ['ERROR', 'INTERRUPTED', null]) for (const identity of ['failed', 'committed', 'missing'] as const) {
+    it(`retains controls/copy after rejected LOAD ${reason} with ${identity} identity and repeated idle updates`, async () => {
+      const { view, element, close, ended } = await connectedCast()
+      rejectReplacement(reason, identity)
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle()
+      expect(deleteSession).toHaveBeenCalledWith('failed-copy')
+      for (let i = 0; i < 3; i++) {
+        await advanceLoadWindow()
+        fake.cast.remote.updateSeq += 1; view.rerender(element()); await settle()
+      }
+      expect(fake.cast.stop).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
+      expect(deleteSession).not.toHaveBeenCalledWith('cast-copy')
+      expect(screen.getByRole('button', { name: 'Stop casting' })).toBeInTheDocument()
+    })
+  }
+  it('can successfully retry after a rejected LOAD, ignore its late error, then handle the new item finishing', async () => {
+    const { view, element, close, ended } = await connectedCast()
+    rejectReplacement('ERROR')
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
+    const failedId = fake.cast.remote.contentId
+    vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('recovered-copy', 500))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle()
+    const recoveredId = fake.cast.remote.contentId
+    expect(deleteSession).toHaveBeenCalledWith('cast-copy')
+    expect(deleteSession).not.toHaveBeenCalledWith('recovered-copy')
+    await advanceLoadWindow()
+    Object.assign(fake.cast.remote, { contentId: failedId, playerState: 'IDLE', idleReason: 'ERROR', updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); await advanceLoadWindow()
+    expect(fake.cast.stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: recoveredId, playerState: 'PLAYING', idleReason: null, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    fake.cast.stop.mockImplementation(() => { fake.cast.status.connected = false })
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'FINISHED', updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle(); view.rerender(element()); await settle()
+    expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce()
+    expect(deleteSession).toHaveBeenCalledWith('recovered-copy')
+  })
+  it('recovers error handling after an identity-less receiver resumes the committed media', async () => {
+    const { view, element, ended } = await connectedCast()
+    rejectReplacement('ERROR', 'missing')
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
+    Object.assign(fake.cast.remote, { playerState: 'PLAYING', idleReason: null, isMediaLoaded: true, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { playerState: 'IDLE', idleReason: 'ERROR', updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(fake.cast.stop).toHaveBeenCalledOnce(); expect(ended).not.toHaveBeenCalled()
+  })
+  for (const reason of ['FINISHED', 'CANCELLED']) {
+    it(`handles a later ${reason} after a rejected LOAD without advancing uncertain media`, async () => {
+      const { view, element, close, ended } = await connectedCast()
+      rejectReplacement('ERROR', 'missing')
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
+      fake.cast.stop.mockImplementation(() => { fake.cast.status.connected = false })
+      Object.assign(fake.cast.remote, { idleReason: reason, updateSeq: fake.cast.remote.updateSeq + 1 })
+      view.rerender(element()); await settle(); view.rerender(element()); await settle()
+      expect(fake.cast.stop).toHaveBeenCalledOnce(); expect(ended).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledOnce()
+      expect(deleteSession).toHaveBeenCalledWith('cast-copy')
+    })
+  }
+  for (const end of ['explicit Stop', 'disconnect']) {
+    it(`releases the retained committed copy on ${end} after a failed LOAD`, async () => {
+      const { view, element, close } = await connectedCast()
+      rejectReplacement('ERROR')
+      fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle(); view.rerender(element()); await settle(); await advanceLoadWindow()
+      fake.cast.stop.mockImplementation(() => { fake.cast.status.connected = false })
+      if (end === 'explicit Stop') fireEvent.click(screen.getByRole('button', { name: 'Stop casting' }))
+      else fake.cast.status.connected = false
+      view.rerender(element()); await settle()
+      expect(close).toHaveBeenCalledOnce(); expect(deleteSession).toHaveBeenCalledWith('cast-copy')
+    })
+  }
 })
