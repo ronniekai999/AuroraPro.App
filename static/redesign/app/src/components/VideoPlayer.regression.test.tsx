@@ -11,7 +11,7 @@ const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
     status: { supported: true, available: true, connected: false, settling: false, deviceName: 'TV' },
-    remote: { contentId: null as string | null, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
+    remote: { contentId: null as string | null, clockContentId: null as string | null, isMediaLoaded: true, isPaused: false, canSeek: true, currentTime: 0, duration: 1000, playerState: 'PLAYING' as string | null, idleReason: null as string | null, updateSeq: 0 },
     start: vi.fn(), stop: vi.fn(), loadCurrent: vi.fn(), seek: vi.fn(), playOrPause: vi.fn(),
   },
   hls: [] as Array<{ emit: (name: string, data?: unknown) => void }>,
@@ -62,6 +62,13 @@ function expectAbsoluteSeekActions(rebuild: ReturnType<typeof vi.fn>, expectedSe
   // can instead replace the receiver's HLS load. Both take source seconds.
   expect([...rebuild.mock.calls, ...fake.cast.loadCurrent.mock.calls].map(([seconds]) => seconds)).toEqual(expectedSec)
 }
+async function mockReceiverLoad(at?: number) {
+  const load = await fake.getter?.(at) as { contentUrl: string; startTime?: number } | null | undefined
+  if (load) Object.assign(fake.cast.remote, {
+    contentId: load.contentUrl, clockContentId: load.contentUrl, currentTime: load.startTime ?? 0, isMediaLoaded: true,
+    isPaused: false, playerState: 'PLAYING', updateSeq: fake.cast.remote.updateSeq + 1,
+  })
+}
 function RebuildHarness({ onSeek = vi.fn(), onAudio = vi.fn(), party }: { onSeek?: (seconds: number) => void; onAudio?: (index: number, resumeMs: number) => void; party?: PartySync }) {
   const [target, setTarget] = useState(movie)
   return <VideoPlayer target={target} onClose={() => {}} profileId={7} party={party}
@@ -71,14 +78,18 @@ function RebuildHarness({ onSeek = vi.fn(), onAudio = vi.fn(), party }: { onSeek
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); vi.clearAllMocks(); fake.hls.length = 0; localStorage.clear()
   Object.assign(fake.cast.status, { connected: false, settling: false })
-  Object.assign(fake.cast.remote, { contentId: null, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
-  fake.cast.start.mockImplementation(async () => { await fake.getter?.(); fake.cast.status.connected = true })
-  fake.cast.loadCurrent.mockImplementation(async (at?: number) => { await fake.getter?.(at) })
-  vi.mocked(getStreamInfo).mockResolvedValue(info() as Awaited<ReturnType<typeof getStreamInfo>>)
-  vi.mocked(createSession).mockImplementation(async request => ({ session_id: `session-${fake.hls.length}`, master_playlist: '/api/stream/session/master.m3u8', start_sec: request.start_sec ?? 0 } as Awaited<ReturnType<typeof createSession>>))
-  vi.mocked(keepalive).mockResolvedValue('ok')
-  vi.mocked(reportProgress).mockResolvedValue(undefined)
-  vi.mocked(markWatched).mockResolvedValue({})
+  Object.assign(fake.cast.remote, { contentId: null, clockContentId: null, isMediaLoaded: true, isPaused: false, currentTime: 0, duration: 1000, playerState: 'PLAYING', idleReason: null, updateSeq: 0 })
+  fake.cast.start.mockReset().mockImplementation(async () => { await mockReceiverLoad(); fake.cast.status.connected = true })
+  fake.cast.loadCurrent.mockReset().mockImplementation(mockReceiverLoad)
+  // Reset one-shot responses too: a failed adversarial case must not change
+  // the delivery contract used by later independently mounted players.
+  vi.mocked(createCastToken).mockReset().mockResolvedValue({ playlist: '/api/stream/cast/master.m3u8?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999, start_sec: 100 })
+  vi.mocked(createDirectCastToken).mockReset().mockResolvedValue({ url: '/api/stream/direct/media/10?token=cast', token: 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x', expires_at: 9999999999 })
+  vi.mocked(getStreamInfo).mockReset().mockResolvedValue(info() as Awaited<ReturnType<typeof getStreamInfo>>)
+  vi.mocked(createSession).mockReset().mockImplementation(async request => ({ session_id: `session-${fake.hls.length}`, master_playlist: '/api/stream/session/master.m3u8', start_sec: request.start_sec ?? 0 } as Awaited<ReturnType<typeof createSession>>))
+  vi.mocked(keepalive).mockReset().mockResolvedValue('ok')
+  vi.mocked(reportProgress).mockReset().mockResolvedValue(undefined)
+  vi.mocked(markWatched).mockReset().mockResolvedValue({})
   vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(play)
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(function(this: HTMLMediaElement) { paused.set(this, true); this.dispatchEvent(new Event('pause')) })
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(function(this: HTMLMediaElement) { this.currentTime = 0 })
@@ -270,7 +281,7 @@ describe('WEB regressions through the real VideoPlayer', () => {
 
   it('keeps pending loads from misattributing the receiver clock', async () => {
     const loaded = deferred<void>()
-    fake.cast.start.mockImplementation(async () => { await fake.getter?.(); fake.cast.status.connected = true; await loaded.promise })
+    fake.cast.start.mockImplementation(async () => { await mockReceiverLoad(); fake.cast.status.connected = true; await loaded.promise })
     const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} />
     const view = render(element()); await bootHls(); fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
     view.rerender(element()); await settle(); fake.cast.remote.currentTime = 500
@@ -285,7 +296,7 @@ describe('WEB regressions through the real VideoPlayer', () => {
     const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} />
     const view = render(element()); await settle(); fireEvent.canPlay(video()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
-    fake.cast.remote.currentTime = 55
+    fake.cast.remote.currentTime = 55; fake.cast.remote.updateSeq++
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 55000, profile_id: 7 }), expect.any(AbortSignal))
   })
@@ -350,7 +361,9 @@ describe('Independent cast acknowledgement race', () => {
     const thirdEpisode = { ...oldEpisode, fileId: 30, episodeId: 13, title: 'C' }
     const loaded = deferred<void>(); const loads: unknown[] = []
     fake.cast.loadCurrent.mockImplementation(async (at?: number) => {
-      loads.push(await fake.getter?.(at)); await loaded.promise
+      const incoming = await fake.getter?.(at) as { contentUrl: string }
+      loads.push(incoming); await loaded.promise
+      Object.assign(fake.cast.remote, { contentId: incoming.contentUrl, clockContentId: incoming.contentUrl, updateSeq: fake.cast.remote.updateSeq + 1 })
     })
     let view: ReturnType<typeof render>
     const ended = vi.fn(async () => { view.rerender(element(nextEpisode)); return true })
@@ -444,7 +457,7 @@ describe('Second independent adversarial review', () => {
     const picker = deferred<void>()
     fake.cast.start.mockImplementation(async () => {
       await picker.promise
-      await fake.getter?.()
+      await mockReceiverLoad()
       fake.cast.status.connected = true
     })
     const element = () => <VideoPlayer target={movie} profileId={7} onClose={() => {}} />
@@ -577,7 +590,7 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
         expect(loaded.startTime).toBe(20)
         // Real useCast marks only SDK session.loadMedia rejections this way.
         // LOAD reached the receiver; its clock changed before CAF timed out.
-        Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, currentTime: 20, isPaused: false, updateSeq: 2 })
+        Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, clockContentId: loaded.contentUrl, currentTime: 20, isPaused: false, updateSeq: 2 })
         throw new CastMediaLoadError('receiver LOAD timed out', loaded.contentUrl)
       })
     }
@@ -640,7 +653,7 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
 
   it('retains loaded exact-URI identity evidence during settlement for a quiet later FINISHED', async () => {
     const { view, element, ended } = await renew()
-    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 510, playerState: 'PLAYING', isMediaLoaded: true, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, playerState: 'PLAYING', isMediaLoaded: true, updateSeq: 3 })
     view.rerender(element()); await settle()
     expect(reportProgress).not.toHaveBeenCalled()
     Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 0, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, updateSeq: 4 })
@@ -653,12 +666,12 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
 
   it('restores progress and FINISHED after fresh identity proves the acknowledged media survived', async () => {
     const { view, element, ended } = await renew()
-    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, currentTime: 510, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: new URL(firstURL, location.href).href, clockContentId: new URL(firstURL, location.href).href, currentTime: 510, updateSeq: 3 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
     vi.mocked(reportProgress).mockClear()
-    Object.assign(fake.cast.remote, { contentId: new URL(failedURL, location.href).href, currentTime: 20, updateSeq: 4 })
+    Object.assign(fake.cast.remote, { contentId: new URL(failedURL, location.href).href, clockContentId: new URL(failedURL, location.href).href, currentTime: 20, updateSeq: 4 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).not.toHaveBeenCalled()
@@ -674,7 +687,7 @@ describe('Receiver LOAD rejection preserves only proven progress', () => {
     view.rerender(element()); await settle()
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/retry/master.m3u8?token=cast', token, expires_at: 9999999999, start_sec: 590 })
     fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
-    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/retry/master.m3u8?token=cast', currentTime: 15, isPaused: false, updateSeq: 4 })
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/retry/master.m3u8?token=cast', clockContentId: 'http://localhost:3000/api/stream/hls/retry/master.m3u8?token=cast', currentTime: 15, isPaused: false, updateSeq: 4 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 605000, episode_id: 11, profile_id: 7 }), expect.any(AbortSignal))
@@ -697,7 +710,7 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: firstURL, token, expires_at: 1, start_sec: 100 })
     fake.cast.start.mockImplementation(async () => {
       await fake.getter?.()
-      Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, isPaused: isHost, updateSeq: 1 })
+      Object.assign(fake.cast.remote, { contentId: firstURL, clockContentId: firstURL, currentTime: 500, isPaused: isHost, updateSeq: 1 })
       fake.cast.status.connected = true
     })
     const view = render(element()); await bootHls()
@@ -708,7 +721,7 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
       const loaded = await fake.getter?.(at) as { contentUrl: string; startTime: number }
       expect(loaded.startTime).toBe(20)
-      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, currentTime: 20, isPaused: false, updateSeq: 3 })
+      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, clockContentId: loaded.contentUrl, currentTime: 20, isPaused: false, updateSeq: 3 })
       throw new CastMediaLoadError('receiver LOAD timed out', loaded.contentUrl)
     })
     fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
@@ -731,7 +744,7 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
     fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
     expect(fake.cast.loadCurrent).toHaveBeenLastCalledWith(600)
-    Object.assign(fake.cast.remote, { contentId: retryURL, currentTime: 10, isPaused: true, updateSeq: 5 }); view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { contentId: retryURL, clockContentId: retryURL, currentTime: 10, isPaused: true, updateSeq: 5 }); view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(4000) }); await settle()
     vi.mocked(party.requestPause).mockClear()
     Object.assign(fake.cast.remote, { currentTime: 20, updateSeq: 6 }); view.rerender(element()); await settle()
@@ -752,7 +765,7 @@ describe('Party casting ignores an unacknowledged receiver clock', () => {
     Object.assign(fake.cast.remote, { contentId: null, currentTime: 25, updateSeq: 4 }); view.rerender(element()); await settle()
     await poll(3)
     expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
-    Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, updateSeq: 5 }); view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { contentId: firstURL, clockContentId: firstURL, currentTime: 500, updateSeq: 5 }); view.rerender(element()); await settle()
     await poll(4)
     // The failed LOAD's fresh token was never acknowledged; the outgoing
     // URL is still expired, so this safe correction renews at canonical701.
@@ -780,7 +793,11 @@ describe('Receiver clock proof for relative actions and resume', () => {
     const seek = vi.fn()
     const ended = vi.fn(() => false)
     const element = (selectedTarget = target, profileId = 7) => <VideoPlayer target={selectedTarget} profileId={profileId} onClose={() => {}} onSeekRebuild={seek} onEnded={ended} />
-    if (!armEnd) fake.cast.remote.playerState = 'PAUSED'
+    if (!armEnd) fake.cast.start.mockImplementation(async () => {
+      await mockReceiverLoad()
+      Object.assign(fake.cast.remote, { playerState: 'PAUSED', isPaused: true })
+      fake.cast.status.connected = true
+    })
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/solo-old/master.m3u8?token=cast', token, expires_at: 1, start_sec: 100 })
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
@@ -791,7 +808,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
       const loaded = await fake.getter?.(at) as { contentUrl: string; startTime: number }
       expect(at).toBe(600); expect(loaded.startTime).toBe(20)
-      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, currentTime: 20, isPaused: false, playerState: armEnd ? 'PLAYING' : 'BUFFERING', updateSeq: 2 })
+      Object.assign(fake.cast.remote, { contentId: loaded.contentUrl, clockContentId: armEnd ? loaded.contentUrl : null, currentTime: 20, isPaused: false, playerState: armEnd ? 'PLAYING' : 'BUFFERING', updateSeq: 2 })
       throw new CastMediaLoadError('LOAD timed out after receiver replaced the media', loaded.contentUrl)
     })
     fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
@@ -834,7 +851,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
   })
   it.each(['button', 'keyboard', 'slider arrow', 'slider page'])('restores the proven source clock for a relative %s seek after healthy identity recovery', async mode => {
     const { view, element, seek } = await failedSoloLoad()
-    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
     view.rerender(element()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     seek.mockClear(); fake.cast.loadCurrent.mockClear()
@@ -849,7 +866,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     // handling. This exercises progress/action proof independently of Stop.
     const { view, element, seek } = await failedSoloLoad(9999999999, false)
     vi.mocked(reportProgress).mockClear()
-    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 20, playerState: 'IDLE', idleReason: 'ERROR', isMediaLoaded: false, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: null, currentTime: 20, playerState: 'IDLE', idleReason: 'ERROR', isMediaLoaded: false, updateSeq: 3 })
     view.rerender(element()); await settle()
     Object.assign(fake.cast.remote, { contentId: null, currentTime: 25, playerState: 'PAUSED', idleReason: null, isMediaLoaded: true, isPaused: true, updateSeq: 4 })
     view.rerender(element()); await settle()
@@ -860,13 +877,50 @@ describe('Receiver clock proof for relative actions and resume', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     expectAbsoluteSeekActions(seek, [])
     // A fresh loaded, exact-URI healthy snapshot restores both progress and actions.
-    Object.assign(fake.cast.remote, { contentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5 })
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: oldURL, currentTime: 510, playerState: 'PAUSED', updateSeq: 5 })
     view.rerender(element()); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
     seek.mockClear(); fake.cast.loadCurrent.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     expectAbsoluteSeekActions(seek, [620])
+  })
+  it('does not recover failed-LOAD uncertainty from matching URI and cached healthy RemotePlayer state without coherent clock proof', async () => {
+    const { view, element, seek } = await failedSoloLoad()
+    vi.mocked(reportProgress).mockClear()
+    Object.assign(fake.cast.remote, { contentId: oldURL, clockContentId: null, currentTime: 510, isPaused: true, playerState: 'PAUSED', updateSeq: 3 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { clockContentId: oldURL, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [620])
+  })
+  it.each(['FINISHED', 'ERROR'])('retires a failed attempt URI after a later successful ACK before delayed IDLE/%s', async idleReason => {
+    const { view, element, ended } = await failedSoloLoad()
+    const failedURI = fake.cast.remote.contentId
+    const retryURI = 'http://localhost:3000/api/stream/hls/retired-failure-retry/master.m3u8?token=cast'
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURI, token, expires_at: 9999999999, start_sec: 590 })
+    Object.assign(fake.cast.remote, { isPaused: true, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledWith(600)
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    vi.mocked(reportProgress).mockClear()
+    Object.assign(fake.cast.remote, { contentId: failedURI, clockContentId: null, playerState: 'IDLE', idleReason, isMediaLoaded: false, updateSeq: 5 })
+    view.rerender(element()); await settle()
+    expect(fake.cast.stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled(); expect(reportProgress).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { contentId: retryURI, idleReason: 'FINISHED', updateSeq: 6 })
+    view.rerender(element()); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
   })
   it.each([undefined, NaN, -5])('does not authorize party relative seeks with an acknowledged but unproven start_sec=%s', async anchor => {
     const target = { ...movie, resumePositionMs: 200000 }
@@ -876,7 +930,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     const element = () => <VideoPlayer target={target} profileId={7} party={party} onClose={() => {}} onSeekRebuild={seek} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
-    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-anchor/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-anchor/master.m3u8?token=cast', clockContentId: 'http://localhost:3000/api/stream/hls/unknown-anchor/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
     view.rerender(element()); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     seek.mockClear(); fake.cast.loadCurrent.mockClear()
@@ -893,7 +947,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: '/api/stream/hls/solo-unknown/master.m3u8?token=cast', token, expires_at: 9999999999, start_sec })
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
-    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/solo-unknown/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/solo-unknown/master.m3u8?token=cast', clockContentId: 'http://localhost:3000/api/stream/hls/solo-unknown/master.m3u8?token=cast', currentTime: 500, isPaused: true, updateSeq: 1 })
     view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     seek.mockClear(); fake.cast.loadCurrent.mockClear()
@@ -911,7 +965,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
     const element = () => <VideoPlayer target={target} profileId={7} party={inParty ? party : undefined} onClose={() => {}} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
-    Object.assign(fake.cast.remote, { contentId: firstURL, currentTime: 500, isPaused: true, playerState: 'PAUSED', updateSeq: 1 })
+    Object.assign(fake.cast.remote, { contentId: firstURL, clockContentId: firstURL, currentTime: 500, isPaused: true, playerState: 'PAUSED', updateSeq: 1 })
     view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) })
     if (inParty) vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
     fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
@@ -919,7 +973,7 @@ describe('Receiver clock proof for relative actions and resume', () => {
       expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).toHaveBeenCalledOnce()
     } else {
       expect(fake.cast.loadCurrent).toHaveBeenCalledWith(600)
-      Object.assign(fake.cast.remote, { contentId: retryURL, currentTime: 15, isPaused: false, playerState: 'PLAYING', updateSeq: 2 })
+      Object.assign(fake.cast.remote, { contentId: retryURL, clockContentId: retryURL, currentTime: 15, isPaused: false, playerState: 'PLAYING', updateSeq: 2 })
       view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
       expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 605000, profile_id: 7 }), expect.any(AbortSignal))
     }
@@ -934,7 +988,7 @@ describe('Party polling with an unproven receiver anchor', () => {
     const element = () => <VideoPlayer target={target} profileId={7} party={party} onClose={() => {}} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
-    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-poll-anchor/master.m3u8?token=cast', currentTime: 20, isPaused: false, updateSeq: 1 })
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/unknown-poll-anchor/master.m3u8?token=cast', clockContentId: 'http://localhost:3000/api/stream/hls/unknown-poll-anchor/master.m3u8?token=cast', currentTime: 20, isPaused: false, updateSeq: 1 })
     view.rerender(element()); await settle()
     for (let i = 0; i < 3; i++) {
       party.tickRef.current = { abs_ms: 600000, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() }
@@ -943,5 +997,308 @@ describe('Party polling with an unproven receiver anchor', () => {
     expect(fake.cast.seek).not.toHaveBeenCalled()
     expect(fake.cast.loadCurrent).not.toHaveBeenCalled()
     expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled()
+  })
+})
+
+describe('Fifth independent LOAD acknowledgement boundaries', () => {
+  const token = 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x'
+  async function renewWhileStatusLags(inParty = false, positivelyIdentify = false, acknowledgementStatus?: Partial<typeof fake.cast.remote>) {
+    const target = { ...movie, resumePositionMs: 600000 }
+    const seek = vi.fn()
+    const ended = vi.fn(() => false)
+    const party: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: false, rev: 1, hlsStartSec: 0, tickRef: { current: { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() } }, seekRef: { current: null }, helloAbsMsRef: { current: 600000 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+    const firstURL = 'http://localhost:3000/api/stream/hls/ack-old/master.m3u8?token=cast'
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: firstURL, token, expires_at: 1, start_sec: 100 })
+    fake.cast.start.mockImplementation(async () => {
+      const load = await fake.getter?.() as { startTime: number }
+      expect(load.startTime).toBe(500)
+      Object.assign(fake.cast.remote, { contentId: positivelyIdentify ? firstURL : null, clockContentId: firstURL, currentTime: 499, playerState: 'PAUSED', isPaused: true, updateSeq: 1 })
+      fake.cast.status.connected = true
+    })
+    const element = () => <VideoPlayer target={target} profileId={7} party={inParty ? party : undefined} onClose={() => {}} onSeekRebuild={seek} onEnded={ended} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    // The outgoing clock was published from its own known media session.
+    // Exercise the second ACK while its new session clock is still unknown.
+    Object.assign(fake.cast.remote, { currentTime: 500, updateSeq: 2 })
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    const ack = deferred<void>()
+    vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: nextURL, token, expires_at: 9999999999, start_sec: 580 })
+    fake.cast.loadCurrent.mockImplementationOnce(async (at?: number) => {
+      const loaded = await fake.getter?.(at) as { startTime: number }
+      expect(at).toBe(600); expect(loaded.startTime).toBe(20)
+      fake.cast.remote.clockContentId = null
+      await ack.promise
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledOnce()
+    expect(fake.cast.loadCurrent).toHaveBeenCalledWith(600)
+    // CAF resolves LOAD before the RemotePlayer ANY_CHANGE snapshot reaches React.
+    // This sender still has the outgoing, loaded PAUSED@500 reading.
+    if (acknowledgementStatus) Object.assign(fake.cast.remote, acknowledgementStatus)
+    ack.resolve(); await settle(); view.rerender(element()); await settle()
+    vi.mocked(party.requestPause).mockClear(); vi.mocked(party.requestSeek).mockClear(); vi.mocked(party.requestPlay).mockClear(); seek.mockClear(); fake.cast.loadCurrent.mockClear()
+    return { view, element, seek, ended, party, nextURL }
+  }
+  it.each(['button', 'keyboard', 'slider'])('does not pair the new acknowledged anchor with the old optional-identity clock for %s relative input', async mode => {
+    const { seek } = await renewWhileStatusLags()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+    else if (mode === 'keyboard') fireEvent.keyDown(document, { key: 'ArrowRight' })
+    else fireEvent.keyDown(screen.getByRole('slider', { name: 'Seek' }), { key: 'ArrowRight' })
+    await settle()
+    expectAbsoluteSeekActions(seek, [])
+  })
+  it('does not broadcast the old optional-identity PAUSED clock against the newly acknowledged anchor', async () => {
+    const { party } = await renewWhileStatusLags(true)
+    await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+    expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled(); expect(party.requestPlay).not.toHaveBeenCalled()
+  })
+  it('keeps an unchanged outgoing optional-identity clock untrusted after ordinary LOAD settlement', async () => {
+    const { seek } = await renewWhileStatusLags()
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+  })
+  it('does not persist a pre-ACK receiver sample against the new anchor at the first heartbeat', async () => {
+    await renewWhileStatusLags()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+  })
+  it('blocks positively mismatched old identity and resumes relative input after the new media status arrives', async () => {
+    const { view, element, seek, nextURL } = await renewWhileStatusLags(false, true)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, isPaused: false, playerState: 'PLAYING', updateSeq: 3 })
+    view.rerender(element()); await settle(); await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [610])
+  })
+
+  it.each([
+    { event: 'volume-only sequence', currentTime: 500, playerState: 'PAUSED', isPaused: true },
+    { event: 'play-state-only sequence', currentTime: 500, playerState: 'PLAYING', isPaused: false },
+    { event: 'outgoing clock drift', currentTime: 500.1, playerState: 'PLAYING', isPaused: false },
+  ])('does not associate the incoming clock from $event', async status => {
+    const { view, element, seek, party } = await renewWhileStatusLags(true)
+    Object.assign(fake.cast.remote, { ...status, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    expect(party.requestPlay).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+  })
+
+  it('declines unchanged or changed near-requested clocks without coherent media proof', async () => {
+    const { view, element, seek, nextURL } = await renewWhileStatusLags(false, false, { currentTime: 20, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { playerState: 'PLAYING', isPaused: false, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { currentTime: 20.25, updateSeq: 5 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: nextURL, updateSeq: 6 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 600250, profile_id: 7 }), expect.any(AbortSignal))
+    seek.mockClear(); fake.cast.loadCurrent.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [610.25])
+  })
+
+  it('does not mistake overlapping outgoing clock drift for the newly requested clock', async () => {
+    const { view, element, seek } = await renewWhileStatusLags(false, false, { currentTime: 19, playerState: 'PLAYING', isPaused: false, updateSeq: 3 })
+    // The new LOAD requested 20s. The outgoing clock can already be near it
+    // and continue ticking; proximity and a numeric change prove no media.
+    Object.assign(fake.cast.remote, { currentTime: 19.25, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+  })
+
+  it.each(['before ACK', 'after ACK'])('does not pair incoming session URI with outgoing RemotePlayer time supplied %s', async timing => {
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    const { view, element, seek, party } = await renewWhileStatusLags(true, false, timing === 'before ACK' ? { contentId: nextURL, clockContentId: null } : undefined)
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: null, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    expect(party.requestPlay).not.toHaveBeenCalled(); expect(party.requestPause).not.toHaveBeenCalled(); expect(party.requestSeek).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+  })
+
+  it('keeps guest corrections quiet when a new session identity lacks coherent clock proof', async () => {
+    const { view, element, seek, party, nextURL } = await renewWhileStatusLags(true)
+    party.isHost = false
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: null, playerState: 'PLAYING', isPaused: false, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    fake.cast.seek.mockClear(); fake.cast.playOrPause.mockClear(); fake.cast.loadCurrent.mockClear()
+    vi.mocked(reportProgress).mockClear()
+    for (let i = 0; i < 10; i++) {
+      party.tickRef.current = { abs_ms: 600000, server_now_ms: Date.now(), running: false, receivedAtMs: Date.now() }
+      await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+    }
+    expect(fake.cast.seek).not.toHaveBeenCalled(); expect(fake.cast.playOrPause).not.toHaveBeenCalled()
+    expectAbsoluteSeekActions(seek, []); expect(reportProgress).not.toHaveBeenCalled()
+    Object.assign(fake.cast.remote, { clockContentId: nextURL, currentTime: 20, isPaused: true, playerState: 'PAUSED', updateSeq: 4 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
+  })
+
+  it('requires clock proof on each snapshot even after earlier healthy incoming media', async () => {
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    const { view, element, seek } = await renewWhileStatusLags(false, false, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, playerState: 'PLAYING', isPaused: false, updateSeq: 3 })
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    Object.assign(fake.cast.remote, { updateSeq: 4 })
+    view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { clockContentId: null, currentTime: 500, updateSeq: 5 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    // The prior proven point remains available to Stop, never the mixed clock.
+    fireEvent.click(screen.getByRole('button', { name: 'Stop casting' })); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
+  })
+
+  it('uses coherent media clocks as playback advances far beyond the requested start', async () => {
+    const { view, element, seek, nextURL } = await renewWhileStatusLags()
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, isPaused: false, playerState: 'PLAYING', updateSeq: 3 })
+    view.rerender(element()); await settle()
+    Object.assign(fake.cast.remote, { currentTime: 100, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 680000, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [690])
+  })
+
+  it.each(['PLAYING', 'PAUSED'])('uses coherent incoming %s clock proof delivered before the LOAD ACK', async playerState => {
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    const { seek } = await renewWhileStatusLags(false, false, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, isPaused: playerState === 'PAUSED', playerState, updateSeq: 3 })
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [610])
+  })
+
+  it.each([
+    { playerState: 'BUFFERING', isMediaLoaded: true, currentTime: 20 },
+    { playerState: 'PAUSED', isMediaLoaded: false, currentTime: 20 },
+    { playerState: 'PLAYING', isMediaLoaded: true, currentTime: NaN },
+  ])('does not trust pre-ACK identity from unhealthy state $playerState / loaded=$isMediaLoaded / clock=$currentTime', async status => {
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    const { view, element, seek } = await renewWhileStatusLags(false, false, { ...status, contentId: nextURL, clockContentId: null, updateSeq: 3 })
+    Object.assign(fake.cast.remote, { contentId: null, playerState: 'PLAYING', isMediaLoaded: true, currentTime: 500, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, updateSeq: 5 })
+    view.rerender(element()); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [610])
+  })
+
+  it('does not fabricate a resume point for Stop after ACK while the incoming clock remains unknown', async () => {
+    await renewWhileStatusLags()
+    vi.mocked(reportProgress).mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Stop and close' })); await settle()
+    expect(fake.cast.stop).toHaveBeenCalledOnce()
+    expect(reportProgress).not.toHaveBeenCalled()
+  })
+
+  it('still completes the acknowledged item from FINISHED before clock association', async () => {
+    const { view, element, ended, nextURL } = await renewWhileStatusLags(false, false, { playerState: 'PLAYING', isPaused: false })
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    Object.assign(fake.cast.remote, { contentId: nextURL, clockContentId: null, playerState: 'IDLE', idleReason: 'FINISHED', isMediaLoaded: false, currentTime: 0, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, duration_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
+  })
+
+  it.each(['FINISHED', 'ERROR'])('ignores known outgoing URI IDLE/%s after successful replacement without a failed LOAD', async reason => {
+    const nextURL = 'http://localhost:3000/api/stream/hls/ack-new/master.m3u8?token=cast'
+    const { view, element, ended } = await renewWhileStatusLags(false, false, { contentId: nextURL, clockContentId: nextURL, currentTime: 20, playerState: 'PLAYING', isPaused: false, updateSeq: 3 })
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    vi.mocked(reportProgress).mockClear()
+    Object.assign(fake.cast.remote, { contentId: 'http://localhost:3000/api/stream/hls/ack-old/master.m3u8?token=cast', clockContentId: null, playerState: 'IDLE', idleReason: reason, isMediaLoaded: false, currentTime: 0, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    expect(ended).not.toHaveBeenCalled(); expect(fake.cast.stop).not.toHaveBeenCalled(); expect(reportProgress).not.toHaveBeenCalled()
+    // A valid terminal event for the actual acknowledged media still works.
+    Object.assign(fake.cast.remote, { contentId: nextURL, idleReason: 'FINISHED', updateSeq: 5 })
+    view.rerender(element()); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(ended).toHaveBeenCalledOnce(); expect(fake.cast.stop).toHaveBeenCalledOnce()
+  })
+
+  it('requires actual initial LOAD clock evidence when the picker joins a TV already playing other media', async () => {
+    const target = { ...movie, resumePositionMs: 200000 }
+    const seek = vi.fn()
+    const element = () => <VideoPlayer target={target} profileId={7} onClose={() => {}} onSeekRebuild={seek} />
+    fake.cast.start.mockImplementationOnce(async () => {
+      // The pre-picker disconnected sender can join an already-playing TV.
+      Object.assign(fake.cast.remote, { currentTime: 500, playerState: 'PAUSED', isPaused: true, updateSeq: 1 })
+      const load = await fake.getter?.() as { startTime: number }
+      expect(load.startTime).toBe(100)
+      fake.cast.status.connected = true
+    })
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    Object.assign(fake.cast.remote, { updateSeq: 2 })
+    view.rerender(element()); await settle()
+    vi.mocked(reportProgress).mockClear()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    Object.assign(fake.cast.remote, { currentTime: 100, updateSeq: 3 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [])
+    const url = 'http://localhost:3000/api/stream/cast/master.m3u8?token=cast'
+    Object.assign(fake.cast.remote, { contentId: url, clockContentId: url, updateSeq: 4 })
+    view.rerender(element()); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 200000, profile_id: 7 }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
+    expectAbsoluteSeekActions(seek, [210])
   })
 })

@@ -965,7 +965,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // A receiver LOAD can take effect even when its ACK times out. Keep the
   // outgoing identity/sample, but distrust subsequent clocks and FINISHED
   // until a later ACK or fresh media identity proves their association.
-  const castProgressFailureRef = useRef<{ updateSeq: number; healthyIdentitySeq?: number } | null>(null)
+  const castProgressFailureRef = useRef<{ contentId: string; updateSeq: number; healthyIdentitySeq?: number } | null>(null)
   const lastCastProgressRef = useRef<CastProgressSample | null>(null)
   const castProgressGenerationRef = useRef(0)
   const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -1473,7 +1473,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         }
       } catch (e) {
         if (e instanceof CastMediaLoadError && progressGeneration === castProgressGenerationRef.current) {
-          castProgressFailureRef.current = { updateSeq: castRef.current.remote.updateSeq }
+          castProgressFailureRef.current = { contentId: e.contentId, updateSeq: castRef.current.remote.updateSeq }
           // Invalidate an older completion/advance awaiting its progress write
           // too. Token/setup failures never disturbed the acknowledged media.
           castProgressGenerationRef.current += 1
@@ -1518,6 +1518,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const failure = castProgressFailureRef.current
     if (!failure) return true
     const healthyIdentity = c.remote.updateSeq > failure.updateSeq && !!context.contentId && c.remote.contentId === context.contentId &&
+      c.remote.clockContentId === context.contentId && Number.isFinite(c.remote.currentTime) && c.remote.currentTime >= 0 &&
       c.remote.isMediaLoaded && (c.remote.playerState === 'PLAYING' || c.remote.playerState === 'PAUSED')
     // Capture positive evidence even during settlement. A rapid FINISHED
     // can follow this loaded state before actions are allowed again.
@@ -1535,10 +1536,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const castReceiverClockIsTrusted = (): boolean => {
     const context = castProgressContextRef.current
     const c = castRef.current
-    return !!context && context.startSec !== null && Number.isFinite(context.startSec) && context.startSec >= 0 &&
-      c.status.connected && !c.status.settling && castLoadsInFlightRef.current === 0 && c.remote.isMediaLoaded &&
-      c.remote.playerState !== 'IDLE' && Number.isFinite(c.remote.currentTime) && c.remote.currentTime >= 0 &&
-      castProgressIdentityIsTrusted()
+    // CAF may expose a new MediaSession URI while RemotePlayer still carries
+    // the outgoing clock. Only the SDK's same-MediaSession clock provenance
+    // can associate the normalized clock with this acknowledged media.
+    // Counters, elapsed time and proximity to LOAD startTime are not proof.
+    if (!context || context.startSec === null || !Number.isFinite(context.startSec) || context.startSec < 0 ||
+        !context.contentId || c.remote.clockContentId !== context.contentId ||
+        !c.status.connected || c.status.settling || castLoadsInFlightRef.current > 0 ||
+        !c.remote.isMediaLoaded || (c.remote.playerState !== 'PLAYING' && c.remote.playerState !== 'PAUSED') ||
+        !Number.isFinite(c.remote.currentTime) || c.remote.currentTime < 0 || !castProgressIdentityIsTrusted()) return false
+    return true
   }
   const snapshotCastProgress = (): CastProgressSample | null => {
     const c = castRef.current
@@ -1995,6 +2002,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // stale snapshot from whenever this effect instance was created.
     const evaluate = () => {
       const c = castRef.current
+      const context = castProgressContextRef.current
+      // An outgoing status may arrive after the replacement LOAD ACK.
+      // Its terminal event cannot finish or stop the acknowledged new media.
+      const failedAttemptEnded = castProgressFailureRef.current?.contentId === c.remote.contentId &&
+        (c.remote.idleReason === 'FINISHED' || c.remote.idleReason === 'CANCELLED')
+      if (c.remote.playerState === 'IDLE' && context?.contentId && c.remote.contentId && c.remote.contentId !== context.contentId && !failedAttemptEnded) return
       if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
       // Our own load ends the old media session; that IDLE is not the title
       // finishing. See castLoadIsSettling.
