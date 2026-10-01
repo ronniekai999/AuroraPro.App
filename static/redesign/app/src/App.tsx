@@ -2305,7 +2305,7 @@ export default function App() {
     e.preventDefault()
     const items: MediaContextItem[] = [
       { label: 'Mark as Watched', onClick: () => {
-        void markWatched(m.id).then((res) => {
+        void markWatched(m.id, { profile_id: activeProfileId ?? undefined }).then((res) => {
           const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
           // Surface achievement unlocks from the server's gamification
@@ -2323,7 +2323,7 @@ export default function App() {
         })
       }},
       { label: 'Clear Progress', tone: 'danger', onClick: () => {
-        void clearProgress(m.id).then(() => {
+        void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
           const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
           setRetryNonce(n => n + 1)

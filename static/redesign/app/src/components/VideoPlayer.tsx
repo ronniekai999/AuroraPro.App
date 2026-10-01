@@ -36,6 +36,7 @@ import {
   type EpisodeFile,
   type MediaFile,
   type SkipMarker,
+  markWatched,
   reportProgress,
   withToken,
 } from '@/lib/api'
@@ -61,10 +62,8 @@ import {
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
 import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
-// Session-identity rules live in their own module so they can be tested — the
-// player itself is not mountable in a unit test, and an adversarial review
-// showed every one of these behaviors could be reverted with the SPA suite
-// staying green.
+// Delivery/viewing identity rules are also exercised by the mounted-player
+// regressions, alongside their unit coverage in playbackQoESession.
 import {
   collectorAction,
   failureTerminal,
@@ -237,6 +236,14 @@ export interface PlayTarget {
   // network-bound boots re-check canonical play/pause state when they finish.
   partyRecoveryBoot?: boolean
 }
+
+type CastProgressContext = {
+  target: PlayTarget
+  profileId?: number
+  durationSec: number
+  startSec: number
+}
+type CastProgressSample = { context: CastProgressContext; positionSec: number }
 
 interface VideoPlayerProps {
   target: PlayTarget | null
@@ -524,6 +531,15 @@ async function attemptPlay(
 export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
   onSurfaceChange, isAdmin, onToast }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  // Error screens remove the media element. Bind to the actual node so the
+  // next title (including a party retarget while the error is visible) gets
+  // all its listeners and can boot after the replacement node mounts.
+  const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null)
+  const bindVideoElement = useCallback((node: HTMLVideoElement | null) => {
+    videoRef.current = node
+    setVideoElement(node)
+  }, [])
+  const failedTargetRef = useRef<PlayTarget | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
   // callback without re-subscribing on every render.
@@ -603,6 +619,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // currentTime=0 / startSec=0 boot window can't propagate abs_ms=0 to the
   // party (which would yank every other participant to the start).
   const playerReadyRef = useRef<boolean>(false)
+  // The logical playhead survives a session teardown, whose media clock is
+  // temporarily zero. Update it synchronously before asking App to rebuild so
+  // two clicks in one frame, keyboard seeks and audio picks share one clock.
+  const logicalAbsoluteSecRef = useRef(0)
+  const readLocalAbsoluteSec = useCallback(() => {
+    const vid = videoRef.current
+    return playerReadyRef.current && vid
+      ? Math.max(0, vid.currentTime + startSecRef.current)
+      : logicalAbsoluteSecRef.current
+  }, [])
   // Set immediately before a seek-triggered session replacement when the
   // authoritative state is Paused. The next delivery-path boot consumes it
   // without calling play(), so a synthetic boot event cannot resume a party.
@@ -717,10 +743,33 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // load getter) and from effects whose dep arrays deliberately stay coarse,
   // both of which would otherwise capture a stale value.
   const partyControlsMediaRef = useRef(false)
+  const prepareLocalReplacement = useCallback((absoluteSec: number, vid: HTMLVideoElement | null) => {
+    const liveParty = partySyncRef.current
+    const inFlight = inFlightPauseIntentRef.current
+    const controlsMedia = partyControlsMediaRef.current
+    const localPause = pauseIntentForReplacementSeek(
+      playerReadyRef.current, vid?.paused ?? true,
+      inFlight?.preservePause ?? null, inFlight?.partyRevision ?? null,
+      controlsMedia, liveParty?.isPlaying ?? null, liveParty?.rev ?? null,
+    )
+    const intent = {
+      preservePause: shouldPreservePauseForLocalSeekRebuild(
+        controlsMedia, liveParty?.isHost ?? false, liveParty?.isPlaying ?? false, localPause,
+      ),
+      partyRevision: controlsMedia ? liveParty?.rev ?? null : null,
+    }
+    pauseAfterSeekRebuildRef.current = intent
+    inFlightPauseIntentRef.current = intent
+    logicalAbsoluteSecRef.current = absoluteSec
+    setCurrentSec(absoluteSec)
+    playerReadyRef.current = false
+  }, [])
   const completePlaybackBoot = useCallback(async (
     vid: HTMLVideoElement,
     preservePause: boolean,
   ) => {
+    logicalAbsoluteSecRef.current = Math.max(0, vid.currentTime + startSecRef.current)
+    setCurrentSec(logicalAbsoluteSecRef.current)
     if (preservePause) {
       // Keep broadcasts gated while enforcing pause. Most browsers are already
       // paused during boot, but native HLS may have begun autonomously.
@@ -907,6 +956,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // to every guest.
   const castPendingMediaRef = useRef<CastLoadedMedia | null>(null)
   const castLoadedMediaRef = useRef<CastLoadedMedia | null>(null)
+  const progressBindingRef = useRef({ target, profileId })
+  progressBindingRef.current = { target, profileId }
+  const castPendingProgressRef = useRef<CastProgressContext | null>(null)
+  const castProgressContextRef = useRef<CastProgressContext | null>(null)
+  const lastCastProgressRef = useRef<CastProgressSample | null>(null)
+  const castProgressGenerationRef = useRef(0)
+  const progressWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const flushCastProgressRef = useRef<(completed?: boolean) => Promise<void>>(async () => {})
   // The last direct-cast attempt failed to mint its token. Without this the
   // failure fell through to the no-media sentinel's generic wording — "wait
   // for the title to start playing" — which is untrue and unactionable when
@@ -1000,11 +1057,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // together. Two call sites already had to keep three refs in step; a fourth
   // and fifth would eventually have gone out of step.
   const endCastTracking = () => {
+    // A disconnect can reset RemotePlayer's clock before React sees it. The
+    // last trusted sample retains the acknowledged media/profile/anchor.
+    void flushCastProgressRef.current()
     castSessionRef.current?.end()
     castPendingMediaRef.current = null
     castLoadedMediaRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
+    castPendingProgressRef.current = null
+    castProgressContextRef.current = null
+    lastCastProgressRef.current = null
+    castProgressGenerationRef.current += 1
     castStuckPollsRef.current = 0
     castReanchorBudgetRef.current = { used: 0, settledPolls: 0 }
     castLastReanchorAtMsRef.current = 0
@@ -1073,6 +1137,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Captured BEFORE any await, so a target change during the mint is
     // detectable at promotion time.
     const loadEpoch = castTargetEpochRef.current
+    const progressContext = {
+      target,
+      profileId: progressBindingRef.current.profileId ?? undefined,
+      durationSec: serverDurationRef.current ? realDurationSecRef.current : 0,
+    }
     const sid = sessionIdRef.current
     if (!sid) {
       // DIRECT PLAY (issue #503). There is no transcode session to mint a
@@ -1122,6 +1191,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // clone with a large anchor (a binge crossing an auto-advance), and a
       // carried-over value would offset every later conversion.
       castPendingStartSecRef.current = 0
+      castPendingProgressRef.current = { ...progressContext, startSec: 0 }
       castPendingEpochRef.current = loadEpoch
       // No transcode session backs this cast. Tell the tracker so explicitly:
       // committing it has to CLEAR the committed slot, or a cast that moves
@@ -1193,6 +1263,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       ? Math.max(0, rawStartSec)
       : Math.max(0, startSecRef.current ?? 0)
     castPendingStartSecRef.current = castStartSec
+    castPendingProgressRef.current = { ...progressContext, startSec: castStartSec }
     castPendingEpochRef.current = loadEpoch
     return {
       contentUrl: absoluteUrl(resp.playlist),
@@ -1330,6 +1401,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     castLoadsInFlightRef.current > 0 || Date.now() < castLoadSettleUntilMsRef.current
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
+      void flushCastProgressRef.current()
       castLoadsInFlightRef.current += 1
       try {
         await op()
@@ -1345,6 +1417,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // a failed load re-point every abs→receiver conversion at a session
           // nothing is playing.
           castStartSecRef.current = castPendingStartSecRef.current
+          castProgressContextRef.current = castPendingProgressRef.current
+          lastCastProgressRef.current = null
+          castProgressGenerationRef.current += 1
           // Seed the host's comparison baseline with what this load MAKES the
           // receiver do, so the arms can tell that apart from what a person
           // does — without suppressing either.
@@ -1389,11 +1464,83 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // pending media the getter did not anchor, which is the exact failure
         // the nullable design exists to prevent.
         castPendingStartSecRef.current = null
+        castPendingProgressRef.current = null
       }
     })
     castLoadGateRef.current = run.catch(() => { /* keep the chain alive */ })
     return run
   }
+
+  const snapshotCastProgress = (): CastProgressSample | null => {
+    const c = castRef.current
+    const context = castProgressContextRef.current
+    if (!context || !c.status.connected || c.status.settling || castLoadIsSettling()) return null
+    if (!Number.isFinite(c.remote.currentTime) || c.remote.currentTime < 0) return null
+    if (!c.remote.isMediaLoaded && c.remote.playerState !== 'IDLE') return null
+    // IDLE often clears currentTime. Preserve the last position unless CAF
+    // positively says FINISHED, whose explicit completion write is below.
+    if (c.remote.playerState === 'IDLE') return lastCastProgressRef.current
+    return { context, positionSec: c.remote.currentTime + context.startSec }
+  }
+  const writeProgress = (sample: CastProgressSample, completed = false): Promise<void> => {
+    // Snapshot before queueing: a target/profile/anchor may change while an
+    // earlier heartbeat is in flight. Serialize final writes behind it so a
+    // late heartbeat cannot replace the final resume point.
+    const { context } = sample
+    const positionSec = completed && context.durationSec > 0
+      ? context.durationSec : sample.positionSec
+    const body = {
+      position_ms: Math.round(Math.max(0, positionSec) * 1000),
+      duration_ms: Math.round(Math.max(0, context.durationSec) * 1000),
+      episode_id: context.target.episodeId,
+      profile_id: context.profileId,
+    }
+    const write = progressWriteQueueRef.current.then(async () => {
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), 5000)
+      try {
+        if (completed && context.durationSec <= 0) {
+          // FINISHED is authoritative even when the source duration is
+          // unknown or the receiver has already reset its clock to zero.
+          await markWatched(context.target.mediaItemId, {
+            episode_id: context.target.episodeId, profile_id: context.profileId,
+          }, controller.signal)
+        }
+        await reportProgress(context.target.mediaItemId, body, controller.signal)
+      } catch {
+        if (completed) onToast?.('Could not save watched status — mark this title as watched when the server reconnects.', 'error')
+      } finally {
+        window.clearTimeout(timeout)
+      }
+    })
+    progressWriteQueueRef.current = write
+    return write
+  }
+  const flushCastProgress = (completed = false): Promise<void> => {
+    const sample = snapshotCastProgress() ?? lastCastProgressRef.current
+      ?? (completed && castProgressContextRef.current
+        ? { context: castProgressContextRef.current, positionSec: 0 } : null)
+    if (!sample) return Promise.resolve()
+    const finalSample = completed && sample.context.durationSec > 0
+      ? { ...sample, positionSec: sample.context.durationSec } : sample
+    lastCastProgressRef.current = finalSample
+    return writeProgress(finalSample, completed)
+  }
+  flushCastProgressRef.current = flushCastProgress
+  const stopCastWithProgress = () => {
+    // Capture before stop can clear the SDK reading; network writes must not
+    // delay the user's transport control, including during an outage.
+    void flushCastProgress()
+    castRef.current.stop()
+  }
+  useEffect(() => {
+    const sample = snapshotCastProgress()
+    if (sample) lastCastProgressRef.current = sample
+    // All bindings are acknowledged-load refs, not the currently rendered
+    // title. A party media change can leave the receiver on the old episode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cast.status.connected, cast.status.settling, cast.remote.updateSeq, cast.remote.currentTime, cast.remote.playerState])
+  useEffect(() => () => { void flushCastProgressRef.current() }, [])
 
   // Re-point the receiver at an ABSOLUTE source position with a freshly
   // minted token. Absolute, not receiver-relative: the reload may come back
@@ -1507,7 +1654,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // on cast end we no longer override their state.
   const pausedByCastRef = useRef(false)
   useEffect(() => {
-    const vid = videoRef.current
+    const vid = videoElement
     if (!vid) return
     if (cast.status.connected) {
       if (!vid.paused) {
@@ -1548,7 +1695,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // before this feature and is recorded as a known limit rather than fixed
     // here — four review rounds of trying produced a new defect each time.
     pausedByCastRef.current = false
-  }, [cast.status.connected])
+  }, [cast.status.connected, videoElement])
 
   // AirPlay active-state detection. Safari fires
   // 'webkitcurrentplaybacktargetiswirelesschanged' on the <video> when the
@@ -1559,8 +1706,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // playback for AirPlay (the pausedByCastRef effect above keys on the
   // Chromecast session only).
   useEffect(() => {
-    const vid = videoRef.current
-    if (!vid) return
+    const vid = videoElement
+    if (!vid) {
+      setAirplayActive(false)
+      setAirplayAvailable(false)
+      return
+    }
     const sync = () => setAirplayActive(!!vid.webkitCurrentPlaybackTargetIsWireless)
     sync()
     // Availability drives our custom AirPlay button (the native glyph is
@@ -1575,7 +1726,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       vid.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', sync)
       vid.removeEventListener('webkitplaybacktargetavailabilitychanged', onAvail as EventListener)
     }
-  }, [target])
+  }, [videoElement])
 
   // Auto-minimize to the floating control widget when playback moves to a
   // remote surface; expand back when it returns to local. The full player
@@ -1653,7 +1804,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   }, [target, minimizedActive, fullscreen])
 
   // Fullscreen is only ever cleared by the `fullscreenchange` listener, and that
-  // listener lives in an effect keyed on [target] — so closing the player while
+  // listener follows the mounted media element — so closing the player while
   // browser-fullscreen races: the UA queues fullscreenchange when the fullscreen
   // element unmounts, but the passive cleanup may have removed the listener
   // first. Lose that race and `fullscreen` stayed true, so the NEXT open
@@ -1800,12 +1951,27 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // rides the same MEDIA_STATUS as playerState, so it's current here.
         const reason = c.remote.idleReason
         if (reason === 'CANCELLED' || reason === 'INTERRUPTED' || reason === 'ERROR') {
-          c.stop()
+          void stopCastWithProgress()
         } else {
           // Arm BEFORE the async advance so the next session's epoch bump (which
           // is network-bound and always lands later) can never beat the flag.
           castAdvancePendingRef.current = true
           void (async () => {
+            const generation = castProgressGenerationRef.current
+            const endedContext = castProgressContextRef.current
+            await flushCastProgress(reason === 'FINISHED')
+            const liveTarget = progressBindingRef.current.target
+            if (generation !== castProgressGenerationRef.current || !castRef.current.status.connected) return
+            // Never advance the local next episode when the receiver finished
+            // a prior item (a party retarget or a load that has not landed).
+            if (!endedContext || !liveTarget ||
+                endedContext.target.fileId !== liveTarget.fileId ||
+                endedContext.target.fileType !== liveTarget.fileType ||
+                endedContext.target.episodeId !== liveTarget.episodeId) {
+              castAdvancePendingRef.current = false
+              c.stop()
+              return
+            }
             const advanced = await onEndedRef.current?.()
             if (!advanced) {
               // Nothing to advance to — clear the arm and close out (the prior
@@ -1925,6 +2091,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Leaving the anchor unknown is what makes both branches decline instead.
     castTargetEpochRef.current += 1
     castPendingMediaRef.current = null
+    castPendingProgressRef.current = null
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
@@ -2436,6 +2603,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       pauseAfterSeekRebuildRef.current = null
       inFlightPauseIntentRef.current = null
       deliveryModeRef.current = 'idle'
+      logicalAbsoluteSecRef.current = 0
+      return
+    }
+    if (!videoElement) {
+      // A terminal error for this target remains visible. A NEW target clears
+      // the old error and boots once its callback ref supplies the new node.
+      if (failedTargetRef.current !== target) setErrorMsg(null)
       return
     }
     // A seek-rebuild writes this immediately before replacing `target`. Consume
@@ -2487,12 +2661,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // see playerReadyRef. Set true right before each vid.play() below.
     playerReadyRef.current = false
     mediaErrorFallbackTriedRef.current = false
-    // Audit M1 fix — reset session-bound playback state so the
-    // scrub bar doesn't render with the OLD session's coords while
-    // the new one boots. Without this, audio-track switches show a
-    // visible "scrub bar flies to wrong position then snaps back"
-    // glitch during the ~half-second transition between sessions.
-    setCurrentSec(0)
+    // Keep the requested absolute playhead through boot; buffered/produced
+    // edges belong to the old session and must be cleared independently.
+    const requestedAbsoluteSec = Math.max(0, (target.resumePositionMs ?? 0) / 1000)
+    logicalAbsoluteSecRef.current = requestedAbsoluteSec
+    setCurrentSec(requestedAbsoluteSec)
     bufferedSecRef.current = 0
     producedEdgeSecRef.current = 0
     lagRebuildFiredRef.current = false
@@ -2598,8 +2771,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // small one).
         serverDurationRef.current = !!(stream.duration_ms && stream.duration_ms > 0)
         if (serverDurationRef.current) {
-          setRealDurationSec(stream.duration_ms! / 1000)
+          realDurationSecRef.current = stream.duration_ms! / 1000
+          setRealDurationSec(realDurationSecRef.current)
         } else {
+          realDurationSecRef.current = 0
           setRealDurationSec(0)
         }
         // Audit M2 (Phase 4.5) — preserve the user's subtitle
@@ -2640,6 +2815,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // listener cannot see them — only this funnel can.
         const failPlayback = (msg: string, kind: FailureKind = 'media') => {
           try { qoeRef.current?.noteError(failureTerminal(kind)) } catch { /* never let telemetry break teardown */ }
+          failedTargetRef.current = target
           setErrorMsg(msg)
           closeAndCleanup()
         }
@@ -2787,6 +2963,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             const playedHealthyMs = performance.now() - playbackBootAt
             if (playedHealthyMs > 60_000 && positionMs > 0 && onSeekRebuild) {
               setStatus('Recovering direct play…')
+              prepareLocalReplacement(Math.floor(positionMs / 1000), vid)
               onSeekRebuild(Math.floor(positionMs / 1000))
               return
             }
@@ -3048,8 +3225,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             if (e?.code === 4) {
               mediaCleanupRef.current?.()
               mediaCleanupRef.current = null
-              setErrorMsg('Playback failed — this stream format is not supported by your browser')
-              closeAndCleanup()
+              failPlayback('Playback failed — this stream format is not supported by your browser')
             }
           }
           vid.addEventListener('seeking', onNativeSeeking)
@@ -3565,6 +3741,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           qoeRef.current?.noteError(failureTerminal('session_create'))
           qoeRef.current?.finish(failureTerminal('session_create'))
         } catch { /* best-effort */ }
+        failedTargetRef.current = target
         setErrorMsg(msg)
         // If a cast auto-advance was waiting on this boot, it just failed
         // (sessionIdRef was never set). Tick the reload epoch so the cast
@@ -3585,7 +3762,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // currentSubIndex is read once to restore subtitles across target changes;
     // adding it as a dependency would restart playback when the user toggles subs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, closeAndCleanup, completePlaybackBoot])
+  }, [target, videoElement, closeAndCleanup, completePlaybackBoot])
 
   // Keepalive ticker — runs while a session is active. V1 uses 10s.
   // setInterval re-creates per session because sessionIdRef is a ref
@@ -3702,9 +3879,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Absolute media position — currentTime is relative to the session's
         // start_sec anchor, and the rebuild wants absolute seconds (same
         // convention as onSeek / the forward-seek rebuild above).
-        const absSec = vid
-          ? Math.max(0, vid.currentTime + (startSecRef.current ?? 0))
-          : Math.max(0, startSecRef.current ?? 0)
+        const absSec = readLocalAbsoluteSec()
 
         // The session is already dead, so nothing here can make playback
         // worse — but a host rebuilding mid-party would drift the guests
@@ -3718,6 +3893,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
 
         if (rebuild && !isPartySyncingThisMedia) {
           setStatus('Reconnecting…')
+          prepareLocalReplacement(absSec, vid)
           rebuild(absSec)
         } else {
           // No rebuild available: surface it rather than leaving a dead
@@ -4928,16 +5104,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // can fire faster — we don't need sub-second precision for the
   // displayed time and re-rendering React on every fire is wasteful.
   useEffect(() => {
-    const vid = videoRef.current
+    const vid = videoElement
     if (!vid) return
     const lastTUpdateRef = { current: 0 }
     const onPlay = () => setPlaying(true)
     const onPause = () => setPlaying(false)
     const onTimeUpdate = () => {
+      if (!playerReadyRef.current) return
       const now = performance.now()
       if (now - lastTUpdateRef.current < 200) return // ~5Hz cap
       lastTUpdateRef.current = now
-      setCurrentSec(vid.currentTime + (startSecRef.current ?? 0))
+      logicalAbsoluteSecRef.current = Math.max(0, vid.currentTime + startSecRef.current)
+      setCurrentSec(logicalAbsoluteSecRef.current)
     }
     const onProgress = () => {
       // Audit H4 fix — TimeRanges can be non-contiguous after a
@@ -5068,7 +5246,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         pendingVolumeRef.current = null
       }
     }
-  }, [target])
+  }, [videoElement])
 
   // True while any popover inside the chrome is open (audio / subtitle /
   // markers pickers, reaction picker). Read by showControlsTemporarily at
@@ -5231,31 +5409,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     const rebuildAtTarget = (): boolean => {
       if (!onSeekRebuild) return false
-      const liveParty = partySyncRef.current
-      const livePartyControlsMedia = Boolean(liveParty) &&
-        (liveParty?.partyMediaItemId === undefined || liveParty.partyMediaItemId === target?.mediaItemId)
-      const inFlightIntent = inFlightPauseIntentRef.current
-      const localPauseIntent = pauseIntentForReplacementSeek(
-        playerReadyRef.current,
-        vid.paused,
-        inFlightIntent?.preservePause ?? null,
-        inFlightIntent?.partyRevision ?? null,
-        livePartyControlsMedia,
-        liveParty?.isPlaying ?? null,
-        liveParty?.rev ?? null,
-      )
-      const preservePause = shouldPreservePauseForLocalSeekRebuild(
-        livePartyControlsMedia,
-        liveParty?.isHost ?? false,
-        liveParty?.isPlaying ?? false,
-        localPauseIntent,
-      )
-      const bootIntent = {
-        preservePause,
-        partyRevision: livePartyControlsMedia ? liveParty?.rev ?? null : null,
-      }
-      pauseAfterSeekRebuildRef.current = bootIntent
-      inFlightPauseIntentRef.current = bootIntent
+      prepareLocalReplacement(targetSec, vid)
       broadcastHostPartySeek()
       onSeekRebuild(targetSec)
       return true
@@ -5535,7 +5689,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             if (baseAbsSec !== null) seekToRealSecRef.current(baseAbsSec + delta)
             break
           }
-          seekToRealSecRef.current(vid.currentTime + (startSecRef.current ?? 0) + delta)
+          seekToRealSecRef.current(readLocalAbsoluteSec() + delta)
           break
         }
         case 'ArrowUp':
@@ -5673,33 +5827,29 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   useEffect(() => {
     if (!target) return
     const id = window.setInterval(() => {
-      const vid = videoRef.current
-      if (!vid || vid.paused) return
-      const offsetMs = (startSecRef.current ?? 0) * 1000
-      const posMs = Math.round(vid.currentTime * 1000) + offsetMs
-      // realDurationSec is the FULL file duration (from
-      // /api/stream/info/{id}.stream.duration_ms). It's NOT
-      // offset-shifted, so no +offsetMs. Read via ref so the
-      // setInterval closure always sees the latest value WITHOUT
-      // forcing the effect to retear on every change (which on
-      // HLS-fallback would happen on every durationchange and
-      // defer the 10s timer indefinitely — deep-debug H1).
-      // Fall back to the old playlist-length math only if the
-      // server didn't return a duration (legacy/missing-probe case
-      // — serverDurationRef.current is FALSE).
-      let durMs: number
-      const realDur = realDurationSecRef.current
-      if (serverDurationRef.current && realDur > 0) {
-        durMs = Math.round(realDur * 1000)
-      } else {
-        durMs = Math.round((vid.duration || 0) * 1000) + offsetMs
+      if (castRef.current.status.connected) {
+        const sample = snapshotCastProgress()
+        if (!sample) return
+        lastCastProgressRef.current = sample
+        void writeProgress(sample)
+        return
       }
-      if (durMs <= 0) return
-      void reportProgress(target.mediaItemId, {
-        position_ms: posMs,
-        duration_ms: durMs,
-        episode_id: target.episodeId,
-      }).catch(() => { /* fire-and-forget */ })
+      const vid = videoRef.current
+      if (!vid || vid.paused || !playerReadyRef.current) return
+      const binding = progressBindingRef.current
+      if (!binding.target) return
+      const offsetSec = startSecRef.current
+      const durationSec = serverDurationRef.current && realDurationSecRef.current > 0
+        ? realDurationSecRef.current
+        : (Number.isFinite(vid.duration) ? vid.duration + offsetSec : 0)
+      if (!(durationSec > 0)) return
+      void writeProgress({
+        context: {
+          target: binding.target, profileId: binding.profileId ?? undefined,
+          durationSec, startSec: offsetSec,
+        },
+        positionSec: readLocalAbsoluteSec(),
+      })
     }, 10000)
     return () => window.clearInterval(id)
   }, [target])
@@ -5950,8 +6100,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     else v.pause()
   }
   const widgetStopAndClose = () => {
-    if (cast.status.connected) cast.stop()
-    else videoRef.current?.pause() // AirPlay ends when the source <video> unmounts on close
+    if (cast.status.connected) {
+      stopCastWithProgress()
+    } else {
+      videoRef.current?.pause() // AirPlay ends when the source <video> unmounts on close
+    }
     onClose()
   }
 
@@ -6156,11 +6309,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                             // PLUS the session's startSec offset)
                             // so the parent rebuilds the session
                             // resuming from where we are right now.
-                            const vid = videoRef.current
-                            const liveMs = vid
-                              ? Math.round((vid.currentTime + (startSecRef.current ?? 0)) * 1000)
-                              : 0
-                            onChangeAudioTrack(a.index, liveMs)
+                            const absoluteSec = readLocalAbsoluteSec()
+                            prepareLocalReplacement(absoluteSec, videoRef.current)
+                            onChangeAudioTrack(a.index, Math.round(absoluteSec * 1000))
                           }
                         }}
                         className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] transition-colors ${
@@ -6376,7 +6527,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   (not the growing HLS playlist length) so users
                   can sync with friends. */}
               <video
-                ref={videoRef}
+                ref={bindVideoElement}
                 className="w-full h-full object-contain cursor-pointer"
                 playsInline
                 preload="auto"
@@ -6502,7 +6653,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   {cast.status.connected ? (
                     <button
                       type="button"
-                      onClick={() => cast.stop()}
+                      onClick={() => { void stopCastWithProgress() }}
                       title={`Stop casting to ${cast.status.deviceName ?? 'device'}`}
                       aria-label="Stop casting"
                       className="inline-flex items-center gap-2 rounded-full bg-purple-600/90 hover:bg-purple-600 px-3 h-9 text-white text-xs font-medium"
@@ -6815,9 +6966,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
                     return
                   }
-                  const localSec = videoRef.current?.currentTime
-                  if (localSec === undefined) return
-                  seekToRealSec(localSec + (startSecRef.current ?? 0) + delta)
+                  seekToRealSec(readLocalAbsoluteSec() + delta)
                 }}
                 onVolumeChange={(v) => {
                   const vid = videoRef.current
