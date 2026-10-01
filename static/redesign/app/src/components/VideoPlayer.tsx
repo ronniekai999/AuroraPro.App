@@ -914,8 +914,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // A failed receiver LOAD may leave its own IDLE/error indefinitely. That
   // event must retain the prior committed copy and controls for retry, rather
   // than becoming a stop once the ordinary 2.5s load window expires. Keep the
-  // failed identity after recovery so a late event cannot end the new item.
-  const castFailedLoadRef = useRef<{ contentId: string; active: boolean; idleSeq: number | null } | null>(null)
+  // failure history after recovery so a late event for ANY unacknowledged
+  // item cannot end the committed one. One bounded latch is enough: current
+  // identity is compared with the acknowledged URI, not a list of failures.
+  const castFailedLoadRef = useRef<{
+    contentId: string
+    active: boolean
+    updateSeq: number
+    idleSeq: number | null
+    recoverySeq: number | null
+    clockUncertain: boolean
+  } | null>(null)
   // The last direct-cast attempt failed to mint its token. Without this the
   // failure fell through to the no-media sentinel's generic wording — "wait
   // for the title to start playing" — which is untrue and unactionable when
@@ -966,12 +975,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     })
   }
   // The receiver's own timeline → absolute source seconds, or null when the
-  // anchor is unknown. Callers that ACT on the result must treat null as
-  // "don't"; the display surfaces (the expanded transport bar and the
+  // anchor or clock association is unknown. Callers that ACT on the result
+  // must treat null as "don't"; the expanded transport bar and the
   // minimized widget) fall back to the raw receiver reading with an explicit
   // `??` so the guess is visible where it is made.
   const recvToAbsSec = (recvSec: number): number | null =>
-    castStartSecRef.current === null ? null : Math.max(0, recvSec) + castStartSecRef.current
+    castStartSecRef.current === null || !castReceiverClockIsTrusted()
+      ? null
+      : Math.max(0, recvSec) + castStartSecRef.current
   // How many times this cast has been re-anchored (see castResyncAction), and
   // how many consecutive polls a correction has failed to land. Per-cast, not
   // per-load: a re-anchor is itself a load, so resetting on load would hand
@@ -1195,18 +1206,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     assertCastScopedToken(resp.token)
     // The anchor of the session the receiver will actually stream. It is the
     // LOCAL session's only when the server decided no clone was needed; a
-    // clone gets its own, near desiredAbsSec. A server that predates the field
-    // always shared the local session's domain, so that is the fallback.
-    const rawStartSec = resp.start_sec ?? (startSecRef.current ?? 0)
-    // Number.isFinite for the same reason partyTargetAbsSec carries one: NaN
-    // reads as in-tolerance to every downstream comparison, so a malformed
-    // anchor would silently report a converged receiver and let a host
-    // broadcast NaN as the party's position. Fall back to the local anchor,
-    // which is what a sender assumed before this field existed.
-    const castStartSec = Number.isFinite(rawStartSec)
-      ? Math.max(0, rawStartSec)
-      : Math.max(0, startSecRef.current ?? 0)
-    castPendingStartSecRef.current = castStartSec
+    // clone gets its own, near desiredAbsSec. A legacy response can still
+    // use the local anchor for its best-effort initial LOAD, but that guess
+    // must never become proof for party/relative/renewal clock consumers.
+    const provenStartSec = typeof resp.start_sec === 'number' &&
+      Number.isFinite(resp.start_sec) && resp.start_sec >= 0 ? resp.start_sec : null
+    const castStartSec = provenStartSec ?? Math.max(0, startSecRef.current ?? 0)
+    castPendingStartSecRef.current = provenStartSec
     castPendingEpochRef.current = loadEpoch
     const contentId = absoluteUrl(resp.playlist)
     castPendingContentIdRef.current = contentId
@@ -1343,8 +1349,26 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // getter awaits a token mint that spawns a server-side FFmpeg, and the
   // receiver keeps publishing PLAYING updates throughout, re-arming the flag
   // long before loadMedia is issued.
-  const castLoadIsSettling = () =>
-    castLoadsInFlightRef.current > 0 || Date.now() < castLoadSettleUntilMsRef.current
+  const castLoadIsSettling = useCallback(() =>
+    castLoadsInFlightRef.current > 0 || Date.now() < castLoadSettleUntilMsRef.current, [])
+  const castReceiverIdentityIsTrusted = useCallback((): boolean => {
+    const c = castRef.current
+    const committedId = castCommittedContentIdRef.current
+    if (!committedId || castLoadsInFlightRef.current > 0) return false
+    // A later SDK update for an old rejected item must not reopen its clock
+    // domain, including after a successful retry or recovery.
+    if (c.remote.contentId && c.remote.contentId !== committedId) return false
+    const failed = castFailedLoadRef.current
+    if (!failed?.clockUncertain) return true
+    if (!c.status.connected || c.status.settling || castLoadIsSettling()) return false
+    // Identity-less PLAYING can restore terminal controls, but it cannot
+    // prove whether currentTime belongs to the old or attempted anchor.
+    if (c.remote.updateSeq <= failed.updateSeq || c.remote.contentId !== committedId) return false
+    failed.clockUncertain = false
+    return true
+  }, [castLoadIsSettling])
+  const castReceiverClockIsTrusted = useCallback((): boolean =>
+    castStartSecRef.current !== null && castReceiverIdentityIsTrusted(), [castReceiverIdentityIsTrusted])
   const runCastLoad = (op: () => Promise<void>): Promise<void> => {
     const run = castLoadGateRef.current.then(async () => {
       const before = castRef.current
@@ -1354,13 +1378,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       try {
         await op()
         castSessionRef.current?.commit()
+        // URI identifies receiver media even when the local target changed
+        // while LOAD was awaiting its ACK. Its transport anchor remains
+        // epoch-gated below, so the old title cannot drive the new party.
+        if (castPendingContentIdRef.current) {
+          castCommittedContentIdRef.current = castPendingContentIdRef.current
+        }
         // Promote alongside the session slot, and only here: op() resolving
         // IS loadMedia resolving, which is the only proof the receiver took
         // this media. A getter that ran but whose load then failed must not
         // move it.
         if (castPendingMediaRef.current && castPendingEpochRef.current === castTargetEpochRef.current) {
           castLoadedMediaRef.current = castPendingMediaRef.current
-          castCommittedContentIdRef.current = castPendingContentIdRef.current
           // Same proof, same moment: the anchor belongs to the media the
           // receiver just took. Promoting it at mint time instead would have
           // a failed load re-point every abs→receiver conversion at a session
@@ -1389,13 +1418,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         }
         if (castFailedLoadRef.current) {
           castFailedLoadRef.current.active = false
-          if (castFailedLoadRef.current.contentId === castCommittedContentIdRef.current) {
-            castFailedLoadRef.current = null
-          }
+          castFailedLoadRef.current.clockUncertain = false
         }
       } catch (e) {
         if (hadReceiverMedia && e instanceof CastMediaLoadError) {
-          castFailedLoadRef.current = { contentId: e.contentId, active: true, idleSeq: null }
+          castFailedLoadRef.current = {
+            contentId: e.contentId, active: true, updateSeq: castRef.current.remote.updateSeq,
+            idleSeq: null, recoverySeq: null, clockUncertain: true,
+          }
         }
         castSessionRef.current?.abandon()
         throw e
@@ -1441,13 +1471,23 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       .finally(() => { castReloadInFlightRef.current = false })
     return true
   }
+  const castResumeAbsSec = (): number | null => {
+    if (partyControlsMediaRef.current && !castReceiverClockIsTrusted()) {
+      // A deliberate retry follows the room's position when the receiver's
+      // unacknowledged clock cannot name a source position.
+      const p = partySyncRef.current
+      if (!p || !target || isPartyEpisodeMismatch(p.partyEpisodeId, target.episodeId)) return null
+      return partyTargetAbsSec(p.tickRef.current, p.isPlaying, p.clockOffsetRef?.current ?? 0, Date.now())
+    }
+    return recvToAbsSec(castRef.current.remote.currentTime)
+  }
   const resumeCast = () => {
     if (cast.remote.isPaused && isCastTokenExpired()) {
       // Unknown anchor: a reload would have to guess where to resume, and
       // guessing wrong on a renewal restarts the film somewhere else. Fall
       // through to a plain resume, which at worst 401s the way it did before
       // the renewal path existed.
-      const atAbsSec = recvToAbsSec(cast.remote.currentTime)
+      const atAbsSec = castResumeAbsSec()
       if (atAbsSec !== null) {
         // A renewal re-mints, and the server re-anchors the clone near the
         // requested position — so the receiver's own clock jumps for the same
@@ -1469,6 +1509,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // `targetRecvSec` is on the RECEIVER's clock, like everything that reads
   // cast.remote.currentTime; the renewal path converts before delegating.
   const seekCastSafely = (targetRecvSec: number) => {
+    if (!castReceiverClockIsTrusted()) return
     if (isCastTokenExpired()) {
       const atAbsSec = recvToAbsSec(targetRecvSec)
       // Same reasoning as resumeCast: with no anchor there is no correct
@@ -1800,6 +1841,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         loadSettleRecheckTimerRef.current = null
       }
     }
+    const scheduleLoadSettleRecheck = () => {
+      clearLoadSettleRecheck()
+      // An in-flight LOAD has not armed its deadline yet. Wait a whole
+      // window rather than repeatedly scheduling a near-zero-time check.
+      loadSettleRecheckTimerRef.current = window.setTimeout(() => {
+        loadSettleRecheckTimerRef.current = null
+        const live = castRef.current
+        if (!live.status.connected || live.status.settling) return
+        evaluate()
+      }, castLoadsInFlightRef.current > 0
+        ? CAST_LOAD_SETTLE_MS
+        : Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50)
+    }
     // The actual PLAYING/IDLE decision, factored out so the fallback timer
     // below can invoke it too. Always reads castRef.current (not the
     // `cast` this render closed over) so a callback firing later — outside
@@ -1809,24 +1863,40 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       const c = castRef.current
       const failed = castFailedLoadRef.current
       const contentId = c.remote.contentId
-      const failedItem = Boolean(failed && contentId && contentId === failed.contentId &&
+      const otherItem = Boolean(contentId && castCommittedContentIdRef.current &&
         contentId !== castCommittedContentIdRef.current)
+      // Recovery evidence may arrive during our load's settling window and
+      // then go quiet. Retain it and recheck instead of requiring a new CAF
+      // event after the deadline. A newer load failure replaces this latch.
+      if (failed?.active && failed.recoverySeq !== null) {
+        if (castLoadIsSettling()) scheduleLoadSettleRecheck()
+        else failed.active = false
+      }
       if (failed && c.remote.playerState === 'IDLE') {
         const reason = c.remote.idleReason
+        // Comparing with the committed URI handles failed A, failed B, then
+        // late A without retaining an unbounded collection of failed URIs.
+        if (otherItem && reason !== 'CANCELLED') {
+          if (failed.active && failed.recoverySeq === null && contentId === failed.contentId && reason === 'FINISHED') {
+            castHasPlayedRef.current = false
+            c.stop()
+          }
+          return
+        }
         // FINISHED after an unacknowledged replacement is terminal, but it
         // cannot complete/advance the prior committed title. Explicit TV
         // cancellation remains actionable regardless of media identity.
-        if (failed.active && reason === 'FINISHED' &&
-          (!contentId || contentId !== castCommittedContentIdRef.current)) {
+        if ((reason === 'FINISHED' || (reason === null && !failed.active)) && castLoadIsSettling()) {
+          scheduleLoadSettleRecheck()
+          return
+        }
+        if ((reason === 'FINISHED' || (reason === null && !failed.active)) &&
+          !castReceiverIdentityIsTrusted()) {
           castHasPlayedRef.current = false
           c.stop()
           return
         }
-        // After successful recovery, a delayed IDLE from the rejected item
-        // describes neither the committed media nor a new receiver stop.
-        if (!failed.active && failedItem && reason !== 'CANCELLED') return
-        if (failed.active && (reason === 'ERROR' || reason === 'INTERRUPTED' || reason === null) &&
-          (!contentId || contentId === failed.contentId || contentId === castCommittedContentIdRef.current)) {
+        if (failed.active && (reason === 'ERROR' || reason === 'INTERRUPTED' || reason === null)) {
           failed.idleSeq = c.remote.updateSeq
           return
         }
@@ -1835,11 +1905,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // The receiver has moved out of the failed IDLE on a genuine later
         // update. CAF variants without identity still recover through this
         // state transition; a successful LOAD also clears active uncertainty.
-        if (failed?.active && failed.idleSeq !== null && c.remote.updateSeq > failed.idleSeq &&
-          !castLoadIsSettling() && (!contentId || contentId === castCommittedContentIdRef.current)) {
-          failed.active = false
+        if (failed?.active && c.remote.updateSeq > failed.updateSeq &&
+          (contentId === castCommittedContentIdRef.current ||
+            (!contentId && failed.idleSeq !== null && c.remote.updateSeq > failed.idleSeq))) {
+          failed.recoverySeq = c.remote.updateSeq
+          if (castLoadIsSettling()) scheduleLoadSettleRecheck()
+          else failed.active = false
         }
-        if (c.remote.playerState === 'PLAYING') castHasPlayedRef.current = true
+        if (c.remote.playerState === 'PLAYING' && !otherItem) castHasPlayedRef.current = true
         return
       }
       // Our own load ends the old media session; that IDLE is not the title
@@ -1854,28 +1927,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // post-blip confirmation wait, and borrowing it here would cancel a
         // pending confirmation (or be cancelled by one) for an unrelated
         // reason.
-        clearLoadSettleRecheck()
-        loadSettleRecheckTimerRef.current = window.setTimeout(
-          () => {
-            loadSettleRecheckTimerRef.current = null
-            // The same re-check its sibling makes below. evaluate() is the
-            // most destructive consumer in this file (advances the episode,
-            // stops the cast), it is now reachable from a timer, and its
-            // safety should not rest on an invariant in another module: a blip
-            // pins remote.playerState at whatever it held when the freeze
-            // started, and acting on that is exactly what `settling` prevents.
-            const live = castRef.current
-            if (!live.status.connected || live.status.settling) return
-            evaluate()
-          },
-          // While the load is still in flight the window has not been armed
-          // yet (that happens in runCastLoad's finally), so the remaining time
-          // computes to zero and this would re-arm every 50ms for as long as
-          // the load takes. Wait a whole window instead and re-evaluate then.
-          castLoadsInFlightRef.current > 0
-            ? CAST_LOAD_SETTLE_MS
-            : Math.max(0, castLoadSettleUntilMsRef.current - Date.now()) + 50,
-        )
+        scheduleLoadSettleRecheck()
         return
       }
       if (castHasPlayedRef.current && c.remote.playerState === 'IDLE') {
@@ -1982,7 +2034,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       clearFallbackTimer()
       clearLoadSettleRecheck()
     }
-  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
+  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq, castLoadIsSettling, castReceiverIdentityIsTrusted])
 
   // A new title is a new convergence problem, and the state describing the old
   // one must not outlive it.
@@ -2014,7 +2066,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Leaving the anchor unknown is what makes both branches decline instead.
     castTargetEpochRef.current += 1
     castPendingMediaRef.current = null
-    castPendingContentIdRef.current = null
+    // Pending URI describes the receiver LOAD, so retain it across a local
+    // target change for ACK identity promotion. Only its title/anchor expire.
     castPendingStartSecRef.current = null
     castStartSecRef.current = null
     castStuckPollsRef.current = 0
@@ -4598,7 +4651,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // which is the #172 hang this machinery exists to close, produced by the
       // machinery itself. 'correcting' rather than 'blocked': nothing is
       // wrong, we are simply mid-move.
-      if (castLoadsInFlightRef.current > 0) return 'correcting'
+      if (castLoadsInFlightRef.current > 0 || !castReceiverClockIsTrusted()) return 'correcting'
       const decision = castResyncAction({
         receiverSec,
         targetAbsSec,
@@ -4655,7 +4708,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // refresh()) — c.remote is frozen at its pre-blip reading, not
         // live. Corrective actions here (party position broadcasts) must
         // wait for it to resolve rather than react to stale data.
-        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castReceiverClockIsTrusted()) {
           hostWasGatedRef.current = true
           // Distinguish WHY we are gated. A settling blip (a Wi-Fi hiccup, a
           // disconnect debounce) leaves the receiver on the same media at the
@@ -4902,7 +4955,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // (including currentTime, which the drift check below compares
       // against the party's continuously-advancing server position) is
       // frozen and stale while a disconnect is pending confirmation.
-      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded || !castReceiverClockIsTrusted()) {
         guestWasGatedRef.current = true
         return
       }
@@ -5411,7 +5464,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // receiver actually took (castLoadedMediaRef, promoted only by a
       // resolved loadMedia) rather than inferring it. Anything else falls
       // through to the rebuild below, which re-points the receiver properly.
-      if (castLoadedIsDirectFor(castLoadedMediaRef.current, target)) {
+      if (castLoadedIsDirectFor(castLoadedMediaRef.current, target) && castReceiverClockIsTrusted()) {
         broadcastHostPartySeek()
         // targetSec is ABSOLUTE and seekCastSafely takes RECEIVER seconds; the
         // two coincide here and only here. castLoadedIsDirectFor is true only
@@ -5493,7 +5546,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       vid.currentTime = localSec
       broadcastHostPartySeek()
     } catch { /* defensive */ }
-  }, [bufferedSec, party, target, onSeekRebuild, cast.status.connected, partyControlsMedia, flashCastError])
+  }, [bufferedSec, party, target, onSeekRebuild, cast.status.connected, partyControlsMedia, flashCastError, castReceiverClockIsTrusted])
 
   // Med-fix (2026-05-29) — ref mirror of seekToRealSec so the
   // keyboard-shortcut effect (registered once per `target`, with an
@@ -5606,7 +5659,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         case 'k':
           e.preventDefault()
           if (castConnectedNow) {
-            const atAbsSec = recvToAbsSec(c.remote.currentTime)
+            const atAbsSec = castResumeAbsSec()
             if (c.remote.isPaused && isCastTokenExpired() && atAbsSec !== null) {
               hostCorrectionSuppressRef.current()
               reloadCastAtAbsSec(atAbsSec)
