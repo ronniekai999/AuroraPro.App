@@ -31,7 +31,7 @@ describe('Real player serialization with repeated cast URLs', () => {
     delete (window as { cast?: unknown }).cast
     delete (window as { chrome?: unknown }).chrome
   })
-  it.each(['heartbeat', 'relative', 'FINISHED'].flatMap(surface => ['cached', 'genuine old status', 'new session id', 'new Media instance'].map(evidence => ({ surface, evidence }))))(
+  it.each(['heartbeat', 'relative', 'FINISHED'].flatMap(surface => ['cached', 'genuine old status', 'retired older generation', 'new session id', 'new Media instance'].map(evidence => ({ surface, evidence }))))(
     'requires the second LOAD generation for $surface with $evidence', async ({ surface, evidence }) => {
       const sdk = installFakeSdk()
       const session = sdk.makeSession()
@@ -47,7 +47,10 @@ describe('Real player serialization with repeated cast URLs', () => {
         return { media, publish: (alive = true) => { for (const listener of [...listeners]) listener(alive) } }
       }
       let current = makeMedia(600, newObject ? undefined : 1)
-      session.getMediaSession = () => current.media
+      const retiredMedia = current
+      // CAF's public getter excludes media once idleReason is present;
+      // the watched Media delivers its terminal update through its listener.
+      session.getMediaSession = () => current.media.idleReason ? null : current.media
       sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
       vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200, headers: { 'Content-Type': 'video/mp4' } })))
       vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
@@ -62,7 +65,10 @@ describe('Real player serialization with repeated cast URLs', () => {
         await firstACK
       }).mockImplementationOnce(async request => {
         expect(request.currentTime).toBe(800); expect(request.media.contentId).toBe(uri)
-        if (evidence === 'new session id') {
+        if (evidence === 'retired older generation') {
+          current = makeMedia(800, 3)
+          sdk.emitRemoteChange('currentTime', 800)
+        } else if (evidence === 'new session id') {
           current.media.mediaSessionId = 3
           current.media.currentTime = 800
           current.publish()
@@ -87,6 +93,12 @@ describe('Real player serialization with repeated cast URLs', () => {
       fireEvent.canPlay(document.querySelector('video')!); await settle()
       await act(async () => { acknowledge() }); await settle()
       expect(session.loadMedia).toHaveBeenCalledTimes(2)
+      if (evidence === 'retired older generation') {
+        // After generations1→2→3, a late snapshot from1 is not incoming
+        // merely because it differs from the immediately outgoing2.
+        current = retiredMedia
+        await act(async () => { sdk.emitRemoteChange() }); await settle()
+      }
       const valid = evidence === 'new session id' || newObject
       if (surface === 'heartbeat') {
         await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
@@ -377,7 +389,7 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     }
     const publishMediaStatus = (alive = true) => { for (const listener of [...mediaListeners]) listener(alive) }
     cachedMedia.getEstimatedTime = vi.fn(function(this: CastMediaSession) { expect(this).toBe(cachedMedia); return this.currentTime! })
-    session.getMediaSession = vi.fn(() => cachedMedia)
+    session.getMediaSession = vi.fn(() => cachedMedia.idleReason ? null : cachedMedia)
     sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
     vi.stubGlobal('fetch', vi.fn(async () => new Response('#EXTM3U', { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } })))
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: oldURL, token, expires_at: 1, start_sec: 100 })
@@ -388,8 +400,8 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
       Object.assign(player, { isConnected: true, isMediaLoaded: true, mediaInfo: cachedMedia.media, currentTime: 500, playerState: cachedMedia.playerState, isPaused: !armEnd, canSeek: true })
       sdk.emitRemoteChange()
     })
-    const seek = vi.fn(); const ended = vi.fn(() => false)
-    const element = (selected = target, profileId = 7) => <VideoPlayer target={selected} profileId={profileId} party={party} onClose={() => {}} onSeekRebuild={seek} onEnded={ended} />
+    const seek = vi.fn(); const ended = vi.fn(() => false); const close = vi.fn()
+    const element = (selected: PlayTarget | null = target, profileId = 7) => <VideoPlayer target={selected} profileId={profileId} party={party} onClose={close} onSeekRebuild={seek} onEnded={ended} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
     await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
@@ -413,12 +425,67 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     vi.mocked(reportProgress).mockClear(); seek.mockClear()
     if (settleAfterFailure) { await act(async () => { vi.advanceTimersByTime(3000) }); await settle() }
     const player = sdk.getRemotePlayer()!
-    return { sdk, session, cachedMedia, player, seek, ended, element, view, publishMediaStatus }
+    return { sdk, session, cachedMedia, player, seek, ended, close, element, view, publishMediaStatus, mediaListeners }
   }
   afterEach(() => {
     vi.unstubAllGlobals()
     delete (window as { cast?: unknown }).cast
     delete (window as { chrome?: unknown }).chrome
+  })
+  it.each([false, true])('keeps outgoing receiver heartbeats after local playback fails and Back=%s', async back => {
+    const { cachedMedia, view, element, close, publishMediaStatus } = await rejectedLoadWithCachedMedia()
+    cachedMedia.currentTime = 510
+    await act(async () => { publishMediaStatus() }); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    close.mockImplementation(() => view.rerender(element(null, 9)))
+    vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('Local media unavailable while TV keeps playing'))
+    view.rerender(element({ ...target, audioTrackIndex: 1 })); await settle()
+    expect(screen.getByText('Playback Error')).toBeInTheDocument()
+    if (back) {
+      fireEvent.click(screen.getByRole('button', { name: 'Back' })); await settle()
+      expect(close).toHaveBeenCalledOnce()
+    }
+    vi.mocked(reportProgress).mockClear()
+    cachedMedia.currentTime = 610
+    await act(async () => { publishMediaStatus() }); await settle()
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenCalledOnce()
+    expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 710000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ profile_id: 9 }), expect.anything())
+  })
+  it('keeps saving the acknowledged TV clock and profile across navigation that clears the local target', async () => {
+    const { cachedMedia, view, element, publishMediaStatus } = await rejectedLoadWithCachedMedia()
+    cachedMedia.currentTime = 510
+    await act(async () => { publishMediaStatus() }); await settle()
+    view.rerender(element(null, 9)); await settle()
+    expect(document.querySelector('video')).toBeNull()
+    vi.mocked(reportProgress).mockClear()
+    for (const currentTime of [610, 620]) {
+      cachedMedia.currentTime = currentTime
+      await act(async () => { publishMediaStatus() }); await settle()
+      await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    }
+    expect(vi.mocked(reportProgress).mock.calls.map(([id, body]) => [id, body.position_ms, body.profile_id])).toEqual([
+      [1, 710000, 7], [1, 720000, 7],
+    ])
+  })
+  it.each([false, true])('declines a resumed receiver with unknown acknowledged context when local target is absent=%s', async absent => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    const media: CastMediaSession = {
+      media: { contentId: oldURL, contentType: 'application/x-mpegURL' }, playerState: 'PLAYING', currentTime: 610,
+      getEstimatedTime() { return this.currentTime! },
+    }
+    session.getMediaSession = () => media
+    sdk.setSession(session); sdk.triggerReconnect()
+    const view = render(<VideoPlayer target={absent ? null : target} profileId={9} onClose={() => {}} />)
+    await settle()
+    Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, currentTime: 610, playerState: 'PLAYING', isPaused: false, mediaInfo: media.media })
+    await act(async () => { sdk.emitRemoteChange() }); await settle()
+    await act(async () => { vi.advanceTimersByTime(20000) }); await settle()
+    expect(session.loadMedia).not.toHaveBeenCalled()
+    expect(reportProgress).not.toHaveBeenCalled()
+    view.unmount()
   })
   it('does not restore relative seeks when only volume republishes the cached outgoing Media object', async () => {
     const { sdk, cachedMedia, seek } = await rejectedLoadWithCachedMedia()
@@ -497,15 +564,21 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
   })
   it('uses a genuinely updated coherent old Media clock when the acknowledged outgoing media survives', async () => {
-    const { sdk, cachedMedia, seek, publishMediaStatus } = await rejectedLoadWithCachedMedia()
+    const { sdk, session, cachedMedia, seek, publishMediaStatus } = await rejectedLoadWithCachedMedia()
     cachedMedia.currentTime = 510
     sdk.getRemotePlayer()!.currentTime = 510
     await act(async () => { publishMediaStatus() }); await settle()
     await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 610000, profile_id: 7 }), expect.any(AbortSignal))
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    seek.mockClear(); vi.mocked(session.loadMedia).mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
-    expect(seek).toHaveBeenCalledWith(620)
+    // This fixture's replacement mint is anchored at 100. Either supported
+    // seek route must take exactly one action at absolute source second 620.
+    expect([
+      ...seek.mock.calls.map(([absoluteSec]) => absoluteSec),
+      ...vi.mocked(session.loadMedia).mock.calls.map(([request]) => (request.currentTime ?? 0) + 100),
+    ]).toEqual([620])
   })
   it('completes a quiet genuine FINISHED after healthy PAUSED recovery during LOAD settlement', async () => {
     const { cachedMedia, player, ended, publishMediaStatus } = await rejectedLoadWithCachedMedia({ settleAfterFailure: false })
@@ -527,6 +600,14 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
     expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000 }), expect.anything())
   })
+  it.each(['Stop', 'unmount'])('detaches the real watched Media on quiet %s without waiting for another receiver event', async action => {
+    const { view, mediaListeners } = await rejectedLoadWithCachedMedia()
+    expect(mediaListeners.size).toBe(1)
+    if (action === 'Stop') fireEvent.click(screen.getByRole('button', { name: 'Stop and close' }))
+    else view.unmount()
+    await settle()
+    expect(mediaListeners.size).toBe(0)
+  })
   it.each([true, false])('keeps party clock readers quiet after a cached volume update for host=%s', async isHost => {
     const party: PartySync = {
       isHost, currentUserId: 1, partyMediaItemId: movie.mediaItemId, partyEpisodeId: null, isPlaying: false, rev: 1, hlsStartSec: 0,
@@ -546,7 +627,7 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(controller.seek).not.toHaveBeenCalled(); expect(controller.playOrPause).not.toHaveBeenCalled()
   })
   it('persists positively identified FINISHED after a successful PAUSED retry ACK without requiring an observed PLAYING event', async () => {
-    const { sdk, session, cachedMedia, ended } = await rejectedLoadWithCachedMedia()
+    const { sdk, session, cachedMedia, ended, publishMediaStatus } = await rejectedLoadWithCachedMedia()
     const retryURL = 'http://localhost:3000/api/stream/hls/paused-retry/master.m3u8?token=cast'
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
     vi.mocked(session.loadMedia).mockImplementationOnce(async request => {
@@ -560,7 +641,8 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     vi.mocked(reportProgress).mockClear()
     Object.assign(cachedMedia, { playerState: 'IDLE', idleReason: 'FINISHED', currentTime: 0 })
     Object.assign(sdk.getRemotePlayer()!, { playerState: 'IDLE', isMediaLoaded: false })
-    await act(async () => { sdk.emitRemoteChange('playerState', 'IDLE') }); await settle()
+    expect(session.getMediaSession()).toBeNull()
+    await act(async () => { publishMediaStatus(false); sdk.emitRemoteChange('playerState', 'IDLE') }); await settle()
     expect(reportProgress).toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000, profile_id: 7 }), expect.any(AbortSignal))
     expect(ended).toHaveBeenCalledOnce()
     vi.mocked(reportProgress).mockClear()
@@ -568,7 +650,7 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(ended).toHaveBeenCalledOnce(); expect(reportProgress).not.toHaveBeenCalled()
   })
   it('stops exact acknowledged CANCELLED after a PAUSED retry ACK without marking completion', async () => {
-    const { sdk, session, cachedMedia, ended } = await rejectedLoadWithCachedMedia()
+    const { sdk, session, cachedMedia, ended, publishMediaStatus } = await rejectedLoadWithCachedMedia()
     const retryURL = 'http://localhost:3000/api/stream/hls/cancelled-paused-retry/master.m3u8?token=cast'
     const stop = vi.spyOn(session, 'endSession')
     vi.mocked(createCastToken).mockResolvedValueOnce({ playlist: retryURL, token, expires_at: 9999999999, start_sec: 590 })
@@ -582,12 +664,28 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     vi.mocked(reportProgress).mockClear()
     Object.assign(cachedMedia, { playerState: 'IDLE', idleReason: 'CANCELLED', currentTime: 0 })
     Object.assign(sdk.getRemotePlayer()!, { playerState: 'IDLE', isMediaLoaded: false })
-    await act(async () => { sdk.emitRemoteChange('playerState', 'IDLE') }); await settle()
+    expect(session.getMediaSession()).toBeNull()
+    await act(async () => { publishMediaStatus(false); sdk.emitRemoteChange('playerState', 'IDLE') }); await settle()
     expect(stop).toHaveBeenCalledOnce(); expect(ended).not.toHaveBeenCalled()
     expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000 }), expect.anything())
   })
+  it.each(['CANCELLED', 'ERROR'])('stops the genuinely updated acknowledged receiver on TV %s when the public getter hides terminal media', async idleReason => {
+    const { session, cachedMedia, player, ended, publishMediaStatus } = await rejectedLoadWithCachedMedia({ armEnd: true })
+    const stop = vi.spyOn(session, 'endSession')
+    cachedMedia.playerState = 'PLAYING'
+    Object.assign(player, { playerState: 'PLAYING', isPaused: false })
+    await act(async () => { publishMediaStatus() }); await settle()
+    vi.mocked(reportProgress).mockClear()
+    Object.assign(cachedMedia, { playerState: 'IDLE', idleReason, currentTime: 0 })
+    Object.assign(player, { playerState: 'IDLE', isMediaLoaded: false })
+    expect(session.getMediaSession()).toBeNull()
+    await act(async () => { publishMediaStatus(false) }); await settle()
+    expect(stop).toHaveBeenCalledOnce(); expect(ended).not.toHaveBeenCalled()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: 600000, profile_id: 7 }), expect.any(AbortSignal))
+    expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000 }), expect.anything())
+  })
   it.each(['FINISHED', 'CANCELLED'])('does not stop a newer retry waiting for ACK when the prior failed URI reports %s', async idleReason => {
-    const { sdk, session, cachedMedia, ended } = await rejectedLoadWithCachedMedia({ armEnd: true })
+    const { sdk, session, cachedMedia, ended, publishMediaStatus } = await rejectedLoadWithCachedMedia({ armEnd: true })
     const retryURL = 'http://localhost:3000/api/stream/hls/pending-new-retry/master.m3u8?token=cast'
     const stop = vi.spyOn(session, 'endSession')
     let acknowledge!: () => void
@@ -602,7 +700,8 @@ describe('Sixth independent actual SDK cached Media after a rejected LOAD', () =
     expect(session.loadMedia).toHaveBeenCalledTimes(3)
     Object.assign(cachedMedia, { media: { contentId: failedURL, contentType: 'application/x-mpegURL' }, playerState: 'IDLE', idleReason, currentTime: 0 })
     Object.assign(sdk.getRemotePlayer()!, { playerState: 'IDLE', isMediaLoaded: false })
-    await act(async () => { sdk.emitRemoteChange('playerState', 'IDLE'); vi.advanceTimersByTime(3000) }); await settle()
+    expect(session.getMediaSession()).toBeNull()
+    await act(async () => { publishMediaStatus(false); sdk.emitRemoteChange('playerState', 'IDLE'); vi.advanceTimersByTime(3000) }); await settle()
     expect(stop).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled()
     expect(reportProgress).not.toHaveBeenCalledWith(1, expect.objectContaining({ position_ms: 1000000 }), expect.anything())
     await act(async () => { acknowledge() }); await settle()

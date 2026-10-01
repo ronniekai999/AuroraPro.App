@@ -5959,7 +5959,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // time display already uses realDurationSec; the progress saver
   // was the missed spot.
   useEffect(() => {
-    if (!target) return
+    // Navigation or Back may remove the local media while the receiver keeps
+    // playing. Its acknowledged context owns progress until casting ends;
+    // snapshotCastProgress declines resumed casts whose context is unknown.
+    if (!target && !cast.status.connected) return
     const id = window.setInterval(() => {
       if (castRef.current.status.connected) {
         const sample = snapshotCastProgress()
@@ -5986,7 +5989,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       })
     }, 10000)
     return () => window.clearInterval(id)
-  }, [target])
+  }, [target, cast.status.connected])
 
   // ── Smart Skip: credits-triggered "Next Episode" card ────────────
   // Crossing the credits onset on a TV episode surfaces the next-up
