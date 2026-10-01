@@ -271,7 +271,7 @@ describe('VideoPlayer recovery with real useCast and receiver Media updates', ()
     const listeners = new Set<(alive:boolean)=>void>()
     const media:CastMediaSession={mediaSessionId:1,addUpdateListener:listener=>{listeners.add(listener)},removeUpdateListener:listener=>{listeners.delete(listener)},media:{contentId:oldURI,contentType:'application/x-mpegURL'},playerState:'PAUSED',currentTime:500,idleReason:null}
     media.getEstimatedTime=vi.fn(function(this:CastMediaSession){expect(this).toBe(media);return this.currentTime!})
-    session.getMediaSession=vi.fn(()=>media)
+    session.getMediaSession=vi.fn(()=>media.idleReason?null:media)
     sdk.setRequestSessionImpl(async()=>{sdk.setSession(session);sdk.triggerReconnect();return undefined})
     vi.stubGlobal('fetch',vi.fn(async()=>new Response('#EXTM3U',{status:200,headers:{'Content-Type':'application/vnd.apple.mpegurl'}})))
     vi.mocked(createCastToken).mockResolvedValueOnce({playlist:oldURI,token,expires_at:1,start_sec:100})
@@ -334,13 +334,17 @@ describe('VideoPlayer serialized repeated-URI LOADs use the new Media generation
   async function repeatedLoad() {
     const sdk = installFakeSdk(), session = sdk.makeSession()
     const uri = 'http://localhost:3000/api/stream/direct/media/10?token=same-second-cast-token'
-    const listeners = new Set<(alive:boolean)=>void>()
-    const media: CastMediaSession = {
-      mediaSessionId: 1, media: { contentId: uri, contentType: 'video/mp4' }, playerState: 'PAUSED', currentTime: 600,
-      getEstimatedTime() { return this.currentTime! },
-      addUpdateListener(listener) { listeners.add(listener) }, removeUpdateListener(listener) { listeners.delete(listener) },
+    const makeMedia=(id:number,time:number)=>{
+      const listeners=new Set<(alive:boolean)=>void>()
+      const media:CastMediaSession={
+        mediaSessionId:id,media:{contentId:uri,contentType:'video/mp4'},playerState:'PAUSED',currentTime:time,idleReason:null,
+        getEstimatedTime(){return this.currentTime!},
+        addUpdateListener(listener){listeners.add(listener)},removeUpdateListener(listener){listeners.delete(listener)},
+      }
+      return{media,emit:(alive=true)=>{for(const listener of [...listeners])listener(alive)}}
     }
-    session.getMediaSession = () => media
+    let receiver=makeMedia(1,600)
+    session.getMediaSession=()=>receiver.media.idleReason?null:receiver.media
     sdk.setRequestSessionImpl(async () => { sdk.setSession(session); sdk.triggerReconnect(); return undefined })
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))
     vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
@@ -348,8 +352,8 @@ describe('VideoPlayer serialized repeated-URI LOADs use the new Media generation
     let ack!:()=>void
     vi.mocked(session.loadMedia).mockImplementationOnce(async request => {
       expect(request.currentTime).toBe(600)
-      media.mediaSessionId = 2
-      Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, mediaInfo: media.media, playerState: 'PAUSED', isPaused: true, currentTime: 600, canSeek: true })
+      receiver=makeMedia(2,600)
+      Object.assign(sdk.getRemotePlayer()!, { isConnected: true, isMediaLoaded: true, mediaInfo: receiver.media.media, playerState: 'PAUSED', isPaused: true, currentTime: 600, canSeek: true })
       sdk.emitRemoteChange()
       await new Promise<void>(resolve => { ack=resolve })
     }).mockImplementationOnce(async request => {
@@ -369,12 +373,12 @@ describe('VideoPlayer serialized repeated-URI LOADs use the new Media generation
     await act(async()=>{ack()});await settle()
     expect(session.loadMedia).toHaveBeenCalledTimes(2)
     await act(async()=>{vi.advanceTimersByTime(3100)});await settle()
-    return {sdk,session,media,close,ended,emit:(alive=true)=>{for(const listener of [...listeners])listener(alive)}}
+    return {sdk,session,media:receiver.media,close,ended,emit:receiver.emit,replaceGeneration:(id:number,time:number)=>{receiver=makeMedia(id,time);return receiver}}
   }
   for(const fresh of [false,true]) it(`requires a replacement Media generation for relative actions after same-URI ACK (fresh=${fresh})`,async()=>{
-    const {sdk,media,emit}=await repeatedLoad()
-    if(fresh){media.mediaSessionId=3;media.currentTime=800}
-    await act(async()=>{emit()});await settle()
+    const {sdk,emit,replaceGeneration}=await repeatedLoad()
+    if(fresh){replaceGeneration(3,800);await act(async()=>{sdk.emitRemoteChange()});await settle()}
+    else{await act(async()=>{emit()});await settle()}
     await act(async()=>{sdk.emitRemoteChange({field:'volumeLevel',value:0.7})});await settle()
     fireEvent.click(screen.getByRole('button',{name:'Expand player'}));await settle()
     fireEvent.mouseMove(screen.getByRole('dialog',{name:'Playing Movie'}),{clientX:100,clientY:100});await settle()
@@ -382,15 +386,17 @@ describe('VideoPlayer serialized repeated-URI LOADs use the new Media generation
     expect(sdk.getRemotePlayer()!.currentTime).toBe(fresh?810:600)
   })
   it('ignores cached outgoing FINISHED, then completes the positively acknowledged new generation once without PLAYING',async()=>{
-    const {sdk,media,ended,close,emit}=await repeatedLoad()
+    const {sdk,media,ended,close,emit,replaceGeneration}=await repeatedLoad()
     media.playerState='IDLE';media.idleReason='FINISHED'
     await act(async()=>{emit(false)});await settle()
     expect(ended).not.toHaveBeenCalled();expect(close).not.toHaveBeenCalled()
-    media.mediaSessionId=3
-    await act(async()=>{emit(false)});await settle()
+    const incoming=replaceGeneration(3,800)
+    await act(async()=>{sdk.emitRemoteChange()});await settle() // actual incoming PAUSED Media is watched first
+    incoming.media.playerState='IDLE';incoming.media.idleReason='FINISHED'
+    await act(async()=>{incoming.emit(false)});await settle()
     expect(ended).toHaveBeenCalledOnce()
     await act(async()=>{sdk.emitRemoteChange({field:'volumeLevel',value:0.8})});await settle()
-    await act(async()=>{emit(false)});await settle()
+    await act(async()=>{incoming.emit(false)});await settle()
     expect(ended).toHaveBeenCalledOnce();expect(close).not.toHaveBeenCalled()
   })
 })
