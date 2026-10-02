@@ -404,3 +404,47 @@ it('boots unrelated local content while joined to a party on another series', as
   expect(video().paused).toBe(false)
   expect(party.requestPlay).not.toHaveBeenCalled()
 })
+
+
+it.each([
+  { delay: 50, queuedPause: false },
+  { delay: 50, queuedPause: true },
+  { delay: 200, queuedPause: false },
+  { delay: 200, queuedPause: true },
+])('manual Pause after resuming suppressed autoplay reaches the room: %j', async ({ delay, queuedPause }) => {
+  const completion = deferred<void>()
+  play.mockImplementationOnce(function(this: HTMLMediaElement) {
+    paused.set(this, false)
+    return completion.promise
+  })
+  let party = host({ partyEpisodeId: 12, isPlaying: false, rev: 2 })
+  const player = () => <VideoPlayer target={nextEpisode} party={party} onClose={() => {}} />
+  const view = render(player())
+  await bootHls()
+  party = { ...party, rev: 3, isPlaying: false }
+  view.rerender(player()); await settle()
+  completion.resolve(); await settle()
+  expect(video().paused).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Play' })); await settle()
+  expect(party.requestPlay).toHaveBeenCalledOnce()
+  party = { ...party, rev: 4, isPlaying: true }
+  view.rerender(player()); await settle()
+  await act(async () => { vi.advanceTimersByTime(delay) })
+  video().currentTime = 41
+  if (queuedPause) {
+    vi.mocked(HTMLMediaElement.prototype.pause).mockImplementationOnce(function(this: HTMLMediaElement) {
+      paused.set(this, true)
+      window.setTimeout(() => this.dispatchEvent(new Event('pause')), 25)
+    })
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' })); await settle()
+  if (queuedPause) await act(async () => { vi.advanceTimersByTime(25) })
+  expect(video().paused).toBe(true)
+  expect(party.requestPause).toHaveBeenCalledOnce()
+  expect(party.requestPause).toHaveBeenCalledWith(41_000)
+  if (delay < 150) {
+    fireEvent.pause(video()); fireEvent.seeked(video())
+    expect(party.requestPause).toHaveBeenCalledOnce()
+    expect(party.requestSeek).not.toHaveBeenCalled()
+  }
+})
