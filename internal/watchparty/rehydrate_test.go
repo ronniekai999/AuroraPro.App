@@ -2,23 +2,26 @@ package watchparty
 
 // Tests for scheduled-party durability (rehydrate.go).
 //
-// The unit cases pin fireScheduledReminder's self-validation — reminder
-// goroutines have no cancel hook, so the ONLY thing standing between a
-// reschedule and a wrong-time ping is the target comparison, and the only
-// thing preventing double-sends is the reminderSentFor guard.
+// The unit cases pin fireScheduledReminder's self-validation even when a
+// timer has fired concurrently with cancellation. The target comparison
+// prevents stale pings and reminderSentFor prevents duplicate delivery.
 //
 // The integration case (TEST_DATABASE_URL opt-in, own pool for raw seeding)
-// drives the real loop: CreateParty persists a scheduled party, a FRESH
-// manager — simulating the post-update restart — rehydrates it, re-arms the
+// drives the real loop: CreateParty persists a scheduled party, Shutdown
+// closes it, then a fresh manager rehydrates it and re-arms the
 // countdown, and leaves started parties alone.
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/db"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -153,10 +156,53 @@ func TestRehydrateScheduledParties_RestartSurvival(t *testing.T) {
 		t.Fatalf("create party: %v", err)
 	}
 	code := ps.Code
+	t.Cleanup(m1.Shutdown)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM watch_parties WHERE party_code = $1`, code) })
+	if _, err := m1.JoinPartyV3Room(code, hostID, "host", &SafeConn{}); err != nil {
+		t.Fatalf("join host: %v", err)
+	}
+
+	// A client retains this revision floor through a reconnect. A host can
+	// seek while the lobby is paused without starting the scheduled party.
+	if err := m1.HandleRequestSeek(code, hostID, 0); err != nil {
+		t.Fatalf("pre-start seek: %v", err)
+	}
+	ps.mu.Lock()
+	preRestart := m1.BuildPartyStateMessage(ps)
+	ps.mu.Unlock()
+	oldParty := preRestart["payload"].(map[string]interface{})["party"].(map[string]interface{})
+	clientRevisionFloor := oldParty["revision"].(uint64)
+	roomConn, roomClient := shutdownTestConn(t)
+	ps.mu.Lock()
+	ps.roomConns[hostID] = roomConn
+	roomID := ps.roomDBID
+	ps.mu.Unlock()
+
+	// Exercise the updater's GRACEFUL restart, not merely a new manager.
+	m1.Shutdown()
+	assertShutdownSocket(t, roomClient, false)
+	if m1.GetPartyState(code) != nil {
+		t.Fatal("shutdown left the scheduled party live in the old manager")
+	}
+	ps.mu.Lock()
+	timersRemain := ps.scheduleCancel != nil || ps.reminderCancel != nil || ps.tickCancel != nil
+	ps.mu.Unlock()
+	if timersRemain {
+		t.Fatal("shutdown did not cancel the scheduled party's timers")
+	}
+	var active, roomDeleted bool
+	if err := pool.QueryRow(ctx, `SELECT p.is_active, r.deleted_at IS NOT NULL
+		FROM watch_parties p JOIN watch_party_rooms r ON r.id = p.room_id WHERE p.party_code = $1`, code).
+		Scan(&active, &roomDeleted); err != nil {
+		t.Fatalf("read durable party after shutdown (room %d): %v", roomID, err)
+	}
+	if !active || roomDeleted {
+		t.Fatalf("shutdown killed a scheduled promise: active=%t roomDeleted=%t", active, roomDeleted)
+	}
 
 	// "After the restart": a fresh manager rehydrates from Postgres alone.
 	m2 := NewManager(q, nil)
+	t.Cleanup(m2.Shutdown)
 	if m2.GetPartyState(code) != nil {
 		t.Fatal("fresh manager unexpectedly knows the party before rehydration")
 	}
@@ -166,6 +212,15 @@ func TestRehydrateScheduledParties_RestartSurvival(t *testing.T) {
 	if got == nil {
 		t.Fatal("scheduled party not rehydrated after restart")
 	}
+	got.mu.Lock()
+	newParty := m2.BuildPartyStateMessage(got)["payload"].(map[string]interface{})["party"].(map[string]interface{})
+	got.mu.Unlock()
+	if restoredRev := newParty["revision"].(uint64); restoredRev >= clientRevisionFloor {
+		t.Fatalf("regression did not exercise a retained high client floor: old=%d restored=%d", clientRevisionFloor, restoredRev)
+	}
+	// The hook regression exercises these exact protocol semantics: the
+	// first snapshot on the replacement room socket replaces the old floor,
+	// then the sync hello and scheduled-start tick follow its new revisions.
 	got.mu.Lock()
 	sched := got.ScheduledStartAt
 	timerArmed := got.scheduleCancel != nil
@@ -210,6 +265,82 @@ func TestRehydrateScheduledParties_RestartSurvival(t *testing.T) {
 	m3.RehydrateScheduledParties(ctx)
 	if m3.GetPartyState(code) != nil {
 		t.Error("started party was rehydrated; want left alone")
+	}
+}
+
+func shutdownTestConn(t *testing.T) (*SafeConn, *websocket.Conn) {
+	t.Helper()
+	accepted := make(chan *SafeConn, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			accepted <- NewSafeConn(conn)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial shutdown test socket: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	conn := <-accepted
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn, client
+}
+
+func assertShutdownSocket(t *testing.T, client *websocket.Conn, ended bool) {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := client.ReadMessage()
+	if ended {
+		if err != nil || !strings.Contains(string(data), `"party-ended"`) {
+			t.Fatalf("active shutdown message = %s, %v; want party-ended", data, err)
+		}
+	} else if !websocket.IsCloseError(err, websocket.CloseGoingAway) {
+		t.Fatalf("scheduled shutdown message = %s, %v; want GoingAway without party-ended", data, err)
+	}
+}
+
+func TestShutdown_ActivePartyStillEnds(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SHUT01", 1)
+	conn, client := shutdownTestConn(t)
+	ps.mu.Lock()
+	ps.roomConns[1] = conn
+	ps.mu.Unlock()
+	m.Shutdown()
+	assertShutdownSocket(t, client, true)
+	if m.GetPartyState(ps.Code) != nil {
+		t.Fatal("active party remains after shutdown")
+	}
+}
+
+func TestScheduledShutdown_ClosingPartyCannotRearm(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SHUT02", 1)
+	// An operation that resolved ps before suspension can acquire its mutex
+	// during socket teardown. This represents that already-claimed state.
+	ps.mu.Lock()
+	ps.ending = true
+	ps.mu.Unlock()
+	when := time.Now().Add(time.Hour)
+	if err := m.SchedulePartyStart(context.Background(), ps.Code, &when); err == nil {
+		t.Error("closing party accepted a schedule")
+	}
+	if _, err := m.JoinPartyV3Room(ps.Code, 1, "host", &SafeConn{}); err == nil {
+		t.Error("closing party accepted a room connection")
+	}
+	if err := m.JoinPartyV3Sync(ps.Code, 1, &SafeConn{}); err == nil {
+		t.Error("closing party accepted a sync connection")
+	}
+	if err := m.HandleRequestPlay(ps.Code, 1); err == nil {
+		t.Error("closing party accepted playback")
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.scheduleCancel != nil || ps.tickCancel != nil || len(ps.roomConns)+len(ps.syncConns) != 0 {
+		t.Error("closing party acquired live resources")
 	}
 }
 

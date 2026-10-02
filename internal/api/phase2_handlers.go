@@ -160,6 +160,11 @@ func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
+		return
+	}
 	episodes, err := h.queries.GetEpisodes(r.Context(), mediaID, seasonNum)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get episodes")
@@ -198,7 +203,7 @@ func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if claims != nil {
-			progress, _ := h.queries.GetWatchProgress(r.Context(), claims.UserID, mediaID, &episodes[i].ID)
+			progress, _ := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profile.ID, mediaID, &episodes[i].ID)
 			episodes[i].Progress = progress
 		}
 
@@ -225,7 +230,12 @@ func (h *TVHandler) GetNextEpisode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ep, err := h.queries.GetNextEpisode(r.Context(), claims.UserID, mediaID)
+	profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
+		return
+	}
+	ep, err := h.queries.GetNextEpisodeForProfile(r.Context(), claims.UserID, profile.ID, mediaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "no next episode found")
@@ -260,7 +270,7 @@ func (h *TVHandler) GetNextEpisode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attach episode-level watch progress so the frontend can auto-resume
-	epProgress, _ := h.queries.GetWatchProgress(r.Context(), claims.UserID, mediaID, &ep.ID)
+	epProgress, _ := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profile.ID, mediaID, &ep.ID)
 	if epProgress != nil {
 		ep.Progress = epProgress
 	}
@@ -328,7 +338,8 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 	// Rating-ceiling enforcement (issue #462) — 404 (not distinguishable
 	// from true not-found) rather than exposing metadata for a title the
 	// acting profile can't see.
-	if profile, perr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); perr != nil {
+	profile, perr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if perr != nil {
 		denyRatingCeiling(w, id, perr)
 		return
 	} else if !db.RatingAllowed(profile.MaxAgeRating, enriched.ContentRating) {
@@ -414,11 +425,11 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 
 	// Load user progress
 	{
-		progress, _ := h.queries.GetWatchProgress(r.Context(), claims.UserID, id, nil)
+		progress, _ := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profile.ID, id, nil)
 		// For TV shows, episode progress is stored with episode_id (never show-level),
 		// so the above query returns nil. Fall back to the most recent in-progress episode.
 		if progress == nil && enriched.Type == models.MediaShow {
-			progress, _ = h.queries.GetLatestEpisodeProgress(r.Context(), claims.UserID, id)
+			progress, _ = h.queries.GetLatestEpisodeProgressForProfile(r.Context(), claims.UserID, profile.ID, id)
 		}
 		enriched.UserProgress = progress
 	}
@@ -2655,12 +2666,17 @@ func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *htt
 		return profile.ID, true
 	}
 
-	dp, err := h.queries.GetDefaultProfile(r.Context(), userID)
+	claims := auth.GetClaims(r.Context())
+	var refreshTokenID int64
+	if claims != nil && claims.UserID == userID {
+		refreshTokenID = claims.RefreshTokenID
+	}
+	dp, err := h.queries.ResolveActingProfile(r.Context(), userID, refreshTokenID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve default profile")
+		writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
 		return 0, false
 	}
-	if dp != nil {
+	if dp != nil && dp.ID > 0 {
 		return dp.ID, true
 	}
 
@@ -2791,7 +2807,20 @@ func (h *ProgressHandler) GetProgress(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	progress, err := h.queries.GetWatchProgress(r.Context(), claims.UserID, mediaID, episodeID)
+	var requested *int64
+	if raw := r.URL.Query().Get("profile_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 0 {
+			writeError(w, http.StatusBadRequest, "invalid profile_id")
+			return
+		}
+		requested = &id
+	}
+	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, requested)
+	if !ok {
+		return
+	}
+	progress, err := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profileID, mediaID, episodeID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no progress found")
 		return
@@ -2841,7 +2870,12 @@ func (h *ProgressHandler) ContinueWatching(w http.ResponseWriter, r *http.Reques
 
 		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profileID, limit)
 	} else {
-		items, err = h.queries.GetContinueWatching(r.Context(), claims.UserID, limit)
+		profile, profileErr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+		if profileErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
+			return
+		}
+		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profile.ID, limit)
 	}
 
 	if err != nil {
@@ -2975,6 +3009,19 @@ func (h *ProgressHandler) DeleteProgress(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	var requestedProfile *int64
+	if raw := r.URL.Query().Get("profile_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 0 {
+			writeError(w, http.StatusBadRequest, "invalid profile_id")
+			return
+		}
+		requestedProfile = &id
+	}
+	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, requestedProfile)
+	if !ok {
+		return
+	}
 
 	var episodeID *int64
 	if epStr := r.URL.Query().Get("episode_id"); epStr != "" {
@@ -2984,7 +3031,7 @@ func (h *ProgressHandler) DeleteProgress(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.queries.DeleteWatchProgress(r.Context(), claims.UserID, mediaID, episodeID); err != nil {
+	if err := h.queries.DeleteWatchProgressForProfile(r.Context(), claims.UserID, profileID, mediaID, episodeID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete progress")
 		return
 	}

@@ -166,6 +166,9 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 	defer ps.mu.Unlock()
 
 	// Existing participant → reconnect path. Refresh conn and LastSeen.
+	if ps.ending {
+		return nil, errUser("party has ended")
+	}
 	if existing, ok := ps.Participants[userID]; ok {
 		ps.roomConns[userID] = sc
 		existing.LastSeen = time.Now()
@@ -273,6 +276,10 @@ func (m *Manager) JoinPartyV3Sync(code string, userID int64, sc *SafeConn) error
 	if _, ok := ps.Participants[userID]; !ok {
 		ps.mu.Unlock()
 		return errUser("not a participant — open /ws/party-room first")
+	}
+	if ps.ending {
+		ps.mu.Unlock()
+		return errUser("party has ended")
 	}
 	ps.syncConns[userID] = sc
 
