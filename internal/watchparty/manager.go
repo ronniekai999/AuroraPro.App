@@ -456,13 +456,14 @@ type PartyState struct {
 	// clients can't receive duplicate "party-starting" broadcasts.
 	scheduleFiring bool
 	// reminderSentFor records the scheduled start the T-10 reminder was
-	// already sent for (migration 051 invites). Reminder goroutines carry
-	// no cancel hook — they self-validate at fire time against the
-	// CURRENT ScheduledStartAt, and this pointer collapses double-arms
+	// already sent for (migration 051 invites). Reminder goroutines
+	// self-validate against the current ScheduledStartAt at fire time,
+	// and this pointer collapses double-arms
 	// for the same target (e.g. CreateParty arming, then a same-time
 	// reschedule) to one send. Reschedules to a NEW time compare unequal
 	// and legitimately remind again.
 	reminderSentFor *time.Time
+	reminderCancel  context.CancelFunc
 }
 
 // Lock acquires the party-level mutex. Exported for cross-package use by handlers
@@ -1418,6 +1419,10 @@ func (m *Manager) SchedulePartyStart(ctx context.Context, code string, scheduled
 
 	ps.mu.Lock()
 	// Cancel any in-flight schedule timer before starting a new one.
+	if ps.ending {
+		ps.mu.Unlock()
+		return errUser("party has ended")
+	}
 	m.cancelScheduleTimerLocked(ps)
 	ps.ScheduledStartAt = scheduledStartAt
 	if scheduledStartAt != nil {
@@ -1459,10 +1464,7 @@ func (m *Manager) SchedulePartyStart(ctx context.Context, code string, scheduled
 // outlive them by minutes or hours.
 func (m *Manager) startScheduleTimerLocked(ps *PartyState, scheduledStartAt time.Time) {
 	// Cancel any existing timer first — idempotent guard.
-	if ps.scheduleCancel != nil {
-		ps.scheduleCancel()
-		ps.scheduleCancel = nil
-	}
+	m.cancelScheduleTimerLocked(ps)
 
 	delay := time.Until(scheduledStartAt)
 	if delay <= 0 {
@@ -1494,8 +1496,8 @@ func (m *Manager) startScheduleTimerLocked(ps *PartyState, scheduledStartAt time
 
 	// Invites (migration 051): nudge the host + non-declined invitees
 	// shortly before showtime. Skips itself when the start is already
-	// inside the lead window, and self-validates at fire time, so it needs
-	// no cancel plumbing through the teardown paths.
+	// inside the lead window, self-validates at fire time, and is cancelled
+	// along with the countdown on reschedule, play, end or shutdown.
 	m.armReminderLocked(ps, scheduledStartAt)
 }
 
@@ -1505,6 +1507,10 @@ func (m *Manager) cancelScheduleTimerLocked(ps *PartyState) {
 	if ps.scheduleCancel != nil {
 		ps.scheduleCancel()
 		ps.scheduleCancel = nil
+	}
+	if ps.reminderCancel != nil {
+		ps.reminderCancel()
+		ps.reminderCancel = nil
 	}
 }
 
@@ -3358,7 +3364,9 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 // Shutdown
 // ============================================================
 
-// Shutdown ends all active parties and waits for cleanup to finish.
+// Shutdown closes live parties, preserving scheduled, unstarted promises in
+// the database for boot-time rehydration. Active parties retain the existing
+// end policy.
 func (m *Manager) Shutdown() {
 	m.mu.RLock()
 	codes := make([]string, 0, len(m.parties))
@@ -3372,9 +3380,54 @@ func (m *Manager) Shutdown() {
 		ps, exists := m.parties[code]
 		m.mu.RUnlock()
 		if exists {
-			_ = m.endPartyInternal(code, ps, 0)
+			if !m.suspendScheduledParty(code, ps) {
+				_ = m.endPartyInternal(code, ps, 0)
+			}
 		}
 	}
 
 	slog.Info("all watch parties shut down", "count", len(codes))
+}
+
+// suspendScheduledParty atomically claims an unstarted scheduled party for
+// shutdown. Marking it ending under its lock prevents timers, late joins and
+// disconnect reapers from starting or ending it while we close the sockets.
+// Unlike ending a party, this performs no DB mutations or party-ended event.
+func (m *Manager) suspendScheduledParty(code string, ps *PartyState) bool {
+	ps.mu.Lock()
+	if ps.ScheduledStartAt == nil || ps.StartedAt != nil || ps.HasEverPlayed {
+		ps.mu.Unlock()
+		return false
+	}
+	if ps.ending {
+		ps.mu.Unlock()
+		return true
+	}
+	ps.ending = true
+	m.cancelScheduleTimerLocked(ps)
+	m.stopTickLoopLocked(ps)
+	closing := make([]*SafeConn, 0, len(ps.syncConns)+len(ps.roomConns))
+	for _, pool := range []map[int64]*SafeConn{ps.syncConns, ps.roomConns} {
+		for uid, conn := range pool {
+			if conn != nil {
+				closing = append(closing, conn)
+			}
+			delete(pool, uid)
+		}
+	}
+	ps.mu.Unlock()
+
+	m.mu.Lock()
+	if m.parties[code] == ps {
+		delete(m.parties, code)
+	}
+	m.mu.Unlock()
+	for _, conn := range closing {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "server restarting"),
+			time.Now().Add(time.Second))
+		_ = conn.Close()
+	}
+	m.invalidateShareCache(code)
+	return true
 }

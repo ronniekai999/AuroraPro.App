@@ -258,6 +258,10 @@ export function useParty(currentUserId?: number): UseParty {
   // Room and sync events share a server revision but travel over independent
   // WebSockets. This ref orders them synchronously before React state commits.
   const latestAcceptedRevRef = useRef(0)
+  // A room reconnect can land on a restarted server whose in-memory party
+  // revision begins again at 1. Its first snapshot establishes a new floor;
+  // subsequent room/sync frames retain normal monotonic ordering.
+  const awaitingRoomSnapshotRef = useRef(true)
   const acceptRevision = useCallback((incomingRev: number | undefined): boolean => {
     if (!shouldAcceptPartyRevision(latestAcceptedRevRef.current, incomingRev)) return false
     if (incomingRev !== undefined) {
@@ -521,6 +525,14 @@ export function useParty(currentUserId?: number): UseParty {
         // sends `revision` here vs `rev` elsewhere; we map both.
         const p = msg.payload
         const inner = p.party || {}
+        if (inner.code !== activeCodeRef.current) break
+        if (awaitingRoomSnapshotRef.current) {
+          awaitingRoomSnapshotRef.current = false
+          latestAcceptedRevRef.current = 0
+          tickRef.current = null
+          seekRef.current = null
+          helloAbsMsRef.current = 0
+        }
         const acceptsSnapshot = acceptRevision(inner.revision)
         // Audit MED-3 (Phase 4.5 final) — clear recentReactions when
         // the party's mediaItemId changes vs. our current state.
@@ -855,8 +867,10 @@ export function useParty(currentUserId?: number): UseParty {
     userInitiatedLeaveRef.current = false
     const rws = new WebSocket(buildWsUrl('/ws/party-room', token))
     roomWsRef.current = rws
+    awaitingRoomSnapshotRef.current = true
 
     rws.onopen = () => {
+      if (roomWsRef.current !== rws) return
       // Send the join-party handshake so the server registers us.
       const msg: OutboundRoomMessage = { type: 'join-party', payload: { party_code: code } }
       try { rws.send(JSON.stringify(msg)) } catch { /* defensive */ }
