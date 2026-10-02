@@ -172,7 +172,7 @@ export interface UseParty {
   // host advances the party (e.g. TV auto-advance to next episode).
   // The consumer should tear down their current player and re-init
   // with the new media. Returns an unsubscribe function.
-  onMediaChange: (cb: (payload: { media_item_id: number; episode_id?: number }) => void) => () => void
+  onMediaChange: (cb: (payload: { media_item_id: number; episode_id?: number; rev?: number }) => void) => () => void
   // 2026-08 — host succession. Fires when the server hands the party to
   // a new host (previous host left or timed out). State (hostUserId +
   // participants' is_host) is already patched by the time the callback
@@ -329,7 +329,7 @@ export function useParty(currentUserId?: number): UseParty {
   // Phase 5 — media-change subscribers. Used by the App-level player
   // glue to swap playerTarget when the host advances to a new
   // episode mid-party.
-  const mediaChangeSubsRef = useRef<Set<(p: { media_item_id: number; episode_id?: number }) => void>>(new Set())
+  const mediaChangeSubsRef = useRef<Set<(p: { media_item_id: number; episode_id?: number; rev?: number }) => void>>(new Set())
   // 2026-08 — host-succession subscribers (the App-level toast).
   const hostChangeSubsRef = useRef<Set<(p: HostChangedEvent) => void>>(new Set())
   // 2026-05-25 — room-socket keepalive + reconnect machinery.
@@ -679,7 +679,7 @@ export function useParty(currentUserId?: number): UseParty {
         // Fan out to consumers (App.tsx will re-emit playerTarget
         // for the new episode).
         for (const cb of mediaChangeSubsRef.current) {
-          try { cb({ media_item_id: p.media_item_id, episode_id: p.episode_id }) } catch { /* defensive */ }
+          try { cb({ media_item_id: p.media_item_id, episode_id: p.episode_id, rev: p.rev }) } catch { /* defensive */ }
         }
         break
       }

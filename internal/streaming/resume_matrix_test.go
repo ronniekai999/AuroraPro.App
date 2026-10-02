@@ -15,7 +15,10 @@ package streaming
 // someone's movie.
 
 import (
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,15 +284,7 @@ func TestPlaybackMatrix_ReapAndResumeRejoinsTheTimeline(t *testing.T) {
 				t.Fatalf("resume published nothing beyond the rollback point (%d segments)", len(final))
 			}
 
-			// Segment NUMBERING is deliberately not asserted here. Under
-			// +append_list hlsenc does not treat -start_number as absolute:
-			// it renumbers as start_number + the entries it parsed from the
-			// existing playlist, so a resume after 6 kept segments begins at
-			// seg_00012 and resumeSegNum cannot be observed from the output.
-			// An earlier version of this test asserted "no duplicate, always
-			// ascending" here; both were unreachable, and an off-by-one in
-			// resumeSegNum passed with byte-identical numbers. resumePoint's
-			// segment return is pinned by unit tests instead.
+			assertPlaylistSequences(t, tm, session, variant, 0)
 
 			// WHERE the resumed media begins is the assertion that matters,
 			// and total duration cannot substitute for it. The band around
@@ -327,6 +322,101 @@ func TestPlaybackMatrix_ReapAndResumeRejoinsTheTimeline(t *testing.T) {
 					published, durationSec, full)
 			}
 		})
+	}
+}
+
+// Pin FFmpeg's real append_list semantics through EnsureVariant and the HTTP
+// serving path. The retained fragments must keep their sequence AND bytes
+// across a deliberate idle reap, a crash, and the missing-playlist fallback.
+func TestPlaybackMatrix_ResumePreservesMediaSequences(t *testing.T) {
+	requireFFmpeg(t)
+	requireFFmpegEncoders(t, "libx264", "aac")
+	for _, remux := range []bool{false, true} {
+		for _, format := range []string{"ts", "fmp4"} {
+			t.Run(fmt.Sprintf("remux_%t/%s", remux, format), func(t *testing.T) {
+				path := (mediaFixture{Container: "mp4", DurationSec: 20, FPS: 24, GOP: 48}).build(t)
+				cfg := matrixConfig()
+				cfg.SegmentFormat = format
+				tm, err := NewTranscodeManager(t.TempDir(), cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(tm.Close)
+				s, v := startFirstVariant(t, tm, path, SessionOpts{
+					SourceVideoCodec: "h264", AudioTrackIndex: -1, AudioChannels: 2,
+					Remux: remux, RemuxAudioCopy: remux,
+				})
+				waitForExitLocked(t, s, v, 30*time.Second)
+				assertPlaylistSequences(t, tm, s, v, 0)
+				for resume, keep := range []int{4, 6, 8} {
+					rollbackToSegments(t, v, keep)
+					preserved := make(map[string][32]byte)
+					for _, num := range playlistSegmentNumbers(t, filepath.Join(v.OutputDir, variantPlaylistName)) {
+						name := fmt.Sprintf("seg_%05d%s", num, segExt(s))
+						data, err := os.ReadFile(filepath.Join(v.OutputDir, name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						preserved[name] = sha256.Sum256(data)
+					}
+					if resume == 2 {
+						if err := os.Remove(filepath.Join(v.OutputDir, variantPlaylistName)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					s.variantMu.Lock()
+					v.reaped = resume != 1
+					if resume == 1 {
+						v.Err = errors.New("synthetic crash after published segment")
+					}
+					s.variantMu.Unlock()
+					if _, err := tm.EnsureVariant(s, v.Profile.Name, s.StartSec); err != nil {
+						t.Fatalf("resume %d: %v", resume+1, err)
+					}
+					waitForExitLocked(t, s, v, 30*time.Second)
+					first := 0
+					if resume == 2 {
+						first = keep
+					}
+					assertPlaylistSequences(t, tm, s, v, first)
+					for name, oldHash := range preserved {
+						data, err := os.ReadFile(filepath.Join(v.OutputDir, name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if sha256.Sum256(data) != oldHash {
+							t.Errorf("resume %d overwrote %s", resume+1, name)
+						}
+					}
+					if nums := playlistSegmentNumbers(t, filepath.Join(v.OutputDir, variantPlaylistName)); nums[len(nums)-1] < keep {
+						t.Fatalf("resume %d produced no new segment: %v", resume+1, nums)
+					}
+				}
+			})
+		}
+	}
+}
+
+func assertPlaylistSequences(t *testing.T, tm *TranscodeManager, s *TranscodeSession, v *QualityVariant, first int) {
+	t.Helper()
+	r := httptest.NewRecorder()
+	tm.ServeVariantPlaylist(r, httptest.NewRequest("GET", "/stream.m3u8", nil), s.ID, v.Profile.Name, "")
+	if r.Code != 200 {
+		t.Fatalf("serve resumed playlist: %d %s", r.Code, r.Body.String())
+	}
+	body := r.Body.String()
+	if !strings.Contains(body, fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", first)) {
+		t.Fatalf("media sequence does not match first filename %d:\n%s", first, body)
+	}
+	segments := segURIRe.FindAllStringSubmatch(body, -1)
+	if len(segments) == 0 {
+		t.Fatal("served playlist has no segments")
+	}
+	for i, m := range segments {
+		n, _ := strconv.Atoi(m[1])
+		if n != first+i {
+			t.Fatalf("sequence %d maps to filename %d:\n%s", first+i, n, body)
+		}
 	}
 }
 

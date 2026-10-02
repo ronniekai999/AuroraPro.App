@@ -64,7 +64,7 @@ func TestVideoEncoderArgs_QSV(t *testing.T) {
 	assertContains(t, args, "-profile:v", "high")
 	// h264_qsv has no named "3.1"-style level constants — the dotted form
 	// silently evaluates to the wrong integer. QSV must get numeric
-	// level_idc ("31"), unlike libx264/NVENC/VAAPI/AMF (see qsvLevel).
+	// level_idc ("31"), as VAAPI does; libx264/NVENC/AMF use dotted levels.
 	assertContains(t, args, "-level", "31")
 	assertContainsVF(t, args, "scale=854:-2")
 	for _, a := range args {
@@ -240,7 +240,7 @@ func containsSubstring(s, substr string) bool {
 
 func TestH264LevelRenderings(t *testing.T) {
 	// One level_idc table (h264LevelIDC) feeds three renderings that MUST
-	// agree: dotted for libx264/NVENC/VAAPI/AMF, numeric for h264_qsv (no
+	// agree: dotted for libx264/NVENC/AMF, numeric for h264_qsv/VAAPI (no
 	// named dotted constants — "4.0" silently evaluates to the integer 4
 	// there), and two hex digits for the CODECS attribute.
 	tests := []struct {
