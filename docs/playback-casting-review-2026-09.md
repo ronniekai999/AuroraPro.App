@@ -1,9 +1,10 @@
 # Playback, transcoding, and casting review (September 2026)
 
-**Status:** verified backlog and phased release plan; **0 of 77 findings fixed on main**.
+**Status:** first-priority code repairs implemented; deployment/device validation and the remaining backlog stay open (§11).
 **Original review:** commit `390d02e`, 2026-09-29.
 **Follow-up:** 2026-09-30; main `bf995002fbd9d2f158714120dbde0295df67e4bf` (verification details in §9).
-**Implementation follow-up:** 2026-10-01; first-priority draft candidates and outstanding validation in §10.
+**Implementation follow-up:** 2026-10-01; dated first-priority candidate evidence in §10.
+**Merge follow-up:** 2026-10-02; resolved release changes and current validation limits in §11.
 **Scope:**
 - **Server:** `internal/streaming`, the stream and cast handlers in `internal/api`, cast tokens in `internal/auth`, and the watch-party sync engine (`internal/watchparty`, `internal/api/party_ws_v3_*`).
 - **SPA:** `VideoPlayer.tsx`, `lib/cast*.ts`, `lib/streaming.ts`, `lib/partyPlayer.ts`, `hooks/useParty.tsx`.
@@ -23,6 +24,7 @@ When required fixes have landed and optional enhancements have an implement/defe
 8. [Method and limits](#8-method-and-limits)
 9. [Follow-up verification and decisions](#9-follow-up-verification-and-decisions-2026-09-30)
 10. [First-priority implementation follow-up](#10-first-priority-implementation-follow-up-2026-10-01)
+11. [Conflict resolution and merge follow-up](#11-conflict-resolution-and-merge-follow-up-2026-10-02)
 
 **Severity**
 - **High:** a common playback, cast, or party path fails, hangs, or loses data; or the issue is privacy-relevant.
@@ -682,6 +684,9 @@ The follow-up is documented separately in §9; the reviewer counts and temporary
 
 ## 9. Follow-up verification and decisions (2026-09-30)
 
+This section records the September 30 pinned revision. See §11 for current
+merge evidence and remaining deployment/device validation.
+
 ### What is fixed on main
 
 **None of this review's findings has a landed fix.** The remote `main` revision
@@ -888,6 +893,9 @@ package version existing. See §2 for the acceptance required before adoption.
 
 ## 10. First-priority implementation follow-up (2026-10-01)
 
+This section retains the October 1 candidate/test/review evidence. The later
+conflict resolutions and merge status are recorded in §11.
+
 The three implementation lanes cover all 15 unique items in the **Do these first** block: web,
 casting, and the remaining lifecycle/party/encoder bugs. Independent read-only
 reviewers follow `dev-workflow.md`; review findings return to implementation and
@@ -1051,3 +1059,40 @@ clear, then PR #521 with the profile-aware progress writer in place. Keep each
 release's database/device smoke checks and rollback from §2. A passing combined
 candidate does not establish production deployment, physical receiver support,
 or closure of the other findings. Main remains the pinned revision above.
+
+## 11. Conflict resolution and merge follow-up (2026-10-02)
+
+Sections 9 and 10 retain the evidence for their dated main/candidate revisions.
+The current first-priority implementation is delivered by PRs #519, #520,
+#521, and #522. This records code implementation separately from production
+and device validation; it does not close the remaining backlog.
+
+[PR #519](https://github.com/ronniekai999/AuroraPro.App/pull/519) supplies scheduled-party restart survival and [PR #522](https://github.com/ronniekai999/AuroraPro.App/pull/522) supplies profile
+attribution and common web playback repairs. [PR #520](https://github.com/ronniekai999/AuroraPro.App/pull/520) was resolved against those
+landed changes, preserving both logical replacement state and automatic/manual
+party playback ownership. Its listeners follow the current video and episode.
+The final review caught a quick manual Play then Pause during automatic echo
+suppression; explicit Pause now owns one matching browser event without clearing
+remote suppression. Regressions cover immediate and queued pause events at
+50 ms and the 200 ms control, with automatic echo/seek inverses.
+
+[PR #520](https://github.com/ronniekai999/AuroraPro.App/pull/520) merge: [`5fdb7e6`](https://github.com/ronniekai999/AuroraPro.App/commit/5fdb7e687374888667c34118d847197839fab67b). [PR #521](https://github.com/ronniekai999/AuroraPro.App/pull/521) resolves its remaining player/sender
+conflicts against that revision, preserving the reviewed combined cast progress,
+terminal cleanup, retry generation ownership, party controls and bounded copies.
+The shared helper relocation retains its body and behavior. [PR #521](https://github.com/ronniekai999/AuroraPro.App/pull/521) completes
+the first-priority source changes when this release is merged.
+
+Verification of the resolved code includes 1,108 frontend tests for #520 and
+1,223 for the combined #521 tree, Chromium audit/layout/PWA, TypeScript and Go
+build after frontend assets. Full uncached PostgreSQL/media-required Go tests
+and affected races pass. Applicable backend results are retained where Go
+sources and module files are byte-identical after frontend-only corrections.
+Fresh independent reviews and exact-content records cover the resolved PR diffs.
+
+Physical Chromecast, Safari/AirPlay and GPU decoding/output remain unverified.
+CASTC-7 covers stopping sender HLS polling; the subtitle-carrier reaper exception
+and general paused-encoder policy remain open. No production updater or admin
+deploy/test loop was explicitly triggered by this merge work. Record the actual
+deployed revision and restart/cast/profile smoke results separately. Future
+fixes continue as the small slices in section 2, with device/hardware work
+released according to its applicable gates.

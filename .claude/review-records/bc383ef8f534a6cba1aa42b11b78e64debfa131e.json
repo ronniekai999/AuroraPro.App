@@ -1,0 +1,10 @@
+{
+  "sha": "bc383ef8f534a6cba1aa42b11b78e64debfa131e",
+  "verdict": "clean",
+  "summary": "Complete final diff against 0f6baef reviewed with no actionable defects. Manual Pause timing defect resolved with one consumed video-owned event; later Play/teardown retire proof and preserve remote suppression. 26 independent cases pass, including original reproductions, queued Pause, fast replacement, remote seek echoes and old automatic completion. 1108 frontend, Chromium audit and Go build pass; unchanged backend retains uncached PG/media and race evidence. Physical GPU/Cast/Safari validation remains open.",
+  "reviewer": "/root/review_merge_520",
+  "findings": "0",
+  "diff_digest": "ce5484519f8becf296733f38b0bd9bb0d37d040423e7b8ca55686fb2f63fb1e6",
+  "branch": "fix/playback-resume-party-levels",
+  "recorded_at": "2026-10-02T16:58:35Z"
+}
