@@ -746,6 +746,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const partyControlsMediaRef = useRef(false)
   const applyingRemoteUntilRef = useRef<number>(0)
   const automaticPauseUntilRef = useRef<number>(0)
+  // An explicit Pause owns one pause event, including a queued native event.
+  // It can broadcast through echo suppression without releasing that window.
+  const manualPauseVideoRef = useRef<HTMLVideoElement | null>(null)
   // A play() promise and its DOM event can both arrive after a newer Pause.
   // Keep ownership until the automatic attempt settles; manual controls
   // supersede it so an old completion cannot stop a later explicit Play.
@@ -779,8 +782,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
   }, [pauseUnwantedAutomaticPlay])
   const toggleLocalPlayback = useCallback((vid: HTMLVideoElement) => {
+    manualPauseVideoRef.current = null
     if (!vid.paused) {
       localPlayIntentRef.current = null
+      manualPauseVideoRef.current = vid
       vid.pause()
       return
     }
@@ -2733,6 +2738,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // outgoing play promise must not hold its owner or pause-echo window.
     localPlayIntentRef.current = null
     automaticPauseUntilRef.current = 0
+    manualPauseVideoRef.current = null
     // hls.js teardown — destroy() detaches the media source and
     // releases the worker thread. Skipping this leaks the segment
     // buffer; running it twice is a no-op.
@@ -4571,13 +4577,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // — also bail out if the host's local player is on a different
     // media than the party's; broadcasting from the wrong content
     // would corrupt the party's currentTimeMs.
-    const hostShouldBroadcast = (explicitPlay = false) =>
+    const hostShouldBroadcast = (explicitControl = false) =>
       party.isHost &&
       // Never broadcast while the player is still (re)booting:
       // startSecRef is 0 and currentTime snaps to 0 during boot, so a transient
       // 'seeked'/'pause' would otherwise propagate abs_ms=0 to the whole party.
       playerReadyRef.current &&
-      (!isApplyingRemote() || explicitPlay) &&
+      (!isApplyingRemote() || explicitControl) &&
       matchesPartyEpisode()
     const onPlay = () => {
       if (holdOutgoingEpisode() || pauseUnwantedAutomaticPlay(vid) || vid.paused) return
@@ -4587,7 +4593,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       party.requestPlay()
     }
     const onPause = () => {
-      if (!hostShouldBroadcast()) return
+      const explicitPause = manualPauseVideoRef.current === vid
+      if (explicitPause) manualPauseVideoRef.current = null
+      if (!vid.paused || !hostShouldBroadcast(explicitPause)) return
       const absMs = Math.round((vid.currentTime + (startSecRef.current ?? 0)) * 1000)
       party.requestPause(absMs)
     }
