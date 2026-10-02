@@ -99,9 +99,9 @@ export function partyPlayerDismissalKeyOnClose(
 export function shouldClosePlayerOnPathChange(
   previousPathname: string,
   currentPathname: string,
-  playerMinimized: boolean,
+  remoteActive: boolean,
 ): boolean {
-  return previousPathname !== currentPathname && !playerMinimized
+  return previousPathname !== currentPathname && !remoteActive
 }
 
 /** Only the newest, still-live async playback resolver may open the player. */

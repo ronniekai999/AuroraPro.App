@@ -227,6 +227,7 @@ export interface CastLoadArgs {
   subtitle?: string
   // Where to resume from (seconds). 0 plays from the start.
   startTime?: number
+  segmentFormat?: 'ts' | 'fmp4'
   // External WebVTT subtitle tracks. The Default Media Receiver
   // renders these on the TV when a track is in activeTrackIds.
   textTracks?: Array<{ url: string; language?: string; label?: string }>
@@ -268,6 +269,7 @@ export interface CastStatus {
 // the sender UI (the minimized cast control widget) can show + drive what's
 // playing on the TV.
 export interface CastRemoteState {
+  title?: string | null
   // The receiver's media identity, when CAF supplies it. Older SDK/device
   // shapes may omit it; end handling retains its reason-based fallback.
   contentId?: string | null
@@ -341,6 +343,7 @@ export function useCast(
     deviceName: null,
   })
   const [remote, setRemote] = useState<CastRemoteState>({
+    title: null,
     contentId: null,
     clockContentId: null,
     mediaStatusSeq: 0,
@@ -837,6 +840,7 @@ export function useCast(
             }
           } catch { /* defensive — SDK shape varies across builds */ }
           setRemote({
+            title: player.title ?? null,
             contentId,
             clockContentId,
             mediaStatusSeq,
@@ -1023,6 +1027,10 @@ export function useCast(
 
     const media = new window.chrome.cast.media.MediaInfo(load.contentUrl, load.contentType)
     media.streamType = window.chrome.cast.media.StreamType.BUFFERED
+    if (load.segmentFormat) {
+      media.hlsSegmentFormat = load.segmentFormat === 'fmp4' ? 'FMP4' : 'TS'
+      media.hlsVideoSegmentFormat = load.segmentFormat === 'fmp4' ? 'FMP4' : 'MPEG2_TS'
+    }
 
     if (load.textTracks && load.textTracks.length) {
       media.tracks = load.textTracks.map((t, i) => {

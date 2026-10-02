@@ -114,7 +114,7 @@ describe('party player auto-open policy', () => {
     expect(shouldAutoOpenPartyPlayer(runningParty, 2, false, dismissed)).toBe(true)
   })
 
-  it('closes for browser history path changes but preserves a minimized cast', () => {
+  it('closes for browser history path changes but preserves any active remote', () => {
     expect(shouldClosePlayerOnPathChange('/movies', '/series', false)).toBe(true)
     expect(shouldClosePlayerOnPathChange('/movies', '/series', true)).toBe(false)
     expect(shouldClosePlayerOnPathChange('/movies', '/movies', false)).toBe(false)

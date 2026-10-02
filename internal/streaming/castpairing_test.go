@@ -86,10 +86,13 @@ func TestCloneForCast_SharedSessionIsNotMarkedAsItsOwnClone(t *testing.T) {
 		SourceWidth:     1920,
 		SourceHeight:    1080,
 		AudioCodecOut:   "aac",
+		SourceFPS:       30,
+		Profiles:        []QualityProfile{AllProfiles["1080p"]},
 		AudioTrackIndex: -1,
 		BurnSubIndex:    -1,
 		BurnSubRelIndex: -1,
 	}
+	src.Profiles[0].CodecString = "avc1.640028,mp4a.40.2"
 	tm.mu.Lock()
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()

@@ -519,9 +519,11 @@ export interface CastTokenResponse {
   // one through the wrong number is issue #172's failure shape (the receiver
   // seeks somewhere the playlist has not produced and buffers forever).
   //
-  // Optional only for the transition: a server that predates the field leaves
-  // the caller with the old assumption, which is what it had anyway.
+  // Optional for legacy servers. Their local-anchor fallback can seed a
+  // best-effort LOAD, but cannot prove a receiver clock for later actions.
   start_sec?: number
+  // Actual output container, including the shared-session / AirPlay paths.
+  segment_format?: 'ts' | 'fmp4'
 }
 
 export async function createCastToken(

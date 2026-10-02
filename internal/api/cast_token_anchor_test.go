@@ -11,9 +11,12 @@ package api
 // has produced seconds.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,10 +25,10 @@ import (
 	"github.com/aurora-media/aurora/internal/streaming"
 )
 
-func castAnchorHandler(t *testing.T) (*StreamHandler, *streaming.TranscodeManager) {
+func castAnchorHandler(t *testing.T, profiles ...string) (*StreamHandler, *streaming.TranscodeManager) {
 	t.Helper()
 	fakeFFmpegForAPITest(t)
-	tm, err := streaming.NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4"})
+	tm, err := streaming.NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4", Profiles: profiles})
 	if err != nil {
 		t.Fatalf("new transcode manager: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestCreateCastToken_UnusableAtIsIgnoredNotFatal(t *testing.T) {
 // reporting the clone's arithmetic here would desync a cast that needed no
 // clone at all.
 func TestCreateCastToken_SharedSessionReportsItsOwnAnchor(t *testing.T) {
-	h, tm := castAnchorHandler(t)
+	h, tm := castAnchorHandler(t, "1080p")
 	// Cast-safe as-is (transcode, H.264 + AAC, no subtitle tracks), so
 	// CloneForCast hands the original session straight back.
 	src, err := tm.CreateSession(7, "testuser", "/library/scooby.mkv", 1920, 1080,
@@ -160,6 +163,7 @@ func TestCreateCastToken_SharedSessionReportsItsOwnAnchor(t *testing.T) {
 			Remux:            false,
 			SourceVideoCodec: "h264",
 			VideoCodecOut:    "h264",
+			SourceFPS:        30,
 			AudioCodecOut:    "aac",
 			AudioTrackIndex:  -1,
 			StartSec:         600,
@@ -169,7 +173,7 @@ func TestCreateCastToken_SharedSessionReportsItsOwnAnchor(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	resp := castTokenJSON(t, h, src.ID, "at=2400")
+	resp := castTokenJSON(t, h, src.ID, "at=610")
 
 	playlist, _ := resp["playlist"].(string)
 	if !strings.Contains(playlist, src.ID) {
@@ -202,5 +206,84 @@ func TestCreateCastToken_ForAirplayReportsTheSourceAnchor(t *testing.T) {
 	}
 	if startSec != 450 {
 		t.Fatalf("start_sec = %v, want the source's 450", startSec)
+	}
+}
+
+func TestCreateCastToken_ReportsActualFormatAndOneReadyRung(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, format string
+		shared              bool
+	}{
+		{"private TS copy", "at=2400", "ts", false},
+		{"near shared fMP4", "at=610", "fmp4", true},
+		{"AirPlay original", "for_airplay=true&at=2400", "fmp4", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, tm := castAnchorHandler(t, "1080p")
+			src, err := tm.CreateSession(7, "testuser", "/library/movie.mkv", 1920, 1080, streaming.SessionOpts{SourceVideoCodec: "h264", SourceFPS: 30, AudioCodecOut: "aac", AudioTrackIndex: -1, StartSec: 600})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := castTokenJSON(t, h, src.ID, tc.query)
+			if resp["segment_format"] != tc.format {
+				t.Fatalf("format=%v want %s", resp["segment_format"], tc.format)
+			}
+			id := strings.Split(strings.TrimPrefix(resp["playlist"].(string), "/api/stream/hls/"), "/")[0]
+			if (id == src.ID) != tc.shared {
+				t.Fatalf("shared=%v want %v", id == src.ID, tc.shared)
+			}
+			cs, ok := tm.GetSession(id)
+			if !ok {
+				t.Fatal("missing cast session")
+			}
+			if len(cs.Profiles) != 1 || len(cs.Variants) != 1 {
+				t.Fatalf("cast ladder=%+v", cs.Profiles)
+			}
+			if !strings.Contains(tc.query, "for_airplay") {
+				playlist := filepath.Join(cs.OutputDir, cs.Profiles[0].Name, "stream.m3u8")
+				if _, err := os.Stat(playlist); err != nil {
+					t.Fatalf("response precedes cast readiness: %v", err)
+				}
+			}
+			if src.StartSec != 600 {
+				t.Fatalf("source anchor moved to %d", src.StartSec)
+			}
+		})
+	}
+}
+
+func TestCreateCastToken_FailedWarmDoesNotLeakCopyOrReplaceOriginal(t *testing.T) {
+	h, tm := castAnchorHandler(t)
+	src := castAnchorSource(t, tm, 0)
+	committed, err := tm.CloneForCast(7, "testuser", src.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.WarmCastSession(context.Background(), committed); err != nil {
+		t.Fatal(err)
+	}
+	// A real startup failure, not quota. Fail closed and clean up only the
+	// unpublished receiver copy; never offer the incompatible original URL.
+	fakeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeDir, "ffmpeg"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	rr := httptest.NewRecorder()
+	h.CreateCastToken(rr, castTokenRequest(t, src.ID, "at=2400", &auth.JWTClaims{UserID: 7, Username: "testuser", Role: "user"}))
+	if rr.Code != http.StatusServiceUnavailable || strings.Contains(rr.Body.String(), "playlist") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, ok := tm.GetSession(src.ID); !ok {
+		t.Fatal("startup failure deleted caller's original session")
+	}
+	if _, ok := tm.GetSession(committed.ID); !ok {
+		t.Fatal("failed replacement deleted the committed copy")
+	}
+	if _, err := os.Stat(filepath.Join(committed.OutputDir, committed.Profiles[0].Name, "stream.m3u8")); err != nil {
+		t.Fatalf("failed replacement removed committed media: %v", err)
+	}
+	if rows := tm.ListSessions(); len(rows) != 2 {
+		t.Fatalf("unpublished cast leaked: %+v", rows)
 	}
 }

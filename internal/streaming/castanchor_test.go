@@ -13,6 +13,7 @@ package streaming
 // the session the local player is itself using.
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/config"
@@ -153,48 +154,41 @@ func TestCloneForCast_AnchorsTheCloneAtTheSenderPosition(t *testing.T) {
 	}
 }
 
-// The one session that must never be re-anchored: when no clone is needed the
-// receiver shares the LOCAL player's session, and moving its -ss would restart
-// the encode under the browser that is playing it.
+// A cast-safe shared session is never re-anchored under the local player.
+// Nearby starts may share; earlier and distant starts receive a private copy.
 func TestCloneForCast_SharedSessionKeepsItsOwnAnchor(t *testing.T) {
-	fakeFFmpegOnPath(t)
-	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4"})
-	if err != nil {
-		t.Fatalf("new transcode manager: %v", err)
-	}
-	defer tm.Close()
-
-	// Cast-safe as-is: a transcode emitting H.264 + AAC with no subtitle
-	// tracks, so CloneForCast returns it unchanged.
-	src := &TranscodeSession{
-		ID:               "src-local",
-		UserID:           7,
-		FilePath:         "/library/movie/halloweentown.mkv",
-		SourceWidth:      1920,
-		SourceHeight:     1080,
-		Remux:            false,
-		SourceVideoCodec: "h264",
-		VideoCodecOut:    "h264",
-		AudioCodecOut:    "aac",
-		AudioTrackIndex:  -1,
-		BurnSubIndex:     -1,
-		BurnSubRelIndex:  -1,
-		StartSec:         600,
-	}
-	tm.mu.Lock()
-	tm.sessions[src.ID] = src
-	tm.mu.Unlock()
-
-	got, err := tm.CloneForCast(7, "ronnie", src.ID, 2400)
-	if err != nil {
-		t.Fatalf("CloneForCast: %v", err)
-	}
-	if got.ID != src.ID {
-		t.Fatalf("expected the shared session back, got a clone (%s)", got.ID)
-	}
-	if got.StartSec != 600 {
-		t.Fatalf("shared session StartSec = %d, want 600 — re-anchoring it would "+
-			"restart the encode the local player is reading", got.StartSec)
+	for _, tc := range []struct {
+		at    int
+		clone bool
+	}{{599, true}, {600, false}, {630, false}, {631, true}, {2400, true}} {
+		t.Run(fmt.Sprint(tc.at), func(t *testing.T) {
+			fakeFFmpegOnPath(t)
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4", Profiles: []string{"1080p"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tm.Close()
+			src, err := tm.CreateSession(7, "ronnie", "/library/movie.mkv", 1920, 1080, SessionOpts{SourceVideoCodec: "hevc", SourceFPS: 30, AudioCodecOut: "aac", AudioTrackIndex: -1, StartSec: 600})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := tm.CloneForCast(7, "ronnie", src.ID, tc.at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got.ID != src.ID) != tc.clone {
+				t.Fatalf("clone=%v, want %v", got.ID != src.ID, tc.clone)
+			}
+			if src.StartSec != 600 {
+				t.Fatalf("shared source moved to %d", src.StartSec)
+			}
+			if tc.clone && got.StartSec != castCloneAnchorSec(src.StartSec, tc.at) {
+				t.Fatalf("copy anchor=%d", got.StartSec)
+			}
+			if got.SourceVideoCodec != "hevc" {
+				t.Fatalf("decode source codec lost: %q", got.SourceVideoCodec)
+			}
+		})
 	}
 }
 

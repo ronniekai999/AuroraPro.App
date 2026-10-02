@@ -66,6 +66,30 @@ smoke test separately. See `docs/server-testing.md`.
 
 ## Current subsystem invariants
 
+### First-priority playback repair contracts (October 2026)
+
+- With a readable prior HLS playlist, `append_list` owns resume numbering;
+  preserve existing segment bytes/sequences and retain missing-playlist fallback.
+- Keep profile-bound cast progress on the acknowledged outgoing title even
+  after local navigation. A clock needs a coherent current Media generation
+  and acknowledged source anchor. Retire old IDs within their CastSession;
+  rejected retries retain genuine prior-media recovery. Failed-generation
+  terminal proof permits cleanup only, never completion or advancement.
+- Party episode advancement withholds outgoing playback/broadcasts. A newer
+  canonical Pause wins over delayed automatic playback; explicit Play/Pause
+  remain usable. Explicit Pause consumes one matching video event without
+  clearing remote echo suppression, and teardown retires its ownership.
+- Cast copies preserve shared anchors/ladders, source decode facts and bounded
+  H.264/AAC output with truthful SPS/playlist signalling. Ordinary ultrafast
+  software output uses a private High-profile copy when sharing is unsafe.
+- VAAPI and QSV encoder levels use their backend's numeric scale; QSV HEVC
+  signalling uses Main tier. The HDR fixture carries BT.2020/PQ in raw HEVC;
+  production tonemapping is unchanged. Physical receiver/GPU checks and the
+  general paused-encoder/subtitle-carrier policy remain separate validation.
+
+See `docs/playback-casting-review-2026-09.md` section 11 and PRs #519–#522 for
+merge evidence and the release-specific test/review records.
+
 ### AI/LLM providers
 
 All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or

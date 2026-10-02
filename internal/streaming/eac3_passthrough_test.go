@@ -299,13 +299,13 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 		BurnSubRelIndex:  -1,
 		SourceHDR:        true,
 	}
-	// When needsVideoTranscode=true, Remux must be disabled and SourceVideoCodec cleared.
+	// Video output changes, while the source codec remains available to PlanDecode.
 	opts := castCloneOpts(src, true, false)
 	if opts.Remux {
 		t.Error("castCloneOpts(needsVideoTranscode=true): Remux should be false")
 	}
-	if opts.SourceVideoCodec != "" {
-		t.Errorf("castCloneOpts(needsVideoTranscode=true): SourceVideoCodec = %q, want empty", opts.SourceVideoCodec)
+	if opts.SourceVideoCodec != "hevc" {
+		t.Errorf("castCloneOpts(needsVideoTranscode=true): SourceVideoCodec = %q, want hevc for hardware decode", opts.SourceVideoCodec)
 	}
 	if opts.AudioCodecOut != "aac" {
 		t.Errorf("castCloneOpts: AudioCodecOut = %q, want aac", opts.AudioCodecOut)

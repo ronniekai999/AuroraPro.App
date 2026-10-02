@@ -879,6 +879,35 @@ describe('Coherent Media receiver clock contract', () => {
 })
 
 describe('useCast disconnect debounce', () => {
+  it.each([
+    ['ts', 'TS', 'MPEG2_TS'],
+    ['fmp4', 'FMP4', 'FMP4'],
+  ] as const)('passes the declared %s container through the SDK load', async (segmentFormat, audioFormat, videoFormat) => {
+    const sdk = installFakeSdk()
+    const session = sdk.makeSession()
+    sdk.setSession(session)
+    sdk.setCastState(sdk.CAST_STATE.CONNECTED)
+    render(<Harness currentLoad={() => ({
+      contentUrl: 'https://example.com/master.m3u8',
+      contentType: 'application/x-mpegURL',
+      segmentFormat,
+    })} />)
+    await act(async () => { await latestCast!.loadCurrent() })
+    expect(session.loadMedia).toHaveBeenCalledWith(expect.objectContaining({
+      media: expect.objectContaining({ hlsSegmentFormat: audioFormat, hlsVideoSegmentFormat: videoFormat }),
+    }))
+  })
+
+  it('keeps receiver metadata available after an SDK reconnect', () => {
+    const sdk = installFakeSdk()
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()! as FakeRemotePlayer & { title: string }
+    player.title = 'A running movie'
+    act(() => sdk.emitRemoteChange())
+    expect(latestCast!.remote.title).toBe('A running movie')
+  })
+
   // Must match cast.ts's private RECONNECT_SETTLE_MS — how long settling
   // stays true after a reconnect before `remote` is trusted again.
   const RECONNECT_SETTLE_MS = 1500

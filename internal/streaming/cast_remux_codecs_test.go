@@ -190,11 +190,14 @@ func TestCloneForCast_TranscodeReusedUnchanged(t *testing.T) {
 		SourceHeight:    1080,
 		Remux:           false, // transcode → emits H.264 + CODECS string
 		AudioCodecOut:   "aac",
+		SourceFPS:       30,
+		Profiles:        []QualityProfile{AllProfiles["1080p"]},
 		AudioTrackIndex: -1,
 		BurnSubIndex:    -1,
 		BurnSubRelIndex: -1,
 		// SubtitleTracks: nil — no subs, so no clone needed
 	}
+	src.Profiles[0].CodecString = "avc1.640028,mp4a.40.2"
 	tm.mu.Lock()
 	tm.sessions[src.ID] = src
 	tm.mu.Unlock()

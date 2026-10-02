@@ -1,0 +1,10 @@
+{
+  "sha": "3004844799f02d8456a6fc5b6e51cf7c5e4ca3b4",
+  "verdict": "clean",
+  "summary": "Independent complete final-diff review against bf995002 found no actionable defects. 51 public CAF ownership, terminal and rejected-retry recovery probes, 1011 frontend tests, TypeScript and Chromium audit passed. Backend is byte-identical to independently verified PG/media/race/SPS sources. Physical receivers and GPU output remain unverified; subtitle-carrier reaping remains open.",
+  "reviewer": "/root/review_cast_first",
+  "findings": "0",
+  "diff_digest": "8bd148335dce762e7606d4d9c5fc507408aa34494e8e2a70ed881f36cbb84311",
+  "branch": "fix/playback-cast-first",
+  "recorded_at": "2026-10-01T12:22:13Z"
+}
