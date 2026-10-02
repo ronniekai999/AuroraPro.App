@@ -15,8 +15,8 @@ package watchparty
 //
 //   2. The T-10 reminder — a bell ping to the host + non-declined invitees
 //      shortly before a scheduled start. Reminder goroutines are armed
-//      wherever the schedule timer is armed and carry NO cancel hook:
-//      they re-validate against the party's CURRENT state at fire time
+//      wherever the schedule timer is armed and cancelled with it.
+//      They also re-validate against the party's CURRENT state at fire time
 //      (rescheduled → target mismatch → silent no-op; ended → party gone →
 //      no-op), with PartyState.reminderSentFor collapsing double-arms.
 
@@ -48,9 +48,16 @@ func (m *Manager) armReminderLocked(ps *PartyState, scheduledStartAt time.Time) 
 	}
 	code := ps.Code
 	target := scheduledStartAt
+	reminderCtx, cancel := context.WithCancel(context.Background())
+	ps.reminderCancel = cancel
 	go func() {
-		time.Sleep(delay)
-		m.fireScheduledReminder(code, target)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			m.fireScheduledReminder(code, target)
+		case <-reminderCtx.Done():
+		}
 	}()
 }
 

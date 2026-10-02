@@ -1337,6 +1337,7 @@ export interface ProgressUpdate {
   position_ms: number
   duration_ms: number
   episode_id?: number
+  profile_id?: number
 }
 
 // Phase 5.2 parity — context-menu actions on media cards.
@@ -1358,8 +1359,9 @@ export async function markWatched(
     signal,
   })
 }
-export async function clearProgress(mediaItemId: number): Promise<void> {
-  await apiFetch(`/api/progress/${mediaItemId}`, { method: 'DELETE' })
+export async function clearProgress(mediaItemId: number, profileId?: number): Promise<void> {
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  await apiFetch(`/api/progress/${mediaItemId}${qs}`, { method: 'DELETE' })
 }
 export async function deleteRequest(id: number): Promise<void> {
   await apiFetch(`/api/requests/${id}`, { method: 'DELETE' })

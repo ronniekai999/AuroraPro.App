@@ -4150,9 +4150,9 @@ func timestampPrefixArgs(session *TranscodeSession) []string {
 
 // startVariant launches FFmpeg for a single profile. resumeSegNum=0 is the
 // normal fresh-start case. resumeSegNum>0 is the P3 auto-restart path:
-// FFmpeg is started with -start_number set so output segment numbering
-// continues from where the prior (crashed) process left off, giving HLS.js
-// seamless playlist continuation. Compatibility shim startVariantAt below
+// FFmpeg appends to a readable prior playlist, preserving its media sequence
+// and segment filenames. If it is unavailable, -start_number continues the
+// directory-derived numbering. Compatibility shim startVariantAt below
 // is a thin wrapper retained for call-site clarity.
 func (tm *TranscodeManager) startVariantAt(session *TranscodeSession, v *QualityVariant, startSec float64, resumeSegNum int) error {
 	return tm.startVariantImpl(session, v, startSec, resumeSegNum)
@@ -4399,7 +4399,8 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// and appends new segments — HLS.js sees a continuous, monotonic
 	// segment list across the crash boundary.
 	hlsFlags := "independent_segments"
-	if resumeSegNum > 0 {
+	appendPriorPlaylist := resumeSegNum > 0 && playlistHighestSegmentNumber(playlistPath) >= 0
+	if appendPriorPlaylist {
 		hlsFlags = "independent_segments+append_list"
 	}
 	if !session.FMP4 {
@@ -4425,22 +4426,13 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// sensitive player at worst re-fetches one init segment.
 		args = append(args, "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4")
 	}
-	// On restart, resume segment numbering so seg_(crash+1).ts onwards
-	// are produced by the fresh FFmpeg without overwriting any pre-crash
-	// segments. The +append_list flag above ensures the playlist file is
-	// extended rather than rewritten.
-	//
-	// 2026-05-20 — flag is `-start_number`, NOT `-hls_start_number`.
-	// The HLS muxer documents `start_number` (no `hls_` prefix). The
-	// old `hls_start_number` was a typo that worked on no version of
-	// FFmpeg we ship — every restart attempt crashed with
-	// "Unrecognized option 'hls_start_number'. Error splitting the
-	// argument list". Symptom for the operator: ~4 HTTP 500s on
-	// /api/stream/hls/<id>/source/seg_NNN.ts after the first FFmpeg
-	// crash, until HLS.js reloaded the player session. The crash
-	// itself is a separate occasional FFmpeg issue; the bug here is
-	// that the *recovery* from the crash never worked.
-	if resumeSegNum > 0 {
+	// With append_list, hlsenc reads the prior sequence and advances its own
+	// counter for every existing entry. Passing start_number here instead
+	// renumbers those same entries and advances the filenames a second time,
+	// breaking HLS clients' sequence-to-timeline mapping on every resume.
+	// Only the unreadable-playlist fallback needs an explicit start number:
+	// its fresh playlist's first sequence then matches its first filename.
+	if resumeSegNum > 0 && !appendPriorPlaylist {
 		args = append(args, "-start_number", strconv.Itoa(resumeSegNum))
 	}
 	args = append(args,

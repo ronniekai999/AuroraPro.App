@@ -1,0 +1,10 @@
+{
+  "sha": "58d2c03c2ae19a07da3c022c2cb45a75e53f9f23",
+  "verdict": "clean",
+  "summary": "Independent complete final-diff review: scheduled shutdown persistence, timer/socket cleanup, join/reaper races, DB rehydration and reconnect revision ordering. No actionable defects; PostgreSQL watchparty race and mounted reconnect checks pass. Live deployed restart unverified.",
+  "reviewer": "/root/review_other_first",
+  "findings": "0",
+  "diff_digest": "7c21d2fc3927cf3ea345b9e79bb8743d2da02fb2f2c21a0a972a893d5eba51cb",
+  "branch": "fix/party-restart-survival",
+  "recorded_at": "2026-10-01T04:40:26Z"
+}

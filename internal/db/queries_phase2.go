@@ -1575,6 +1575,18 @@ func (q *Queries) GetSeasonEpisodeCounts(ctx context.Context, mediaItemID int64)
 
 // GetNextEpisode returns the next unwatched episode for a show for a given user.
 func (q *Queries) GetNextEpisode(ctx context.Context, userID, mediaItemID int64) (*models.EpisodeDetail, error) {
+	profile, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, pgx.ErrNoRows
+	}
+	return q.GetNextEpisodeForProfile(ctx, userID, profile.ID, mediaItemID)
+}
+
+// GetNextEpisodeForProfile scopes playback history to the validated viewing profile.
+func (q *Queries) GetNextEpisodeForProfile(ctx context.Context, userID, actingProfileID, mediaItemID int64) (*models.EpisodeDetail, error) {
 	// Strategy: find the first episode that either has no progress or is not completed,
 	// ordered by season then episode number.
 	row := q.pool.QueryRow(ctx, `
@@ -1584,11 +1596,11 @@ func (q *Queries) GetNextEpisode(ctx context.Context, userID, mediaItemID int64)
 		       COALESCE(e.still_path, '')
 		FROM tv_episodes e
 		JOIN tv_seasons s ON s.id = e.season_id
-		LEFT JOIN watch_progress wp ON wp.episode_id = e.id AND wp.user_id = $1
+		LEFT JOIN watch_progress wp ON wp.episode_id = e.id AND wp.user_id = $1 AND wp.profile_id = $3
 		WHERE e.media_item_id = $2
 		  AND (wp.id IS NULL OR wp.completed = FALSE)
 		ORDER BY s.season_number, e.episode_number
-		LIMIT 1`, userID, mediaItemID)
+		LIMIT 1`, userID, mediaItemID, actingProfileID)
 
 	var ep models.EpisodeDetail
 	err := row.Scan(&ep.ID, &ep.SeasonID, &ep.MediaItemID, &ep.Number,
@@ -1779,12 +1791,21 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 }
 
 // GetWatchProgress returns progress for a specific item/episode, scoped to the
-// user's DEFAULT profile. Deferred follow-up (deep-debug B, non-blocking): make
-// this read + DeleteWatchProgress honor an explicit non-default profile, gated
-// on multi-profile UI. Today no client sends an explicit profile, so writes
-// (via resolveProgressProfileID) and reads/deletes all consistently resolve to
-// the default profile — the asymmetry is dormant until profile-switching ships.
+// user's DEFAULT profile. Playback handlers use GetWatchProgressForProfile
+// after resolving the acting profile; keep this wrapper for legacy callers.
 func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int64, episodeID *int64) (*models.WatchProgress, error) {
+	profile, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, pgx.ErrNoRows
+	}
+	return q.GetWatchProgressForProfile(ctx, userID, profile.ID, mediaItemID, episodeID)
+}
+
+// GetWatchProgressForProfile scopes playback history to the validated viewing profile.
+func (q *Queries) GetWatchProgressForProfile(ctx context.Context, userID, actingProfileID, mediaItemID int64, episodeID *int64) (*models.WatchProgress, error) {
 	var wp models.WatchProgress
 	var err error
 
@@ -1793,15 +1814,15 @@ func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int6
 		err = q.pool.QueryRow(ctx, `
 			SELECT id, user_id, media_item_id, episode_id, position_ms, duration_ms, completed, updated_at, profile_id
 			FROM watch_progress WHERE user_id = $1 AND episode_id = $2
-			  AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)`,
-			userID, *episodeID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
+			  AND profile_id = $3`,
+			userID, *episodeID, actingProfileID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
 			&wp.PositionMs, &wp.DurationMs, &wp.Completed, &wp.UpdatedAt, &profileID)
 	} else {
 		err = q.pool.QueryRow(ctx, `
 			SELECT id, user_id, media_item_id, episode_id, position_ms, duration_ms, completed, updated_at, profile_id
 			FROM watch_progress WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL
-			  AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)`,
-			userID, mediaItemID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
+			  AND profile_id = $3`,
+			userID, mediaItemID, actingProfileID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
 			&wp.PositionMs, &wp.DurationMs, &wp.Completed, &wp.UpdatedAt, &profileID)
 	}
 	if err != nil {
@@ -1817,6 +1838,18 @@ func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int6
 // Used on the detail page to show "Resume at X:XX" for TV shows (since episode progress
 // is stored with episode_id, not at the show level).
 func (q *Queries) GetLatestEpisodeProgress(ctx context.Context, userID, mediaItemID int64) (*models.WatchProgress, error) {
+	profile, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, pgx.ErrNoRows
+	}
+	return q.GetLatestEpisodeProgressForProfile(ctx, userID, profile.ID, mediaItemID)
+}
+
+// GetLatestEpisodeProgressForProfile scopes playback history to the validated viewing profile.
+func (q *Queries) GetLatestEpisodeProgressForProfile(ctx context.Context, userID, actingProfileID, mediaItemID int64) (*models.WatchProgress, error) {
 	var wp models.WatchProgress
 	var profileID *int64
 	err := q.pool.QueryRow(ctx, `
@@ -1824,10 +1857,10 @@ func (q *Queries) GetLatestEpisodeProgress(ctx context.Context, userID, mediaIte
 		       wp.completed, wp.updated_at, wp.profile_id
 		FROM watch_progress wp
 		JOIN tv_episodes e ON e.id = wp.episode_id
-		WHERE wp.user_id = $1 AND wp.media_item_id = $2
+		WHERE wp.user_id = $1 AND wp.media_item_id = $2 AND wp.profile_id = $3
 		  AND wp.episode_id IS NOT NULL AND wp.completed = FALSE AND wp.position_ms > 0
 		ORDER BY wp.updated_at DESC LIMIT 1`,
-		userID, mediaItemID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
+		userID, mediaItemID, actingProfileID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
 		&wp.PositionMs, &wp.DurationMs, &wp.Completed, &wp.UpdatedAt, &profileID)
 	if err != nil {
 		return nil, err

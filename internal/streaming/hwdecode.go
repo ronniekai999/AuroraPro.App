@@ -44,6 +44,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -185,7 +186,7 @@ func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool, fps 
 			// outputs bt709 nv12.
 			vf = fmt.Sprintf("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709,scale_vaapi=w=%d:h=-2", width)
 		}
-		args := []string{"-c:v", "h264_vaapi", "-level", level, "-vf", vf}
+		args := []string{"-c:v", "h264_vaapi", "-level", strconv.Itoa(h264LevelIDC(height, fps)), "-vf", vf}
 		return append(args, h.policy().vaapiCompressionArgs()...)
 	}
 	return nil
@@ -207,7 +208,7 @@ func (h HWAccelInfo) FullGPUHEVCEncoderArgs(width, height int, hdrTonemap bool, 
 		if hdrTonemap {
 			vf = fmt.Sprintf("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709,scale_vaapi=w=%d:h=-2", width)
 		}
-		args := []string{"-c:v", "hevc_vaapi", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
+		args := []string{"-c:v", "hevc_vaapi", "-level", strconv.Itoa(hevcLevelIDC(height, fps)), "-vf", vf, "-tag:v", "hvc1"}
 		return append(args, h.policy().vaapiCompressionArgs()...)
 	}
 	return nil
