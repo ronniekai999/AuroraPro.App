@@ -1,0 +1,10 @@
+{
+  "sha": "f0ef93d28316e1f454cdea93c04910c7201a20b5",
+  "verdict": "clean",
+  "summary": "Fresh-context read-only adversarial review of the complete 71-file diff found zero actionable findings. Verified setup-android package argument semantics, current Google SDK metadata, Platform 36/Build Tools 35.0.0/AGP 8.13.2/Gradle 8.13/JDK 21 compatibility, retained API-28 TV emulator and all checks/reporting. Traced full-feature auth, profile, pagination/search, canonical episode progress, capability/track/seek/pause contracts, final-save ordering and session cleanup. Local Android workflow build/lint/unit/APK and Go build/uncached tests pass; repaired hosted run and physical device acceptance remain pending.",
+  "reviewer": "/root/android_tv_ci_fix_review",
+  "findings": "0",
+  "diff_digest": "a7781e8101930bf7fbbd537e45ee457d66e00d3bc8950a6f02592aab034a5304",
+  "branch": "feat/android-tv-foundation",
+  "recorded_at": "2026-10-10T21:28:29Z"
+}

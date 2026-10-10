@@ -44,6 +44,11 @@ type Queries struct {
 	// reached through the recount, which catches the same case first, so
 	// deleting the guard left every package green.
 	testHookInRetypeTxn func()
+
+	// Pauses after identifying a refresh token's user but before taking its
+	// lock. Scoped to this Queries instance and nil in production, so tests
+	// can commit account revocation at that exact interleaving without races.
+	testHookBeforeRefreshUserLock func()
 }
 
 func NewQueries(pool *pgxpool.Pool) *Queries {
@@ -448,6 +453,121 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, rt *models.RefreshToke
 		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
 		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo, rt.ActiveProfileID,
 	).Scan(&rt.ID, &rt.CreatedAt)
+}
+
+// CreateRefreshTokenAtVersion fences a pending device grant against
+// account-wide revocation. Both operations lock the user row first, so issuance
+// either precedes revocation (and is revoked by it) or observes the new version.
+func (q *Queries) CreateRefreshTokenAtVersion(ctx context.Context, rt *models.RefreshToken, expectedVersion int) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var version int
+	if err := tx.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1 FOR UPDATE`, rt.UserID).Scan(&version); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if version != expectedVersion {
+		return false, nil
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+		rt.UserID, hashToken(rt.Token), rt.ExpiresAt, rt.DeviceInfo, rt.ActiveProfileID,
+	).Scan(&rt.ID, &rt.CreatedAt); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RotateRefreshToken consumes and replaces a session under the same user lock
+// as account-wide revocation. Capture the identity before committing: a later
+// lookup could assign a post-revocation version to this pre-revocation session.
+// Role changes deliberately retain refresh sessions, so they use the fresh role
+// and version read under the lock. A missing/expired/consumed token returns nil.
+func (q *Queries) RotateRefreshToken(ctx context.Context, token string, replacement *models.RefreshToken) (*models.User, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	hashed := hashToken(token)
+	var userID int64
+	// Identify the lock without taking a token-row lock first. Revocation locks
+	// the user before its tokens; following that order avoids a deadlock.
+	if err := tx.QueryRow(ctx, `SELECT user_id FROM refresh_tokens WHERE token = $1 AND NOT revoked AND expires_at > NOW()`, hashed).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if q.testHookBeforeRefreshUserLock != nil {
+		q.testHookBeforeRefreshUserLock()
+	}
+	user := &models.User{}
+	if err := tx.QueryRow(ctx,
+		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
+			created_at, updated_at, token_version, oauth_provider, oauth_subject
+		 FROM users WHERE id = $1 FOR UPDATE`, userID,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Recheck after acquiring the user lock. A revocation or another rotation
+	// may have retired the token while the initial lookup was still visible.
+	if err := tx.QueryRow(ctx,
+		`UPDATE refresh_tokens SET revoked = TRUE
+		 WHERE token = $1 AND NOT revoked AND expires_at > clock_timestamp()
+		 RETURNING active_profile_id`, hashed,
+	).Scan(&replacement.ActiveProfileID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	replacement.UserID = user.ID
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+		replacement.UserID, hashToken(replacement.Token), replacement.ExpiresAt, replacement.DeviceInfo, replacement.ActiveProfileID,
+	).Scan(&replacement.ID, &replacement.CreatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// RevokeAllUserSessions changes the version and revokes renewable sessions in
+// one transaction, using the same user-row lock as issuance and rotation.
+func (q *Queries) RevokeAllUserSessions(ctx context.Context, userID int64) (int, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	var version int
+	if err := tx.QueryRow(ctx, `UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`, userID).Scan(&version); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 func (q *Queries) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {

@@ -439,20 +439,29 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomically revoke the old token and retrieve its data.
-	// This prevents TOCTOU races where two concurrent requests both succeed.
-	//
+	newRefreshStr, err := h.authSvc.GenerateRefreshToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
+		return
+	}
+	newRT := &models.RefreshToken{
+		Token:      newRefreshStr,
+		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
+		DeviceInfo: r.UserAgent(),
+	}
+	// Consume the old token, carry its acting-profile binding, and insert the
+	// replacement in one transaction under the account-revocation lock.
 	// Distinguish "DB error" from "token not found" so a flaky database
 	// doesn't mass-log-out every active user with a misleading 401. A real
 	// DB outage returns 500 (alertable, retried by clients); a legitimate
 	// revoked/expired token returns 401 (re-login).
-	rt, err := h.queries.RevokeAndGetRefreshToken(r.Context(), refreshTok)
+	user, err := h.queries.RotateRefreshToken(r.Context(), refreshTok, newRT)
 	if err != nil {
-		slog.Warn("refresh: RevokeAndGetRefreshToken DB error", "error", err)
+		slog.Warn("refresh: RotateRefreshToken DB error", "error", err)
 		writeError(w, http.StatusInternalServerError, "refresh failed")
 		return
 	}
-	if rt == nil {
+	if user == nil {
 		// Audit M-refresh — a token that hashes to nothing in the table was
 		// presented: either already-consumed (rotated away) or forged. Both
 		// are worth a theft signal so operators can alert on replay bursts.
@@ -468,35 +477,6 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 			"client_ip", clientIP(r))
 		h.clearAuthCookies(w, r)
 		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
-		return
-	}
-
-	user, err := h.queries.GetUserByID(r.Context(), rt.UserID)
-	if err != nil || user == nil {
-		// Don't distinguish "user was deleted" from "token revoked" to a
-		// holder of a previously-valid token. Same response either way.
-		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
-		return
-	}
-
-	newRefreshStr, err := h.authSvc.GenerateRefreshToken()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
-		return
-	}
-	newRT := &models.RefreshToken{
-		UserID:     user.ID,
-		Token:      newRefreshStr,
-		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
-		DeviceInfo: r.UserAgent(),
-		// Carry the acting-profile binding forward across rotation (issue
-		// #462) — access tokens are short-lived (15 min) and refresh
-		// silently in the background, so without this the user's active
-		// profile would revert to the account default every rotation.
-		ActiveProfileID: rt.ActiveProfileID,
-	}
-	if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
 		return
 	}
 
@@ -550,15 +530,9 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		// EVERY refresh token for the user, not just the one presented.
 		// RevokeAndGetRefreshToken above only consumed the submitted token,
 		// leaving other devices' refresh tokens live and renewable. Mirror
-		// the password-change path (ChangePassword) which already pairs
-		// RevokeAllUserTokens with BumpUserTokenVersion. Non-fatal on error:
-		// the submitted token IS already revoked, and the token_version bump
-		// below still neutralizes outstanding access tokens; operator sees
-		// the log.
-		if err := h.queries.RevokeAllUserTokens(r.Context(), rt.UserID); err != nil {
-			slog.Error("failed to revoke all refresh tokens on logout", "user_id", rt.UserID, "error", err)
-		}
-
+		// the password-change path: revoke sessions and bump the version in
+		// one transaction. On failure the submitted token is still revoked;
+		// log the error, preserving the existing idempotent logout response.
 		// Bump token_version so outstanding access AND cast-scoped tokens
 		// are invalidated immediately, not just on natural expiry. Without
 		// this, a long-lived cast URL (default 4h TTL) handed to a
@@ -570,8 +544,8 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		// matching the password-change path above. Multi-device users
 		// who want per-device logout would need a separate session-id
 		// concept, out of scope here.
-		if _, err := h.queries.BumpUserTokenVersion(r.Context(), rt.UserID); err != nil {
-			slog.Error("failed to bump token_version on logout", "user_id", rt.UserID, "error", err)
+		if _, err := h.queries.RevokeAllUserSessions(r.Context(), rt.UserID); err != nil {
+			slog.Error("failed to revoke sessions on logout", "user_id", rt.UserID, "error", err)
 			// Don't fail the logout — the refresh token IS revoked,
 			// which prevents session renewal. Access/cast tokens will
 			// expire naturally (15m / 4h). Operator will see the log.
@@ -667,13 +641,8 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	// silently logging the failure would leave a window where old tokens
 	// still work while the response says "updated" — exactly the scenario
 	// the user changed their password to escape.
-	if err := h.queries.RevokeAllUserTokens(r.Context(), claims.UserID); err != nil {
-		slog.Error("failed to revoke tokens after password change", "user_id", claims.UserID, "error", err)
-		writeError(w, http.StatusInternalServerError, "password updated but session revocation failed; contact admin")
-		return
-	}
-	if _, err := h.queries.BumpUserTokenVersion(r.Context(), claims.UserID); err != nil {
-		slog.Error("failed to bump token_version after password change", "user_id", claims.UserID, "error", err)
+	if _, err := h.queries.RevokeAllUserSessions(r.Context(), claims.UserID); err != nil {
+		slog.Error("failed to revoke sessions after password change", "user_id", claims.UserID, "error", err)
 		writeError(w, http.StatusInternalServerError, "password updated but session revocation failed; contact admin")
 		return
 	}

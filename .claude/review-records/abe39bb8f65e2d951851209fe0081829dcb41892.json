@@ -1,0 +1,10 @@
+{
+  "sha": "abe39bb8f65e2d951851209fe0081829dcb41892",
+  "verdict": "clean",
+  "summary": "Fresh-context read-only adversarial review of the complete 57-file Android TV client, device pairing/browser consent, cookie/profile/refresh/revocation flows, source-time playback and cancellation cleanup, CI, documentation, and tests. No actionable correctness or security defects. Inspected passing verification artifacts. Physical TV, hardware HDR/audio, extended network/expiry/sleep/process-death, configured OAuth, and hosted CI remain verification gaps.",
+  "reviewer": "/root/tv_verified_diff_review",
+  "findings": "0",
+  "diff_digest": "2213e06424a1f0c91d9c74ff4b4fe608704d0c2e0ceef7073f66aaf059dd8af1",
+  "branch": "feat/android-tv-foundation",
+  "recorded_at": "2026-10-10T09:59:37Z"
+}

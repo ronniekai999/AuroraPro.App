@@ -1,0 +1,59 @@
+# Android TV feature parity checklist
+
+The first implementation is an installable native login-to-playback client.
+Full web parity remains the release gate in [the delivery plan](android-tv-plan.md).
+Target: a TV with built-in Android TV, initially Android TV 9+ and Google TV.
+
+**Status:** implemented means the operation is connected in the first client;
+device acceptance remains pending until exercised on the user's TV. Planned
+actions have an assigned milestone and must retain their existing role and
+profile restrictions. Optional integrations retain their configured availability.
+
+| User action | Server contract / existing source of truth | Role | TV status |
+| --- | --- | --- | --- |
+| Connect server; password login; refresh; logout | `/api/health`, `/api/auth/login`, `/refresh`, `/logout`, `/me` | All accounts | Implemented; encrypted cookies; account-wide logout disclosed |
+| Sign in through existing OAuth providers | Browser OAuth + `/api/auth/device/*`, `/v2/device` | All accounts | Implemented browser-assisted pairing |
+| Choose an existing profile | `/api/profiles/`, `/{id}/activate` | Profile owner | Implemented; saved avatar/orb; session-bound activation precedes browsing |
+| Create/edit/delete profiles; language, captions, rating ceiling, avatar, taste setup | Profile handlers; web Settings/profile onboarding | Profile owner | Milestone 4; existing playback preferences read now |
+| View Home, recent additions, Continue Watching, hero recommendations | `/api/media/recent`, `/api/progress/continue`, `/api/me/hero` with profile ID | All accounts | Implemented basic Home; optional hero can be unavailable |
+| Browse/search titles; open details and versions | `/api/media/`, `/search`, `/{id}`, `/{id}/files` | All accounts; rating ceiling applies | Implemented pagination, sorting, genre/type filters, debounced search and Aurora details |
+| Navigate seasons, specials and episodes | `/{id}/seasons`, `/{id}/seasons/{season}/episodes`, `/episodes/{id}/files` | All accounts; rating ceiling applies | Implemented; season zero follows numbered seasons |
+| Resume a show; choose next unfinished episode | `/api/media/{id}/next-episode`; profile-specific progress | All accounts | Implemented manual continuation; auto-advance in 2 |
+| Play/pause/seek/resume; leave or sleep | Stream-info, direct byte-range and HLS session handlers | All accounts; server authorization remains enforced | Implemented; source-time progress; real-device codec/lifecycle gate pending |
+| Select audio and subtitles | Stream-info tracks; profile prefs; direct embedded tracks and HLS manifests | All accounts | Basic native track controls; full language/forced/bitmap handling in 2 |
+| Select quality, skip intro/credits, playback preferences and diagnostics | Web player, stream markers, QoE and diagnostics APIs | All accounts | Quality and source/output/decoder diagnostics implemented; skip markers, persistent preferences and QoE in 2 |
+| Mark watched/unwatched; ratings and feedback | Progress and rating handlers | All accounts | Milestone 2; automatic playback progress implemented |
+| Save/remove titles; saved Library and watchlists | Profile library/watchlist handlers; LibraryView | Profile owner | Milestone 2 |
+| Create/edit/delete/reorder collections; add/remove/share titles | Collection handlers and CollectionsView | Owner; shared reads as allowed | Milestone 2 |
+| Discover personalized picks, refresh heroes and recommendation feedback | Recommendation handlers; web Home/search rails | All accounts; integration availability | Milestone 2; first hero read implemented |
+| Request a movie/show; inspect status; cancel eligible requests | Request handlers; RequestsView; configured ARR integrations | Member / owner | Milestone 3 |
+| Approve/deny/manage requests; choose server libraries/quality | Admin request and ARR handlers | Administrator | Milestone 3 |
+| View upcoming episodes; month/list navigation; open title | Calendar handlers; CalendarView | All accounts | Milestone 3 |
+| Host/create/join/leave/end a watch party; schedule or restart it | Party handlers; V3 lifecycle and two authenticated sockets | Party participant / host | Milestone 3 |
+| Pick party media/version/episode; play/pause/seek with host rules | V3 identity/revision/state/clock contracts; source-time mapping | Party participant / host | Milestone 3; shared playback timeline foundation exists |
+| Invite friends; accept/decline/maybe; inspect invitations and lobby | Party invite handlers; web party calendar/inbox | Invitee / host | Milestone 3 |
+| Party chat, reactions, participant state and supported voice | Party messages/reactions/sockets; voice ICE configuration | Party participant | Milestone 3; voice/hardware compatibility decision in 4 |
+| Notifications, read state, deep links and device push preferences | Notification/push handlers; web notification inbox | Recipient | Milestone 3 |
+| Member directory, profiles, follow/unfollow and social activity | Social handlers; MembersView/UserProfileView | All accounts; privacy rules | Milestone 4 |
+| Recap catch-up; ask a question; save/share or react to results | Recap handlers and dialogs; optional AI integration | All accounts; configuration/permissions | Milestone 4 |
+| Achievements, referrals, invitations, account links and sharing | Existing achievement/referral/invite/QR handlers | Account owner / permitted issuer | Milestone 4 |
+| Account settings, password, avatar, linked OAuth identities and support | Auth/account/feedback handlers; SettingsView | Account owner | Milestone 4 |
+| Appearance, accessibility, notification and playback settings | Web preference model plus native device preferences | Account/device owner | Milestone 4; TV focus/theme foundation implemented |
+| Dashboard, users/roles, invites and account administration | Admin handlers and AdminView | Administrator | Milestone 4 |
+| Libraries, scanning, paths, metadata matches, rematches and health | Library, scanner, matching and health handlers | Administrator | Milestone 4 |
+| Server settings, integrations, AI/search and recommendation configuration | Admin settings / LLM / ARR handlers | Administrator | Milestone 4 |
+| Active streams, sessions, jobs, logs and activity | Session/admin/activity handlers | Administrator | Milestone 4 |
+| Backups, restore, updates and destructive maintenance | Existing admin/operator APIs and confirmation contracts | Administrator | Milestone 4; preview/confirmation required by each operation |
+| TV launcher, remote accessibility, memory/performance, signing and distribution | Android manifest, native focus/MediaSession, Android build/release | Device owner / release operator | Debug launcher/build and CI implemented; release validation in 5 |
+
+The web remains the contract source for actions within each row. Before closing
+a row, enumerate its concrete buttons/forms and conditional states from the
+named view and handler, exercise every one for applicable roles, and record
+normal, disabled-integration, error and recovery results. An API helper existing
+does not prove its TV action exists. No row marked planned is represented as
+available by a placeholder TV destination.
+
+Playback and authentication checks must include a normal member, administrator,
+restricted profile, changed password, server restart and revoked session. Party
+acceptance requires mixed web/TV participants and the existing paused-room
+invariants; the first solo-player APK does not validate party synchronization.

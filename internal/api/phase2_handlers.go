@@ -1864,7 +1864,10 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		"source_height":     session.SourceHeight,
 		"remux":             session.Remux,
 		"audio_passthrough": session.AudioPassthrough,
-		"start_sec":         session.StartSec,
+		// AudioPassthrough is the full-transcode flag; remux has a separate
+		// copy flag. Expose the effective fact without changing the old field.
+		"audio_copy": session.RemuxAudioCopy || session.AudioPassthrough,
+		"start_sec":  session.StartSec,
 	})
 }
 
