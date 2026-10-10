@@ -1,0 +1,10 @@
+{
+  "sha": "f2b27b83cc7fb8e85ba4ec2fe08cd6e4c3910f8e",
+  "verdict": "clean",
+  "summary": "Fresh-context read-only review of all 70 changed files against 79153d6 found no actionable defects. Traced pairing consent/expiry/revocation, cookie refresh and origin/profile isolation, aggregated episode versions with canonical progress, decoder/track eligibility, source-time/pause/remote behavior, serialized replacement, final progress ordering, cancelled loads and session cleanup. Frozen final APK passed 33 unit tests, four focused native regressions and the complete 20-test native suite; physical TV 4K/HDR/audio, actual Young Frankenstein, OAuth and extended recovery remain acceptance gaps.",
+  "reviewer": "/root/tv_refinement_delivery_review",
+  "findings": "0",
+  "diff_digest": "313800e04d536b830d2fde595a93e4e407b6e1c0f9936041b8f1ba38fded2773",
+  "branch": "feat/android-tv-foundation",
+  "recorded_at": "2026-10-10T21:05:58Z"
+}
