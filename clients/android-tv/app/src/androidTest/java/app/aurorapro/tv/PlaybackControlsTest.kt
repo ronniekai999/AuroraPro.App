@@ -96,6 +96,45 @@ class PlaybackControlsTest {
     @Test fun exitDuringDelayedSeekDeletionSavesThePlayedPositionRatherThanTheUnconfirmedSeek() =
         exitDuringReplacement("DELETE", seek = true)
 
+    @Test fun periodicAndFinalSavesDuringReplacementPlaylistLoadingKeepThePlayedCheckpoint() =
+        exitBeforeReplacementReady("PLAYLIST")
+
+    @Test fun periodicAndFinalSavesDuringReplacementSegmentLoadingKeepThePlayedCheckpoint() =
+        exitBeforeReplacementReady("SEGMENT")
+
+    @Test fun periodicAndFinalSavesAfterReplacementPlaylistFailureKeepThePlayedCheckpoint() =
+        exitBeforeReplacementReady("FAILED_PLAYLIST")
+
+    private fun exitBeforeReplacementReady(blockedStage: String) = withPlayer(blockedStage) { fixture ->
+        remote(KeyEvent.KEYCODE_MEDIA_PAUSE)
+        var playedPosition = 0L
+        compose.runOnIdle { playedPosition = 28_000 + fixture.view.player!!.currentPosition }
+        compose.onNodeWithContentDescription("Playback timeline")
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(.99f) }
+        compose.waitUntil(30_000) { fixture.replacementStarted.count == 0L }
+        assertEquals(2, fixture.sessions().size)
+        compose.runOnIdle { assertNotEquals(Player.STATE_READY, fixture.view.player!!.playbackState) }
+        if (blockedStage == "FAILED_PLAYLIST") compose.waitUntil(30_000) {
+            compose.onAllNodesWithText("Playback stopped. Check your connection, then choose Retry.").fetchSemanticsNodes().isNotEmpty()
+        }
+        fun assertCheckpoint() {
+            val saved = apiJson.parseToJsonElement(fixture.requests.last { it.method == "PUT" }.body.clone().readUtf8()).jsonObject
+            val checkpoint = saved["position_ms"]!!.jsonPrimitive.content.toLong()
+            assertTrue("A successful session POST cannot commit the unplayable 99% seek", checkpoint in playedPosition..(playedPosition + 2000))
+            assertEquals(360_000L, saved["duration_ms"]!!.jsonPrimitive.content.toLong())
+        }
+        val previousSaves = fixture.requests.count { it.method == "PUT" }
+        compose.mainClock.advanceTimeBy(16_000)
+        compose.waitUntil(20_000) { fixture.requests.count { it.method == "PUT" } > previousSaves }
+        assertCheckpoint()
+        val periodicSaves = fixture.requests.count { it.method == "PUT" }
+        choose("Back to title")
+        compose.waitUntil(20_000) { fixture.requests.count { it.method == "PUT" } > periodicSaves }
+        assertCheckpoint()
+        fixture.replacementGate.countDown()
+        compose.waitUntil(20_000) { fixture.requests.count { it.method == "DELETE" } == 2 }
+    }
+
     private fun exitDuringReplacement(blockedMethod: String, seek: Boolean) = withPlayer(blockedMethod) { fixture ->
         remote(KeyEvent.KEYCODE_MEDIA_PAUSE)
         var playedPosition = 0L
@@ -159,8 +198,15 @@ class PlaybackControlsTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     requests += request
+                    val replacementMedia = request.path!!.startsWith("/api/stream/hls/controls-2/")
+                    if (replacementMedia && blockReplacement == "FAILED_PLAYLIST") {
+                        replacementStarted.countDown()
+                        return MockResponse().setResponseCode(404)
+                    }
                     if ((blockReplacement == "DELETE" && request.method == "DELETE" && request.path == "/api/stream/sessions/controls-1") ||
-                        (blockReplacement == "POST" && request.path == "/api/stream/sessions" && sessions().size == 2)) {
+                        (blockReplacement == "POST" && request.path == "/api/stream/sessions" && sessions().size == 2) ||
+                        (replacementMedia && blockReplacement == "PLAYLIST" && request.path!!.endsWith("master.m3u8")) ||
+                        (replacementMedia && blockReplacement == "SEGMENT" && request.path!!.endsWith(".ts"))) {
                         replacementStarted.countDown()
                         replacementGate.await(30, TimeUnit.SECONDS)
                     }

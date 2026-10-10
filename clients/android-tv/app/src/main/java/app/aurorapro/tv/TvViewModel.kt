@@ -51,6 +51,7 @@ data class TvState(
 )
 
 class TvViewModel(application: Application) : AndroidViewModel(application) {
+    private data class PlaybackRefresh(val target: PlayTarget, val episode: Episode?)
     private val preferences = application.getSharedPreferences("aurora_tv", 0)
     private val mutable = MutableStateFlow(TvState(server = preferences.getString("server", "").orEmpty()))
     val state = mutable.asStateFlow()
@@ -59,6 +60,8 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     private var job: Job? = null
     private var operationSequence = 0L
     private var returnPage = Page.HOME
+    private var pendingPlaybackSave: Job? = null
+    private var pendingPlaybackRefresh: PlaybackRefresh? = null
     var focusedMediaKey: String? = null
 
     init { if (state.value.server.isNotEmpty()) connect(state.value.server) }
@@ -84,6 +87,8 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(address: String) = perform {
+        pendingPlaybackSave = null
+        pendingPlaybackRefresh = null
         val origin = serverAddress(address)
         client?.disconnect()
         client = null
@@ -106,6 +111,8 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun newAuthenticationAttempt(): AuroraClient {
+        pendingPlaybackSave = null
+        pendingPlaybackRefresh = null
         val previous = requireNotNull(client)
         previous.disconnect()
         val api = withContext(Dispatchers.IO) { previous.nextSession() }
@@ -145,6 +152,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.busy) return
         perform {
             val api = requireNotNull(client)
+            pendingPlaybackRefresh = null
             // Once activation starts, its server outcome may be uncertain on a
             // network failure. Do not return to content labelled with the old
             // profile; remain at the picker until a selection is acknowledged.
@@ -152,6 +160,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
                 query = "", searchKind = "all", browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList()) }
             api.activate(profile)
             update { it.copy(page = Page.HOME, profile = profile) }
+            awaitPlaybackSave()
             val home = api.home(profile.id)
             update { it.copy(home = home) }
         }
@@ -162,7 +171,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         update { it.copy(page = page, profileReturnPage = if (page == Page.PROFILES) it.page else null, target = null, error = null) }
         val api = requireNotNull(client)
         when (page) {
-            Page.HOME -> { val home = api.home(profile.id); update { it.copy(home = home) } }
+            Page.HOME -> { awaitPlaybackSave(); val home = api.home(profile.id); update { it.copy(home = home) } }
             Page.MOVIES, Page.SHOWS -> {
                 update { it.copy(items = emptyList(), browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList()) }
                 loadBrowse(1)
@@ -207,10 +216,12 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun detail(media: Media) = perform {
+        pendingPlaybackRefresh = null
         returnPage = state.value.page
         update { it.copy(page = Page.DETAIL, detail = media, files = emptyList(), seasons = emptyList(),
             episodes = emptyList(), episode = null, suggestedEpisode = null, season = null) }
         val api = requireNotNull(client)
+        awaitPlaybackSave()
         val detail = api.media(media.id)
         update { it.copy(detail = detail) }
         if (detail.isShow) {
@@ -268,11 +279,69 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         update { it.copy(page = Page.PLAYER, target = PlayTarget(media, file, profile, snapshot.episode?.id, resume)) }
     }
     fun play(file: MediaFile, restart: Boolean = false) = perform { preparePlayback(file, restart) }
+
+    private suspend fun awaitPlaybackSave() {
+        val pending = pendingPlaybackSave ?: return
+        pending.join()
+        if (pendingPlaybackSave === pending) pendingPlaybackSave = null
+    }
+
+    fun playbackClosed(finalProgressSaved: Job) {
+        if (state.value.page != Page.PLAYER) return
+        // The player completes this after disposal saves its last playable
+        // checkpoint. Retain the barrier if Back cancels the detail refresh.
+        pendingPlaybackSave = finalProgressSaved
+        back()
+    }
+
+    private fun returnFromPlayback(refresh: PlaybackRefresh) = perform {
+        val target = refresh.target
+        pendingPlaybackRefresh = refresh
+        val snapshot = state.value
+        val api = requireNotNull(client)
+        update { it.copy(page = Page.DETAIL, profileReturnPage = null, target = null, suggestedEpisode = null, home = null) }
+        awaitPlaybackSave()
+        val progress = api.progress(target.media.id, target.profile.id, target.episodeId)
+        val detail = api.media(target.media.id).copy(userProgress = progress)
+        val episodes = if (detail.isShow && snapshot.season != null) api.episodes(detail.id, snapshot.season) else snapshot.episodes
+        val episode = snapshot.episode?.let { selected ->
+            (episodes.firstOrNull { it.id == selected.id } ?: selected).let {
+                if (it.id == target.episodeId) it.copy(progress = progress) else it
+            }
+        }
+        // Keep a partially watched later episode ahead of skipped specials or
+        // earlier episodes. A completed episode must use the server's next one.
+        val playedEpisode = episodes.firstOrNull { it.id == target.episodeId } ?: refresh.episode
+        val next = if (detail.isShow) {
+            if (!progress.completed && playedEpisode != null) playedEpisode.copy(progress = progress) else api.nextEpisode(detail.id)
+        } else null
+        val home = api.home(target.profile.id)
+        // Preserve the selected version, season, and saved detail focus.
+        update { it.copy(detail = detail, episodes = episodes, episode = episode, suggestedEpisode = next, home = home) }
+        pendingPlaybackRefresh = null
+    }
+
     fun back() {
         if (state.value.signingOut) return
         // Consume Back during activation instead of cancelling a request that
         // can still commit remotely. An idle picker can return without mutation.
         if (state.value.page == Page.PROFILES && state.value.busy) return
+        state.value.target?.takeIf { state.value.page == Page.PLAYER }?.let {
+            returnFromPlayback(PlaybackRefresh(it, state.value.episode)); return
+        }
+        val destination = when (state.value.page) {
+            Page.DETAIL -> returnPage
+            Page.PROFILES -> state.value.profileReturnPage
+            Page.MOVIES, Page.SHOWS, Page.SEARCH -> Page.HOME
+            else -> null
+        }
+        if (destination == Page.HOME && (state.value.home == null || pendingPlaybackSave != null)) {
+            navigate(Page.HOME); return
+        }
+        // Visiting Profiles cancels the foreground refresh. Returning without
+        // switching profiles still owes this detail a refresh, even if its
+        // progress save had already finished before cancellation.
+        if (destination == Page.DETAIL) pendingPlaybackRefresh?.let { returnFromPlayback(it); return }
         operationSequence++
         job?.cancel()
         update { it.copy(page = when (it.page) {
@@ -290,9 +359,13 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.page == Page.PROFILES && state.value.busy) return
         operationSequence++
         job?.cancel()
+        pendingPlaybackSave = null
+        pendingPlaybackRefresh = null
         update { TvState(server = it.server) }
     }
     fun signOut() = perform {
+        pendingPlaybackSave = null
+        pendingPlaybackRefresh = null
         val previous = requireNotNull(client)
         update { it.copy(signingOut = true) }
         try { previous.logout() }

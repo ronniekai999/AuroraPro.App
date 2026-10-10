@@ -94,7 +94,7 @@ internal fun AuroraApp(vm: TvViewModel = viewModel()) {
         (state.page != Page.PROFILES || state.profileReturnPage != null || state.busy)) { vm.back() }
     val api = vm.client
     if (state.page == Page.PLAYER && state.target != null && api != null) {
-        PlayerScreen(api, state.target!!, onClose = vm::back)
+        PlayerScreen(api, state.target!!, onClose = vm::playbackClosed)
         return
     }
     Box(Modifier.fillMaxSize().auroraBackground()) {
@@ -501,8 +501,8 @@ private fun DetailScreen(state: TvState, api: AuroraClient?, vm: TvViewModel) {
             if (key in setOf("play", "continue", "start", "back")) scope.launch { scroll.animateScrollToItem(0) }
         } }
     }
-    LaunchedEffect(Unit) {
-        if (detailFocusKey == "episode-play" && file != null && !state.busy) {
+    LaunchedEffect(state.busy) {
+        if (restoreFocus && detailFocusKey == "episode-play" && file != null && !state.busy) {
             episodePlayFocus.requestFocus()
             restoreFocus = false
         }
