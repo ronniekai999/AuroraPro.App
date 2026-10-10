@@ -2,7 +2,8 @@
 
 Native Kotlin, Compose for TV, and Media3 client for built-in Android TVs and
 Google TV devices. Minimum Android version: **9 / API 28**. This is the first
-login-to-playback build in the [approved delivery plan](../../docs/android-tv-plan.md).
+login-to-playback client in the [approved delivery plan](../../docs/android-tv-plan.md),
+with the Aurora design and playback refinements in version **0.2.0**.
 The remaining web features are tracked in [the parity checklist](../../docs/android-tv-parity.md).
 
 ## Build and install
@@ -43,21 +44,48 @@ server or media library.
 ## Available in this build
 
 - Server connection and password sign-in, or phone/browser approval by QR/code.
-- Existing profile selection and server-side session activation.
+- Existing profile selection with saved Aurora nebula orbs/custom images, and
+  server-side session activation.
 - Home recommendations when enabled, Recently Added, and Continue Watching.
-- Basic movie/show browsing, library search, movie versions, seasons, and episodes.
+- Paginated movie/show browsing, sorting and genre filters; debounced search with
+  movie/show filters, keyboard Search and platform voice input where available.
+- Aurora movie/show details, accurately labelled movie versions, seasons and
+  episode artwork/progress, with next-episode continuation and restored focus.
 - Direct playback when the device reports support, HLS remux/transcode, and a
   bounded H.264/AAC fallback for decoder/container errors.
-- Native playback controls and track selection, source-time ±30-second seeking,
+- A single Aurora playback overlay that hides after five seconds while playing;
+  source-time timeline and ±30-second seeking, audio/subtitle/quality settings,
   profile/episode progress, resume, and HLS keepalive/deletion.
+- Playback information that separates probed source dimensions, decoded output,
+  active decoder and the server's direct/remux/transcode decision and reason.
 - Encrypted persistent cookies in Android Keystore, origin isolation, and
   coordinated cookie refresh.
 
 `Play / Resume` reads the selected profile's progress. `Start over` starts at
-zero. Show details offer the next unfinished episode as well as manual season
-and episode selection. Stop/sleep pauses playback; leaving the player flushes
-progress and cleans up its HLS session. Returning from sleep leaves playback
+zero. Continue Watching resumes its listed episode even if earlier episodes are
+unfinished. Other show details offer the next unfinished episode as well as manual
+season and episode selection. Episode choices retain versions from matching
+libraries, including when the selected show's episode has metadata but no local file.
+Stop/sleep pauses playback; leaving the player flushes
+progress and cleans up its HLS session. Leaving during a pending quality change
+or long seek saves the last playable position, before the unconfirmed replacement.
+Returning from sleep leaves playback
 paused until the viewer resumes it.
+
+D-pad/OK reveals hidden player controls without activating an invisible button.
+Pause, scrubbing and open settings keep controls visible. Back dismisses settings,
+then the overlay, before returning to the title. Media transport keys work while
+the overlay is hidden. HLS quality changes replace the session at the source
+position and preserve pause and track selections; available tiers come from the
+actual supported stream tracks. Direct playback offers Original. Player settings
+stay in the video window so older TVs do not have to composite a separate dialog
+window over the video surface.
+
+Source dimensions come from scanned `resolution` metadata, not `version_tag`.
+A stored "720p" edition tag cannot label a 1918×1038 source as 720p. Refresh
+missing dimensions/profile/frame-rate metadata on the server before expecting a
+device capability decision. A 4K emulator display does not establish a hardware
+HEVC decoder; the information panel explains conservative compatibility playback.
 
 Signing out uses Aurora's existing **account-wide logout**. Its confirmation
 states this before sending the request. Changing the server only changes this
@@ -68,6 +96,9 @@ client's connection and does not revoke other devices.
 Pairing requires the backend and web changes from this branch. Password sign-in
 can use the existing cookie-auth API. Deploy the reviewed server/web build
 before testing phone approval.
+Older servers return a clear update/password message in the TV app when pairing
+routes are missing, instead of a generic HTTP 404. New/expired codes and temporary
+connection loss remain retryable. This client update does not deploy the server.
 
 | Endpoint | Authentication | Behavior |
 | --- | --- | --- |
@@ -113,12 +144,23 @@ offset. An HLS seek outside the available playlist starts a new session and
 deletes the previous one. The visible source clock uses the source duration,
 not the length of a growing playlist.
 
-This build has a basic browse page, native track controls, and manual episode
-continuation. Complete pagination/filtering, quality controls, skip markers,
-bitmap subtitle burn-in, automated episode advance, library saves/collections,
+This build includes paginated browsing/filtering, playback quality and track
+controls, and manual episode continuation. Skip markers, bitmap subtitle
+burn-in, automated episode advance, library saves/collections,
 requests, calendar, watch parties, notifications, social, and administration
 remain in later milestones. Track selection is limited to tracks the chosen
-direct file/HLS manifest exposes. This APK is a sideloaded debug build, not a
+direct file/HLS manifest exposes. A manually selected original-file audio track
+is matched to scanned language, codec, channels and title before compatibility
+fallback. If that metadata cannot identify one track, playback asks for Automatic
+audio rather than silently switching languages. Search returns up to the server's
+supported maximum of 50 results per query.
+Returning mapped audio to Automatic replaces its HLS session at the source
+position. Manual captions match across containers by language and meaningful
+track properties; unavailable or ambiguous replacements disable captions and
+offer a visible Settings message instead of choosing another track.
+Progress reads and writes share a profile/title/episode lock across players,
+so reopening waits for the preceding player's final save.
+This APK is a sideloaded debug build, not a
 signed production release.
 
 ## First device acceptance run

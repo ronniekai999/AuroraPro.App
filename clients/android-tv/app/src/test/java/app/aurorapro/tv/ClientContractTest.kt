@@ -29,6 +29,70 @@ class MemoryCookies : CookiePersistence {
 }
 
 class ClientContractTest {
+    @Test fun searchUsesTheSupportedServerLimitRatherThanFallingBackToTwenty(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setBody("[]"))
+            val client = AuroraClient(server.url("/"), SessionCookies(server.url("/"), MemoryCookies()))
+            client.search("Aurora", 7)
+            val url = server.takeRequest().requestUrl!!
+            assertEquals("/api/media/search", url.encodedPath)
+            assertEquals("50", url.queryParameter("limit"))
+            assertEquals("7", url.queryParameter("profile_id"))
+        }
+    }
+
+    @Test fun paginatedBrowseKeepsFiltersCountsAndOlderArrayResponses(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val client = AuroraClient(server.url("/"), SessionCookies(server.url("/"), MemoryCookies()))
+            server.enqueue(MockResponse().setBody("""{"data":[{"id":41,"title":"Second page"}],"page":2,"total_items":41,"total_pages":2}"""))
+            val page = client.browsePage("movie", 7, 2, "title", "Science Fiction")
+            assertEquals(41L, page.data.single().id)
+            assertEquals(2, page.page)
+            assertEquals(41L, page.totalItems)
+            assertEquals(2, page.totalPages)
+            val url = server.takeRequest().requestUrl!!
+            assertEquals("2", url.queryParameter("page"))
+            assertEquals("40", url.queryParameter("per_page"))
+            assertEquals("7", url.queryParameter("profile_id"))
+            assertEquals("title", url.queryParameter("sort_by"))
+            assertEquals("Science Fiction", url.queryParameter("genre"))
+            server.enqueue(MockResponse().setBody("""[{"id":1,"title":"Older server"}]"""))
+            assertEquals(1L, client.browsePage("movie", 7).totalItems)
+            server.enqueue(MockResponse().setBody("null"))
+            assertTrue(client.browsePage("movie", 7).data.isEmpty())
+        }
+    }
+
+    @Test fun unsupportedPhonePairingExplainsServerUpdateAndPreservesErrorStatus(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val client = AuroraClient(server.url("/"), SessionCookies(server.url("/"), MemoryCookies()))
+            for (status in listOf(404, 405)) {
+                server.enqueue(MockResponse().setResponseCode(status))
+                val error = runCatching { client.beginPairing() }.exceptionOrNull() as AuroraException
+                assertEquals(status, error.status)
+                assertTrue(error.message.orEmpty().contains("update on your AuroraPro server"))
+                assertTrue(error.message.orEmpty().contains("password"))
+            }
+            server.enqueue(MockResponse().setResponseCode(503).setBody("""{"error":"Server is starting"}"""))
+            assertEquals("Server is starting", runCatching { client.beginPairing() }.exceptionOrNull()?.message)
+        }
+    }
+
+    @Test fun pairingRejectsInvalidCodesAndForeignApprovalUrls(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val client = AuroraClient(server.url("/"), SessionCookies(server.url("/"), MemoryCookies()))
+            for ((uri, code, expiry) in listOf(Triple("https://other.example/device", "secret", 600),
+                Triple("/device", "", 600), Triple("/device", "secret", 0))) {
+                server.enqueue(MockResponse().setBody("""{"device_code":"$code","user_code":"ABCD-EFGH","verification_uri":"$uri","expires_in":$expiry}"""))
+                assertTrue(runCatching { client.beginPairing() }.exceptionOrNull() is IllegalArgumentException)
+            }
+        }
+    }
+
     @Test fun serverNormalizationAndOriginIsolation() {
         assertEquals("https://aurora.example/", serverAddress("aurora.example/v2/").toString())
         assertEquals("http://192.168.1.2:8080/", serverAddress("http://192.168.1.2:8080").toString())

@@ -2,6 +2,7 @@ package app.aurorapro.tv.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 @Serializable
 data class User(val id: Long, val username: String, val role: String = "user")
@@ -18,6 +19,7 @@ data class Profile(
     @SerialName("subtitle_lang") val subtitleLang: String = "",
     @SerialName("subtitle_mode") val subtitleMode: String = "off",
     @SerialName("max_age_rating") val maxAgeRating: String = "",
+    @SerialName("avatar_url") val avatarUrl: String = "",
 )
 
 @Serializable
@@ -33,6 +35,9 @@ data class Media(
     @SerialName("backdrop_path") val backdropPath: String = "",
     val genres: List<String> = emptyList(),
     @SerialName("user_progress") val userProgress: Progress? = null,
+    @SerialName("runtime_minutes") val runtimeMinutes: Int = 0,
+    // Continue Watching supplies this hint; the detail endpoint does not.
+    @Transient val resumeSeason: Int? = null,
 ) {
     val isShow: Boolean get() = type == "show"
 }
@@ -53,7 +58,8 @@ data class MediaFile(
 )
 
 @Serializable
-data class Season(@SerialName("season_number") val number: Int, val title: String = "")
+data class Season(@SerialName("season_number") val number: Int, val title: String = "",
+    @SerialName("episode_count") val episodeCount: Int = 0, val id: Long = 0)
 
 @Serializable
 data class Episode(
@@ -61,6 +67,12 @@ data class Episode(
     @SerialName("episode_number") val number: Int = 0,
     val title: String = "",
     val overview: String = "",
+    @SerialName("season_number") val season: Int? = null,
+    @SerialName("season_id") val seasonId: Long = 0,
+    @SerialName("still_path") val stillPath: String = "",
+    @SerialName("runtime_minutes") val runtimeMinutes: Int = 0,
+    val progress: Progress? = null,
+    val files: List<MediaFile> = emptyList(),
 )
 
 @Serializable
@@ -85,8 +97,14 @@ data class ContinueItem(
     @SerialName("episode_number") val episode: Int? = null,
 ) {
     fun media() = Media(id = mediaId, title = title, type = type,
-        posterPath = posterPath, backdropPath = backdropPath)
+        posterPath = posterPath, backdropPath = backdropPath, userProgress = Progress(positionMs, durationMs, episodeId = episodeId),
+        resumeSeason = season)
 }
+
+@Serializable
+data class MediaPage(val data: List<Media> = emptyList(), val page: Int = 1,
+    @SerialName("total_items") val totalItems: Long = 0,
+    @SerialName("total_pages") val totalPages: Int = 1)
 
 @Serializable
 data class HeroPick(val item: Media, val reason: String = "", val match: Int = 0)
@@ -114,6 +132,8 @@ data class StreamDecision(
     @SerialName("video_codec") val videoCodec: String = "",
     @SerialName("hdr_tonemap") val hdrTonemap: Boolean = false,
     val remux: Boolean = false,
+    @SerialName("transcode_reason") val transcodeReason: String = "",
+    @SerialName("reason_code") val reasonCode: String = "",
 )
 
 @Serializable
@@ -127,14 +147,22 @@ data class Subtitle(
 )
 
 @Serializable
-data class AudioTrack(val index: Int, val language: String = "", val codec: String = "")
+data class AudioTrack(val index: Int, val language: String = "", val codec: String = "",
+    val channels: Int = 0, val title: String = "")
 
 @Serializable
 data class StreamSession(
     @SerialName("session_id") val id: String,
     @SerialName("master_playlist") val playlist: String,
     @SerialName("start_sec") val startSec: Long = 0,
+    val profiles: List<QualityProfile> = emptyList(),
+    val remux: Boolean? = null,
+    @SerialName("audio_passthrough") val audioPassthrough: Boolean? = null,
+    @SerialName("audio_copy") val audioCopy: Boolean? = null,
 )
+
+@Serializable
+data class QualityProfile(val name: String, val width: Int, val height: Int)
 
 @Serializable
 data class DeviceGrant(

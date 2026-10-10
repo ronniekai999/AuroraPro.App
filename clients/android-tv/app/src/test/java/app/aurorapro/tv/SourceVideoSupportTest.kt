@@ -7,6 +7,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SourceVideoSupportTest {
+    @Test fun matching4kHardwareIsNotCappedAt720pAndHdrSupportIsStillRequired() {
+        val source = MediaFile(1, videoCodec = "hevc", videoProfile = "Main 10", videoPixFmt = "yuv420p10le",
+            resolution = "3840x2160", videoFps = 24.0, colorTransfer = "smpte2084")
+        val hardware = PlaybackDecoder(profiles = setOf(CodecProfileLevel.HEVCProfileMain10), hardwareAccelerated = true,
+            supportsVideo = { width, height, fps -> width <= 3840 && height <= 2160 && fps <= 60 })
+        fun caps(file: MediaFile, hdr: Boolean) = playbackCapabilities(file, hdr) { mime ->
+            if (mime == "video/hevc") listOf(hardware) else emptyList()
+        }.split(',').toSet()
+        assertTrue("A compatible 4K source retains original HEVC capability", "hevc_main10" in caps(source, true))
+        assertFalse("A 4K display cannot bypass missing HDR support", "hevc" in caps(source, false))
+        assertFalse("Frame-rate limits still apply", "hevc" in caps(source.copy(videoFps = 120.0), true))
+    }
+
     @Test fun secureOrTunneledOnlyDecodersCannotEstablishPlaybackSupport() {
         val source = MediaFile(1, videoCodec = "hevc", videoProfile = "Main 10", videoPixFmt = "yuv420p10le",
             resolution = "1920x1080", videoFps = 24.0)

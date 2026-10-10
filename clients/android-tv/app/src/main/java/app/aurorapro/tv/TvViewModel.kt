@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.aurorapro.tv.data.*
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +39,15 @@ data class TvState(
     val grant: DeviceGrant? = null,
     val target: PlayTarget? = null,
     val query: String = "",
+    val searchKind: String = "all",
+    val browsePage: Int = 0,
+    val browsePages: Int = 1,
+    val browseTotal: Long = 0,
+    val browseSort: String = "added",
+    val browseGenre: String = "",
+    val genres: List<String> = emptyList(),
+    val pairExpiresAt: Long = 0,
+    val pairMessage: String? = null,
 )
 
 class TvViewModel(application: Application) : AndroidViewModel(application) {
@@ -110,18 +120,25 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     fun pair() = perform {
         val api = newAuthenticationAttempt()
         val grant = api.beginPairing()
-        update { it.copy(page = Page.PAIR, grant = grant, busy = false) }
-        val expiresAt = android.os.SystemClock.elapsedRealtime() + grant.expiresIn * 1000L
+        val expiresAt = android.os.SystemClock.elapsedRealtime() + grant.expiresIn.coerceAtMost(600) * 1000L
+        update { it.copy(page = Page.PAIR, grant = grant, busy = false, pairExpiresAt = expiresAt, pairMessage = null) }
         while (android.os.SystemClock.elapsedRealtime() < expiresAt) {
             delay(grant.interval.coerceIn(5, 30) * 1000L)
-            val poll = api.pollPairing(grant.deviceCode)
+            val poll = try { api.pollPairing(grant.deviceCode) }
+            catch (e: IOException) {
+                if (e is AuroraException && e.status in setOf(400, 404)) break
+                if (e is AuroraException && e.status !in setOf(429, 500, 502, 503, 504)) throw e
+                update { it.copy(pairMessage = "Waiting for your server connection. You can retry with a new code.") }
+                continue
+            }
+            update { it.copy(pairMessage = null) }
             when (poll.status) {
                 "authorized" -> { signedIn(poll.user ?: api.me()); return@perform }
                 "authorization_pending" -> Unit
-                else -> { update { it.copy(grant = null, error = "This code expired. Choose New code to try again.") }; return@perform }
+                else -> break
             }
         }
-        update { it.copy(grant = null, error = "This code expired. Choose New code to try again.") }
+        update { it.copy(grant = null, error = "This code expired or the server restarted. Choose New code to try again.") }
     }
 
     fun selectProfile(profile: Profile) {
@@ -131,7 +148,8 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
             // Once activation starts, its server outcome may be uncertain on a
             // network failure. Do not return to content labelled with the old
             // profile; remain at the picker until a selection is acknowledged.
-            update { it.copy(profile = null, profileReturnPage = null, home = null, items = emptyList(), detail = null) }
+            update { it.copy(profile = null, profileReturnPage = null, home = null, items = emptyList(), detail = null,
+                query = "", searchKind = "all", browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList()) }
             api.activate(profile)
             update { it.copy(page = Page.HOME, profile = profile) }
             val home = api.home(profile.id)
@@ -146,18 +164,44 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         when (page) {
             Page.HOME -> { val home = api.home(profile.id); update { it.copy(home = home) } }
             Page.MOVIES, Page.SHOWS -> {
-                update { it.copy(items = emptyList()) }
-                val items = api.browse(if (page == Page.MOVIES) "movie" else "show", profile.id)
-                update { it.copy(items = items) }
+                update { it.copy(items = emptyList(), browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList()) }
+                loadBrowse(1)
+                val type = if (page == Page.MOVIES) "movie" else "show"
+                val genres = try { api.genres(type) } catch (e: IOException) {
+                    if (e is AuroraException && e.status == 401) throw e
+                    emptyList()
+                }
+                update { it.copy(genres = genres) }
             }
             Page.PROFILES -> { val profiles = api.profiles(); update { it.copy(profiles = profiles) } }
-            Page.SEARCH -> update { it.copy(items = emptyList()) }
+            Page.SEARCH -> if (state.value.query.isNotBlank()) {
+                val items = api.search(state.value.query, profile.id); update { it.copy(items = items) }
+            } else update { it.copy(items = emptyList()) }
             else -> Unit
         }
     }
 
-    fun search(query: String) = perform {
-        update { it.copy(query = query, items = emptyList()) }
+    private suspend fun loadBrowse(page: Int) {
+        val snapshot = state.value
+        val response = requireNotNull(client).browsePage(if (snapshot.page == Page.MOVIES) "movie" else "show",
+            requireNotNull(snapshot.profile).id, page, snapshot.browseSort, snapshot.browseGenre)
+        update { it.copy(items = (if (page == 1) response.data else it.items + response.data).distinctBy { media -> media.id },
+            browsePage = response.page, browsePages = response.totalPages, browseTotal = response.totalItems) }
+    }
+    fun browseFilter(sort: String = state.value.browseSort, genre: String = state.value.browseGenre) = perform {
+        update { it.copy(browseSort = sort, browseGenre = genre, browsePage = 0, items = emptyList()) }
+        loadBrowse(1)
+    }
+    fun loadMore() {
+        val snapshot = state.value
+        if (snapshot.busy || snapshot.page !in setOf(Page.MOVIES, Page.SHOWS) || snapshot.browsePage >= snapshot.browsePages) return
+        perform { loadBrowse(snapshot.browsePage + 1) }
+    }
+    fun searchKind(kind: String) { update { it.copy(searchKind = kind) } }
+    fun search(query: String, immediate: Boolean = false) = perform {
+        update { it.copy(query = query, items = if (it.query.trim() == query.trim()) it.items else emptyList()) }
+        if (query.isBlank()) { update { it.copy(items = emptyList()) }; return@perform }
+        if (!immediate) delay(300)
         val items = requireNotNull(client).search(query.trim(), requireNotNull(state.value.profile).id)
         update { it.copy(items = items) }
     }
@@ -172,9 +216,25 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (detail.isShow) {
             val seasons = api.seasons(detail.id).sortedWith(compareBy<Season> { it.number == 0 }.thenBy { it.number })
             update { it.copy(seasons = seasons) }
-            seasons.firstOrNull()?.let { loadSeason(it.number) }
-            val next = api.nextEpisode(detail.id)
+            // Continue Watching names a particular in-progress episode. The
+            // next-episode endpoint instead finds the first unfinished episode,
+            // which can be an earlier episode or special the viewer skipped.
+            val resumeId = media.userProgress?.takeUnless { it.completed }?.episodeId
+            var resumeEpisode: Episode? = null
+            var resumeEpisodes: Pair<Int, List<Episode>>? = null
+            if (resumeId != null) {
+                for (season in seasons.sortedBy { if (it.number == media.resumeSeason) 0 else 1 }) {
+                    val episodes = api.episodes(detail.id, season.number)
+                    resumeEpisode = episodes.firstOrNull { it.id == resumeId }
+                    if (resumeEpisode != null) { resumeEpisodes = season.number to episodes; break }
+                }
+            }
+            val next = resumeEpisode ?: api.nextEpisode(detail.id)
             update { it.copy(suggestedEpisode = next) }
+            val nextSeason = next?.let { episodeSeason(it, seasons) }
+            if (resumeEpisodes != null) {
+                update { it.copy(season = resumeEpisodes.first, episodes = resumeEpisodes.second) }
+            } else (seasons.firstOrNull { it.number == nextSeason } ?: seasons.firstOrNull())?.let { loadSeason(it.number) }
         } else { val files = api.files(detail.id); update { it.copy(files = files) } }
     }
 
@@ -183,12 +243,23 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         update { it.copy(season = number, episodes = episodes, episode = null, files = emptyList()) }
     }
     fun season(number: Int) = perform { loadSeason(number) }
-    fun episode(episode: Episode) = perform {
+    private suspend fun loadEpisode(episode: Episode) {
+        episodeSeason(episode, state.value.seasons)?.let { if (it != state.value.season) loadSeason(it) }
         update { it.copy(episode = episode, files = emptyList()) }
-        val files = requireNotNull(client).episodeFiles(episode.id)
+        // Season/continuation responses include matching versions from sibling
+        // libraries. The legacy files endpoint only knows this episode's rows.
+        val files = episode.files.ifEmpty { requireNotNull(client).episodeFiles(episode.id) }
         update { it.copy(files = files) }
     }
-    fun play(file: MediaFile, restart: Boolean = false) = perform {
+    fun episode(episode: Episode) = perform { loadEpisode(episode) }
+    fun continueSeries() = perform {
+        val next = state.value.suggestedEpisode ?: return@perform
+        loadEpisode(next)
+        val file = state.value.files.firstOrNull()
+        if (file == null) update { it.copy(error = "This episode has no playable version yet. Choose another episode.") }
+        else preparePlayback(file)
+    }
+    private suspend fun preparePlayback(file: MediaFile, restart: Boolean = false) {
         val snapshot = state.value
         val media = requireNotNull(snapshot.detail)
         val profile = requireNotNull(snapshot.profile)
@@ -196,6 +267,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         val resume = if (restart || progress.completed) 0 else progress.positionMs
         update { it.copy(page = Page.PLAYER, target = PlayTarget(media, file, profile, snapshot.episode?.id, resume)) }
     }
+    fun play(file: MediaFile, restart: Boolean = false) = perform { preparePlayback(file, restart) }
     fun back() {
         if (state.value.signingOut) return
         // Consume Back during activation instead of cancelling a request that
@@ -234,3 +306,6 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 }
+
+internal fun episodeSeason(episode: Episode, seasons: List<Season>): Int? = episode.season
+    ?: seasons.firstOrNull { episode.seasonId != 0L && it.id == episode.seasonId }?.number

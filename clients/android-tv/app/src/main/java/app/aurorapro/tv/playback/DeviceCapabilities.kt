@@ -9,7 +9,11 @@ import android.view.Display
 import app.aurorapro.tv.data.MediaFile
 
 /** Probe this TV and this source. Never infer a Hi10P decoder from ordinary H.264 support. */
-fun deviceCapabilities(context: Context, file: MediaFile): String {
+fun deviceCapabilities(context: Context, file: MediaFile): String = deviceCapabilityReport(context, file).caps
+
+data class DeviceCapabilityReport(val caps: String, val explanation: String, val decoderNames: String)
+
+fun deviceCapabilityReport(context: Context, file: MediaFile): DeviceCapabilityReport {
     val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isEncoder }
     val hdrType = when (file.colorTransfer) {
         "smpte2084" -> Display.HdrCapabilities.HDR_TYPE_HDR10
@@ -29,10 +33,24 @@ fun deviceCapabilities(context: Context, file: MediaFile): String {
                 requiresSecure = caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback),
                 requiresTunneled = caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback),
                 supportsVideo = { width, height, fps -> caps.videoCapabilities?.areSizeAndRateSupported(width, height, fps) == true },
+                name = info.name,
             )
         }
     }
-    return playbackCapabilities(file, hdrOkay, ::capabilities)
+    val result = playbackCapabilities(file, hdrOkay, ::capabilities)
+    val profile = sourceVideoProfile(file)
+    val decoders = profile?.let { capabilities(it.mime) }.orEmpty()
+    val explanation = when {
+        profile == null -> "Source codec/profile metadata is missing or unsupported. Compatibility playback is used."
+        sourceVideoSize(file.resolution) == null || !file.videoFps.isFinite() || file.videoFps <= 0 ->
+            "Source dimensions or frame rate are missing. Refresh the title's metadata to evaluate original playback."
+        !hdrOkay -> "This display does not report the source HDR format. An SDR conversion is needed."
+        profile.cap in result.split(',') -> "The device reports a matching hardware video decoder."
+        decoders.none { it.hardwareAccelerated && !it.requiresSecure && !it.requiresTunneled } ->
+            "No ordinary hardware decoder is reported for this source. An emulator's display resolution does not establish codec support."
+        else -> "The device does not report support for this source's profile, dimensions and frame rate."
+    }
+    return DeviceCapabilityReport(result, explanation, decoders.joinToString { it.name }.ifBlank { "None reported" })
 }
 
 internal data class PlaybackDecoder(
@@ -41,6 +59,7 @@ internal data class PlaybackDecoder(
     val requiresSecure: Boolean = false,
     val requiresTunneled: Boolean = false,
     val supportsVideo: (Int, Int, Double) -> Boolean = { _, _, _ -> false },
+    val name: String = "",
 )
 
 /** Special playback features are not enabled in this player, for video or audio. */

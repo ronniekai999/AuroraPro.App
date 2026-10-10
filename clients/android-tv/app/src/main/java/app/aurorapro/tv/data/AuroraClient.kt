@@ -2,6 +2,7 @@ package app.aurorapro.tv.data
 
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.async
@@ -11,6 +12,9 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -36,8 +40,14 @@ val apiJson = Json { ignoreUnknownKeys = true; explicitNulls = false; coerceInpu
 class AuroraException(val status: Int, message: String) : IOException(message)
 private data class CookieSnapshot(val header: String)
 private object LogoutRequest
+private data class ProgressKey(val profile: Long, val media: Long, val episode: Long?)
 
 class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
+    // This client is bound to one account/origin. Share row ownership across
+    // player generations, including a predecessor's detached final save.
+    private val progressLocks = ConcurrentHashMap<ProgressKey, Mutex>()
+    private fun progressLock(media: Long, profile: Long, episode: Long?) =
+        progressLocks.computeIfAbsent(ProgressKey(profile, media, episode)) { Mutex() }
     private val refreshLock = Any()
     @Volatile private var retired = false
     private val baseClient = OkHttpClient.Builder()
@@ -50,7 +60,7 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
         .addInterceptor { chain ->
             if (retired && chain.request().tag(LogoutRequest::class.java) == null) throw IOException("This Aurora session has ended.")
             if (!origin.sameOrigin(chain.request().url)) throw IOException("A server response pointed outside your Aurora server.")
-            chain.proceed(chain.request().newBuilder().header("User-Agent", "AuroraPro-AndroidTV/0.1.0")
+            chain.proceed(chain.request().newBuilder().header("User-Agent", "AuroraPro-AndroidTV/${app.aurorapro.tv.BuildConfig.VERSION_NAME}")
                 .tag(CookieSnapshot::class.java, CookieSnapshot(cookies.header(chain.request().url))).build())
         }.build()
     private val refreshClient = baseClient.newBuilder().callTimeout(15, TimeUnit.SECONDS).build()
@@ -207,8 +217,23 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
     }
     suspend fun browse(type: String, profileId: Long): List<Media> = list("/api/media/",
         mapOf("type" to type, "per_page" to "80", "profile_id" to "$profileId"))
+    suspend fun browsePage(type: String, profileId: Long, page: Int = 1, sort: String = "added", genre: String = ""): MediaPage {
+        val element = apiJson.parseToJsonElement(body("/api/media/", parameters = mapOf(
+            "type" to type, "per_page" to "40", "page" to "$page", "profile_id" to "$profileId",
+            "sort_by" to sort, "genre" to genre)))
+        // Array responses are supported for older servers and contract fixtures.
+        return when (element) {
+            is JsonNull -> MediaPage()
+            is JsonArray -> apiJson.decodeFromString<List<Media>>(element.toString()).let { MediaPage(it, totalItems = it.size.toLong()) }
+            else -> apiJson.decodeFromString(element.toString())
+        }
+    }
+    suspend fun genres(type: String): List<String> {
+        val element = apiJson.parseToJsonElement(body("/api/media/genres", parameters = mapOf("type" to type))).jsonObject
+        return apiJson.decodeFromString(element["genres"]?.toString() ?: "[]")
+    }
     suspend fun search(query: String, profileId: Long): List<Media> = list("/api/media/search",
-        mapOf("q" to query, "profile_id" to "$profileId"))
+        mapOf("q" to query, "profile_id" to "$profileId", "limit" to "50"))
     suspend fun media(id: Long): Media = get("/api/media/$id")
     suspend fun files(id: Long): List<MediaFile> = list("/api/media/$id/files")
     suspend fun episodeFiles(id: Long): List<MediaFile> = list("/api/media/episodes/$id/files")
@@ -217,13 +242,30 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
     suspend fun nextEpisode(id: Long): Episode? = try { get("/api/media/$id/next-episode") }
         catch (e: AuroraException) { if (e.status == 404) null else throw e }
 
-    suspend fun progress(mediaId: Long, profileId: Long, episodeId: Long?): Progress = try {
-        get("/api/progress/$mediaId", buildMap {
-            put("profile_id", "$profileId"); episodeId?.let { put("episode_id", "$it") }
-        })
-    } catch (e: AuroraException) { if (e.status == 404) Progress() else throw e }
+    suspend fun progress(mediaId: Long, profileId: Long, episodeId: Long?): Progress =
+        progressLock(mediaId, profileId, episodeId).withLock {
+            try {
+                get("/api/progress/$mediaId", buildMap {
+                    put("profile_id", "$profileId"); episodeId?.let { put("episode_id", "$it") }
+                })
+            } catch (e: AuroraException) { if (e.status == 404) Progress() else throw e }
+        }
 
     suspend fun saveProgress(target: PlayTarget, positionMs: Long, durationMs: Long) {
+        progressLock(target.media.id, target.profile.id, target.episodeId).withLock {
+            putProgress(target, positionMs, durationMs)
+        }
+    }
+
+    internal suspend fun saveFinalProgress(target: PlayTarget, positionMs: Long, durationMs: Long) {
+        progressLock(target.media.id, target.profile.id, target.episodeId).withLock {
+            // Allow an already-running periodic save to finish before starting
+            // the bounded final PUT. A subsequent resume read waits behind it.
+            withTimeout(15_000) { putProgress(target, positionMs, durationMs) }
+        }
+    }
+
+    private suspend fun putProgress(target: PlayTarget, positionMs: Long, durationMs: Long) {
         body("/api/progress/${target.media.id}", "PUT", buildJsonObject {
             put("profile_id", target.profile.id); target.episodeId?.let { put("episode_id", it) }
             put("position_ms", positionMs.coerceAtLeast(0)); put("duration_ms", durationMs.coerceAtLeast(0))
@@ -249,8 +291,21 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
     suspend fun keepAlive(id: String) { body("/api/stream/sessions/$id/keepalive", "POST") }
     suspend fun deleteSession(id: String) { body("/api/stream/sessions/$id", "DELETE") }
 
-    suspend fun beginPairing(): DeviceGrant = apiJson.decodeFromString(body("/api/auth/device/start", "POST",
-        buildJsonObject { put("device_name", "AuroraPro Android TV") }))
+    suspend fun beginPairing(): DeviceGrant {
+        val grant: DeviceGrant = try {
+            apiJson.decodeFromString(body("/api/auth/device/start", "POST",
+                buildJsonObject { put("device_name", "AuroraPro Android TV") }))
+        } catch (e: AuroraException) {
+            if (e.status == 404 || e.status == 405) throw AuroraException(e.status,
+                "Phone sign-in needs the Android TV pairing update on your AuroraPro server. Use your password, or update the server and try again.")
+            throw e
+        }
+        endpoint(grant.verificationUri)
+        require(grant.deviceCode.isNotBlank() && grant.userCode.isNotBlank() && grant.expiresIn > 0) {
+            "Aurora returned an invalid sign-in code. Try again."
+        }
+        return grant
+    }
     suspend fun pollPairing(code: String): DevicePoll = apiJson.decodeFromString(body("/api/auth/device/poll", "POST",
         buildJsonObject { put("device_code", code) }))
 

@@ -13,15 +13,15 @@ profile restrictions. Optional integrations retain their configured availability
 | --- | --- | --- | --- |
 | Connect server; password login; refresh; logout | `/api/health`, `/api/auth/login`, `/refresh`, `/logout`, `/me` | All accounts | Implemented; encrypted cookies; account-wide logout disclosed |
 | Sign in through existing OAuth providers | Browser OAuth + `/api/auth/device/*`, `/v2/device` | All accounts | Implemented browser-assisted pairing |
-| Choose an existing profile | `/api/profiles/`, `/{id}/activate` | Profile owner | Implemented; session-bound activation precedes browsing |
+| Choose an existing profile | `/api/profiles/`, `/{id}/activate` | Profile owner | Implemented; saved avatar/orb; session-bound activation precedes browsing |
 | Create/edit/delete profiles; language, captions, rating ceiling, avatar, taste setup | Profile handlers; web Settings/profile onboarding | Profile owner | Milestone 4; existing playback preferences read now |
 | View Home, recent additions, Continue Watching, hero recommendations | `/api/media/recent`, `/api/progress/continue`, `/api/me/hero` with profile ID | All accounts | Implemented basic Home; optional hero can be unavailable |
-| Browse/search titles; open details and versions | `/api/media/`, `/search`, `/{id}`, `/{id}/files` | All accounts; rating ceiling applies | Implemented basic browse/search/details; complete filters and pagination in 2 |
+| Browse/search titles; open details and versions | `/api/media/`, `/search`, `/{id}`, `/{id}/files` | All accounts; rating ceiling applies | Implemented pagination, sorting, genre/type filters, debounced search and Aurora details |
 | Navigate seasons, specials and episodes | `/{id}/seasons`, `/{id}/seasons/{season}/episodes`, `/episodes/{id}/files` | All accounts; rating ceiling applies | Implemented; season zero follows numbered seasons |
 | Resume a show; choose next unfinished episode | `/api/media/{id}/next-episode`; profile-specific progress | All accounts | Implemented manual continuation; auto-advance in 2 |
 | Play/pause/seek/resume; leave or sleep | Stream-info, direct byte-range and HLS session handlers | All accounts; server authorization remains enforced | Implemented; source-time progress; real-device codec/lifecycle gate pending |
 | Select audio and subtitles | Stream-info tracks; profile prefs; direct embedded tracks and HLS manifests | All accounts | Basic native track controls; full language/forced/bitmap handling in 2 |
-| Select quality, skip intro/credits, playback preferences and diagnostics | Web player, stream markers, QoE and diagnostics APIs | All accounts | Milestone 2 |
+| Select quality, skip intro/credits, playback preferences and diagnostics | Web player, stream markers, QoE and diagnostics APIs | All accounts | Quality and source/output/decoder diagnostics implemented; skip markers, persistent preferences and QoE in 2 |
 | Mark watched/unwatched; ratings and feedback | Progress and rating handlers | All accounts | Milestone 2; automatic playback progress implemented |
 | Save/remove titles; saved Library and watchlists | Profile library/watchlist handlers; LibraryView | Profile owner | Milestone 2 |
 | Create/edit/delete/reorder collections; add/remove/share titles | Collection handlers and CollectionsView | Owner; shared reads as allowed | Milestone 2 |
