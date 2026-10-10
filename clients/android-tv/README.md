@@ -159,7 +159,10 @@ position. Manual captions match across containers by language and meaningful
 track properties; unavailable or ambiguous replacements disable captions and
 offer a visible Settings message instead of choosing another track.
 Progress reads and writes share a profile/title/episode lock across players,
-so reopening waits for the preceding player's final save.
+so reopening waits for the preceding player's final save. A replacement stream
+keeps the outgoing checkpoint until Media3 reports the new item ready, including
+when its playlist or first segments fail. Returning to the title refreshes episode
+progress, series continuation, and Home after the final save finishes.
 This APK is a sideloaded debug build, not a
 signed production release.
 
@@ -174,7 +177,14 @@ signed production release.
 4. Play a baseline H.264/AAC file, pause/resume, seek, and leave the player.
    Open that title in the web app using the same profile and verify its position.
 5. Repeat with a forced-transcode/remux fixture and a nonzero resume offset.
-   Verify source-time progress and that leaving removes its HLS session.
+   Verify source-time progress and that leaving removes its HLS session. Seek
+   near the end while the replacement playlist/segments cannot load, then exit:
+   the saved position must remain at the last playable checkpoint.
+   Finish an episode, return to its title, select the season, and choose Continue
+   series: it must start the next unfinished episode. Return to Home as well and
+   check that Continue Watching no longer resumes the completed episode. Open
+   Profiles during the refresh and return without switching; the title must
+   recover its updated episode progress and continuation.
 6. Relaunch the app; confirm the cookie session persists, select another
    profile, and check that progress stays attached to the original profile.
 7. Test network loss, sleep/wake, and expired credentials; record the TV model,

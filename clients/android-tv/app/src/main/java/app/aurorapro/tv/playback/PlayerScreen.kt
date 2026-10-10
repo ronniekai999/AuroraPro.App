@@ -39,11 +39,9 @@ import app.aurorapro.tv.data.*
 import app.aurorapro.tv.ui.*
 import kotlinx.coroutines.*
 
-private data class PlaybackCheckpoint(val positionMs: Long, val durationMs: Long)
-
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
+fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope { Dispatchers.Main.immediate }
@@ -68,7 +66,8 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
     var loadJob by remember { mutableStateOf<Job?>(null) }
     var progressMessage by remember { mutableStateOf<String?>(null) }
     var hasLoaded by remember { mutableStateOf(false) }
-    var lastCheckpoint by remember { mutableStateOf<PlaybackCheckpoint?>(null) }
+    val progress = remember(player) { PlaybackProgress() }
+    val finalProgressSaved = remember(player) { CompletableDeferred<Unit>() }
     var active by remember { mutableStateOf(true) }
     var playRequested by remember { mutableStateOf(true) }
     var pausingForLoad by remember { mutableStateOf(false) }
@@ -100,7 +99,9 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
     val playFocus = remember { FocusRequester() }
 
     fun reveal() { overlay = true; interaction++ }
+    fun close() { onClose(finalProgressSaved) }
     fun sourcePosition() = if (hasLoaded) timeline.sourcePosition(player.currentPosition) else position
+    fun checkpoint() = progress.checkpoint(sourcePosition(), timeline.durationMs)
     fun applySelections(current: Tracks) {
         val textChoices = mediaTrackChoices(current, C.TRACK_TYPE_TEXT)
         val manualText = textPreference?.let { preference ->
@@ -130,22 +131,21 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
         if (next != player.trackSelectionParameters) player.trackSelectionParameters = next
     }
     suspend fun persist() {
-        if (!hasLoaded) return
-        val snapshot = sourcePosition()
-        val synced = syncProgress { api.saveProgress(target, snapshot, timeline.durationMs) }
+        val snapshot = checkpoint() ?: return
+        val synced = syncProgress { api.saveProgress(target, snapshot.positionMs, snapshot.durationMs) }
         progressMessage = if (synced) null else "Watch progress couldn't sync. Aurora will retry."
     }
     suspend fun load(at: Long, force: Boolean) {
         // A replacement can outlive this screen. Keep the outgoing playable
         // position before stop resets the item, rather than the requested seek.
-        if (hasLoaded) lastCheckpoint = PlaybackCheckpoint(sourcePosition(), timeline.durationMs)
+        progress.beginLoad(sourcePosition(), timeline.durationMs)
         busy = true; error = null; loadGeneration++
+        hasLoaded = false
         pausingForLoad = true
         // Cancel the old HLS loader before retiring its server session. Pausing
         // alone still lets Media3 buffer from URLs that deletion will invalidate.
         try { player.pause(); player.stop() } finally { pausingForLoad = false }
         position = timeline.seekPosition(at)
-        hasLoaded = false
         val oldSession = sessionId
         sessionId = null
         if (oldSession != null) withContext(NonCancellable) { withTimeoutOrNull(15_000) { runCatching { api.deleteSession(oldSession) } } }
@@ -182,7 +182,8 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
         tracks = Tracks.EMPTY
         applySelections(Tracks.EMPTY) // Keep manual captions disabled until their new group is identified.
         output = "Waiting for video…"
-        val item = MediaItem.Builder().setUri(url).setMediaMetadata(MediaMetadata.Builder().setTitle(target.media.title).build())
+        val item = MediaItem.Builder().setUri(url).setMediaId(loadGeneration.toString())
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(target.media.title).build())
         if (sessionId != null) item.setMimeType(MimeTypes.APPLICATION_M3U8)
         player.setMediaItem(item.build(), start)
         hasLoaded = true
@@ -225,7 +226,11 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 ended = playbackState == Player.STATE_ENDED
                 if (ended) reveal()
-                if (playbackState == Player.STATE_READY) applySelections(player.currentTracks)
+                if (playbackState == Player.STATE_READY && hasLoaded &&
+                    player.currentMediaItem?.mediaId == loadGeneration.toString()) {
+                    progress.onReady()
+                    applySelections(player.currentTracks)
+                }
             }
             override fun onTracksChanged(newTracks: Tracks) { tracks = newTracks; applySelections(newTracks) }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -256,7 +261,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
         lifecycle.addObserver(observer)
         onDispose {
             active = false
-            val finalCheckpoint = if (hasLoaded) PlaybackCheckpoint(sourcePosition(), timeline.durationMs) else lastCheckpoint
+            val finalCheckpoint = checkpoint()
             val pending = loadJob
             pending?.cancel()
             lifecycle.removeObserver(observer)
@@ -267,14 +272,18 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
             val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             // Enqueue synchronously during disposal, before another screen can
             // resume this row. The client lock also covers reads and later saves.
-            val finalSave = if (finalCheckpoint != null) cleanup.launch(start = CoroutineStart.UNDISPATCHED) {
-                runCatching { api.saveFinalProgress(target, finalCheckpoint.positionMs, finalCheckpoint.durationMs) }
-            } else null
+            val finalSave = cleanup.launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    if (finalCheckpoint != null) runCatching {
+                        api.saveFinalProgress(target, finalCheckpoint.positionMs, finalCheckpoint.durationMs)
+                    }
+                } finally { finalProgressSaved.complete(Unit) }
+            }
             cleanup.launch {
                 withTimeoutOrNull(125_000) {
                     try {
                         pending?.join()
-                        finalSave?.join()
+                        finalSave.join()
                     } finally {
                         withContext(NonCancellable) { withTimeoutOrNull(15_000) {
                             sessionId?.let { runCatching { api.deleteSession(it) } }
@@ -306,7 +315,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
         if (panel == null) { if (overlay) playFocus.requestFocus() else surfaceFocus.requestFocus() }
     }
     BackHandler {
-        when { panel != null -> { panel = null; reveal() }; overlay -> overlay = false; else -> onClose() }
+        when { panel != null -> { panel = null; reveal() }; overlay -> overlay = false; else -> close() }
     }
     val root = Modifier.fillMaxSize().background(Color.Black).focusRequester(surfaceFocus).onPreviewKeyEvent { event ->
         val code = event.nativeKeyEvent.keyCode
@@ -359,7 +368,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: () -> Unit) {
                 PlayerTimeline(position, timeline.durationMs, !busy, { scrubbing = it }, { reveal(); seek(it) })
                 Text(playbackClock(position) + " / " + playbackClock(timeline.durationMs), color = AuroraColors.Muted, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TvAction("Back to title", onClose)
+                    TvAction("Back to title", ::close)
                     TvAction("−30 sec", { reveal(); seek(sourcePosition() - 30_000) }, enabled = !busy)
                     TvAction(if (ended) "Replay" else if (playRequested) "Pause" else "Resume", { togglePlay() },
                         Modifier.focusRequester(playFocus), primary = true)
