@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
 import { useNavigate, useLocation } from 'react-router'
+import { consumeDevicePairing, rememberDevicePairing } from '@/lib/devicePairing'
 import {
   fetchMe,
   getStoredUser,
@@ -150,6 +151,7 @@ const VIEW_LOADERS = {
   search: () => import('@/components/SearchView'),
   member: () => import('@/components/UserProfileView'),
   members: () => import('@/components/MembersView'),
+  device: () => import('@/components/DeviceApprovalView'),
 } as const
 // Nav tab id → chunk. Home is eager (no entry); movies and shows share the
 // browse chunk; detail/member are never reached from a tab.
@@ -228,6 +230,7 @@ const UserProfileView = lazy(VIEW_LOADERS.member)
 // Reached from the avatar dropdown, not the tab strip (the strip is curated
 // browse surfaces; this is an occasional destination like Settings).
 const MembersView = lazy(VIEW_LOADERS.members)
+const DeviceApprovalView = lazy(VIEW_LOADERS.device)
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -701,7 +704,10 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
       // loses its `link` role entirely while submitting, so the tiles vanish
       // from the accessibility tree instead of announcing as unavailable.
       aria-disabled={disabled || undefined}
-      onClick={(e) => { if (disabled) e.preventDefault() }}
+      onClick={(e) => {
+        if (disabled) e.preventDefault()
+        else rememberDevicePairing(window.location.pathname, window.location.search)
+      }}
       className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >
       {config.icon}
@@ -2056,6 +2062,7 @@ const VIEW_BY_PATH: Record<string, string> = {
   '/settings': 'settings',
   '/search': 'search',
   '/members': 'members',
+  '/device': 'device',
 }
 
 // titleIdFromPath extracts the media id from a /title/:id pathname, or
@@ -2808,6 +2815,11 @@ export default function App() {
   const [homeLibraryTotal, setHomeLibraryTotal] = useState<number | null>(null)
 
   const navigate = useNavigate()
+  useEffect(() => {
+    if (!user) return
+    const code = consumeDevicePairing()
+    if (code) navigate(`/device?code=${encodeURIComponent(code)}`, { replace: true })
+  }, [user, navigate])
   const location = useLocation()
   const previousPathnameRef = useRef(location.pathname)
 
@@ -6076,6 +6088,9 @@ export default function App() {
                 })()}
               />
             </ViewSuspense>
+          )}
+          {view === 'device' && (
+            <DeviceApprovalView key={location.key} username={user.username} initialCode={new URLSearchParams(location.search).get('code') ?? ''} />
           )}
           {view === 'search' && (
             <ViewSuspense fallback={<ViewFallback />}>

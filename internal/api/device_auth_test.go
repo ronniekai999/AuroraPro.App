@@ -1,0 +1,278 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aurora-media/aurora/internal/auth"
+	"github.com/aurora-media/aurora/internal/config"
+	"github.com/aurora-media/aurora/internal/models"
+)
+
+type deviceTestStore struct {
+	mu         sync.Mutex
+	user       models.User
+	created    []models.RefreshToken
+	failCreate bool
+}
+
+func (s *deviceTestStore) GetUserByID(_ context.Context, id int64) (*models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != s.user.ID {
+		return nil, errors.New("missing user")
+	}
+	user := s.user
+	return &user, nil
+}
+func (s *deviceTestStore) CreateRefreshTokenAtVersion(_ context.Context, token *models.RefreshToken, expectedVersion int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failCreate {
+		return false, errors.New("database unavailable")
+	}
+	if token.UserID != s.user.ID || expectedVersion != s.user.TokenVersion {
+		return false, nil
+	}
+	token.ID = int64(len(s.created) + 1)
+	s.created = append(s.created, *token)
+	return true, nil
+}
+func (*deviceTestStore) RevokeRefreshToken(context.Context, string) error { return nil }
+
+func deviceTestHandler() (*DeviceAuthHandler, *deviceTestStore) {
+	store := &deviceTestStore{user: models.User{ID: 7, Username: "alice", Role: "user", TokenVersion: 3, PasswordHash: "private"}}
+	cfg := config.Default().Auth
+	cfg.JWTSecret = "device-test-secret-at-least-32-characters-long"
+	cfg.AccessTokenExpiry = 15 * time.Minute
+	cfg.RefreshTokenExpiry = 24 * time.Hour
+	svc := auth.NewService(cfg)
+	return &DeviceAuthHandler{grants: newDeviceGrants(), sessions: store, authSvc: svc}, store
+}
+
+func deviceRequest(handler http.HandlerFunc, method, path, body string, authenticated bool) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, "https://aurora.example"+path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		r = r.WithContext(context.WithValue(r.Context(), auth.ClaimsContextKey, &auth.JWTClaims{UserID: 7, Username: "alice", Role: "user", TokenVersion: 3}))
+	}
+	w := httptest.NewRecorder()
+	handler(w, r)
+	return w
+}
+
+func TestDevicePairing_ApprovalAndSingleUseCookieExchange(t *testing.T) {
+	h, store := deviceTestHandler()
+	start := deviceRequest(h.Start, "POST", "/api/auth/device/start", `{"device_name":"Living room TV"}`, false)
+	var grant struct {
+		DeviceCode string `json:"device_code"`
+		UserCode   string `json:"user_code"`
+	}
+	if start.Code != 201 || json.Unmarshal(start.Body.Bytes(), &grant) != nil {
+		t.Fatalf("start: %d %s", start.Code, start.Body)
+	}
+	if len(grant.DeviceCode) != 43 || len(grant.UserCode) != 9 || start.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("invalid grant")
+	}
+	pollBody := fmt.Sprintf(`{"device_code":%q}`, grant.DeviceCode)
+	if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", pollBody, false); !strings.Contains(w.Body.String(), "authorization_pending") || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("pending: %s", w.Body)
+	}
+	preview := deviceRequest(h.Preview, "GET", "/api/auth/device/preview?code="+grant.UserCode, "", true)
+	if preview.Code != 200 || !strings.Contains(preview.Body.String(), "Living room TV") || strings.Contains(preview.Body.String(), grant.DeviceCode) {
+		t.Fatalf("preview: %s", preview.Body)
+	}
+	approveBody := fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, strings.ToLower(grant.UserCode))
+	if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", approveBody, false); w.Code != 401 {
+		t.Fatalf("anonymous approval: %d", w.Code)
+	}
+	if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", approveBody, true); w.Code != 200 {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", approveBody, true); w.Code != 404 {
+		t.Fatalf("re-approve: %d", w.Code)
+	}
+	exchange := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", pollBody, false)
+	if exchange.Code != 200 || !strings.Contains(exchange.Body.String(), "authorized") {
+		t.Fatalf("exchange: %d %s", exchange.Code, exchange.Body)
+	}
+	for _, secret := range []string{"private", "access_token", "refresh_token", store.created[0].Token} {
+		if strings.Contains(exchange.Body.String(), secret) {
+			t.Fatalf("body leaked %q", secret)
+		}
+	}
+	cookies := exchange.Result().Cookies()
+	if len(cookies) != 2 {
+		t.Fatalf("cookies: %+v", cookies)
+	}
+	for _, cookie := range cookies {
+		if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode {
+			t.Fatalf("unsafe cookie: %+v", cookie)
+		}
+		if cookie.Name == "aurora_refresh" && cookie.Path != "/api/auth" {
+			t.Fatalf("refresh scope: %+v", cookie)
+		}
+		if cookie.Name == "aurora_access" {
+			claims, err := h.authSvc.ValidateAccessToken(cookie.Value)
+			if err != nil || claims.RefreshTokenID != store.created[0].ID || claims.TokenVersion != 3 {
+				t.Fatalf("unbound access token: %+v %v", claims, err)
+			}
+		}
+	}
+	if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", pollBody, false); !strings.Contains(w.Body.String(), "expired_token") || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("reused poll: %s", w.Body)
+	}
+	if len(store.created) != 1 || store.created[0].DeviceInfo != "Living room TV" {
+		t.Fatalf("sessions: %+v", store.created)
+	}
+}
+
+func TestDevicePairing_RevocationAndFailedExchange(t *testing.T) {
+	for _, failure := range []string{"revoked", "deleted", "create"} {
+		t.Run(failure, func(t *testing.T) {
+			h, store := deviceTestHandler()
+			secret, grant, err := h.grants.start("TV")
+			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3) {
+				t.Fatal("grant failed")
+			}
+			switch failure {
+			case "revoked":
+				store.user.TokenVersion++
+			case "deleted":
+				store.user.ID = 8
+			case "create":
+				store.failCreate = true
+			}
+			w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
+			if len(w.Result().Cookies()) != 0 || len(store.created) != 0 {
+				t.Fatal("invalid grant produced session")
+			}
+			if failure == "create" && w.Code != 500 {
+				t.Fatalf("status=%d", w.Code)
+			}
+			if failure != "create" && !strings.Contains(w.Body.String(), "expired_token") {
+				t.Fatalf("body=%s", w.Body)
+			}
+		})
+	}
+}
+
+func TestDevicePairing_CrossOriginAndStaleApproval(t *testing.T) {
+	h, store := deviceTestHandler()
+	_, grant, _ := h.grants.start("TV")
+	r := httptest.NewRequest("POST", "https://aurora.example/api/auth/device/authorize", strings.NewReader(fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode)))
+	r = r.WithContext(context.WithValue(r.Context(), auth.ClaimsContextKey, &auth.JWTClaims{UserID: 7, TokenVersion: 3}))
+	r.Header.Set("Origin", "https://attacker.example")
+	w := httptest.NewRecorder()
+	h.Authorize(w, r)
+	if w.Code != 403 {
+		t.Fatalf("cross-origin: %d", w.Code)
+	}
+	store.user.TokenVersion++
+	w = deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true)
+	if w.Code != 401 {
+		t.Fatalf("stale approval: %d", w.Code)
+	}
+	if _, okay := h.grants.preview(grant.UserCode); !okay {
+		t.Fatal("failed approval consumed grant")
+	}
+}
+
+func TestDevicePairing_ApprovalRejectsAccountChangeAfterPreview(t *testing.T) {
+	h, _ := deviceTestHandler()
+	_, grant, _ := h.grants.start("TV")
+	preview := deviceRequest(h.Preview, "GET", "/api/auth/device/preview?code="+grant.UserCode, "", true)
+	var identity struct {
+		UserID   int64  `json:"user_id"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(preview.Body.Bytes(), &identity); err != nil || identity.UserID != 7 || identity.Username != "alice" {
+		t.Fatalf("unverified preview identity: %s", preview.Body)
+	}
+	w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":8}`, grant.UserCode), true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("changed account: %d %s", w.Code, w.Body)
+	}
+	if _, okay := h.grants.preview(grant.UserCode); !okay {
+		t.Fatal("account mismatch authorized the device")
+	}
+}
+
+func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
+	g := newDeviceGrants()
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	secret, grant, _ := g.start("TV")
+	if !g.authorize(grant.UserCode, 7, 3) {
+		t.Fatal("authorize failed")
+	}
+	var successes atomic.Int32
+	var group sync.WaitGroup
+	for range 40 {
+		group.Go(func() {
+			if _, status := g.take(secret); status == "authorized" {
+				successes.Add(1)
+			}
+		})
+	}
+	group.Wait()
+	if successes.Load() != 1 {
+		t.Fatalf("exchanges=%d", successes.Load())
+	}
+	secret, grant, _ = g.start("TV")
+	now = now.Add(deviceGrantTTL)
+	if g.authorize(grant.UserCode, 7, 3) {
+		t.Fatal("expired grant approved")
+	}
+	if _, status := g.take(secret); status != "expired_token" {
+		t.Fatalf("status=%s", status)
+	}
+	for range 1024 {
+		if _, _, err := g.start("TV"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := g.start("TV"); err == nil {
+		t.Fatal("grant bound not enforced")
+	}
+	for range 10 {
+		if !g.allow("start", "client", 10) {
+			t.Fatal("premature limit")
+		}
+	}
+	if g.allow("start", "client", 10) || !g.allow("poll", "client", 120) {
+		t.Fatal("budgets are not independent")
+	}
+	now = now.Add(time.Minute)
+	if !g.allow("start", "client", 10) {
+		t.Fatal("budget failed to expire")
+	}
+}
+
+func TestDevicePairing_RouterPublicAndProtectedRoutes(t *testing.T) {
+	router := newHealthTestRouter(healthTestService())
+	for _, route := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{"POST", "/api/auth/device/start", `{"device_name":"TV"}`, 201},
+		{"POST", "/api/auth/device/poll", `{"device_code":"bad"}`, 400},
+		{"GET", "/api/auth/device/preview?code=ABCD-1234", "", 401},
+		{"POST", "/api/auth/device/authorize", `{"user_code":"ABCD-1234"}`, 401},
+	} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(route.method, route.path, strings.NewReader(route.body)))
+		if w.Code != route.status {
+			t.Errorf("%s: %d %s", route.path, w.Code, w.Body)
+		}
+	}
+}

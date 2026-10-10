@@ -386,6 +386,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// Token-version store + handlers
 	tokenVerStore := auth.NewTokenVersionStore(deps.Queries)
 	authH := NewAuthHandler(deps.AuthSvc, deps.Queries, deps.Activity)
+	deviceAuthH := NewDeviceAuthHandler(deps.AuthSvc, deps.Queries, deps.Activity, cfg.Server.SecureCookies)
 	// Phase 3 (Google OAuth): handles /api/auth/oauth/google/{start,callback}.
 	// Reads config from server_settings on each request so admin toggles
 	// take effect without a restart. Returns 404 when OAuth not enabled.
@@ -742,6 +743,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.With(deps.LoginLimiter.Middleware).Post("/register", authH.Register)
 			r.With(deps.RefreshLimiter.Middleware).Post("/refresh", authH.Refresh)
 			r.With(deps.RefreshLimiter.Middleware).Post("/logout", authH.Logout)
+			r.Post("/device/start", deviceAuthH.Start)
+			r.Post("/device/poll", deviceAuthH.Poll)
 			// Phase 3 → Phase A refactor: provider-agnostic OAuth.
 			// {provider} is resolved against OAuthHandler's registry
 			// at request time (currently: "google"; future: "discord",
@@ -760,6 +763,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAuth(deps.AuthSvc, tokenVerStore))
 				r.Get("/me", authH.Me)
+				r.Get("/device/preview", deviceAuthH.Preview)
+				r.Post("/device/authorize", deviceAuthH.Authorize)
 				// Rate-limited: change-password verifies the current password
 				// with Argon2id (~100ms/attempt) but is still brute-forceable
 				// over the access-token lifetime (~10 min) by a stolen-token
