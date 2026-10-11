@@ -104,13 +104,13 @@ class SmartSkipPlaybackTest {
     @Test fun aSlowProgressSaveDoesNotStallAutoplayOrLoseTheOutgoingSaveBarrier() =
         withPlayer(holdProgress = true, creditsStartMs = 45_000) { fixture ->
             fixture.ready(1)
-            assertTrue(fixture.progressEntered.await(25, TimeUnit.SECONDS))
             remote(KeyEvent.KEYCODE_MEDIA_PAUSE)
+            fixture.holdFirstProgressSave()
             // Keep the real player inside credits with ample media before EOF.
             compose.runOnIdle { fixture.view.player!!.seekTo(17_000) }
             remote(KeyEvent.KEYCODE_MEDIA_PLAY)
             compose.waitUntil(8000) { fixture.advances.get() == 1 }
-            assertFalse(fixture.outgoingSaved!!.isCompleted)
+            compose.runOnIdle { assertFalse(fixture.outgoingSaved!!.isCompleted) }
             assertEquals(1L, fixture.releaseProgress.count)
             fixture.releaseProgress.countDown()
             fixture.ready(2)
@@ -127,8 +127,8 @@ class SmartSkipPlaybackTest {
     @Test fun aSlowProgressSaveDoesNotKeepAnExpiredIntroActionVisible() =
         withPlayer(credits = false, holdProgress = true, introEndMs = 47_000) { fixture ->
             fixture.ready(1)
-            assertTrue(fixture.progressEntered.await(25, TimeUnit.SECONDS))
             remote(KeyEvent.KEYCODE_MEDIA_PAUSE)
+            fixture.holdFirstProgressSave()
             compose.runOnIdle { fixture.view.player!!.seekTo(22_000) }
             compose.waitUntil(5000) { compose.onAllNodesWithText("Skip Intro").fetchSemanticsNodes().isEmpty() }
             compose.onNodeWithText("Next episode").assertExists()
@@ -238,6 +238,12 @@ class SmartSkipPlaybackTest {
                     it.currentMediaItem?.localConfiguration?.uri.toString().contains("smart-$session/") } == true }
                 ready
             }
+        }
+        fun holdFirstProgressSave() {
+            // LaunchedEffect delays use Compose's virtual test clock. A blocking
+            // latch wait leaves that clock stopped and never starts the PUT.
+            // waitUntil advances frames while allowing the network to respond.
+            compose.waitUntil(25_000) { progressEntered.count == 0L }
         }
         fun close() {
             releaseManifest.countDown()
