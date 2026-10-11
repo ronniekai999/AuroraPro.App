@@ -18,10 +18,10 @@ profile restrictions. Optional integrations retain their configured availability
 | View Home, recent additions, Continue Watching, hero recommendations | `/api/media/recent`, `/api/progress/continue`, `/api/me/hero` with profile ID | All accounts | Implemented basic Home; optional hero can be unavailable |
 | Browse/search titles; open details and versions | `/api/media/`, `/search`, `/{id}`, `/{id}/files` | All accounts; rating ceiling applies | Implemented pagination, sorting, genre/type filters, debounced search and Aurora details |
 | Navigate seasons, specials and episodes | `/{id}/seasons`, `/{id}/seasons/{season}/episodes`, `/episodes/{id}/files` | All accounts; rating ceiling applies | Implemented; season zero follows numbered seasons |
-| Resume a show; choose next unfinished episode | `/api/media/{id}/next-episode`; profile-specific progress | All accounts | Implemented manual continuation; auto-advance in 2 |
+| Resume a show; choose next unfinished episode | `/api/media/{id}/next-episode`; profile-specific progress | All accounts | Implemented resume; separate chronological in-player Next and cancellable autoplay in 0.3.0; device acceptance pending |
 | Play/pause/seek/resume; leave or sleep | Stream-info, direct byte-range and HLS session handlers | All accounts; server authorization remains enforced | Implemented; source-time progress; real-device codec/lifecycle gate pending |
 | Select audio and subtitles | Stream-info tracks; profile prefs; direct embedded tracks and HLS manifests | All accounts | Basic native track controls; full language/forced/bitmap handling in 2 |
-| Select quality, skip intro/credits, playback preferences and diagnostics | Web player, stream markers, QoE and diagnostics APIs | All accounts | Quality and source/output/decoder diagnostics implemented; skip markers, persistent preferences and QoE in 2 |
+| Select quality, skip intro/recap/credits, playback preferences and diagnostics | Web player, stream markers, QoE and diagnostics APIs | All accounts | Quality, source/output/decoder diagnostics, Smart Skip and persistent TV autoplay implemented; other preferences and QoE in 2; device acceptance pending |
 | Mark watched/unwatched; ratings and feedback | Progress and rating handlers | All accounts | Milestone 2; automatic playback progress implemented |
 | Save/remove titles; saved Library and watchlists | Profile library/watchlist handlers; LibraryView | Profile owner | Milestone 2 |
 | Create/edit/delete/reorder collections; add/remove/share titles | Collection handlers and CollectionsView | Owner; shared reads as allowed | Milestone 2 |
@@ -57,3 +57,32 @@ Playback and authentication checks must include a normal member, administrator,
 restricted profile, changed password, server restart and revoked session. Party
 acceptance requires mixed web/TV participants and the existing paused-room
 invariants; the first solo-player APK does not validate party synchronization.
+
+## Playback parity acceptance for 0.3.0
+
+JVM contract/state tests cover marker decoding, chronological advancement across
+season gaps, missing files, rewatch, edition selection, lookup retry/cancellation,
+countdown readiness/pause/cancellation and outgoing-save barriers. Media3/D-pad
+instrumentation covers source-time intro skipping, a cancelled and automatic
+credits countdown, fresh player ownership, persistent autoplay and marker/countdown
+updates while a progress save is delayed. Intro skipping includes D-pad traversal
+from the transport controls. Instrumentation
+must run on a connected TV/emulator before device acceptance; compilation alone
+does not close this gate.
+
+| Device scenario | Expected result |
+| --- | --- |
+| Resume HLS inside an intro; skip beyond the produced playlist | New session uses the source marker end; returned source anchor is respected; Pause remains paused |
+| Enter episode credits; pause, buffer, open settings, scrub or sleep | Five-second countdown runs only while the ready stream plays without interaction; return from sleep remains paused |
+| Choose Watch credits, then reach the natural end | This episode stays open; explicit Next still works; Replay resets the cancellation |
+| Turn autoplay Off; switch episodes and restart the app | Preference stays Off on this TV; explicit Next works; no passive advance |
+| Rewatch, skip a fileless episode, cross a season gap, reach the finale | Advance chronologically through playable files; retain the edition when available; leave the final frame open at the end |
+| Next lookup fails or returns after closing/changing the title | Retry keeps the current stream; late results cannot restore the outgoing player |
+| Progress saves are slow while playback continues | The source clock keeps updating; expired skip actions disappear and autoplay advances on time |
+| Advance and immediately leave while the outgoing save is delayed | Home/detail refresh waits for every outgoing save; progress keeps the captured profile and episode |
+| Movie credits in a growing HLS playlist | Skip appears only when the destination is produced; no rebuild at approximate EOF |
+
+Full viewing parity still requires saved Library/watchlists, collections,
+ratings/watched actions, discovery refinements, additional subtitle paths and QoE.
+Connected viewing, account/social/admin flows and release validation retain their
+milestones above.

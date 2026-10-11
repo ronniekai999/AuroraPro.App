@@ -23,6 +23,82 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackContinuationTest {
+    @Test fun advancingReplacesTheEpisodeAtZeroAndPreservesProfileAndEdition() = withFixture {
+        openShow()
+        act { it.episode(it.state.value.episodes.first()) }; idle()
+        act { it.play(it.state.value.files.last()) }; idle(); continuationIdle()
+        val outgoing = requireNotNull(vm.state.value.target)
+        val saved = CompletableDeferred<Unit>()
+        var advanced = false
+        act { advanced = it.advanceEpisode(outgoing, saved) }
+        assertTrue(advanced)
+        val next = requireNotNull(vm.state.value.target)
+        assertEquals(102L, next.episodeId)
+        assertEquals(1102L, next.file.id)
+        assertEquals("Extended", next.file.versionTag)
+        assertEquals(0L, next.resumeMs)
+        assertEquals(outgoing.profile, next.profile)
+        assertEquals(1, next.seasonNumber)
+        assertEquals(2, next.episodeNumber)
+        act { assertFalse(it.advanceEpisode(outgoing, CompletableDeferred(Unit))) }
+        saved.complete(Unit)
+        continuationIdle()
+        assertNull(vm.state.value.continuation)
+    }
+
+    @Test fun closingTheNextEpisodeWaitsForBothOutgoingProgressSaves() = withFixture {
+        openShow()
+        act { it.continueSeries() }; idle(); continuationIdle()
+        val outgoing = requireNotNull(vm.state.value.target)
+        val firstSave = CompletableDeferred<Unit>()
+        act { assertTrue(it.advanceEpisode(outgoing, firstSave)) }
+        continuationIdle()
+        val current = requireNotNull(vm.state.value.target)
+        api.saveFinalProgress(current, 20_000, 60_000)
+        act { it.playbackClosed(CompletableDeferred(Unit)) }
+        delay(100)
+        assertTrue(vm.state.value.busy)
+        assertNull(vm.state.value.home)
+        api.saveFinalProgress(outgoing, 60_000, 60_000)
+        firstSave.complete(Unit)
+        idle()
+        assertEquals(102L, vm.state.value.suggestedEpisode?.id)
+        assertEquals(20_000L, vm.state.value.episode?.progress?.positionMs)
+        assertEquals(listOf(102L), requireNotNull(vm.state.value.home).continuing.map { it.episodeId })
+    }
+
+    @Test fun closingDuringANextEpisodeLookupCannotRestoreStalePlayerState() = withFixture {
+        openShow()
+        act { it.episode(it.state.value.episodes.first()) }; idle()
+        blockFollowing = true
+        act { it.play(it.state.value.files.first()) }; idle()
+        assertTrue(followingEntered.await(5, TimeUnit.SECONDS))
+        blockFollowing = false
+        act { it.playbackClosed(CompletableDeferred(Unit)) }; idle()
+        releaseFollowing.countDown()
+        delay(100)
+        assertEquals(Page.DETAIL, vm.state.value.page)
+        assertNull(vm.state.value.target)
+        assertNull(vm.state.value.continuation)
+        assertFalse(vm.state.value.continuationLoading)
+    }
+
+    @Test fun failedNextEpisodeLookupCanBeRetriedWithoutRestartingPlayback() = withFixture {
+        openShow()
+        act { it.episode(it.state.value.episodes.first()) }; idle()
+        followingFailure = true
+        act { it.play(it.state.value.files.first()) }; idle(); continuationIdle()
+        val target = requireNotNull(vm.state.value.target)
+        assertNotNull(vm.state.value.continuationError)
+        assertNull(vm.state.value.continuation)
+        act { assertFalse(it.advanceEpisode(target, CompletableDeferred(Unit))) }
+        followingFailure = false
+        act { it.retryContinuation() }; continuationIdle()
+        assertSame(target, vm.state.value.target)
+        assertEquals(102L, vm.state.value.continuation?.episode?.id)
+        assertNull(vm.state.value.continuationError)
+    }
+
     @Test fun completedPlaybackRefreshesContinuationEpisodeProgressAndHomeWithoutChangingTheVersion() = withFixture {
         openShow()
         act { it.episode(it.state.value.episodes.first()) }; idle()
@@ -174,6 +250,7 @@ class PlaybackContinuationTest {
         finally {
             fixture.releaseSave.countDown()
             fixture.releaseDetail.countDown()
+            fixture.releaseFollowing.countDown()
             fixture.closeViewModel()
             fixture.server.shutdown()
             Dispatchers.resetMain()
@@ -191,11 +268,16 @@ class PlaybackContinuationTest {
         val detailEntered = CountDownLatch(1)
         val releaseDetail = CountDownLatch(1)
         @Volatile var blockDetail = false
+        val followingEntered = CountDownLatch(1)
+        val releaseFollowing = CountDownLatch(1)
+        @Volatile var blockFollowing = false
+        @Volatile var followingFailure = false
         lateinit var api: AuroraClient
         lateinit var vm: TvViewModel
 
         private fun episode(id: Long) = Episode(id, number = (id - 100).toInt(), title = "Episode $id", seasonId = 10,
-            progress = progress[id] ?: Progress(), files = listOf(MediaFile(id, durationMs = 60_000), MediaFile(id + 1000, durationMs = 60_000)))
+            progress = progress[id] ?: Progress(), files = listOf(MediaFile(id, durationMs = 60_000),
+                MediaFile(id + 1000, durationMs = 60_000, versionTag = "Extended")))
 
         suspend fun open() {
             server.dispatcher = object : Dispatcher() {
@@ -220,7 +302,14 @@ class PlaybackContinuationTest {
                         "/api/media/30" -> """{"id":30,"title":"Movie"}"""
                         "/api/media/30/files" -> """[{"id":30,"duration_ms":60000}]"""
                         "/api/media/20/seasons" -> """[{"id":10,"season_number":1}]"""
-                        "/api/media/20/seasons/1/episodes" -> apiJson.encodeToString(listOf(episode(101), episode(102)))
+                        "/api/media/20/seasons/1/episodes" -> {
+                            if (blockFollowing) {
+                                followingEntered.countDown()
+                                check(releaseFollowing.await(10, TimeUnit.SECONDS))
+                            }
+                            if (followingFailure) return MockResponse().setResponseCode(500)
+                            apiJson.encodeToString(listOf(episode(101), episode(102)))
+                        }
                         "/api/media/20/next-episode" -> {
                             val id = listOf(101L, 102L).firstOrNull { progress[it]?.completed != true }
                                 ?: return MockResponse().setResponseCode(404)
@@ -261,6 +350,7 @@ class PlaybackContinuationTest {
             withTimeout(5_000) { while (vm.state.value.busy) delay(10) }
             assertNull(vm.state.value.error)
         }
+        suspend fun continuationIdle() { withTimeout(5_000) { while (vm.state.value.continuationLoading) delay(10) } }
         suspend fun openShow() { act { it.detail(Media(20, "Show", "show")) }; idle() }
     }
 }

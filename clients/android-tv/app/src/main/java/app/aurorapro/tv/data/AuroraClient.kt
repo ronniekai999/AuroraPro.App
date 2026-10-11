@@ -242,6 +242,29 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
     suspend fun nextEpisode(id: Long): Episode? = try { get("/api/media/$id/next-episode") }
         catch (e: AuroraException) { if (e.status == 404) null else throw e }
 
+    // Resume finds the first unfinished episode. In-player advancement instead
+    // follows season/episode order, including rewatched episodes, like the web.
+    suspend fun followingEpisode(target: PlayTarget): EpisodeContinuation? {
+        if (target.episodeId == null) return null
+        val season = target.seasonNumber ?: return null
+        val number = target.episodeNumber ?: return null
+        fun playable(episodes: List<Episode>, seasonNumber: Int, after: Int? = null): EpisodeContinuation? {
+            for (episode in episodes.sortedBy { it.number }) {
+                if (after != null && episode.number <= after) continue
+                if (episode.id == target.episodeId) continue
+                val file = episode.files.firstOrNull { target.file.versionTag.isNotBlank() && it.versionTag == target.file.versionTag }
+                    ?: episode.files.firstOrNull() ?: continue
+                return EpisodeContinuation(episode, file, seasonNumber)
+            }
+            return null
+        }
+        playable(episodes(target.media.id, season), season, number)?.let { return it }
+        for (later in seasons(target.media.id).filter { it.number > season }.sortedBy { it.number }) {
+            playable(episodes(target.media.id, later.number), later.number)?.let { return it }
+        }
+        return null
+    }
+
     suspend fun progress(mediaId: Long, profileId: Long, episodeId: Long?): Progress =
         progressLock(mediaId, profileId, episodeId).withLock {
             try {

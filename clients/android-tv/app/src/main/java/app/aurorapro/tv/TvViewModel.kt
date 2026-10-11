@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 enum class Page { SERVER, LOGIN, PAIR, PROFILES, HOME, MOVIES, SHOWS, SEARCH, DETAIL, PLAYER }
 
@@ -38,6 +39,9 @@ data class TvState(
     val suggestedEpisode: Episode? = null,
     val grant: DeviceGrant? = null,
     val target: PlayTarget? = null,
+    val continuation: EpisodeContinuation? = null,
+    val continuationLoading: Boolean = false,
+    val continuationError: String? = null,
     val query: String = "",
     val searchKind: String = "all",
     val browsePage: Int = 0,
@@ -58,6 +62,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     var client: AuroraClient? = null
         private set
     private var job: Job? = null
+    private var continuationJob: Job? = null
     private var operationSequence = 0L
     private var returnPage = Page.HOME
     private var pendingPlaybackSave: Job? = null
@@ -71,8 +76,9 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.signingOut) return
         val operation = ++operationSequence
         job?.cancel()
+        continuationJob?.cancel()
         job = viewModelScope.launch {
-            update { it.copy(busy = true, error = null) }
+            update { it.copy(busy = true, error = null, continuation = null, continuationLoading = false, continuationError = null) }
             try { block() }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) {
@@ -276,9 +282,57 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         val profile = requireNotNull(snapshot.profile)
         val progress = requireNotNull(client).progress(media.id, profile.id, snapshot.episode?.id)
         val resume = if (restart || progress.completed) 0 else progress.positionMs
-        update { it.copy(page = Page.PLAYER, target = PlayTarget(media, file, profile, snapshot.episode?.id, resume)) }
+        val target = PlayTarget(media, file, profile, snapshot.episode?.id, resume,
+            snapshot.episode?.let { episodeSeason(it, snapshot.seasons) }, snapshot.episode?.number, snapshot.episode?.title.orEmpty())
+        update { it.copy(page = Page.PLAYER, target = target) }
+        resolveContinuation(target)
     }
     fun play(file: MediaFile, restart: Boolean = false) = perform { preparePlayback(file, restart) }
+
+    private fun resolveContinuation(target: PlayTarget) {
+        continuationJob?.cancel()
+        val api = requireNotNull(client)
+        update { it.copy(continuation = null, continuationError = null, continuationLoading = target.episodeId != null) }
+        if (target.episodeId == null) return
+        continuationJob = viewModelScope.launch {
+            try {
+                val next = withTimeout(15_000) { api.followingEpisode(target) }
+                if (client === api && state.value.page == Page.PLAYER && state.value.target === target)
+                    update { it.copy(continuation = next, continuationLoading = false) }
+            } catch (e: CancellationException) {
+                // A timeout offers Retry, while a superseded player remains retired.
+                if (e is kotlinx.coroutines.TimeoutCancellationException && client === api && state.value.target === target)
+                    update { it.copy(continuationLoading = false, continuationError = "Couldn't load the next episode. Try again.") }
+                else throw e
+            } catch (_: Exception) {
+                if (client === api && state.value.page == Page.PLAYER && state.value.target === target)
+                    update { it.copy(continuationLoading = false, continuationError = "Couldn't load the next episode. Try again.") }
+            }
+        }
+    }
+
+    fun retryContinuation() { state.value.target?.takeIf { state.value.page == Page.PLAYER }?.let { resolveContinuation(it) } }
+
+    private fun trackPlaybackSave(saved: Job) {
+        val previous = pendingPlaybackSave
+        pendingPlaybackSave = viewModelScope.launch { previous?.join(); saved.join() }
+    }
+
+    fun advanceEpisode(from: PlayTarget, finalProgressSaved: Job): Boolean {
+        val snapshot = state.value
+        if (snapshot.page != Page.PLAYER || snapshot.target !== from) return false
+        val next = snapshot.continuation ?: return false
+        trackPlaybackSave(finalProgressSaved)
+        val target = PlayTarget(from.media, next.file, from.profile, next.episode.id,
+            seasonNumber = next.season, episodeNumber = next.episode.number, episodeTitle = next.episode.title)
+        // Replacing the target disposes the old player and saves its captured
+        // profile/episode checkpoint. The next episode starts at zero, as on web.
+        update { it.copy(target = target, episode = next.episode, season = next.season,
+            episodes = if (it.season == next.season) it.episodes else emptyList(), files = next.episode.files,
+            suggestedEpisode = next.episode, home = null) }
+        resolveContinuation(target)
+        return true
+    }
 
     private suspend fun awaitPlaybackSave() {
         val pending = pendingPlaybackSave ?: return
@@ -290,7 +344,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.page != Page.PLAYER) return
         // The player completes this after disposal saves its last playable
         // checkpoint. Retain the barrier if Back cancels the detail refresh.
-        pendingPlaybackSave = finalProgressSaved
+        trackPlaybackSave(finalProgressSaved)
         back()
     }
 
@@ -344,6 +398,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (destination == Page.DETAIL) pendingPlaybackRefresh?.let { returnFromPlayback(it); return }
         operationSequence++
         job?.cancel()
+        continuationJob?.cancel()
         update { it.copy(page = when (it.page) {
             Page.PLAYER -> Page.DETAIL
             Page.DETAIL -> returnPage
@@ -359,6 +414,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         if (state.value.page == Page.PROFILES && state.value.busy) return
         operationSequence++
         job?.cancel()
+        continuationJob?.cancel()
         pendingPlaybackSave = null
         pendingPlaybackRefresh = null
         update { TvState(server = it.server) }
