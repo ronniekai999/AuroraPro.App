@@ -3,7 +3,7 @@
 Native Kotlin, Compose for TV, and Media3 client for built-in Android TVs and
 Google TV devices. Minimum Android version: **9 / API 28**. This is the first
 login-to-playback client in the [approved delivery plan](../../docs/android-tv-plan.md),
-with the Aurora design and playback refinements in version **0.2.0**.
+with the Aurora design and playback refinements in version **0.3.0**.
 The remaining web features are tracked in [the parity checklist](../../docs/android-tv-parity.md).
 
 ## Build and install
@@ -56,6 +56,9 @@ server or media library.
 - A single Aurora playback overlay that hides after five seconds while playing;
   source-time timeline and ±30-second seeking, audio/subtitle/quality settings,
   profile/episode progress, resume, and HLS keepalive/deletion.
+- Smart Skip for recap/intro markers and reachable movie credits; next-episode
+  controls, a cancellable credits countdown, natural-end autoplay, and a saved
+  TV autoplay preference.
 - Playback information that separates probed source dimensions, decoded output,
   active decoder and the server's direct/remux/transcode decision and reason.
 - Encrypted persistent cookies in Android Keystore, origin isolation, and
@@ -71,6 +74,26 @@ progress and cleans up its HLS session. Leaving during a pending quality change
 or long seek saves the last playable position, before the unconfirmed replacement.
 Returning from sleep leaves playback
 paused until the viewer resumes it.
+
+In-player `Next episode` follows season/episode order and skips episodes without
+files, including on rewatch. It retains the selected edition when the next
+episode has that edition, otherwise uses its first available version. The next
+episode starts at zero; Home's Continue Watching still uses saved resume progress.
+At a credits marker, autoplay waits five seconds of observed playback. Pause,
+buffering, sleep, seeking and open settings suspend the countdown. `Watch credits`
+cancels automatic advancement for this episode, including its natural end;
+`Next episode` remains available. Replaying starts a fresh countdown.
+Without credits markers, enabled autoplay advances at the observed natural end.
+The last available episode stays in the player; lookup failures offer Retry.
+
+`Auto-play next episode` in player Settings defaults to On and persists on this
+TV, just as the web stores its preference in each browser. It is not a server
+profile setting and does not synchronize to browsers. Turning it Off retains
+explicit next-episode controls. Markers use source-file time, including resumed
+HLS anchors; skipping an intro beyond the current playlist creates a new session.
+Movie credits only offer a skip when their destination is already reachable,
+avoiding a transcode rebuild at approximate EOF. Progress saves the observed
+outgoing episode position rather than synthesizing completion at a credits marker.
 
 D-pad/OK reveals hidden player controls without activating an invisible button.
 Pause, scrubbing and open settings keep controls visible. Back dismisses settings,
@@ -93,7 +116,7 @@ client's connection and does not revoke other devices.
 
 ## Browser pairing contract
 
-Pairing requires the backend and web changes from this branch. Password sign-in
+Pairing requires the backend and web support delivered with the TV foundation. Password sign-in
 can use the existing cookie-auth API. Deploy the reviewed server/web build
 before testing phone approval.
 Older servers return a clear update/password message in the TV app when pairing
@@ -145,8 +168,8 @@ deletes the previous one. The visible source clock uses the source duration,
 not the length of a growing playlist.
 
 This build includes paginated browsing/filtering, playback quality and track
-controls, and manual episode continuation. Skip markers, bitmap subtitle
-burn-in, automated episode advance, library saves/collections,
+controls, Smart Skip and automated episode continuation. Bitmap subtitle
+burn-in, library saves/collections,
 requests, calendar, watch parties, notifications, social, and administration
 remain in later milestones. Track selection is limited to tracks the chosen
 direct file/HLS manifest exposes. A manually selected original-file audio track

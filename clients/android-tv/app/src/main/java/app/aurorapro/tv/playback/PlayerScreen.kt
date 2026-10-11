@@ -1,5 +1,6 @@
 package app.aurorapro.tv.playback
 
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
@@ -22,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -41,9 +43,31 @@ import kotlinx.coroutines.*
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) {
+fun PlayerScreen(api: AuroraClient, target: PlayTarget, continuation: EpisodeContinuation? = null,
+                 continuationLoading: Boolean = false, continuationError: String? = null,
+                 onRetryContinuation: () -> Unit = {}, onAdvance: (Job) -> Boolean = { false }, onClose: (Job) -> Unit) {
+    // Every title owns all its effects, tracks, source clock and cleanup. A new
+    // player must never inherit the outgoing episode's mutable remembered state.
+    key(api, target) {
+        PlaybackContent(api, target, continuation, continuationLoading, continuationError, onRetryContinuation, onAdvance, onClose)
+    }
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun PlaybackContent(api: AuroraClient, target: PlayTarget, continuation: EpisodeContinuation?,
+                            continuationLoading: Boolean, continuationError: String?,
+                            onRetryContinuation: () -> Unit, onAdvance: (Job) -> Boolean, onClose: (Job) -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val preferences = remember { context.getSharedPreferences("aurora_tv", 0) }
+    var autoplay by remember { mutableStateOf(preferences.getBoolean("autoplay", true)) }
+    val episodeAutoplay = remember { EpisodeAutoplay() }
+    var nextPrompt by remember { mutableStateOf(EpisodePrompt()) }
+    var markers by remember { mutableStateOf<List<SkipMarker>>(emptyList()) }
+    var dismissedMarker by remember { mutableStateOf<SkipMarker?>(null) }
+    var readyGeneration by remember { mutableIntStateOf(0) }
+    var started by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) }
     val scope = rememberCoroutineScope { Dispatchers.Main.immediate }
     val report = remember(target.file) { deviceCapabilityReport(context, target.file) }
     val player = remember(api, target) {
@@ -55,7 +79,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, target.profile.subtitleMode == "off").build()
         }
     }
-    val mediaSession = remember(player) { MediaSession.Builder(context, player).build() }
+    val mediaSession = remember(player) { MediaSession.Builder(context, player).setId(java.util.UUID.randomUUID().toString()).build() }
     var timeline by remember { mutableStateOf(SourceTimeline(0, target.file.durationMs)) }
     var sessionId by remember { mutableStateOf<String?>(null) }
     var decision by remember { mutableStateOf<StreamDecision?>(null) }
@@ -97,6 +121,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
     var actualAudioCopy by remember { mutableStateOf<Boolean?>(null) }
     val surfaceFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val nextUpFocus = remember { FocusRequester() }
 
     fun reveal() { overlay = true; interaction++ }
     fun close() { onClose(finalProgressSaved) }
@@ -140,7 +165,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
         // position before stop resets the item, rather than the requested seek.
         progress.beginLoad(sourcePosition(), timeline.durationMs)
         busy = true; error = null; loadGeneration++
-        hasLoaded = false
+        hasLoaded = false; readyGeneration = 0
         pausingForLoad = true
         // Cancel the old HLS loader before retiring its server session. Pausing
         // alone still lets Media3 buffer from URLs that deletion will invalidate.
@@ -152,6 +177,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
         currentCoroutineContext().ensureActive()
         val stream = decision ?: api.streamInfo(target, report.caps).let {
             sourceAudioTracks = it.audioTracks
+            markers = validSkipMarkers(it.markers, it.stream.durationMs.takeIf { ms -> ms > 0 } ?: target.file.durationMs)
             it.stream
         }.also { decision = it }
         val duration = stream.durationMs.takeIf { it > 0 } ?: target.file.durationMs
@@ -203,32 +229,44 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
     }
     fun seek(at: Long) {
         val source = timeline.seekPosition(at)
+        episodeAutoplay.seek(); nextPrompt = EpisodePrompt(); position = source; ended = false
+        if (dismissedMarker?.let { source < it.startMs } == true) dismissedMarker = null
         val local = timeline.playerPosition(source)
         if (hasLoaded && (sessionId == null || (source >= timeline.offsetMs && player.duration > 0 && local <= player.duration)))
             player.seekTo(local)
         else scheduleLoad(source)
     }
     fun togglePlay() {
-        if (ended) { playRequested = true; seek(0); player.play() }
+        if (ended) { episodeAutoplay.replay(); dismissedMarker = null; playRequested = true; seek(0); player.play() }
         else {
             playRequested = !playRequested
             player.playWhenReady = playRequested && !busy
         }
         reveal()
     }
+    val ready = hasLoaded && readyGeneration == loadGeneration
+    fun advance() {
+        if (!hasLoaded || readyGeneration != loadGeneration || player.currentMediaItem?.mediaId != loadGeneration.toString() ||
+            busy || error != null || continuation == null) { return }
+        if (onAdvance(finalProgressSaved)) {
+            episodeAutoplay.consume(); playRequested = false; player.pause()
+        }
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                if (!pausingForLoad) { playRequested = playWhenReady; if (!playWhenReady) reveal() }
+                if (!pausingForLoad) { playRequested = playWhenReady; if (!playWhenReady) { episodeAutoplay.pause(); reveal() } }
             }
-            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying; if (!isPlaying) episodeAutoplay.pause() }
             override fun onPlaybackStateChanged(playbackState: Int) {
-                ended = playbackState == Player.STATE_ENDED
+                ended = playbackState == Player.STATE_ENDED && hasLoaded && readyGeneration == loadGeneration &&
+                    player.currentMediaItem?.mediaId == loadGeneration.toString()
                 if (ended) reveal()
                 if (playbackState == Player.STATE_READY && hasLoaded &&
                     player.currentMediaItem?.mediaId == loadGeneration.toString()) {
                     progress.onReady()
+                    readyGeneration = loadGeneration
                     applySelections(player.currentTracks)
                 }
             }
@@ -238,6 +276,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
             }
             override fun onPlayerError(playbackError: PlaybackException) {
                 if (busy || !hasLoaded) return // An outgoing load cannot fail its replacement.
+                dismissedMarker = null
                 val at = sourcePosition()
                 if (!fallbackUsed && playbackError.errorCode in setOf(
                     PlaybackException.ERROR_CODE_DECODING_FAILED, PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
@@ -254,7 +293,8 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
                                                     initializedTimestampMs: Long, initializationDurationMs: Long) { decoder = decoderName }
         }
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) { playRequested = false; player.pause(); reveal(); scope.launch { persist() } }
+            if (event == Lifecycle.Event.ON_START) started = true
+            if (event == Lifecycle.Event.ON_STOP) { started = false; episodeAutoplay.pause(); playRequested = false; player.pause(); reveal(); scope.launch { persist() } }
         }
         player.addListener(listener)
         player.addAnalyticsListener(analytics)
@@ -296,23 +336,38 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
     }
     LaunchedEffect(player) { scheduleLoad(target.resumeMs, false) }
     LaunchedEffect(player) {
-        var ticks = 0
         while (isActive && active) {
-            delay(1000); position = sourcePosition(); ticks++
-            if (ticks % 15 == 0) persist()
+            delay(1000); position = sourcePosition()
+        }
+    }
+    LaunchedEffect(player) {
+        // Progress requests can wait on the server or a previous save. The
+        // playback clock and marker/countdown controls must keep sampling.
+        while (isActive && active) {
+            delay(15_000); persist()
         }
     }
     LaunchedEffect(sessionId) {
         val id = sessionId ?: return@LaunchedEffect
         while (isActive) { delay(20_000); runCatching { api.keepAlive(id) } }
     }
-    LaunchedEffect(overlay, interaction, playing, busy, panel, scrubbing, error, trackMessage) {
-        if (overlay && playing && !busy && panel == null && !scrubbing && error == null && trackMessage == null) {
+    val creditsStart = if (target.episodeId != null) markers.firstOrNull { it.kind == "credits" }?.startMs else null
+    LaunchedEffect(position, creditsStart, ended, playing, ready, continuation, autoplay, busy, error, panel, scrubbing, started, playRequested) {
+        nextPrompt = episodeAutoplay.sample(position, creditsStart, ended, playing, ready, continuation != null, autoplay,
+            busy || error != null || panel != null || scrubbing || !started || !playRequested, SystemClock.elapsedRealtime())
+        if (nextPrompt.advance) advance()
+    }
+    LaunchedEffect(nextPrompt.offered) { if (nextPrompt.offered && panel == null) reveal() }
+    LaunchedEffect(overlay, interaction, playing, busy, panel, scrubbing, error, trackMessage, nextPrompt.offered) {
+        if (overlay && playing && !busy && panel == null && !scrubbing && error == null && trackMessage == null && !nextPrompt.offered) {
             delay(5000); overlay = false
         }
     }
     LaunchedEffect(overlay, panel) {
-        if (panel == null) { if (overlay) playFocus.requestFocus() else surfaceFocus.requestFocus() }
+        if (panel == null) {
+            if (overlay && nextPrompt.offered && !ended) nextUpFocus.requestFocus()
+            else if (overlay) playFocus.requestFocus() else surfaceFocus.requestFocus()
+        }
     }
     BackHandler {
         when { panel != null -> { panel = null; reveal() }; overlay -> overlay = false; else -> close() }
@@ -326,7 +381,7 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
             if (down) {
                 when (code) {
                     KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> togglePlay()
-                    KeyEvent.KEYCODE_MEDIA_PLAY -> { playRequested = true; player.playWhenReady = !busy; reveal() }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> { if (ended) togglePlay() else { playRequested = true; player.playWhenReady = !busy; reveal() } }
                     KeyEvent.KEYCODE_MEDIA_PAUSE -> { playRequested = false; player.pause(); reveal() }
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (!busy) { seek(sourcePosition() + 30_000); reveal() }
                     KeyEvent.KEYCODE_MEDIA_REWIND -> if (!busy) { seek(sourcePosition() - 30_000); reveal() }
@@ -352,10 +407,24 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
             isFocusable = false; descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         } }, modifier = Modifier.fillMaxSize(), onRelease = { it.player = null }, update = { it.player = player })
         if (busy) Text("Preparing your stream…", Modifier.align(Alignment.Center), color = AuroraColors.Focus)
+        val skip = if (ready && !busy && error == null) activeSkipMarker(markers, position, target.episodeId != null,
+            if (sessionId == null) null else timeline.sourcePosition(player.bufferedPosition), dismissedMarker) else null
+        if (!overlay && panel == null && (skip != null || nextPrompt.offered)) {
+            Column(Modifier.align(Alignment.BottomEnd).padding(36.dp).background(AuroraColors.Surface, RoundedCornerShape(16.dp)).padding(16.dp)) {
+                Text(nextPrompt.seconds?.let { "Next episode in $it sec" } ?: if (nextPrompt.offered) "Next episode available" else skip!!.label())
+                Text("Press OK for controls", color = AuroraColors.Muted, fontSize = 12.sp)
+            }
+        }
         if (overlay && panel == null) {
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .9f),
                 Color.Transparent))).padding(32.dp), verticalAlignment = Alignment.CenterVertically) {
-                AuroraTitle(target.media.title, Modifier.weight(1f), size = 24)
+                Column(Modifier.weight(1f)) {
+                    AuroraTitle(target.media.title, size = 24)
+                    if (target.seasonNumber != null && target.episodeNumber != null) {
+                        Text("S${target.seasonNumber}E${target.episodeNumber}" + target.episodeTitle.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
+                            color = AuroraColors.Muted, fontSize = 13.sp)
+                    }
+                }
                 Text(if (sessionId == null && decision?.decision == "direct_play") "Original" else "Output · $output",
                     color = AuroraColors.Muted, fontSize = 12.sp)
             }
@@ -365,6 +434,32 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
                 error?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 13.sp) }
                 progressMessage?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 12.sp) }
                 trackMessage?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 12.sp) }
+                if (nextPrompt.offered && continuation != null) {
+                    Text(nextPrompt.seconds?.let { "Next episode in $it sec · ${continuation.label}" } ?: "Up next · ${continuation.label}",
+                        color = AuroraColors.Focus, fontSize = 16.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                }
+                if (skip != null || target.episodeId != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (skip != null) {
+                            TvAction(skip.label(), { dismissedMarker = skip; reveal(); seek(skipDestination(skip)) }, primary = true)
+                        }
+                        if (continuation != null) {
+                            TvAction("Next episode", { advance() }, enabled = ready && !busy && error == null)
+                            if (nextPrompt.offered && !ended) {
+                                TvAction("Watch credits", {
+                                    episodeAutoplay.cancel(); nextPrompt = EpisodePrompt(); reveal(); playFocus.requestFocus()
+                                }, Modifier.focusRequester(nextUpFocus))
+                            }
+                        } else if (continuationLoading) {
+                            Text("Finding next episode…", color = AuroraColors.Muted, fontSize = 13.sp)
+                        } else if (continuationError != null) {
+                            Text(continuationError, color = Color(0xFFFFBAAE), fontSize = 13.sp)
+                            TvAction("Retry next episode", onRetryContinuation)
+                        } else if (ended && target.seasonNumber != null && target.episodeNumber != null) {
+                            Text("No later playable episodes are available.", color = AuroraColors.Muted, fontSize = 13.sp)
+                        }
+                    }
+                }
                 PlayerTimeline(position, timeline.durationMs, !busy, { scrubbing = it }, { reveal(); seek(it) })
                 Text(playbackClock(position) + " / " + playbackClock(timeline.durationMs), color = AuroraColors.Muted, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -406,7 +501,8 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
                                 val profile = profiles.firstOrNull { "${it.width}x${it.height}" == choice.key }
                                 choice.key to (profile?.name?.let { "$it · " }.orEmpty() + choice.label)
                             }
-                        else -> listOf("quality" to "Quality", "audio" to "Audio", "subtitles" to "Subtitles", "info" to "Playback information")
+                        else -> listOf("quality" to "Quality", "audio" to "Audio", "subtitles" to "Subtitles",
+                            "autoplay" to "Auto-play next episode · ${if (autoplay) "On" else "Off"}", "info" to "Playback information")
                     }
                     val selected = when (current) { "audio" -> audioChoice ?: "auto"; "subtitles" -> textChoice ?: "auto"
                         "quality" -> if (direct) "original" else quality ?: "auto"; else -> null }
@@ -444,7 +540,10 @@ fun PlayerScreen(api: AuroraClient, target: PlayTarget, onClose: (Job) -> Unit) 
                                         scheduleLoad(sourcePosition())
                                     }
                                 }
-                                else -> panel = key
+                                else -> if (key == "autoplay") {
+                                    autoplay = !autoplay
+                                    preferences.edit { putBoolean("autoplay", autoplay) }
+                                } else panel = key
                             }
                             reveal()
                         }, { panel = if (current == "settings") null else "settings"; reveal() })

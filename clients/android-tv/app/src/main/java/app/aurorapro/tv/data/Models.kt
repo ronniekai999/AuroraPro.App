@@ -117,7 +117,12 @@ data class StreamInfo(
     val stream: StreamDecision,
     val subtitles: List<Subtitle> = emptyList(),
     @SerialName("audio_tracks") val audioTracks: List<AudioTrack> = emptyList(),
+    val markers: List<SkipMarker> = emptyList(),
 )
+
+@Serializable
+data class SkipMarker(val kind: String, @SerialName("start_ms") val startMs: Long,
+    @SerialName("end_ms") val endMs: Long)
 
 @Serializable
 data class StreamDecision(
@@ -184,6 +189,13 @@ data class PlayTarget(
     val profile: Profile,
     val episodeId: Long? = null,
     val resumeMs: Long = 0,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val episodeTitle: String = "",
 ) {
     val fileType: String get() = if (episodeId == null) "media" else "episode"
+}
+
+data class EpisodeContinuation(val episode: Episode, val file: MediaFile, val season: Int) {
+    val label: String get() = "S${season}E${episode.number}" + episode.title.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
 }

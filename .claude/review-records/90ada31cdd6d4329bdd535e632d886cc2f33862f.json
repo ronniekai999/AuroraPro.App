@@ -1,0 +1,10 @@
+{
+  "sha": "90ada31cdd6d4329bdd535e632d886cc2f33862f",
+  "verdict": "clean",
+  "summary": "Reviewed full Android TV Smart Skip, chronological Next and autoplay diff; no actionable defects. Native Media3/D-pad execution and physical-device acceptance remain pending.",
+  "reviewer": "/root/review_tv_parity_final",
+  "findings": "0",
+  "diff_digest": "27e045fee5b9dfbae5be6a64cde0a76c7af5fc010f2c995e9b2ad16f8f3dd568",
+  "branch": "feat/android-tv-smart-skip",
+  "recorded_at": "2026-10-11T03:36:53Z"
+}

@@ -94,7 +94,9 @@ internal fun AuroraApp(vm: TvViewModel = viewModel()) {
         (state.page != Page.PROFILES || state.profileReturnPage != null || state.busy)) { vm.back() }
     val api = vm.client
     if (state.page == Page.PLAYER && state.target != null && api != null) {
-        PlayerScreen(api, state.target!!, onClose = vm::playbackClosed)
+        val target = state.target!!
+        PlayerScreen(api, target, state.continuation, state.continuationLoading, state.continuationError,
+            onRetryContinuation = vm::retryContinuation, onAdvance = { vm.advanceEpisode(target, it) }, onClose = vm::playbackClosed)
         return
     }
     Box(Modifier.fillMaxSize().auroraBackground()) {
