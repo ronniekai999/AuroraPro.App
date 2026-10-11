@@ -1,0 +1,10 @@
+{
+  "sha": "f4d1ca409f4a88caa4b6e6932c9d2d03dfa7928f",
+  "verdict": "clean",
+  "summary": "Reviewed complete Smart Skip and chronological autoplay diff plus corrected frame-driven delayed-PUT test setup; no actionable defects. Corrected native test execution and physical-TV acceptance remain pending.",
+  "reviewer": "/root/review_tv_parity_ci_final",
+  "findings": "0",
+  "diff_digest": "0f5c176ab4cb324bc8fdd85d1f4348cdebbf6b34b84109604f0b55b8b2810744",
+  "branch": "feat/android-tv-smart-skip",
+  "recorded_at": "2026-10-11T03:52:45Z"
+}
