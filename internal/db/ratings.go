@@ -49,9 +49,12 @@ var ageRatingOrder = map[string]int{
 // maxRating is matched ignoring case and surrounding whitespace, so a stored
 // "pg" means PG. A non-empty ceiling the ladder doesn't know fails CLOSED to the
 // all-ages tier: someone set it to restrict, and lifting every restriction
-// because of a typo is the wrong way to fail. (It must not return an empty
-// slice either — callers read an empty slice as "no restriction".) New values
-// are validated on write by CanonicalMaxRating, so this covers legacy rows.
+// because of a typo is the wrong way to fail. It must not return an empty
+// slice either: the gates disagree about one. Those that test len(allowed) > 0
+// read it as no restriction, and those that test `$n::text[] IS NULL` read it
+// as allowing nothing. New values are validated on write by
+// CanonicalMaxRating, and canonicalizeProfileRatings rewrites stored ones at
+// boot, so this covers only rows written since by hand.
 func AllowedRatingsForMax(maxRating string) []string {
 	if strings.TrimSpace(maxRating) == "" {
 		return nil

@@ -405,8 +405,9 @@ type MediaHandler struct {
 // handler trivially testable with a fake.
 //
 // allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
-// nil or empty = unrestricted), which the implementation must apply before
-// its recall limits so a restricted search is filled with allowed titles.
+// nil or empty = unrestricted), which the implementation must apply in its
+// recall queries, not to its final page, so a restricted search is filled
+// with allowed titles as far as its index allows.
 type SemanticSearcher interface {
 	Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]SemanticHit, error)
 }
@@ -821,7 +822,7 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	// The ceiling comes from the session's acting profile (issue #462), never a
 	// client-sent profile_id/max_rating, with the same fail-open posture as
 	// List and Recent: this is discovery, and the read/playback path is the
-	// boundary. Both paths apply it in SQL before their limits.
+	// boundary. Both paths apply it in their SQL, not to the final page.
 	var maxRating string
 	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
 		slog.Warn("resolve acting profile for search failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)

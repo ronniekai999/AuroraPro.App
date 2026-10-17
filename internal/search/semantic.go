@@ -211,7 +211,8 @@ type Hit struct {
 // allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
 // nil or empty = unrestricted). Both recall legs apply it in SQL, so every
 // later stage — fusion, dedup, rerank, the title fallback — only ever sees
-// allowed titles and cannot pick an over-ceiling one.
+// allowed titles and cannot pick an over-ceiling one. Under the HNSW index the
+// vector leg can return fewer allowed rows than asked for (see SemanticSearch).
 func (s *Searcher) Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]Hit, *ParsedQuery, error) {
 	if limit <= 0 {
 		limit = 20
@@ -392,9 +393,6 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int, allowedR
 	return out, parsed, nil
 }
 
-// vectorOrderHits is the rerank-failure fallback: deduped items in their
-// vector-recall order, no reasons. The Score field is filled from cosine
-// distance so consumers that still depend on it (e.g. tests) keep working.
 // lexicalRecall runs the trigram leg: one ranked id list per query (empty
 // lists dropped), and records each newly seen item in itemByID. It takes the
 // vector leg's own filter, so the two legs cannot disagree about the media
@@ -428,6 +426,9 @@ func (s *Searcher) lexicalRecall(ctx context.Context, queries []string, filter d
 	return lists
 }
 
+// vectorOrderHits is the rerank-failure fallback: deduped items in their
+// vector-recall order, no reasons. The Score field is filled from cosine
+// distance so consumers that still depend on it (e.g. tests) keep working.
 func vectorOrderHits(items []*models.MediaItem, distByID map[int64]float64, limit int) []Hit {
 	if limit > len(items) {
 		limit = len(items)

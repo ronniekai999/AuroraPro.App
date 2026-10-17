@@ -110,7 +110,10 @@ func TestSearchMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 
 // TestSemanticSearchAppliesRatingCeilingBeforeLimit is the same contract for
 // the vector leg: rows nearer the query but over the ceiling (or unrated) must
-// not crowd an allowed, farther row out of the kNN page.
+// not crowd an allowed, farther row out of the kNN page. It pins the filter's
+// placement in the query; on a test-sized catalog the planner picks an exact
+// sequential scan, so the HNSW candidate window SemanticSearch documents is
+// not exercised here.
 func TestSemanticSearchAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	q := requireIntegrationDB(t)
 	ctx := context.Background()
@@ -148,6 +151,9 @@ func TestSemanticSearchAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	open, err := q.SemanticSearch(ctx, query, SemanticFilter{}, 3)
 	if err != nil {
 		t.Fatalf("SemanticSearch (unrestricted): %v", err)
+	}
+	if len(open) != 3 {
+		t.Fatalf("unrestricted page has %d rows, want 3", len(open))
 	}
 	for _, h := range open {
 		if h.Item.ID == allowed {

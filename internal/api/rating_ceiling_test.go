@@ -591,19 +591,26 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 // TestAICollectionSeed_ServerDerivedCeiling: an AI collection is seeded by a
 // library search run as its creator, so a restricted profile prompting one
 // must hand the searcher its own ceiling, or the collection becomes a way to
-// read back any title the search would have hidden.
+// read back any title the search would have hidden. The fake also returns an
+// R hit regardless, standing in for a searcher that ignores its argument: the
+// seed must not save it for the restricted profile.
 func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 	f := newRCFixture(t)
+	rItem, err := f.q.GetMediaItem(context.Background(), f.movieID)
+	if err != nil || rItem == nil {
+		t.Fatalf("load R item: %v", err)
+	}
 	for _, tc := range []struct {
 		name      string
 		refreshID int64
 		want      []string
+		wantSaved bool
 	}{
-		{"restricted", f.restrictedRefreshID, db.AllowedRatingsForMax("PG")},
-		{"unrestricted", f.unrestrictedRefreshID, nil},
+		{"restricted", f.restrictedRefreshID, db.AllowedRatingsForMax("PG"), false},
+		{"unrestricted", f.unrestrictedRefreshID, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeSemantic{}
+			fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
 			h := NewCollectionsHandler(f.q)
 			h.SetSemanticSearcher(fake)
 			r := httptest.NewRequest(http.MethodPost, "/api/collections",
@@ -615,14 +622,26 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 				t.Fatalf("Create status = %d, want 201 (body %q)", rr.Code, rr.Body.String())
 			}
 			var c models.Collection
-			if err := json.Unmarshal(rr.Body.Bytes(), &c); err == nil && c.ID != 0 {
-				t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
+			if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil || c.ID == 0 {
+				t.Fatalf("decode created collection: %v (body %q)", err, rr.Body.String())
 			}
+			t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
 			if !fake.called {
 				t.Fatal("AI collection creation did not run the semantic search")
 			}
 			if !sameRatings(fake.allowedRatings, tc.want) {
 				t.Errorf("AI collection seed passed allowedRatings %v, want %v", fake.allowedRatings, tc.want)
+			}
+			items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+			if err != nil {
+				t.Fatalf("list collection items: %v", err)
+			}
+			saved := false
+			for _, it := range items {
+				saved = saved || it.ID == rItem.ID
+			}
+			if saved != tc.wantSaved {
+				t.Errorf("R hit saved into the collection = %v, want %v", saved, tc.wantSaved)
 			}
 		})
 	}

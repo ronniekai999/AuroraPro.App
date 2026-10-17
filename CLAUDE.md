@@ -118,20 +118,28 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   client-sent `profile_id`/`max_rating`. Discovery fails open on a resolve
   error; the read/playback path is the boundary.
 - `internal/db/ratings.go` is the only ladder. Gates use `AllowedRatingsForMax`
-  or `RatingAllowed`; nil means unrestricted, and an empty slice reads the same
-  way, so never return one for a restriction.
+  or `RatingAllowed`; nil means unrestricted. An empty slice is ambiguous: gates
+  testing `len(allowed) > 0` read it as unrestricted, gates testing
+  `$n::text[] IS NULL` as allowing nothing. Never produce one for a restriction.
 - Filter in SQL before cross-library dedup and before `LIMIT`. Library search
-  filters both semantic recall legs (vector and lexical), so fusion, rerank and
-  the title fallback only see allowed titles; AI-collection seeding passes the
-  creator's ceiling.
+  filters both semantic recall legs (the lexical leg takes the vector leg's
+  `SemanticFilter`), so fusion, rerank and the title fallback only see allowed
+  titles. AI-collection seeding passes the creator's ceiling and, because the
+  seed is saved, skips seeding on a resolve error instead of failing open.
 - `max_age_rating` is canonicalized on write by `CanonicalMaxRating`; unknown
-  values are a 400. Reads tolerate case and whitespace, and an unknown legacy
-  value restricts to the all-ages tier rather than lifting the ceiling.
+  values are a 400. Reads tolerate case and whitespace, and an unknown value
+  restricts to the all-ages tier rather than lifting the ceiling. The boot data
+  migration `canonicalizeProfileRatings` rewrites stored values to that meaning
+  so the API and clients report the enforced ceiling.
 - A ceiling change invalidates the profile's recommender caches, which are built
   under the ceiling and otherwise live up to 24h.
-- Known gaps: `/api/me/hero` and continue-watching trust a client `profile_id`;
-  collection contents are not ceiling-gated; any session on the account can
-  change any of its profiles' ceilings (no PIN).
+- Known gaps: under the HNSW index, kNN filters apply to about `hnsw.ef_search`
+  (100) candidates, so a restricted semantic search on a large catalog can
+  return fewer allowed rows than its limit (no leak; `MediaType` and the
+  recommender's kNN queries share this). `/api/me/hero` and continue-watching
+  let an owned `?profile_id=` override the acting profile; `/api/calendar`
+  applies no ceiling; collection contents are not ceiling-gated when read; any
+  session on the account can change any of its profiles' ceilings (no PIN).
 
 ### Member profiles and follows
 
