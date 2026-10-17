@@ -14,6 +14,17 @@ class PlaybackPresentationTest {
         assertEquals("Dimensions unknown · HEVC", sourceLabel(source.copy(resolution = "1080p")))
     }
 
+    @Test fun titleBadgesComeFromProbedGeometryAndTransferNeverTheVersionTag() {
+        val source = MediaFile(1, videoCodec = "hevc", resolution = "1918x1038", versionTag = "720p")
+        assertEquals(listOf("1080p"), sourceBadges(source))
+        assertEquals(listOf("4K", "HDR"), sourceBadges(source.copy(resolution = "3840x2160", colorTransfer = "smpte2084", versionTag = "1080p")))
+        assertEquals(listOf("4K", "HLG"), sourceBadges(source.copy(resolution = "4096x1716", colorTransfer = "arib-std-b67")))
+        assertEquals(listOf("720p"), sourceBadges(source.copy(resolution = "1280x536")))
+        assertEquals(listOf("SD"), sourceBadges(source.copy(resolution = "720x480", colorTransfer = "bt709")))
+        // A height-only label is not geometry; show no tier rather than trust it.
+        assertEquals(emptyList<String>(), sourceBadges(source.copy(resolution = "2160p", versionTag = "4K")))
+    }
+
     @Test fun realProfileAndEpisodeDtosKeepOrbSeasonAndProgressIdentity() {
         val profile = apiJson.decodeFromString<Profile>("""{"id":7,"name":"Alice","avatar_url":"nebula:aurora"}""")
         assertEquals("nebula:aurora", profile.avatarUrl)

@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -16,8 +17,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.*
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.*
@@ -406,34 +411,38 @@ private fun PlaybackContent(api: AuroraClient, target: PlayTarget, continuation:
             this.player = player; keepScreenOn = true; useController = false
             isFocusable = false; descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         } }, modifier = Modifier.fillMaxSize(), onRelease = { it.player = null }, update = { it.player = player })
-        if (busy) Text("Preparing your stream…", Modifier.align(Alignment.Center), color = AuroraColors.Focus)
+        if (busy) Text("Preparing your stream…", Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = .55f), RoundedCornerShape(50))
+            .padding(horizontal = 22.dp, vertical = 10.dp), color = AuroraColors.Focus, fontSize = 16.sp)
         val skip = if (ready && !busy && error == null) activeSkipMarker(markers, position, target.episodeId != null,
             if (sessionId == null) null else timeline.sourcePosition(player.bufferedPosition), dismissedMarker) else null
         if (!overlay && panel == null && (skip != null || nextPrompt.offered)) {
-            Column(Modifier.align(Alignment.BottomEnd).padding(36.dp).background(AuroraColors.Surface, RoundedCornerShape(16.dp)).padding(16.dp)) {
-                Text(nextPrompt.seconds?.let { "Next episode in $it sec" } ?: if (nextPrompt.offered) "Next episode available" else skip!!.label())
-                Text("Press OK for controls", color = AuroraColors.Muted, fontSize = 12.sp)
+            Column(Modifier.align(Alignment.BottomEnd).padding(48.dp).background(AuroraColors.Surface.copy(alpha = .92f), RoundedCornerShape(18.dp))
+                .border(1.dp, AuroraColors.Focus.copy(alpha = .5f), RoundedCornerShape(18.dp)).padding(horizontal = 20.dp, vertical = 14.dp)) {
+                Text(nextPrompt.seconds?.let { "Next episode in $it sec" } ?: if (nextPrompt.offered) "Next episode available" else skip!!.label(),
+                    fontFamily = AuroraHeading, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                Text("Press OK for controls", color = AuroraColors.Muted, fontSize = 13.sp)
             }
         }
         if (overlay && panel == null) {
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .9f),
-                Color.Transparent))).padding(32.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    AuroraTitle(target.media.title, size = 24)
+                Color.Transparent))).padding(start = 48.dp, end = 48.dp, top = 32.dp, bottom = 48.dp), verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AuroraTitle(target.media.title, size = 30)
                     if (target.seasonNumber != null && target.episodeNumber != null) {
                         Text("S${target.seasonNumber}E${target.episodeNumber}" + target.episodeTitle.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
-                            color = AuroraColors.Muted, fontSize = 13.sp)
+                            color = Color.White.copy(alpha = .8f), fontSize = 16.sp)
                     }
                 }
                 Text(if (sessionId == null && decision?.decision == "direct_play") "Original" else "Output · $output",
-                    color = AuroraColors.Muted, fontSize = 12.sp)
+                    Modifier.background(Color.White.copy(alpha = .08f), RoundedCornerShape(50)).border(1.dp, AuroraColors.GlassBorder, RoundedCornerShape(50))
+                        .padding(horizontal = 14.dp, vertical = 6.dp), color = AuroraColors.Muted, fontSize = 13.sp)
             }
             Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(
-                listOf(Color.Transparent, Color.Black.copy(alpha = .95f)))).padding(horizontal = 36.dp, vertical = 24.dp),
+                listOf(Color.Transparent, Color.Black.copy(alpha = .7f), Color.Black.copy(alpha = .95f)))).padding(start = 48.dp, end = 48.dp, top = 56.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                error?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 13.sp) }
-                progressMessage?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 12.sp) }
-                trackMessage?.let { Text(it, color = Color(0xFFFFBAAE), fontSize = 12.sp) }
+                error?.let { Text(it, color = AuroraColors.Error, fontSize = 14.sp) }
+                progressMessage?.let { Text(it, color = AuroraColors.Error, fontSize = 13.sp) }
+                trackMessage?.let { Text(it, color = AuroraColors.Error, fontSize = 13.sp) }
                 if (nextPrompt.offered && continuation != null) {
                     Text(nextPrompt.seconds?.let { "Next episode in $it sec · ${continuation.label}" } ?: "Up next · ${continuation.label}",
                         color = AuroraColors.Focus, fontSize = 16.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -461,12 +470,13 @@ private fun PlaybackContent(api: AuroraClient, target: PlayTarget, continuation:
                     }
                 }
                 PlayerTimeline(position, timeline.durationMs, !busy, { scrubbing = it }, { reveal(); seek(it) })
-                Text(playbackClock(position) + " / " + playbackClock(timeline.durationMs), color = AuroraColors.Muted, fontSize = 13.sp)
+                Text(playbackClock(position) + " / " + playbackClock(timeline.durationMs), color = Color.White.copy(alpha = .78f), fontSize = 14.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TvAction("Back to title", ::close)
+                    TvAction("Back to title", ::close, icon = AuroraIcons.Back)
                     TvAction("−30 sec", { reveal(); seek(sourcePosition() - 30_000) }, enabled = !busy)
                     TvAction(if (ended) "Replay" else if (playRequested) "Pause" else "Resume", { togglePlay() },
-                        Modifier.focusRequester(playFocus), primary = true)
+                        Modifier.focusRequester(playFocus), primary = true,
+                        icon = if (ended) AuroraIcons.Restart else if (playRequested) AuroraIcons.Pause else AuroraIcons.Play)
                     TvAction("+30 sec", { reveal(); seek(sourcePosition() + 30_000) }, enabled = !busy)
                     TvAction("Settings", { panel = "settings"; reveal() }, enabled = !busy)
                     if (error != null) TvAction("Retry", { scheduleLoad(position); reveal() })
@@ -480,7 +490,8 @@ private fun PlaybackContent(api: AuroraClient, target: PlayTarget, continuation:
                 "info" -> PlaybackPanel {
                     val backFocus = remember { FocusRequester() }
                     LaunchedEffect(Unit) { backFocus.requestFocus() }
-                    Column(Modifier.width(540.dp).heightIn(max = 400.dp).background(AuroraColors.Surface, RoundedCornerShape(20.dp)).padding(24.dp),
+                    Column(Modifier.width(540.dp).heightIn(max = 400.dp).background(AuroraColors.Surface, RoundedCornerShape(24.dp))
+                        .border(1.dp, AuroraColors.GlassBorder, RoundedCornerShape(24.dp)).padding(26.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         AuroraTitle("Playback information", size = 24)
                         Text(playbackPathLabel(direct, actualRemux, actualAudioCopy), color = AuroraColors.Focus)
@@ -569,10 +580,12 @@ private fun PlaybackChoices(id: String, title: String, choices: List<Pair<String
         val firstFocus = remember { FocusRequester() }
         LaunchedEffect(Unit) { firstFocus.requestFocus() }
         PlaybackPanel {
-            Column(Modifier.width(480.dp).heightIn(max = 390.dp).background(AuroraColors.Surface, RoundedCornerShape(20.dp)).padding(24.dp),
+            Column(Modifier.width(480.dp).heightIn(max = 400.dp).background(AuroraColors.Surface, RoundedCornerShape(24.dp))
+                .border(1.dp, AuroraColors.GlassBorder, RoundedCornerShape(24.dp)).padding(26.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 AuroraTitle(title, size = 24)
-                LazyColumn(Modifier.weight(1f, fill = false), state = list, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                LazyColumn(Modifier.weight(1f, fill = false), state = list, verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(vertical = 6.dp, horizontal = 4.dp)) {
                     items(choices, key = { it.first }) { (choice, label) ->
                         val focus = if (choice == choices.getOrNull(initial)?.first) Modifier.focusRequester(firstFocus) else Modifier
                         TvAction((if (selected == choice) "✓  " else "") + label, { onSelect(choice) }, focus.fillMaxWidth(), selected = selected == choice)
@@ -624,8 +637,7 @@ private fun PlayerTimeline(position: Long, duration: Long, enabled: Boolean, onS
     var preview by remember { mutableStateOf<Long?>(null) }
     val shown = preview ?: position
     val fraction = if (duration > 0) (shown.toDouble() / duration).toFloat().coerceIn(0f, 1f) else 0f
-    Box(Modifier.fillMaxWidth().height(32.dp).border(if (focused) 2.dp else 0.dp,
-        if (focused) AuroraColors.Focus else Color.Transparent, RoundedCornerShape(8.dp))
+    Box(Modifier.fillMaxWidth().height(32.dp)
         .onFocusChanged { focused = it.isFocused; if (!focused) { preview = null; onScrub(false) } }
         .onPreviewKeyEvent { event ->
             val code = event.nativeKeyEvent.keyCode
@@ -641,7 +653,18 @@ private fun PlayerTimeline(position: Long, duration: Long, enabled: Boolean, onS
             progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
             if (enabled && duration > 0) setProgress { value -> onSeek((duration * value.coerceIn(0f, 1f)).toLong()); true }
         }.focusable(enabled), contentAlignment = Alignment.CenterStart) {
-        Box(Modifier.fillMaxWidth().height(4.dp).background(Color.White.copy(alpha = .3f), RoundedCornerShape(4.dp)))
-        if (fraction > 0) Box(Modifier.fillMaxWidth(fraction).height(4.dp).background(AuroraColors.Purple, RoundedCornerShape(4.dp)))
+        Canvas(Modifier.fillMaxSize()) {
+            val track = (if (focused) 8 else 5).dp.toPx()
+            val top = (size.height - track) / 2
+            val radius = CornerRadius(track / 2)
+            drawRoundRect(Color.White.copy(alpha = .26f), Offset(0f, top), Size(size.width, track), radius)
+            if (fraction > 0) drawRoundRect(Brush.horizontalGradient(listOf(AuroraColors.Purple, AuroraColors.Cyan), 0f, size.width),
+                Offset(0f, top), Size(size.width * fraction, track), radius)
+            if (focused) {
+                val center = Offset(size.width * fraction, size.height / 2)
+                drawCircle(AuroraColors.Focus.copy(alpha = .35f), 14.dp.toPx(), center)
+                drawCircle(Color.White, 8.dp.toPx(), center)
+            }
+        }
     }
 }

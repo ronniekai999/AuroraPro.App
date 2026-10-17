@@ -1,7 +1,9 @@
 # Android TV feature parity checklist
 
 The first implementation is an installable native login-to-playback client.
-Full web parity remains the release gate in [the delivery plan](android-tv-plan.md).
+Full web parity remains the release gate in [the delivery plan](android-tv-plan.md),
+except server administration, which stays in the web app as an
+[approved exception](android-tv-plan.md#scope-exceptions).
 Target: a TV with built-in Android TV, initially Android TV 9+ and Google TV.
 
 **Status:** implemented means the operation is connected in the first client;
@@ -27,7 +29,7 @@ profile restrictions. Optional integrations retain their configured availability
 | Create/edit/delete/reorder collections; add/remove/share titles | Collection handlers and CollectionsView | Owner; shared reads as allowed | Milestone 2 |
 | Discover personalized picks, refresh heroes and recommendation feedback | Recommendation handlers; web Home/search rails | All accounts; integration availability | Milestone 2; first hero read implemented |
 | Request a movie/show; inspect status; cancel eligible requests | Request handlers; RequestsView; configured ARR integrations | Member / owner | Milestone 3 |
-| Approve/deny/manage requests; choose server libraries/quality | Admin request and ARR handlers | Administrator | Milestone 3 |
+| Approve/deny/manage requests; choose server libraries/quality | Admin request and ARR handlers | Administrator | Web app only (approved exception) |
 | View upcoming episodes; month/list navigation; open title | Calendar handlers; CalendarView | All accounts | Milestone 3 |
 | Host/create/join/leave/end a watch party; schedule or restart it | Party handlers; V3 lifecycle and two authenticated sockets | Party participant / host | Milestone 3 |
 | Pick party media/version/episode; play/pause/seek with host rules | V3 identity/revision/state/clock contracts; source-time mapping | Party participant / host | Milestone 3; shared playback timeline foundation exists |
@@ -39,11 +41,11 @@ profile restrictions. Optional integrations retain their configured availability
 | Achievements, referrals, invitations, account links and sharing | Existing achievement/referral/invite/QR handlers | Account owner / permitted issuer | Milestone 4 |
 | Account settings, password, avatar, linked OAuth identities and support | Auth/account/feedback handlers; SettingsView | Account owner | Milestone 4 |
 | Appearance, accessibility, notification and playback settings | Web preference model plus native device preferences | Account/device owner | Milestone 4; TV focus/theme foundation implemented |
-| Dashboard, users/roles, invites and account administration | Admin handlers and AdminView | Administrator | Milestone 4 |
-| Libraries, scanning, paths, metadata matches, rematches and health | Library, scanner, matching and health handlers | Administrator | Milestone 4 |
-| Server settings, integrations, AI/search and recommendation configuration | Admin settings / LLM / ARR handlers | Administrator | Milestone 4 |
-| Active streams, sessions, jobs, logs and activity | Session/admin/activity handlers | Administrator | Milestone 4 |
-| Backups, restore, updates and destructive maintenance | Existing admin/operator APIs and confirmation contracts | Administrator | Milestone 4; preview/confirmation required by each operation |
+| Dashboard, users/roles, invites and account administration | Admin handlers and AdminView | Administrator | Web app only (approved exception); TV account menu points administrators there |
+| Libraries, scanning, paths, metadata matches, rematches and health | Library, scanner, matching and health handlers | Administrator | Web app only (approved exception) |
+| Server settings, integrations, AI/search and recommendation configuration | Admin settings / LLM / ARR handlers | Administrator | Web app only (approved exception) |
+| Active streams, sessions, jobs, logs and activity | Session/admin/activity handlers | Administrator | Web app only (approved exception) |
+| Backups, restore, updates and destructive maintenance | Existing admin/operator APIs and confirmation contracts | Administrator | Web app only (approved exception) |
 | TV launcher, remote accessibility, memory/performance, signing and distribution | Android manifest, native focus/MediaSession, Android build/release | Device owner / release operator | Debug launcher/build and CI implemented; release validation in 5 |
 
 The web remains the contract source for actions within each row. Before closing
@@ -84,5 +86,5 @@ does not close this gate.
 
 Full viewing parity still requires saved Library/watchlists, collections,
 ratings/watched actions, discovery refinements, additional subtitle paths and QoE.
-Connected viewing, account/social/admin flows and release validation retain their
-milestones above.
+Connected viewing, account/social flows and release validation retain their
+milestones above; administration stays in the web app.

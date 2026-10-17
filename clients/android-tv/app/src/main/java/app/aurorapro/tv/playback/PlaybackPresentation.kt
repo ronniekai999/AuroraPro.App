@@ -75,3 +75,17 @@ private fun audioCodecFamily(codec: String?): String = when (val raw = codec.orE
     "raw" -> "pcm"
     else -> if (raw.startsWith("pcm_")) "pcm" else raw
 }
+
+/** Short title-page badges from probed geometry and transfer, never from the version tag. */
+fun sourceBadges(file: MediaFile): List<String> {
+    val size = sourceVideoSize(file.resolution)
+    val tier = when {
+        size == null -> null
+        size.width >= 3200 || size.height >= 2000 -> "4K"
+        size.width >= 1800 || size.height >= 1000 -> "1080p"
+        size.width >= 1200 || size.height >= 700 -> "720p"
+        else -> "SD"
+    }
+    val range = when (file.colorTransfer.lowercase()) { "smpte2084" -> "HDR"; "arib-std-b67" -> "HLG"; else -> null }
+    return listOfNotNull(tier, range)
+}
