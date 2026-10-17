@@ -1405,9 +1405,22 @@ func (q *Queries) GetAnyFilePath(ctx context.Context, mediaItemID int64) string 
 	return path
 }
 
-func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.MediaItem, error) {
+// GetRecentMedia lists the newest titles, deduplicated across libraries.
+// allowedRatings is the acting profile's parental ceiling from
+// AllowedRatingsForMax: nil means unrestricted, and otherwise only titles
+// whose content_rating is in the slice are returned, so unrated (NULL or empty)
+// titles are excluded under a restriction. Like GetMediaItems, the ceiling is
+// applied before dedup and LIMIT, so over-ceiling titles cannot crowd allowed
+// ones off the page.
+func (q *Queries) GetRecentMedia(ctx context.Context, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	where := "TRUE"
+	args := []interface{}{limit}
+	if len(allowedRatings) > 0 {
+		where = "m.content_rating = ANY($2)"
+		args = append(args, allowedRatings)
 	}
 	// Cross-library deduplication: same DISTINCT ON pattern as GetMediaItems.
 	// Among duplicates sharing a tmdb_id, pick the item with the richest
@@ -1443,6 +1456,7 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 		          COALESCE(m.backdrop_path,'') AS backdrop_path,
 		          m.added_at, m.updated_at
 		   FROM media_items m
+		   WHERE `+where+`
 		   ORDER BY m.type, COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
 		            (CASE WHEN m.overview IS NOT NULL AND m.overview <> '' THEN 3 ELSE 0 END
 		           + CASE WHEN m.poster_path IS NOT NULL AND m.poster_path <> '' THEN 3 ELSE 0 END
@@ -1458,7 +1472,7 @@ func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.Medi
 		        overview, rating, runtime_minutes, content_rating,
 		        poster_path, backdrop_path, added_at, updated_at
 		 FROM deduped
-		 ORDER BY added_at DESC LIMIT $1`, limit,
+		 ORDER BY added_at DESC LIMIT $1`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get recent media: %w", err)

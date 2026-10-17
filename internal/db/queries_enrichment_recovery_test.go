@@ -142,7 +142,7 @@ func TestGetRecentMediaSurvivesNullColumns(t *testing.T) {
 	lib := nullProbeLibrary(t, q, owner, "show")
 	id, _ := insertShow(t, q, lib)
 
-	items, err := q.GetRecentMedia(context.Background(), 500)
+	items, err := q.GetRecentMedia(context.Background(), 500, nil)
 	if err != nil {
 		t.Fatalf("GetRecentMedia with a NULL-column row present: %v", err)
 	}
