@@ -417,7 +417,7 @@ private fun HomeScreen(home: HomeData?, api: AuroraClient?, onMedia: (Media) -> 
                         }, primary = true)
                     } else {
                         AuroraTitle("Welcome to your cinema.", size = 44)
-                        if (home != null) Text("Nothing to show for this profile yet. Try Movies, TV shows or Search.",
+                        if (home != null) Text("Nothing here yet. New titles appear here once Aurora adds them to your libraries.",
                             color = AuroraColors.Muted, fontSize = 16.sp)
                     }
                 }

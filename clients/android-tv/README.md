@@ -48,8 +48,8 @@ server or media library.
 - The Aurora Stage design: full-bleed title art behind Home and title pages that
   fades into the canvas and dims once you scroll, a single top bar, pill actions,
   poster and Continue Watching cards with a lilac focus ring, Match and rating
-  details, and source badges: a resolution tier from probed geometry and
-  HDR/HLG from the probed color transfer, never from the version tag.
+  details, and source badges: 4K/HD/SD from probed geometry and HDR/HLG from
+  the probed color transfer, never from the version tag.
 - Server connection and password sign-in, or phone/browser approval by QR/code.
 - Existing profile selection with saved Aurora nebula orbs/custom images, and
   server-side session activation.
