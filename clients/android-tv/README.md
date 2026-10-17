@@ -3,8 +3,10 @@
 Native Kotlin, Compose for TV, and Media3 client for built-in Android TVs and
 Google TV devices. Minimum Android version: **9 / API 28**. This is the first
 login-to-playback client in the [approved delivery plan](../../docs/android-tv-plan.md),
-with the Aurora design and playback refinements in version **0.3.0**.
+with the playback refinements of 0.3.0 and the Aurora Stage TV design in version **0.4.0**.
 The remaining web features are tracked in [the parity checklist](../../docs/android-tv-parity.md).
+Server administration stays in the web app by design; the TV account menu tells
+administrators where to find it.
 
 ## Build and install
 
@@ -43,6 +45,11 @@ server or media library.
 
 ## Available in this build
 
+- The Aurora Stage design: full-bleed title art behind Home and title pages that
+  fades into the canvas and dims once you scroll, a single top bar, pill actions,
+  poster and Continue Watching cards with a lilac focus ring, Match and rating
+  details, and source badges: 4K/HD/SD from probed geometry and HDR/HLG from
+  the probed color transfer, never from the version tag.
 - Server connection and password sign-in, or phone/browser approval by QR/code.
 - Existing profile selection with saved Aurora nebula orbs/custom images, and
   server-side session activation.
@@ -114,6 +121,24 @@ Signing out uses Aurora's existing **account-wide logout**. Its confirmation
 states this before sending the request. Changing the server only changes this
 client's connection and does not revoke other devices.
 
+## Reviewing the design without a TV
+
+The JVM screen captures render the real app against a fixture server with
+Robolectric, so the design can be reviewed where no emulator runs:
+
+```sh
+./gradlew testDebugUnitTest --tests '*ScreenCaptureTest' -Paurora.screenshots
+# Optional: serve real artwork by file name from a local folder.
+./gradlew testDebugUnitTest --tests '*ScreenCaptureTest' -Paurora.screenshots -Paurora.screenshots.art=/path/to/art
+```
+
+PNGs are written to `app/build/outputs/screens`. Without `-Paurora.screenshots`
+(or with `-Paurora.screenshots=false`) the capture test is excluded from the test
+run and Android resources are not merged for unit tests; CI still compiles it and
+resolves Robolectric and the Compose test libraries. These are design evidence
+only: remote navigation, playback and device behavior are proven by the
+instrumentation suite and on a TV.
+
 ## Browser pairing contract
 
 Pairing requires the backend and web support delivered with the TV foundation. Password sign-in
@@ -170,8 +195,8 @@ not the length of a growing playlist.
 This build includes paginated browsing/filtering, playback quality and track
 controls, Smart Skip and automated episode continuation. Bitmap subtitle
 burn-in, library saves/collections,
-requests, calendar, watch parties, notifications, social, and administration
-remain in later milestones. Track selection is limited to tracks the chosen
+requests, calendar, watch parties, notifications and social features
+remain in later milestones; server administration stays in the web app. Track selection is limited to tracks the chosen
 direct file/HLS manifest exposes. A manually selected original-file audio track
 is matched to scanned language, codec, channels and title before compatibility
 fallback. If that metadata cannot identify one track, playback asks for Automatic

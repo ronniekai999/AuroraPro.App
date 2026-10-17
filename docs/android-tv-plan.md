@@ -3,7 +3,7 @@
 **Status:** Scope approved; first native build in verification.
 **Date:** October 10, 2026
 
-Build a native Android TV and Google TV client that brings AuroraPro's web capabilities to the living room. Keep Aurora's visual identity and shared server data, and adapt every flow for a directional remote. The launch goal is full web feature parity for each account role. Earlier milestones deliver usable builds so playback and navigation can be evaluated before the entire app is finished.
+Build a native Android TV and Google TV client that brings AuroraPro's web capabilities to the living room. Keep Aurora's visual identity and shared server data, and adapt every flow for a directional remote. The launch goal is full web feature parity for each account role, except server administration, which stays in the web app (see [Scope exceptions](#scope-exceptions)). Earlier milestones deliver usable builds so playback and navigation can be evaluated before the entire app is finished.
 
 Approval of this proposal starts implementation with the first milestone below. Public distribution and production rollout follow a separate release decision after a tested build is available.
 
@@ -31,16 +31,22 @@ The initial device proposal is Android TV 9 and newer, including Google TV. Conf
 | AI features | Catch Me Up and Ask Previously with the same spoiler boundaries; semantic search and recommendation features respect server configuration | 2 search, 4 recaps and questions |
 | Notifications | In-app inbox, read state, request outcomes, party invites and reminders, highlight readiness and applicable admin alerts | 3 inbox, 4 notification preferences |
 | Account and appearance | Password and OAuth linking controls, referral prompt, privacy settings, appearance choices, playback defaults, sign-out behavior | 4 |
-| Administration | Users and invitations, roles, libraries and scans, metadata review, request approvals, active streams and rooms, activity and logs, server and integration settings, backups and restore, updates | 3 request approvals, 4 complete admin surface |
+| Administration | Stays in the web app. The TV account menu tells administrators where to manage the server. | Approved exception |
 | Support and device integration | Bug reports and supported screenshot or recording attachments, TV launcher assets, system media controls, deep links, playback handoff and sharing where a target supports them | 4 support, 5 platform validation |
 
-This table is the starting inventory. Milestone 0 expands it into individual web actions, including secondary dialogs, account flows and admin operations. Each action gets a native destination, applicable role, API contract, verification scenario and milestone. A feature is not counted as parity merely because its data can be displayed. Deferrals or hardware-dependent substitutions remain explicit and require agreement before a full-parity launch.
+This table is the starting inventory. Milestone 0 expands it into individual web actions, including secondary dialogs and account flows. Each action gets a native destination, applicable role, API contract, verification scenario and milestone. A feature is not counted as parity merely because its data can be displayed. Deferrals or hardware-dependent substitutions remain explicit and require agreement before a full-parity launch.
+
+### Scope exceptions
+
+**Server administration stays in the web app** (approved October 17, 2026). Users and invitations, roles, libraries and scans, metadata review, request approvals, active streams and rooms, activity and logs, server and integration settings, backups and restore, and updates are not built for the TV. These are text-heavy forms, credentials and destructive operations that a remote keyboard handles poorly and that gain nothing from the big screen. The server's role checks are unchanged; the TV simply has no destination for these actions. Administrators keep every viewing, request, party and account feature on the TV.
+
+Request approval is the closest call: it is a quick yes/no rather than a form. It stays in the web app with the rest of administration for now. Revisit it as a separate decision if household use shows a need for it on the couch.
 
 ### TV experience
 
 Preserve Aurora's dark canvas, purple and cyan accents, cinematic artwork, hero composition, poster rails, Bricolage Grotesque display type and Inter body type. Reuse the existing brand assets and translate design tokens into the TV theme. These choices come from the current web styles; spacing and type sizes change for viewing across a room.
 
-Use a focusable navigation rail with the familiar destinations: Home, Movies, TV Shows, Collections, Calendar, My Library and Requests. Add an easy Watch Parties entry, with Search, notifications and the active profile always reachable. Members, Settings and role-gated Admin remain easy to find. Prototype this shell before committing every screen to it.
+Use a focusable navigation rail with the familiar destinations: Home, Movies, TV Shows, Collections, Calendar, My Library and Requests. Add an easy Watch Parties entry, with Search, notifications and the active profile always reachable. Members and Settings remain easy to find; there is no Admin destination. Prototype this shell before committing every screen to it.
 
 Every action must work with Up, Down, Left, Right, Select and Back. Focus stays visible over artwork, returns to the selected poster after leaving a title, and survives data refreshes. Dialogs own focus while open and return it when dismissed. Back closes the nearest overlay, then returns through navigation history. Loading, empty and error screens provide a useful focused action. Support large readable labels, screen-reader semantics, high contrast and reduced motion.
 
@@ -58,7 +64,7 @@ Start with these logical boundaries without creating a separate Gradle module fo
 - API models, HTTP, authentication, caching and realtime transport.
 - Playback decisions, Media3, source-time mapping, progress and session lifecycle.
 - Party state and synchronization, room communication and optional voice.
-- Feature screens for discovery, library, requests, calendar, social, settings and administration.
+- Feature screens for discovery, library, requests, calendar, social and settings.
 
 ### Authentication and shared state
 
@@ -93,13 +99,13 @@ Use the server notification inbox and realtime events for the first TV builds. E
 | 0 Scope and contracts | Inventory every web action, map endpoints and roles, confirm target devices, define focus and navigation behavior, identify pairing and native capability gaps | Agreed parity checklist, TV screen map and architecture notes; remaining estimates updated |
 | 1 First working TV build | Create `clients/android-tv/`, TV launcher setup, theme and navigation, server connection, login and pairing, profile selection, basic Home and details, direct and HLS playback | Installable APK on a real TV; connect, sign in, choose a profile, play, pause, leave and resume the same title on the web |
 | 2 Complete viewing experience | Browse, search, recommendations, saved titles, watchlists, collections, seasons, audio, subtitles, quality, skip markers, progress and episode continuation | Viewer beta with complete remote navigation and proven direct/remux/transcode behavior |
-| 3 Connected viewing | Requests and approvals, calendar, party creation and scheduling, invites, RSVP, lobby, V3 sync, chat, reactions, notification inbox | A web user and TV user watch together; TV can request a title, track it, and join a scheduled party from Calendar |
-| 4 Full web parity | Social, recaps and questions, achievements, account and profile management, appearance, complete admin actions, support, sharing and voice on suitable hardware | All inventory actions pass for their applicable role; any exception is explicitly reviewed |
+| 3 Connected viewing | Requests, calendar, party creation and scheduling, invites, RSVP, lobby, V3 sync, chat, reactions, notification inbox | A web user and TV user watch together; TV can request a title, track it, and join a scheduled party from Calendar |
+| 4 Full web parity | Social, recaps and questions, achievements, account and profile management, appearance, support, sharing and voice on suitable hardware | All inventory actions pass for their applicable role; administration remains the approved web-only exception and any other exception is explicitly reviewed |
 | 5 Release validation | Device and codec matrix, lifecycle and network recovery, accessibility, performance, launcher/deep-link integration, signing, update behavior and release instructions | Tested signed build and release checklist, independent review records, known hardware limits and rollout recommendation |
 
 **First implementation target:** Milestone 1's complete login-to-playback flow, followed by Milestone 2. This proves the app's foundation while keeping watch parties, requests and calendar on the committed delivery path. The first APK is an early milestone, not the full-parity release.
 
-Allow roughly **13–21 engineering weeks** for all milestones with one experienced Android engineer, reusable server APIs and access to representative physical TVs. This is an initial scope estimate, not a delivery-date commitment. Pairing, codec limits, native voice, admin forms and device validation can materially change it. Re-estimate after Milestone 0 and again after the first working TV playback build; measure progress by the gates above.
+Allow roughly **13–21 engineering weeks** for all milestones with one experienced Android engineer, reusable server APIs and access to representative physical TVs. This estimate predates the administration exception, which removes the admin forms from scope. It is an initial scope estimate, not a delivery-date commitment. Pairing, codec limits, native voice and device validation can materially change it. Re-estimate after Milestone 0 and again after the first working TV playback build; measure progress by the gates above.
 
 ## Verification and release gates
 
@@ -113,7 +119,7 @@ Maintain the web-to-TV checklist throughout implementation. Each item must be ex
 | Party synchronization | TV/web mix, initial join, source offsets, pause/play/seek, buffering, reconnection, host departure, scheduled restart, media changes and episode advancement without stale commands |
 | Authentication and profiles | Login, pairing expiry and reuse rejection, refresh, revocation, restart, account switching, profile isolation and parental behavior; clear indication of existing server restrictions |
 | Resilience | Network loss, server restart, expired credentials, process death, sleep/wake, long viewing sessions and resource cleanup |
-| Administration | Role enforcement for each action, meaningful previews and confirmations for destructive operations, backup export/restore handling, bounded logs and activity views |
+| Administration | No TV destination performs an administrative action; the server's role checks are unchanged; administrators are pointed to the web app |
 | Build and review | Android lint, unit/contract tests and D-pad instrumentation for meaningful flows; applicable Go and web checks for shared changes; fresh independent review of each final code diff |
 
 Use emulator runs for navigation coverage and physical devices for decoder, HDR, sound, voice and performance claims. Start with an Android TV or Google TV streaming device and a representative TV with fewer resources, then expand to the actual household/device targets. Record the tested device, server revision and media fixtures.
@@ -124,6 +130,6 @@ Implement on feature branches and follow [the repository development workflow](d
 
 ## Approval decision
 
-Approve this scope and milestone order, with these proposed defaults: a Kotlin/Compose native client in the existing repository, Android TV 9+ subject to the target-device check, the existing Aurora backend and profile model, optional phone assistance, sideloaded test builds first, and full web parity as the launch gate.
+Approve this scope and milestone order, with these proposed defaults: a Kotlin/Compose native client in the existing repository, Android TV 9+ subject to the target-device check, the existing Aurora backend and profile model, optional phone assistance, sideloaded test builds first, and full web parity as the launch gate. Server administration staying in the web app was approved as an exception on October 17, 2026.
 
 After approval, begin Milestone 0 and build the Milestone 1 native shell, sign-in, profile, Home, details and playback flow. Review that APK on a real TV before expanding into the remaining screens. Distribution choices and any proposed feature exceptions stay visible as separate decisions.
