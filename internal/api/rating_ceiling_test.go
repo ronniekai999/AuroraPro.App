@@ -515,11 +515,13 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	tvmaItem := seed(token, models.MediaShow, "TV-MA", "mature show")
 	unratedItem := seed(token, models.MediaMovie, "", "unrated")
 	onlyOverItem := seed(onlyOverToken, models.MediaMovie, "R", "the only match")
-	// crowdToken: one PG title and twelve over-ceiling titles that match the
-	// query better (short titles; the PG one's long tail dilutes similarity).
+	// crowdToken: one PG title, and more over-ceiling titles matching the
+	// query better than a limit=1 search fetches (short titles; the PG one's
+	// long tail dilutes its similarity).
 	crowdToken := "zqcrowd" + reqTestSuffix(t)
 	crowdPG := seed(crowdToken, models.MediaMovie, "PG", "with a much longer tail that dilutes the trigram similarity")
-	for i := 0; i < 12; i++ {
+	crowdFetch := searchFetchLimit(1)
+	for i := 0; i <= crowdFetch; i++ {
 		seed(crowdToken, models.MediaMovie, "R", fmt.Sprintf("r%d", i))
 	}
 	allowed, overR, overTVMA, unrated := pgItem.ID, rItem.ID, tvmaItem.ID, unratedItem.ID
@@ -580,19 +582,31 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		}
 	})
 
-	// With limit=1 the handler fetches 11 trigram rows. Twelve over-ceiling
-	// titles match better than the allowed one, so a ceiling applied to the
-	// fetched page in Go, instead of in SearchMedia's SQL, serves nothing.
+	// With limit=1 the handler fetches searchFetchLimit(1) trigram rows, and
+	// more over-ceiling titles than that match better than the allowed one, so
+	// a ceiling applied to the fetched page in Go, instead of in SearchMedia's
+	// SQL, serves nothing.
 	t.Run("literal_ceiling_before_limit", func(t *testing.T) {
+		// Control: unfiltered, a page of that size holds only crowd titles,
+		// so the PG title below can only have come from filtering in SQL.
+		unfiltered, err := f.q.SearchMedia(ctx, crowdToken, crowdFetch, nil)
+		if err != nil {
+			t.Fatalf("SearchMedia (unfiltered): %v", err)
+		}
+		if len(unfiltered) != crowdFetch {
+			t.Fatalf("unfiltered fetch has %d rows, want %d", len(unfiltered), crowdFetch)
+		}
+		for _, it := range unfiltered {
+			if it.ID == crowdPG.ID {
+				t.Fatalf("the PG title %d is inside the unfiltered %d-row fetch; the crowd no longer proves the ordering", crowdPG.ID, crowdFetch)
+			}
+		}
+
 		// search puts q into the URL as is, so it can carry the limit.
 		got, _ := search(t, f.restrictedRefreshID, nil, crowdToken+"&limit=1", "literal")
 		if !got[crowdPG.ID] || len(got) != 1 {
 			t.Errorf("restricted (PG) literal search with limit=1: got %v, want only the PG title %d; "+
 				"the ceiling must be applied in SQL, before the fetch limit", got, crowdPG.ID)
-		}
-		open, _ := search(t, f.unrestrictedRefreshID, nil, crowdToken+"&limit=1", "literal")
-		if open[crowdPG.ID] || len(open) != 1 {
-			t.Errorf("unrestricted literal search with limit=1: got %v, want one closer R title, not the PG title %d", open, crowdPG.ID)
 		}
 	})
 

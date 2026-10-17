@@ -782,6 +782,15 @@ func (h *MediaHandler) Recent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// searchFetchLimit is how many trigram rows Search fetches for a page of
+// limit: headroom for cross-library dedup, capped at 50.
+func searchFetchLimit(limit int) int {
+	if n := limit + 10; n < 50 {
+		return n
+	}
+	return 50
+}
+
 func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -835,11 +844,7 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// trigram runs the fast literal path (exact + substring + trigram-similar).
 	trigram := func() ([]*models.MediaItem, error) {
-		fetchLimit := limit + 10
-		if fetchLimit > 50 {
-			fetchLimit = 50
-		}
-		return h.queries.SearchMedia(r.Context(), query, fetchLimit, allowedRatings)
+		return h.queries.SearchMedia(r.Context(), query, searchFetchLimit(limit), allowedRatings)
 	}
 	// semantic runs the LLM path; ok is false when it errored (the caller
 	// decides how to degrade). Reason is a transient per-search annotation set

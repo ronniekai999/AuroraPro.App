@@ -28,7 +28,8 @@ import (
 // ceilingQueryDim is the one non-zero dimension of the fake query embedding.
 // It is a high index no other test points at, so the shared catalog's
 // embeddings are nearly orthogonal to the query (cosine distance about 1) and
-// cannot outrank the fixture's rows at 0 and 0.2.
+// cannot outrank the fixture's rows at 0 and 0.2. Only a concurrent run of
+// these tests seeds rows at the same distances, and the assertions allow it.
 const ceilingQueryDim = 710
 
 func ceilingVec(at map[int]float64) string {
@@ -119,7 +120,9 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 }
 
 // seed stores a movie; an empty vecLit leaves the embedding NULL. tmdb_id
-// stays NULL so cross-library dedup leaves every fixture row alone.
+// stays NULL so cross-library dedup leaves every fixture row alone. Rows are
+// dated a month back so these crowds never fill the "Recently added" windows
+// other packages' tests read from the shared catalog.
 func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 	f.t.Helper()
 	var vec *string
@@ -130,8 +133,8 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 	if err := f.pool.QueryRow(context.Background(),
 		`INSERT INTO media_items
 		   (library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		    content_rating, poster_path, backdrop_path, embedding)
-		 VALUES ($1, 'movie', $2, $2, 0, '', 0, 0, $3, '', '', $4::vector)
+		    content_rating, poster_path, backdrop_path, embedding, added_at)
+		 VALUES ($1, 'movie', $2, $2, 0, '', 0, 0, $3, '', '', $4::vector, NOW() - interval '30 days')
 		 RETURNING id`,
 		f.libID, title, rating, vec).Scan(&id); err != nil {
 		f.t.Fatalf("seed %q: %v", title, err)
@@ -141,8 +144,9 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 
 // TestSearchAppliesRatingCeilingToVectorRecall runs the whole pipeline. The
 // rows carry no query token, so only the vector leg can recall them, and they
-// sit nearest the query on a dimension nothing else uses, so under the
-// fixture's exact scans they top the fused list on any catalog. There are
+// sit nearest the query on a dimension no other test uses, so under the
+// fixture's exact scans only rows from a concurrent run of this test can tie
+// them, and those are over-ceiling too. There are
 // more over-ceiling rows nearer the query than the vector leg recalls
 // (vectorRecallSize), so a ceiling applied after that LIMIT, in Go, would
 // leave nothing allowed. The lexical leg's output cannot be seen here, so the
@@ -216,19 +220,27 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 		t.Errorf("Search handed the lexical leg ceiling %v, want %v", got, want)
 	}
 
-	// Control: unrestricted, the nearer R rows fill the recall, so the PG row's
-	// presence above came from the ceiling being applied before the LIMIT.
-	hits, _, err = f.s.Search(ctx, f.token, 50, nil)
+	// Control: unfiltered, the vector leg's recall is full without the PG
+	// row, so its presence above came from the ceiling being applied before
+	// that LIMIT. Checked on the recall itself rather than on Search's
+	// rerank-capped output; R rows other runs seed at the same distance only
+	// add to the crowd.
+	recall, err := f.s.q.SemanticSearch(ctx, near, db.SemanticFilter{}, vectorRecallSize)
 	if err != nil {
+		t.Fatalf("SemanticSearch (unfiltered): %v", err)
+	}
+	if len(recall) != vectorRecallSize {
+		t.Fatalf("unfiltered recall has %d rows, want %d", len(recall), vectorRecallSize)
+	}
+	for _, h := range recall {
+		if h.Item.ID == allowed {
+			t.Fatalf("the PG row %d is inside the unfiltered %d-row recall; the crowd no longer proves the ordering", allowed, vectorRecallSize)
+		}
+	}
+
+	// Unrestricted, Search hands the lexical leg no ceiling.
+	if _, _, err = f.s.Search(ctx, f.token, 50, nil); err != nil {
 		t.Fatalf("Search (unrestricted): %v", err)
-	}
-	got = ids(hits)
-	sawOver := false
-	for id := range overs {
-		sawOver = sawOver || got[id]
-	}
-	if !sawOver || got[allowed] {
-		t.Errorf("unrestricted: want the nearer R rows to crowd out the PG row; got some R=%v PG=%v", sawOver, got[allowed])
 	}
 	if got := lexicalRatings(); got != nil {
 		t.Errorf("unrestricted Search handed the lexical leg ceiling %v, want nil", got)

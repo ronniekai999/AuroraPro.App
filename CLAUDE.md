@@ -123,11 +123,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   seeding, invite sending and taste-onboarding seed validation do; party media
   changes and the recommender caches do not (see the gaps).
 - `internal/db/ratings.go` is the only ladder a gate may use, through
-  `AllowedRatingsForMax` or `RatingAllowed`; nil means unrestricted.
-  `maturityTierCase` (recommender) and `audienceClause` (embedding text) map
-  ratings to soft tiers, know ratings the ladder does not, and must never gate. An empty slice is ambiguous: gates
-  testing `len(allowed) > 0` read it as unrestricted, gates testing
-  `$n::text[] IS NULL` as allowing nothing. Never produce one for a restriction.
+  `AllowedRatingsForMax` or `RatingAllowed`; nil means unrestricted. An empty
+  slice is ambiguous: gates testing `len(allowed) > 0` read it as unrestricted,
+  gates testing `$n::text[] IS NULL` as allowing nothing. Never produce one for
+  a restriction.
+- `maturityTierCase` (`internal/db/queries_recommender.go`) and
+  `audienceClause` (`internal/embedding`) map ratings to soft tiers, know
+  ratings the ladder does not, and must never gate.
 - Filter in SQL before cross-library dedup and before `LIMIT`. Library search
   filters both semantic recall legs (the lexical leg takes the vector leg's
   `SemanticFilter`), so fusion, rerank and the title fallback only see allowed
@@ -178,8 +180,8 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     only account ownership, so a restricted session holding another profile's
     session id on the account can use it.
   - Watch parties: creating one applies no ceiling, and changing a party's
-    media skips its ceiling check when the profile lookup errors; both are
-    persisted.
+    media skips its ceiling check when the media or profile lookup errors or
+    finds nothing; both are persisted.
   - Any session on the account can change any of its profiles' ceilings (no
     PIN).
 
