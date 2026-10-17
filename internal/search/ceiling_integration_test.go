@@ -60,7 +60,17 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	ctx := context.Background()
 	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(connectCtx, dbURL)
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("parse test db url: %v", err)
+	}
+	// Exact kNN scans, so the fixture's rows lead the vector leg whatever the
+	// shared catalog holds. With enough embedded rows the planner picks the
+	// HNSW index, whose candidate window (see db.SemanticSearch) would make
+	// these results depend on unrelated rows. That window is a documented gap,
+	// not what these tests pin.
+	cfg.ConnConfig.RuntimeParams["enable_indexscan"] = "off"
+	pool, err := pgxpool.NewWithConfig(connectCtx, cfg)
 	if err != nil {
 		t.Fatalf("connect to test db: %v", err)
 	}
@@ -130,8 +140,9 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 
 // TestSearchAppliesRatingCeilingToVectorRecall runs the whole pipeline. The
 // rows carry no query token, so only the vector leg can recall them, and they
-// sit nearest the query on a dimension nothing else uses, so they top the
-// fused list on any catalog. The lexical leg's output cannot be seen here, so
+// sit nearest the query on a dimension nothing else uses, so under the
+// fixture's exact scans they top the fused list on any catalog. The lexical
+// leg's output cannot be seen here, so
 // the hook pins that Search hands that leg the same ceiling, and
 // TestLexicalRecallAppliesRatingCeiling pins that the leg applies it.
 func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {

@@ -723,7 +723,8 @@ func (h *MediaHandler) Recent(w http.ResponseWriter, r *http.Request) {
 
 	// The ceiling comes from the session's acting profile (issue #462), never
 	// the profile_id/max_rating a client sends, with the same fail-open posture
-	// as List: this is discovery, and the read/playback path is the boundary.
+	// as List: this is discovery, and the gated detail and playback routes are
+	// the boundary.
 	var allowedRatings []string
 	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
 		slog.Warn("resolve acting profile for recent media failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
@@ -821,8 +822,9 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// The ceiling comes from the session's acting profile (issue #462), never a
 	// client-sent profile_id/max_rating, with the same fail-open posture as
-	// List and Recent: this is discovery, and the read/playback path is the
-	// boundary. Both paths apply it in their SQL, not to the final page.
+	// List and Recent: this is discovery, and the gated detail and playback
+	// routes are the boundary. Both paths apply it in their SQL, not to the
+	// final page.
 	var maxRating string
 	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
 		slog.Warn("resolve acting profile for search failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)

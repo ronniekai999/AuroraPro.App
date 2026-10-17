@@ -114,11 +114,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 
 ### Parental rating ceiling
 
-- Rule (issue #462): a gate takes the ceiling from `ResolveActingProfile`,
-  never a client-sent `profile_id`/`max_rating`. Not every existing route
-  does yet; see the gaps below. Discovery responses fail open on a resolve
-  error, with the gated detail and playback routes as the boundary; anything
-  persisted fails closed.
+- Rule (issue #462): a gate on the caller's own ceiling takes it from
+  `ResolveActingProfile`, never a client-sent `profile_id`/`max_rating`. (A
+  gate on someone else's ceiling, such as the watch-party invite check, uses
+  theirs.) Not every existing route follows the rule yet; see the gaps below.
+  Discovery responses fail open on a resolve error, with the gated detail and
+  playback routes as the boundary. Persisted results should fail closed; so
+  far only AI-collection seeding does.
 - `internal/db/ratings.go` is the only ladder. Gates use `AllowedRatingsForMax`
   or `RatingAllowed`; nil means unrestricted. An empty slice is ambiguous: gates
   testing `len(allowed) > 0` read it as unrestricted, gates testing
@@ -138,7 +140,7 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 - Coverage is NOT complete, and no route-by-route audit exists. Server-derived
   enforcement covers: the #462 routes (media detail, seasons and episodes,
   media/episode/direct file streaming, subtitles, transcode-session creation,
-  cast-token minting), browse, Recently added, library search, and
+  direct-play cast-token minting), browse, Recently added, library search, and
   AI-collection seeding. Never infer coverage elsewhere from this list; check
   the handler.
 - Known gaps (examples, not exhaustive):
@@ -168,6 +170,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     only). Collections, watchlists and My Library accept any media id and read
     items back unfiltered, so a restricted profile can enumerate the library
     through them.
+  - Transcode sessions rely on their creation-time check: the session cast
+    token (`CreateCastToken`) and the session's playlists and segments check
+    only account ownership, so a restricted session holding another profile's
+    session id on the account can use it.
+  - Watch parties: creating one applies no ceiling, and changing a party's
+    media skips its ceiling check when the profile lookup errors; both are
+    persisted.
   - Any session on the account can change any of its profiles' ceilings (no
     PIN).
 

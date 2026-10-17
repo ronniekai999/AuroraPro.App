@@ -9,9 +9,39 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// exactScanQueries is a Queries on its own pool with index scans disabled, so
+// a kNN query is an exact sequential scan whatever the shared catalog holds.
+// With enough embedded rows the planner picks the HNSW index, whose candidate
+// window (see SemanticSearch) would make a fixture's result depend on
+// unrelated rows. That window is a documented gap, not what these tests pin.
+func exactScanQueries(t *testing.T) *Queries {
+	t.Helper()
+	requireIntegrationDB(t) // skips without TEST_DATABASE_URL
+	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("parse test db url: %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["enable_indexscan"] = "off"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect to test db: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping test db: %v", err)
+	}
+	return NewQueries(pool)
+}
 
 // seedSearchCeilingItem inserts a movie with the given title, rating (nil
 // stores SQL NULL) and embedding (empty leaves it NULL). Unrelated scalars are
@@ -111,11 +141,10 @@ func TestSearchMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 // TestSemanticSearchAppliesRatingCeilingBeforeLimit is the same contract for
 // the vector leg: rows nearer the query but over the ceiling (or unrated) must
 // not crowd an allowed, farther row out of the kNN page. It pins the filter's
-// placement in the query; on a test-sized catalog the planner picks an exact
-// sequential scan, so the HNSW candidate window SemanticSearch documents is
-// not exercised here.
+// placement in the query, under exact scans (exactScanQueries); the HNSW
+// candidate window SemanticSearch documents is not exercised here.
 func TestSemanticSearchAppliesRatingCeilingBeforeLimit(t *testing.T) {
-	q := requireIntegrationDB(t)
+	q := exactScanQueries(t)
 	ctx := context.Background()
 	libID := seedTypedLibrary(t, q, seedTestUser(t, q), "movie")
 	token := "semceil" + randomSuffix(t)
