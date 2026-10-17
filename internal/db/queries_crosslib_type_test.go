@@ -196,9 +196,10 @@ func TestGetRecentMediaKeepsBothTypesOnATMDBIDCollision(t *testing.T) {
 	// title filter — so unlike the GetMediaItems and rail/grid tests, this one
 	// cannot narrow the query to its own rows. It
 	// relies on the fixture's rows being among the 500 newest by added_at, which
-	// holds because they were just inserted and real catalog rows are older. It
-	// would break only if something seeded 500+ media_items concurrently, and it
-	// would break loudly.
+	// holds because they were just inserted; the only rows dated ahead of NOW()
+	// are the few from the rating-ceiling tests, and only briefly. It would break
+	// only if something seeded 500+ media_items concurrently, and it would break
+	// loudly.
 	items, err := q.GetRecentMedia(context.Background(), 500, nil)
 	if err != nil {
 		t.Fatalf("GetRecentMedia: %v", err)
