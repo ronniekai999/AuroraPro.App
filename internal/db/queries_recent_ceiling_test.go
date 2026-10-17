@@ -123,8 +123,10 @@ func TestGetRecentMediaCeilingAppliesBeforeDedup(t *testing.T) {
 	token := randomSuffix(t)
 	tmdbID := uniqueTMDBID(t)
 
-	richR := seedRecentCeilingItem(t, q, libA, token, recentCeilingItem{rating: ratingPtr("R"), hours: 5, tmdbID: tmdbID, rich: true})
-	plainPG := seedRecentCeilingItem(t, q, libB, token, recentCeilingItem{rating: ratingPtr("PG"), hours: 5, tmdbID: tmdbID})
+	// Dated at NOW(), below the other test's G row, so this in-ceiling PG row
+	// can never crowd that test's three-row restricted page.
+	richR := seedRecentCeilingItem(t, q, libA, token, recentCeilingItem{rating: ratingPtr("R"), hours: 0, tmdbID: tmdbID, rich: true})
+	plainPG := seedRecentCeilingItem(t, q, libB, token, recentCeilingItem{rating: ratingPtr("PG"), hours: 0, tmdbID: tmdbID})
 
 	find := func(allowed []string) (sawR, sawPG bool) {
 		t.Helper()
