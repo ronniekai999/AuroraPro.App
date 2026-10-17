@@ -279,7 +279,7 @@ func TestSearchMediaSurvivesNullColumns(t *testing.T) {
 	lib := nullProbeLibrary(t, q, owner, "movie")
 	id, token := insertMovie(t, q, lib)
 
-	items, err := q.SearchMedia(context.Background(), token, 50)
+	items, err := q.SearchMedia(context.Background(), token, 50, nil)
 	if err != nil {
 		t.Fatalf("SearchMedia with a NULL-column row present: %v", err)
 	}

@@ -112,6 +112,27 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   effective fields are display-only. Never persist resolved defaults during a
   provider-family switch.
 
+### Parental rating ceiling
+
+- The ceiling comes from `ResolveActingProfile` (issue #462), never a
+  client-sent `profile_id`/`max_rating`. Discovery fails open on a resolve
+  error; the read/playback path is the boundary.
+- `internal/db/ratings.go` is the only ladder. Gates use `AllowedRatingsForMax`
+  or `RatingAllowed`; nil means unrestricted, and an empty slice reads the same
+  way, so never return one for a restriction.
+- Filter in SQL before cross-library dedup and before `LIMIT`. Library search
+  filters both semantic recall legs (vector and lexical), so fusion, rerank and
+  the title fallback only see allowed titles; AI-collection seeding passes the
+  creator's ceiling.
+- `max_age_rating` is canonicalized on write by `CanonicalMaxRating`; unknown
+  values are a 400. Reads tolerate case and whitespace, and an unknown legacy
+  value restricts to the all-ages tier rather than lifting the ceiling.
+- A ceiling change invalidates the profile's recommender caches, which are built
+  under the ceiling and otherwise live up to 24h.
+- Known gaps: `/api/me/hero` and continue-watching trust a client `profile_id`;
+  collection contents are not ceiling-gated; any session on the account can
+  change any of its profiles' ceilings (no PIN).
+
 ### Member profiles and follows
 
 - Watch-history sharing is opt-in and rechecked on every read. Shared history

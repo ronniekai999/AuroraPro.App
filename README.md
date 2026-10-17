@@ -53,7 +53,7 @@ Aurora is a media server written in Go with a React single-page app on top. It s
 - Multi-path libraries with **filesystem watching** and scheduled auto-scans
 - **TMDB** metadata (movies + TV) with **TVDB** fallback — cast & crew, artwork, blurhash placeholders
 - **Collections**, a release **Calendar**, **My Library**, per-profile **watchlists**, and a ⌘K **search palette**
-- Netflix-style **sub-profiles** with avatars and per-profile subtitle/language preferences, plus a **parental age ceiling** applied to browsing, the home rails, taste onboarding, the follow feed, and watch-party invites
+- Netflix-style **sub-profiles** with avatars and per-profile subtitle/language preferences, plus a **parental age ceiling** applied to browsing, library search, the home rails, taste onboarding, the follow feed, and watch-party invites
 - **XP, levels, streaks, and achievements** for the people who like a scoreboard
 
 ### 👥 Social

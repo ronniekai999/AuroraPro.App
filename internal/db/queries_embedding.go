@@ -148,6 +148,10 @@ type SemanticFilter struct {
 	YearMax    int      // 0 = no ceiling
 	RuntimeMax int      // minutes; 0 = no cap
 	ExcludeIDs []int64  // e.g. items already in user history
+	// AllowedRatings is the acting profile's ceiling (AllowedRatingsForMax);
+	// nil or empty = unrestricted. Applied before the kNN LIMIT, so a
+	// restricted search still fills its recall from allowed titles.
+	AllowedRatings []string
 }
 
 // SemanticHit is one row from a vector search, with the cosine distance kept
@@ -198,6 +202,11 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 	if len(filter.ExcludeIDs) > 0 {
 		where = append(where, fmt.Sprintf("m.id <> ALL($%d)", argIdx))
 		args = append(args, filter.ExcludeIDs)
+		argIdx++
+	}
+	if len(filter.AllowedRatings) > 0 {
+		where = append(where, fmt.Sprintf("m.content_rating = ANY($%d)", argIdx))
+		args = append(args, filter.AllowedRatings)
 		argIdx++
 	}
 	if len(filter.Genres) > 0 {

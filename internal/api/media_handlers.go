@@ -403,8 +403,12 @@ type MediaHandler struct {
 // search. Defining the interface here (instead of importing internal/search
 // directly) keeps the api package free of LLM dependencies and makes the
 // handler trivially testable with a fake.
+//
+// allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
+// nil or empty = unrestricted), which the implementation must apply before
+// its recall limits so a restricted search is filled with allowed titles.
 type SemanticSearcher interface {
-	Search(ctx context.Context, query string, limit int) ([]SemanticHit, error)
+	Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]SemanticHit, error)
 }
 
 // SemanticHit mirrors search.Hit at the API boundary. The api package owns
@@ -777,6 +781,10 @@ func (h *MediaHandler) Recent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		writeError(w, http.StatusBadRequest, "search query required")
@@ -810,30 +818,47 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	//   ?mode=literal  — use trigram only, never the LLM
 	mode := r.URL.Query().Get("mode")
 
+	// The ceiling comes from the session's acting profile (issue #462), never a
+	// client-sent profile_id/max_rating, with the same fail-open posture as
+	// List and Recent: this is discovery, and the read/playback path is the
+	// boundary. Both paths apply it in SQL before their limits.
+	var maxRating string
+	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
+		slog.Warn("resolve acting profile for search failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
+	} else {
+		maxRating = profile.MaxAgeRating
+	}
+	allowedRatings := db.AllowedRatingsForMax(maxRating)
+
 	// trigram runs the fast literal path (exact + substring + trigram-similar).
 	trigram := func() ([]*models.MediaItem, error) {
 		fetchLimit := limit + 10
 		if fetchLimit > 50 {
 			fetchLimit = 50
 		}
-		return h.queries.SearchMedia(r.Context(), query, fetchLimit)
+		return h.queries.SearchMedia(r.Context(), query, fetchLimit, allowedRatings)
 	}
 	// semantic runs the LLM path; ok is false when it errored (the caller
 	// decides how to degrade). Reason is a transient per-search annotation set
 	// here rather than on the model so it doesn't bleed into other endpoints
 	// that serve the same media item.
 	semantic := func() (its []*models.MediaItem, ok bool) {
-		hits, err := h.semantic.Search(r.Context(), query, limit+10)
+		hits, err := h.semantic.Search(r.Context(), query, limit+10, allowedRatings)
 		if err != nil {
 			slog.Warn("semantic search failed", "error", err, "q", query)
 			return nil, false
 		}
-		its = make([]*models.MediaItem, len(hits))
-		for i, hit := range hits {
-			its[i] = hit.Item
-			if hit.Reason != "" && its[i] != nil {
-				its[i].Reason = hit.Reason
+		its = make([]*models.MediaItem, 0, len(hits))
+		for _, hit := range hits {
+			// The searcher filters in SQL; this re-check is what the handler
+			// can promise for rows it did not query itself.
+			if hit.Item == nil || !db.RatingAllowed(maxRating, hit.Item.ContentRating) {
+				continue
 			}
+			if hit.Reason != "" {
+				hit.Item.Reason = hit.Reason
+			}
+			its = append(its, hit.Item)
 		}
 		return its, true
 	}

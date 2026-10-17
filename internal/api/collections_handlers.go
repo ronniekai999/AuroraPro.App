@@ -169,10 +169,21 @@ func (h *CollectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// items from the top hits. Failures are non-fatal — the empty
 	// collection still gets returned and the user can rebuild via
 	// "regenerate" later.
+	//
+	// The seed is a library search run as the creator, so it takes the
+	// creator's acting-profile ceiling exactly as /api/media/search does;
+	// otherwise a restricted profile could read any title back by prompting
+	// a collection for it. Fail-open on a resolve error, as that handler does.
 	if req.Kind == "ai" {
+		var allowedRatings []string
+		if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
+			slog.Warn("resolve acting profile for AI collection failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
+		} else {
+			allowedRatings = db.AllowedRatingsForMax(profile.MaxAgeRating)
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		hits, serr := h.semantic.Search(ctx, c.Prompt, aiCollectionDefaultPicks)
+		hits, serr := h.semantic.Search(ctx, c.Prompt, aiCollectionDefaultPicks, allowedRatings)
 		if serr != nil {
 			slog.Warn("AI collection: semantic search failed (returning empty collection)",
 				"prompt", c.Prompt, "error", serr)

@@ -481,6 +481,172 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	}
 }
 
+// TestMediaSearch_ServerDerivedCeiling pins library search to the same
+// server-resolved ceiling as browse. Search used to apply no ceiling at all,
+// so a restricted profile could type the title of anything in the library and
+// get its poster, overview and id back. As with Recently added, the request
+// names the unrestricted default profile and asks for NC-17, and neither may
+// loosen the session's ceiling.
+func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	ctx := context.Background()
+	defaultProfile, err := f.q.GetDefaultProfile(ctx, f.userID)
+	if err != nil || defaultProfile == nil {
+		t.Fatalf("load default profile: %v", err)
+	}
+
+	// Every title carries a token no other row can contain, so the literal
+	// query matches exactly these four, whatever else is in the catalog.
+	token := "rcsearch" + reqTestSuffix(t)
+	seed := func(typ models.MediaType, rating, name string) int64 {
+		t.Helper()
+		it := &models.MediaItem{LibraryID: f.libraryID, Type: typ, Title: token + " " + name, SortTitle: token + " " + name, ContentRating: rating}
+		if err := f.q.UpsertMediaItem(ctx, it); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		return it.ID
+	}
+	allowed := seed(models.MediaMovie, "PG", "allowed")
+	overR := seed(models.MediaMovie, "R", "restricted movie")
+	overTVMA := seed(models.MediaShow, "TV-MA", "mature show")
+	unrated := seed(models.MediaMovie, "", "unrated")
+
+	search := func(refreshTokenID int64, fake *fakeSemantic, mode string) map[int64]bool {
+		t.Helper()
+		h := NewMediaHandler(f.q, nil)
+		if fake != nil {
+			h.SetSemanticSearcher(fake)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/api/media/search?q="+token+"&mode="+mode+
+			"&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
+		r = rcClaimsCtx(r, f.userID, refreshTokenID)
+		rr := httptest.NewRecorder()
+		h.Search(rr, r)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Search status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+		}
+		var items []*models.MediaItem
+		if err := json.Unmarshal(rr.Body.Bytes(), &items); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		ids := map[int64]bool{}
+		for _, it := range items {
+			ids[it.ID] = true
+		}
+		return ids
+	}
+
+	t.Run("literal", func(t *testing.T) {
+		got := search(f.restrictedRefreshID, nil, "literal")
+		if got[overR] || got[overTVMA] {
+			t.Errorf("restricted (PG) session found over-ceiling titles by searching: R movie=%v TV-MA show=%v", got[overR], got[overTVMA])
+		}
+		if got[unrated] {
+			t.Errorf("restricted (PG) session found the unrated title %d; unrated titles are excluded under a restriction", unrated)
+		}
+		if !got[allowed] {
+			t.Errorf("restricted (PG) session lost the PG title %d from search", allowed)
+		}
+
+		open := search(f.unrestrictedRefreshID, nil, "literal")
+		for name, id := range map[string]int64{"PG": allowed, "R": overR, "TV-MA": overTVMA, "unrated": unrated} {
+			if !open[id] {
+				t.Errorf("unrestricted session lost the %s title %d from search", name, id)
+			}
+		}
+	})
+
+	// The semantic searcher is handed the ceiling rather than trusted to find
+	// one, so what it receives is the contract. The fake also returns an R hit
+	// regardless, standing in for a searcher that ignores its argument: the
+	// handler re-checks the rows it serves.
+	t.Run("semantic", func(t *testing.T) {
+		rItem, err := f.q.GetMediaItem(ctx, overR)
+		if err != nil || rItem == nil {
+			t.Fatalf("load R item: %v", err)
+		}
+		fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+		got := search(f.restrictedRefreshID, fake, "semantic")
+		if !fake.called {
+			t.Fatal("mode=semantic did not invoke the semantic searcher")
+		}
+		if want := db.AllowedRatingsForMax("PG"); !sameRatings(fake.allowedRatings, want) {
+			t.Errorf("restricted (PG) session passed allowedRatings %v to the semantic searcher, want %v", fake.allowedRatings, want)
+		}
+		if got[overR] {
+			t.Errorf("restricted (PG) session was served the R hit %d the semantic searcher returned", overR)
+		}
+
+		fake = &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+		open := search(f.unrestrictedRefreshID, fake, "semantic")
+		if fake.allowedRatings != nil {
+			t.Errorf("unrestricted session passed allowedRatings %v to the semantic searcher, want nil", fake.allowedRatings)
+		}
+		if !open[overR] {
+			t.Errorf("unrestricted session lost the R hit %d", overR)
+		}
+	})
+}
+
+// TestAICollectionSeed_ServerDerivedCeiling: an AI collection is seeded by a
+// library search run as its creator, so a restricted profile prompting one
+// must hand the searcher its own ceiling, or the collection becomes a way to
+// read back any title the search would have hidden.
+func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	for _, tc := range []struct {
+		name      string
+		refreshID int64
+		want      []string
+	}{
+		{"restricted", f.restrictedRefreshID, db.AllowedRatingsForMax("PG")},
+		{"unrestricted", f.unrestrictedRefreshID, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeSemantic{}
+			h := NewCollectionsHandler(f.q)
+			h.SetSemanticSearcher(fake)
+			r := httptest.NewRequest(http.MethodPost, "/api/collections",
+				strings.NewReader(`{"name":"rc ai `+reqTestSuffix(t)+`","kind":"ai","prompt":"grim war films"}`))
+			r = rcClaimsCtx(r, f.userID, tc.refreshID)
+			rr := httptest.NewRecorder()
+			h.Create(rr, r)
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("Create status = %d, want 201 (body %q)", rr.Code, rr.Body.String())
+			}
+			var c models.Collection
+			if err := json.Unmarshal(rr.Body.Bytes(), &c); err == nil && c.ID != 0 {
+				t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
+			}
+			if !fake.called {
+				t.Fatal("AI collection creation did not run the semantic search")
+			}
+			if !sameRatings(fake.allowedRatings, tc.want) {
+				t.Errorf("AI collection seed passed allowedRatings %v, want %v", fake.allowedRatings, tc.want)
+			}
+		})
+	}
+}
+
+// sameRatings reports whether two rating lists hold the same set; the ladder
+// is a map, so AllowedRatingsForMax's order is not stable between calls.
+func sameRatings(a, b []string) bool {
+	if (a == nil) != (b == nil) || len(a) != len(b) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, r := range a {
+		seen[r]++
+	}
+	for _, r := range b {
+		if seen[r] == 0 {
+			return false
+		}
+		seen[r]--
+	}
+	return true
+}
+
 func TestActivateProfile_OwnershipEnforced(t *testing.T) {
 	f := newRCFixture(t)
 	h := NewProfileHandler(f.q)
