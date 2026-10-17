@@ -45,6 +45,7 @@ func TestCanonicalizeProfileRatings(t *testing.T) {
 		{ratingPtr("BOGUS"), ratingPtr(allAgesCeiling)},
 		{ratingPtr("PG13"), ratingPtr(allAgesCeiling)},
 		{ratingPtr("   "), nil},
+		{ratingPtr(""), ratingPtr("")}, // left alone: readers treat it as NULL already
 		{ratingPtr("NC-17"), ratingPtr("NC-17")},
 		{nil, nil},
 	}

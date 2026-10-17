@@ -512,7 +512,8 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	overTVMA := seed(models.MediaShow, "TV-MA", "mature show")
 	unrated := seed(models.MediaMovie, "", "unrated")
 
-	search := func(refreshTokenID int64, fake *fakeSemantic, mode string) map[int64]bool {
+	// search returns the served ids and the X-Search-Mode the handler reported.
+	search := func(refreshTokenID int64, fake *fakeSemantic, mode string) (map[int64]bool, string) {
 		t.Helper()
 		h := NewMediaHandler(f.q, nil)
 		if fake != nil {
@@ -534,11 +535,11 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		for _, it := range items {
 			ids[it.ID] = true
 		}
-		return ids
+		return ids, rr.Header().Get("X-Search-Mode")
 	}
 
 	t.Run("literal", func(t *testing.T) {
-		got := search(f.restrictedRefreshID, nil, "literal")
+		got, _ := search(f.restrictedRefreshID, nil, "literal")
 		if got[overR] || got[overTVMA] {
 			t.Errorf("restricted (PG) session found over-ceiling titles by searching: R movie=%v TV-MA show=%v", got[overR], got[overTVMA])
 		}
@@ -549,7 +550,7 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 			t.Errorf("restricted (PG) session lost the PG title %d from search", allowed)
 		}
 
-		open := search(f.unrestrictedRefreshID, nil, "literal")
+		open, _ := search(f.unrestrictedRefreshID, nil, "literal")
 		for name, id := range map[string]int64{"PG": allowed, "R": overR, "TV-MA": overTVMA, "unrated": unrated} {
 			if !open[id] {
 				t.Errorf("unrestricted session lost the %s title %d from search", name, id)
@@ -560,14 +561,20 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	// The semantic searcher is handed the ceiling rather than trusted to find
 	// one, so what it receives is the contract. The fake also returns an R hit
 	// regardless, standing in for a searcher that ignores its argument: the
-	// handler re-checks the rows it serves.
+	// handler re-checks the rows it serves, and must still serve the PG hit
+	// beside it. The mode header proves the semantic path served it; an empty
+	// semantic answer would fall back to trigram, which also finds that row.
 	t.Run("semantic", func(t *testing.T) {
 		rItem, err := f.q.GetMediaItem(ctx, overR)
 		if err != nil || rItem == nil {
 			t.Fatalf("load R item: %v", err)
 		}
-		fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
-		got := search(f.restrictedRefreshID, fake, "semantic")
+		pgItem, err := f.q.GetMediaItem(ctx, allowed)
+		if err != nil || pgItem == nil {
+			t.Fatalf("load PG item: %v", err)
+		}
+		fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: pgItem}}}
+		got, mode := search(f.restrictedRefreshID, fake, "semantic")
 		if !fake.called {
 			t.Fatal("mode=semantic did not invoke the semantic searcher")
 		}
@@ -577,9 +584,13 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		if got[overR] {
 			t.Errorf("restricted (PG) session was served the R hit %d the semantic searcher returned", overR)
 		}
+		if !got[allowed] || mode != "semantic" {
+			t.Errorf("restricted (PG) session: PG hit %d served=%v with X-Search-Mode %q, want served by the semantic path",
+				allowed, got[allowed], mode)
+		}
 
 		fake = &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
-		open := search(f.unrestrictedRefreshID, fake, "semantic")
+		open, _ := search(f.unrestrictedRefreshID, fake, "semantic")
 		if fake.allowedRatings != nil {
 			t.Errorf("unrestricted session passed allowedRatings %v to the semantic searcher, want nil", fake.allowedRatings)
 		}
@@ -594,12 +605,19 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 // must hand the searcher its own ceiling, or the collection becomes a way to
 // read back any title the search would have hidden. The fake also returns an
 // R hit regardless, standing in for a searcher that ignores its argument: the
-// seed must not save it for the restricted profile.
+// seed must not save it for the restricted profile, and must still save the PG
+// hit beside it.
 func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 	f := newRCFixture(t)
-	rItem, err := f.q.GetMediaItem(context.Background(), f.movieID)
+	ctx := context.Background()
+	rItem, err := f.q.GetMediaItem(ctx, f.movieID)
 	if err != nil || rItem == nil {
 		t.Fatalf("load R item: %v", err)
+	}
+	pgItem := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Seed PG " + reqTestSuffix(t),
+		SortTitle: "rc seed pg", ContentRating: "PG"}
+	if err := f.q.UpsertMediaItem(ctx, pgItem); err != nil {
+		t.Fatalf("seed PG movie: %v", err)
 	}
 	for _, tc := range []struct {
 		name      string
@@ -611,7 +629,7 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 		{"unrestricted", f.unrestrictedRefreshID, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+			fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: pgItem}}}
 			h := NewCollectionsHandler(f.q)
 			h.SetSemanticSearcher(fake)
 			r := httptest.NewRequest(http.MethodPost, "/api/collections",
@@ -637,12 +655,16 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 			if err != nil {
 				t.Fatalf("list collection items: %v", err)
 			}
-			saved := false
+			saved, savedPG := false, false
 			for _, it := range items {
 				saved = saved || it.ID == rItem.ID
+				savedPG = savedPG || it.ID == pgItem.ID
 			}
 			if saved != tc.wantSaved {
 				t.Errorf("R hit saved into the collection = %v, want %v", saved, tc.wantSaved)
+			}
+			if !savedPG {
+				t.Errorf("the PG hit %d was not saved into the collection", pgItem.ID)
 			}
 		})
 	}

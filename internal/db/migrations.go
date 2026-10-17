@@ -28,13 +28,20 @@ const allAgesCeiling = "G"
 
 // canonicalizeProfileRatings rewrites every stored max_age_rating to the
 // ladder's spelling of what it already means: case and whitespace variants to
-// the canonical key ("pg " → "PG"), blank to NULL (unrestricted), and a value
-// the ladder doesn't know to allAgesCeiling. Before write validation those
+// the canonical key ("pg " → "PG"), whitespace-only to NULL (unrestricted),
+// and a value the ladder doesn't know to allAgesCeiling. An exactly empty
+// string is left alone; every reader treats it as NULL already. Before write validation those
 // were all storable, and the readers disagreed about them: the gates normalize,
 // but the API returned the raw string and the SPA's age slider shows an
 // unknown value as Adult. In Go rather than SQL so the ladder stays in one
 // place. Idempotent, and cheap enough to run on every boot, which also catches
 // a value written since by hand.
+//
+// Lossy by design: the original of an unknown value survives only in the
+// warning logged here. One consequence to know before rolling back a release
+// that ADDS a rating to the ladder: the older binary rewrites every ceiling set
+// to the new rating to allAgesCeiling on its next boot. That fails stricter,
+// never looser, but the setting has to be re-entered.
 func canonicalizeProfileRatings(ctx context.Context, q *Queries) error {
 	rows, err := q.pool.Query(ctx,
 		`SELECT id, max_age_rating FROM user_profiles WHERE max_age_rating IS NOT NULL`)

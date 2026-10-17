@@ -142,10 +142,14 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     fails, and the hero, discover and engagement builds cache that result, so
     one database error can serve a restricted profile unfiltered picks for up
     to a day.
-  - These take the ceiling from an owned `?profile_id=`, or the account's
-    default profile without one, never the acting profile: `/api/me/hero`,
-    continue-watching, the follow feed (`resolveViewerProfile`) and taste
-    onboarding (`resolveProfile`).
+  - These take the profile, and so the ceiling, from an owned `?profile_id=`,
+    or the account's default profile without one, never the acting profile:
+    every `HeroHandler.resolveProfileID` route (hero, recommendations, discover,
+    anchor and engagement rails), the follow feed (`resolveViewerProfile`) and
+    taste onboarding (`resolveProfile`).
+  - Continue-watching applies no ceiling and scopes history by an owned
+    `?profile_id=`, else the acting profile, so a restricted session can name
+    another profile on the account and read its in-progress titles.
   - No ceiling at all: `/api/calendar`; `/api/media/{id}/files`; collection
     contents when read, and `AddItem` accepts any media id, so a restricted
     profile can enumerate the library through a manual collection.
