@@ -119,10 +119,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   gate on someone else's ceiling, such as the watch-party invite check, uses
   theirs.) Not every existing route follows the rule yet; see the gaps below.
   Discovery responses fail open on a resolve error, with the gated detail and
-  playback routes as the boundary. Persisted results should fail closed; so
-  far only AI-collection seeding does.
-- `internal/db/ratings.go` is the only ladder. Gates use `AllowedRatingsForMax`
-  or `RatingAllowed`; nil means unrestricted. An empty slice is ambiguous: gates
+  playback routes as the boundary. Persisted results fail closed: AI-collection
+  seeding, invite sending and taste-onboarding seed validation do; party media
+  changes and the recommender caches do not (see the gaps).
+- `internal/db/ratings.go` is the only ladder a gate may use, through
+  `AllowedRatingsForMax` or `RatingAllowed`; nil means unrestricted.
+  `maturityTierCase` (recommender) and `audienceClause` (embedding text) map
+  ratings to soft tiers, know ratings the ladder does not, and must never gate. An empty slice is ambiguous: gates
   testing `len(allowed) > 0` read it as unrestricted, gates testing
   `$n::text[] IS NULL` as allowing nothing. Never produce one for a restriction.
 - Filter in SQL before cross-library dedup and before `LIMIT`. Library search
@@ -184,7 +187,9 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 
 - Watch-history sharing is opt-in and rechecked on every read. Shared history
   uses only the account's default profile and completed rows.
-- Follow feeds apply the viewing profile's parental ceiling.
+- Follow feeds apply the viewing profile's parental ceiling, where the viewing
+  profile is an owned `?profile_id=` or the default, not the acting profile
+  (see Parental rating ceiling).
 - Member responses never expose email, role, or auth data. Avatars pass through
   `memberSafeAvatar`; social handles are bare and network-validated.
 - Member routes stay under `/api/members/*`; `/api/users` remains admin-only.

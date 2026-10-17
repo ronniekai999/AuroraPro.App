@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -514,6 +515,13 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	tvmaItem := seed(token, models.MediaShow, "TV-MA", "mature show")
 	unratedItem := seed(token, models.MediaMovie, "", "unrated")
 	onlyOverItem := seed(onlyOverToken, models.MediaMovie, "R", "the only match")
+	// crowdToken: one PG title and twelve over-ceiling titles that match the
+	// query better (short titles; the PG one's long tail dilutes similarity).
+	crowdToken := "zqcrowd" + reqTestSuffix(t)
+	crowdPG := seed(crowdToken, models.MediaMovie, "PG", "with a much longer tail that dilutes the trigram similarity")
+	for i := 0; i < 12; i++ {
+		seed(crowdToken, models.MediaMovie, "R", fmt.Sprintf("r%d", i))
+	}
 	allowed, overR, overTVMA, unrated := pgItem.ID, rItem.ID, tvmaItem.ID, unratedItem.ID
 
 	// search returns the served ids and the X-Search-Mode the handler
@@ -569,6 +577,22 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 			if !open[id] {
 				t.Errorf("unrestricted session lost the %s title %d from search", name, id)
 			}
+		}
+	})
+
+	// With limit=1 the handler fetches 11 trigram rows. Twelve over-ceiling
+	// titles match better than the allowed one, so a ceiling applied to the
+	// fetched page in Go, instead of in SearchMedia's SQL, serves nothing.
+	t.Run("literal_ceiling_before_limit", func(t *testing.T) {
+		// search puts q into the URL as is, so it can carry the limit.
+		got, _ := search(t, f.restrictedRefreshID, nil, crowdToken+"&limit=1", "literal")
+		if !got[crowdPG.ID] || len(got) != 1 {
+			t.Errorf("restricted (PG) literal search with limit=1: got %v, want only the PG title %d; "+
+				"the ceiling must be applied in SQL, before the fetch limit", got, crowdPG.ID)
+		}
+		open, _ := search(t, f.unrestrictedRefreshID, nil, crowdToken+"&limit=1", "literal")
+		if open[crowdPG.ID] || len(open) != 1 {
+			t.Errorf("unrestricted literal search with limit=1: got %v, want one closer R title, not the PG title %d", open, crowdPG.ID)
 		}
 	})
 

@@ -27,7 +27,8 @@ import (
 
 // ceilingQueryDim is the one non-zero dimension of the fake query embedding.
 // It is a high index no other test points at, so the shared catalog's
-// embeddings are orthogonal to the query and cannot outrank the fixture.
+// embeddings are nearly orthogonal to the query (cosine distance about 1) and
+// cannot outrank the fixture's rows at 0 and 0.2.
 const ceilingQueryDim = 710
 
 func ceilingVec(at map[int]float64) string {
@@ -141,9 +142,11 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 // TestSearchAppliesRatingCeilingToVectorRecall runs the whole pipeline. The
 // rows carry no query token, so only the vector leg can recall them, and they
 // sit nearest the query on a dimension nothing else uses, so under the
-// fixture's exact scans they top the fused list on any catalog. The lexical
-// leg's output cannot be seen here, so
-// the hook pins that Search hands that leg the same ceiling, and
+// fixture's exact scans they top the fused list on any catalog. There are
+// more over-ceiling rows nearer the query than the vector leg recalls
+// (vectorRecallSize), so a ceiling applied after that LIMIT, in Go, would
+// leave nothing allowed. The lexical leg's output cannot be seen here, so the
+// hook pins that Search hands that leg the same ceiling, and
 // TestLexicalRecallAppliesRatingCeiling pins that the leg applies it.
 func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 	f := newCeilingFixture(t)
@@ -174,7 +177,11 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 		}
 		return true
 	}
-	over := f.seed("Vector over "+f.token[8:16], "R", ceilingVec(map[int]float64{ceilingQueryDim: 1}))
+	overs := map[int64]bool{}
+	near := ceilingVec(map[int]float64{ceilingQueryDim: 1})
+	for i := 0; i <= vectorRecallSize; i++ {
+		overs[f.seed(fmt.Sprintf("Vector over %s %d", f.token[8:16], i), "R", near)] = true
+	}
 	allowed := f.seed("Vector allowed "+f.token[8:16], "PG",
 		ceilingVec(map[int]float64{ceilingQueryDim: 0.8, ceilingQueryDim + 1: 0.6})) // cosine distance 0.2
 
@@ -191,11 +198,14 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 		t.Fatalf("Search (restricted): %v", err)
 	}
 	got := ids(hits)
-	if got[over] {
-		t.Errorf("PG ceiling returned the R row %d through the vector leg", over)
+	for id := range overs {
+		if got[id] {
+			t.Errorf("PG ceiling returned the R row %d through the vector leg", id)
+		}
 	}
 	if !got[allowed] {
-		t.Errorf("PG ceiling lost the PG row %d", allowed)
+		t.Errorf("PG ceiling lost the PG row %d behind %d nearer R rows; the vector leg must filter before its LIMIT",
+			allowed, len(overs))
 	}
 	for _, h := range hits {
 		if !db.RatingAllowed("PG", h.Item.ContentRating) {
@@ -206,15 +216,19 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 		t.Errorf("Search handed the lexical leg ceiling %v, want %v", got, want)
 	}
 
-	// Control: unrestricted, the R row is the nearest match, so its absence
-	// above came from the ceiling.
+	// Control: unrestricted, the nearer R rows fill the recall, so the PG row's
+	// presence above came from the ceiling being applied before the LIMIT.
 	hits, _, err = f.s.Search(ctx, f.token, 50, nil)
 	if err != nil {
 		t.Fatalf("Search (unrestricted): %v", err)
 	}
 	got = ids(hits)
-	if !got[over] || !got[allowed] {
-		t.Errorf("unrestricted search lost fixture rows: R=%v PG=%v", got[over], got[allowed])
+	sawOver := false
+	for id := range overs {
+		sawOver = sawOver || got[id]
+	}
+	if !sawOver || got[allowed] {
+		t.Errorf("unrestricted: want the nearer R rows to crowd out the PG row; got some R=%v PG=%v", sawOver, got[allowed])
 	}
 	if got := lexicalRatings(); got != nil {
 		t.Errorf("unrestricted Search handed the lexical leg ceiling %v, want nil", got)
@@ -224,12 +238,23 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 // TestLexicalRecallAppliesRatingCeiling checks the trigram leg directly,
 // because Search's output cannot show it on a shared database (see
 // lexicalRecall). The rows have no embedding, so in Search they are reachable
-// through this leg alone.
+// through this leg alone. More over-ceiling titles match the query better
+// than the allowed one than the leg recalls (lexicalRecallSize), so a ceiling
+// applied after that LIMIT would leave nothing allowed.
 func TestLexicalRecallAppliesRatingCeiling(t *testing.T) {
 	f := newCeilingFixture(t)
 	ctx := context.Background()
-	allowed := f.seed(f.token+" lexical allowed", "G", "")
-	over := f.seed(f.token+" lexical over", "TV-MA", "")
+	// Short titles are the closest trigram matches; the allowed title's long
+	// tail makes it the weakest match of the set.
+	allowed := f.seed(f.token+" with a much longer tail that dilutes the trigram similarity", "G", "")
+	overs := map[int64]bool{}
+	for i := 0; i <= lexicalRecallSize; i++ {
+		rating := "TV-MA"
+		if i%2 == 0 {
+			rating = "R"
+		}
+		overs[f.seed(fmt.Sprintf("%s o%d", f.token, i), rating, "")] = true
+	}
 
 	recall := func(allowedRatings []string) (map[int64]bool, map[int64]*models.MediaItem) {
 		t.Helper()
@@ -245,15 +270,23 @@ func TestLexicalRecallAppliesRatingCeiling(t *testing.T) {
 	}
 
 	got, items := recall(db.AllowedRatingsForMax("PG"))
-	if got[over] || items[over] != nil {
-		t.Errorf("PG ceiling recalled the TV-MA row %d lexically", over)
+	for id := range overs {
+		if got[id] || items[id] != nil {
+			t.Errorf("PG ceiling recalled the over-ceiling row %d lexically", id)
+		}
 	}
 	if !got[allowed] || items[allowed] == nil {
-		t.Errorf("PG ceiling lost the G row %d from lexical recall", allowed)
+		t.Errorf("PG ceiling lost the G row %d behind %d closer over-ceiling matches; the lexical leg must filter before its LIMIT",
+			allowed, len(overs))
 	}
 
+	// Control: unrestricted, the closer matches fill the recall.
 	got, _ = recall(nil)
-	if !got[over] || !got[allowed] {
-		t.Errorf("unrestricted lexical recall lost fixture rows: TV-MA=%v G=%v", got[over], got[allowed])
+	sawOver := false
+	for id := range overs {
+		sawOver = sawOver || got[id]
+	}
+	if !sawOver || got[allowed] {
+		t.Errorf("unrestricted: want the closer over-ceiling matches to crowd out the G row; got some over=%v G=%v", sawOver, got[allowed])
 	}
 }

@@ -24,8 +24,11 @@ import (
 // unrelated rows. That window is a documented gap, not what these tests pin.
 func exactScanQueries(t *testing.T) *Queries {
 	t.Helper()
-	requireIntegrationDB(t) // skips without TEST_DATABASE_URL
-	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	cfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		t.Fatalf("parse test db url: %v", err)
 	}
@@ -69,8 +72,9 @@ func seedSearchCeilingItem(t *testing.T, q *Queries, libID int64, title string, 
 
 // sparseVec768 builds a 768-dim vector literal that is zero except at the
 // given indices. The search tests point their vectors at high indices no
-// other test uses, so the shared catalog's embeddings are orthogonal to them
-// (cosine distance 1) and cannot outrank the fixture.
+// other test uses, so the shared catalog's embeddings are nearly orthogonal to
+// them (cosine distance about 1; a dense real embedding lands within roughly
+// 0.15 of that) and cannot outrank the fixture's rows at 0 and 0.2.
 func sparseVec768(at map[int]float64) string {
 	parts := make([]string, 768)
 	for i := range parts {
