@@ -585,7 +585,7 @@ private fun PlaybackChoices(id: String, title: String, choices: List<Pair<String
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 AuroraTitle(title, size = 24)
                 LazyColumn(Modifier.weight(1f, fill = false), state = list, verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(vertical = 6.dp, horizontal = 4.dp)) {
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 18.dp)) {
                     items(choices, key = { it.first }) { (choice, label) ->
                         val focus = if (choice == choices.getOrNull(initial)?.first) Modifier.focusRequester(firstFocus) else Modifier
                         TvAction((if (selected == choice) "✓  " else "") + label, { onSelect(choice) }, focus.fillMaxWidth(), selected = selected == choice)

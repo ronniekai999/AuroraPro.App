@@ -63,13 +63,20 @@ import kotlinx.coroutines.launch
 
 // Keep visible hero actions in place. The TV pivot otherwise scrolls the top
 // of a fully visible hero out of view when its primary button receives focus.
+// Items brought in from below stop an overscan margin above the screen edge.
 @OptIn(ExperimentalFoundationApi::class)
-private val heroScrollSpec = object : BringIntoViewSpec {
+private fun heroScrollSpec(endMargin: Float) = object : BringIntoViewSpec {
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = when {
         offset < 0 -> offset
-        offset + size > containerSize -> offset + size - containerSize
+        offset + size > containerSize - endMargin -> offset + size - (containerSize - endMargin)
         else -> 0f
     }
+}
+
+@Composable
+private fun rememberHeroScrollSpec(): BringIntoViewSpec {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    return remember(density) { heroScrollSpec(with(density) { 27.dp.toPx() }) }
 }
 
 private val HeroHeight = 292.dp
@@ -115,9 +122,13 @@ internal fun AuroraApp(vm: TvViewModel = viewModel()) {
     Box(Modifier.fillMaxSize().auroraBackground()) {
         // Composed first so remote focus enters the chrome before the page, as it did
         // when the chrome sat above the content; drawn last so it overlays full-bleed art.
-        if (state.page !in setOf(Page.SERVER, Page.LOGIN, Page.PAIR)) TopBar(state, vm, { accountOpen = true }, Modifier.zIndex(1f))
-        screens.SaveableStateProvider(state.page.name) {
-            when (state.page) {
+        val chrome = state.page !in setOf(Page.SERVER, Page.LOGIN, Page.PAIR)
+        if (chrome) TopBar(state, vm, { accountOpen = true }, Modifier.zIndex(1f))
+        // An error takes its own space below the page, so it can never cover a focused control.
+        Column(Modifier.fillMaxSize()) {
+          Box(Modifier.weight(1f).fillMaxWidth()) {
+            screens.SaveableStateProvider(state.page.name) {
+              when (state.page) {
                 Page.SERVER -> ServerForm(state.server, state.busy, vm::connect)
                 Page.LOGIN -> LoginForm(state.server, state.busy, vm::login, vm::pair, vm::changeServer)
                 Page.PAIR -> PairScreen(state, api, vm::pair, vm::back)
@@ -128,9 +139,14 @@ internal fun AuroraApp(vm: TvViewModel = viewModel()) {
                 Page.MOVIES, Page.SHOWS -> BrowseScreen(state, api, vm)
                 Page.SEARCH -> SearchScreen(state, api, vm)
                 else -> Unit
+              }
             }
+          }
+          state.error?.let { ErrorBanner(it) }
         }
-        StatusLayer(state, Modifier.align(Alignment.BottomCenter).zIndex(2f))
+        // Signed-in pages show loading in the top bar; the sign-in pages keep this corner empty.
+        if (state.busy && !chrome) Text("Loading…", Modifier.align(Alignment.TopEnd).padding(top = 28.dp, end = Gutter),
+            color = AuroraColors.Focus, fontSize = 14.sp)
     }
     if (accountOpen && state.profile != null) Dialog(onDismissRequest = { if (!state.signingOut) accountOpen = false }) {
         var confirm by remember { mutableStateOf(false) }
@@ -172,29 +188,26 @@ private fun TopBar(state: TvState, vm: TvViewModel, onAccount: () -> Unit, modif
                     }
             }
         }
-        Spacer(Modifier.weight(1f))
-        if (state.busy) Text("Loading…", Modifier.padding(end = 16.dp), color = AuroraColors.Focus, fontSize = 13.sp)
+        // Loading takes only leftover space, so it never squeezes the navigation or profile.
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+            if (state.busy) Text("Loading…", Modifier.padding(horizontal = 12.dp), color = AuroraColors.Focus, fontSize = 13.sp,
+                maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+        }
         state.profile?.let { profile ->
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 ProfileOrb(profile, 34.dp)
-                TvAction(profile.name, onAccount, enabled = !state.signingOut)
+                TvAction(profile.name, onAccount, Modifier.widthIn(max = 200.dp), enabled = !state.signingOut)
             }
         }
     }
 }
 
-/** Errors float over the page rather than pushing content below the fold. Signed-in pages show loading in the top bar. */
 @Composable
-private fun StatusLayer(state: TvState, modifier: Modifier = Modifier) {
-    Column(modifier.padding(bottom = 28.dp, start = Gutter, end = Gutter), horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (state.busy && state.page in setOf(Page.SERVER, Page.LOGIN, Page.PAIR))
-            Text("Loading…", color = AuroraColors.Focus, fontSize = 14.sp)
-        state.error?.let { error ->
-            Text(error, Modifier.background(Color(0xF0241418), RoundedCornerShape(16.dp))
-                .border(1.dp, AuroraColors.Error.copy(alpha = .35f), RoundedCornerShape(16.dp))
-                .padding(horizontal = 20.dp, vertical = 12.dp), color = AuroraColors.Error, fontSize = 14.sp)
-        }
+private fun ErrorBanner(error: String) {
+    Box(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 8.dp, bottom = 24.dp), contentAlignment = Alignment.Center) {
+        Text(error, Modifier.background(Color(0xF0241418), RoundedCornerShape(16.dp))
+            .border(1.dp, AuroraColors.Error.copy(alpha = .35f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 20.dp, vertical = 12.dp), color = AuroraColors.Error, fontSize = 14.sp)
     }
 }
 
@@ -377,11 +390,11 @@ private fun HomeScreen(home: HomeData?, api: AuroraClient?, onMedia: (Media) -> 
     val scrolled by remember { derivedStateOf { scroll.firstVisibleItemIndex > 0 || scroll.firstVisibleItemScrollOffset > 48 } }
     Box(Modifier.fillMaxSize()) {
         AuroraBackdrop(hero?.let { api?.image(it.backdropPath.ifBlank { it.posterPath }, "w1280") }, dimmed = scrolled)
-        CompositionLocalProvider(LocalBringIntoViewSpec provides heroScrollSpec) {
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHeroScrollSpec()) {
           LazyColumn(Modifier.fillMaxSize().padding(top = TopBar), state = scroll,
               contentPadding = PaddingValues(bottom = 36.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {
-                Column(Modifier.fillMaxWidth().height(HeroHeight).padding(horizontal = Gutter, vertical = 8.dp),
+                Column(Modifier.fillMaxWidth().heightIn(min = HeroHeight).padding(horizontal = Gutter, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom)) {
                     if (hero != null) {
                         val match = home?.hero?.takeIf { it.item.id == hero.id }?.match?.takeIf { it > 0 }
@@ -404,7 +417,7 @@ private fun HomeScreen(home: HomeData?, api: AuroraClient?, onMedia: (Media) -> 
                         }, primary = true)
                     } else {
                         AuroraTitle("Welcome to your cinema.", size = 44)
-                        if (home != null) Text("Titles appear here once your Aurora libraries finish scanning.",
+                        if (home != null) Text("Nothing to show for this profile yet. Try Movies, TV shows or Search.",
                             color = AuroraColors.Muted, fontSize = 16.sp)
                     }
                 }
@@ -558,7 +571,7 @@ internal fun ChoiceDialog(title: String, choices: List<Pair<String, String>>, se
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             AuroraTitle(title, size = 24)
             LazyColumn(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(vertical = 6.dp, horizontal = 4.dp)) {
+                contentPadding = PaddingValues(vertical = 12.dp, horizontal = 18.dp)) {
                 items(choices, key = { it.first }) { (key, label) ->
                     TvAction((if (selected == key) "✓  " else "") + label, { onSelect(key) }, Modifier.fillMaxWidth(), selected = selected == key)
                 }
@@ -659,7 +672,7 @@ private fun DetailScreen(state: TvState, api: AuroraClient?, vm: TvViewModel) {
     val rating = media.rating?.takeIf { it > 0 }
     Box(Modifier.fillMaxSize()) {
       AuroraBackdrop(api?.image(media.backdropPath.ifBlank { media.posterPath }, "w1280"), dimmed = scrolled)
-      CompositionLocalProvider(LocalBringIntoViewSpec provides heroScrollSpec) {
+      CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHeroScrollSpec()) {
         // Item order is load-bearing: episode selection scrolls to the version section by index.
         LazyColumn(Modifier.fillMaxSize().padding(top = TopBar), state = scroll,
             contentPadding = PaddingValues(bottom = 36.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -680,7 +693,9 @@ private fun DetailScreen(state: TvState, api: AuroraClient?, vm: TvViewModel) {
                         leading = if (rating != null) { { RatingLabel(rating) } } else null)
                     Text(media.overview, maxLines = 3, overflow = TextOverflow.Ellipsis, color = Color.White.copy(alpha = .8f),
                         fontSize = 15.sp, lineHeight = 22.sp)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)) {
+                    // Padding leaves room for the focus scale and halo; the offset keeps buttons aligned with the text.
+                    LazyRow(Modifier.offset(x = (-16).dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)) {
                         if (file != null) item {
                             TvAction(if (media.isShow) "Play / Resume episode" else "Play / Resume", { vm.play(file) }, restoreModifier("play", initial = true),
                                 enabled = !state.busy, primary = true, icon = AuroraIcons.Play)
@@ -706,7 +721,7 @@ private fun DetailScreen(state: TvState, api: AuroraClient?, vm: TvViewModel) {
                 }
             } }
             item {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(horizontal = Gutter, vertical = 6.dp)) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(horizontal = Gutter, vertical = 12.dp)) {
                     items(state.seasons, key = { it.number }) { season ->
                         TvAction(if (season.number == 0) "Specials" else "Season ${season.number}", { vm.season(season.number) },
                             restoreModifier("season.${season.number}"),
@@ -770,7 +785,8 @@ private fun EpisodeCard(episode: Episode, season: Int?, selected: Boolean, api: 
         shape = CardDefaults.shape(CardShape), scale = CardDefaults.scale(focusedScale = 1.05f),
         border = CardDefaults.border(focusedBorder = Border.None), glow = CardDefaults.glow(),
         colors = CardDefaults.colors(containerColor = Color.Transparent, focusedContainerColor = Color.Transparent)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).focusRing(focused || selected, CardShape).clip(CardShape)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).focusRing(focused, CardShape)
+            .then(if (selected && !focused) Modifier.border(1.5.dp, Color.White.copy(alpha = .6f), CardShape) else Modifier).clip(CardShape)) {
             AuroraArtwork(api?.image(episode.stillPath, "w500"), Modifier.fillMaxSize(), fallback = episode.title.takeIf { it.isNotBlank() })
             Text("E${episode.number}", Modifier.align(Alignment.TopStart).padding(10.dp).clearAndSetSemantics {}
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp)).padding(horizontal = 7.dp, vertical = 2.dp),

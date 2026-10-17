@@ -48,7 +48,8 @@ server or media library.
 - The Aurora Stage design: full-bleed title art behind Home and title pages that
   fades into the canvas and dims once you scroll, a single top bar, pill actions,
   poster and Continue Watching cards with a lilac focus ring, Match and rating
-  details, and source badges (4K/1080p, HDR) derived from probed geometry.
+  details, and source badges: a resolution tier from probed geometry and
+  HDR/HLG from the probed color transfer, never from the version tag.
 - Server connection and password sign-in, or phone/browser approval by QR/code.
 - Existing profile selection with saved Aurora nebula orbs/custom images, and
   server-side session activation.
@@ -132,9 +133,11 @@ Robolectric, so the design can be reviewed where no emulator runs:
 ```
 
 PNGs are written to `app/build/outputs/screens`. Without `-Paurora.screenshots`
-the capture test is excluded, so normal builds and CI are unchanged. These are
-design evidence only: remote navigation, playback and device behavior are proven
-by the instrumentation suite and on a TV.
+(or with `-Paurora.screenshots=false`) the capture test is excluded from the test
+run and Android resources are not merged for unit tests; CI still compiles it and
+resolves Robolectric and the Compose test libraries. These are design evidence
+only: remote navigation, playback and device behavior are proven by the
+instrumentation suite and on a TV.
 
 ## Browser pairing contract
 
@@ -192,8 +195,8 @@ not the length of a growing playlist.
 This build includes paginated browsing/filtering, playback quality and track
 controls, Smart Skip and automated episode continuation. Bitmap subtitle
 burn-in, library saves/collections,
-requests, calendar, watch parties, notifications, social, and administration
-remain in later milestones. Track selection is limited to tracks the chosen
+requests, calendar, watch parties, notifications and social features
+remain in later milestones; server administration stays in the web app. Track selection is limited to tracks the chosen
 direct file/HLS manifest exposes. A manually selected original-file audio track
 is matched to scanned language, codec, channels and title before compatibility
 fallback. If that metadata cannot identify one track, playback asks for Automatic

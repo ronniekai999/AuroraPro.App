@@ -19,6 +19,7 @@ class PlaybackPresentationTest {
         assertEquals(listOf("1080p"), sourceBadges(source))
         assertEquals(listOf("4K", "HDR"), sourceBadges(source.copy(resolution = "3840x2160", colorTransfer = "smpte2084", versionTag = "1080p")))
         assertEquals(listOf("4K", "HLG"), sourceBadges(source.copy(resolution = "4096x1716", colorTransfer = "arib-std-b67")))
+        assertEquals(listOf("1440p"), sourceBadges(source.copy(resolution = "2560x1440")))
         assertEquals(listOf("720p"), sourceBadges(source.copy(resolution = "1280x536")))
         assertEquals(listOf("SD"), sourceBadges(source.copy(resolution = "720x480", colorTransfer = "bt709")))
         // A height-only label is not geometry; show no tier rather than trust it.

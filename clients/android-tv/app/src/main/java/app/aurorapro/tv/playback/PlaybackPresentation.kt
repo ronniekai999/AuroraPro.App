@@ -82,6 +82,7 @@ fun sourceBadges(file: MediaFile): List<String> {
     val tier = when {
         size == null -> null
         size.width >= 3200 || size.height >= 2000 -> "4K"
+        size.width >= 2400 || size.height >= 1400 -> "1440p"
         size.width >= 1800 || size.height >= 1000 -> "1080p"
         size.width >= 1200 || size.height >= 700 -> "720p"
         else -> "SD"

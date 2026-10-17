@@ -5,6 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// JVM screen captures are a design review aid, not a CI gate:
+// ./gradlew testDebugUnitTest --tests '*ScreenCaptureTest' -Paurora.screenshots [-Paurora.screenshots.art=DIR]
+val captureScreens = providers.gradleProperty("aurora.screenshots").map { it != "false" }.getOrElse(false)
+
 android {
     namespace = "app.aurorapro.tv"
     compileSdk = 36
@@ -23,7 +27,7 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
-        unitTests.isIncludeAndroidResources = true // Robolectric screen captures read the merged resources.
+        unitTests.isIncludeAndroidResources = captureScreens // Robolectric captures read the merged resources.
     }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
@@ -32,14 +36,12 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
-// JVM screen captures are a design review aid, not a CI gate:
-// ./gradlew testDebugUnitTest --tests '*ScreenCaptureTest' -Paurora.screenshots [-Paurora.screenshots.art=DIR]
-val captureScreens = providers.gradleProperty("aurora.screenshots").isPresent
-val screenshotArt = providers.gradleProperty("aurora.screenshots.art").orElse("")
 tasks.withType<Test>().configureEach {
     if (!captureScreens) exclude("**/ScreenCaptureTest*")
-    systemProperty("aurora.screenshots.dir", layout.buildDirectory.dir("outputs/screens").get().asFile.path)
-    systemProperty("aurora.screenshots.art", screenshotArt.get())
+    else {
+        systemProperty("aurora.screenshots.dir", layout.buildDirectory.dir("outputs/screens").get().asFile.path)
+        systemProperty("aurora.screenshots.art", providers.gradleProperty("aurora.screenshots.art").getOrElse(""))
+    }
 }
 
 dependencies {

@@ -64,7 +64,7 @@ Start with these logical boundaries without creating a separate Gradle module fo
 - API models, HTTP, authentication, caching and realtime transport.
 - Playback decisions, Media3, source-time mapping, progress and session lifecycle.
 - Party state and synchronization, room communication and optional voice.
-- Feature screens for discovery, library, requests, calendar, social, settings and administration.
+- Feature screens for discovery, library, requests, calendar, social and settings.
 
 ### Authentication and shared state
 
@@ -105,7 +105,7 @@ Use the server notification inbox and realtime events for the first TV builds. E
 
 **First implementation target:** Milestone 1's complete login-to-playback flow, followed by Milestone 2. This proves the app's foundation while keeping watch parties, requests and calendar on the committed delivery path. The first APK is an early milestone, not the full-parity release.
 
-Allow roughly **13–21 engineering weeks** for all milestones with one experienced Android engineer, reusable server APIs and access to representative physical TVs. This estimate predates the administration exception, which removes the admin forms from scope; re-estimate after the next milestone rather than subtracting a guess. It is an initial scope estimate, not a delivery-date commitment. Pairing, codec limits, native voice and device validation can materially change it. Re-estimate after Milestone 0 and again after the first working TV playback build; measure progress by the gates above.
+Allow roughly **13–21 engineering weeks** for all milestones with one experienced Android engineer, reusable server APIs and access to representative physical TVs. This estimate predates the administration exception, which removes the admin forms from scope. It is an initial scope estimate, not a delivery-date commitment. Pairing, codec limits, native voice and device validation can materially change it. Re-estimate after Milestone 0 and again after the first working TV playback build; measure progress by the gates above.
 
 ## Verification and release gates
 
