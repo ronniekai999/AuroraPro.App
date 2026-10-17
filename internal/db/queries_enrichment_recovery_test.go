@@ -142,7 +142,7 @@ func TestGetRecentMediaSurvivesNullColumns(t *testing.T) {
 	lib := nullProbeLibrary(t, q, owner, "show")
 	id, _ := insertShow(t, q, lib)
 
-	items, err := q.GetRecentMedia(context.Background(), 500)
+	items, err := q.GetRecentMedia(context.Background(), 500, nil)
 	if err != nil {
 		t.Fatalf("GetRecentMedia with a NULL-column row present: %v", err)
 	}
@@ -154,8 +154,9 @@ func TestGetRecentMediaSurvivesNullColumns(t *testing.T) {
 		}
 	}
 	if !found {
-		// Not a pass: the row is the newest in the catalog and the limit is
-		// generous, so its absence means the query silently dropped it.
+		// Not a pass: the row was just inserted and the limit is generous (the
+		// few rows dated ahead of NOW() by the rating-ceiling tests cannot crowd
+		// it out), so its absence means the query silently dropped it.
 		t.Errorf("the NULL-column row (id %d) is missing from GetRecentMedia's %d results", id, len(items))
 	}
 }

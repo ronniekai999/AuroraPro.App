@@ -1,0 +1,10 @@
+{
+  "sha": "8b04422c0c2c858f1fff8ec2e5ce028c9185dd99",
+  "verdict": "lows-only",
+  "summary": "Recently-added rating ceiling, full diff 2ccbe31..8b04422. Handler resolves the session's acting profile via ResolveActingProfile (never client profile_id/max_rating) with List's fail-open posture; GetRecentMedia applies AllowedRatingsForMax in SQL before dedup and LIMIT, matching GetMediaItems. Pass 1 lows-only: 6 lows in tests/comments (dedup-order untested, centuries-ahead fixture dates, brittle unrestricted control, NULL fixture columns, API test missing max_rating and all-rows check, stale comments); pass 2 verified all fixed and found 1 new low (dedup fixture could crowd the before-LIMIT page under 4-process stress); pass 3 verified it fixed under the same stress. Mutation-checked: ceiling ignored, applied after dedup, filtered after LIMIT, unrated allowed, client profile_id or max_rating honoured all fail a test. Full go test -count=1 ./... green against Postgres 16 + pgvector. Outside this diff, not fixed: /api/me/hero trusts client profile_id; /api/media/search has no ceiling; max_age_rating values unvalidated; real devices and cast-scoped tokens untested.",
+  "reviewer": "independent-subagent-general-purpose (fresh-context read-only, 3 passes)",
+  "findings": "0",
+  "diff_digest": "daf8e97d982bd1af6627bb3f00acd46bdc4a465d089ecb3dcf6f3cba6e29b803",
+  "branch": "claude/gifted-hopper-rfs4s9",
+  "recorded_at": "2026-10-17T18:34:00Z"
+}

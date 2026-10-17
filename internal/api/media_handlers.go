@@ -707,13 +707,27 @@ func (h *MediaHandler) GetFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MediaHandler) Recent(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
 
+	// The ceiling comes from the session's acting profile (issue #462), never
+	// the profile_id/max_rating a client sends, with the same fail-open posture
+	// as List: this is discovery, and the read/playback path is the boundary.
+	var allowedRatings []string
+	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
+		slog.Warn("resolve acting profile for recent media failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
+	} else {
+		allowedRatings = db.AllowedRatingsForMax(profile.MaxAgeRating)
+	}
+
 	// GetRecentMedia performs SQL-level dedup via DISTINCT ON CTE
-	items, err := h.queries.GetRecentMedia(r.Context(), limit)
+	items, err := h.queries.GetRecentMedia(r.Context(), limit, allowedRatings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get recent media")
 		return

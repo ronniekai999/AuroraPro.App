@@ -71,6 +71,7 @@ type rcFixture struct {
 	userID                int64
 	restrictedRefreshID   int64 // bound to the PG profile
 	unrestrictedRefreshID int64 // bound to the unrestricted default profile
+	libraryID             int64
 	movieID               int64
 	movieFileID           int64
 	showID                int64
@@ -156,7 +157,7 @@ func newRCFixture(t *testing.T) *rcFixture {
 	return &rcFixture{
 		q: q, userID: userID,
 		restrictedRefreshID: restrictedRT, unrestrictedRefreshID: unrestrictedRT,
-		movieID: movie.ID, movieFileID: movieFile.ID,
+		libraryID: lib.ID, movieID: movie.ID, movieFileID: movieFile.ID,
 		showID: show.ID, episodeFileID: episodeFile.ID,
 	}
 }
@@ -405,6 +406,78 @@ func TestMediaList_ServerDerivedCeiling(t *testing.T) {
 		if it.ID == f.movieID {
 			t.Errorf("restricted profile requesting max_rating=NC-17 still saw the R-rated movie (id=%d) — discovery filter is client-elective again", it.ID)
 		}
+	}
+}
+
+// TestMediaRecent_ServerDerivedCeiling pins "Recently added" to the same
+// server-resolved ceiling as browse. The handler used to call GetRecentMedia
+// with no profile at all, so a restricted profile's Home rail (and the web and
+// TV heroes that fall back to its first item) listed every recent title. The
+// TV also sends ?profile_id=; neither it nor max_rating may pick a looser
+// ceiling, so the restricted request names the unrestricted default profile
+// and asks for NC-17.
+func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	h := NewMediaHandler(f.q, nil)
+	ctx := context.Background()
+
+	// An in-ceiling title, so the restricted case proves filtering rather than
+	// an empty response. The fixture's movie (R) and show (TV-MA) exceed PG.
+	allowed := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Allowed " + reqTestSuffix(t),
+		SortTitle: "rc allowed", ContentRating: "PG"}
+	if err := f.q.UpsertMediaItem(ctx, allowed); err != nil {
+		t.Fatalf("seed allowed movie: %v", err)
+	}
+	defaultProfile, err := f.q.GetDefaultProfile(ctx, f.userID)
+	if err != nil || defaultProfile == nil {
+		t.Fatalf("load default profile: %v", err)
+	}
+
+	recent := func(refreshTokenID int64) []*models.MediaItem {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/api/media/recent?limit=50&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
+		r = rcClaimsCtx(r, f.userID, refreshTokenID)
+		rr := httptest.NewRecorder()
+		h.Recent(rr, r)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Recent status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+		}
+		var items []*models.MediaItem
+		if err := json.Unmarshal(rr.Body.Bytes(), &items); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return items
+	}
+	idSet := func(items []*models.MediaItem) map[int64]bool {
+		ids := map[int64]bool{}
+		for _, it := range items {
+			ids[it.ID] = true
+		}
+		return ids
+	}
+
+	// The ceiling check covers every returned row, whatever else is in the
+	// shared catalog. The id checks rely on this fixture's rows being among the
+	// 50 newest, which holds unless something seeds 50+ newer rows concurrently.
+	restrictedItems := recent(f.restrictedRefreshID)
+	for _, it := range restrictedItems {
+		if !db.RatingAllowed("PG", it.ContentRating) {
+			t.Errorf("restricted (PG) session got item %d rated %q from Recently added", it.ID, it.ContentRating)
+		}
+	}
+	restricted := idSet(restrictedItems)
+	if restricted[f.movieID] || restricted[f.showID] {
+		t.Errorf("restricted (PG) session saw over-ceiling titles in Recently added: movie=%v show=%v",
+			restricted[f.movieID], restricted[f.showID])
+	}
+	if !restricted[allowed.ID] {
+		t.Errorf("restricted (PG) session lost the PG title %d from Recently added", allowed.ID)
+	}
+
+	open := idSet(recent(f.unrestrictedRefreshID))
+	if !open[f.movieID] || !open[allowed.ID] {
+		t.Errorf("unrestricted session must still see every recent title: R movie=%v PG movie=%v",
+			open[f.movieID], open[allowed.ID])
 	}
 }
 

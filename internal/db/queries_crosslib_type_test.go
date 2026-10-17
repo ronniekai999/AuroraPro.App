@@ -47,7 +47,7 @@ func uniqueTMDBID(t *testing.T) int {
 	// only considers the slice it is passed, the file-level assertions are keyed
 	// to the fixture's own row ids, and the GetMediaItems and rail/grid tests
 	// scope their queries (title token / content_rating token). The exposed pair
-	// is the two GetRecentMedia tests, whose query takes no filter at all: a
+	// is the two GetRecentMedia tests, whose query they run unfiltered: a
 	// pre-existing row with the same tmdb_id and type could join their dedup
 	// group and win it. At a ~1/2e9 draw that is a tolerated residual risk, not
 	// something the range rules out, and it fails loudly rather than passing.
@@ -192,13 +192,15 @@ func TestGetRecentMediaKeepsBothTypesOnATMDBIDCollision(t *testing.T) {
 	// than on any total count.
 	//
 	// UNSCOPEABLE ASSUMPTION, stated rather than fixed: GetRecentMedia takes only
-	// a limit — no filter struct, no allowedRatings — so unlike the GetMediaItems
-	// and rail/grid tests, this one cannot narrow the query to its own rows. It
+	// a limit and a rating ceiling (left unrestricted here) — no library, type or
+	// title filter — so unlike the GetMediaItems and rail/grid tests, this one
+	// cannot narrow the query to its own rows. It
 	// relies on the fixture's rows being among the 500 newest by added_at, which
-	// holds because they were just inserted and real catalog rows are older. It
-	// would break only if something seeded 500+ media_items concurrently, and it
-	// would break loudly.
-	items, err := q.GetRecentMedia(context.Background(), 500)
+	// holds because they were just inserted; the only rows dated ahead of NOW()
+	// are the few from the rating-ceiling tests, and only briefly. It would break
+	// only if something seeded 500+ media_items concurrently, and it would break
+	// loudly.
+	items, err := q.GetRecentMedia(context.Background(), 500, nil)
 	if err != nil {
 		t.Fatalf("GetRecentMedia: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestGetRecentMediaStillCollapsesSameTypeSiblings(t *testing.T) {
 	idA := seedTypedMediaItem(t, q, libA, "movie", tmdbID, token)
 	idB := seedTypedMediaItem(t, q, libB, "movie", tmdbID, token)
 
-	items, err := q.GetRecentMedia(context.Background(), 500)
+	items, err := q.GetRecentMedia(context.Background(), 500, nil)
 	if err != nil {
 		t.Fatalf("GetRecentMedia: %v", err)
 	}
