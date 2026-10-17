@@ -133,7 +133,11 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   so the API and clients report the enforced ceiling.
 - A ceiling change invalidates the profile's recommender caches, which are built
   under the ceiling it reads at build time and otherwise live up to 24h.
-- Known gaps:
+- Coverage is NOT complete, and no route-by-route audit exists. Server-derived
+  enforcement covers: the read/playback path (#462), browse, Recently added,
+  library search, and AI-collection seeding. Never infer coverage elsewhere
+  from this list; check the handler.
+- Known gaps (examples, not exhaustive):
   - Under the HNSW index, kNN filters apply to about `hnsw.ef_search` (100)
     candidates, so a restricted semantic search on a large catalog can return
     fewer allowed rows than its limit (no leak; `MediaType` and the
@@ -142,17 +146,20 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     fails, and the hero, discover and engagement builds cache that result, so
     one database error can serve a restricted profile unfiltered picks for up
     to a day.
-  - These take the profile, and so the ceiling, from an owned `?profile_id=`,
-    or the account's default profile without one, never the acting profile:
-    every `HeroHandler.resolveProfileID` route (hero, recommendations, discover,
-    anchor and engagement rails), the follow feed (`resolveViewerProfile`) and
-    taste onboarding (`resolveProfile`).
-  - Continue-watching applies no ceiling and scopes history by an owned
-    `?profile_id=`, else the acting profile, so a restricted session can name
-    another profile on the account and read its in-progress titles.
-  - No ceiling at all: `/api/calendar`; `/api/media/{id}/files`; collection
-    contents when read, and `AddItem` accepts any media id, so a restricted
-    profile can enumerate the library through a manual collection.
+  - Ceiling taken from an owned `?profile_id=`, or the account's default
+    profile without one, never the acting profile: the discovery routes behind
+    `HeroHandler.resolveProfileID` (hero, recommendations, discover, anchor and
+    engagement rails), the follow feed (`resolveViewerProfile`) and taste
+    onboarding (`resolveProfile`).
+  - Profile chosen the same way and no ceiling at all: the recap routes
+    (`RecapHandler.resolveProfileID`), and continue-watching, which falls back
+    to the acting profile rather than the default.
+  - No ceiling, account-wide: watch history (`/api/progress/recent`,
+    `/history`), member profiles' recent watches, and `/api/parties/active`.
+  - No ceiling on lookups by id: `/api/calendar`, `/api/media/{id}/files`,
+    `/next-episode`, episode files, artwork and cast. Collections, watchlists
+    and My Library accept any media id and read items back unfiltered, so a
+    restricted profile can enumerate the library through them.
   - Any session on the account can change any of its profiles' ceilings (no
     PIN).
 

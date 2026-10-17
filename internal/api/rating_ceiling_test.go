@@ -573,7 +573,11 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		if err != nil || pgItem == nil {
 			t.Fatalf("load PG item: %v", err)
 		}
-		fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: pgItem}}}
+		unratedItem, err := f.q.GetMediaItem(ctx, unrated)
+		if err != nil || unratedItem == nil {
+			t.Fatalf("load unrated item: %v", err)
+		}
+		fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: unratedItem}, {Item: pgItem}}}
 		got, mode := search(f.restrictedRefreshID, fake, "semantic")
 		if !fake.called {
 			t.Fatal("mode=semantic did not invoke the semantic searcher")
@@ -581,8 +585,8 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		if want := db.AllowedRatingsForMax("PG"); !sameRatings(fake.allowedRatings, want) {
 			t.Errorf("restricted (PG) session passed allowedRatings %v to the semantic searcher, want %v", fake.allowedRatings, want)
 		}
-		if got[overR] {
-			t.Errorf("restricted (PG) session was served the R hit %d the semantic searcher returned", overR)
+		if got[overR] || got[unrated] {
+			t.Errorf("restricted (PG) session was served over-ceiling semantic hits: R=%v unrated=%v", got[overR], got[unrated])
 		}
 		if !got[allowed] || mode != "semantic" {
 			t.Errorf("restricted (PG) session: PG hit %d served=%v with X-Search-Mode %q, want served by the semantic path",
@@ -596,6 +600,25 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 		}
 		if !open[overR] {
 			t.Errorf("unrestricted session lost the R hit %d", overR)
+		}
+	})
+
+	// An empty semantic answer falls back to trigram (the rescue for titles
+	// that trip a recommendation marker). It is the branch a restricted search
+	// reaches whenever the vector leg finds nothing allowed, so it must carry
+	// the ceiling too.
+	t.Run("semantic_empty_rescued_by_trigram", func(t *testing.T) {
+		fake := &fakeSemantic{}
+		got, mode := search(f.restrictedRefreshID, fake, "semantic")
+		if !fake.called || mode != "literal" {
+			t.Fatalf("want an empty semantic answer rescued by trigram: semantic called=%v, X-Search-Mode %q", fake.called, mode)
+		}
+		if got[overR] || got[overTVMA] || got[unrated] {
+			t.Errorf("restricted (PG) trigram rescue served over-ceiling titles: R=%v TV-MA=%v unrated=%v",
+				got[overR], got[overTVMA], got[unrated])
+		}
+		if !got[allowed] {
+			t.Errorf("restricted (PG) trigram rescue lost the PG title %d", allowed)
 		}
 	})
 }

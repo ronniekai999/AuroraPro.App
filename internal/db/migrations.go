@@ -26,16 +26,16 @@ func RunDataMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // rewritten to: the tier AllowedRatingsForMax already enforces for it.
 const allAgesCeiling = "G"
 
-// canonicalizeProfileRatings rewrites every stored max_age_rating to the
-// ladder's spelling of what it already means: case and whitespace variants to
+// canonicalizeProfileRatings rewrites stored max_age_rating values to the
+// ladder's spelling of what they already mean: case and whitespace variants to
 // the canonical key ("pg " → "PG"), whitespace-only to NULL (unrestricted),
-// and a value the ladder doesn't know to allAgesCeiling. An exactly empty
-// string is left alone; every reader treats it as NULL already. Before write validation those
-// were all storable, and the readers disagreed about them: the gates normalize,
-// but the API returned the raw string and the SPA's age slider shows an
-// unknown value as Adult. In Go rather than SQL so the ladder stays in one
-// place. Idempotent, and cheap enough to run on every boot, which also catches
-// a value written since by hand.
+// and a value the ladder doesn't know to allAgesCeiling. Before write
+// validation those were all storable, and the readers disagreed about them:
+// the gates normalize, but the API returned the raw string and the SPA's age
+// slider shows an unknown value as Adult. An exactly empty string is left
+// alone, since every reader already treats it as NULL. In Go rather than SQL
+// so the ladder stays in one place. Idempotent, and cheap enough to run on
+// every boot, which also catches a value written since by hand.
 //
 // Lossy by design: the original of an unknown value survives only in the
 // warning logged here. One consequence to know before rolling back a release
