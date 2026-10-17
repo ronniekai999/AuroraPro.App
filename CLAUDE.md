@@ -132,14 +132,25 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   migration `canonicalizeProfileRatings` rewrites stored values to that meaning
   so the API and clients report the enforced ceiling.
 - A ceiling change invalidates the profile's recommender caches, which are built
-  under the ceiling and otherwise live up to 24h.
-- Known gaps: under the HNSW index, kNN filters apply to about `hnsw.ef_search`
-  (100) candidates, so a restricted semantic search on a large catalog can
-  return fewer allowed rows than its limit (no leak; `MediaType` and the
-  recommender's kNN queries share this). `/api/me/hero` and continue-watching
-  let an owned `?profile_id=` override the acting profile; `/api/calendar`
-  applies no ceiling; collection contents are not ceiling-gated when read; any
-  session on the account can change any of its profiles' ceilings (no PIN).
+  under the ceiling it reads at build time and otherwise live up to 24h.
+- Known gaps:
+  - Under the HNSW index, kNN filters apply to about `hnsw.ef_search` (100)
+    candidates, so a restricted semantic search on a large catalog can return
+    fewer allowed rows than its limit (no leak; `MediaType` and the
+    recommender's kNN queries share this).
+  - `Hero.allowedRatings` returns nil (unrestricted) when the ceiling lookup
+    fails, and the hero, discover and engagement builds cache that result, so
+    one database error can serve a restricted profile unfiltered picks for up
+    to a day.
+  - These take the ceiling from an owned `?profile_id=`, or the account's
+    default profile without one, never the acting profile: `/api/me/hero`,
+    continue-watching, the follow feed (`resolveViewerProfile`) and taste
+    onboarding (`resolveProfile`).
+  - No ceiling at all: `/api/calendar`; `/api/media/{id}/files`; collection
+    contents when read, and `AddItem` accepts any media id, so a restricted
+    profile can enumerate the library through a manual collection.
+  - Any session on the account can change any of its profiles' ceilings (no
+    PIN).
 
 ### Member profiles and follows
 

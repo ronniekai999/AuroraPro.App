@@ -14,6 +14,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -644,6 +645,47 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 				t.Errorf("R hit saved into the collection = %v, want %v", saved, tc.wantSaved)
 			}
 		})
+	}
+}
+
+// TestAICollectionSeed_ResolveErrorSkipsSeed pins the deliberate difference
+// from search: a seed is saved, and collection contents are read back without
+// a ceiling, so a failed profile lookup must not seed unrestricted.
+func TestAICollectionSeed_ResolveErrorSkipsSeed(t *testing.T) {
+	f := newRCFixture(t)
+	rItem, err := f.q.GetMediaItem(context.Background(), f.movieID)
+	if err != nil || rItem == nil {
+		t.Fatalf("load R item: %v", err)
+	}
+	fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+	h := NewCollectionsHandler(f.q)
+	h.SetSemanticSearcher(fake)
+	h.resolveProfile = func(context.Context, int64, int64) (*models.UserProfile, error) {
+		return nil, errors.New("transient profile lookup failure")
+	}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/collections",
+		strings.NewReader(`{"name":"rc ai `+reqTestSuffix(t)+`","kind":"ai","prompt":"grim war films"}`))
+	r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+	rr := httptest.NewRecorder()
+	h.Create(rr, r)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("Create status = %d, want 201 with an empty collection (body %q)", rr.Code, rr.Body.String())
+	}
+	var c models.Collection
+	if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil || c.ID == 0 {
+		t.Fatalf("decode created collection: %v (body %q)", err, rr.Body.String())
+	}
+	t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
+	if fake.called {
+		t.Error("a failed profile lookup still ran the seed search")
+	}
+	items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+	if err != nil {
+		t.Fatalf("list collection items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("a failed profile lookup seeded %d items, want none", len(items))
 	}
 }
 

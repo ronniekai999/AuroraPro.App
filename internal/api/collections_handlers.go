@@ -38,10 +38,13 @@ const aiCollectionDefaultPicks = 12
 type CollectionsHandler struct {
 	queries  *db.Queries
 	semantic SemanticSearcher
+	// resolveProfile is queries.ResolveActingProfile; a field so a test can
+	// make it fail and pin that AI seeding does not fail open.
+	resolveProfile func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 }
 
 func NewCollectionsHandler(queries *db.Queries) *CollectionsHandler {
-	return &CollectionsHandler{queries: queries}
+	return &CollectionsHandler{queries: queries, resolveProfile: queries.ResolveActingProfile}
 }
 
 // SetSemanticSearcher wires the LLM-backed search for AI-collection
@@ -186,7 +189,7 @@ func (h *CollectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 // seedAICollection fills a new AI collection from a semantic search on its
 // prompt and returns the reloaded collection (c itself if nothing reloads).
 func (h *CollectionsHandler) seedAICollection(r *http.Request, claims *auth.JWTClaims, c *models.Collection) *models.Collection {
-	profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	profile, err := h.resolveProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil {
 		slog.Warn("AI collection: resolve acting profile failed (returning empty collection)",
 			"user_id", claims.UserID, "error", err)
