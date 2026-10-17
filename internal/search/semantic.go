@@ -64,6 +64,11 @@ type Searcher struct {
 	llm   *llm.Client
 	q     *db.Queries
 	cache *parseCache
+	// testHookLexicalFilter, when set, receives the filter the lexical leg
+	// runs with. Search's output cannot show that leg on a busy catalog (see
+	// lexicalRecall), so this is how a test pins what Search hands it. A field,
+	// not a package variable, so it fires for one Searcher only.
+	testHookLexicalFilter func(db.SemanticFilter)
 }
 
 // New constructs a Searcher. The cache TTL is fixed (10 min) — long enough to
@@ -401,6 +406,9 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int, allowedR
 // rerankInputCap, so on a catalog with that many embedded rows Search's
 // output cannot show what this leg returned.
 func (s *Searcher) lexicalRecall(ctx context.Context, queries []string, filter db.SemanticFilter, itemByID map[int64]*models.MediaItem) [][]int64 {
+	if s.testHookLexicalFilter != nil {
+		s.testHookLexicalFilter(filter)
+	}
 	wantType := filter.MediaType // "movie" | "show" | ""
 	var lists [][]int64
 	for _, lq := range queries {

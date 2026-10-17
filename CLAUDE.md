@@ -114,9 +114,11 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 
 ### Parental rating ceiling
 
-- The ceiling comes from `ResolveActingProfile` (issue #462), never a
-  client-sent `profile_id`/`max_rating`. Discovery fails open on a resolve
-  error; the read/playback path is the boundary.
+- Rule (issue #462): a gate takes the ceiling from `ResolveActingProfile`,
+  never a client-sent `profile_id`/`max_rating`. Not every existing route
+  does yet; see the gaps below. Discovery responses fail open on a resolve
+  error, with the gated detail and playback routes as the boundary; anything
+  persisted fails closed.
 - `internal/db/ratings.go` is the only ladder. Gates use `AllowedRatingsForMax`
   or `RatingAllowed`; nil means unrestricted. An empty slice is ambiguous: gates
   testing `len(allowed) > 0` read it as unrestricted, gates testing
@@ -134,9 +136,11 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 - A ceiling change invalidates the profile's recommender caches, which are built
   under the ceiling it reads at build time and otherwise live up to 24h.
 - Coverage is NOT complete, and no route-by-route audit exists. Server-derived
-  enforcement covers: the read/playback path (#462), browse, Recently added,
-  library search, and AI-collection seeding. Never infer coverage elsewhere
-  from this list; check the handler.
+  enforcement covers: the #462 routes (media detail, seasons and episodes,
+  media/episode/direct file streaming, subtitles, transcode-session creation,
+  cast-token minting), browse, Recently added, library search, and
+  AI-collection seeding. Never infer coverage elsewhere from this list; check
+  the handler.
 - Known gaps (examples, not exhaustive):
   - Under the HNSW index, kNN filters apply to about `hnsw.ef_search` (100)
     candidates, so a restricted semantic search on a large catalog can return
@@ -154,12 +158,16 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - Profile chosen the same way and no ceiling at all: the recap routes
     (`RecapHandler.resolveProfileID`), and continue-watching, which falls back
     to the acting profile rather than the default.
-  - No ceiling, account-wide: watch history (`/api/progress/recent`,
-    `/history`), member profiles' recent watches, and `/api/parties/active`.
-  - No ceiling on lookups by id: `/api/calendar`, `/api/media/{id}/files`,
-    `/next-episode`, episode files, artwork and cast. Collections, watchlists
-    and My Library accept any media id and read items back unfiltered, so a
-    restricted profile can enumerate the library through them.
+  - No ceiling on listings: the account's watch history
+    (`/api/progress/recent`, `/history`), another member's recent watches,
+    every live party server-wide (`/api/parties/active`, with title and
+    poster), and `/api/calendar` (every show's upcoming episodes by date).
+  - No ceiling on lookups by id: `/api/media/{id}/files`, `/next-episode`,
+    episode files, artwork, cast, `/api/stream/info/{fileID}` (tracks and
+    external subtitle filenames), and a party's `highlight.mp4` (membership
+    only). Collections, watchlists and My Library accept any media id and read
+    items back unfiltered, so a restricted profile can enumerate the library
+    through them.
   - Any session on the account can change any of its profiles' ceilings (no
     PIN).
 

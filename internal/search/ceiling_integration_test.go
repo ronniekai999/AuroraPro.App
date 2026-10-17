@@ -131,10 +131,38 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 // TestSearchAppliesRatingCeilingToVectorRecall runs the whole pipeline. The
 // rows carry no query token, so only the vector leg can recall them, and they
 // sit nearest the query on a dimension nothing else uses, so they top the
-// fused list on any catalog.
+// fused list on any catalog. The lexical leg's output cannot be seen here, so
+// the hook pins that Search hands that leg the same ceiling, and
+// TestLexicalRecallAppliesRatingCeiling pins that the leg applies it.
 func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 	f := newCeilingFixture(t)
 	ctx := context.Background()
+	var lexicalFilters []db.SemanticFilter
+	f.s.testHookLexicalFilter = func(filter db.SemanticFilter) { lexicalFilters = append(lexicalFilters, filter) }
+	lexicalRatings := func() []string {
+		t.Helper()
+		if len(lexicalFilters) != 1 {
+			t.Fatalf("lexical leg ran %d times, want once", len(lexicalFilters))
+		}
+		got := lexicalFilters[0].AllowedRatings
+		lexicalFilters = nil
+		return got
+	}
+	sameSet := func(a, b []string) bool {
+		if (a == nil) != (b == nil) || len(a) != len(b) {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, r := range a {
+			seen[r] = true
+		}
+		for _, r := range b {
+			if !seen[r] {
+				return false
+			}
+		}
+		return true
+	}
 	over := f.seed("Vector over "+f.token[8:16], "R", ceilingVec(map[int]float64{ceilingQueryDim: 1}))
 	allowed := f.seed("Vector allowed "+f.token[8:16], "PG",
 		ceilingVec(map[int]float64{ceilingQueryDim: 0.8, ceilingQueryDim + 1: 0.6})) // cosine distance 0.2
@@ -163,6 +191,9 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 			t.Errorf("PG ceiling returned item %d rated %q", h.Item.ID, h.Item.ContentRating)
 		}
 	}
+	if got, want := lexicalRatings(), db.AllowedRatingsForMax("PG"); !sameSet(got, want) {
+		t.Errorf("Search handed the lexical leg ceiling %v, want %v", got, want)
+	}
 
 	// Control: unrestricted, the R row is the nearest match, so its absence
 	// above came from the ceiling.
@@ -173,6 +204,9 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 	got = ids(hits)
 	if !got[over] || !got[allowed] {
 		t.Errorf("unrestricted search lost fixture rows: R=%v PG=%v", got[over], got[allowed])
+	}
+	if got := lexicalRatings(); got != nil {
+		t.Errorf("unrestricted Search handed the lexical leg ceiling %v, want nil", got)
 	}
 }
 
