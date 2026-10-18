@@ -131,6 +131,12 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 - `maturityTierCase` (`internal/db/queries_recommender.go`) and
   `audienceClause` (`internal/embedding`) map ratings to soft tiers, know
   ratings the ladder does not, and must never gate.
+- `SemanticSearch` is the one kNN query the HNSW index serves, and under it
+  filters apply to only about `hnsw.ef_search` (100) candidates, so a selective
+  filter comes back short. A short page is re-run once as an exact scan
+  (`exactSemanticSearch`, index scans off); a full page is as good as any
+  HNSW result. The recommender and onboarding kNN queries order by their
+  `DISTINCT ON` key first, so they never use the index and are exact.
 - Filter in SQL before cross-library dedup and before `LIMIT`. Library search
   filters both semantic recall legs (the lexical leg takes the vector leg's
   `SemanticFilter`), so fusion, rerank and the title fallback only see allowed
@@ -154,10 +160,6 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   AI-collection seeding. Never infer coverage elsewhere from this list; check
   the handler.
 - Known gaps (examples, not exhaustive):
-  - Under the HNSW index, kNN filters apply to about `hnsw.ef_search` (100)
-    candidates, so a restricted semantic search on a large catalog can return
-    fewer allowed rows than its limit (no leak; `MediaType` and the
-    recommender's kNN queries share this).
   - Ceiling taken from an owned `?profile_id=`, or the account's default
     profile without one, never the acting profile: the discovery routes behind
     `HeroHandler.resolveProfileID` (hero, recommendations, discover, anchor and

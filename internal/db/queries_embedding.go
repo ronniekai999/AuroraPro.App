@@ -3,10 +3,12 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/jackc/pgx/v5"
 )
 
 // EmbeddingCandidate is a media item that needs to be embedded (or re-embedded
@@ -149,9 +151,8 @@ type SemanticFilter struct {
 	RuntimeMax int      // minutes; 0 = no cap
 	ExcludeIDs []int64  // e.g. items already in user history
 	// AllowedRatings is the acting profile's ceiling (AllowedRatingsForMax);
-	// nil or empty = unrestricted. No over-ceiling row is ever returned, but
-	// under the HNSW index a restricted search can return fewer than limit
-	// rows (see SemanticSearch).
+	// nil or empty = unrestricted. SemanticSearch fills a restricted page with
+	// allowed rows even under the HNSW index (see its exact retry).
 	AllowedRatings []string
 }
 
@@ -165,15 +166,21 @@ type SemanticHit struct {
 // SemanticSearch runs a kNN query against media_items.embedding using the
 // supplied vector literal (e.g. "[0.1,...]" — produced by llm.FormatVector).
 //
-// Filters are a WHERE clause, so no returned row ever fails one, but they do
-// not always run before the LIMIT. When the planner uses the HNSW index, the
-// scan yields about hnsw.ef_search candidates (100, set in pool.go) and the
-// filters apply to those; pgvector before 0.8 has no fallback, and 0.8's
-// iterative scan is off by default. A filter that rejects most of the nearest
-// neighbours therefore returns fewer than limit rows, possibly none, although
-// matching rows exist further out. A sequential scan (small or tightly
-// filtered tables) is exact. This holds for MediaType and AllowedRatings
-// alike, and for the recommender's kNN queries.
+// Filters are a WHERE clause, so no returned row ever fails one. When the
+// planner uses the HNSW index, though, the scan yields only about
+// hnsw.ef_search candidates (100, set in pool.go) and the filters apply to
+// those; pgvector before 0.8 has no fallback, and 0.8's iterative scan is off
+// by default. A filter that rejects most of the nearest neighbours (a kid
+// profile's rating ceiling on an adult-heavy catalog, a media type the catalog
+// has few of) then comes back short, possibly empty, although matching rows
+// exist further out. A limit above ef_search does the same unfiltered.
+//
+// So a short page is re-run once as an exact scan (exactSemanticSearch). A
+// full page needs no retry: every row nearer than its last hit was inside the
+// candidate window too, so the window already holds the nearest matches, as
+// close to exact as an unfiltered ANN query. A page that is short because
+// fewer rows match pays for one extra scan, filtered before any distance is
+// computed. If the retry itself fails, the short page is returned.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {
@@ -241,9 +248,46 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 		strings.Join(where, " AND "), argIdx,
 	)
 
-	rows, err := q.pool.Query(ctx, sql, args...)
+	hits, err := semanticHits(ctx, q.pool, sql, args)
 	if err != nil {
 		return nil, fmt.Errorf("semantic search: %w", err)
+	}
+	if len(hits) >= limit {
+		return hits, nil
+	}
+	exact, err := q.exactSemanticSearch(ctx, sql, args)
+	if err != nil {
+		slog.Warn("semantic search: exact retry of a short page failed; returning the short page",
+			"rows", len(hits), "limit", limit, "error", err)
+		return hits, nil
+	}
+	return exact, nil
+}
+
+// exactSemanticSearch runs a SemanticSearch query with plain index scans
+// turned off. HNSW supports no other scan type (no bitmap scan), so every
+// plan left is exact: a sequential or bitmap scan that applies the filters,
+// then distance and a sort over what passes. SET LOCAL scopes the setting to
+// this read-only transaction.
+func (q *Queries) exactSemanticSearch(ctx context.Context, sql string, args []any) ([]SemanticHit, error) {
+	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // read-only: nothing to commit
+	if _, err := tx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
+		return nil, err
+	}
+	return semanticHits(ctx, tx, sql, args)
+}
+
+// semanticHits runs a SemanticSearch query on the pool or a transaction.
+func semanticHits(ctx context.Context, querier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, sql string, args []any) ([]SemanticHit, error) {
+	rows, err := querier.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 

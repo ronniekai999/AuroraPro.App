@@ -70,8 +70,8 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	// Exact kNN scans, so the fixture's rows lead the vector leg whatever the
 	// shared catalog holds. With enough embedded rows the planner picks the
 	// HNSW index, whose candidate window (see db.SemanticSearch) would make
-	// these results depend on unrelated rows. That window is a documented gap,
-	// not what these tests pin.
+	// the first pass depend on unrelated rows. The db package pins how that
+	// window is handled; these tests pin where the ceiling is applied.
 	cfg.ConnConfig.RuntimeParams["enable_indexscan"] = "off"
 	pool, err := pgxpool.NewWithConfig(connectCtx, cfg)
 	if err != nil {
