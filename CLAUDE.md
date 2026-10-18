@@ -226,8 +226,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   SHARE and rechecks the PIN state the handler judged
   (`SetActiveProfileForTokenIfPIN`), so a PIN set or changed in between is a
   403 `profile_pin_required`, not a bind. PIN writes run argon2id twice at
-  most and have their own budget, 5 per 15 minutes per account
-  (`pinWriteLimiter`, in memory).
+  most and have their own budget, 5 per 15 minutes per account and acting
+  profile (`pinWriteLimiter`, in memory), so one session cannot spend the
+  owner's.
 - PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
   refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
   check let concurrent guesses all pass the lockout read; a review drove 40
@@ -243,7 +244,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   could multiply it by pairing devices, which all act as the kid.
 - Refusals carry `error.reason`: `profile_pin_required` (nothing supplied, not
   counted), `profile_pin_invalid`, `profile_pin_locked` (with Retry-After; also
-  a spent password budget), `profile_restricted`, `session_unbound`.
+  a spent password budget), `profile_restricted`, `session_unbound`,
+  `session_ended`.
 - A restricted session is one acting as a profile with a non-empty
   `max_age_rating`. It may edit only its own name, avatar, language, subtitle
   and maturity settings. It cannot create, delete or re-default profiles, set
@@ -251,7 +253,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   passes), edit another profile's settings, or link or unlink a sign-in
   identity (a fresh sign-in through a new link would land on the default
   without its PIN). These checks fail closed when the acting profile cannot be
-  resolved.
+  resolved, and refuse a session whose row is gone (401 `session_ended`,
+  `requireLiveSession`): its still-valid access token acts as the most
+  restrictive profile, which with no restricted profile left is the
+  unrestricted default.
 - An account keeps at least one profile without a ceiling: a ceiling on its
   last one, or that profile's delete, is a 409 `last_unrestricted_profile`
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
@@ -265,7 +270,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   the server has lost. Revoked session rows are kept until `revoked_at` is
   older than the access-token lifetime (migration 061, `PurgeExpiredTokens`),
   because access tokens name their row and outlive its revocation; and a token
-  whose row is gone anyway resolves to the account's most restrictive profile.
+  whose row is gone anyway, or whose row names a profile that is gone or not
+  the account's, resolves to the account's most restrictive profile.
   Deleting a profile deletes its sessions: the binding's foreign key
   cascades (migration 062). It used to be `ON DELETE SET NULL`, which put
   them on the default; deleting the rows first missed one bound in between by
@@ -282,7 +288,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   profile itself has a PIN, the device gets the account's most restrictive
   unlocked profile instead (`MostRestrictiveUnlockedProfile`), and with every
   profile locked the approval is a 409 `profile_locked` (the account password
-  can still sign the device in).
+  can still sign the device in). The grant waits up to ten minutes for the
+  device's poll, so the session insert rechecks under the user-row lock: a
+  grant whose profile has gained a PIN since creates nothing, and the device
+  pairs again. An approver whose own session row is gone cannot pair.
 - Clients show the server's binding, never a remembered choice: the SPA reads
   `GET /api/profiles/active` at startup (one retry, `readSessionProfile`)
   and changes its display only after activation resolves, one switch at a
@@ -369,7 +378,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     signs out every session on the account.
   - A session a PIN write ended keeps its still-valid access token for up to
     one token lifetime, acting as the account's most restrictive profile, as
-    a deleted profile's sessions do.
+    a deleted profile's sessions do; it can read and write that profile's
+    data but cannot manage profiles or pair a device.
+  - A PIN write keeps only the session row its access token names, so a tab
+    whose token predates its session's latest rotation ends its own session
+    too; it signs in again.
   - Locking a kid's own profile signs out the kid's devices; signing one
     back in lands on the default, and the web app does not re-select the
     now-locked profile, so someone picks it with its PIN.

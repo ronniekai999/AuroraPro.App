@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,11 +212,29 @@ func (failingActingResolver) ResolveActingProfile(context.Context, int64, int64)
 	return nil, errors.New("database down")
 }
 
+func (failingActingResolver) SessionLive(context.Context, int64, int64) (bool, error) {
+	return true, nil
+}
+
 func TestDenyRestrictedSessionFailsClosed(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
 	if !denyRestrictedSession(rr, r, failingActingResolver{}, &auth.JWTClaims{UserID: 1, RefreshTokenID: 2}, "do this") {
 		t.Fatal("a lookup error let the action through")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rr.Code)
+	}
+}
+
+// TestTheSessionCheckFailsClosed: a failed lookup of the session row refuses
+// rather than treating the session as live.
+func TestTheSessionCheckFailsClosed(t *testing.T) {
+	rr := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/x", nil)
+	failing := func(context.Context, int64, int64) (bool, error) { return true, errors.New("database down") }
+	if requireLiveSession(rr, r, failing, &auth.JWTClaims{UserID: 1, RefreshTokenID: 2}) {
+		t.Fatal("a session lookup error let the request through")
 	}
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500", rr.Code)
@@ -371,8 +391,9 @@ func TestAStaleSessionActsAsTheMostRestrictiveProfile(t *testing.T) {
 	if got := f.acting(t, f.kidRT); got != f.kid.ID {
 		t.Errorf("a purged kid session acts as %d, want the most restrictive profile, the kid %d", got, f.kid.ID)
 	}
-	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, f.kidRT, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusForbidden || reason != "profile_restricted" {
-		t.Errorf("a purged kid session lifting its ceiling: %d %q, want 403 profile_restricted", code, reason)
+	// Profile management refuses a session whose row is gone outright.
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, f.kidRT, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("a purged kid session lifting its ceiling: %d %q, want 401 session_ended", code, reason)
 	}
 }
 
@@ -707,12 +728,12 @@ func TestSettingAPINSignsOutTheSessionsActingAsTheProfile(t *testing.T) {
 		t.Errorf("the PIN also ended the caller (%v) or the kid's own session (%v)", ended(f.parentRT), ended(f.kidRT))
 	}
 	// The ended session's still-valid access token acts as the most
-	// restrictive profile, with none of the parent's powers.
+	// restrictive profile, and cannot manage profiles at all.
 	if got := f.acting(t, kidOnParent); got != f.kid.ID {
 		t.Errorf("the ended session's token acts as %d, want the most restrictive profile, the kid (%d)", got, f.kid.ID)
 	}
-	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, kidOnParent, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusForbidden || reason != "profile_restricted" {
-		t.Errorf("the ended session lifting the kid's ceiling: %d %q, want 403 profile_restricted", code, reason)
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, kidOnParent, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("the ended session lifting the kid's ceiling: %d %q, want 401 session_ended", code, reason)
 	}
 
 	// A device that got in with the PIN is signed out when the PIN changes.
@@ -1015,5 +1036,128 @@ func TestActivatingAProfileLockedMeanwhileIsRefused(t *testing.T) {
 	}
 	if acting := f.acting(t, f.kidRT); acting != f.kid.ID {
 		t.Errorf("the kid's session acts as %d, want still the kid (%d)", acting, f.kid.ID)
+	}
+}
+
+// TestAPairingApprovedBeforeAPINExpires: a pairing grant names the profile
+// its approver could pass on and lives ten minutes. A kid's session on the
+// unlocked parent approved one, the parent then set a PIN (ending the kid's
+// session), and the kid's poll still created a session on the newly locked
+// profile. The session insert rechecks under the user lock.
+func TestAPairingApprovedBeforeAPINExpires(t *testing.T) {
+	f := newLockFixture(t)
+	h, _ := deviceTestHandler()
+	h.sessions = f.q
+	kidOnParent := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, kidOnParent, f.parent.ID)
+	secret, grant, err := h.grants.start("Kid's tablet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := f.q.GetUserByID(context.Background(), f.userID)
+	if err != nil || u == nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if !h.grants.authorize(grant.UserCode, f.userID, u.TokenVersion, f.parent.ID) {
+		t.Fatal("authorize the grant")
+	}
+	f.setPIN(t, "4321")
+	w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
+	var n int
+	if err := lockTestPool(t).QueryRow(context.Background(),
+		`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND active_profile_id = $2 AND id <> $3`,
+		f.userID, f.parent.ID, f.parentRT).Scan(&n); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if n != 0 || !strings.Contains(w.Body.String(), "expired_token") {
+		t.Errorf("polling a grant for a profile locked since: %d %s, %d new sessions on it; want expired_token and none", w.Code, w.Body, n)
+	}
+}
+
+// TestAnEndedSessionCannotManageProfilesOrPair: a session a PIN write ended
+// keeps its access token for up to one token lifetime, acting as the most
+// restrictive profile, which once no restricted profile is left is the
+// unrestricted default. It is refused management and pairing outright.
+func TestAnEndedSessionCannotManageProfilesOrPair(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	ended := seedRCRefreshToken(t, f.q, f.userID)
+	if _, err := lockTestPool(t).Exec(ctx, `DELETE FROM refresh_tokens WHERE id = $1`, ended); err != nil {
+		t.Fatalf("end the session: %v", err)
+	}
+	// With the kid's ceiling gone, the most restrictive profile is the
+	// unrestricted default.
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE user_profiles SET max_age_rating = NULL WHERE id = $1`, f.kid.ID); err != nil {
+		t.Fatalf("clear the kid's ceiling: %v", err)
+	}
+	if code, reason, _ := f.call(t, f.h.CreateProfile, http.MethodPost, ended, 0, `{"name":"free"}`); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("an ended session creating a profile: %d %q, want 401 session_ended", code, reason)
+	}
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, ended, f.kid.ID, `{"max_age_rating":"PG"}`); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("an ended session changing a ceiling: %d %q, want 401 session_ended", code, reason)
+	}
+	rr := httptest.NewRecorder()
+	r := rcClaimsCtx(httptest.NewRequest(http.MethodGet, "/x", nil), f.userID, ended)
+	if !denyRestrictedSession(rr, r, f.q, &auth.JWTClaims{UserID: f.userID, RefreshTokenID: ended}, "do this") || rr.Code != http.StatusUnauthorized {
+		t.Errorf("an ended session passing the account-level check: %d", rr.Code)
+	}
+	h, _ := deviceTestHandler()
+	h.sessions = f.q
+	_, grant, err := h.grants.start("TV")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := f.q.GetUserByID(ctx, f.userID)
+	ar := httptest.NewRequest(http.MethodPost, "https://aurora.example/api/auth/device/authorize",
+		strings.NewReader(fmt.Sprintf(`{"user_code":%q,"expected_user_id":%d}`, grant.UserCode, f.userID)))
+	ar.Header.Set("Content-Type", "application/json")
+	ar = ar.WithContext(context.WithValue(ar.Context(), auth.ClaimsContextKey,
+		&auth.JWTClaims{UserID: f.userID, Username: u.Username, Role: "user", TokenVersion: u.TokenVersion, RefreshTokenID: ended}))
+	aw := httptest.NewRecorder()
+	h.Authorize(aw, ar)
+	if aw.Code != http.StatusUnauthorized {
+		t.Errorf("an ended session approving a pairing: %d %s, want 401", aw.Code, aw.Body)
+	}
+	// A live session is unaffected.
+	if code, _, body := f.call(t, f.h.CreateProfile, http.MethodPost, f.parentRT, 0, `{"name":"spare"}`); code != http.StatusCreated {
+		t.Errorf("a live session creating a profile: %d %s", code, body)
+	}
+}
+
+// TestOneSessionCannotSpendTheOwnersPINBudget: the PIN-write budget is per
+// account and acting profile, so a session on another profile spending it
+// leaves the owner's.
+func TestOneSessionCannotSpendTheOwnersPINBudget(t *testing.T) {
+	f := newLockFixture(t)
+	guest := &models.UserProfile{UserID: f.userID, Name: "guest", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(context.Background(), guest); err != nil {
+		t.Fatalf("seed guest: %v", err)
+	}
+	guestRT := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, guestRT, guest.ID)
+	for i := 0; i < profilePINWrites+1; i++ {
+		f.call(t, f.h.SetProfilePIN, http.MethodPut, guestRT, f.kid.ID, `{"pin":""}`)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.parent.ID, `{"pin":"4321"}`); code != http.StatusOK {
+		t.Errorf("the owner's PIN write after a guest spent its budget: %d %s", code, body)
+	}
+}
+
+// TestABindingToAProfileThatIsGoneActsAsTheMostRestrictive: a session bound
+// to a profile its account no longer has (a delete racing the lookup) fell
+// back to the account default.
+func TestABindingToAProfileThatIsGoneActsAsTheMostRestrictive(t *testing.T) {
+	f := newLockFixture(t)
+	other := seedReqUser(t, f.q)
+	foreign, err := f.q.CreateDefaultProfileForUser(context.Background(), other, "foreign")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	stray := seedRCRefreshToken(t, f.q, f.userID)
+	if _, err := lockTestPool(t).Exec(context.Background(), `UPDATE refresh_tokens SET active_profile_id = $2 WHERE id = $1`, stray, foreign.ID); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if got := f.acting(t, stray); got != f.kid.ID {
+		t.Errorf("a session bound to another account's profile acts as %d, want the most restrictive, the kid (%d)", got, f.kid.ID)
 	}
 }

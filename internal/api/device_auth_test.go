@@ -26,6 +26,13 @@ type deviceTestStore struct {
 	acting     *models.UserProfile // nil: an unrestricted acting profile
 	failActing bool
 	unlocked   *models.UserProfile // MostRestrictiveUnlockedProfile's answer
+	ended      bool                // SessionLive answers false
+}
+
+func (s *deviceTestStore) SessionLive(context.Context, int64, int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.ended, nil
 }
 
 func (s *deviceTestStore) MostRestrictiveUnlockedProfile(context.Context, int64) (*models.UserProfile, error) {

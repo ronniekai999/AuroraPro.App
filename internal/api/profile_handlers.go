@@ -30,6 +30,8 @@ type ProfileHandler struct {
 	// resolveActing resolves the session's acting profile; a field so a test
 	// can make it fail and see the management gates fail closed.
 	resolveActing func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
+	// sessionLive is queries.SessionLive; see actingProfile.
+	sessionLive func(ctx context.Context, userID, refreshTokenID int64) (bool, error)
 }
 
 // Profile PIN brute-force budget: a four-digit PIN has 10,000 values, so the
@@ -85,6 +87,7 @@ func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 		passwordLimiter: auth.NewRateLimiter(profilePasswordAttempts, profilePasswordWindow),
 		pinWriteLimiter: auth.NewRateLimiter(profilePINWrites, profilePINWriteWindow),
 		resolveActing:   queries.ResolveActingProfile,
+		sessionLive:     queries.SessionLive,
 	}
 }
 
@@ -108,7 +111,16 @@ func writeErrorReason(w http.ResponseWriter, status int, reason, message string)
 // actingProfile resolves the session's acting profile for a profile-management
 // write. Unlike discovery, these fail CLOSED: a resolve error must not let a
 // restricted session through.
+//
+// A session whose row is gone (a PIN write, a profile delete or the purge
+// ended it) is refused outright: its still-valid access token acts as the
+// most restrictive profile, which once no restricted profile is left is the
+// unrestricted default, so it could otherwise manage profiles until the
+// token expired.
 func (h *ProfileHandler) actingProfile(w http.ResponseWriter, r *http.Request, claims *auth.JWTClaims) (*models.UserProfile, bool) {
+	if !requireLiveSession(w, r, h.sessionLive, claims) {
+		return nil, false
+	}
 	acting, err := h.resolveActing(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		slog.Warn("profiles: resolve acting profile failed", "user_id", claims.UserID, "error", err)
@@ -116,6 +128,26 @@ func (h *ProfileHandler) actingProfile(w http.ResponseWriter, r *http.Request, c
 		return nil, false
 	}
 	return acting, true
+}
+
+// requireLiveSession refuses (401 session_ended) a token whose session row
+// no longer exists, writing the refusal itself. A token with no session id
+// predates session binding and is let through, as elsewhere. Fails closed.
+func requireLiveSession(w http.ResponseWriter, r *http.Request, live func(context.Context, int64, int64) (bool, error), claims *auth.JWTClaims) bool {
+	if claims.RefreshTokenID == 0 || live == nil {
+		return true
+	}
+	ok, err := live(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		slog.Warn("check session failed", "user_id", claims.UserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to check the session")
+		return false
+	}
+	if !ok {
+		writeErrorReason(w, http.StatusUnauthorized, "session_ended", "this session has ended; sign in again")
+		return false
+	}
+	return true
 }
 
 // requireUnrestricted refuses profile management from a session acting as a
@@ -142,7 +174,13 @@ func denyLastUnrestricted(w http.ResponseWriter) {
 		"an account keeps at least one profile without a content rating limit; add one first")
 }
 
-// actingProfileResolver is the one query denyRestrictedSession needs.
+// sessionStore is what denyRestrictedSession needs.
+type sessionStore interface {
+	actingProfileResolver
+	SessionLive(ctx context.Context, userID, refreshTokenID int64) (bool, error)
+}
+
+// actingProfileResolver resolves the session's acting profile.
 type actingProfileResolver interface {
 	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 }
@@ -152,7 +190,10 @@ type actingProfileResolver interface {
 // action and returning true. It fails closed: a resolve error refuses too.
 // Linking a sign-in identity is one such action: a fresh sign-in through it
 // lands on the account default without that profile's PIN.
-func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store actingProfileResolver, claims *auth.JWTClaims, action string) bool {
+func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store sessionStore, claims *auth.JWTClaims, action string) bool {
+	if !requireLiveSession(w, r, store.SessionLive, claims) {
+		return true
+	}
 	acting, err := store.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		slog.Warn("resolve acting profile failed", "user_id", claims.UserID, "error", err)
@@ -756,7 +797,9 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 	// Every write hashes the new PIN with argon2id (64 MiB), and checking the
 	// current one costs another, so PIN writes have their own budget per
 	// account, as the auth routes do.
-	if h.pinWriteLimiter != nil && !h.pinWriteLimiter.Allow(strconv.FormatInt(claims.UserID, 10)) {
+	// Keyed by account and acting profile, like the password budget, so one
+	// session spending it does not lock the owner out of PIN changes.
+	if h.pinWriteLimiter != nil && !h.pinWriteLimiter.Allow(strconv.FormatInt(claims.UserID, 10)+":"+strconv.FormatInt(acting.ID, 10)) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(profilePINWriteWindow.Seconds())))
 		writeErrorReason(w, http.StatusTooManyRequests, "rate_limited", "too many PIN changes; try again later")
 		return

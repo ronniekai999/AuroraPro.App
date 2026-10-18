@@ -31,8 +31,10 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
   // Includes the Add-Profile row, so Down from the last profile reaches it.
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
 
-  const active =
-    profiles.find((p) => p.id === activeProfileId) ?? profiles.find((p) => p.is_default) ?? profiles[0]
+  // Only the profile the server confirmed. While the binding is unknown the
+  // host forces the picker open, and naming the default here would show a
+  // guess behind it.
+  const active = profiles.find((p) => p.id === activeProfileId)
   const canSwitch = profiles.length > 1
 
   // Closing always returns focus to the trigger.

@@ -92,6 +92,17 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 	return p, nil
 }
 
+// SessionLive reports whether refreshTokenID names a session row of userID
+// that still exists (revoked or not: rotation revokes a row whose access
+// tokens stay valid). A row a PIN write, a profile delete or the purge
+// removed does not.
+func (q *Queries) SessionLive(ctx context.Context, userID, refreshTokenID int64) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refresh_tokens WHERE id = $1 AND user_id = $2)`,
+		refreshTokenID, userID).Scan(&exists)
+	return exists, err
+}
+
 // ResolveActingProfile returns the sub-profile currently bound to
 // refreshTokenID (set via ProfileHandler.ActivateProfile), falling back to
 // the account's default profile when there's no binding — refreshTokenID is
@@ -146,6 +157,9 @@ func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshToken
 			if p != nil && p.UserID == userID {
 				return p, nil
 			}
+			// Bound to a profile that is gone (a delete racing this read)
+			// or not this account's: as unknowable as a missing row.
+			return q.mostRestrictiveProfile(ctx, userID)
 		}
 	}
 	p, err := q.GetDefaultProfile(ctx, userID)

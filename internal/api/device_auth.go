@@ -176,6 +176,7 @@ type deviceSessionStore interface {
 	GetUserByID(context.Context, int64) (*models.User, error)
 	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
+	SessionLive(ctx context.Context, userID, refreshTokenID int64) (bool, error)
 	CreateRefreshTokenAtVersion(context.Context, *models.RefreshToken, int) (bool, error)
 	RevokeRefreshToken(context.Context, string) error
 }
@@ -277,6 +278,12 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	user, err := h.sessions.GetUserByID(r.Context(), claims.UserID)
 	if err != nil || user == nil || user.TokenVersion != claims.TokenVersion {
 		writeError(w, http.StatusUnauthorized, "sign in again before authorizing this device")
+		return
+	}
+	// An approver whose own session has ended (its row deleted by a PIN write,
+	// a profile delete or the purge) cannot pair: the new session would
+	// outlive the one that approved it.
+	if !requireLiveSession(w, r, h.sessions.SessionLive, claims) {
 		return
 	}
 	// The approver passes its own acting profile on to the device. A

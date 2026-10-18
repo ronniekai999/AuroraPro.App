@@ -481,6 +481,22 @@ func (q *Queries) CreateRefreshTokenAtVersion(ctx context.Context, rt *models.Re
 	if version != expectedVersion {
 		return false, nil
 	}
+	// A pairing grant names the profile its approver could pass on, judged
+	// up to ten minutes earlier. A PIN set since then would otherwise land
+	// the device on the newly locked profile without it (SetProfilePIN only
+	// sees existing rows). Under the same user lock, a profile that now has
+	// a PIN creates nothing; the device pairs again.
+	if rt.ActiveProfileID != nil {
+		var locked bool
+		err := tx.QueryRow(ctx, `SELECT pin_hash IS NOT NULL FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			*rt.ActiveProfileID, rt.UserID).Scan(&locked)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && locked) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
 		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
