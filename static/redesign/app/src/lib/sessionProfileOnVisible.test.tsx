@@ -33,6 +33,22 @@ describe('useSessionProfileOnVisible', () => {
     expect(view.shown()).toBe(2)
   })
 
+  // Another device can have edited a profile's ceiling, name or PIN.
+  it('re-lists the profiles on every re-read', async () => {
+    const edited = [profile(1), { ...profile(2), max_age_rating: 'PG' }]
+    const view = setup(async () => profile(2), undefined, async () => edited)
+    await becomeVisible()
+    expect(view.setProfiles).toHaveBeenCalledWith(edited)
+    expect(view.shown()).toBe(2)
+  })
+
+  it('still shows the binding when the re-list fails', async () => {
+    const view = setup(async () => profile(2), undefined, async () => { throw new Error('down') })
+    await becomeVisible()
+    expect(view.setProfiles).not.toHaveBeenCalled()
+    expect(view.shown()).toBe(2)
+  })
+
   it('re-lists the profiles when the binding names one the list lacks', async () => {
     const fresh = [...profiles, profile(9)]
     const view = setup(async () => profile(9), undefined, async () => fresh)

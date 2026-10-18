@@ -174,11 +174,22 @@ describe('loadStartupProfiles', () => {
   const teen = profile(3)
 
   it('shows nothing when the profile list cannot be read', async () => {
-    const read = vi.fn(), activate = vi.fn()
+    // The binding is read alongside the list, so it may be; nothing is bound.
+    const read = vi.fn(async () => kid), activate = vi.fn()
     const result = await loadStartupProfiles({ list: async () => { throw new Error('down') }, read, activate, remembered: 2, retryMs: 0 })
     expect(result).toBeNull()
-    expect(read).not.toHaveBeenCalled()
     expect(activate).not.toHaveBeenCalled()
+  })
+
+  it('reads the list and the binding at once', async () => {
+    // The list answers only once the binding has been asked for, so a
+    // sequential load would never finish.
+    let asked!: () => void
+    const bindingAsked = new Promise<void>(r => { asked = r })
+    const read = vi.fn(async () => { asked(); return kid })
+    const list = async () => { await bindingAsked; return [parent, kid, teen] }
+    expect(await loadStartupProfiles({ list, read, activate: vi.fn(), remembered: null, retryMs: 0 }))
+      .toEqual({ profiles: [parent, kid, teen], activeId: 2, askForProfile: false })
   })
 
   it('shows the binding, or a remembered unlocked profile the server accepts', async () => {

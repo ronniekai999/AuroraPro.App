@@ -214,8 +214,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   token resolves through its row after rotation), so re-defaulting moves no
   other device.
 - Setting or changing a PIN ends the account's other sessions that act as
-  the profile without having presented it: those bound to it, and the
-  unbound ones when it is the default, revoked rows included
+  the profile, including ones that entered the old PIN: those bound to it,
+  and the unbound ones when it is the default, revoked rows included
   (`SetProfilePIN`, under the user-row lock rotation takes). The rows are
   DELETED: a revoked row keeps resolving to its binding for its access
   token's lifetime, and a review used that window to lift the kid's ceiling
@@ -298,50 +298,55 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   grant whose profile has gained a PIN since creates nothing, and the device
   pairs again. An approver whose own session row is gone cannot pair.
 - Clients show the server's binding, never a remembered choice: the SPA reads
-  `GET /api/profiles/active` at startup (one retry, `readSessionProfile`)
-  and changes its display only after activation resolves, one switch at a
-  time. The remembered choice only steers startup: the SPA re-activates the
-  profile this browser last showed when it is unlocked
-  (`resolveStartupProfile`), and shows it once the server has bound it, so a
-  fresh sign-in on a browser a kid last used lands on the kid's profile, and
-  one a parent last used on the parent's. It used to switch locally and activate fire-and-forget, so a failed
-  call left a kid's UI on the kid profile while the server enforced the
-  parent's ceiling. Nothing personalized (hero, personalized rails, Continue
-  Watching, taste onboarding, a title's recap and star rating) loads until
-  the session's profile is known
-  (`personalProfileReady`): requests without a `profile_id` are answered for
-  the account default on some routes, so a kid's Home showed the parent's
-  hero pick on every load. When the binding cannot be read it shows no
-  profile and opens the picker, which cannot be left without a pick, rather
-  than guessing the default; if the profile list fails, nothing personalized
-  loads at all. The catalog (Home's core rails, the browse grids) waits for
-  the startup binding too, unless it cannot be read or the list fails
-  (`catalogProfileSettled`). Only the latest hero request lands, and a switch
-  clears the previous profile's hero. A switch also loads Home cold (its
-  rails come down at once, so a slow or failed load shows the skeleton or
-  the error, not the old rails), drops the Movies and Shows grids (aborting
-  a Load More or a first page in flight), Continue Watching, the
-  conversational rail and My Library, sends an open title back through its
-  `/title/:id` hydration, which leaves for Home if the new profile may not
-  see it, and remounts search, collections, the calendar and member pages
-  (`useOnProfileChange`). Each of these used to keep the previous profile's
-  titles: the grids for the session, the conversational rail until the next
-  search, Home's rails and Continue Watching until a refetch succeeded. A
-  failed activation (a switch, a PIN unlock, the startup re-selection)
-  re-reads the binding, because a lost answer can follow a bind that
-  happened. Its tab-visibility re-read drops an answer once a switch has
-  started since the read, and re-lists the profiles when the binding names
-  one this tab does not know (another tab created it). The TV
-  stays at the picker until activation succeeds, a refused PIN keeps the
-  session's own profile and the page behind the picker, and it does not ask
-  for the PIN of the profile the session is bound to (the server would accept
-  any digits) or label it locked: an unlock lasts the session's life.
+  `GET /api/profiles/active` at startup (one retry, `readSessionProfile`,
+  alongside the profile list) and changes its display only after activation
+  resolves, one switch at a time. It used to switch locally and activate
+  fire-and-forget, so a failed call left a kid's UI on the kid profile while
+  the server enforced the parent's ceiling. After a switch it shows the
+  server's record of the bound profile (the same read), not the list's copy,
+  which can predate an edit from another device; the tab-visibility re-read
+  re-lists the profiles each time for the same reason. The remembered choice
+  only steers startup: the SPA re-activates the profile this browser last
+  showed when it is unlocked (`resolveStartupProfile`), and shows it once the
+  server has bound it, so a fresh sign-in on a browser a kid last used lands
+  on the kid's profile, and one a parent last used on the parent's. Nothing
+  personalized (hero, personalized rails, Continue Watching, taste onboarding,
+  a title's recap and star rating, the My Library snapshot) loads until the
+  session's profile is known (`personalProfileReady`); the snapshot is kept
+  per account and profile. Requests without a `profile_id` are answered for
+  the account default on some routes, so a kid's Home showed the parent's hero
+  pick on every load. When the binding cannot be read it shows no profile and
+  opens the picker, which cannot be left without a pick, rather than guessing
+  the default; if the profile list fails, nothing personalized loads at all.
+  The catalog (Home's core rails, the browse grids) and a deep-linked
+  `/title/:id` wait for the startup binding too, unless it cannot be read or
+  the list fails (`catalogProfileSettled`), so the binding arriving at startup
+  is not a switch and resets nothing. Only the latest hero request lands, and
+  a switch clears the previous profile's hero. A switch also loads Home cold
+  (its rails come down at once, so a slow or failed load shows the skeleton or
+  the error, not the old rails), drops the Movies and Shows grids (aborting a
+  Load More or a first page in flight), Continue Watching and the
+  conversational rail, swaps My Library to the new profile's snapshot, sends
+  an open title back through its `/title/:id` hydration, which leaves for Home
+  if the new profile may not see it, and remounts search, collections, the
+  calendar and member pages (`useOnProfileChange`). Each of these used to keep
+  the previous profile's titles: the grids for the session, the conversational
+  rail until the next search, Home's rails and Continue Watching until a
+  refetch succeeded. A failed activation (a switch, a PIN unlock, the startup
+  re-selection) re-reads the binding, because a lost answer can follow a bind
+  that happened. The tab-visibility re-read starts once the startup load
+  settles, and drops an answer once a switch has started since the read. The
+  TV re-lists the profiles each time its picker opens and stays there until
+  activation succeeds, a refused PIN keeps the session's own profile and the
+  page behind the picker, and it does not ask for the PIN of the profile the
+  session is bound to (the server would accept any digits) or label it locked:
+  an unlock lasts the session's life.
 - Known gaps:
   - A switch in the web app does not close a player that is already open.
-  - The web app's profile list is read at sign-in and after a Settings
-    change, so the name, ceiling and lock it shows for a profile another
-    device has since edited, and the restricted-session checks that read
-    them, are as of that read. The server enforces the current values.
+  - A profile another device edits shows its new name, ceiling and lock in
+    an open web tab at the next switch or tab-visibility re-read; until then
+    that tab's restricted-session UI (Settings' controls, onboarding's age
+    step) follows the old values. The server enforces the current ones.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
@@ -393,10 +398,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     App wiring (the switcher and the picker going through `switchProfile`,
     `activeProfileId` starting null, the personalized fetches waiting for
     `personalProfileReady`, `catalogProfileSettled`, the hero's
-    latest-request guard, and what a switch resets: `resetForProfileChange`,
-    the cold Home load, the grid effects' profile dependency and the views'
-    keys, though `useOnProfileChange` itself is tested) has no App-level
-    test, and the
+    latest-request guard, the keyed My Library snapshot, and what a switch
+    resets: `resetForProfileChange` and its startup exemption, the cold Home
+    load, the grid effects' profile dependency and the views' keys, though
+    `useOnProfileChange` itself is tested) has no App-level test, and the
     room socket's connect-time profile and its retry
     are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
     lock either, nor that activation hands its bind the hash a PIN matched

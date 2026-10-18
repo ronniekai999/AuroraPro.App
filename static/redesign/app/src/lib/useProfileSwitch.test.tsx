@@ -18,11 +18,11 @@ const other = profile(3)
 const refusal = (reason: string) =>
   new APIError(403, 'refused', { error: { code: 403, message: 'refused', reason } })
 
-function setup(activeProfileId = 2, readBinding?: () => Promise<Profile>) {
+function setup(activeProfileId = 2, readBinding?: () => Promise<Profile>, onBound?: (p: Profile) => void) {
   const setActiveProfileId = vi.fn()
   const onError = vi.fn()
   const hook = renderHook(() => useProfileSwitch({
-    profiles: [parent, kid, other], activeProfileId, setActiveProfileId, onError, readBinding,
+    profiles: [parent, kid, other], activeProfileId, setActiveProfileId, onError, readBinding, onBound,
   }))
   return { hook, setActiveProfileId, onError }
 }
@@ -51,6 +51,43 @@ describe('useProfileSwitch', () => {
     expect(switched).toBe(false)
     expect(setActiveProfileId).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledWith(other)
+  })
+
+  // The list's copy can predate an edit from another device.
+  it('shows the server’s record of the profile it bound', async () => {
+    api.activateProfile.mockResolvedValue(undefined)
+    const fresh = profile(3, { max_age_rating: 'PG', name: 'renamed' })
+    const readBinding = vi.fn().mockResolvedValue(fresh)
+    const onBound = vi.fn()
+    const { hook, setActiveProfileId } = setup(2, readBinding, onBound)
+    let switched = false
+    await act(async () => { switched = await hook.result.current.switchProfile(3) })
+    expect(switched).toBe(true)
+    expect(onBound).toHaveBeenCalledWith(fresh)
+    expect(setActiveProfileId).toHaveBeenCalledWith(3)
+  })
+
+  it('shows the binding the server reports, even another tab’s, and the list’s copy when it cannot read', async () => {
+    api.activateProfile.mockResolvedValue(undefined)
+    const moved = setup(2, vi.fn().mockResolvedValue(parent), vi.fn())
+    await act(async () => { await moved.hook.result.current.switchProfile(3) })
+    expect(moved.setActiveProfileId).toHaveBeenCalledWith(1)
+    const unread = setup(2, vi.fn().mockRejectedValue(new TypeError('Failed to fetch')), vi.fn())
+    await act(async () => { await unread.hook.result.current.switchProfile(3) })
+    expect(unread.setActiveProfileId).toHaveBeenCalledWith(3)
+  })
+
+  it('stores the server’s record after a PIN unlock too', async () => {
+    api.activateProfile.mockResolvedValue(undefined)
+    const fresh = profile(1, { is_default: true, has_pin: true, name: 'renamed' })
+    const onBound = vi.fn()
+    const { hook, setActiveProfileId } = setup(2, vi.fn().mockResolvedValue(fresh), onBound)
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(1) })
+    await act(async () => { await hook.result.current.unlock({ pin: '1234' }) })
+    expect(onBound).toHaveBeenCalledWith(fresh)
+    expect(setActiveProfileId).toHaveBeenCalledWith(1)
+    expect(await switched!).toBe(true)
   })
 
   it('shows the binding after a failure whose bind may have happened', async () => {

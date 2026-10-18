@@ -2519,18 +2519,38 @@ export default function App() {
   // with the server's set once the active profile is known. Stale entries
   // (media deleted on the server) degrade gracefully: the card still renders;
   // opening detail fetches fresh data and may 404 — handled there.
-  const [library, setLibrary] = useState<Media[]>(() => {
-    try {
-      const raw = localStorage.getItem('aurora_my_library')
-      return raw ? (JSON.parse(raw) as Media[]) : []
-    } catch {
-      return []
-    }
-  })
+  //
+  // The snapshot is kept per account and profile, and shown only once the
+  // session's profile is known. One snapshot for the whole browser showed
+  // whichever profile saved it last, before the binding was read, and for
+  // the session when the profile list failed to load.
+  const [library, setLibrary] = useState<Media[]>([])
+  const libraryCacheKey = user && activeProfileId !== null ? `aurora_my_library:${user.id}:${activeProfileId}` : null
+  // The key the list in `library` belongs to. The write below runs before
+  // the load that follows it, so on a switch it saves the outgoing list
+  // under its own key and never under the incoming one.
+  const libraryOwnerRef = useRef<string | null>(null)
   useEffect(() => {
-    try { localStorage.setItem('aurora_my_library', JSON.stringify(library)) }
+    const key = libraryOwnerRef.current
+    if (!key) return
+    try { localStorage.setItem(key, JSON.stringify(library)) }
     catch { /* quota / private mode — non-fatal */ }
   }, [library])
+  useEffect(() => {
+    libraryOwnerRef.current = libraryCacheKey
+    let cached: Media[] = []
+    if (libraryCacheKey) {
+      try {
+        const raw = localStorage.getItem(libraryCacheKey)
+        cached = raw ? (JSON.parse(raw) as Media[]) : []
+      } catch { cached = [] }
+    }
+    setLibrary(cached)
+  }, [libraryCacheKey])
+  // The browser-wide snapshot this replaced.
+  useEffect(() => {
+    try { localStorage.removeItem('aurora_my_library') } catch { /* ignore */ }
+  }, [])
   // False until the reconcile below has answered once for the active
   // profile (success OR failure — an offline device keeps its cache and
   // must not sit on a skeleton). LibraryView uses it to hold a grid
@@ -2959,14 +2979,22 @@ export default function App() {
   // switch in another tab (they share one session) or a switch whose answer
   // was lost.
   const readSessionBinding = useCallback(() => getActiveProfile(), [])
+  // The server's record of a profile replaces the list's copy of it.
+  const storeBoundProfile = useCallback((p: Profile) => {
+    setProfiles(ps => (ps.some(x => x.id === p.id) ? ps.map(x => (x.id === p.id ? { ...x, ...p } : x)) : [...ps, p]))
+  }, [])
   const profileSwitch = useProfileSwitch({
     profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused, readBinding: readSessionBinding,
+    onBound: storeBoundProfile,
   })
   const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = profileSwitch
 
   const reloadProfiles = useCallback(() => listProfiles(), [])
   useSessionProfileOnVisible({
-    enabled: !!user, profiles, read: readSessionBinding, setActiveProfileId, switching: profileSwitch,
+    // Not until the startup load settles: its re-selection is not a switch
+    // the re-read's guards can see, so an answer read before it could land
+    // after it.
+    enabled: !!user && profilesSettled, profiles, read: readSessionBinding, setActiveProfileId, switching: profileSwitch,
     reloadProfiles, setProfiles,
   })
 
@@ -2977,7 +3005,10 @@ export default function App() {
   // Placed after addToast so its declaration precedes this reference.
   useEffect(() => {
     const id = titleIdFromPath(location.pathname)
-    if (id === null || !user) return
+    // Waits for the session's binding too, like the catalog: the server gates
+    // a title by the session's profile, so one fetched before startup
+    // re-selected a profile was fetched under the wrong one.
+    if (id === null || !user || !catalogProfileSettled) return
     if (selectedMedia && selectedMedia.id === id) return
     let cancelled = false
     ;(async () => {
@@ -2991,7 +3022,7 @@ export default function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [location.pathname, user, selectedMedia, addToast, navigate])
+  }, [location.pathname, user, selectedMedia, addToast, navigate, catalogProfileSettled])
 
   // App-wide realtime hub: live request-status patches + push notifications.
   // One socket for the whole session, enabled only while logged in.
@@ -5453,9 +5484,10 @@ export default function App() {
     setHomeHeroIsFallback(false)
   }, [activeProfileId])
   // A switch also drops everything else App keeps that the server filtered
-  // by the previous profile: the browse grids, Continue Watching, the
-  // conversational rail and My Library (each refetches for the new profile;
-  // a failed fetch leaves it empty rather than the old profile's), and an
+  // by the previous profile: the browse grids, Continue Watching and the
+  // conversational rail (each refetches for the new profile; a failed fetch
+  // leaves it empty rather than the old profile's), My Library (its keyed
+  // snapshot swaps to the new profile's, see above), and an
   // open title, which goes back through the /title/:id hydration, asks the
   // server again and leaves for Home if the new profile may not see it. The
   // grids used to keep the old profile's titles for the session, with Load
@@ -5463,6 +5495,12 @@ export default function App() {
   // in the home-rails effect, which loads cold on a switch. Search,
   // collections, the calendar and member pages remount (their keys below).
   const resetForProfileChange = useCallback(() => {
+    // The startup binding arriving is not a switch: the catalog, a deep-linked
+    // title and My Library wait for it, so nothing here was fetched before
+    // it. Only a change after the startup load settled (a switch, another
+    // tab's, or a pick from the picker opened for an unreadable binding)
+    // resets.
+    if (!profilesSettledBeforeRef.current) return
     moviesLoadMoreAcRef.current?.abort()
     moviesLoadMoreAcRef.current = null
     showsLoadMoreAcRef.current?.abort()
@@ -5480,10 +5518,14 @@ export default function App() {
     setConvoQuery('')
     setConvoResults([])
     setConvoLoading(false)
-    setLibrary([])
     if (viewRef.current === 'detail') setSelectedMedia(null)
   }, [])
   useOnProfileChange(activeProfileId, resetForProfileChange)
+  // Whether the startup load had settled before this render; written after
+  // the effect above has read it, so on the render that settles it and sets
+  // the binding together, the reset sees false.
+  const profilesSettledBeforeRef = useRef(false)
+  useEffect(() => { profilesSettledBeforeRef.current = profilesSettled }, [profilesSettled])
   // homeReloadNonce is deliberately a dependency (trigger-only, like the
   // home-rails and continue-watching effects): the hero was the ONE home
   // surface that never refetched after first load, so a star rating or 👎

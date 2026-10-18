@@ -105,9 +105,12 @@ export async function loadStartupProfiles({ list, read, activate, remembered, si
   signal?: AbortSignal
   retryMs?: number
 }): Promise<{ profiles: Profile[]; activeId: number | null; askForProfile: boolean } | null> {
-  let profiles: Profile[]
-  try { profiles = await list() } catch { return null }
-  const acting = await readSessionProfile(read, retryMs)
+  // Both at once: neither depends on the other, and the catalog waits on them.
+  const [profiles, acting] = await Promise.all([
+    list().catch(() => null),
+    readSessionProfile(read, retryMs),
+  ])
+  if (!profiles) return null
   if (signal?.aborted) return null
   const activeId = await resolveStartupProfile({ profiles, acting, remembered, activate, reread: read })
   if (signal?.aborted) return null
@@ -130,9 +133,9 @@ export async function readSessionProfile(
 /** Tabs share one session, so a switch in another tab moves this tab's
  * server binding too. Re-reads the binding whenever the tab comes back into
  * view and shows it, unless a switch is under way or started while the read
- * was in flight (that switch owns the answer). A binding to a profile the
- * list doesn't hold (another tab created it) re-lists the profiles first and
- * shows it if the new list has it. */
+ * was in flight (that switch owns the answer). With reloadProfiles it also
+ * re-lists the profiles each time, so a profile another device created or
+ * edited (a new ceiling, name or PIN) shows as the server has it. */
 export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveProfileId, switching, reloadProfiles, setProfiles }: {
   enabled: boolean
   profiles: Profile[]
@@ -151,15 +154,11 @@ export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveP
       if (document.visibilityState !== 'visible' || isSwitching()) return
       const generation = switchGeneration()
       const stale = () => isSwitching() || switchGeneration() !== generation
-      void read().then(async acting => {
+      const listed = reloadProfiles && setProfiles ? reloadProfiles().catch(() => null) : Promise.resolve(null)
+      void Promise.all([read(), listed]).then(([acting, list]) => {
         if (!acting || stale()) return
-        if (!profiles.some(p => p.id === acting.id)) {
-          if (!reloadProfiles || !setProfiles) return
-          const list = await reloadProfiles()
-          if (stale()) return
-          setProfiles(list)
-          if (!list.some(p => p.id === acting.id)) return
-        }
+        if (list) setProfiles?.(list)
+        if (!(list ?? profiles).some(p => p.id === acting.id)) return
         setActiveProfileId(prev => (acting.id !== prev ? acting.id : prev))
       }).catch(() => { /* keep what we have */ })
     }

@@ -13,6 +13,7 @@ package api
 // Client → server:  join-party, leave-party, chat-message, reaction
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -320,8 +321,11 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
 			if caller == nil {
 				// The connect-time lookup failed; one failure must not
-				// turn the check off for the socket's life.
-				caller = h.manager.CallerProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+				// turn the check off for the socket's life. Bounded like
+				// ChangeMedia's own validation, since it holds the read loop.
+				lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+				caller = h.manager.CallerProfile(lookupCtx, claims.UserID, claims.RefreshTokenID)
+				cancel()
 			}
 			if err := h.manager.ChangeMedia(code, claims.UserID, caller, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))

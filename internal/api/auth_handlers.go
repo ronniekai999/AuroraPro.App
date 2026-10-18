@@ -463,8 +463,11 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if user == nil {
 		// Audit M-refresh — a token that hashes to nothing in the table was
-		// presented: either already-consumed (rotated away) or forged. Both
-		// are worth a theft signal so operators can alert on replay bursts.
+		// presented: already consumed (rotated away), forged, or its session
+		// ended (a PIN write or a profile delete deletes the row, and that
+		// device's next refresh lands here). The first two are worth a theft
+		// signal so operators can alert on replay bursts; the third is an
+		// expected sign-out, and the message says so rather than alarm.
 		// We log the client IP (not the token itself — it's a bearer secret).
 		//
 		// NOTE: this only *signals* reuse; it cannot *contain* it. Truly
@@ -473,7 +476,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		// chain when any consumed member reappears. That needs a schema
 		// migration and is deferred (migration numbering is coordinated
 		// separately).
-		slog.Warn("refresh: non-matching refresh token presented (consumed or invalid) — possible replay/theft",
+		slog.Warn("refresh: non-matching refresh token presented (consumed, ended by a PIN change or profile delete, or invalid) — possible replay/theft unless a session was just ended",
 			"client_ip", clientIP(r))
 		h.clearAuthCookies(w, r)
 		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")

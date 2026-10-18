@@ -11,15 +11,18 @@
 import { useCallback, useRef, useState } from 'react'
 import { activateProfile, APIError, profileErrorReason, type Profile, type ProfileUnlock } from './api'
 
-export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId, onError, readBinding }: {
+export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId, onError, readBinding, onBound }: {
   profiles: Profile[]
   activeProfileId: number | null
   setActiveProfileId: (id: number) => void
   /** Reports a switch the server refused for a reason other than a PIN. */
   onError: (profile: Profile) => void
-  /** Reads the session's binding (GET /api/profiles/active) after a failed
-   * switch, whose bind may have happened with only its answer lost. */
+  /** Reads the session's binding (GET /api/profiles/active): after a switch,
+   * for the server's record of the profile now bound, and after a failed
+   * one, whose bind may have happened with only its answer lost. */
   readBinding?: () => Promise<Profile>
+  /** Stores the server's record of the bound profile in the host's list. */
+  onBound?: (profile: Profile) => void
 }) {
   const [pinTarget, setPinTarget] = useState<Profile | null>(null)
   const pinResolveRef = useRef<((switched: boolean) => void) | null>(null)
@@ -30,6 +33,22 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
   // Counts switches started, so a background read of the binding can tell
   // that one started (and perhaps finished) while it was in flight.
   const generationRef = useRef(0)
+
+  // Shows a bind that succeeded, with the server's record of the profile: the
+  // list's copy can predate an edit from another device (a new ceiling, name
+  // or PIN), and what the app then shows and allows would follow the copy.
+  // The read also catches another tab's switch landing in between.
+  const showBinding = useCallback(async (id: number) => {
+    if (readBinding && onBound) {
+      try {
+        const bound = await readBinding()
+        onBound(bound)
+        setActiveProfileId(bound.id)
+        return
+      } catch { /* the bind succeeded; show it as the list has it */ }
+    }
+    setActiveProfileId(id)
+  }, [readBinding, onBound, setActiveProfileId])
 
   const settle = useCallback((switched: boolean) => {
     const resolve = pinResolveRef.current
@@ -55,6 +74,7 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
     inFlightRef.current = true
     try {
       await activateProfile(id)
+      await showBinding(id)
     } catch (e) {
       // The list can be stale: a PIN set from another device since it loaded.
       if (profileErrorReason(e) === 'profile_pin_required') return askForPin()
@@ -72,9 +92,8 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
     } finally {
       inFlightRef.current = false
     }
-    setActiveProfileId(id)
     return true
-  }, [activeProfileId, profiles, setActiveProfileId, onError, readBinding])
+  }, [activeProfileId, profiles, setActiveProfileId, onError, readBinding, showBinding])
 
   // Sends the PIN or password for pinTarget. Rejects with the server's refusal,
   // which the dialog shows; the prompt stays open until this succeeds.
@@ -91,6 +110,7 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
         let bound: Profile | null = null
         try { bound = await readBinding() } catch { /* the dialog shows the first error */ }
         if (bound?.id === target.id) {
+          onBound?.(bound)
           setActiveProfileId(target.id)
           settle(true)
           return
@@ -98,9 +118,9 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       }
       throw e
     }
-    setActiveProfileId(target.id)
+    await showBinding(target.id)
     settle(true)
-  }, [pinTarget, setActiveProfileId, settle, readBinding])
+  }, [pinTarget, setActiveProfileId, settle, readBinding, showBinding, onBound])
 
   const cancelPin = useCallback(() => settle(false), [settle])
 
