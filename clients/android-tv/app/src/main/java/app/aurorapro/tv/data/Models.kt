@@ -20,6 +20,8 @@ data class Profile(
     @SerialName("subtitle_mode") val subtitleMode: String = "off",
     @SerialName("max_age_rating") val maxAgeRating: String = "",
     @SerialName("avatar_url") val avatarUrl: String = "",
+    // Switching to a locked profile needs its PIN (or the account password).
+    @SerialName("has_pin") val hasPin: Boolean = false,
 )
 
 @Serializable

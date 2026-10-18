@@ -52,6 +52,10 @@ data class TvState(
     val genres: List<String> = emptyList(),
     val pairExpiresAt: Long = 0,
     val pairMessage: String? = null,
+    // A locked profile waiting for its PIN (or the account password), and why
+    // the last attempt was refused.
+    val pinPrompt: Profile? = null,
+    val pinError: String? = null,
 )
 
 class TvViewModel(application: Application) : AndroidViewModel(application) {
@@ -156,20 +160,55 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectProfile(profile: Profile) {
         if (state.value.busy) return
-        perform {
-            val api = requireNotNull(client)
-            pendingPlaybackRefresh = null
-            // Once activation starts, its server outcome may be uncertain on a
-            // network failure. Do not return to content labelled with the old
-            // profile; remain at the picker until a selection is acknowledged.
-            update { it.copy(profile = null, profileReturnPage = null, home = null, items = emptyList(), detail = null,
-                query = "", searchKind = "all", browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList()) }
-            api.activate(profile)
-            update { it.copy(page = Page.HOME, profile = profile) }
-            awaitPlaybackSave()
-            val home = api.home(profile.id)
-            update { it.copy(home = home) }
+        // A locked profile asks first; the session's own profile never does.
+        if (profile.hasPin && state.value.profile?.id != profile.id) {
+            update { it.copy(pinPrompt = profile, pinError = null, error = null) }
+            return
         }
+        activateProfile(profile, pin = null, password = null)
+    }
+
+    // Sends the PIN, or the account password when usePassword is set, for the
+    // profile the prompt is asking about.
+    fun submitUnlock(secret: String, usePassword: Boolean) {
+        val profile = state.value.pinPrompt ?: return
+        if (state.value.busy || secret.isEmpty()) return
+        if (usePassword) activateProfile(profile, pin = null, password = secret)
+        else activateProfile(profile, pin = secret, password = null)
+    }
+
+    fun cancelUnlock() {
+        if (state.value.busy) return
+        update { it.copy(pinPrompt = null, pinError = null) }
+    }
+
+    private fun activateProfile(profile: Profile, pin: String?, password: String?) = perform {
+        val api = requireNotNull(client)
+        pendingPlaybackRefresh = null
+        // Once activation starts, its server outcome may be uncertain on a
+        // network failure. Do not return to content labelled with the old
+        // profile; remain at the picker until a selection is acknowledged.
+        update { it.copy(profile = null, profileReturnPage = null, home = null, items = emptyList(), detail = null,
+            query = "", searchKind = "all", browsePage = 0, browseGenre = "", browseSort = "added", genres = emptyList(),
+            pinError = null) }
+        try {
+            api.activate(profile, pin, password)
+        } catch (e: AuroraException) {
+            // A refused unlock is certain: the server kept the session's
+            // binding. Keep asking rather than surfacing a page-level error.
+            val refusal = when (e.reason) {
+                "profile_pin_required" -> null
+                "profile_pin_invalid" -> if (password != null) "That password is not right." else "That PIN is not right."
+                "profile_pin_locked" -> "Too many wrong attempts. Try again in 15 minutes."
+                else -> throw e
+            }
+            update { it.copy(pinPrompt = profile, pinError = refusal) }
+            return@perform
+        }
+        update { it.copy(page = Page.HOME, profile = profile, pinPrompt = null, pinError = null) }
+        awaitPlaybackSave()
+        val home = api.home(profile.id)
+        update { it.copy(home = home) }
     }
 
     fun navigate(page: Page) = perform {
@@ -380,6 +419,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         // Consume Back during activation instead of cancelling a request that
         // can still commit remotely. An idle picker can return without mutation.
         if (state.value.page == Page.PROFILES && state.value.busy) return
+        if (state.value.pinPrompt != null) { cancelUnlock(); return }
         state.value.target?.takeIf { state.value.page == Page.PLAYER }?.let {
             returnFromPlayback(PlaybackRefresh(it, state.value.episode)); return
         }

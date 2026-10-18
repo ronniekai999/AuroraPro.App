@@ -37,7 +37,9 @@ import okhttp3.Response
 
 val apiJson = Json { ignoreUnknownKeys = true; explicitNulls = false; coerceInputValues = true }
 
-class AuroraException(val status: Int, message: String) : IOException(message)
+// reason is the server's stable `error.reason`, when it sent one (the profile
+// lock's profile_pin_required, profile_pin_invalid and profile_pin_locked).
+class AuroraException(val status: Int, message: String, val reason: String? = null) : IOException(message)
 private data class CookieSnapshot(val header: String)
 private object LogoutRequest
 private data class ProgressKey(val profile: Long, val media: Long, val episode: Long?)
@@ -94,14 +96,16 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
     private fun checkedBody(response: Response): String {
         val text = response.body?.string().orEmpty()
         if (!response.isSuccessful) {
+            val field = runCatching { apiJson.parseToJsonElement(text).jsonObject["error"] }.getOrNull()
             val message = runCatching {
-                when (val field = apiJson.parseToJsonElement(text).jsonObject["error"]) {
+                when (field) {
                     is JsonPrimitive -> field.content
                     is JsonObject -> field["message"]?.jsonPrimitive?.content
                     else -> null
                 }
             }.getOrNull()?.take(240) ?: "Aurora could not complete this request (${response.code})."
-            throw AuroraException(response.code, message)
+            val reason = runCatching { (field as? JsonObject)?.get("reason")?.jsonPrimitive?.content }.getOrNull()
+            throw AuroraException(response.code, message, reason)
         }
         return text
     }
@@ -189,14 +193,20 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
         return AuroraClient(origin, cookies.nextSession())
     }
     suspend fun profiles(): List<Profile> = list("/api/profiles/")
-    suspend fun activate(profile: Profile): Unit = withContext(Dispatchers.IO) {
+    // A locked profile needs `pin`, or the account `password` in its place;
+    // without one the server refuses with reason profile_pin_required.
+    suspend fun activate(profile: Profile, pin: String? = null, password: String? = null): Unit = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            pin?.let { put("pin", it) }
+            password?.let { put("password", it) }
+        }.toString()
         synchronized(refreshLock) {
             // Bind the session that is current under the rotation lock. If
             // activation wins, refresh copies its new profile; if refresh wins,
             // activation sends the replacement token. Execute on this IO thread
             // so a 401 authenticator can acquire the same monitor reentrantly.
             val request = Request.Builder().url(endpoint("/api/profiles/${profile.id}/activate"))
-                .post("{}".toRequestBody("application/json".toMediaType())).build()
+                .post(body.toRequestBody("application/json".toMediaType())).build()
             profileClient.newCall(request).execute().use { checkedBody(it) }
             Unit
         }

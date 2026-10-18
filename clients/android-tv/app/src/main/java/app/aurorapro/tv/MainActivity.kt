@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
@@ -111,7 +112,7 @@ internal fun AuroraApp(vm: TvViewModel = viewModel()) {
     val screens = rememberSaveableStateHolder()
     var accountOpen by rememberSaveable(state.user?.id) { mutableStateOf(false) }
     BackHandler(enabled = state.page !in setOf(Page.SERVER, Page.HOME, Page.PLAYER) &&
-        (state.page != Page.PROFILES || state.profileReturnPage != null || state.busy)) { vm.back() }
+        (state.page != Page.PROFILES || state.profileReturnPage != null || state.busy || state.pinPrompt != null)) { vm.back() }
     val api = vm.client
     if (state.page == Page.PLAYER && state.target != null && api != null) {
         val target = state.target!!
@@ -344,6 +345,7 @@ private fun PairScreen(state: TvState, api: AuroraClient?, onNew: () -> Unit, on
 
 @Composable
 private fun ProfilesScreen(state: TvState, vm: TvViewModel) {
+    state.pinPrompt?.let { locked -> ProfileUnlockPanel(locked, state, vm); return }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text("Who's watching?", fontFamily = AuroraHeading, fontWeight = FontWeight.Bold, fontSize = 44.sp,
             style = TextStyle(brush = Brush.horizontalGradient(listOf(Color.White, AuroraColors.Focus))))
@@ -366,7 +368,7 @@ private fun ProfilesScreen(state: TvState, vm: TvViewModel) {
                         ProfileOrb(profile, 116.dp, focused || state.profile?.id == profile.id)
                         Text(profile.name, fontFamily = AuroraHeading, fontWeight = FontWeight.SemiBold, fontSize = 19.sp, maxLines = 1,
                             overflow = TextOverflow.Ellipsis, color = if (focused) Color.White else Color.White.copy(alpha = .82f))
-                        Text(if (state.profile?.id == profile.id) "Selected" else if (profile.isDefault) "Default profile" else if (profile.maxAgeRating.isNotBlank()) profile.maxAgeRating else "Profile",
+                        Text(if (state.profile?.id == profile.id) "Selected" else if (profile.hasPin) "Locked" else if (profile.isDefault) "Default profile" else if (profile.maxAgeRating.isNotBlank()) profile.maxAgeRating else "Profile",
                             color = if (focused) AuroraColors.Focus else AuroraColors.Muted, fontSize = 12.sp)
                     }
                 }
@@ -376,6 +378,48 @@ private fun ProfilesScreen(state: TvState, vm: TvViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.profileReturnPage != null) TvAction("Back", vm::back, enabled = !state.busy, icon = AuroraIcons.Back)
             TvAction("Change server", vm::changeServer, enabled = !state.busy)
+        }
+    }
+}
+
+// The PIN prompt for a locked profile. The server checks the PIN; a refusal
+// comes back as state.pinError. The account password stands in for a
+// forgotten PIN.
+@Composable
+private fun ProfileUnlockPanel(profile: Profile, state: TvState, vm: TvViewModel) {
+    var usePassword by remember(profile.id) { mutableStateOf(false) }
+    var secret by remember(profile.id, usePassword) { mutableStateOf("") }
+    val field = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    // A refused attempt clears the field for the next one.
+    LaunchedEffect(state.pinError) { if (state.pinError != null) secret = "" }
+    LaunchedEffect(profile.id, usePassword) { field.requestFocus() }
+    val ready = if (usePassword) secret.isNotEmpty() else secret.length == 4
+    val submit = { if (ready && !state.busy) { keyboard?.hide(); vm.submitUnlock(secret, usePassword) } }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        GlassPanel(Modifier.width(460.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                ProfileOrb(profile, 72.dp, true)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AuroraTitle("${profile.name} is locked", size = 26)
+                    Text(if (usePassword) "Enter the account password." else "Enter this profile's 4-digit PIN.",
+                        color = AuroraColors.Muted, fontSize = 14.sp)
+                }
+            }
+            OutlinedTextField(secret, { typed -> secret = if (usePassword) typed else typed.filter(Char::isDigit).take(4) },
+                label = { androidx.compose.material3.Text(if (usePassword) "Account password" else "PIN") },
+                singleLine = true, visualTransformation = PasswordVisualTransformation(), shape = FieldShape, colors = auroraFieldColors(),
+                modifier = Modifier.fillMaxWidth().focusRequester(field), enabled = !state.busy,
+                keyboardOptions = KeyboardOptions(keyboardType = if (usePassword) KeyboardType.Password else KeyboardType.NumberPassword,
+                    imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }))
+            state.pinError?.let { Text(it, color = Color(0xFFFCA5A5), fontSize = 14.sp) }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TvAction(if (state.busy) "Checking…" else "Unlock", { submit() }, enabled = ready && !state.busy, primary = true)
+                TvAction("Cancel", vm::cancelUnlock, enabled = !state.busy)
+            }
+            TvAction(if (usePassword) "Use the PIN instead" else "Forgot the PIN? Use the account password",
+                { usePassword = !usePassword }, Modifier.fillMaxWidth(), enabled = !state.busy)
         }
     }
 }
