@@ -73,8 +73,10 @@ describe('ProfilesGate', () => {
       <ProfilesGate profiles={profiles} activeProfileId={1} onSelect={() => true} ready forced onDismiss={onDismiss} />)
     expect(screen.getByRole('button', { name: /Keep watching as Profile 1/ })).toBeInTheDocument()
 
-    rerender(<ProfilesGate profiles={profiles} activeProfileId={null} onSelect={() => true} ready forced onDismiss={onDismiss} />)
+    rerender(<ProfilesGate profiles={profiles} activeProfileId={null} onSelect={() => true} ready forced onDismiss={onDismiss}
+      onAddProfile={() => {}} />)
     expect(screen.queryByRole('button', { name: /Keep watching/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Add profile/ })).not.toBeInTheDocument()
     fireEvent.keyDown(screen.getByRole('dialog', { name: "Who's watching?" }), { key: 'Escape' })
     expect(onDismiss).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog', { name: "Who's watching?" })).toBeInTheDocument()

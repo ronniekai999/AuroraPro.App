@@ -25,6 +25,17 @@ type deviceTestStore struct {
 	failCreate bool
 	acting     *models.UserProfile // nil: an unrestricted acting profile
 	failActing bool
+	unlocked   *models.UserProfile // MostRestrictiveUnlockedProfile's answer
+}
+
+func (s *deviceTestStore) MostRestrictiveUnlockedProfile(context.Context, int64) (*models.UserProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unlocked == nil {
+		return nil, nil
+	}
+	p := *s.unlocked
+	return &p, nil
 }
 
 func (s *deviceTestStore) ResolveActingProfile(_ context.Context, userID, _ int64) (*models.UserProfile, error) {
@@ -345,4 +356,39 @@ func TestDevicePairing_FailsClosedWhenTheActingProfileIsUnknown(t *testing.T) {
 	if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false); len(store.created) != 0 {
 		t.Errorf("the refused approval still paired the device: poll %d %s, sessions %d", w.Code, w.Body, len(store.created))
 	}
+}
+
+// TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn: a device acting
+// as a locked profile skips its PIN, so a parent pairing the family TV from
+// a session on its locked profile left that profile open to anyone at the
+// TV. The device gets the account's most restrictive unlocked profile, and
+// with every profile locked the approval is refused.
+func TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn(t *testing.T) {
+	pair := func(t *testing.T, store *deviceTestStore, h *DeviceAuthHandler) (int, []models.RefreshToken) {
+		t.Helper()
+		secret, grant, err := h.grants.start("Family TV")
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true)
+		deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
+		return w.Code, store.created
+	}
+	t.Run("an unlocked profile exists", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		store.unlocked = &models.UserProfile{ID: 42, UserID: 7, MaxAgeRating: "PG"}
+		code, created := pair(t, store, h)
+		if code != http.StatusOK || len(created) != 1 || created[0].ActiveProfileID == nil || *created[0].ActiveProfileID != 42 {
+			t.Errorf("approval %d, sessions %+v; want the device bound to the unlocked profile 42", code, created)
+		}
+	})
+	t.Run("every profile is locked", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		code, created := pair(t, store, h)
+		if code != http.StatusConflict || len(created) != 0 {
+			t.Errorf("approval %d with %d sessions created; want 409 and none", code, len(created))
+		}
+	})
 }

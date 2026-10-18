@@ -195,46 +195,56 @@ type unlockRequest struct {
 // profile's budget (and that of any unlocked profile it can switch into),
 // and every session it can open acts as that profile.
 func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, acting, profile *models.UserProfile, req unlockRequest) bool {
+	ok, _ := h.checkUnlockHash(w, r, acting, profile, req)
+	return ok
+}
+
+// checkUnlockHash is checkUnlock that also returns the hash a presented PIN
+// matched ("" when the password unlocked it, or the profile turned out to
+// have no PIN), so a bind can refuse if the PIN changed in between.
+func (h *ProfileHandler) checkUnlockHash(w http.ResponseWriter, r *http.Request, acting, profile *models.UserProfile, req unlockRequest) (bool, string) {
 	ctx := r.Context()
 	if h.authSvc == nil {
 		writeError(w, http.StatusInternalServerError, "profile lock check unavailable")
-		return false
+		return false, ""
 	}
+	verified := ""
 	switch {
 	case req.PIN != "":
 		attempt, err := h.queries.ReserveProfilePINAttempt(ctx, profile.ID, profilePINMaxFailures, profilePINLockout)
 		if err != nil {
 			slog.Warn("profiles: reserve pin attempt failed", "profile_id", profile.ID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false
+			return false, ""
 		}
 		if attempt.NoPIN {
-			return true
+			return true, ""
 		}
 		if !attempt.Reserved {
 			writeLockout(w, *attempt.LockedUntil)
-			return false
+			return false, ""
 		}
 		if ok, _ := h.authSvc.VerifyPassword(req.PIN, attempt.Hash); !ok {
 			if attempt.LocksOut {
 				writeLockout(w, time.Now().Add(profilePINLockout))
-				return false
+				return false, ""
 			}
 			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
-			return false
+			return false, ""
 		}
+		verified = attempt.Hash
 	case req.Password != "":
 		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
 		if err != nil || st == nil {
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false
+			return false, ""
 		}
 		if st.Hash == "" {
-			return true
+			return true, ""
 		}
 		if h.passwordLimiter != nil && !h.passwordLimiter.Allow(strconv.FormatInt(profile.UserID, 10)+":"+strconv.FormatInt(acting.ID, 10)) {
 			writeLockout(w, time.Now().Add(profilePasswordWindow))
-			return false
+			return false, ""
 		}
 		matched := false
 		if user, uerr := h.queries.GetUserByID(ctx, profile.UserID); uerr == nil && user != nil && user.PasswordHash != "" {
@@ -242,25 +252,25 @@ func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, act
 		}
 		if !matched {
 			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
-			return false
+			return false, ""
 		}
 	default:
 		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
 		if err != nil || st == nil {
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false
+			return false, ""
 		}
 		if st.Hash == "" {
-			return true
+			return true, ""
 		}
 		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile is locked; enter its PIN")
-		return false
+		return false, ""
 	}
 	// A correct PIN or password clears the count and any lockout.
 	if err := h.queries.ResetProfilePINFailures(ctx, profile.ID); err != nil {
 		slog.Warn("profiles: reset pin failures failed", "profile_id", profile.ID, "error", err)
 	}
-	return true
+	return true, verified
 }
 
 func writeLockout(w http.ResponseWriter, until time.Time) {
@@ -632,13 +642,24 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// The bind rechecks the PIN state judged here (wantHash), so a PIN set
+	// or changed in between cannot be skipped.
+	none := ""
+	wantHash := &none
 	if profile.HasPIN {
 		acting, ok := h.actingProfile(w, r, claims)
 		if !ok {
 			return
 		}
-		if acting.ID != profile.ID && !h.checkUnlock(w, r, acting, profile, unlock) {
-			return
+		wantHash = nil
+		if acting.ID != profile.ID {
+			ok, verified := h.checkUnlockHash(w, r, acting, profile, unlock)
+			if !ok {
+				return
+			}
+			if verified != "" {
+				wantHash = &verified
+			}
 		}
 	}
 
@@ -652,7 +673,11 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	bound, err := h.queries.SetActiveProfileForToken(r.Context(), claims.RefreshTokenID, claims.UserID, profileID)
+	bound, err := h.queries.SetActiveProfileForTokenIfPIN(r.Context(), claims.RefreshTokenID, claims.UserID, profileID, wantHash)
+	if errors.Is(err, db.ErrProfilePINChanged) {
+		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile's PIN just changed; enter its PIN")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to activate profile")
 		return

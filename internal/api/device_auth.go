@@ -175,6 +175,7 @@ func (g *deviceGrants) take(secret string) (deviceGrant, string) {
 type deviceSessionStore interface {
 	GetUserByID(context.Context, int64) (*models.User, error)
 	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
+	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
 	CreateRefreshTokenAtVersion(context.Context, *models.RefreshToken, int) (bool, error)
 	RevokeRefreshToken(context.Context, string) error
 }
@@ -281,11 +282,29 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	// The approver passes its own acting profile on to the device. A
 	// restricted approver therefore cannot raise a ceiling by pairing, and an
 	// unrestricted non-default one does not hand the device the account
-	// default, which may be a locked profile it never unlocked. Fails closed.
+	// default, which may be a locked profile it never unlocked. A locked
+	// acting profile is not passed on either: a device acting as it would
+	// skip its PIN, so anyone at the new device could pick it. The device
+	// gets the account's most restrictive unlocked profile instead, and with
+	// every profile locked the pairing is refused (the account password can
+	// still sign the device in). Fails closed.
 	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		writeError(w, http.StatusInternalServerError, "could not check the active profile")
 		return
+	}
+	if acting.HasPIN {
+		unlocked, uerr := h.sessions.MostRestrictiveUnlockedProfile(r.Context(), claims.UserID)
+		if uerr != nil {
+			writeError(w, http.StatusInternalServerError, "could not check the active profile")
+			return
+		}
+		if unlocked == nil {
+			writeErrorReason(w, http.StatusConflict, "profile_locked",
+				"every profile on this account has a PIN; sign in on the device with the account password instead")
+			return
+		}
+		acting = unlocked
 	}
 	bindProfile := acting.ID // 0 when the account has no profile yet: unbound
 	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion, bindProfile) {

@@ -39,15 +39,21 @@ func (q *Queries) GetProfilePINState(ctx context.Context, profileID int64) (*Pro
 // Either way the attempt counter and lockout reset: they belong to the PIN
 // that was being guessed.
 //
-// Setting or changing a PIN also revokes the account's other sessions that
-// act as the profile without having presented it: those bound to it, and the
+// Setting or changing a PIN also ends the account's other sessions that act
+// as the profile without having presented it: those bound to it, and the
 // unbound ones when it is the default. A session already acting as a profile
 // skips its PIN, and before the lock any session could switch freely, so a
 // kid's device bound to the parent's profile, or one that unlocked it with
-// a leaked PIN, otherwise kept it. The caller's own session (keepTokenID) is
-// kept; the others sign in again. The user row is locked first, as rotation
-// locks it, so a rotation cannot carry a binding past the revocation.
-// Clearing a PIN revokes nothing. It returns how many sessions it revoked.
+// a leaked PIN, otherwise kept it. The rows are DELETED, not revoked, revoked
+// ones included: a revoked row keeps resolving to its binding for as long as
+// its access token is valid, so a revoked session kept the profile's powers
+// for that long, enough to lift a ceiling or pair a device for good. With the
+// row gone, its token acts as the account's most restrictive profile, as a
+// deleted profile's do. The caller's own session (keepTokenID) is kept; the
+// others sign in again. The user row is locked first, as rotation locks it,
+// so a rotation cannot carry a binding past the deletion, and activation
+// takes it FOR SHARE. Clearing a PIN ends nothing. It returns how many
+// sessions it ended.
 func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, hash string, keepTokenID int64) (int64, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
@@ -67,8 +73,8 @@ func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, ha
 	var revoked int64
 	if hash != "" {
 		tag, err := tx.Exec(ctx,
-			`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW()
-			 WHERE user_id = $1 AND NOT revoked AND id <> $3
+			`DELETE FROM refresh_tokens
+			 WHERE user_id = $1 AND id <> $3
 			   AND (active_profile_id = $2
 			        OR (active_profile_id IS NULL AND EXISTS (
 			              SELECT 1 FROM user_profiles WHERE id = $2 AND is_default)))`,

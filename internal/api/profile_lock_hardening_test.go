@@ -670,32 +670,49 @@ func TestAnExpiredLockoutReLocksOnTheNextMiss(t *testing.T) {
 // acting as a profile skips its PIN, and before the lock any session could
 // switch freely, so a kid's device left on the parent's profile kept it
 // after the parent locked it, and so did one that had used a leaked PIN once
-// the PIN changed. Setting or changing a PIN revokes the account's other
+// the PIN changed. Setting or changing a PIN ends the account's other
 // sessions bound to the profile, and the unbound ones (which act as the
-// default) when it is the default. Clearing one revokes nothing.
+// default) when it is the default. Their rows are deleted, revoked ones
+// included: a revoked row still resolves to its binding for its access
+// token's lifetime, and in that window lifted the kid's ceiling. Clearing a
+// PIN ends nothing.
 func TestSettingAPINSignsOutTheSessionsActingAsTheProfile(t *testing.T) {
 	f := newLockFixture(t)
 	ctx := context.Background()
 	pool := lockTestPool(t)
-	revoked := func(rt int64) bool {
+	ended := func(rt int64) bool {
 		t.Helper()
-		var r bool
-		if err := pool.QueryRow(ctx, `SELECT revoked FROM refresh_tokens WHERE id = $1`, rt).Scan(&r); err != nil {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = $1`, rt).Scan(&n); err != nil {
 			t.Fatalf("read session %d: %v", rt, err)
 		}
-		return r
+		return n == 0
 	}
 	kidOnParent := seedRCRefreshToken(t, f.q, f.userID)
 	f.bind(t, kidOnParent, f.parent.ID)
 	unbound := seedRCRefreshToken(t, f.q, f.userID)
+	// A rotated predecessor still bound to the parent: revoked, retained.
+	rotated := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, rotated, f.parent.ID)
+	if _, err := pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE id = $1`, rotated); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
 
 	f.setPIN(t, "4321")
-	if !revoked(kidOnParent) || !revoked(unbound) {
-		t.Errorf("after the parent locked its profile: the device on it revoked %v, the unbound one %v; want both signed out",
-			revoked(kidOnParent), revoked(unbound))
+	if !ended(kidOnParent) || !ended(unbound) || !ended(rotated) {
+		t.Errorf("after the parent locked its profile: the device on it ended %v, the unbound one %v, the rotated one %v; want all three gone",
+			ended(kidOnParent), ended(unbound), ended(rotated))
 	}
-	if revoked(f.parentRT) || revoked(f.kidRT) {
-		t.Errorf("the PIN also signed out the caller (%v) or the kid's own session (%v)", revoked(f.parentRT), revoked(f.kidRT))
+	if ended(f.parentRT) || ended(f.kidRT) {
+		t.Errorf("the PIN also ended the caller (%v) or the kid's own session (%v)", ended(f.parentRT), ended(f.kidRT))
+	}
+	// The ended session's still-valid access token acts as the most
+	// restrictive profile, with none of the parent's powers.
+	if got := f.acting(t, kidOnParent); got != f.kid.ID {
+		t.Errorf("the ended session's token acts as %d, want the most restrictive profile, the kid (%d)", got, f.kid.ID)
+	}
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, kidOnParent, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusForbidden || reason != "profile_restricted" {
+		t.Errorf("the ended session lifting the kid's ceiling: %d %q, want 403 profile_restricted", code, reason)
 	}
 
 	// A device that got in with the PIN is signed out when the PIN changes.
@@ -707,7 +724,7 @@ func TestSettingAPINSignsOutTheSessionsActingAsTheProfile(t *testing.T) {
 		`{"pin":"9876","current_pin":"4321"}`); code != http.StatusOK {
 		t.Fatalf("change the PIN: %d %s", code, body)
 	}
-	if !revoked(leaked) {
+	if !ended(leaked) {
 		t.Error("a session that unlocked with the old PIN survived the PIN change")
 	}
 
@@ -716,20 +733,179 @@ func TestSettingAPINSignsOutTheSessionsActingAsTheProfile(t *testing.T) {
 	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
 		t.Fatalf("lock the kid: %d %s", code, body)
 	}
-	if !revoked(f.kidRT) || revoked(unbound2) || revoked(f.parentRT) {
-		t.Errorf("after locking the kid: kid's session revoked %v, an unbound one %v, the caller %v; want only the kid's",
-			revoked(f.kidRT), revoked(unbound2), revoked(f.parentRT))
+	if !ended(f.kidRT) || ended(unbound2) || ended(f.parentRT) {
+		t.Errorf("after locking the kid: kid's session ended %v, an unbound one %v, the caller %v; want only the kid's",
+			ended(f.kidRT), ended(unbound2), ended(f.parentRT))
 	}
 
-	// Clearing a PIN revokes nothing.
+	// Clearing a PIN ends nothing.
 	onKid := seedRCRefreshToken(t, f.q, f.userID)
 	f.bind(t, onKid, f.kid.ID)
 	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID,
 		`{"pin":"","current_pin":"2468"}`); code != http.StatusOK {
 		t.Fatalf("clear the kid's PIN: %d %s", code, body)
 	}
-	if revoked(onKid) {
+	if ended(onKid) {
 		t.Error("clearing a PIN signed a session out")
+	}
+}
+
+// TestAPINWriteWaitsForTheAccountLock: rotation copies a session's binding
+// to its successor under the user-row lock, so a PIN write that did not take
+// it could end the old row while a new one bound to the profile appeared.
+// Here another transaction holds the lock while it binds a new session to
+// the kid; the PIN write on the kid must wait, then end that session too.
+// (The kid is not the default, so the session's committed, unbound state
+// does not match the write, and nothing but the user lock makes it wait.)
+func TestAPINWriteWaitsForTheAccountLock(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	successor := seedRCRefreshToken(t, f.q, f.userID)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, f.userID); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET active_profile_id = $2 WHERE id = $1`, successor, f.kid.ID); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.q.SetProfilePIN(ctx, f.userID, f.kid.ID, "$argon2id$placeholder", f.parentRT)
+		done <- err
+	}()
+	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE%")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("set PIN: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = $1`, successor).Scan(&n); err != nil || n != 0 {
+		t.Errorf("a session bound to the profile while the PIN was being set survived it (rows %d, %v)", n, err)
+	}
+}
+
+// TestActivationRechecksThePINUnderTheAccountLock: activation judges the
+// PIN, then binds. A PIN set between the two ended nothing (the session was
+// not yet on the profile) and the bind then put the session on the newly
+// locked profile. The bind takes the user row FOR SHARE and rechecks; here a
+// PIN is set under that lock while the bind waits for it.
+func TestActivationRechecksThePINUnderTheAccountLock(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("set the PIN: %v", err)
+	}
+	none := ""
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.q.SetActiveProfileForTokenIfPIN(ctx, f.kidRT, f.userID, f.parent.ID, &none)
+		done <- err
+	}()
+	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR SHARE%")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := <-done; !errors.Is(err, db.ErrProfilePINChanged) {
+		t.Errorf("binding to a profile locked meanwhile: %v, want ErrProfilePINChanged", err)
+	}
+	if got := f.acting(t, f.kidRT); got != f.kid.ID {
+		t.Errorf("the kid's session acts as %d after the refused bind, want still the kid (%d)", got, f.kid.ID)
+	}
+	// A PIN that matched before a change is refused the same way.
+	old := "old-hash"
+	if _, err := f.q.SetActiveProfileForTokenIfPIN(ctx, f.kidRT, f.userID, f.parent.ID, &old); !errors.Is(err, db.ErrProfilePINChanged) {
+		t.Errorf("binding with a PIN checked against the old hash: %v, want ErrProfilePINChanged", err)
+	}
+}
+
+// waitForALockWait returns once a backend running a statement like the given
+// pattern waits on a lock, or done fires (the caller then sees the wrong
+// answer), or five seconds pass.
+func waitForALockWait(t *testing.T, pool *pgxpool.Pool, done chan error, like string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if len(done) > 0 {
+			return
+		}
+		var waiting bool
+		if err := pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND datname = current_database() AND query LIKE $1)`, like).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAPINWriteClearsTheLockout: the attempt count and any lockout belong to
+// the PIN being guessed, so a new PIN starts clean.
+func TestAPINWriteClearsTheLockout(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	for i := 0; i < profilePINMaxFailures; i++ {
+		f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"0000"}`)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.parent.ID,
+		`{"pin":"9876","password":"`+lockTestPassword+`"}`); code != http.StatusOK {
+		t.Fatalf("change the PIN: %d %s", code, body)
+	}
+	var attempts int
+	var locked bool
+	if err := lockTestPool(t).QueryRow(context.Background(),
+		`SELECT pin_failed_attempts, pin_locked_until IS NOT NULL FROM user_profiles WHERE id = $1`, f.parent.ID).Scan(&attempts, &locked); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if attempts != 0 || locked {
+		t.Errorf("after a new PIN: %d failed attempts, lockout set %v; want 0 and none", attempts, locked)
+	}
+}
+
+// TestTheMostRestrictiveUnlockedProfileSkipsLockedOnes: pairing binds a
+// device to it when the approver's profile is locked.
+func TestTheMostRestrictiveUnlockedProfileSkipsLockedOnes(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	got := func() *models.UserProfile {
+		t.Helper()
+		p, err := f.q.MostRestrictiveUnlockedProfile(ctx, f.userID)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		return p
+	}
+	if p := got(); p == nil || p.ID != f.kid.ID {
+		t.Errorf("with the kid unlocked: got %+v, want the kid", p)
+	}
+	pool := lockTestPool(t)
+	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'x' WHERE id = $1`, f.kid.ID); err != nil {
+		t.Fatalf("lock the kid: %v", err)
+	}
+	if p := got(); p == nil || p.ID != f.parent.ID {
+		t.Errorf("with only the parent unlocked: got %+v, want the parent", p)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'x' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("lock the parent: %v", err)
+	}
+	if p := got(); p != nil {
+		t.Errorf("with every profile locked: got %+v, want none", p)
 	}
 }
 
@@ -799,4 +975,45 @@ func TestEveryRevocationStampsRevokedAt(t *testing.T) {
 		}
 		stamped(t, a, b)
 	})
+}
+
+// TestActivatingAProfileLockedMeanwhileIsRefused drives the handler through
+// the same race: it reads the profile as unlocked, a PIN lands while its
+// bind waits for the account lock, and the bind must refuse.
+func TestActivatingAProfileLockedMeanwhileIsRefused(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("set the PIN: %v", err)
+	}
+	type result struct {
+		code   int
+		reason string
+	}
+	got := make(chan result, 1)
+	done := make(chan error, 1)
+	go func() {
+		code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, "")
+		got <- result{code, reason}
+		done <- nil
+	}()
+	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR SHARE%")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if r := <-got; r.code != http.StatusForbidden || r.reason != "profile_pin_required" {
+		t.Errorf("activating a profile locked meanwhile: %d %q, want 403 profile_pin_required", r.code, r.reason)
+	}
+	if acting := f.acting(t, f.kidRT); acting != f.kid.ID {
+		t.Errorf("the kid's session acts as %d, want still the kid (%d)", acting, f.kid.ID)
+	}
 }

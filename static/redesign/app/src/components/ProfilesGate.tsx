@@ -327,7 +327,9 @@ export function ProfilesGate({
             stop in a set documented as having exactly one. Wrapped so it keeps
             flowing on the same visual line as the orbs. */}
         <div className="mt-6 flex flex-wrap items-start justify-center gap-6 md:gap-9">
-          {onAddProfile && (
+          {/* Not while no profile is active: leaving for Settings would
+              leave the gate without a pick (see dismissable). */}
+          {onAddProfile && activeProfileId !== null && (
             <button
               type="button"
               onClick={() => { onAddProfile(); dismiss() }}

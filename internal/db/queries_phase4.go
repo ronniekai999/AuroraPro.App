@@ -202,7 +202,42 @@ func (q *Queries) mostRestrictiveProfile(ctx context.Context, userID int64) (*mo
 // it, refresh and retry. (This filter used to be left off on purpose, because
 // the web client activated fire-and-forget and swallowed the 409.)
 func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, userID, profileID int64) (bool, error) {
-	tag, err := q.pool.Exec(ctx,
+	return q.SetActiveProfileForTokenIfPIN(ctx, refreshTokenID, userID, profileID, nil)
+}
+
+// ErrProfilePINChanged refuses a bind whose PIN check no longer holds: the
+// profile's PIN was set or changed after the caller judged it.
+var ErrProfilePINChanged = errors.New("the profile's PIN changed")
+
+// SetActiveProfileForTokenIfPIN is SetActiveProfileForToken that first checks
+// the profile's PIN is still the one the caller judged: wantHash nil checks
+// nothing, "" means the profile had no PIN, and anything else is the hash
+// the presented PIN matched. A mismatch is ErrProfilePINChanged. It takes
+// the user row FOR SHARE, so SetProfilePIN (FOR UPDATE) runs wholly before
+// or after it: a PIN set in between would otherwise revoke nothing (the
+// session was not yet bound to the profile) and the bind would then put it
+// on the newly locked profile.
+func (q *Queries) SetActiveProfileForTokenIfPIN(ctx context.Context, refreshTokenID, userID, profileID int64, wantHash *string) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
+		return false, err
+	}
+	if wantHash != nil {
+		var hash string
+		err := tx.QueryRow(ctx, `SELECT COALESCE(pin_hash, '') FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			profileID, userID).Scan(&hash)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return false, err
+		}
+		if err == nil && hash != *wantHash {
+			return false, ErrProfilePINChanged
+		}
+	}
+	tag, err := tx.Exec(ctx,
 		`UPDATE refresh_tokens SET active_profile_id = $1
 		 WHERE id = $2 AND user_id = $3 AND NOT revoked`,
 		profileID, refreshTokenID, userID,
@@ -210,7 +245,43 @@ func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, 
 	if err != nil {
 		return false, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// MostRestrictiveUnlockedProfile returns the account's profile with no PIN
+// and the tightest ceiling (an unrestricted one only when no unlocked
+// profile has a ceiling, the default first), or nil when every profile has
+// a PIN.
+func (q *Queries) MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error) {
+	profiles, err := q.GetProfilesByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var pick *models.UserProfile
+	tighter := func(p, than *models.UserProfile) bool {
+		a, b := AllowedRatingsForMax(p.MaxAgeRating), AllowedRatingsForMax(than.MaxAgeRating)
+		switch {
+		case a == nil && b == nil:
+			return p.IsDefault && !than.IsDefault
+		case a == nil:
+			return false
+		case b == nil:
+			return true
+		}
+		return len(a) < len(b)
+	}
+	for _, p := range profiles {
+		if p.HasPIN {
+			continue
+		}
+		if pick == nil || tighter(p, pick) {
+			pick = p
+		}
+	}
+	return pick, nil
 }
 
 func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *models.UpdateProfileRequest) error {
