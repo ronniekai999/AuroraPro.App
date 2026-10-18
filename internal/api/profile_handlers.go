@@ -23,8 +23,10 @@ type ProfileHandler struct {
 	hero    HeroProvider  // optional; for cache invalidation on maturity_pref change
 	authSvc *auth.Service // hashes and checks profile PINs and the account password
 	// passwordLimiter is the account password's own budget as a stand-in for
-	// a PIN, keyed by account.
+	// a PIN, keyed by account and acting profile.
 	passwordLimiter *auth.RateLimiter
+	// pinWriteLimiter bounds PIN writes, which each run argon2id.
+	pinWriteLimiter *auth.RateLimiter
 	// resolveActing resolves the session's acting profile; a field so a test
 	// can make it fail and see the management gates fail closed.
 	resolveActing func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
@@ -41,6 +43,10 @@ const (
 	profilePINLockout       = 15 * time.Minute
 	profilePasswordAttempts = 5
 	profilePasswordWindow   = 15 * time.Minute
+	// profilePINWrites PIN sets, changes or removals per profilePINWriteWindow
+	// per account.
+	profilePINWrites      = 5
+	profilePINWriteWindow = 15 * time.Minute
 )
 
 // profilePINRe: profile PINs are exactly four digits, as on a TV remote.
@@ -77,6 +83,7 @@ func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 	return &ProfileHandler{
 		queries:         queries,
 		passwordLimiter: auth.NewRateLimiter(profilePasswordAttempts, profilePasswordWindow),
+		pinWriteLimiter: auth.NewRateLimiter(profilePINWrites, profilePINWriteWindow),
 		resolveActing:   queries.ResolveActingProfile,
 	}
 }
@@ -721,6 +728,14 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Every write hashes the new PIN with argon2id (64 MiB), and checking the
+	// current one costs another, so PIN writes have their own budget per
+	// account, as the auth routes do.
+	if h.pinWriteLimiter != nil && !h.pinWriteLimiter.Allow(strconv.FormatInt(claims.UserID, 10)) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(profilePINWriteWindow.Seconds())))
+		writeErrorReason(w, http.StatusTooManyRequests, "rate_limited", "too many PIN changes; try again later")
+		return
+	}
 	if profile.HasPIN && !h.checkUnlock(w, r, acting, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password}) {
 		return
 	}
@@ -736,9 +751,14 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := h.queries.SetProfilePIN(r.Context(), profileID, hash); err != nil {
+	revoked, err := h.queries.SetProfilePIN(r.Context(), claims.UserID, profileID, hash, claims.RefreshTokenID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to set the PIN")
 		return
+	}
+	if revoked > 0 {
+		slog.Info("profiles: a PIN change signed out the sessions acting as the profile",
+			"profile_id", profileID, "sessions", revoked)
 	}
 	updated, _ := h.queries.GetProfile(r.Context(), profileID)
 	writeJSON(w, http.StatusOK, updated)

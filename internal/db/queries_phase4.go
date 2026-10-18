@@ -96,8 +96,9 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 // refreshTokenID (set via ProfileHandler.ActivateProfile), falling back to
 // the account's default profile when there's no binding — refreshTokenID is
 // 0 (a cast-scoped token, or an access token minted before this feature
-// shipped), the bound profile was deleted, or it no longer belongs to
-// userID. This is issue #462's fix: it is the ONLY place read/playback
+// shipped), the row has none, or the bound profile no longer belongs to
+// userID. A deleted profile takes its session rows with it (migration 062),
+// so their tokens find no row; see below. This is issue #462's fix: it is the ONLY place read/playback
 // (and now discovery) rating-ceiling enforcement should get an acting
 // profile from — never a client-supplied profile_id/max_rating, which was
 // a full bypass (the ceiling was entirely client-elective).

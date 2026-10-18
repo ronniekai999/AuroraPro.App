@@ -665,3 +665,138 @@ func TestAnExpiredLockoutReLocksOnTheNextMiss(t *testing.T) {
 		t.Errorf("the right PIN after one miss past an expired lockout: %d %q, want 429 profile_pin_locked", code, reason)
 	}
 }
+
+// TestSettingAPINSignsOutTheSessionsActingAsTheProfile: a session already
+// acting as a profile skips its PIN, and before the lock any session could
+// switch freely, so a kid's device left on the parent's profile kept it
+// after the parent locked it, and so did one that had used a leaked PIN once
+// the PIN changed. Setting or changing a PIN revokes the account's other
+// sessions bound to the profile, and the unbound ones (which act as the
+// default) when it is the default. Clearing one revokes nothing.
+func TestSettingAPINSignsOutTheSessionsActingAsTheProfile(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	revoked := func(rt int64) bool {
+		t.Helper()
+		var r bool
+		if err := pool.QueryRow(ctx, `SELECT revoked FROM refresh_tokens WHERE id = $1`, rt).Scan(&r); err != nil {
+			t.Fatalf("read session %d: %v", rt, err)
+		}
+		return r
+	}
+	kidOnParent := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, kidOnParent, f.parent.ID)
+	unbound := seedRCRefreshToken(t, f.q, f.userID)
+
+	f.setPIN(t, "4321")
+	if !revoked(kidOnParent) || !revoked(unbound) {
+		t.Errorf("after the parent locked its profile: the device on it revoked %v, the unbound one %v; want both signed out",
+			revoked(kidOnParent), revoked(unbound))
+	}
+	if revoked(f.parentRT) || revoked(f.kidRT) {
+		t.Errorf("the PIN also signed out the caller (%v) or the kid's own session (%v)", revoked(f.parentRT), revoked(f.kidRT))
+	}
+
+	// A device that got in with the PIN is signed out when the PIN changes.
+	leaked := seedRCRefreshToken(t, f.q, f.userID)
+	if code, _, body := f.call(t, f.h.ActivateProfile, http.MethodPost, leaked, f.parent.ID, `{"pin":"4321"}`); code != http.StatusOK {
+		t.Fatalf("unlock with the PIN: %d %s", code, body)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.parent.ID,
+		`{"pin":"9876","current_pin":"4321"}`); code != http.StatusOK {
+		t.Fatalf("change the PIN: %d %s", code, body)
+	}
+	if !revoked(leaked) {
+		t.Error("a session that unlocked with the old PIN survived the PIN change")
+	}
+
+	// Locking a profile that is not the default leaves unbound sessions be.
+	unbound2 := seedRCRefreshToken(t, f.q, f.userID)
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("lock the kid: %d %s", code, body)
+	}
+	if !revoked(f.kidRT) || revoked(unbound2) || revoked(f.parentRT) {
+		t.Errorf("after locking the kid: kid's session revoked %v, an unbound one %v, the caller %v; want only the kid's",
+			revoked(f.kidRT), revoked(unbound2), revoked(f.parentRT))
+	}
+
+	// Clearing a PIN revokes nothing.
+	onKid := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, onKid, f.kid.ID)
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID,
+		`{"pin":"","current_pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("clear the kid's PIN: %d %s", code, body)
+	}
+	if revoked(onKid) {
+		t.Error("clearing a PIN signed a session out")
+	}
+}
+
+// TestPINWritesHaveABudget: each write runs argon2id (64 MiB), so a session
+// could otherwise run them without limit.
+func TestPINWritesHaveABudget(t *testing.T) {
+	f := newLockFixture(t)
+	for i := 0; i < profilePINWrites; i++ {
+		if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":""}`); code != http.StatusOK {
+			t.Fatalf("PIN write %d: %d %s", i+1, code, body)
+		}
+	}
+	if code, reason, _ := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":""}`); code != http.StatusTooManyRequests || reason != "rate_limited" {
+		t.Errorf("a PIN write past the budget: %d %q, want 429 rate_limited", code, reason)
+	}
+}
+
+// TestEveryRevocationStampsRevokedAt: a revoked row is kept until its
+// revoked_at is older than the access-token lifetime, because its access
+// tokens still resolve through it. A row revoked without the stamp is purged
+// at once, and its tokens then act as the most restrictive profile.
+func TestEveryRevocationStampsRevokedAt(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	token := func(tok string) int64 {
+		t.Helper()
+		rt := &models.RefreshToken{UserID: f.userID, Token: tok + reqTestSuffix(t), ExpiresAt: time.Now().Add(time.Hour)}
+		if err := f.q.CreateRefreshToken(ctx, rt); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+		return rt.ID
+	}
+	stamped := func(t *testing.T, ids ...int64) {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = ANY($1) AND revoked AND revoked_at IS NOT NULL`,
+			ids).Scan(&n); err != nil {
+			t.Fatalf("read sessions: %v", err)
+		}
+		if n != len(ids) {
+			t.Errorf("%d of %d revoked sessions carry revoked_at", n, len(ids))
+		}
+	}
+	t.Run("one session", func(t *testing.T) {
+		plain := "revoke-one-" + reqTestSuffix(t)
+		rt := &models.RefreshToken{UserID: f.userID, Token: plain, ExpiresAt: time.Now().Add(time.Hour)}
+		if err := f.q.CreateRefreshToken(ctx, rt); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+		if err := f.q.RevokeRefreshToken(ctx, plain); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		stamped(t, rt.ID)
+	})
+	t.Run("every session", func(t *testing.T) {
+		a, b := token("revoke-all-a-"), token("revoke-all-b-")
+		if err := f.q.RevokeAllUserTokens(ctx, f.userID); err != nil {
+			t.Fatalf("revoke all: %v", err)
+		}
+		stamped(t, a, b)
+	})
+	t.Run("sign out everywhere", func(t *testing.T) {
+		a, b := token("revoke-sessions-a-"), token("revoke-sessions-b-")
+		if _, err := f.q.RevokeAllUserSessions(ctx, f.userID); err != nil {
+			t.Fatalf("revoke sessions: %v", err)
+		}
+		stamped(t, a, b)
+	})
+}

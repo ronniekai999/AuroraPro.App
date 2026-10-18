@@ -38,16 +38,50 @@ func (q *Queries) GetProfilePINState(ctx context.Context, profileID int64) (*Pro
 // SetProfilePIN stores a new PIN hash, or clears the PIN when hash is "".
 // Either way the attempt counter and lockout reset: they belong to the PIN
 // that was being guessed.
-func (q *Queries) SetProfilePIN(ctx context.Context, profileID int64, hash string) error {
-	_, err := q.pool.Exec(ctx,
+//
+// Setting or changing a PIN also revokes the account's other sessions that
+// act as the profile without having presented it: those bound to it, and the
+// unbound ones when it is the default. A session already acting as a profile
+// skips its PIN, and before the lock any session could switch freely, so a
+// kid's device bound to the parent's profile, or one that unlocked it with
+// a leaked PIN, otherwise kept it. The caller's own session (keepTokenID) is
+// kept; the others sign in again. The user row is locked first, as rotation
+// locks it, so a rotation cannot carry a binding past the revocation.
+// Clearing a PIN revokes nothing. It returns how many sessions it revoked.
+func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, hash string, keepTokenID int64) (int64, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("set profile pin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		return 0, fmt.Errorf("set profile pin: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE user_profiles
 		 SET pin_hash = $2, pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = NOW()
-		 WHERE id = $1`,
-		profileID, nilIfEmpty(hash))
-	if err != nil {
-		return fmt.Errorf("set profile pin: %w", err)
+		 WHERE id = $1 AND user_id = $3`,
+		profileID, nilIfEmpty(hash), userID); err != nil {
+		return 0, fmt.Errorf("set profile pin: %w", err)
 	}
-	return nil
+	var revoked int64
+	if hash != "" {
+		tag, err := tx.Exec(ctx,
+			`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW()
+			 WHERE user_id = $1 AND NOT revoked AND id <> $3
+			   AND (active_profile_id = $2
+			        OR (active_profile_id IS NULL AND EXISTS (
+			              SELECT 1 FROM user_profiles WHERE id = $2 AND is_default)))`,
+			userID, profileID, keepTokenID)
+		if err != nil {
+			return 0, fmt.Errorf("set profile pin: revoke sessions: %w", err)
+		}
+		revoked = tag.RowsAffected()
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("set profile pin: %w", err)
+	}
+	return revoked, nil
 }
 
 // PINAttempt is the outcome of ReserveProfilePINAttempt.

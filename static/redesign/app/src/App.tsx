@@ -6089,6 +6089,7 @@ export default function App() {
                 onRated={handleRatedMedia}
                 inLibrary={library.some(l => l.id === selectedMedia.id)}
                 profileId={activeProfileId}
+                profileReady={personalProfileReady}
                 detail={detailItem ?? undefined}
                 apiEpisodes={detailEpisodes}
                 onPlayEpisode={handlePlayEpisode}

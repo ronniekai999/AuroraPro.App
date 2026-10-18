@@ -1282,6 +1282,8 @@ function ProfileLockPanel({ profile, profiles, newPin, setNewPin, busy, onSave, 
         {profile.has_pin
           ? 'Switching to this profile needs its PIN or the account password.'
           : 'No PIN: anyone signed in to this account can switch to it.'}
+        {' '}Setting or changing the PIN signs out the account’s other devices using this profile
+        {profile.is_default ? ', and those that never picked one' : ''}; they sign in again with the account password.
       </p>
       {openDoors.length > 0 && (
         <p className="text-amber-200/80 text-xs mt-2">

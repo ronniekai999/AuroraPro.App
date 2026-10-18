@@ -212,6 +212,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   account's unbound sessions to the old default (revoked rows too: an access
   token resolves through its row after rotation), so re-defaulting moves no
   other device.
+- Setting or changing a PIN revokes the account's other sessions that act as
+  the profile without having presented it: those bound to it, and the
+  unbound ones when it is the default (`SetProfilePIN`, under the user-row
+  lock rotation takes). The caller's own session is kept; the others sign in
+  again. Without this a kid's device left on the parent's profile (switching
+  was free before the lock), or one that used a leaked PIN, kept it, since a
+  session already acting as a profile skips its PIN. Clearing a PIN revokes
+  nothing. PIN writes run argon2id twice at most and have their own budget,
+  5 per 15 minutes per account (`pinWriteLimiter`, in memory).
 - PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
   refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
   check let concurrent guesses all pass the lockout read; a review drove 40
@@ -269,7 +278,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   time. It used to switch locally and activate fire-and-forget, so a failed
   call left a kid's UI on the kid profile while the server enforced the
   parent's ceiling. Nothing personalized (hero, personalized rails, Continue
-  Watching, taste onboarding) loads until the session's profile is known
+  Watching, taste onboarding, a title's recap and star rating) loads until
+  the session's profile is known
   (`personalProfileReady`): requests without a `profile_id` are answered for
   the account default on some routes, so a kid's Home showed the parent's
   hero pick on every load. When the binding cannot be read it shows no
@@ -336,10 +346,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     App-level test, and the room socket's connect-time profile and its retry
     are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
     lock either.
-  - Account-level actions still open to a restricted session: editing the
-    member profile (`PUT /api/me/profile`, whose `share_watch_history`
-    switch publishes the default profile's history), push subscriptions, and
-    logout, which signs out every session on the account.
+  - Account-level actions still open to a restricted session, for example:
+    editing the member profile (`PUT /api/me/profile`, whose
+    `share_watch_history` switch publishes the default profile's history),
+    changing the account password (it needs the current one), approving a
+    device pairing (the device binds to the restricted profile), follows,
+    media requests, collections, watch parties and rooms, notifications,
+    feedback and referral answers, push subscriptions, and logout, which
+    signs out every session on the account.
+  - A session a PIN write revoked keeps its still-valid access token for up
+    to one token lifetime, acting as the profile, because rotation's revoked
+    rows must keep resolving and this one cannot be told apart.
   - The room socket keeps the profile it resolved at connect, so a switch
     made while it is open applies to its ceiling check from the next
     connect.

@@ -36,6 +36,11 @@ interface DetailViewProps {
   inLibrary: boolean
   // Active profile — scopes the per-profile "Previously" recap boundary.
   profileId?: number | null
+  // False until the session's profile is known (App's personalProfileReady).
+  // The recap and star rating wait for it: without a profile_id the server
+  // answers for its own choice of profile, which on a cold deep link showed,
+  // and could take a rating for, a profile the app had not confirmed.
+  profileReady?: boolean
   // Fired after a star rating COMMITS server-side (not on the optimistic
   // update). App uses it to keep already-fetched personalized state honest —
   // e.g. dropping a freshly-panned title from the loaded hero pool so it
@@ -99,7 +104,7 @@ interface DetailViewProps {
   }
 }
 export default function DetailView({
-  media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId, onRated,
+  media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId, profileReady = true, onRated,
   detail, apiEpisodes, onPlayEpisode, onEpisodeUnavailable, loading, error,
   onStartParty, inParty,
   seasons, selectedSeason, onSelectSeason,
@@ -134,6 +139,7 @@ export default function DetailView({
     recapIdentityRef.current = recapIdentity
   }, [recapIdentity])
   useEffect(() => {
+    if (!profileReady) return
     const controller = new AbortController()
     const sequence = ++recapStatusSequence.current
     getRecapStatus(media.id, profileId ?? undefined, controller.signal)
@@ -148,8 +154,9 @@ export default function DetailView({
         }
       })
     return () => controller.abort()
-  }, [media.id, profileId, recapIdentity])
+  }, [media.id, profileId, profileReady, recapIdentity])
   const refreshRecap = useCallback(async () => {
+    if (!profileReady) return
     const identity = `${media.id}:${profileId ?? 'default'}`
     if (identity !== recapIdentityRef.current) return
     const sequence = ++recapFetchSequence.current
@@ -171,7 +178,7 @@ export default function DetailView({
         error: caught instanceof Error ? caught.message : 'Failed to load recap',
       })
     }
-  }, [media.id, profileId])
+  }, [media.id, profileId, profileReady])
   const handleAskHistoryChanged = useCallback((hasHistory: boolean) => {
     ++recapStatusSequence.current
     setRecapStatusState(previous => {
@@ -212,13 +219,15 @@ export default function DetailView({
   useEffect(() => {
     const seq = ++rateSeqRef.current
     setMyRating(null)
+    // Not yet loaded is null, which also keeps clicks from rating.
+    if (!profileReady) return
     getUserRating(media.id, profileId ?? undefined)
       .then((stars) => { if (seq === rateSeqRef.current) setMyRating(stars) })
       // Load failure → show the widget unrated rather than never: rating is
       // still likely to work (POST is a separate call), and if it doesn't,
       // handleRate reverts.
       .catch(() => { if (seq === rateSeqRef.current) setMyRating(0) })
-  }, [media.id, profileId])
+  }, [media.id, profileId, profileReady])
   const handleRate = useCallback((stars: number) => {
     if (myRating === null) return // still loading the saved value
     const previous = myRating
