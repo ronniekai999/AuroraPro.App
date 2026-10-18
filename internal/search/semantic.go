@@ -216,7 +216,8 @@ type Hit struct {
 // allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
 // nil or empty = unrestricted). Both recall legs apply it in SQL, so every
 // later stage — fusion, dedup, rerank, the title fallback — only ever sees
-// allowed titles and cannot pick an over-ceiling one.
+// allowed titles and cannot pick an over-ceiling one. When the HNSW index
+// comes back short, an exact scan refills the vector leg (see SemanticSearch).
 func (s *Searcher) Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]Hit, *ParsedQuery, error) {
 	if limit <= 0 {
 		limit = 20

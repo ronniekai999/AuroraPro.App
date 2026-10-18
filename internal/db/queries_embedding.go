@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
-	"github.com/jackc/pgx/v5"
 )
 
 // EmbeddingCandidate is a media item that needs to be embedded (or re-embedded
@@ -152,7 +151,8 @@ type SemanticFilter struct {
 	ExcludeIDs []int64  // e.g. items already in user history
 	// AllowedRatings is the acting profile's ceiling (AllowedRatingsForMax);
 	// nil or empty = unrestricted. SemanticSearch fills a restricted page with
-	// allowed rows even under the HNSW index (see its exact retry).
+	// allowed rows even under the HNSW index, through its exact retry; a retry
+	// that fails returns the short page.
 	AllowedRatings []string
 }
 
@@ -175,12 +175,17 @@ type SemanticHit struct {
 // has few of) then comes back short, possibly empty, although matching rows
 // exist further out. A limit above ef_search does the same unfiltered.
 //
-// So a short page is re-run once as an exact scan (exactSemanticSearch). A
-// full page needs no retry: every row nearer than its last hit was inside the
-// candidate window too, so the window already holds the nearest matches, as
-// close to exact as an unfiltered ANN query. A page that is short because
-// fewer rows match pays for one extra scan, filtered before any distance is
-// computed. If the retry itself fails, the short page is returned.
+// So a short page is re-run once as an exact scan. A full page needs no
+// retry: it is as good as an unfiltered ANN query of the same depth, which is
+// approximate (HNSW recall is lowest at the tail of its window), and making
+// ANN exact is not the retry's job. A page that is short because fewer rows
+// match pays for one exact scan, filtered before any distance is computed:
+// about 15 ms on a 20k-row catalog under a PG ceiling. A short page under a
+// filter that passes nearly everything scores every embedded row, about 140-
+// 180 ms there; that is every search with a limit above ef_search, including
+// all of them if pool.go's SET hnsw.ef_search fails and pgvector's default of
+// 40 applies. If the retry fails for any reason but cancellation, the short
+// page is returned.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {
@@ -233,7 +238,8 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 
 	args = append(args, limit)
 
-	sql := fmt.Sprintf(`
+	query := func(orderBy string) string {
+		return fmt.Sprintf(`
 		SELECT m.id, m.library_id, m.type, m.title, m.sort_title,
 		       COALESCE(m.year, 0), COALESCE(m.overview, ''),
 		       COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
@@ -243,20 +249,24 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 		       (m.embedding <=> $1::vector) AS distance
 		FROM media_items m
 		WHERE %s
-		ORDER BY m.embedding <=> $1::vector
+		ORDER BY %s
 		LIMIT $%d`,
-		strings.Join(where, " AND "), argIdx,
-	)
+			strings.Join(where, " AND "), orderBy, argIdx,
+		)
+	}
 
-	hits, err := semanticHits(ctx, q.pool, sql, args)
+	hits, err := q.semanticHits(ctx, query(annOrder), args)
 	if err != nil {
 		return nil, fmt.Errorf("semantic search: %w", err)
 	}
 	if len(hits) >= limit {
 		return hits, nil
 	}
-	exact, err := q.exactSemanticSearch(ctx, sql, args)
+	exact, err := q.semanticHits(ctx, query(exactOrder), args)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("semantic search: exact retry: %w", err)
+		}
 		slog.Warn("semantic search: exact retry of a short page failed; returning the short page",
 			"rows", len(hits), "limit", limit, "error", err)
 		return hits, nil
@@ -264,28 +274,29 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 	return exact, nil
 }
 
-// exactSemanticSearch runs a SemanticSearch query with plain index scans
-// turned off. HNSW supports no other scan type (no bitmap scan), so every
-// plan left is exact: a sequential or bitmap scan that applies the filters,
-// then distance and a sort over what passes. SET LOCAL scopes the setting to
-// this read-only transaction.
-func (q *Queries) exactSemanticSearch(ctx context.Context, sql string, args []any) ([]SemanticHit, error) {
-	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // read-only: nothing to commit
-	if _, err := tx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
-		return nil, err
-	}
-	return semanticHits(ctx, tx, sql, args)
-}
+// annOrder is the ordering the HNSW index serves: a bare distance to a
+// parameter.
+//
+// exactOrder sorts by the same distance through an expression the index
+// cannot serve, because the planner matches an index ordering only against
+// that bare form. Every plan left for it is exact (a sequential or bitmap
+// scan that applies the filters, then distance and a sort over what passes),
+// whatever the session's planner settings and however PostgreSQL caches the
+// statement. It must stay a separate SQL text. The first version re-ran the
+// same text with SET LOCAL enable_indexscan = off, which pgx's statement
+// cache defeated: after five executions PostgreSQL may switch a prepared
+// statement to a generic plan, costed under the settings of whichever
+// execution builds it, and a SET does not re-plan a cached plan. Once a first
+// pass built it, every retry on that connection ran the HNSW scan again and
+// came back as short as the page it was retrying.
+const (
+	annOrder   = "m.embedding <=> $1::vector"
+	exactOrder = "(m.embedding <=> $1::vector) + 0"
+)
 
-// semanticHits runs a SemanticSearch query on the pool or a transaction.
-func semanticHits(ctx context.Context, querier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, sql string, args []any) ([]SemanticHit, error) {
-	rows, err := querier.Query(ctx, sql, args...)
+// semanticHits runs one SemanticSearch query.
+func (q *Queries) semanticHits(ctx context.Context, sql string, args []any) ([]SemanticHit, error) {
+	rows, err := q.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

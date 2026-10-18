@@ -342,9 +342,11 @@ func (h *Hero) tasteRecall(ctx context.Context, profileID int64, pool int, allow
 		slog.Warn("taste: clustering failed, single centroid", "profile", profileID, "error", err)
 		return h.singleCentroidRecall(ctx, profileID, pool, allowed, surface, within)
 	}
-	// Recall the full pool per centroid (each recall is cheap; full-each
-	// maximizes mode coverage), then interleave. A single centroid (taste collapsed) is
-	// just a degenerate merge.
+	// Recall the full pool per centroid (full-each maximizes mode coverage),
+	// then interleave. Each recall is an exact scan (NearestUnwatched never
+	// uses the HNSW index), so this costs catalog size times centroid count:
+	// a review measured 240-310 ms per centroid on a 20k-row catalog. A single centroid
+	// (taste collapsed) is just a degenerate merge.
 	lists := make([][]*models.MediaItem, 0, len(centroids))
 	for _, c := range centroids {
 		cands, err := h.q.NearestUnwatched(ctx, profileID, c, pool, allowed, surface, within, true)

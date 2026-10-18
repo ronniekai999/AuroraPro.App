@@ -30,7 +30,12 @@ import (
 // idx_media_items_embedding_version (partial, on embedding IS NOT NULL) plus a
 // sort is exact too, and the planner flips to it as statistics change. With
 // sorts off as well, the HNSW scan is the only plan with no disabled node.
-func hnswWindowQueries(t *testing.T) *Queries {
+// The exact retry still has no HNSW plan at all, which is what it relies on;
+// a retry that only disabled index scans lost to HNSW here on PostgreSQL 18,
+// which breaks ties between disabled plans on cost.
+//
+// extra holds further session settings; maxConns > 0 caps the pool.
+func hnswWindowQueries(t *testing.T, maxConns int32, extra ...string) *Queries {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -40,9 +45,16 @@ func hnswWindowQueries(t *testing.T) *Queries {
 	if err != nil {
 		t.Fatalf("parse test db url: %v", err)
 	}
-	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+	stmts := append([]string{
 		// Load pgvector first so hnsw.ef_search exists, as pool.go does.
-		for _, stmt := range []string{"SELECT '[0]'::vector(1)", "SET enable_seqscan = off", "SET enable_sort = off", "SET hnsw.ef_search = 1"} {
+		"SELECT '[0]'::vector(1)",
+		"SET enable_seqscan = off", "SET enable_sort = off", "SET hnsw.ef_search = 1",
+	}, extra...)
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		for _, stmt := range stmts {
 			if _, err := conn.Exec(ctx, stmt); err != nil {
 				return err
 			}
@@ -67,25 +79,52 @@ func hnswWindowQueries(t *testing.T) *Queries {
 // short page and fill it exactly. Sixty over-ceiling rows sit nearer the query
 // than the five allowed ones, so the exact page also proves the retry keeps
 // the filter.
+//
+// The generic-plan case runs every statement on one connection with
+// plan_cache_mode = force_generic_plan. That makes deterministic what the
+// default mode does after five executions of a statement: PostgreSQL reuses a
+// generic plan, costed under the settings of the execution that built it. A
+// retry that re-ran the first pass's SQL text then got the first pass's HNSW
+// plan back whatever it SET, and returned the same short page.
 func TestSemanticSearchFillsAFilteredPageUnderTheHNSWIndex(t *testing.T) {
-	q := hnswWindowQueries(t)
+	for _, tc := range []struct {
+		name     string
+		maxConns int32
+		extra    []string
+	}{
+		{name: "default_plan_cache"},
+		{name: "generic_plans", maxConns: 1, extra: []string{"SET plan_cache_mode = force_generic_plan"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkHNSWWindowFill(t, hnswWindowQueries(t, tc.maxConns, tc.extra...))
+		})
+	}
+}
+
+func checkHNSWWindowFill(t *testing.T, q *Queries) {
+	t.Helper()
 	ctx := context.Background()
 	libID := seedTypedLibrary(t, q, seedTestUser(t, q), "movie")
 	token := "hnswwin" + randomSuffix(t)
 
-	// A random dimension, so concurrent runs of this test rarely share one;
-	// other tests use 700 and 710, and the shared catalog sits at distance ~1.
-	dim := 400 + 3*rand.Intn(90)
-	query := sparseVec768(map[int]float64{dim: 1})
+	// A random direction across two dimensions (8,100 combinations), so
+	// concurrent runs of this test practically never share one: a run on the
+	// same first dimension but another second one sits at cosine distance 0.5,
+	// beyond this run's allowed rows at 0.2. Other tests use dimensions above
+	// 600, and the shared catalog sits at distance ~1.
+	a, b := 400+rand.Intn(90), 500+rand.Intn(90)
+	const rOffset, pgOffset = 590, 595
+	query := sparseVec768(map[int]float64{a: 1, b: 1})
 	for i := 0; i < 60; i++ {
 		seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s r%d", token, i), ratingPtr("R"),
-			sparseVec768(map[int]float64{dim: 1, dim + 1: 0.001 * float64(i+1)}))
+			sparseVec768(map[int]float64{a: 1, b: 1, rOffset: 0.001 * float64(i+1)}))
 	}
 	allowedRatings := AllowedRatingsForMax("PG")
 	allowed := map[int64]bool{}
 	for i := 0; i < 5; i++ {
+		// cos((1,1,x), (1,1)) = 0.8 at x ≈ 1.06: cosine distance ~0.2.
 		allowed[seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s pg%d", token, i), ratingPtr("PG"),
-			sparseVec768(map[int]float64{dim: 0.8, dim + 2: 0.6 + 0.01*float64(i)}))] = true // cosine distance ~0.2
+			sparseVec768(map[int]float64{a: 1, b: 1, pgOffset: 1.06 + 0.01*float64(i)}))] = true
 	}
 
 	// Precondition: in these sessions the plain index path really is short.
