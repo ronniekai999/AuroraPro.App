@@ -29,7 +29,8 @@ import (
 // It is a high index no other test points at, so the shared catalog's
 // embeddings are nearly orthogonal to the query (cosine distance about 1) and
 // cannot outrank the fixture's rows at 0 and 0.2. Only a concurrent run of
-// these tests seeds rows at the same distances, and the assertions allow it.
+// these tests seeds rows at the same distances, over-ceiling and allowed
+// alike, so the assertions accept any run's rows of the expected kind.
 const ceilingQueryDim = 710
 
 func ceilingVec(at map[int]float64) string {
@@ -145,11 +146,12 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 // TestSearchAppliesRatingCeilingToVectorRecall runs the whole pipeline. The
 // rows carry no query token, so only the vector leg can recall them, and they
 // sit nearest the query on a dimension no other test uses, so under the
-// fixture's exact scans only rows from a concurrent run of this test can tie
-// them, and those are over-ceiling too. There are
-// more over-ceiling rows nearer the query than the vector leg recalls
-// (vectorRecallSize), so a ceiling applied after that LIMIT, in Go, would
-// leave nothing allowed. The lexical leg's output cannot be seen here, so the
+// fixture's exact scans only a concurrent run of this test can tie them.
+// Each run puts more over-ceiling rows nearer the query than the vector leg
+// recalls (vectorRecallSize), so a ceiling applied after that LIMIT, in Go,
+// would leave no allowed row at all. The restricted assertion accepts any
+// run's allowed row, since concurrent runs' PG rows tie with this one and
+// can fill the rerank-capped output. The lexical leg's output cannot be seen here, so the
 // hook pins that Search hands that leg the same ceiling, and
 // TestLexicalRecallAppliesRatingCeiling pins that the leg applies it.
 func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
@@ -207,8 +209,12 @@ func TestSearchAppliesRatingCeilingToVectorRecall(t *testing.T) {
 			t.Errorf("PG ceiling returned the R row %d through the vector leg", id)
 		}
 	}
-	if !got[allowed] {
-		t.Errorf("PG ceiling lost the PG row %d behind %d nearer R rows; the vector leg must filter before its LIMIT",
+	sawAllowed := false
+	for _, h := range hits {
+		sawAllowed = sawAllowed || strings.HasPrefix(h.Item.Title, "Vector allowed ")
+	}
+	if !sawAllowed {
+		t.Errorf("PG ceiling returned no fixture PG row (this run's is %d) behind %d nearer R rows; the vector leg must filter before its LIMIT",
 			allowed, len(overs))
 	}
 	for _, h := range hits {

@@ -48,7 +48,8 @@ func exactScanQueries(t *testing.T) *Queries {
 
 // seedSearchCeilingItem inserts a movie with the given title, rating (nil
 // stores SQL NULL) and embedding (empty leaves it NULL). Unrelated scalars are
-// zero values rather than NULL, as in seedTypedMediaItem.
+// zero values rather than NULL, as in seedTypedMediaItem. Rows are dated a
+// month back so they never crowd the "Recently added" tests' windows.
 func seedSearchCeilingItem(t *testing.T, q *Queries, libID int64, title string, rating *string, vecLit string) int64 {
 	t.Helper()
 	var vec *string
@@ -59,8 +60,8 @@ func seedSearchCeilingItem(t *testing.T, q *Queries, libID int64, title string, 
 	err := q.pool.QueryRow(context.Background(),
 		`INSERT INTO media_items
 		   (library_id, type, title, sort_title, tmdb_id, year, overview, rating, runtime_minutes,
-		    content_rating, poster_path, backdrop_path, embedding)
-		 VALUES ($1, 'movie', $2, $2, $3, 0, '', 0, 0, $4, '', '', $5::vector)
+		    content_rating, poster_path, backdrop_path, embedding, added_at)
+		 VALUES ($1, 'movie', $2, $2, $3, 0, '', 0, 0, $4, '', '', $5::vector, NOW() - interval '30 days')
 		 RETURNING id`,
 		libID, title, uniqueTMDBID(t), rating, vec,
 	).Scan(&id)
@@ -147,6 +148,11 @@ func TestSearchMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 // not crowd an allowed, farther row out of the kNN page. It pins the filter's
 // placement in the query, under exact scans (exactScanQueries); the HNSW
 // candidate window SemanticSearch documents is not exercised here.
+//
+// Every run of this test seeds the same vectors, so concurrent runs' allowed
+// rows tie with this one at distance 0.2. The restricted assertion therefore
+// accepts ANY run's allowed row: each sits behind its own run's nearer rows,
+// so a filter applied after the LIMIT keeps none of them.
 func TestSemanticSearchAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	q := exactScanQueries(t)
 	ctx := context.Background()
@@ -169,15 +175,18 @@ func TestSemanticSearchAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	}
 	sawAllowed := false
 	for _, h := range restricted {
-		if h.Item.ID == allowed {
-			sawAllowed = true
+		if strings.HasPrefix(h.Item.Title, "semceil") && strings.HasSuffix(h.Item.Title, " allowed") {
+			sawAllowed = true // this run's allowed row or a concurrent run's
 		}
 		if rating, bad := excluded[h.Item.ID]; bad {
 			t.Errorf("PG ceiling returned item %d rated %s", h.Item.ID, rating)
 		}
+		if !RatingAllowed("PG", h.Item.ContentRating) {
+			t.Errorf("PG ceiling returned item %d rated %q", h.Item.ID, h.Item.ContentRating)
+		}
 	}
 	if !sawAllowed {
-		t.Errorf("PG ceiling with limit 3 omitted the PG item %d behind nearer over-ceiling rows — "+
+		t.Errorf("PG ceiling with limit 3 returned no fixture PG row (this run's is %d) behind nearer over-ceiling rows — "+
 			"the ceiling must be applied before LIMIT, not after", allowed)
 	}
 

@@ -29,6 +29,7 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // seedRCRefreshToken mirrors internal/db's seedRefreshToken (unexported,
@@ -165,6 +166,24 @@ func newRCFixture(t *testing.T) *rcFixture {
 }
 
 func i64(v int64) string { return strconv.FormatInt(v, 10) }
+
+// rcShiftAddedAt sets items' added_at to NOW() plus shift (a Postgres
+// interval, e.g. "-30 days"). The "Recently added" tests read a 50-row window
+// of a shared catalog, so they date their own rows ahead and crowd-seeding
+// tests date theirs back.
+func rcShiftAddedAt(t *testing.T, shift string, ids []int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("connect to test db: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `UPDATE media_items SET added_at = NOW() + $2::interval WHERE id = ANY($1)`, ids, shift); err != nil {
+		t.Fatalf("shift added_at of seeded items: %v", err)
+	}
+}
 
 func TestGetSeasons_RatingCeiling(t *testing.T) {
 	f := newRCFixture(t)
@@ -434,6 +453,10 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	if err != nil || defaultProfile == nil {
 		t.Fatalf("load default profile: %v", err)
 	}
+	// Dated two hours ahead, so rows other tests insert at NOW() meanwhile
+	// cannot push these out of the 50-row window; hours, not years, so a row a
+	// killed run leaks ages out of the newest pages within a day.
+	rcShiftAddedAt(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID})
 
 	recent := func(refreshTokenID int64) []*models.MediaItem {
 		t.Helper()
@@ -460,7 +483,8 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 
 	// The ceiling check covers every returned row, whatever else is in the
 	// shared catalog. The id checks rely on this fixture's rows being among the
-	// 50 newest, which holds unless something seeds 50+ newer rows concurrently.
+	// 50 newest, which their future added_at keeps true unless 50+ rows dated
+	// further ahead appear concurrently.
 	restrictedItems := recent(f.restrictedRefreshID)
 	for _, it := range restrictedItems {
 		if !db.RatingAllowed("PG", it.ContentRating) {
@@ -502,12 +526,14 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	// onlyOverToken matches one R title and nothing a PG profile may see.
 	token := "rcsearch" + reqTestSuffix(t)
 	onlyOverToken := "zqonlyover" + reqTestSuffix(t) // shares no prefix with token
+	var seeded []int64
 	seed := func(tok string, typ models.MediaType, rating, name string) *models.MediaItem {
 		t.Helper()
 		it := &models.MediaItem{LibraryID: f.libraryID, Type: typ, Title: tok + " " + name, SortTitle: tok + " " + name, ContentRating: rating}
 		if err := f.q.UpsertMediaItem(ctx, it); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
 		}
+		seeded = append(seeded, it.ID)
 		return it
 	}
 	pgItem := seed(token, models.MediaMovie, "PG", "allowed")
@@ -524,6 +550,7 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	for i := 0; i <= crowdFetch; i++ {
 		seed(crowdToken, models.MediaMovie, "R", fmt.Sprintf("r%d", i))
 	}
+	rcShiftAddedAt(t, "-30 days", seeded)
 	allowed, overR, overTVMA, unrated := pgItem.ID, rItem.ID, tvmaItem.ID, unratedItem.ID
 
 	// search returns the served ids and the X-Search-Mode the handler

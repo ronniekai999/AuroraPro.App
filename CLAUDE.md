@@ -182,8 +182,9 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - Watch parties: creating one applies no ceiling, and changing a party's
     media skips its ceiling check when the media or profile lookup errors or
     finds nothing; both are persisted.
-  - Any session on the account can change any of its profiles' ceilings (no
-    PIN).
+  - No PIN anywhere: any session on the account can change any of its
+    profiles' ceilings, and `ActivateProfile` checks only ownership, so a
+    restricted session can switch itself to an unrestricted profile.
 
 ### Member profiles and follows
 

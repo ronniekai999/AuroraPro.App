@@ -8,6 +8,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -79,10 +80,14 @@ func TestGetRecentMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRecentMedia (restricted): %v", err)
 	}
+	// Concurrent runs of this test seed the same shape, and their G rows tie
+	// with this one in the three-row page, so any run's fixture G row counts:
+	// each sits behind its own run's five newer R rows, so a filter applied
+	// after LIMIT keeps none of them.
 	sawAllowed := false
 	for _, it := range restricted {
 		switch {
-		case it.ID == allowed:
+		case it.ID == allowed || (strings.HasPrefix(it.Title, "RecentCeiling ") && it.ContentRating == "G"):
 			sawAllowed = true
 		case overCeiling[it.ID]:
 			t.Errorf("PG ceiling returned R-rated item %d", it.ID)
@@ -91,7 +96,7 @@ func TestGetRecentMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 		}
 	}
 	if !sawAllowed {
-		t.Errorf("PG ceiling with limit 3 omitted the G-rated item %d behind five newer R-rated items — "+
+		t.Errorf("PG ceiling with limit 3 returned no fixture G row (this run's is %d) behind five newer R-rated items — "+
 			"the ceiling must be applied before LIMIT, not after", allowed)
 	}
 
