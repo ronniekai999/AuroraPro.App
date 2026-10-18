@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -259,8 +260,61 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		strings.Join(setClauses, ", "), idx)
 	args = append(args, profileID)
 
-	_, err := q.pool.Exec(ctx, query, args...)
-	return err
+	if req.MaxAgeRating == nil || *req.MaxAgeRating == "" {
+		_, err := q.pool.Exec(ctx, query, args...)
+		return err
+	}
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := keepAnUnrestrictedProfile(ctx, tx, profileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, query, args...); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ErrLastUnrestrictedProfile refuses a write that would leave an account with
+// no profile free of a content rating limit. Only a session acting as such a
+// profile can manage profiles, so nothing on that account could lift a limit
+// or add a profile again, and the account password, which unlocks any locked
+// profile, would have nothing left to unlock.
+var ErrLastUnrestrictedProfile = errors.New("the account's last profile without a content rating limit")
+
+// keepAnUnrestrictedProfile returns ErrLastUnrestrictedProfile when profileID
+// has no limit and no other profile on its account is free of one, so a
+// write that gives it a limit, or deletes it, must be refused. It locks the
+// account's user row first, so two such writes cannot each see the other's
+// profile as the one left free. A profile that already has a limit passes:
+// re-sending a limit is how a restricted session's own edits round-trip it.
+func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
+		WHERE p.id = $1 FOR UPDATE OF u`, profileID); err != nil {
+		return err
+	}
+	var last bool
+	err := tx.QueryRow(ctx, `
+		SELECT NULLIF(btrim(p.max_age_rating), '') IS NULL
+		       AND NOT EXISTS (
+		         SELECT 1 FROM user_profiles o
+		         WHERE o.user_id = p.user_id AND o.id <> p.id
+		           AND NULLIF(btrim(o.max_age_rating), '') IS NULL)
+		FROM user_profiles p WHERE p.id = $1`, profileID).Scan(&last)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if last {
+		return ErrLastUnrestrictedProfile
+	}
+	return nil
 }
 
 // DeleteProfile deletes a non-default profile. Every session bound to it goes
@@ -270,21 +324,36 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 // session rows (not just unbinding them) means a still-valid access token of
 // theirs finds no row, which resolves to the most restrictive profile; the
 // devices sign in again.
+//
+// It refuses (ErrLastUnrestrictedProfile) to delete the account's last profile
+// without a content rating limit.
 func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, error) {
-	tag, err := q.pool.Exec(ctx,
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := keepAnUnrestrictedProfile(ctx, tx, profileID); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx,
 		"DELETE FROM user_profiles WHERE id = $1 AND is_default = FALSE", profileID)
 	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
 }
 
-// SetDefaultProfile makes profileID the account's default. A live session
-// with no binding acts as the default, so it is first bound to the OLD
-// default: re-defaulting must not move another device onto a profile, locked
-// or not, that it never switched to. The user row is locked like
-// RotateRefreshToken locks it, so a rotation cannot slip an unbound row in
-// between.
+// SetDefaultProfile makes profileID the account's default. A session with no
+// binding acts as the default, so it is first bound to the OLD default:
+// re-defaulting must not move another device onto a profile, locked or not,
+// that it never switched to. Revoked rows are bound too, because an access
+// token outlives its row's rotation and resolves through it. The user row is
+// locked like RotateRefreshToken locks it, so a rotation cannot slip an
+// unbound row in between.
 func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64) error {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
@@ -298,7 +367,7 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 	_, err = tx.Exec(ctx, `
 		UPDATE refresh_tokens SET active_profile_id =
 		  (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE)
-		WHERE user_id = $1 AND active_profile_id IS NULL AND NOT revoked`, userID)
+		WHERE user_id = $1 AND active_profile_id IS NULL`, userID)
 	if err != nil {
 		return err
 	}

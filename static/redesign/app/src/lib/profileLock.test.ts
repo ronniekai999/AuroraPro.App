@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activateProfile, APIError, getActiveProfile, profileErrorReason, setProfilePin, type Profile } from './api'
-import { isRestrictedProfile, loadStartupProfiles, openDoorProfiles, readSessionProfile, resolveStartupProfile } from './profileSession'
+import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, openDoorProfiles, readSessionProfile, resolveStartupProfile } from './profileSession'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `p${id}`, is_default: false, created_at: '', updated_at: '', ...extra,
@@ -210,5 +210,22 @@ describe('openDoorProfiles', () => {
     expect(names([locked, tv14, tvy])).toEqual(['teen', 'little'])
     // Profiles sharing one limit are no door to each other.
     expect(names([locked, tvy, tvy2])).toEqual([])
+  })
+})
+
+describe('isSoleUnrestrictedProfile', () => {
+  it('is true only for the one profile without a limit', () => {
+    const parent = profile(1)
+    const kid = profile(2, { max_age_rating: 'PG' })
+    const spare = profile(3, { max_age_rating: ' ' })
+    expect(isSoleUnrestrictedProfile([parent, kid], 1)).toBe(true)
+    expect(isSoleUnrestrictedProfile([parent, kid], 2)).toBe(false)
+    // A profile with a limit is never the one without, even with no other.
+    expect(isSoleUnrestrictedProfile([kid, profile(4, { max_age_rating: 'TV-14' })], 2)).toBe(false)
+    // A blank limit is no limit, so the parent is no longer the only one.
+    expect(isSoleUnrestrictedProfile([parent, kid, spare], 1)).toBe(false)
+    expect(isSoleUnrestrictedProfile([parent], 1)).toBe(true)
+    expect(isSoleUnrestrictedProfile([parent, kid], null)).toBe(false)
+    expect(isSoleUnrestrictedProfile([parent, kid], 9)).toBe(false)
   })
 })

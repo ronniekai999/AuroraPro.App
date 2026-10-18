@@ -128,6 +128,13 @@ func (h *ProfileHandler) requireUnrestricted(w http.ResponseWriter, r *http.Requ
 	return acting, true
 }
 
+// denyLastUnrestricted refuses a write that would leave the account no
+// profile without a content rating limit (db.ErrLastUnrestrictedProfile).
+func denyLastUnrestricted(w http.ResponseWriter) {
+	writeErrorReason(w, http.StatusConflict, "last_unrestricted_profile",
+		"an account keeps at least one profile without a content rating limit; add one first")
+}
+
 // actingProfileResolver is the one query denyRestrictedSession needs.
 type actingProfileResolver interface {
 	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
@@ -469,6 +476,10 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {
+		if errors.Is(err, db.ErrLastUnrestrictedProfile) {
+			denyLastUnrestricted(w)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
 		return
 	}
@@ -517,6 +528,10 @@ func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := h.queries.DeleteProfile(r.Context(), profileID)
 	if err != nil {
+		if errors.Is(err, db.ErrLastUnrestrictedProfile) {
+			denyLastUnrestricted(w)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to delete profile")
 		return
 	}

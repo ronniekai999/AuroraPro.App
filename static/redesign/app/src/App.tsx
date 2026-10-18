@@ -106,7 +106,7 @@ import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
+import { isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
@@ -2292,12 +2292,21 @@ export default function App() {
   // on a switch once activateProfile resolves (switchProfile below). It used
   // to change first, with activation fire-and-forget, so a failed call left a
   // kid's UI showing the kid profile while the server enforced the parent's.
-  // It starts null, so nothing personalized loads for a guessed profile.
-  // localStorage remembers the last choice, only so a new login (which binds
-  // the account default) can re-select it; it used to seed activeProfileId,
-  // which fetched for the remembered profile before the binding was read, and
-  // kept it for the tab's life when the profile list failed to load.
+  // It starts null, and nothing personalized loads until it is known
+  // (personalProfileReady below). localStorage remembers the last choice, only
+  // so a new login (which binds the account default) can re-select it; it
+  // used to seed activeProfileId, which fetched for the remembered profile
+  // before the binding was read, and kept it for the tab's life when the
+  // profile list failed to load.
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  // Personalized content (the hero, the personalized Home rails, Continue
+  // Watching, taste onboarding) loads only once the session's profile is
+  // known, or the account has no profile to know. A request sent before then
+  // carries no profile_id, and some routes answer that for the account
+  // default: a kid's Home showed the parent's hero pick on every load. While
+  // the binding is unknown, or the profile list failed to load, nothing
+  // personalized loads at all.
+  const personalProfileReady = activeProfileId !== null || (profilesLoaded && profiles.length === 0)
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2780,6 +2789,8 @@ export default function App() {
   // Ref to read latest heroPool from the home-rails effect without
   // adding it to deps (which would re-fetch rails on every rotate).
   const heroPoolRef = useRef<HeroPick[]>([])
+  // Counts hero pool requests; only the latest one's answer lands.
+  const heroLoadRef = useRef(0)
   // Throttle the "no file available" toast (episode_id → last-shown
   // ms). 2s cooldown dedupes accidental double-clicks while still
   // letting a genuine later click re-fire.
@@ -4062,11 +4073,12 @@ export default function App() {
   // Stage 3 — manual "Refresh picks": force a server rebuild, then let the
   // discover_ready push / poll deliver the fresh rails.
   const handleRefreshRecs = useCallback(async () => {
+    if (!personalProfileReady) return
     setRecsRefreshing(true)
     addToast('Refreshing your picks…', 'info')
     await refetchDiscover(activeProfileId, true)
     setRecsRefreshing(false)
-  }, [activeProfileId, refetchDiscover, addToast])
+  }, [activeProfileId, personalProfileReady, refetchDiscover, addToast])
 
   useEffect(() => {
     if (!user) return
@@ -4186,6 +4198,7 @@ export default function App() {
           // until a full page reload.
           setDiscoverBuilding(false)
         }
+        if (!personalProfileReady) return
 
         // Fast rails (pure vector + first-party engagement signals, no LLM).
         // Fire-and-forget: splice in as soon as they resolve, AbortController
@@ -4242,7 +4255,7 @@ export default function App() {
       cancelled = true
       ac.abort()
     }
-  }, [user, retryNonce, activeProfileId, homeReloadNonce])
+  }, [user, retryNonce, activeProfileId, personalProfileReady, homeReloadNonce])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -5348,10 +5361,15 @@ export default function App() {
 
   // Personalized hero from /api/me/hero. 503 = no recommender; we
   // fall back to listRecent[0] (set in the home-rails effect).
+  //
+  // Only the latest request lands (heroLoadRef): a slower answer for the
+  // previous profile used to overwrite the new one's.
   const reloadHeroPool = useCallback(async (refresh: boolean) => {
-    if (!user) return
+    if (!user || !personalProfileReady) return
+    const load = ++heroLoadRef.current
     try {
       const resp = await getHeroPool(refresh, activeProfileId ?? undefined)
+      if (load !== heroLoadRef.current) return
       heroPoolRef.current = resp.picks
       setHeroPool(resp.picks)
       setHeroPersonalization(resp.personalization)
@@ -5365,6 +5383,7 @@ export default function App() {
       // displayed hero is still the previous pool pick — not catalog
       // filler — so the existing label remains correct.
     } catch {
+      if (load !== heroLoadRef.current) return
       // Non-fatal — keep whatever hero we had (listRecent fallback
       // from home-rails effect).
       heroPoolRef.current = []
@@ -5372,7 +5391,25 @@ export default function App() {
       setHeroPersonalization(null)
       setHeroSlateToken(undefined)
     }
-  }, [user, activeProfileId])
+  }, [user, activeProfileId, personalProfileReady])
+  // A switch clears the previous profile's hero: an empty or failed pool for
+  // the new profile leaves homeHero as it is, which kept the old profile's
+  // pick on screen. The home-rails effect then puts the catalog fallback up
+  // until the new pool lands.
+  const heroProfileRef = useRef<number | null>(null)
+  useEffect(() => {
+    const prev = heroProfileRef.current
+    heroProfileRef.current = activeProfileId
+    if (prev === null || prev === activeProfileId) return
+    heroLoadRef.current++
+    heroPoolRef.current = []
+    setHeroPool([])
+    setHeroPersonalization(null)
+    setHeroSlateToken(undefined)
+    setHeroIndex(0)
+    setHomeHero(null)
+    setHomeHeroIsFallback(false)
+  }, [activeProfileId])
   // homeReloadNonce is deliberately a dependency (trigger-only, like the
   // home-rails and continue-watching effects): the hero was the ONE home
   // surface that never refetched after first load, so a star rating or 👎
@@ -5561,7 +5598,7 @@ export default function App() {
   // this, opening detail for the 13th+ most-recent in-progress title
   // silently lost the Resume affordance and Play restarted at 0:00.
   useEffect(() => {
-    if (!user) return
+    if (!user || !personalProfileReady) return
     let cancelled = false
     const ac = new AbortController()
     listContinueWatching(50, activeProfileId ?? undefined, ac.signal)
@@ -5576,7 +5613,7 @@ export default function App() {
     // 2026-05-27 — Re-runs on retryNonce (Retry button bumps both
     // home + CW) AND on cwReloadNonce (player-close bumps only CW so
     // the Resume label freshens without re-fetching home rails).
-  }, [user, retryNonce, cwReloadNonce, activeProfileId, homeReloadNonce])
+  }, [user, retryNonce, cwReloadNonce, activeProfileId, personalProfileReady, homeReloadNonce])
 
   // 2026-05-27 — Bug-report feature-flag probe. Single fetch on user
   // login; the flag is server-config-driven (env var only) so it
@@ -5841,7 +5878,7 @@ export default function App() {
             // onboarding it kicks off.
             onAddProfile={() => handleNavigate('settings')}
             onOpenProfilesGate={() => setProfilesGateForced(true)}
-            avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
+            avatarUrl={profiles.find(p => p.id === activeProfileId)?.avatar_url}
             onSignOut={() => { void handleLogout() }}
           />
         </div>{/* /sticky stack */}
@@ -6540,13 +6577,17 @@ export default function App() {
       )}
 
       {/* Taste onboarding ("Pick What You Love") — self-gating: renders only
-          when the active/default profile is eligible and hasn't completed it.
+          when the active profile is eligible and hasn't completed it, and
+          mounts only once that profile is known (personalProfileReady).
           Existing users get prompted once at next login. */}
-      <TasteOnboardingGate
-        profileId={activeProfileId}
-        profile={profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0] ?? null}
-        onComplete={() => window.location.reload()}
-      />
+      {personalProfileReady && (
+        <TasteOnboardingGate
+          profileId={activeProfileId}
+          profile={profiles.find(p => p.id === activeProfileId) ?? null}
+          soleUnrestricted={isSoleUnrestrictedProfile(profiles, activeProfileId)}
+          onComplete={() => window.location.reload()}
+        />
+      )}
 
       {collectionsModalOpen && (
         <CollectionsModal

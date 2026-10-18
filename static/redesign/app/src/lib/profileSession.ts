@@ -17,6 +17,15 @@ export function isRestrictedProfile(p: Pick<Profile, 'max_age_rating'> | null | 
   return !!p?.max_age_rating?.trim()
 }
 
+/** Whether id is the account's only profile without a content limit. The
+ * server refuses to give that profile a limit, or to delete it (409
+ * last_unrestricted_profile): only a session acting as such a profile can
+ * manage profiles, so an account with none could never lift a limit again. */
+export function isSoleUnrestrictedProfile(profiles: Profile[], id: number | null): boolean {
+  const own = profiles.find(p => p.id === id)
+  return !!own && !isRestrictedProfile(own) && !profiles.some(p => p.id !== id && !isRestrictedProfile(p))
+}
+
 /** The unlocked profiles a restricted profile could switch into to loosen its
  * limit: any without a limit, and any whose limit differs from some
  * restricted profile's. The app has no rating ladder of its own (the

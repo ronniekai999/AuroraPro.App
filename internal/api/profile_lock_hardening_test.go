@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
+	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -494,13 +495,173 @@ func TestReDefaultingDoesNotMoveUnboundSessions(t *testing.T) {
 		}
 	}
 	unbound := seedRCRefreshToken(t, f.q, f.userID)
-	if got := f.acting(t, unbound); got != f.kid.ID {
-		t.Fatalf("precondition: the unbound session acts as %d, want the kid (%d)", got, f.kid.ID)
+	// A rotated row: revoked, but its access tokens still resolve through it.
+	rotated := seedRCRefreshToken(t, f.q, f.userID)
+	if _, err := pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE id = $1`, rotated); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	for _, rt := range []int64{unbound, rotated} {
+		if got := f.acting(t, rt); got != f.kid.ID {
+			t.Fatalf("precondition: unbound session %d acts as %d, want the kid (%d)", rt, got, f.kid.ID)
+		}
 	}
 	if code, _, body := f.call(t, f.h.SetDefault, http.MethodPost, f.parentRT, f.parent.ID, ""); code != http.StatusOK {
 		t.Fatalf("the parent re-defaulting to itself: %d %s", code, body)
 	}
 	if got := f.acting(t, unbound); got != f.kid.ID {
 		t.Errorf("after re-defaulting, the kid's unbound session acts as %d, want still the kid (%d)", got, f.kid.ID)
+	}
+	if got := f.acting(t, rotated); got != f.kid.ID {
+		t.Errorf("after re-defaulting, a rotated unbound session acts as %d, want still the kid (%d)", got, f.kid.ID)
+	}
+}
+
+// TestAnAccountKeepsAProfileWithoutALimit: only a session acting as a profile
+// without a limit can manage profiles, so an account whose every profile had
+// one could never lift a limit or add a profile again. Onboarding's age step
+// did that to a single-profile account in one move. A limit on, or the delete
+// of, the account's last such profile is refused.
+func TestAnAccountKeepsAProfileWithoutALimit(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	ceiling := func(id int64) string {
+		t.Helper()
+		p, err := f.q.GetProfile(ctx, id)
+		if err != nil || p == nil {
+			t.Fatalf("read profile %d: %v", id, err)
+		}
+		return p.MaxAgeRating
+	}
+
+	// The parent is the only profile without a limit.
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, f.parentRT, f.parent.ID,
+		`{"max_age_rating":"PG"}`); code != http.StatusConflict || reason != "last_unrestricted_profile" {
+		t.Errorf("a limit on the last profile without one: %d %q, want 409 last_unrestricted_profile", code, reason)
+	}
+	if got := ceiling(f.parent.ID); got != "" {
+		t.Fatalf("the refused write still set the parent's limit to %q", got)
+	}
+
+	// With a second unrestricted profile the parent can take a limit, and the
+	// spare is then the last one.
+	spare := &models.UserProfile{UserID: f.userID, Name: "spare", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, spare); err != nil {
+		t.Fatalf("seed spare profile: %v", err)
+	}
+	spareRT := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, spareRT, spare.ID)
+	if code, _, body := f.call(t, f.h.UpdateProfile, http.MethodPut, f.parentRT, f.parent.ID,
+		`{"max_age_rating":"TV-14"}`); code != http.StatusOK {
+		t.Fatalf("a limit on the parent while the spare has none: %d %s", code, body)
+	}
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, spareRT, spare.ID,
+		`{"max_age_rating":"PG"}`); code != http.StatusConflict || reason != "last_unrestricted_profile" {
+		t.Errorf("a limit on the spare, now the last without one: %d %q, want 409", code, reason)
+	}
+	if code, reason, _ := f.call(t, f.h.DeleteProfile, http.MethodDelete, spareRT, spare.ID, ""); code != http.StatusConflict || reason != "last_unrestricted_profile" {
+		t.Errorf("deleting the last profile without a limit: %d %q, want 409", code, reason)
+	}
+	if p, err := f.q.GetProfile(ctx, spare.ID); err != nil || p == nil || p.MaxAgeRating != "" {
+		t.Fatalf("the spare after the refusals: %+v, %v; want it kept without a limit", p, err)
+	}
+	// Clearing a limit is never refused.
+	if code, _, body := f.call(t, f.h.UpdateProfile, http.MethodPut, spareRT, f.parent.ID,
+		`{"max_age_rating":""}`); code != http.StatusOK {
+		t.Errorf("clearing the parent's limit: %d %s", code, body)
+	}
+
+	// An account already left with no such profile (data from before the
+	// rule) still lets a restricted session save its own settings, which
+	// round-trip its unchanged limit.
+	if _, err := lockTestPool(t).Exec(ctx,
+		`UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatalf("restrict every profile: %v", err)
+	}
+	if code, _, body := f.call(t, f.h.UpdateProfile, http.MethodPut, f.kidRT, f.kid.ID,
+		`{"name":"kiddo","max_age_rating":"PG"}`); code != http.StatusOK {
+		t.Errorf("a restricted session's own edit, re-sending its limit: %d %s", code, body)
+	}
+}
+
+// TestTheLastUnrestrictedCheckWaitsForTheAccountLock: two writes, each giving
+// a limit to one of the account's last two profiles without one, must not
+// both pass. The check locks the account's user row first; here another
+// transaction holds a share lock on it while it limits one of them, and the
+// write on the other must wait, then see that limit and refuse.
+func TestTheLastUnrestrictedCheckWaitsForTheAccountLock(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	spare := &models.UserProfile{UserID: f.userID, Name: "spare", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, spare); err != nil {
+		t.Fatalf("seed spare profile: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, f.userID); err != nil {
+		t.Fatalf("lock the user row: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE id = $1`, spare.ID); err != nil {
+		t.Fatalf("limit the spare: %v", err)
+	}
+
+	pg := "PG"
+	done := make(chan error, 1)
+	go func() { done <- f.q.UpdateProfile(ctx, f.parent.ID, &models.UpdateProfileRequest{MaxAgeRating: &pg}) }()
+	var result error
+	finished := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		select {
+		case result = <-done:
+			finished = true
+		default:
+		}
+		if finished {
+			break
+		}
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF u%')`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if !finished {
+		result = <-done
+	}
+	if !errors.Is(result, db.ErrLastUnrestrictedProfile) {
+		t.Errorf("the parent's limit while the spare's was being set: %v; want ErrLastUnrestrictedProfile", result)
+	}
+	if p, err := f.q.GetProfile(ctx, f.parent.ID); err != nil || p == nil || p.MaxAgeRating != "" {
+		t.Errorf("the parent after the race: %+v, %v; want no limit", p, err)
+	}
+}
+
+// TestAnExpiredLockoutReLocksOnTheNextMiss: the attempt counter is not reset
+// when a lockout ends, so after one lockout each further miss locks again.
+// The documented guessing rate depends on it.
+func TestAnExpiredLockoutReLocksOnTheNextMiss(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	for i := 0; i < profilePINMaxFailures; i++ {
+		f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"0000"}`)
+	}
+	if _, err := lockTestPool(t).Exec(context.Background(),
+		`UPDATE user_profiles SET pin_locked_until = NOW() - interval '1 second' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("end the lockout: %v", err)
+	}
+	f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"0000"}`)
+	if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"4321"}`); code != http.StatusTooManyRequests || reason != "profile_pin_locked" {
+		t.Errorf("the right PIN after one miss past an expired lockout: %d %q, want 429 profile_pin_locked", code, reason)
 	}
 }

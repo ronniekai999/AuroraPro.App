@@ -87,6 +87,11 @@ func TestUpdateProfile_MaxAgeRatingValidatedAndInvalidatesHero(t *testing.T) {
 	q := requireRequestTestDB(t)
 	userID := seedReqUser(t, q)
 	ctx := context.Background()
+	// The parent keeps the account a profile without a ceiling, which a
+	// ceiling on its only profile would take away (409).
+	if _, err := q.CreateDefaultProfileForUser(ctx, userID, "parent"); err != nil {
+		t.Fatalf("seed parent profile: %v", err)
+	}
 	p := &models.UserProfile{UserID: userID, Name: "kid", Language: "en", SubtitleMode: "off"}
 	if err := q.CreateProfile(ctx, p); err != nil {
 		t.Fatalf("seed profile: %v", err)

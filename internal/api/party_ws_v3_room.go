@@ -318,6 +318,11 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// server-side, so this is the only path that needs the guard.
 			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
 			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
+			if caller == nil {
+				// The connect-time lookup failed; one failure must not
+				// turn the check off for the socket's life.
+				caller = h.manager.CallerProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+			}
 			if err := h.manager.ChangeMedia(code, claims.UserID, caller, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))
 			}

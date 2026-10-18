@@ -163,8 +163,10 @@ export function ProfilesGate({
   // Escape dismisses only when the gate was opened BY HAND. On a first visit it
   // is a genuine gate — dismissing it without a choice would leave the app
   // running as whichever profile happened to be stored, which is the ambiguity
-  // the gate exists to remove.
-  const dismissable = forced
+  // the gate exists to remove. Nor when no profile is active: the host forces
+  // the gate open when it could not read the session's binding, and there is
+  // no current profile to keep watching as.
+  const dismissable = forced && activeProfileId !== null
 
   return (
     <div

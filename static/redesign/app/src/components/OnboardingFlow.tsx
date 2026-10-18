@@ -49,6 +49,9 @@ interface OnboardingFlowProps {
   taste: boolean
   /** Server-decided referral prompt state. Absent/not-pending hides the step. */
   referral?: ReferralPromptState | null
+  /** The profile is the account's only one without a content limit, which
+   *  the server refuses to give one (see onboardingProfilePatch). */
+  soleUnrestricted?: boolean
   /** Called once everything is persisted and the rails are warmed. */
   onDone: () => void
 }
@@ -81,13 +84,17 @@ function ratingForAge(age: number): {
 // settings (the age-derived ceiling and tone lean) ride along only when the
 // age slider was moved, and never for a profile that already has a ceiling:
 // the server refuses a restricted profile's ceiling change, and the slider is
-// disabled for one.
-export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked }: {
+// disabled for one. The account's only profile without a ceiling gets the
+// tone lean but no ceiling: the server refuses that too, since nothing on an
+// account whose every profile is restricted could lift a limit again, and a
+// single-profile account used to get there in one move of this slider.
+export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked, soleUnrestricted = false }: {
   name: string
   avatarId: string | null
   age: number
   ageTouched: boolean
   ceilingLocked: boolean
+  soleUnrestricted?: boolean
 }): { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } {
   const patch: { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } = {
     name: name.trim(),
@@ -95,7 +102,7 @@ export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilin
   }
   if (ageTouched && !ceilingLocked) {
     const r = ratingForAge(age)
-    patch.max_age_rating = r.maxRating
+    if (!soleUnrestricted) patch.max_age_rating = r.maxRating
     patch.maturity_pref = r.maturityPref
   }
   return patch
@@ -121,7 +128,7 @@ function ageForRating(maxRating?: string | null): number {
   return 24 // R / TV-MA / NC-17 / unknown → adult
 }
 
-export function OnboardingFlow({ profileId, profile, status, taste, referral, onDone }: OnboardingFlowProps) {
+export function OnboardingFlow({ profileId, profile, status, taste, referral, soleUnrestricted = false, onDone }: OnboardingFlowProps) {
   const minPicks = status.min_picks ?? 5
   const previewThreshold = status.threshold ?? 3
 
@@ -463,7 +470,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
         // moved the age slider — so a returning profile that breezes past the
         // pre-filled age keeps its existing rating/tone (e.g. a kids profile is
         // never silently un-restricted).
-        const patch = onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked })
+        const patch = onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked, soleUnrestricted })
         // The critical writes + a best-effort hero warm:
         //  1) persist identity (+ content settings when the age step was used),
         //  2) save taste seeds — flips taste_onboarding_completed, mirrors picks to
@@ -723,6 +730,8 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
 
   function renderAge() {
     const r = ratingForAge(age)
+    // What a limit-free sole profile gets is the lean alone, so say so.
+    const noLimit = soleUnrestricted && !ceilingLocked && r.maxRating !== ''
     const pct = ((age - 4) / (80 - 4)) * 100
     return (
       <div className="text-center">
@@ -733,7 +742,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
         <p className="mx-auto mt-3 max-w-sm text-[0.95rem] leading-relaxed text-white/55">
           {ceilingLocked
             ? `This profile has a content limit (${profile?.max_age_rating}), so its age can’t be changed here.`
-            : 'This tailors your recommendations and keeps things age-appropriate.'}
+            : noLimit
+              ? 'This is the account’s only profile without a content limit, so your age tunes what’s recommended but sets no limit. To limit what a child sees, give them their own profile.'
+              : 'This tailors your recommendations and keeps things age-appropriate.'}
         </p>
         <div
           className="font-display mt-6 bg-gradient-to-b from-white to-[#d8b4fe] bg-clip-text text-[clamp(3.2rem,10vw,5rem)] font-bold leading-none text-transparent"
@@ -749,7 +760,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
             {r.tier}
           </span>
           <span className="h-1 w-1 rounded-full bg-white/30" />
-          <span className="text-[0.74rem] text-white/55">{r.tag}</span>
+          <span className="text-[0.74rem] text-white/55">{noLimit ? 'No content limit' : r.tag}</span>
         </div>
         <input
           type="range"

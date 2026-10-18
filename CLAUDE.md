@@ -209,8 +209,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   password is the recovery path, by the owner's choice. Making a locked
   profile the default (`SetDefault`) needs the same, since every session with
   no binding acts as the default, and `SetDefaultProfile` first binds the
-  account's live unbound sessions to the old default, so re-defaulting moves
-  no other device.
+  account's unbound sessions to the old default (revoked rows too: an access
+  token resolves through its row after rotation), so re-defaulting moves no
+  other device.
 - PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
   refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
   check let concurrent guesses all pass the lockout read; a review drove 40
@@ -235,6 +236,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   identity (a fresh sign-in through a new link would land on the default
   without its PIN). These checks fail closed when the acting profile cannot be
   resolved.
+- An account keeps at least one profile without a ceiling: a ceiling on its
+  last one, or that profile's delete, is a 409 `last_unrestricted_profile`
+  (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
+  writes cannot each count the other's profile as the one left). Without it
+  nothing on the account could manage profiles again, and onboarding's age
+  step reached that on a single-profile account in one move; that step now
+  gives the account's only such profile the tone lean and no ceiling. A
+  profile that already has a ceiling passes, so a restricted session's own
+  edits still round-trip it.
 - The acting profile must not degrade to the account default for a session
   the server has lost. Revoked session rows are kept until `revoked_at` is
   older than the access-token lifetime (migration 061, `PurgeExpiredTokens`),
@@ -246,7 +256,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   a refresh or a switch. A long-lived socket resolves its profile once, at
   connect (`Manager.CallerProfile`): the session row it names is rotated and
   purged while the socket stays open, and would then resolve to the most
-  restrictive profile.
+  restrictive profile. A failed connect-time lookup is retried at the next
+  change-media rather than leaving the check off for the socket's life.
 - Binding a revoked (rotated) session row is refused (409): rotation already
   copied the old binding to its successor, so the write changed nothing that
   lasted. The SPA refreshes and retries once.
@@ -257,13 +268,20 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   and changes its display only after activation resolves, one switch at a
   time. It used to switch locally and activate fire-and-forget, so a failed
   call left a kid's UI on the kid profile while the server enforced the
-  parent's ceiling. When the binding cannot be read it shows no profile and
-  opens the picker, rather than guessing the default. Its tab-visibility
+  parent's ceiling. Nothing personalized (hero, personalized rails, Continue
+  Watching, taste onboarding) loads until the session's profile is known
+  (`personalProfileReady`): requests without a `profile_id` are answered for
+  the account default on some routes, so a kid's Home showed the parent's
+  hero pick on every load. When the binding cannot be read it shows no
+  profile and opens the picker, which cannot be left without a pick, rather
+  than guessing the default; if the profile list fails, nothing personalized
+  loads at all. Only the latest hero request lands, and a switch clears the
+  previous profile's hero. Its tab-visibility
   re-read drops an answer once a switch has started since the read. The TV
   stays at the picker until activation succeeds, a refused PIN keeps the
   session's own profile and the page behind the picker, and it does not ask
   for the PIN of the profile the session is bound to (the server would accept
-  any digits).
+  any digits) or label it locked: an unlock lasts the session's life.
 - Known gaps:
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
@@ -275,7 +293,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. So does an account whose every profile is
     restricted: nothing on it can lift a ceiling or create an unrestricted
-    profile.
+    profile. Writes can no longer produce one, but data from before the rule,
+    a backup restore or hand-written SQL can.
   - The admin role is account-level, so a restricted profile on an admin
     account keeps every admin route: it can invite a new, unrestricted
     account or restore a backup. The README tells owners to keep children
@@ -283,7 +302,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50
-    days of continuous attempts.
+    days of continuous attempts, assuming no correct entry in between: a
+    correct PIN or password from anyone resets the count, and a guesser then
+    gets the full five again.
   - Anyone on the account can keep a profile's PIN locked out with one wrong
     guess per 15 minutes; the password is the way past it. A restricted
     session can also keep spending the password budget of the profile it
@@ -310,8 +331,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
     App wiring (the switcher and the picker going through `switchProfile`,
-    and `activeProfileId` starting null) has no App-level test, and the room
-    socket's connect-time profile is pinned only at the manager.
+    `activeProfileId` starting null, the personalized fetches waiting for
+    `personalProfileReady`, and the hero's latest-request guard) has no
+    App-level test, and the room socket's connect-time profile and its retry
+    are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
+    lock either.
   - Account-level actions still open to a restricted session: editing the
     member profile (`PUT /api/me/profile`, whose `share_watch_history`
     switch publishes the default profile's history), push subscriptions, and

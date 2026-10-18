@@ -368,7 +368,7 @@ private fun ProfilesScreen(state: TvState, vm: TvViewModel) {
                         ProfileOrb(profile, 116.dp, focused || state.profile?.id == profile.id)
                         Text(profile.name, fontFamily = AuroraHeading, fontWeight = FontWeight.SemiBold, fontSize = 19.sp, maxLines = 1,
                             overflow = TextOverflow.Ellipsis, color = if (focused) Color.White else Color.White.copy(alpha = .82f))
-                        Text(if (state.profile?.id == profile.id) "Selected" else if (profile.hasPin) "Locked" else if (profile.isDefault) "Default profile" else if (profile.maxAgeRating.isNotBlank()) profile.maxAgeRating else "Profile",
+                        Text(if (state.profile?.id == profile.id) "Selected" else if (profile.hasPin && profile.id != state.boundProfileId) "Locked" else if (profile.isDefault) "Default profile" else if (profile.maxAgeRating.isNotBlank()) profile.maxAgeRating else "Profile",
                             color = if (focused) AuroraColors.Focus else AuroraColors.Muted, fontSize = 12.sp)
                     }
                 }

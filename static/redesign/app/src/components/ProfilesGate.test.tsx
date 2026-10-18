@@ -63,4 +63,20 @@ describe('ProfilesGate', () => {
     expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent('Locked')
     expect(screen.getByRole('radio', { name: /Profile 3/ })).not.toHaveTextContent('Locked')
   })
+
+  // Opened by hand, the gate can be left for the profile already active.
+  // Opened because the session's binding could not be read, there is none,
+  // so it stays until a pick binds one.
+  it('can be left only when a profile is active', () => {
+    const onDismiss = vi.fn()
+    const { rerender } = render(
+      <ProfilesGate profiles={profiles} activeProfileId={1} onSelect={() => true} ready forced onDismiss={onDismiss} />)
+    expect(screen.getByRole('button', { name: /Keep watching as Profile 1/ })).toBeInTheDocument()
+
+    rerender(<ProfilesGate profiles={profiles} activeProfileId={null} onSelect={() => true} ready forced onDismiss={onDismiss} />)
+    expect(screen.queryByRole('button', { name: /Keep watching/ })).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('dialog', { name: "Who's watching?" }), { key: 'Escape' })
+    expect(onDismiss).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: "Who's watching?" })).toBeInTheDocument()
+  })
 })
