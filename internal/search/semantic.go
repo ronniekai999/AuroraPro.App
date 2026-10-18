@@ -64,6 +64,11 @@ type Searcher struct {
 	llm   *llm.Client
 	q     *db.Queries
 	cache *parseCache
+	// testHookLexicalFilter, when set, receives the filter the lexical leg
+	// runs with. Search's output cannot show that leg on a busy catalog (see
+	// lexicalRecall), so this is how a test pins what Search hands it. A field,
+	// not a package variable, so it fires for one Searcher only.
+	testHookLexicalFilter func(db.SemanticFilter)
 }
 
 // New constructs a Searcher. The cache TTL is fixed (10 min) — long enough to
@@ -207,7 +212,13 @@ type Hit struct {
 //   - Embed failure  → return error; caller falls back to trigram.
 //   - Vector failure → return error.
 //   - Rerank failure → return vector-ordered hits with no reasons.
-func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, *ParsedQuery, error) {
+//
+// allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
+// nil or empty = unrestricted). Both recall legs apply it in SQL, so every
+// later stage — fusion, dedup, rerank, the title fallback — only ever sees
+// allowed titles and cannot pick an over-ceiling one. Under the HNSW index the
+// vector leg can return fewer allowed rows than asked for (see SemanticSearch).
+func (s *Searcher) Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]Hit, *ParsedQuery, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -237,8 +248,13 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 	// bug. The one filter we DO keep is media_type, and only when validated —
 	// translated to the media_items.type domain ('show', not 'tv') so a TV-typed
 	// query doesn't filter to `m.type = 'tv'` and match zero rows.
+	//
+	// The rating ceiling is not a relevance filter, so it is exempt from that
+	// reasoning: an over-ceiling title is never a candidate. The lexical leg
+	// takes this same filter.
 	filter := db.SemanticFilter{
-		MediaType: mediaItemsTypeFilter(validMediaType(parsed.MediaType)),
+		MediaType:      mediaItemsTypeFilter(validMediaType(parsed.MediaType)),
+		AllowedRatings: allowedRatings,
 	}
 
 	hits, err := s.q.SemanticSearch(ctx, llm.FormatVector(queryVec), filter, vectorRecallSize)
@@ -252,7 +268,6 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 	// (e.g. "movies like harry potter" → the actual Harry Potter titles). Lexical
 	// hits are type-filtered in Go so a movie query can't pull shows back in via
 	// trigram (preserving the explicit-media-type guarantee). See hybrid.go.
-	wantType := filter.MediaType // "movie" | "show" | ""
 	itemByID := make(map[int64]*models.MediaItem, len(hits))
 	distByID := make(map[int64]float64, len(hits))
 	vecIDs := make([]int64, 0, len(hits))
@@ -263,26 +278,9 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 	}
 	rankedLists := [][]int64{vecIDs}
 	weights := []float64{hybridVectorWeight}
-	for _, lq := range lexicalQueries(parsed.SimilarToTitles, query) {
-		lexItems, lerr := s.q.SearchMedia(ctx, lq, lexicalRecallSize)
-		if lerr != nil {
-			slog.Warn("search: lexical recall failed (continuing)", "q", lq, "error", lerr)
-			continue
-		}
-		ids := make([]int64, 0, len(lexItems))
-		for _, it := range lexItems {
-			if wantType != "" && string(it.Type) != wantType {
-				continue // keep the explicit-media-type filter through the lexical leg
-			}
-			if _, ok := itemByID[it.ID]; !ok {
-				itemByID[it.ID] = it
-			}
-			ids = append(ids, it.ID)
-		}
-		if len(ids) > 0 {
-			rankedLists = append(rankedLists, ids)
-			weights = append(weights, hybridLexicalWeight)
-		}
+	for _, ids := range s.lexicalRecall(ctx, lexicalQueries(parsed.SimilarToTitles, query), filter, itemByID) {
+		rankedLists = append(rankedLists, ids)
+		weights = append(weights, hybridLexicalWeight)
 	}
 
 	fusedIDs := rrfFuse(rankedLists, weights)
@@ -398,6 +396,42 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 		return vectorOrderHits(deduped, distByID, limit), parsed, nil
 	}
 	return out, parsed, nil
+}
+
+// lexicalRecall runs the trigram leg: one ranked id list per query (empty
+// lists dropped), and records each newly seen item in itemByID. It takes the
+// vector leg's own filter, so the two legs cannot disagree about the media
+// type or the rating ceiling. It is separate so the leg can be tested on its
+// own: after fusion, a lexical-only row ranks below vector rank
+// rerankInputCap, so on a catalog with that many embedded rows Search's
+// output cannot show what this leg returned.
+func (s *Searcher) lexicalRecall(ctx context.Context, queries []string, filter db.SemanticFilter, itemByID map[int64]*models.MediaItem) [][]int64 {
+	if s.testHookLexicalFilter != nil {
+		s.testHookLexicalFilter(filter)
+	}
+	wantType := filter.MediaType // "movie" | "show" | ""
+	var lists [][]int64
+	for _, lq := range queries {
+		lexItems, lerr := s.q.SearchMedia(ctx, lq, lexicalRecallSize, filter.AllowedRatings)
+		if lerr != nil {
+			slog.Warn("search: lexical recall failed (continuing)", "q", lq, "error", lerr)
+			continue
+		}
+		ids := make([]int64, 0, len(lexItems))
+		for _, it := range lexItems {
+			if wantType != "" && string(it.Type) != wantType {
+				continue // keep the explicit-media-type filter through the lexical leg
+			}
+			if _, ok := itemByID[it.ID]; !ok {
+				itemByID[it.ID] = it
+			}
+			ids = append(ids, it.ID)
+		}
+		if len(ids) > 0 {
+			lists = append(lists, ids)
+		}
+	}
+	return lists
 }
 
 // vectorOrderHits is the rerank-failure fallback: deduped items in their

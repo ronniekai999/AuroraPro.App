@@ -1,0 +1,10 @@
+{
+  "sha": "bd0a8c94f99d68d00a76fbaa5bfda61cc0ab53f4",
+  "verdict": "lows-only",
+  "summary": "Search and AI-collection-seeding parental ceiling plus max_age_rating validation, full diff origin/main..bd0a8c9. Search applies the acting profile's ceiling (ResolveActingProfile, never client profile_id/max_rating) in SQL before LIMIT on the trigram, semantic (vector and lexical recall legs) and trigram-rescue branches, with a RatingAllowed re-check of semantic hits; AI seeding passes the creator's ceiling and skips seeding on a resolve error; max_age_rating canonicalized on write (unknown = 400) and at boot (unknown = G). Passes 1-11 alternated fix-first/lows-only; pass 11 (b9b7304) fix-first: README overstated coverage, an unrated mutation escaped 37/150 under concurrency, the Recent handler was unpinned for filter-before-LIMIT/unrated, crowd rows broke the stale-metadata tests. Pass 12 (d2220d6) verified all four fixed under concurrent load (mutations killed 100-150/150) and found 2 lows (README unfiltered list read as complete; two stale comments); pass 13 (bd0a8c9) verified both fixed. Open, deferred: README's bare 'search' should read 'library search' (Requests TMDB search is unfiltered), the Watch together card also lists scheduled parties, and one test comment misstates the api PG row's date (+2h). Full go test -count=1 ./... green against Postgres 16 + pgvector 0.6. Known gaps stay listed in CLAUDE.md: no PIN, ?profile_id= resolvers, unfiltered listings and by-id lookups.",
+  "reviewer": "independent-subagent-general-purpose (fresh-context read-only, 13 passes)",
+  "findings": "3",
+  "diff_digest": "867fbe1087ea9e6432cdc01988e0320813c44b4e1e0295ec9023ce57a768f235",
+  "branch": "claude/gifted-hopper-rfs4s9",
+  "recorded_at": "2026-10-18T05:53:14Z"
+}

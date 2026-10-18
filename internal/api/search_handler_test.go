@@ -29,15 +29,19 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 )
 
-// fakeSemantic is a controllable SemanticSearcher for routing tests.
+// fakeSemantic is a controllable SemanticSearcher for routing tests. It
+// records the rating ceiling it was handed and does NOT apply it, so a test
+// can check both what the handler passes and what it serves.
 type fakeSemantic struct {
-	hits   []SemanticHit
-	err    error
-	called bool
+	hits           []SemanticHit
+	err            error
+	called         bool
+	allowedRatings []string
 }
 
-func (f *fakeSemantic) Search(_ context.Context, _ string, _ int) ([]SemanticHit, error) {
+func (f *fakeSemantic) Search(_ context.Context, _ string, _ int, allowedRatings []string) ([]SemanticHit, error) {
 	f.called = true
+	f.allowedRatings = allowedRatings
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -87,7 +91,9 @@ func TestSearchHandler_Routing(t *testing.T) {
 		if fake != nil {
 			h.SetSemanticSearcher(fake)
 		}
-		req := httptest.NewRequest(http.MethodGet, "/api/media/search?"+rawQuery, nil)
+		// No session binding and no profile rows: the account resolves to an
+		// unrestricted acting profile, so routing is tested without a ceiling.
+		req := rcClaimsCtx(httptest.NewRequest(http.MethodGet, "/api/media/search?"+rawQuery, nil), userID, 0)
 		rec := httptest.NewRecorder()
 		h.Search(rec, req)
 		var got []*models.MediaItem
@@ -108,10 +114,12 @@ func TestSearchHandler_Routing(t *testing.T) {
 	}
 	// SearchMedia scans the whole catalog (no library_id filter), so a fixed
 	// gibberish string could in theory be matched by a stray row on a shared
-	// CI database. Embedding the per-test random suffix makes the query
-	// globally unique — it cannot be a substring of, or trigram-similar to,
-	// any pre-existing title/overview.
-	noMatch := "zqxvno" + suffix + "match"
+	// CI database. A fresh random suffix makes the query globally unique — it
+	// cannot be a substring of, or trigram-similar to, any pre-existing
+	// title/overview. It must NOT be the titles' suffix: sixteen shared hex
+	// characters made it trigram-similar to this test's own rows, so the
+	// fallback subtest below skipped on every run.
+	noMatch := "zqxvno" + reqTestSuffix(t) + "match"
 
 	// #207: an exact, long, marker-less title must resolve via trigram even
 	// though a semantic searcher is configured — and must NOT pay the LLM.
@@ -147,7 +155,7 @@ func TestSearchHandler_Routing(t *testing.T) {
 	// Marker-less descriptive query with no library hit → empty-trigram fallback.
 	t.Run("marker_less_no_match_falls_back_to_semantic", func(t *testing.T) {
 		// Precondition: the fallback only fires when trigram is genuinely empty.
-		if pre, _ := q.SearchMedia(context.Background(), noMatch, 5); len(pre) != 0 {
+		if pre, _ := q.SearchMedia(context.Background(), noMatch, 5, nil); len(pre) != 0 {
 			t.Skipf("catalog unexpectedly matches %q (%d rows); fallback precondition unmet", noMatch, len(pre))
 		}
 		fake := &fakeSemantic{hits: []SemanticHit{{Item: semItem}}}

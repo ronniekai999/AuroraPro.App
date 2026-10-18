@@ -1628,8 +1628,10 @@ type cacheEntry struct {
 // expanding its max_age_rating through the shared ladder (db.AllowedRatingsForMax).
 // Returns nil for an unrestricted profile, and also nil on a lookup error
 // (logged) so a transient failure degrades to today's behavior rather than
-// emptying every rail. The candidate queries treat a nil/empty slice as "no
-// age filter". Without this, restricted/kid profiles received recommendations
+// emptying every rail; the builds cache that unrestricted result (a known gap,
+// see CLAUDE.md). The candidate queries treat a nil slice as "no age filter";
+// most test `$n::text[] IS NULL`, so an empty non-nil slice would allow
+// nothing. Without this, restricted/kid profiles received recommendations
 // above their rating — browse was age-gated but the recommender was not.
 func (h *Hero) allowedRatings(ctx context.Context, profileID int64) []string {
 	maxRating, err := h.q.ProfileMaxAgeRating(ctx, profileID)

@@ -1276,8 +1276,8 @@ type semanticAdapter struct {
 	s *search.Searcher
 }
 
-func (a semanticAdapter) Search(ctx context.Context, query string, limit int) ([]api.SemanticHit, error) {
-	hits, _, err := a.s.Search(ctx, query, limit)
+func (a semanticAdapter) Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]api.SemanticHit, error) {
+	hits, _, err := a.s.Search(ctx, query, limit, allowedRatings)
 	if err != nil {
 		return nil, err
 	}

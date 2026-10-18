@@ -20,12 +20,45 @@ func TestAllowedRatingsForMax(t *testing.T) {
 		return false
 	}
 
-	// Unrestricted / unknown → nil, which the query filters read as "no filter".
-	if got := AllowedRatingsForMax(""); got != nil {
-		t.Errorf(`AllowedRatingsForMax("") = %v, want nil (unrestricted = no filter)`, got)
+	// Only an empty ceiling is unrestricted → nil, which the query filters read
+	// as "no filter".
+	for _, unrestricted := range []string{"", "   "} {
+		if got := AllowedRatingsForMax(unrestricted); got != nil {
+			t.Errorf(`AllowedRatingsForMax(%q) = %v, want nil (unrestricted = no filter)`, unrestricted, got)
+		}
 	}
-	if got := AllowedRatingsForMax("BOGUS"); got != nil {
-		t.Errorf(`AllowedRatingsForMax("BOGUS") = %v, want nil`, got)
+	// An unknown non-empty ceiling fails CLOSED to the all-ages tier. It used to
+	// return nil, so a stored typo or foreign rating lifted every restriction.
+	// It must be non-empty: callers read an empty slice as "no filter" too.
+	for _, unknown := range []string{"BOGUS", "12A", "MA15+", "PG13"} {
+		got := AllowedRatingsForMax(unknown)
+		if len(got) == 0 {
+			t.Errorf("AllowedRatingsForMax(%q) = %v; an unknown ceiling must restrict, not lift the filter", unknown, got)
+		}
+		for _, r := range []string{"PG", "TV-Y7", "PG-13", "R", "TV-MA", "NC-17"} {
+			if has(got, r) {
+				t.Errorf("AllowedRatingsForMax(%q) includes %q; an unknown ceiling must fail closed to all-ages", unknown, r)
+			}
+		}
+		for _, r := range []string{"G", "TV-Y", "TV-G"} {
+			if !has(got, r) {
+				t.Errorf("AllowedRatingsForMax(%q) missing all-ages %q; got %v", unknown, r, got)
+			}
+		}
+	}
+	// Case and surrounding whitespace don't matter: a stored "pg" is PG, not
+	// an unknown value. Compare as sets; map iteration order varies.
+	for _, spelled := range []string{"pg", " PG ", "Pg"} {
+		got := AllowedRatingsForMax(spelled)
+		want := AllowedRatingsForMax("PG")
+		if len(got) != len(want) {
+			t.Errorf("AllowedRatingsForMax(%q) = %v, want the PG ladder %v", spelled, got, want)
+		}
+		for _, r := range want {
+			if !has(got, r) {
+				t.Errorf("AllowedRatingsForMax(%q) missing %q from the PG ladder", spelled, r)
+			}
+		}
 	}
 
 	cases := []struct {
@@ -121,6 +154,38 @@ func TestRatingToneBuckets(t *testing.T) {
 		if IsMatureRating(r) || IsKidRating(r) {
 			t.Errorf("rating %q must be in neither tone bucket (mature=%v kid=%v)",
 				r, IsMatureRating(r), IsKidRating(r))
+		}
+	}
+}
+
+// TestCanonicalMaxRating pins write-time validation of a profile ceiling: the
+// ladder's spelling is stored, "" means unrestricted, and anything the ladder
+// doesn't know is rejected rather than stored.
+func TestCanonicalMaxRating(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "", "  ": "", "PG": "PG", "pg": "PG", " tv-14 ": "TV-14", "nc-17": "NC-17", "Tv-Ma": "TV-MA",
+	} {
+		got, ok := CanonicalMaxRating(in)
+		if !ok || got != want {
+			t.Errorf("CanonicalMaxRating(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"BOGUS", "12A", "PG13", "MA15+", "R18", "TV 14"} {
+		if got, ok := CanonicalMaxRating(in); ok {
+			t.Errorf("CanonicalMaxRating(%q) = (%q, true), want rejection", in, got)
+		}
+	}
+	// Every listed choice must round-trip, and the list must cover the ladder.
+	choices := MaxRatingChoices()
+	if len(choices) != len(ageRatingOrder) {
+		t.Fatalf("MaxRatingChoices() has %d entries, ladder has %d", len(choices), len(ageRatingOrder))
+	}
+	for i, c := range choices {
+		if got, ok := CanonicalMaxRating(c); !ok || got != c {
+			t.Errorf("choice %q does not round-trip: (%q, %v)", c, got, ok)
+		}
+		if i > 0 && ageRatingOrder[choices[i-1]] > ageRatingOrder[c] {
+			t.Errorf("MaxRatingChoices() not ordered least to most mature at %q", c)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package db
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Content-rating ladder — the single source of truth for parental-control
 // gating across Aurora. Browse (internal/api/media_handlers.go), taste
@@ -36,16 +39,29 @@ var ageRatingOrder = map[string]int{
 }
 
 // AllowedRatingsForMax returns all rating strings whose severity is at or below
-// the given max rating. Returns nil when maxRating is empty or unrecognized —
-// callers treat nil as "no restriction". The query filters that consume this
+// the given max rating. Returns nil only when maxRating is empty — callers treat
+// nil as "no restriction". The query filters that consume this
 // (NearestUnwatched / NearestUnwatchedRich / PopularUnwatched / OnboardingGrid)
 // pass through when the allowed slice IS NULL, and otherwise match with
 // `content_rating = ANY(allowed)`, which naturally EXCLUDES NULL/empty ratings
 // under a restriction — we can't prove an unrated title is safe for a kid.
+//
+// maxRating is matched ignoring case and surrounding whitespace, so a stored
+// "pg" means PG. A non-empty ceiling the ladder doesn't know fails CLOSED to the
+// all-ages tier: someone set it to restrict, and lifting every restriction
+// because of a typo is the wrong way to fail. It must not return an empty
+// slice either: the gates disagree about one. Those that test len(allowed) > 0
+// read it as no restriction, and those that test `$n::text[] IS NULL` read it
+// as allowing nothing. New values are validated on write by
+// CanonicalMaxRating, and canonicalizeProfileRatings rewrites stored ones at
+// boot, so this covers only rows written since by hand.
 func AllowedRatingsForMax(maxRating string) []string {
-	maxLevel, ok := ageRatingOrder[maxRating]
-	if !ok {
+	if strings.TrimSpace(maxRating) == "" {
 		return nil
+	}
+	maxLevel, ok := ratingLevel(maxRating)
+	if !ok {
+		maxLevel = 0
 	}
 	var allowed []string
 	for rating, level := range ageRatingOrder {
@@ -56,13 +72,46 @@ func AllowedRatingsForMax(maxRating string) []string {
 	return allowed
 }
 
+// CanonicalMaxRating validates a profile ceiling on write. It returns the
+// ladder's spelling of the rating ("pg " → "PG"), "" for no restriction, and
+// ok=false for anything the ladder doesn't know, so a value that would
+// silently restrict nothing (or, read back, everything) is rejected up front.
+func CanonicalMaxRating(maxRating string) (string, bool) {
+	r := strings.ToUpper(strings.TrimSpace(maxRating))
+	if r == "" {
+		return "", true
+	}
+	if _, ok := ageRatingOrder[r]; !ok {
+		return "", false
+	}
+	return r, true
+}
+
+// MaxRatingChoices lists the ratings a profile ceiling may be set to, from
+// most to least restrictive, for validation messages.
+func MaxRatingChoices() []string {
+	choices := make([]string, 0, len(ageRatingOrder))
+	for rating := range ageRatingOrder {
+		choices = append(choices, rating)
+	}
+	sort.Slice(choices, func(i, j int) bool {
+		li, lj := ageRatingOrder[choices[i]], ageRatingOrder[choices[j]]
+		if li != lj {
+			return li < lj
+		}
+		return choices[i] < choices[j]
+	})
+	return choices
+}
+
 // RatingAllowed reports whether contentRating is permitted under maxRating's
 // ceiling — the single check every read/playback and discovery gate should
 // call (issue #462) so "unrestricted", "restricted", and "unrated under a
 // restriction" can never be decided two different ways. Fail-closed by
 // construction: AllowedRatingsForMax's returned slice never contains "", so
 // an empty/unrated contentRating is excluded whenever maxRating imposes any
-// restriction, matching its documented NULL-exclusion behavior.
+// restriction, matching its documented NULL-exclusion behavior. An unknown
+// non-empty maxRating restricts to the all-ages tier, as AllowedRatingsForMax.
 func RatingAllowed(maxRating, contentRating string) bool {
 	allowed := AllowedRatingsForMax(maxRating)
 	if allowed == nil {

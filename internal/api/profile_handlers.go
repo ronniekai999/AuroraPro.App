@@ -37,6 +37,14 @@ func validAvatarValue(v string) bool {
 	return nebulaAvatarRe.MatchString(v)
 }
 
+// maxAgeRatingError is the 400 for a ceiling the rating ladder doesn't know.
+// Rejecting it beats storing it: a value no gate recognises reads back as
+// all-ages only (db.AllowedRatingsForMax), and before that it meant no
+// restriction at all.
+func maxAgeRatingError() string {
+	return "max_age_rating must be empty (no restriction) or one of: " + strings.Join(db.MaxRatingChoices(), ", ")
+}
+
 func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 	return &ProfileHandler{queries: queries}
 }
@@ -116,13 +124,18 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "avatar must be an http(s) URL or a built-in avatar id")
 		return
 	}
+	maxRating, ok := db.CanonicalMaxRating(req.MaxAgeRating)
+	if !ok {
+		writeError(w, http.StatusBadRequest, maxAgeRatingError())
+		return
+	}
 
 	profile := &models.UserProfile{
 		UserID:       claims.UserID,
 		Name:         req.Name,
 		AvatarURL:    req.AvatarURL,
 		IsDefault:    false,
-		MaxAgeRating: req.MaxAgeRating,
+		MaxAgeRating: maxRating,
 		Language:     lang,
 		SubtitleLang: req.SubtitleLang,
 		SubtitleMode: subMode,
@@ -211,6 +224,14 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "avatar must be an http(s) URL or a built-in avatar id")
 		return
 	}
+	if req.MaxAgeRating != nil {
+		maxRating, ok := db.CanonicalMaxRating(*req.MaxAgeRating)
+		if !ok {
+			writeError(w, http.StatusBadRequest, maxAgeRatingError())
+			return
+		}
+		req.MaxAgeRating = &maxRating
+	}
 
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
@@ -219,8 +240,10 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	// A content-tone change reshapes recall (maturityPenaltyExpr), so drop the
 	// profile's cached hero/discover to re-curate on the next fetch instead of
-	// waiting out the 24h TTL.
-	if req.MaturityPref != nil && h.hero != nil {
+	// waiting out the 24h TTL. A ceiling change must too, and more urgently:
+	// those caches were built under the old ceiling, so tightening it would
+	// otherwise keep serving now over-ceiling picks for up to a day.
+	if (req.MaturityPref != nil || req.MaxAgeRating != nil) && h.hero != nil {
 		h.hero.Invalidate(profileID)
 	}
 

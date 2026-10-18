@@ -112,11 +112,87 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   effective fields are display-only. Never persist resolved defaults during a
   provider-family switch.
 
+### Parental rating ceiling
+
+- Rule (issue #462): a gate on the caller's own ceiling takes it from
+  `ResolveActingProfile`, never a client-sent `profile_id`/`max_rating`. (A
+  gate on someone else's ceiling, such as the watch-party invite check, uses
+  theirs.) Not every existing route follows the rule yet; see the gaps below.
+  Discovery responses fail open on a resolve error, with the gated detail and
+  playback routes as the boundary. Persisted results fail closed: AI-collection
+  seeding, invite sending and taste-onboarding seed validation do; party media
+  changes and the recommender caches do not (see the gaps).
+- `internal/db/ratings.go` is the only ladder a gate may use, through
+  `AllowedRatingsForMax` or `RatingAllowed`; nil means unrestricted. An empty
+  slice is ambiguous: gates testing `len(allowed) > 0` read it as unrestricted,
+  gates testing `$n::text[] IS NULL` as allowing nothing. Never produce one for
+  a restriction.
+- `maturityTierCase` (`internal/db/queries_recommender.go`) and
+  `audienceClause` (`internal/embedding`) map ratings to soft tiers, know
+  ratings the ladder does not, and must never gate.
+- Filter in SQL before cross-library dedup and before `LIMIT`. Library search
+  filters both semantic recall legs (the lexical leg takes the vector leg's
+  `SemanticFilter`), so fusion, rerank and the title fallback only see allowed
+  titles. AI-collection seeding passes the creator's ceiling and, because the
+  seed is saved, skips seeding on a resolve error instead of failing open.
+- `max_age_rating` is canonicalized on write by `CanonicalMaxRating`; unknown
+  values are a 400. Reads tolerate case and whitespace, and an unknown value
+  restricts to the all-ages tier rather than lifting the ceiling. The boot data
+  migration `canonicalizeProfileRatings` rewrites stored values to that meaning
+  so the API and clients report the enforced ceiling.
+- A ceiling change invalidates the profile's recommender caches, which are built
+  under the ceiling it reads at build time and otherwise live up to 24h.
+- Coverage is NOT complete, and no route-by-route audit exists. Server-derived
+  enforcement covers: the #462 routes (media detail, seasons and episodes,
+  media/episode/direct file streaming, subtitles, transcode-session creation,
+  direct-play cast-token minting), browse, Recently added, library search, and
+  AI-collection seeding. Never infer coverage elsewhere from this list; check
+  the handler.
+- Known gaps (examples, not exhaustive):
+  - Under the HNSW index, kNN filters apply to about `hnsw.ef_search` (100)
+    candidates, so a restricted semantic search on a large catalog can return
+    fewer allowed rows than its limit (no leak; `MediaType` and the
+    recommender's kNN queries share this).
+  - `Hero.allowedRatings` returns nil (unrestricted) when the ceiling lookup
+    fails, and the hero, discover and engagement builds cache that result, so
+    one database error can serve a restricted profile unfiltered picks for up
+    to a day.
+  - Ceiling taken from an owned `?profile_id=`, or the account's default
+    profile without one, never the acting profile: the discovery routes behind
+    `HeroHandler.resolveProfileID` (hero, recommendations, discover, anchor and
+    engagement rails), the follow feed (`resolveViewerProfile`) and taste
+    onboarding (`resolveProfile`).
+  - Profile chosen the same way and no ceiling at all: the recap routes
+    (`RecapHandler.resolveProfileID`), and continue-watching, which falls back
+    to the acting profile rather than the default.
+  - No ceiling on listings: the account's watch history
+    (`/api/progress/recent`, `/history`), another member's recent watches,
+    every live party server-wide (`/api/parties/active`, with title and
+    poster), and `/api/calendar` (every show's upcoming episodes by date).
+  - No ceiling on lookups by id: `/api/media/{id}/files`, `/next-episode`,
+    episode files, artwork, cast, `/api/stream/info/{fileID}` (tracks and
+    external subtitle filenames), and a party's `highlight.mp4` (membership
+    only). Collections, watchlists and My Library accept any media id and read
+    items back unfiltered, so a restricted profile can enumerate the library
+    through them.
+  - Transcode sessions rely on their creation-time check: the session cast
+    token (`CreateCastToken`) and the session's playlists and segments check
+    only account ownership, so a restricted session holding another profile's
+    session id on the account can use it.
+  - Watch parties: creating one applies no ceiling, and changing a party's
+    media skips its ceiling check when the media or profile lookup errors or
+    finds nothing; both are persisted.
+  - No PIN anywhere: any session on the account can change any of its
+    profiles' ceilings, and `ActivateProfile` checks only ownership, so a
+    restricted session can switch itself to an unrestricted profile.
+
 ### Member profiles and follows
 
 - Watch-history sharing is opt-in and rechecked on every read. Shared history
   uses only the account's default profile and completed rows.
-- Follow feeds apply the viewing profile's parental ceiling.
+- Follow feeds apply the viewing profile's parental ceiling, where the viewing
+  profile is an owned `?profile_id=` or the default, not the acting profile
+  (see Parental rating ceiling).
 - Member responses never expose email, role, or auth data. Avatars pass through
   `memberSafeAvatar`; social handles are bare and network-validated.
 - Member routes stay under `/api/members/*`; `/api/users` remains admin-only.

@@ -1189,20 +1189,30 @@ func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem
 	return item, nil
 }
 
-func (q *Queries) SearchMedia(ctx context.Context, query string, limit int) ([]*models.MediaItem, error) {
+// SearchMedia is the trigram title/overview search. allowedRatings is the
+// acting profile's ceiling (AllowedRatingsForMax; nil or empty means
+// unrestricted). It is applied in SQL, before LIMIT, so over-ceiling titles
+// that match the query better cannot crowd an allowed one out of the page.
+func (q *Queries) SearchMedia(ctx context.Context, query string, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	ceiling := ""
+	args := []interface{}{query, limit}
+	if len(allowedRatings) > 0 {
+		ceiling = "content_rating = ANY($3) AND "
+		args = append(args, allowedRatings)
 	}
 	rows, err := q.pool.Query(ctx,
 		`SELECT id, library_id, type, title, sort_title, COALESCE(year, 0), COALESCE(overview, ''),
 		        COALESCE(rating, 0), COALESCE(runtime_minutes, 0), COALESCE(content_rating, ''),
 		        COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
 		 FROM media_items
-		 WHERE title % $1 OR title ILIKE '%' || $1 || '%'
-		    OR overview % $1 OR overview ILIKE '%' || $1 || '%'
+		 WHERE `+ceiling+`(title % $1 OR title ILIKE '%' || $1 || '%'
+		    OR overview % $1 OR overview ILIKE '%' || $1 || '%')
 		 ORDER BY similarity(title, $1) DESC, id DESC
 		 LIMIT $2`,
-		query, limit,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("search media: %w", err)

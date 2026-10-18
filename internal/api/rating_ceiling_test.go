@@ -14,6 +14,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +29,7 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // seedRCRefreshToken mirrors internal/db's seedRefreshToken (unexported,
@@ -163,6 +166,29 @@ func newRCFixture(t *testing.T) *rcFixture {
 }
 
 func i64(v int64) string { return strconv.FormatInt(v, 10) }
+
+// rcDateRows sets items' added_at to NOW() plus shift (a Postgres interval,
+// e.g. "-30 days"). The "Recently added" tests read the newest rows of a
+// shared catalog (50 rows here; 3 and 50 in the db package), so they date
+// their own rows ahead and crowd-seeding tests date theirs back.
+//
+// It also stamps last_metadata_attempt. Fixture rows have no metadata
+// progress, so unstamped they sort to the head of GetStaleMetadataItems'
+// never-attempted page, which the db package's stale-metadata tests read
+// while these run. Nothing these tests query reads the column.
+func rcDateRows(t *testing.T, shift string, ids []int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("connect to test db: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `UPDATE media_items SET added_at = NOW() + $2::interval, last_metadata_attempt = NOW() WHERE id = ANY($1)`, ids, shift); err != nil {
+		t.Fatalf("shift added_at of seeded items: %v", err)
+	}
+}
 
 func TestGetSeasons_RatingCeiling(t *testing.T) {
 	f := newRCFixture(t)
@@ -428,14 +454,27 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	if err := f.q.UpsertMediaItem(ctx, allowed); err != nil {
 		t.Fatalf("seed allowed movie: %v", err)
 	}
+	// An unrated title inside the window: a restriction must exclude it.
+	unrated := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Unrated " + reqTestSuffix(t),
+		SortTitle: "rc unrated", ContentRating: ""}
+	if err := f.q.UpsertMediaItem(ctx, unrated); err != nil {
+		t.Fatalf("seed unrated movie: %v", err)
+	}
 	defaultProfile, err := f.q.GetDefaultProfile(ctx, f.userID)
 	if err != nil || defaultProfile == nil {
 		t.Fatalf("load default profile: %v", err)
 	}
+	// Dated two hours ahead, so rows other tests insert at NOW() meanwhile
+	// cannot push these out of the 50-row window; hours, not years, so a row a
+	// killed run leaks ages out of the newest pages within a day or so (the R
+	// movie, moved to +30h below, within 30 hours). The db
+	// package's Recently-added test dates rows ahead too, some further, and
+	// both tests check those by class so neither depends on the other's dates.
+	rcDateRows(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID, unrated.ID})
 
-	recent := func(refreshTokenID int64) []*models.MediaItem {
+	recent := func(refreshTokenID int64, limit int) []*models.MediaItem {
 		t.Helper()
-		r := httptest.NewRequest(http.MethodGet, "/api/media/recent?limit=50&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/media/recent?limit="+strconv.Itoa(limit)+"&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
 		r = rcClaimsCtx(r, f.userID, refreshTokenID)
 		rr := httptest.NewRecorder()
 		h.Recent(rr, r)
@@ -457,9 +496,10 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	}
 
 	// The ceiling check covers every returned row, whatever else is in the
-	// shared catalog. The id checks rely on this fixture's rows being among the
-	// 50 newest, which holds unless something seeds 50+ newer rows concurrently.
-	restrictedItems := recent(f.restrictedRefreshID)
+	// shared catalog. The restricted id checks rely on this fixture's PG row
+	// being among the 50 newest ALLOWED rows, which its future added_at keeps
+	// true unless 50+ allowed rows dated further ahead appear concurrently.
+	restrictedItems := recent(f.restrictedRefreshID, 50)
 	for _, it := range restrictedItems {
 		if !db.RatingAllowed("PG", it.ContentRating) {
 			t.Errorf("restricted (PG) session got item %d rated %q from Recently added", it.ID, it.ContentRating)
@@ -473,12 +513,381 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	if !restricted[allowed.ID] {
 		t.Errorf("restricted (PG) session lost the PG title %d from Recently added", allowed.ID)
 	}
-
-	open := idSet(recent(f.unrestrictedRefreshID))
-	if !open[f.movieID] || !open[allowed.ID] {
-		t.Errorf("unrestricted session must still see every recent title: R movie=%v PG movie=%v",
-			open[f.movieID], open[allowed.ID])
+	if restricted[unrated.ID] {
+		t.Errorf("restricted (PG) session saw unrated title %d in Recently added; a restriction excludes unrated titles", unrated.ID)
 	}
+
+	// Unrestricted, by class: the page must hold a title the PG ceiling
+	// rejects. Usually that is this fixture's R movie, but other tests' newer
+	// R rows count too, and under load they can push it out of the window.
+	sawOver := false
+	for _, it := range recent(f.unrestrictedRefreshID, 50) {
+		sawOver = sawOver || !db.RatingAllowed("PG", it.ContentRating)
+	}
+	if !sawOver {
+		t.Errorf("unrestricted session saw no over-ceiling title in Recently added (this fixture's R movie is %d)", f.movieID)
+	}
+
+	// The ceiling goes to SQL before LIMIT at the handler too. With this
+	// fixture's R movie the newest row anywhere (no fixture dates a row
+	// further ahead), a handler that fetched one row and filtered it in Go
+	// would return an empty one-row page.
+	rcDateRows(t, "30 hours", []int64{f.movieID})
+	page := recent(f.restrictedRefreshID, 1)
+	if len(page) != 1 {
+		t.Fatalf("restricted (PG) one-row page returned %d rows behind a newer R title; the ceiling must be applied before LIMIT", len(page))
+	}
+	if !db.RatingAllowed("PG", page[0].ContentRating) {
+		t.Errorf("restricted (PG) one-row page returned item %d rated %q", page[0].ID, page[0].ContentRating)
+	}
+}
+
+// TestMediaSearch_ServerDerivedCeiling pins library search to the same
+// server-resolved ceiling as browse, on every routing branch. Search used to
+// apply no ceiling at all, so a restricted profile could type the title of
+// anything in the library and get its poster, overview and id back. As with
+// Recently added, the request names the unrestricted default profile and asks
+// for NC-17, and neither may loosen the session's ceiling.
+func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	ctx := context.Background()
+	defaultProfile, err := f.q.GetDefaultProfile(ctx, f.userID)
+	if err != nil || defaultProfile == nil {
+		t.Fatalf("load default profile: %v", err)
+	}
+
+	// Every title carries a token no other row can contain, so a query for it
+	// matches exactly this fixture's rows, whatever else is in the catalog.
+	// onlyOverToken matches one R title and nothing a PG profile may see.
+	token := "rcsearch" + reqTestSuffix(t)
+	onlyOverToken := "zqonlyover" + reqTestSuffix(t) // shares no prefix with token
+	var seeded []int64
+	seed := func(tok string, typ models.MediaType, rating, name string) *models.MediaItem {
+		t.Helper()
+		it := &models.MediaItem{LibraryID: f.libraryID, Type: typ, Title: tok + " " + name, SortTitle: tok + " " + name, ContentRating: rating}
+		if err := f.q.UpsertMediaItem(ctx, it); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		seeded = append(seeded, it.ID)
+		return it
+	}
+	pgItem := seed(token, models.MediaMovie, "PG", "allowed")
+	rItem := seed(token, models.MediaMovie, "R", "restricted movie")
+	tvmaItem := seed(token, models.MediaShow, "TV-MA", "mature show")
+	unratedItem := seed(token, models.MediaMovie, "", "unrated")
+	onlyOverItem := seed(onlyOverToken, models.MediaMovie, "R", "the only match")
+	// crowdToken: one PG title, and more over-ceiling titles matching the
+	// query better than a limit=1 search fetches (short titles; the PG one's
+	// long tail dilutes its similarity).
+	crowdToken := "zqcrowd" + reqTestSuffix(t)
+	crowdPG := seed(crowdToken, models.MediaMovie, "PG", "with a much longer tail that dilutes the trigram similarity")
+	crowdFetch := searchFetchLimit(1)
+	for i := 0; i <= crowdFetch; i++ {
+		seed(crowdToken, models.MediaMovie, "R", fmt.Sprintf("r%d", i))
+	}
+	rcDateRows(t, "-30 days", seeded)
+	allowed, overR, overTVMA, unrated := pgItem.ID, rItem.ID, tvmaItem.ID, unratedItem.ID
+
+	// search returns the served ids and the X-Search-Mode the handler
+	// reported; an empty mode leaves the param out (default routing).
+	search := func(t *testing.T, refreshTokenID int64, fake *fakeSemantic, q, mode string) (map[int64]bool, string) {
+		t.Helper()
+		h := NewMediaHandler(f.q, nil)
+		if fake != nil {
+			h.SetSemanticSearcher(fake)
+		}
+		url := "/api/media/search?q=" + q + "&max_rating=NC-17&profile_id=" + i64(defaultProfile.ID)
+		if mode != "" {
+			url += "&mode=" + mode
+		}
+		r := rcClaimsCtx(httptest.NewRequest(http.MethodGet, url, nil), f.userID, refreshTokenID)
+		rr := httptest.NewRecorder()
+		h.Search(rr, r)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Search status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+		}
+		var items []*models.MediaItem
+		if err := json.Unmarshal(rr.Body.Bytes(), &items); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		ids := map[int64]bool{}
+		for _, it := range items {
+			ids[it.ID] = true
+		}
+		return ids, rr.Header().Get("X-Search-Mode")
+	}
+	// leakyFake stands in for a searcher that ignores its ceiling argument: it
+	// returns over-ceiling and unrated hits beside the PG one, so the handler's
+	// own re-check is what keeps them out, and the PG hit must still be served.
+	leakyFake := func() *fakeSemantic {
+		return &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: unratedItem}, {Item: pgItem}}}
+	}
+	pgLadder := db.AllowedRatingsForMax("PG")
+
+	t.Run("literal", func(t *testing.T) {
+		got, _ := search(t, f.restrictedRefreshID, nil, token, "literal")
+		if got[overR] || got[overTVMA] {
+			t.Errorf("restricted (PG) session found over-ceiling titles by searching: R movie=%v TV-MA show=%v", got[overR], got[overTVMA])
+		}
+		if got[unrated] {
+			t.Errorf("restricted (PG) session found the unrated title %d; unrated titles are excluded under a restriction", unrated)
+		}
+		if !got[allowed] {
+			t.Errorf("restricted (PG) session lost the PG title %d from search", allowed)
+		}
+
+		open, _ := search(t, f.unrestrictedRefreshID, nil, token, "literal")
+		for name, id := range map[string]int64{"PG": allowed, "R": overR, "TV-MA": overTVMA, "unrated": unrated} {
+			if !open[id] {
+				t.Errorf("unrestricted session lost the %s title %d from search", name, id)
+			}
+		}
+	})
+
+	// With limit=1 the handler fetches searchFetchLimit(1) trigram rows, and
+	// more over-ceiling titles than that match better than the allowed one, so
+	// a ceiling applied to the fetched page in Go, instead of in SearchMedia's
+	// SQL, serves nothing.
+	t.Run("literal_ceiling_before_limit", func(t *testing.T) {
+		// Control: unfiltered, a page of that size holds only crowd titles,
+		// so the PG title below can only have come from filtering in SQL.
+		unfiltered, err := f.q.SearchMedia(ctx, crowdToken, crowdFetch, nil)
+		if err != nil {
+			t.Fatalf("SearchMedia (unfiltered): %v", err)
+		}
+		if len(unfiltered) != crowdFetch {
+			t.Fatalf("unfiltered fetch has %d rows, want %d", len(unfiltered), crowdFetch)
+		}
+		for _, it := range unfiltered {
+			if it.ID == crowdPG.ID {
+				t.Fatalf("the PG title %d is inside the unfiltered %d-row fetch; the crowd no longer proves the ordering", crowdPG.ID, crowdFetch)
+			}
+		}
+
+		// search puts q into the URL as is, so it can carry the limit.
+		got, _ := search(t, f.restrictedRefreshID, nil, crowdToken+"&limit=1", "literal")
+		if !got[crowdPG.ID] || len(got) != 1 {
+			t.Errorf("restricted (PG) literal search with limit=1: got %v, want only the PG title %d; "+
+				"the ceiling must be applied in SQL, before the fetch limit", got, crowdPG.ID)
+		}
+	})
+
+	// Semantic first. The semantic searcher is handed the ceiling rather than
+	// trusted to find one, so what it receives is the contract. The mode header
+	// proves the semantic path served the PG hit: an empty semantic answer
+	// would fall back to trigram, which also finds that row.
+	t.Run("semantic", func(t *testing.T) {
+		fake := leakyFake()
+		got, mode := search(t, f.restrictedRefreshID, fake, token, "semantic")
+		if !fake.called {
+			t.Fatal("mode=semantic did not invoke the semantic searcher")
+		}
+		if !sameRatings(fake.allowedRatings, pgLadder) {
+			t.Errorf("restricted (PG) session passed allowedRatings %v to the semantic searcher, want %v", fake.allowedRatings, pgLadder)
+		}
+		if got[overR] || got[unrated] {
+			t.Errorf("restricted (PG) session was served over-ceiling semantic hits: R=%v unrated=%v", got[overR], got[unrated])
+		}
+		if !got[allowed] || mode != "semantic" {
+			t.Errorf("restricted (PG) session: PG hit %d served=%v with X-Search-Mode %q, want served by the semantic path",
+				allowed, got[allowed], mode)
+		}
+
+		fake = &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+		open, _ := search(t, f.unrestrictedRefreshID, fake, token, "semantic")
+		if fake.allowedRatings != nil {
+			t.Errorf("unrestricted session passed allowedRatings %v to the semantic searcher, want nil", fake.allowedRatings)
+		}
+		if !open[overR] {
+			t.Errorf("unrestricted session lost the R hit %d", overR)
+		}
+	})
+
+	// Semantic first, empty answer: the handler falls back to trigram (the
+	// rescue for titles that trip a recommendation marker). That happens
+	// whenever the whole semantic answer is empty — both recall legs found
+	// nothing allowed, or the handler's re-check dropped every hit.
+	t.Run("semantic_empty_rescued_by_trigram", func(t *testing.T) {
+		fake := &fakeSemantic{}
+		got, mode := search(t, f.restrictedRefreshID, fake, token, "semantic")
+		if !fake.called || mode != "literal" {
+			t.Fatalf("want an empty semantic answer rescued by trigram: semantic called=%v, X-Search-Mode %q", fake.called, mode)
+		}
+		if got[overR] || got[overTVMA] || got[unrated] {
+			t.Errorf("restricted (PG) trigram rescue served over-ceiling titles: R=%v TV-MA=%v unrated=%v",
+				got[overR], got[overTVMA], got[unrated])
+		}
+		if !got[allowed] {
+			t.Errorf("restricted (PG) trigram rescue lost the PG title %d", allowed)
+		}
+	})
+
+	// Trigram first, empty answer: the handler falls back to semantic. This is
+	// the branch a restricted profile reaches by typing the exact title of an
+	// over-ceiling film, since the filtered trigram search then finds nothing.
+	t.Run("trigram_empty_falls_back_to_semantic", func(t *testing.T) {
+		fake := leakyFake()
+		got, mode := search(t, f.restrictedRefreshID, fake, onlyOverToken, "")
+		if !fake.called || mode != "semantic" {
+			t.Fatalf("want the filtered trigram search to find nothing and fall back to semantic: semantic called=%v, X-Search-Mode %q",
+				fake.called, mode)
+		}
+		if !sameRatings(fake.allowedRatings, pgLadder) {
+			t.Errorf("restricted (PG) fallback passed allowedRatings %v to the semantic searcher, want %v", fake.allowedRatings, pgLadder)
+		}
+		if got[onlyOverItem.ID] || got[overR] || got[unrated] {
+			t.Errorf("restricted (PG) fallback served over-ceiling titles: searched R=%v R hit=%v unrated=%v",
+				got[onlyOverItem.ID], got[overR], got[unrated])
+		}
+		if !got[allowed] {
+			t.Errorf("restricted (PG) fallback lost the PG hit %d", allowed)
+		}
+
+		// Control: unrestricted, trigram finds the title itself, so the
+		// fallback above fired because of the ceiling.
+		fake = leakyFake()
+		open, mode := search(t, f.unrestrictedRefreshID, fake, onlyOverToken, "")
+		if fake.called || mode != "literal" || !open[onlyOverItem.ID] {
+			t.Errorf("unrestricted: want trigram to serve the R title %d without semantic; got served=%v mode=%q semantic called=%v",
+				onlyOverItem.ID, open[onlyOverItem.ID], mode, fake.called)
+		}
+	})
+}
+
+// TestAICollectionSeed_ServerDerivedCeiling: an AI collection is seeded by a
+// library search run as its creator, so a restricted profile prompting one
+// must hand the searcher its own ceiling, or the collection becomes a way to
+// read back any title the search would have hidden. The fake also returns R
+// and unrated hits regardless, standing in for a searcher that ignores its
+// argument: the seed must not save them for the restricted profile, and must
+// still save the PG hit beside them.
+func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	ctx := context.Background()
+	rItem, err := f.q.GetMediaItem(ctx, f.movieID)
+	if err != nil || rItem == nil {
+		t.Fatalf("load R item: %v", err)
+	}
+	pgItem := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Seed PG " + reqTestSuffix(t),
+		SortTitle: "rc seed pg", ContentRating: "PG"}
+	if err := f.q.UpsertMediaItem(ctx, pgItem); err != nil {
+		t.Fatalf("seed PG movie: %v", err)
+	}
+	unratedItem := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Seed Unrated " + reqTestSuffix(t),
+		SortTitle: "rc seed unrated"}
+	if err := f.q.UpsertMediaItem(ctx, unratedItem); err != nil {
+		t.Fatalf("seed unrated movie: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		refreshID int64
+		want      []string
+		wantSaved bool
+	}{
+		{"restricted", f.restrictedRefreshID, db.AllowedRatingsForMax("PG"), false},
+		{"unrestricted", f.unrestrictedRefreshID, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}, {Item: unratedItem}, {Item: pgItem}}}
+			h := NewCollectionsHandler(f.q)
+			h.SetSemanticSearcher(fake)
+			r := httptest.NewRequest(http.MethodPost, "/api/collections",
+				strings.NewReader(`{"name":"rc ai `+reqTestSuffix(t)+`","kind":"ai","prompt":"grim war films"}`))
+			r = rcClaimsCtx(r, f.userID, tc.refreshID)
+			rr := httptest.NewRecorder()
+			h.Create(rr, r)
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("Create status = %d, want 201 (body %q)", rr.Code, rr.Body.String())
+			}
+			var c models.Collection
+			if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil || c.ID == 0 {
+				t.Fatalf("decode created collection: %v (body %q)", err, rr.Body.String())
+			}
+			t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
+			if !fake.called {
+				t.Fatal("AI collection creation did not run the semantic search")
+			}
+			if !sameRatings(fake.allowedRatings, tc.want) {
+				t.Errorf("AI collection seed passed allowedRatings %v, want %v", fake.allowedRatings, tc.want)
+			}
+			items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+			if err != nil {
+				t.Fatalf("list collection items: %v", err)
+			}
+			saved, savedUnrated, savedPG := false, false, false
+			for _, it := range items {
+				saved = saved || it.ID == rItem.ID
+				savedUnrated = savedUnrated || it.ID == unratedItem.ID
+				savedPG = savedPG || it.ID == pgItem.ID
+			}
+			if saved != tc.wantSaved || savedUnrated != tc.wantSaved {
+				t.Errorf("saved into the collection: R hit=%v unrated hit=%v, want both %v", saved, savedUnrated, tc.wantSaved)
+			}
+			if !savedPG {
+				t.Errorf("the PG hit %d was not saved into the collection", pgItem.ID)
+			}
+		})
+	}
+}
+
+// TestAICollectionSeed_ResolveErrorSkipsSeed pins the deliberate difference
+// from search: a seed is saved, and collection contents are read back without
+// a ceiling, so a failed profile lookup must not seed unrestricted.
+func TestAICollectionSeed_ResolveErrorSkipsSeed(t *testing.T) {
+	f := newRCFixture(t)
+	rItem, err := f.q.GetMediaItem(context.Background(), f.movieID)
+	if err != nil || rItem == nil {
+		t.Fatalf("load R item: %v", err)
+	}
+	fake := &fakeSemantic{hits: []SemanticHit{{Item: rItem}}}
+	h := NewCollectionsHandler(f.q)
+	h.SetSemanticSearcher(fake)
+	h.resolveProfile = func(context.Context, int64, int64) (*models.UserProfile, error) {
+		return nil, errors.New("transient profile lookup failure")
+	}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/collections",
+		strings.NewReader(`{"name":"rc ai `+reqTestSuffix(t)+`","kind":"ai","prompt":"grim war films"}`))
+	r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+	rr := httptest.NewRecorder()
+	h.Create(rr, r)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("Create status = %d, want 201 with an empty collection (body %q)", rr.Code, rr.Body.String())
+	}
+	var c models.Collection
+	if err := json.Unmarshal(rr.Body.Bytes(), &c); err != nil || c.ID == 0 {
+		t.Fatalf("decode created collection: %v (body %q)", err, rr.Body.String())
+	}
+	t.Cleanup(func() { _ = f.q.DeleteCollection(context.Background(), c.ID) })
+	if fake.called {
+		t.Error("a failed profile lookup still ran the seed search")
+	}
+	items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+	if err != nil {
+		t.Fatalf("list collection items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("a failed profile lookup seeded %d items, want none", len(items))
+	}
+}
+
+// sameRatings reports whether two rating lists hold the same set; the ladder
+// is a map, so AllowedRatingsForMax's order is not stable between calls.
+func sameRatings(a, b []string) bool {
+	if (a == nil) != (b == nil) || len(a) != len(b) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, r := range a {
+		seen[r]++
+	}
+	for _, r := range b {
+		if seen[r] == 0 {
+			return false
+		}
+		seen[r]--
+	}
+	return true
 }
 
 func TestActivateProfile_OwnershipEnforced(t *testing.T) {

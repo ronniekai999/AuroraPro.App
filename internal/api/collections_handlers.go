@@ -38,10 +38,13 @@ const aiCollectionDefaultPicks = 12
 type CollectionsHandler struct {
 	queries  *db.Queries
 	semantic SemanticSearcher
+	// resolveProfile is queries.ResolveActingProfile; a field so a test can
+	// make it fail and pin that AI seeding does not fail open.
+	resolveProfile func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 }
 
 func NewCollectionsHandler(queries *db.Queries) *CollectionsHandler {
-	return &CollectionsHandler{queries: queries}
+	return &CollectionsHandler{queries: queries, resolveProfile: queries.ResolveActingProfile}
 }
 
 // SetSemanticSearcher wires the LLM-backed search for AI-collection
@@ -169,31 +172,53 @@ func (h *CollectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// items from the top hits. Failures are non-fatal — the empty
 	// collection still gets returned and the user can rebuild via
 	// "regenerate" later.
+	//
+	// The seed is a library search run as the creator, so it takes the
+	// creator's acting-profile ceiling exactly as /api/media/search does;
+	// otherwise a restricted profile could read any title back by prompting
+	// a collection for it. Unlike that handler it does NOT fail open: the seed
+	// is saved, and collection contents are read back without a ceiling, so a
+	// resolve error skips the seed and returns the empty collection instead.
 	if req.Kind == "ai" {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		hits, serr := h.semantic.Search(ctx, c.Prompt, aiCollectionDefaultPicks)
-		if serr != nil {
-			slog.Warn("AI collection: semantic search failed (returning empty collection)",
-				"prompt", c.Prompt, "error", serr)
-		} else {
-			for _, hit := range hits {
-				if hit.Item == nil {
-					continue
-				}
-				if aerr := h.queries.AddToCollection(r.Context(), c.ID, hit.Item.ID); aerr != nil {
-					slog.Warn("AI collection: add item failed",
-						"collection_id", c.ID, "media_id", hit.Item.ID, "error", aerr)
-				}
-			}
-			// Re-load to update ItemCount in the response.
-			if reloaded, _ := h.queries.GetCollection(r.Context(), c.ID); reloaded != nil {
-				c = reloaded
-			}
-		}
+		c = h.seedAICollection(r, claims, c)
 	}
 
 	writeJSON(w, http.StatusCreated, c)
+}
+
+// seedAICollection fills a new AI collection from a semantic search on its
+// prompt and returns the reloaded collection (c itself if nothing reloads).
+func (h *CollectionsHandler) seedAICollection(r *http.Request, claims *auth.JWTClaims, c *models.Collection) *models.Collection {
+	profile, err := h.resolveProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		slog.Warn("AI collection: resolve acting profile failed (returning empty collection)",
+			"user_id", claims.UserID, "error", err)
+		return c
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	hits, err := h.semantic.Search(ctx, c.Prompt, aiCollectionDefaultPicks, db.AllowedRatingsForMax(profile.MaxAgeRating))
+	if err != nil {
+		slog.Warn("AI collection: semantic search failed (returning empty collection)",
+			"prompt", c.Prompt, "error", err)
+		return c
+	}
+	for _, hit := range hits {
+		// Re-checked as in MediaHandler.Search: the searcher filters in SQL,
+		// and this is what the handler can promise itself.
+		if hit.Item == nil || !db.RatingAllowed(profile.MaxAgeRating, hit.Item.ContentRating) {
+			continue
+		}
+		if aerr := h.queries.AddToCollection(r.Context(), c.ID, hit.Item.ID); aerr != nil {
+			slog.Warn("AI collection: add item failed",
+				"collection_id", c.ID, "media_id", hit.Item.ID, "error", aerr)
+		}
+	}
+	// Re-load to update ItemCount in the response.
+	if reloaded, _ := h.queries.GetCollection(r.Context(), c.ID); reloaded != nil {
+		c = reloaded
+	}
+	return c
 }
 
 // Delete removes a collection. Owner OR admin only.

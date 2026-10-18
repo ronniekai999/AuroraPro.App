@@ -148,6 +148,11 @@ type SemanticFilter struct {
 	YearMax    int      // 0 = no ceiling
 	RuntimeMax int      // minutes; 0 = no cap
 	ExcludeIDs []int64  // e.g. items already in user history
+	// AllowedRatings is the acting profile's ceiling (AllowedRatingsForMax);
+	// nil or empty = unrestricted. No over-ceiling row is ever returned, but
+	// under the HNSW index a restricted search can return fewer than limit
+	// rows (see SemanticSearch).
+	AllowedRatings []string
 }
 
 // SemanticHit is one row from a vector search, with the cosine distance kept
@@ -160,10 +165,15 @@ type SemanticHit struct {
 // SemanticSearch runs a kNN query against media_items.embedding using the
 // supplied vector literal (e.g. "[0.1,...]" — produced by llm.FormatVector).
 //
-// Filters are applied as a WHERE clause *before* the ORDER BY <=>, which is
-// safe with the HNSW index because pgvector falls back to exact search inside
-// the filtered subset. For very tight filters (a handful of rows) the planner
-// chooses seq scan, which is fine.
+// Filters are a WHERE clause, so no returned row ever fails one, but they do
+// not always run before the LIMIT. When the planner uses the HNSW index, the
+// scan yields about hnsw.ef_search candidates (100, set in pool.go) and the
+// filters apply to those; pgvector before 0.8 has no fallback, and 0.8's
+// iterative scan is off by default. A filter that rejects most of the nearest
+// neighbours therefore returns fewer than limit rows, possibly none, although
+// matching rows exist further out. A sequential scan (small or tightly
+// filtered tables) is exact. This holds for MediaType and AllowedRatings
+// alike, and for the recommender's kNN queries.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {
@@ -198,6 +208,11 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 	if len(filter.ExcludeIDs) > 0 {
 		where = append(where, fmt.Sprintf("m.id <> ALL($%d)", argIdx))
 		args = append(args, filter.ExcludeIDs)
+		argIdx++
+	}
+	if len(filter.AllowedRatings) > 0 {
+		where = append(where, fmt.Sprintf("m.content_rating = ANY($%d)", argIdx))
+		args = append(args, filter.AllowedRatings)
 		argIdx++
 	}
 	if len(filter.Genres) > 0 {
