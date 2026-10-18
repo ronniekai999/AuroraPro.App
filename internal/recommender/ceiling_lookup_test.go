@@ -40,10 +40,15 @@ import (
 // crowd other runs of this test and the db package's engagement tests, whose
 // titles must land inside a catalog-wide LIMIT. So the R titles and anchors
 // qualify for neither (rating 6.9 is under Hidden Gems' 7.0, 120 minutes is
-// over Finish It Tonight's 110), and the G titles qualify at the bottom
-// (7.1, 50 votes). The unrestricted engagement proof is Comfort Rewatch, which
-// reads only this profile's own completions: a watched R title, unembedded so
-// it moves neither the taste centroid nor the history count.
+// over Finish It Tonight's 110). The G titles must qualify for one, so that a
+// surface ignoring ok is caught, and are rated 7.0 with 50 votes: Hidden
+// Gems' floor, and level with the lowest-rated title the db engagement tests
+// look for. The unrestricted engagement proof is Comfort Rewatch, which reads
+// only this profile's own completions: a watched R title, unembedded so it
+// moves neither the taste centroid nor the history count.
+//
+// Every row is stamped as metadata-attempted, so it never heads the
+// never-attempted page the db package's stale-metadata tests read.
 type ceilingFixture struct {
 	q         *db.Queries
 	profileID int64
@@ -83,8 +88,13 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 
 	userID := exec(`INSERT INTO users (username, email, password_hash) VALUES ($1, $2, 'x') RETURNING id`, token, token+"@example.com")
 	t.Cleanup(func() { cleanupExec(t, pool, `DELETE FROM users WHERE id = $1`, userID) })
-	profileID := exec(`INSERT INTO user_profiles (user_id, name, is_default, max_age_rating, language, subtitle_mode)
-		VALUES ($1, 'kid', FALSE, 'PG', 'en', 'off') RETURNING id`, userID)
+	// A mature tone lean (maturity_pref 2): the PG anchors would otherwise lean
+	// the profile family-ward, adding a distance penalty to every R title, and
+	// then a concurrent run that drew the same direction could crowd them out
+	// of the unrestricted hero pool. The lean only reorders; the ceiling is
+	// unaffected.
+	profileID := exec(`INSERT INTO user_profiles (user_id, name, is_default, max_age_rating, maturity_pref, language, subtitle_mode)
+		VALUES ($1, 'kid', FALSE, 'PG', 2, 'en', 'off') RETURNING id`, userID)
 	libID := exec(`INSERT INTO libraries (name, type, paths, owner_id) VALUES ($1, 'movie', $2, $3) RETURNING id`,
 		token, []string{"/tmp/" + token}, userID)
 	t.Cleanup(func() { cleanupExec(t, pool, `DELETE FROM libraries WHERE id = $1`, libID) })
@@ -93,14 +103,23 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	// and 740..767, clear of the other tests' dimensions), about 700
 	// combinations, with each title's offset on a shared third one. The rest
 	// of the catalog sits at distance ~1, and a concurrent run sharing one of
-	// the two dimensions at ~0.5, far beyond this fixture's titles (< 0.05);
-	// a run would have to draw both to interfere. Titles still count by
-	// rating, not by id, in case it ever does.
+	// the two dimensions at ~0.5, far beyond this fixture's titles (< 0.05).
+	// Titles count by rating, not by id, and the mature lean above keeps the
+	// R titles in the hero pool, so even a run that draws both dimensions
+	// does not break this one.
+	//
+	// The small negative weight on dimensions 0-7 puts every fixture row just
+	// past distance 1 from the db package's one-hot queries. Without it the
+	// rows sat at exactly 1, tied with those tests' own "far" rows inside a
+	// LIMIT that has no tiebreak.
 	d1, d2 := 672+int(b[0]%26), 740+int(b[1]%28)
 	vec := func(lead float64) *string {
 		parts := make([]string, 768)
 		for i := range parts {
 			parts[i] = "0"
+		}
+		for i := 0; i < 8; i++ {
+			parts[i] = "-0.01"
 		}
 		parts[d1], parts[d2] = "1", "1"
 		parts[699] = fmt.Sprintf("%g", lead)
@@ -111,8 +130,8 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	item := func(name, rating string, score float64, votes, runtime int, embedding *string) int64 {
 		return exec(`INSERT INTO media_items
 			   (library_id, type, title, sort_title, year, overview, rating, vote_count, runtime_minutes,
-			    content_rating, poster_path, backdrop_path, embedding)
-			 VALUES ($1, 'movie', $2, $2, 2000, 'An overview.', $3, $4, $5, $6, '/p.jpg', '/b.jpg', $7::vector)
+			    content_rating, poster_path, backdrop_path, embedding, last_metadata_attempt)
+			 VALUES ($1, 'movie', $2, $2, 2000, 'An overview.', $3, $4, $5, $6, '/p.jpg', '/b.jpg', $7::vector, NOW())
 			 RETURNING id`, libID, token+" "+name, score, votes, runtime, rating, embedding)
 	}
 	watch := func(itemID int64) {
@@ -131,25 +150,31 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	// They are rated G, the all-ages tier allowedRatings returns on failure,
 	// so a surface that ignored ok would build these and be caught.
 	for i := 0; i < anchorRailMinItems+1; i++ {
-		item(fmt.Sprintf("allowed %d", i), "G", 7.1, 50, 90, vec(0.3+0.01*float64(i)))
+		item(fmt.Sprintf("allowed %d", i), "G", 7.0, 50, 90, vec(0.3+0.01*float64(i)))
 	}
 	return &ceilingFixture{q: db.NewQueries(pool), profileID: profileID}
 }
 
 // cleanupExec runs a fixture cleanup statement and reports a failure instead
 // of leaking the rows. A concurrent run's cleanup can deadlock with this one
-// over rows that link the two runs' fixtures, so a deadlock is retried.
+// over rows that link the two runs' fixtures, so a deadlock is retried, and
+// logged: anti-repetition is off (newTestHero) so that nothing should link
+// them, and a retry firing means something does again.
 func cleanupExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	t.Helper()
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
-		if _, err = pool.Exec(context.Background(), sql, args...); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err = pool.Exec(ctx, sql, args...)
+		cancel()
+		if err == nil {
 			return
 		}
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "40P01" {
 			break
 		}
+		t.Logf("cleanup %q deadlocked with a concurrent run; retrying", sql)
 		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
 	}
 	t.Errorf("cleanup %q: %v", sql, err)
@@ -165,13 +190,15 @@ func newTestHero(q *db.Queries, chat *llm.Client) *Hero {
 }
 
 // countingLLM is a chat endpoint that records whether it was called and
-// fails every call, so Discover builds nothing past its LLM step either way.
+// refuses every call, so Discover builds nothing past its LLM step either
+// way. A 4xx, not a 5xx: Discover retries a 5xx after a second, which kept
+// each run's rows alive in the shared catalog for longer.
 func countingLLM(t *testing.T) (*llm.Client, *atomic.Bool) {
 	t.Helper()
 	called := &atomic.Bool{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called.Store(true)
-		http.Error(w, "no chat in this test", http.StatusInternalServerError)
+		http.Error(w, "no chat in this test", http.StatusBadRequest)
 	}))
 	t.Cleanup(srv.Close)
 	return llm.NewClient(llm.Config{BaseURL: srv.URL}), called

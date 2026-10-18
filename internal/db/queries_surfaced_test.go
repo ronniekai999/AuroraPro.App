@@ -132,8 +132,19 @@ func TestNearestUnwatchedDemotion(t *testing.T) {
 	farther := seedEmbeddedItem(t, q, libID, 1) // orthogonal → distance ~1
 	queryVec := oneHotLit(0)
 
+	// A demoted item sorts after EVERY fresh one in the catalog, so with nine
+	// or more embedded rows anywhere (another package's fixture, running
+	// concurrently) closer fell out of the 10-row page and the no-starvation
+	// check failed. A rating no other row carries scopes the query to these
+	// two rows; the rating filter is the only way to scope NearestUnwatched.
+	scope := "DM" + randomSuffix(t) // 18 characters; content_rating is varchar(20)
+	if _, err := q.pool.Exec(ctx, `UPDATE media_items SET content_rating = $1 WHERE id = ANY($2)`,
+		scope, []int64{closer, farther}); err != nil {
+		t.Fatalf("scope fixture rows: %v", err)
+	}
+
 	order := func(surface string, within int64) []int64 {
-		items, err := q.NearestUnwatched(ctx, profileID, queryVec, 10, nil, surface, within, false)
+		items, err := q.NearestUnwatched(ctx, profileID, queryVec, 10, []string{scope}, surface, within, false)
 		if err != nil {
 			t.Fatalf("nearest: %v", err)
 		}
