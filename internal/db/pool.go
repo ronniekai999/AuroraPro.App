@@ -25,8 +25,9 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 	poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
 
 	// Bump pgvector HNSW search-list size on every connection. Default 40
-	// is below our vectorRecallSize=50 — without this, kNN queries
-	// silently truncate the candidate set and produce lower-quality results.
+	// is below our vectorRecallSize=50 — without this, every 50-row
+	// semantic page would come back short from the index, and
+	// SemanticSearch would pay for its exact retry on every search.
 	//
 	// Sequence matters: pgvector's GUC isn't registered until its shared
 	// library is loaded into the backend, which happens lazily on first
@@ -77,8 +78,8 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 // The tuning itself is done by `pool.AfterConnect` (see NewPool comment),
 // which forces pgvector load via a `'[0]'::vector(1)` cast and then runs a
 // session-level `SET hnsw.ef_search = 100`. This function checks that the
-// session-level SET actually took effect — without it, kNN queries would
-// silently truncate candidate sets and quality-regress without any signal.
+// session-level SET actually took effect — without it, every semantic search
+// would fall back to its slower exact retry, with no other signal.
 //
 // Non-fatal: we LOG mismatches at WARN rather than fail-start, because:
 //   - pgvector may not be installed at all (e.g. CI against vanilla PG)

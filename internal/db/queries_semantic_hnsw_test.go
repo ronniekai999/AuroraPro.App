@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +114,17 @@ func TestSemanticSearchFillsAFilteredPageUnderTheHNSWIndex(t *testing.T) {
 type hnswFixture struct {
 	query   string
 	allowed map[int64]bool
+	// ranked holds the PG rows' ids, nearest first.
+	ranked []int64
+}
+
+// nearest is the set of the n nearest PG rows.
+func (f hnswFixture) nearest(n int) map[int64]bool {
+	out := map[int64]bool{}
+	for _, id := range f.ranked[:n] {
+		out[id] = true
+	}
+	return out
 }
 
 func seedHNSWFixture(t *testing.T, q *Queries, allowedRows int) hnswFixture {
@@ -126,7 +139,7 @@ func seedHNSWFixture(t *testing.T, q *Queries, allowedRows int) hnswFixture {
 	// outside dimensions 400-599, and the shared catalog sits at distance ~1.
 	a, b := 400+rand.Intn(90), 500+rand.Intn(90)
 	const rOffset, pgOffset = 590, 595
-	f := hnswFixture{query: sparseVec768(map[int]float64{a: 1, b: 1}), allowed: map[int64]bool{}}
+	f := hnswFixture{query: sparseVec768(map[int]float64{a: 1, b: 1}), allowed: map[int64]bool{}, ranked: make([]int64, allowedRows)}
 	for _, i := range fromBothEnds(60) {
 		seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s r%d", token, i), ratingPtr("R"),
 			sparseVec768(map[int]float64{a: 1, b: 1, rOffset: 0.001 * float64(i+1)}))
@@ -134,8 +147,10 @@ func seedHNSWFixture(t *testing.T, q *Queries, allowedRows int) hnswFixture {
 	for _, i := range fromBothEnds(allowedRows) {
 		// cos((1,1,x), (1,1)) = 0.8 at x ≈ 1.06: cosine distance ~0.2, and
 		// about 0.3 at the fiftieth row, still short of a concurrent run's 0.5.
-		f.allowed[seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s pg%d", token, i), ratingPtr("PG"),
-			sparseVec768(map[int]float64{a: 1, b: 1, pgOffset: 1.06 + 0.005*float64(i)}))] = true
+		id := seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s pg%d", token, i), ratingPtr("PG"),
+			sparseVec768(map[int]float64{a: 1, b: 1, pgOffset: 1.06 + 0.005*float64(i)}))
+		f.allowed[id] = true
+		f.ranked[i] = id
 	}
 	return f
 }
@@ -186,10 +201,12 @@ func checkAscending(t *testing.T, hits []SemanticHit) {
 // it finds this fixture's allowed rows) and a hook drops one. The page is the
 // production recall size, 50, so a page one row short is 98% full and any
 // tolerance short of the full limit (90% as a float, limit - limit/10) fails.
+// Five more allowed rows than the page holds lie further out, so a retry
+// that asked for more than the page shows too.
 func TestSemanticSearchRetriesAShortButNonEmptyPage(t *testing.T) {
 	const limit = 50
 	q := exactScanQueries(t)
-	f := seedHNSWFixture(t, q, limit)
+	f := seedHNSWFixture(t, q, limit+5)
 	firstPass := -1
 	q.testHookSemanticFirstPass = func(hits []SemanticHit) []SemanticHit {
 		firstPass = len(hits)
@@ -205,19 +222,10 @@ func TestSemanticSearchRetriesAShortButNonEmptyPage(t *testing.T) {
 		t.Fatalf("SemanticSearch: %v", err)
 	}
 	if firstPass != limit {
-		t.Fatalf("precondition: the exact first pass returned %d rows, want this fixture's %d allowed ones", firstPass, limit)
+		t.Fatalf("precondition: the exact first pass returned %d rows, want a full page of %d", firstPass, limit)
 	}
-	got := map[int64]bool{}
-	for _, h := range hits {
-		got[h.Item.ID] = true
-	}
-	for id := range f.allowed {
-		if !got[id] {
-			t.Errorf("SemanticSearch lost the allowed row %d: got %d of %d rows from a first pass one row short; a short page must be retried",
-				id, len(hits), limit)
-		}
-	}
-	checkAscending(t, hits)
+	// A first pass one row short loses a row unless the page is retried.
+	checkFilledPage(t, hits, f.nearest(limit), limit)
 }
 
 func checkHNSWWindowFill(t *testing.T, q *Queries) {
@@ -233,9 +241,30 @@ func checkHNSWWindowFill(t *testing.T, q *Queries) {
 		t.Fatalf("precondition: the index path returned %d of 5 rows; the fixture no longer reproduces the candidate window", direct)
 	}
 
+	// The first pass itself must still be the index scan: an ordering the
+	// index cannot serve would make every search an exact scan, and the page
+	// would then come back full, retry or not.
+	firstPass := -1
+	q.testHookSemanticFirstPass = func(hits []SemanticHit) []SemanticHit {
+		firstPass = len(hits)
+		return hits
+	}
 	hits, err := q.SemanticSearch(ctx, query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
 	if err != nil {
 		t.Fatalf("SemanticSearch: %v", err)
+	}
+	if firstPass < 0 || firstPass >= 5 {
+		t.Errorf("SemanticSearch's first pass returned %d of 5 rows where the index path returns %d; it no longer runs as an index scan", firstPass, direct)
+	}
+	checkFilledPage(t, hits, allowed, 5)
+}
+
+// checkFilledPage checks that hits holds every row of allowed, and no more
+// than limit rows, all within the PG ceiling and in ascending distance.
+func checkFilledPage(t *testing.T, hits []SemanticHit, allowed map[int64]bool, limit int) {
+	t.Helper()
+	if len(hits) > limit {
+		t.Errorf("SemanticSearch returned %d rows for a page of %d", len(hits), limit)
 	}
 	got := map[int64]bool{}
 	for _, h := range hits {
@@ -246,7 +275,7 @@ func checkHNSWWindowFill(t *testing.T, q *Queries) {
 	}
 	for id := range allowed {
 		if !got[id] {
-			t.Errorf("SemanticSearch lost the allowed row %d: got %d of 5 rows, while the index path alone found %d", id, len(hits), direct)
+			t.Errorf("SemanticSearch lost the allowed row %d: got %d of %d rows", id, len(hits), limit)
 		}
 	}
 	checkAscending(t, hits)
@@ -291,4 +320,125 @@ func TestSemanticSearchRetryFailures(t *testing.T) {
 			t.Errorf("a failed retry returned %d hits, want the first pass's 4", len(hits))
 		}
 	})
+}
+
+// TestSemanticSearchFillsAPageBeyondTheLargestWindow: 1,100 over-ceiling rows
+// sit nearer the query than the five allowed ones, more than pgvector's
+// largest candidate window (hnsw.ef_search 1000), so no index scan of any
+// window reaches the allowed rows and only an exact retry fills the page. The
+// five-row cases above put only sixty rows in front, which a retry that just
+// widened the window would get past.
+func TestSemanticSearchFillsAPageBeyondTheLargestWindow(t *testing.T) {
+	const nearer = 1100
+	q := hnswWindowQueries(t, 0)
+	ctx := context.Background()
+	libID := seedTypedLibrary(t, q, seedTestUser(t, q), "movie")
+	token := "hnswwide" + randomSuffix(t)
+	a, b := 400+rand.Intn(90), 500+rand.Intn(90)
+	query := sparseVec768(map[int]float64{a: 1, b: 1})
+	// The R rows, in one statement: (1, 1, x) with x up to 0.11 on dimension
+	// 590, within cosine distance ~0.003 of the query. Columns as in
+	// seedSearchCeilingItem.
+	if _, err := q.pool.Exec(ctx, `
+		INSERT INTO media_items
+		  (library_id, type, title, sort_title, tmdb_id, year, overview, rating, runtime_minutes,
+		   content_rating, poster_path, backdrop_path, embedding, added_at, last_metadata_attempt)
+		SELECT $1, 'movie', $2 || g, $2 || g, $3 + g, 0, '', 0, 0, 'R', '', '',
+		       (SELECT array_agg(CASE WHEN d = $4 OR d = $5 THEN 1.0 WHEN d = 590 THEN 0.0001 * g ELSE 0.0 END ORDER BY d)
+		        FROM generate_series(0, 767) d)::vector,
+		       NOW() - interval '30 days', NOW()
+		FROM generate_series(1, $6::int) g`,
+		libID, token+" r", uniqueTMDBID(t), a, b, nearer); err != nil {
+		t.Fatalf("seed the nearer rows: %v", err)
+	}
+	allowed := map[int64]bool{}
+	for _, i := range fromBothEnds(5) {
+		allowed[seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s pg%d", token, i), ratingPtr("PG"),
+			sparseVec768(map[int]float64{a: 1, b: 1, 595: 1.06 + 0.005*float64(i)}))] = true
+	}
+	allowedRatings := AllowedRatingsForMax("PG")
+
+	// Precondition: under the largest window the index path is still short.
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL hnsw.ef_search = 1000"); err != nil {
+		t.Fatalf("widen the window: %v", err)
+	}
+	var widest int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (
+		  SELECT 1 FROM media_items m
+		  WHERE m.embedding IS NOT NULL AND m.content_rating = ANY($2)
+		  ORDER BY m.embedding <=> $1::vector LIMIT 5) s`, query, allowedRatings).Scan(&widest); err != nil {
+		t.Fatalf("index query under the largest window: %v", err)
+	}
+	_ = tx.Rollback(ctx)
+	if widest >= 5 {
+		t.Fatalf("precondition: under ef_search 1000 the index path returned %d of 5 rows; the fixture no longer puts the allowed rows beyond the window", widest)
+	}
+
+	hits, err := q.SemanticSearch(ctx, query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
+	if err != nil {
+		t.Fatalf("SemanticSearch: %v", err)
+	}
+	checkFilledPage(t, hits, allowed, 5)
+}
+
+// semanticQueryCounter counts the SemanticSearch statements a pool runs.
+type semanticQueryCounter struct{ n atomic.Int32 }
+
+func (c *semanticQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "AS distance") {
+		c.n.Add(1)
+	}
+	return ctx
+}
+
+func (c *semanticQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// TestSemanticSearchRunsOneQueryForAFullPage: the exact retry is paid only by
+// a short page. A full first page is as good as any HNSW result, and an
+// unconditional retry would make every search an exact scan.
+func TestSemanticSearchRunsOneQueryForAFullPage(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("parse test db url: %v", err)
+	}
+	// Index scans off, so the first pass is exact and finds the whole page.
+	cfg.ConnConfig.RuntimeParams["enable_indexscan"] = "off"
+	counter := &semanticQueryCounter{}
+	cfg.ConnConfig.Tracer = counter
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect to test db: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	q := NewQueries(pool)
+	f := seedHNSWFixture(t, q, 5)
+	allowedRatings := AllowedRatingsForMax("PG")
+
+	counter.n.Store(0)
+	hits, err := q.SemanticSearch(context.Background(), f.query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
+	if err != nil {
+		t.Fatalf("SemanticSearch: %v", err)
+	}
+	checkFilledPage(t, hits, f.allowed, 5)
+	if got := counter.n.Load(); got != 1 {
+		t.Errorf("a full first page ran %d search queries, want 1: the exact retry is for short pages only", got)
+	}
+
+	// The counter does see a retry.
+	q.testHookSemanticFirstPass = func(hits []SemanticHit) []SemanticHit { return hits[:len(hits)-1] }
+	counter.n.Store(0)
+	if _, err := q.SemanticSearch(context.Background(), f.query, SemanticFilter{AllowedRatings: allowedRatings}, 5); err != nil {
+		t.Fatalf("SemanticSearch: %v", err)
+	}
+	if got := counter.n.Load(); got != 2 {
+		t.Errorf("a short first page ran %d search queries, want 2", got)
+	}
 }

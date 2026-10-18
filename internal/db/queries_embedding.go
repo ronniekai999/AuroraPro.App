@@ -186,7 +186,8 @@ type SemanticHit struct {
 // row, roughly 90-180 ms there; that is every search with a limit above
 // ef_search, including all of them if pool.go's SET hnsw.ef_search fails and
 // pgvector's default of 40 applies. If the retry fails for any reason but
-// cancellation, the short page is returned.
+// the context ending (cancelled or past its deadline), the short page is
+// returned.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {

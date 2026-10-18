@@ -138,8 +138,8 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   is a separate SQL text that selects `exactDistance` and orders by that
   column, which the index cannot serve.
   Never retry the same text under changed planner settings: a cached generic
-  plan ignores them. A retry that fails (other than by cancellation) returns
-  the short page. The recommender and onboarding kNN queries order by their
+  plan ignores them. A retry that fails (other than by its context ending)
+  returns the short page. The recommender and onboarding kNN queries order by their
   `DISTINCT ON` key first, so they never use the index and are exact.
 - Filter in SQL before cross-library dedup and before `LIMIT`. Library search
   filters both semantic recall legs (the lexical leg takes the vector leg's
