@@ -51,6 +51,7 @@ import {
   listAdminActivity,
   listProfiles,
   activateProfile,
+  getActiveProfile,
   setProfileMaturity,
   updateProfile,
   listWatchlists,
@@ -104,6 +105,9 @@ import { SearchPalette } from '@/components/SearchPalette'
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
+import { ProfilePinDialog } from '@/components/ProfilePinDialog'
+import { resolveStartupProfile } from '@/lib/profileSession'
+import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -2282,6 +2286,14 @@ export default function App() {
   // `profiles.length > 0` made `ready` a tautology, since the policy's own
   // `profileCount < 2` check already subsumes it.
   const [profilesLoaded, setProfilesLoaded] = useState(false)
+  // The profile this session acts as. The server's binding is the truth
+  // (issue #462: every ceiling is enforced from it), so activeProfileId only
+  // changes after the server confirms: at startup from getActiveProfile, and
+  // on a switch once activateProfile resolves (switchProfile below). It used
+  // to change first, with activation fire-and-forget, so a failed call left a
+  // kid's UI showing the kid profile while the server enforced the parent's.
+  // localStorage remembers the last choice, only so a new login (which binds
+  // the account default) can re-select it.
   const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
     try {
       const raw = localStorage.getItem('aurora_active_profile_id')
@@ -2293,16 +2305,6 @@ export default function App() {
       if (activeProfileId) localStorage.setItem('aurora_active_profile_id', String(activeProfileId))
       else localStorage.removeItem('aurora_active_profile_id')
     } catch { /* ignore */ }
-  }, [activeProfileId])
-  // Issue #462 — bind the switch server-side so parental-rating enforcement
-  // (which never trusts a client-supplied profile id) knows which profile is
-  // acting. Fire-and-forget: local switching above already works instantly
-  // regardless of this call's outcome, and a transient failure here just
-  // means enforcement uses the account default until the next successful
-  // switch or token refresh.
-  useEffect(() => {
-    if (!activeProfileId) return
-    void activateProfile(activeProfileId).catch(() => { /* best-effort */ })
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
@@ -2724,24 +2726,25 @@ export default function App() {
   // nothing has loaded yet).
   const seedResolvedRef = useRef(false)
 
-  // Load profiles once the user is logged in.
+  // Load profiles once the user is logged in, and take the active profile
+  // from the server's session binding rather than the remembered one.
   useEffect(() => {
     if (!user) { setProfiles([]); setProfilesLoaded(false); return }
     const ac = new AbortController()
-    listProfiles(ac.signal).then(ps => {
+    const remembered = activeProfileId
+    void (async () => {
+      let ps: Profile[]
+      try { ps = await listProfiles(ac.signal) } catch { return /* non-fatal — profile features just stay disabled */ }
+      const acting = await getActiveProfile(ac.signal).catch(() => null)
+      if (ac.signal.aborted) return
+      const next = await resolveStartupProfile({
+        profiles: ps, acting, remembered, activate: id => activateProfile(id),
+      })
+      if (ac.signal.aborted) return
       setProfiles(ps)
-      // Validate the stored active profile against the loaded list.
-      // If it no longer exists (deleted from another tab), fall back
-      // to the default so we don't keep sending a stale profile_id.
-      const validCurrent = activeProfileId && ps.some(p => p.id === activeProfileId)
-      if (!validCurrent && ps.length > 0) {
-        const def = ps.find(p => p.is_default) || ps[0]
-        setActiveProfileId(def.id)
-      } else if (ps.length === 0 && activeProfileId !== null) {
-        setActiveProfileId(null)
-      }
+      setActiveProfileId(next)
       setProfilesLoaded(true)
-    }).catch(() => { /* non-fatal — profile features just stay disabled */ })
+    })()
     return () => ac.abort()
   // activeProfileId intentionally excluded — we set it inside the
   // effect and don't want to re-run on that change.
@@ -2921,6 +2924,28 @@ export default function App() {
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
+
+  // Profile switching goes through the server, and a locked profile asks for
+  // its PIN first; see lib/useProfileSwitch.
+  const onSwitchRefused = useCallback((p: Profile) => addToast(`Couldn't switch to ${p.name}`, 'error'), [addToast])
+  const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = useProfileSwitch({
+    profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused,
+  })
+
+  // Tabs share one session, so a switch in another tab moves this tab's
+  // server binding too. Re-read it when the tab comes back into view, so
+  // what this tab shows is what the server enforces.
+  useEffect(() => {
+    if (!user) return
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      void getActiveProfile().then(acting => {
+        setActiveProfileId(prev => (acting && acting.id !== prev ? acting.id : prev))
+      }).catch(() => { /* keep what we have */ })
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [user])
 
   // Hydrate a /title/:id deep link (cold load, refresh, forward-button,
   // shared link). In-app opens set selectedMedia synchronously in
@@ -3354,6 +3379,9 @@ export default function App() {
         // palette without ALSO triggering the page-level back/etc.
         // navigation here.
         if (paletteOpen) return
+        // The PIN prompt's Escape cancels it (Radix); it must not also navigate
+        // the page behind it.
+        if (pinTarget) return
         // While a cast/AirPlay receiver is active, Escape
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
@@ -3380,7 +3408,7 @@ export default function App() {
         // The profile gate belongs in this list too. SearchPalette is z-200 and
         // the gate is z-85, so Cmd+K opened the palette over it, and picking a
         // result navigated the app behind a gate that stayed up.
-        if (profilesGateOpen) return
+        if (profilesGateOpen || pinTarget) return
         e.preventDefault()
         setPaletteOpen(true)
       }
@@ -3390,7 +3418,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer, closeSearch])
+  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, pinTarget, closePlayer, closeSearch])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -5816,7 +5844,7 @@ export default function App() {
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}
-            onSelectProfile={setActiveProfileId}
+            onSelectProfile={id => { void switchProfile(id) }}
             // The dashed Add-Profile row routes here rather than duplicating
             // the create form in the menu — SettingsView's
             // ProfilesAndWatchlistsCard already owns creation plus the taste
@@ -6123,6 +6151,7 @@ export default function App() {
                     .catch((e) => { addToast('Failed to update avatar', 'error'); throw e })
                 }}
                 onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
+                onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
               />
             </ViewSuspense>
           )}
@@ -6504,7 +6533,7 @@ export default function App() {
       <ProfilesGate
         profiles={profiles}
         activeProfileId={activeProfileId}
-        onSelect={setActiveProfileId}
+        onSelect={switchProfile}
         onAddProfile={() => handleNavigate('settings')}
         // `ready` = the list has actually been fetched. It must NOT be
         // `profiles.length > 0`: the policy's own `profileCount < 2` check
@@ -6515,6 +6544,10 @@ export default function App() {
         onDismiss={() => setProfilesGateForced(false)}
         onOpenChange={setProfilesGateOpen}
       />
+
+      {pinTarget && (
+        <ProfilePinDialog profile={pinTarget} onSubmit={unlockProfile} onCancel={cancelPin} />
+      )}
 
       {/* Taste onboarding ("Pick What You Love") — self-gating: renders only
           when the active/default profile is eligible and hasn't completed it.

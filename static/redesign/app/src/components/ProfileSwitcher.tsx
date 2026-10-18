@@ -6,6 +6,8 @@ import { maturityLeanLabel } from '@/lib/maturity'
 interface ProfileSwitcherProps {
   profiles: Profile[]
   activeProfileId: number | null
+  // Asks the host to switch. The host may first prompt for a locked profile's
+  // PIN, so the active profile can change after the menu closes, or not at all.
   onSelect: (id: number) => void
   // Navigates to where profiles are created (Settings). Optional so the
   // component renders without it; the Add-Profile row is simply absent.
@@ -177,7 +179,7 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
                       'Default' spelled out rather than a ★ glyph: NVDA reads
                       U+2605 as "black star", right before the word it decorates. */}
                   <span className="block truncate text-[11px] text-white/50">
-                    {[p.is_default ? 'Default' : null, maturityLeanLabel(p.maturity_pref)]
+                    {[p.is_default ? 'Default' : null, p.has_pin ? 'Locked' : null, maturityLeanLabel(p.maturity_pref)]
                       .filter(Boolean)
                       .join(' · ') || 'Profile'}
                   </span>

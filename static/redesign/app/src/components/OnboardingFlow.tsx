@@ -13,6 +13,7 @@ import {
   type Profile,
   type ReferralPromptState,
 } from '@/lib/api'
+import { isRestrictedProfile } from '@/lib/profileSession'
 import { buildSteps, nextStep, prevStep, type Step } from '@/lib/onboardingSteps'
 import {
   shuffleReferralOptions,
@@ -113,6 +114,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
   const [name, setName] = useState(() => (profile?.name ?? '').slice(0, 24))
   const [age, setAge] = useState(() => ageForRating(profile?.max_age_rating))
   const [ageTouched, setAgeTouched] = useState(false)
+  // A profile that already has a content limit is the one this session acts
+  // as, so it is restricted, and the server refuses any change to its limit.
+  // The age step shows the limit instead of offering a slider that would fail.
+  const ceilingLocked = isRestrictedProfile(profile)
 
   // The profile can arrive AFTER mount (App's listProfiles can lose the race to
   // the gate's getOnboardingStatus, so `profile` is briefly null). Back-fill the
@@ -438,7 +443,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
           name: name.trim(),
           avatar_url: nebulaValue(avatarId ?? 'aurora'),
         }
-        if (ageTouched) {
+        if (ageTouched && !ceilingLocked) {
           const r = ratingForAge(age)
           patch.max_age_rating = r.maxRating
           patch.maturity_pref = r.maturityPref
@@ -710,7 +715,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
           How old are you?
         </h1>
         <p className="mx-auto mt-3 max-w-sm text-[0.95rem] leading-relaxed text-white/55">
-          This tailors your recommendations and keeps things age-appropriate.
+          {ceilingLocked
+            ? `This profile has a content limit (${profile?.max_age_rating}), so its age can’t be changed here.`
+            : 'This tailors your recommendations and keeps things age-appropriate.'}
         </p>
         <div
           className="font-display mt-6 bg-gradient-to-b from-white to-[#d8b4fe] bg-clip-text text-[clamp(3.2rem,10vw,5rem)] font-bold leading-none text-transparent"
@@ -733,6 +740,8 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
           min={4}
           max={80}
           value={age}
+          disabled={ceilingLocked}
+          aria-label="Age"
           onChange={(e) => {
             setAge(parseInt(e.target.value, 10))
             setAgeTouched(true)

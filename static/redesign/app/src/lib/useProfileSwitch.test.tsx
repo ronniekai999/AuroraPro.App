@@ -1,0 +1,101 @@
+// @vitest-environment jsdom
+
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { APIError, type Profile } from './api'
+import { useProfileSwitch } from './useProfileSwitch'
+
+const api = vi.hoisted(() => ({ activateProfile: vi.fn() }))
+vi.mock('./api', async importOriginal => ({ ...(await importOriginal<typeof import('./api')>()), ...api }))
+
+const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
+  id, user_id: 1, name: `p${id}`, is_default: id === 1, created_at: '', updated_at: '', ...extra,
+})
+const parent = profile(1, { has_pin: true })
+const kid = profile(2, { max_age_rating: 'PG' })
+const other = profile(3)
+
+const refusal = (reason: string) =>
+  new APIError(403, 'refused', { error: { code: 403, message: 'refused', reason } })
+
+function setup(activeProfileId = 2) {
+  const setActiveProfileId = vi.fn()
+  const onError = vi.fn()
+  const hook = renderHook(() => useProfileSwitch({
+    profiles: [parent, kid, other], activeProfileId, setActiveProfileId, onError,
+  }))
+  return { hook, setActiveProfileId, onError }
+}
+
+describe('useProfileSwitch', () => {
+  beforeEach(() => { api.activateProfile.mockReset() })
+
+  it('switches an unlocked profile only after the server binds it', async () => {
+    let bind!: () => void
+    api.activateProfile.mockImplementation(() => new Promise<void>(r => { bind = r }))
+    const { hook, setActiveProfileId } = setup()
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(3) })
+    expect(api.activateProfile).toHaveBeenCalledWith(3)
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+    await act(async () => { bind() })
+    await expect(switched!).resolves.toBe(true)
+    expect(setActiveProfileId).toHaveBeenCalledWith(3)
+  })
+
+  it('keeps the current profile when the server refuses', async () => {
+    api.activateProfile.mockRejectedValue(new APIError(409, 'session no longer active', null))
+    const { hook, setActiveProfileId, onError } = setup()
+    let switched = true
+    await act(async () => { switched = await hook.result.current.switchProfile(3) })
+    expect(switched).toBe(false)
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledWith(other)
+  })
+
+  it('asks for a locked profile’s PIN and switches once it is accepted', async () => {
+    api.activateProfile.mockResolvedValue(undefined)
+    const { hook, setActiveProfileId } = setup()
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(1) })
+    expect(hook.result.current.pinTarget).toEqual(parent)
+    expect(api.activateProfile).not.toHaveBeenCalled()
+
+    api.activateProfile.mockRejectedValueOnce(refusal('profile_pin_invalid'))
+    await act(async () => {
+      await expect(hook.result.current.unlock({ pin: '0000' })).rejects.toBeInstanceOf(APIError)
+    })
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+    expect(hook.result.current.pinTarget).toEqual(parent) // still asking
+
+    await act(async () => { await hook.result.current.unlock({ pin: '1234' }) })
+    expect(api.activateProfile).toHaveBeenLastCalledWith(1, { pin: '1234' })
+    expect(setActiveProfileId).toHaveBeenCalledWith(1)
+    expect(hook.result.current.pinTarget).toBeNull()
+    await expect(switched!).resolves.toBe(true)
+  })
+
+  it('reports a cancelled PIN prompt as no switch', async () => {
+    const { hook, setActiveProfileId } = setup()
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(1) })
+    act(() => { hook.result.current.cancelPin() })
+    await expect(switched!).resolves.toBe(false)
+    expect(hook.result.current.pinTarget).toBeNull()
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+  })
+
+  it('asks for a PIN the profile list did not know about', async () => {
+    api.activateProfile.mockRejectedValueOnce(refusal('profile_pin_required'))
+    const { hook, onError } = setup()
+    await act(async () => { void hook.result.current.switchProfile(3) })
+    expect(hook.result.current.pinTarget).toEqual(other)
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it('treats the current profile as already switched', async () => {
+    const { hook } = setup(2)
+    await expect(hook.result.current.switchProfile(2)).resolves.toBe(true)
+    expect(api.activateProfile).not.toHaveBeenCalled()
+  })
+})

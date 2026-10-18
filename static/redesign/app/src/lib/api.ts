@@ -2041,8 +2041,9 @@ export async function updateAdminOAuth(body: Partial<{
 
 // Phase 4.6 — profiles. Aurora supports per-account "profiles" (think
 // Netflix profiles) so a single login can have separate watch
-// history / watchlists per family member. Pure read+CRUD; the
-// active-profile concept is client-stored only (no server endpoint).
+// history / watchlists per family member. The active profile is bound to the
+// session server-side (activateProfile / getActiveProfile); the localStorage
+// copy in App is only a hint for which profile to re-select after a new login.
 export interface Profile {
   id: number
   user_id: number
@@ -2056,6 +2057,40 @@ export interface Profile {
   // Phase E2c content-tone recall lean: -1 Auto (server derives the lean
   // from the profile's watched/seeded tiers), 0 family, 1 teen, 2 mature.
   maturity_pref?: number
+  // True when switching into this profile needs its PIN (or the account
+  // password). Optional so an older server reads as unlocked.
+  has_pin?: boolean
+}
+
+// Stable `error.reason` values the profile routes send beside the message.
+export type ProfileErrorReason =
+  | 'profile_pin_required'
+  | 'profile_pin_invalid'
+  | 'profile_pin_locked'
+  | 'profile_restricted'
+
+export function profileErrorReason(e: unknown): ProfileErrorReason | null {
+  if (!(e instanceof APIError)) return null
+  const body = e.body
+  if (!body || typeof body !== 'object') return null
+  const errField = (body as Record<string, unknown>).error
+  if (!errField || typeof errField !== 'object') return null
+  const reason = (errField as Record<string, unknown>).reason
+  switch (reason) {
+    case 'profile_pin_required':
+    case 'profile_pin_invalid':
+    case 'profile_pin_locked':
+    case 'profile_restricted':
+      return reason
+    default:
+      return null
+  }
+}
+
+// A PIN or the account password, for unlocking a locked profile. Send one.
+export interface ProfileUnlock {
+  pin?: string
+  password?: string
 }
 
 // setProfileMaturity sets a profile's content-tone preference (-1 Auto —
@@ -2205,11 +2240,28 @@ export async function setDefaultProfile(id: number): Promise<void> {
 // Binds `id` as this session's server-side acting profile (issue #462) —
 // distinct from setDefaultProfile's account-wide persistent default. The
 // server derives the parental rating ceiling from this, never from a
-// client-supplied value, so it must be called whenever the local active
-// profile changes. Best-effort by design: local switching (activeProfileId)
-// already works instantly regardless of this call's outcome.
-export async function activateProfile(id: number): Promise<void> {
-  await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST' })
+// client-supplied value, so a client must switch its own display only after
+// this resolves: showing one profile while the server enforces another is
+// how a failed call used to leave a kid's UI on the parent's ceiling. A
+// locked profile rejects with profileErrorReason 'profile_pin_required'
+// until `unlock` carries its PIN or the account password.
+export async function activateProfile(id: number, unlock?: ProfileUnlock): Promise<void> {
+  await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST', body: unlock })
+}
+
+// The profile this session is acting as — the one every server-side ceiling
+// uses. Read at startup instead of trusting the locally remembered choice.
+export async function getActiveProfile(signal?: AbortSignal): Promise<Profile> {
+  return apiFetch<Profile>('/api/profiles/active', { signal })
+}
+
+// Sets (pin = four digits) or removes (pin = '') a profile's PIN. Changing or
+// removing an existing PIN needs `current` — its PIN or the account password.
+export async function setProfilePin(id: number, pin: string, current?: ProfileUnlock): Promise<Profile> {
+  return apiFetch<Profile>(`/api/profiles/${id}/pin`, {
+    method: 'PUT',
+    body: { pin, current_pin: current?.pin, password: current?.password },
+  })
 }
 
 export interface Watchlist {
