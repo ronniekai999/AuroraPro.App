@@ -53,7 +53,9 @@ func TestChangeMediaUsesTheProfileResolvedAtConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create party: %v", err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM watch_parties WHERE party_code = $1`, ps.Code) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM watch_parties WHERE party_code = $1`, ps.Code)
+	})
 
 	caller := m.CallerProfile(ctx, hostID, rt)
 	if caller == nil || caller.ID != parentID {

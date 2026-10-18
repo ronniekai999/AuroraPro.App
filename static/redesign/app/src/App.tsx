@@ -106,7 +106,7 @@ import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { readSessionProfile, resolveStartupProfile, useSessionProfileOnVisible } from '@/lib/profileSession'
+import { loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
@@ -2292,19 +2292,17 @@ export default function App() {
   // on a switch once activateProfile resolves (switchProfile below). It used
   // to change first, with activation fire-and-forget, so a failed call left a
   // kid's UI showing the kid profile while the server enforced the parent's.
+  // It starts null, so nothing personalized loads for a guessed profile.
   // localStorage remembers the last choice, only so a new login (which binds
-  // the account default) can re-select it.
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
-    try {
-      const raw = localStorage.getItem('aurora_active_profile_id')
-      return raw ? parseInt(raw, 10) || null : null
-    } catch { return null }
-  })
+  // the account default) can re-select it; it used to seed activeProfileId,
+  // which fetched for the remembered profile before the binding was read, and
+  // kept it for the tab's life when the profile list failed to load.
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
-    try {
-      if (activeProfileId) localStorage.setItem('aurora_active_profile_id', String(activeProfileId))
-      else localStorage.removeItem('aurora_active_profile_id')
-    } catch { /* ignore */ }
+    if (!activeProfileId) return
+    rememberProfileId(activeProfileId)
+    rememberedProfileIdRef.current = activeProfileId
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
@@ -2729,29 +2727,25 @@ export default function App() {
   // Load profiles once the user is logged in, and take the active profile
   // from the server's session binding rather than the remembered one.
   useEffect(() => {
-    if (!user) { setProfiles([]); setProfilesLoaded(false); return }
+    if (!user) { setProfiles([]); setProfilesLoaded(false); setActiveProfileId(null); return }
     const ac = new AbortController()
-    const remembered = activeProfileId
-    void (async () => {
-      let ps: Profile[]
-      try { ps = await listProfiles(ac.signal) } catch { return /* non-fatal — profile features just stay disabled */ }
-      const acting = await readSessionProfile(() => getActiveProfile(ac.signal))
-      if (ac.signal.aborted) return
-      const next = await resolveStartupProfile({
-        profiles: ps, acting, remembered, activate: id => activateProfile(id),
-      })
-      if (ac.signal.aborted) return
-      setProfiles(ps)
-      setActiveProfileId(next)
+    void loadStartupProfiles({
+      list: () => listProfiles(ac.signal),
+      read: () => getActiveProfile(ac.signal),
+      activate: id => activateProfile(id),
+      remembered: rememberedProfileIdRef.current,
+      signal: ac.signal,
+    }).then(result => {
+      // No list: profile features just stay disabled.
+      if (!result || ac.signal.aborted) return
+      setProfiles(result.profiles)
+      setActiveProfileId(result.activeId)
       setProfilesLoaded(true)
       // The binding could not be read: ask rather than guess. The pick binds
       // the session.
-      if (next === null && ps.length > 1) setProfilesGateForced(true)
-    })()
+      if (result.askForProfile) setProfilesGateForced(true)
+    })
     return () => ac.abort()
-  // activeProfileId intentionally excluded — we set it inside the
-  // effect and don't want to re-run on that change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
   // `null` rails = not yet fetched. Empty arrays inside rails are
   // filtered out by HomeView so a fresh install with no media

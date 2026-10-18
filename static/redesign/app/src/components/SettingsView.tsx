@@ -69,7 +69,7 @@ import {
 } from '@/lib/api'
 import { SOCIAL_NETWORKS, normalizeHandleInput } from '@/lib/socialLinks'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { isRestrictedProfile } from '@/lib/profileSession'
+import { isRestrictedProfile, openDoorProfiles } from '@/lib/profileSession'
 
 /* ─────────────────────── SETTINGS VIEW ─────────────────────── */
 interface SettingsViewProps {
@@ -1273,8 +1273,7 @@ function ProfileLockPanel({ profile, profiles, newPin, setNewPin, busy, onSave, 
   onRemove: () => void
 }) {
   if (!profile) return null
-  const anyRestricted = profiles.some(p => isRestrictedProfile(p))
-  const openDoors = profiles.filter(p => !isRestrictedProfile(p) && !p.has_pin)
+  const openDoors = openDoorProfiles(profiles)
   const pinOk = /^[0-9]{4}$/.test(newPin)
   return (
     <div className="mb-5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
@@ -1284,10 +1283,10 @@ function ProfileLockPanel({ profile, profiles, newPin, setNewPin, busy, onSave, 
           ? 'Switching to this profile needs its PIN or the account password.'
           : 'No PIN: anyone signed in to this account can switch to it.'}
       </p>
-      {anyRestricted && openDoors.length > 0 && (
+      {openDoors.length > 0 && (
         <p className="text-amber-200/80 text-xs mt-2">
-          Profiles with a content limit can switch to {openDoors.map(p => p.name).join(', ')} without a PIN.
-          Set one to keep their limits in place.
+          Profiles with a content limit can switch to {openDoors.map(p => p.name).join(', ')} without a PIN,
+          and each may have a looser limit or none. Set a PIN on any that does to keep the limits in place.
         </p>
       )}
       <form

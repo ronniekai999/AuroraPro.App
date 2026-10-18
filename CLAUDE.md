@@ -208,7 +208,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   reason, never a 200: clients take a 200 as a confirmed binding. The
   password is the recovery path, by the owner's choice. Making a locked
   profile the default (`SetDefault`) needs the same, since every session with
-  no binding acts as the default.
+  no binding acts as the default, and `SetDefaultProfile` first binds the
+  account's live unbound sessions to the old default, so re-defaulting moves
+  no other device.
 - PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
   refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
   check let concurrent guesses all pass the lockout read; a review drove 40
@@ -264,15 +266,22 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   any digits).
 - Known gaps:
   - A lock protects only the profile it is on. A restricted profile can
-    switch to any unlocked unrestricted profile; Settings warns about it.
-  - A new login binds the account default without its PIN. The password that
-    signed in already stands in for any PIN.
+    switch to any unlocked profile, including one with a looser limit or
+    none; Settings warns about the unlocked profiles whose limit differs
+    (it has no rating ladder of its own, so it also lists stricter ones).
+  - A new login binds the account default without its PIN: the password
+    that signed in stands in for it. So does a sign-in through an already
+    linked identity, which needs no password.
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. So does an account whose every profile is
     restricted: nothing on it can lift a ceiling or create an unrestricted
     profile.
   - The admin role is account-level, so a restricted profile on an admin
-    account keeps every admin route.
+    account keeps every admin route: it can invite a new, unrestricted
+    account or restore a backup. The README tells owners to keep children
+    on an account that is not an admin.
+  - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
+    holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50
     days of continuous attempts.
   - Anyone on the account can keep a profile's PIN locked out with one wrong
@@ -280,10 +289,18 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     session can also keep spending the password budget of the profile it
     acts as (and of any unlocked profile it can switch into), so on the
     kid's own device the owner's password can be held off indefinitely. A
-    session acting as another profile, or a fresh sign-in, still works.
+    session acting as another profile, or a fresh sign-in, still works. The
+    budget is in memory, so it resets on a restart, and its fixed window
+    allows two bursts across a window boundary; a spent budget's Retry-After
+    gives the whole window, not the time left.
   - A deleted profile's devices keep their still-valid access tokens for up
     to one token lifetime, acting as the account's most restrictive remaining
-    profile, which is the default if that was the only restricted one.
+    profile, which is the default if that was the only restricted one; their
+    progress and feedback writes land on that profile. A backup restore can
+    leave tokens in the same state.
+  - The web app has no screen for changing another profile's ceiling or the
+    default profile; ceilings are set in a profile's own onboarding or
+    through the API.
   - A restricted session can still read and edit other profiles' watchlists
     and My Library, which check only account ownership (`?profile_id=` and
     the other routes listed under Parental rating ceiling likewise).
@@ -291,7 +308,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     becomes visible, so two visible tabs can show different profiles.
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
-  - Nothing tests the TV's PIN panel or Back handling on a device.
+  - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
+    App wiring (the switcher and the picker going through `switchProfile`,
+    and `activeProfileId` starting null) has no App-level test, and the room
+    socket's connect-time profile is pinned only at the manager.
   - Account-level actions still open to a restricted session: editing the
     member profile (`PUT /api/me/profile`, whose `share_watch_history`
     switch publishes the default profile's history), push subscriptions, and

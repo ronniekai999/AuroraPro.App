@@ -17,6 +17,19 @@ export function isRestrictedProfile(p: Pick<Profile, 'max_age_rating'> | null | 
   return !!p?.max_age_rating?.trim()
 }
 
+/** The unlocked profiles a restricted profile could switch into to loosen its
+ * limit: any without a limit, and any whose limit differs from some
+ * restricted profile's. The app has no rating ladder of its own (the
+ * server's is the only one), so a differing limit that happens to be
+ * stricter is listed too; profiles sharing one limit are harmless to each
+ * other and are not. Empty when no profile is restricted. */
+export function openDoorProfiles(profiles: Profile[]): Profile[] {
+  const limit = (p: Profile) => (p.max_age_rating ?? '').trim().toUpperCase()
+  const restricted = new Set(profiles.filter(isRestrictedProfile).map(limit))
+  if (restricted.size === 0) return []
+  return profiles.filter(p => !p.has_pin && (!isRestrictedProfile(p) || [...restricted].some(l => l !== limit(p))))
+}
+
 export async function resolveStartupProfile({ profiles, acting, remembered, activate }: {
   profiles: Profile[]
   /** The session's binding, or null when it could not be read. */
@@ -41,6 +54,44 @@ export async function resolveStartupProfile({ profiles, acting, remembered, acti
   // binds the session, so what the app shows is what the server enforces.
   if (next === null && profiles.length === 1) next = profiles[0].id
   return next
+}
+
+const REMEMBERED_PROFILE_KEY = 'aurora_active_profile_id'
+
+/** The profile id this browser last showed. It only feeds
+ * resolveStartupProfile's re-selection after a new login; the app never shows
+ * or fetches for it before the server's binding is read. */
+export function readRememberedProfileId(): number | null {
+  try {
+    const raw = localStorage.getItem(REMEMBERED_PROFILE_KEY)
+    return raw ? parseInt(raw, 10) || null : null
+  } catch { return null }
+}
+
+export function rememberProfileId(id: number): void {
+  try { localStorage.setItem(REMEMBERED_PROFILE_KEY, String(id)) } catch { /* ignore */ }
+}
+
+/** The startup sequence: the account's profiles, then the session's binding
+ * (readSessionProfile), then resolveStartupProfile. Null when the profile list
+ * cannot be read (profile features stay off) or the signal aborts.
+ * askForProfile means the binding is unknown and there are several profiles:
+ * the host opens the picker rather than guess. */
+export async function loadStartupProfiles({ list, read, activate, remembered, signal, retryMs }: {
+  list: () => Promise<Profile[]>
+  read: () => Promise<Profile>
+  activate: (id: number) => Promise<void>
+  remembered: number | null
+  signal?: AbortSignal
+  retryMs?: number
+}): Promise<{ profiles: Profile[]; activeId: number | null; askForProfile: boolean } | null> {
+  let profiles: Profile[]
+  try { profiles = await list() } catch { return null }
+  const acting = await readSessionProfile(read, retryMs)
+  if (signal?.aborted) return null
+  const activeId = await resolveStartupProfile({ profiles, acting, remembered, activate })
+  if (signal?.aborted) return null
+  return { profiles, activeId, askForProfile: activeId === null && profiles.length > 1 }
 }
 
 /** Reads the session's binding, retrying once after retryMs; null when both

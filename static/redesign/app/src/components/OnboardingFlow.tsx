@@ -77,6 +77,30 @@ function ratingForAge(age: number): {
   return { maxRating: '', maturityPref: -1, tier: 'Adult', tag: 'Up to R · TV-MA', tone: '#d8b4fe' }
 }
 
+// onboardingProfilePatch is the profile write that ends onboarding. Content
+// settings (the age-derived ceiling and tone lean) ride along only when the
+// age slider was moved, and never for a profile that already has a ceiling:
+// the server refuses a restricted profile's ceiling change, and the slider is
+// disabled for one.
+export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked }: {
+  name: string
+  avatarId: string | null
+  age: number
+  ageTouched: boolean
+  ceilingLocked: boolean
+}): { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } {
+  const patch: { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } = {
+    name: name.trim(),
+    avatar_url: nebulaValue(avatarId ?? 'aurora'),
+  }
+  if (ageTouched && !ceilingLocked) {
+    const r = ratingForAge(age)
+    patch.max_age_rating = r.maxRating
+    patch.maturity_pref = r.maturityPref
+  }
+  return patch
+}
+
 const LOADING_MESSAGES = [
   'Reading your taste signals…',
   'Scoring your library…',
@@ -439,15 +463,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, on
         // moved the age slider — so a returning profile that breezes past the
         // pre-filled age keeps its existing rating/tone (e.g. a kids profile is
         // never silently un-restricted).
-        const patch: { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } = {
-          name: name.trim(),
-          avatar_url: nebulaValue(avatarId ?? 'aurora'),
-        }
-        if (ageTouched && !ceilingLocked) {
-          const r = ratingForAge(age)
-          patch.max_age_rating = r.maxRating
-          patch.maturity_pref = r.maturityPref
-        }
+        const patch = onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked })
         // The critical writes + a best-effort hero warm:
         //  1) persist identity (+ content settings when the age step was used),
         //  2) save taste seeds — flips taste_onboarding_completed, mirrors picks to

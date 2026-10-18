@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activateProfile, APIError, getActiveProfile, profileErrorReason, setProfilePin, type Profile } from './api'
-import { isRestrictedProfile, readSessionProfile, resolveStartupProfile } from './profileSession'
+import { isRestrictedProfile, loadStartupProfiles, openDoorProfiles, readSessionProfile, resolveStartupProfile } from './profileSession'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `p${id}`, is_default: false, created_at: '', updated_at: '', ...extra,
@@ -150,5 +150,65 @@ describe('readSessionProfile', () => {
     const fine = vi.fn().mockResolvedValue(ok)
     expect(await readSessionProfile(fine, 0)).toBe(ok)
     expect(fine).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('loadStartupProfiles', () => {
+  const parent = profile(1, { is_default: true, has_pin: true })
+  const kid = profile(2, { max_age_rating: 'PG' })
+  const teen = profile(3)
+
+  it('shows nothing when the profile list cannot be read', async () => {
+    const read = vi.fn(), activate = vi.fn()
+    const result = await loadStartupProfiles({ list: async () => { throw new Error('down') }, read, activate, remembered: 2, retryMs: 0 })
+    expect(result).toBeNull()
+    expect(read).not.toHaveBeenCalled()
+    expect(activate).not.toHaveBeenCalled()
+  })
+
+  it('shows the binding, or a remembered unlocked profile the server accepts', async () => {
+    const activate = vi.fn(async () => {})
+    expect(await loadStartupProfiles({ list: async () => [parent, kid, teen], read: async () => kid, activate, remembered: null, retryMs: 0 }))
+      .toEqual({ profiles: [parent, kid, teen], activeId: 2, askForProfile: false })
+    expect(activate).not.toHaveBeenCalled()
+    const switched = await loadStartupProfiles({ list: async () => [parent, kid, teen], read: async () => parent, activate, remembered: 3, retryMs: 0 })
+    expect(switched?.activeId).toBe(3)
+    expect(activate).toHaveBeenCalledWith(3)
+  })
+
+  it('asks when the binding cannot be read and there are several profiles', async () => {
+    const down = async (): Promise<Profile> => { throw new Error('down') }
+    expect(await loadStartupProfiles({ list: async () => [parent, kid], read: down, activate: vi.fn(), remembered: null, retryMs: 0 }))
+      .toEqual({ profiles: [parent, kid], activeId: null, askForProfile: true })
+    expect((await loadStartupProfiles({ list: async () => [parent], read: down, activate: vi.fn(), remembered: null, retryMs: 0 }))?.askForProfile)
+      .toBe(false)
+  })
+
+  it('activates nothing once aborted', async () => {
+    const ac = new AbortController()
+    const activate = vi.fn(async () => {})
+    const result = await loadStartupProfiles({
+      list: async () => [parent, kid, teen], read: async () => { ac.abort(); return parent },
+      activate, remembered: 3, signal: ac.signal, retryMs: 0,
+    })
+    expect(result).toBeNull()
+    expect(activate).not.toHaveBeenCalled()
+  })
+})
+
+describe('openDoorProfiles', () => {
+  const names = (ps: Profile[]) => openDoorProfiles(ps).map(p => p.name)
+  it('lists the unlocked profiles a restricted one could loosen its limit in', () => {
+    const parent = profile(1, { name: 'parent' })
+    const locked = profile(2, { name: 'locked' , has_pin: true })
+    const tv14 = profile(3, { name: 'teen', max_age_rating: 'TV-14' })
+    const tvy = profile(4, { name: 'little', max_age_rating: 'TV-Y' })
+    const tvy2 = profile(5, { name: 'twin', max_age_rating: 'tv-y ' })
+    expect(names([parent, locked])).toEqual([]) // no restricted profile
+    expect(names([parent, locked, tvy])).toEqual(['parent'])
+    // TV-Y can switch into the unlocked TV-14 sibling: a looser limit.
+    expect(names([locked, tv14, tvy])).toEqual(['teen', 'little'])
+    // Profiles sharing one limit are no door to each other.
+    expect(names([locked, tvy, tvy2])).toEqual([])
   })
 })

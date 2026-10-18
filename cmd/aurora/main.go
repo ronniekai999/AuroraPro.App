@@ -746,9 +746,7 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				// Keep revoked rows past the longest-lived access token minted
-				// from them; see PurgeExpiredTokens.
-				purged, err := queries.PurgeExpiredTokens(context.Background(), cfg.Auth.AccessTokenExpiry+time.Minute)
+				purged, err := queries.PurgeExpiredTokens(context.Background(), revokedTokenRetention(cfg.Auth.AccessTokenExpiry))
 				if err != nil {
 					slog.Error("token cleanup failed", "error", err)
 				} else if purged > 0 {
@@ -1560,4 +1558,13 @@ func runSubtitleCacheSweeper(ctx context.Context, subDir string, interval, maxAg
 			return
 		}
 	}
+}
+
+// revokedTokenRetention is how long the purge keeps a revoked session row:
+// past the longest-lived access token minted from it, which names the row in
+// its "rtid" claim. With the row gone that token would resolve to the
+// account's most restrictive profile instead of its own; see
+// PurgeExpiredTokens.
+func revokedTokenRetention(accessTokenExpiry time.Duration) time.Duration {
+	return accessTokenExpiry + time.Minute
 }

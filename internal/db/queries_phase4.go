@@ -279,12 +279,29 @@ func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, err
 	return tag.RowsAffected() > 0, nil
 }
 
+// SetDefaultProfile makes profileID the account's default. A live session
+// with no binding acts as the default, so it is first bound to the OLD
+// default: re-defaulting must not move another device onto a profile, locked
+// or not, that it never switched to. The user row is locked like
+// RotateRefreshToken locks it, so a rotation cannot slip an unbound row in
+// between.
 func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64) error {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	if _, err = tx.Exec(ctx, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE", userID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE refresh_tokens SET active_profile_id =
+		  (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE)
+		WHERE user_id = $1 AND active_profile_id IS NULL AND NOT revoked`, userID)
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec(ctx,
 		"UPDATE user_profiles SET is_default = FALSE WHERE user_id = $1 AND is_default = TRUE", userID)

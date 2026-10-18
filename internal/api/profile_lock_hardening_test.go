@@ -155,6 +155,34 @@ func TestProfileManagementFailsClosedWhenTheActingProfileIsUnknown(t *testing.T)
 	if code, _, body := f.call(t, f.h.UpdateProfile, http.MethodPut, f.kidRT, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusInternalServerError {
 		t.Errorf("lifting a ceiling with the acting profile unknown: %d %s, want 500", code, body)
 	}
+	// The refusals changed nothing.
+	profiles, err := f.q.GetProfilesByUser(context.Background(), f.userID)
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(profiles) != 2 {
+		t.Errorf("the account has %d profiles after the refused create, want 2", len(profiles))
+	}
+	if kid, err := f.q.GetProfile(context.Background(), f.kid.ID); err != nil || kid == nil || kid.MaxAgeRating != "PG" {
+		t.Errorf("the kid's ceiling after the refused edit: %+v (err %v), want PG", kid, err)
+	}
+}
+
+// TestAStoredUnknownCeilingCannotBeCleared: a stored ceiling the ladder does
+// not know restricts to the all-ages tier. A restricted session may re-send
+// its own unchanged ceiling, and an unknown one must not read as "no
+// ceiling" when compared, or the kid could clear it by sending none.
+func TestAStoredUnknownCeilingCannotBeCleared(t *testing.T) {
+	f := newLockFixture(t)
+	if _, err := lockTestPool(t).Exec(context.Background(), `UPDATE user_profiles SET max_age_rating = 'PG13' WHERE id = $1`, f.kid.ID); err != nil {
+		t.Fatalf("store an unknown ceiling: %v", err)
+	}
+	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, f.kidRT, f.kid.ID, `{"max_age_rating":""}`); code != http.StatusForbidden || reason != "profile_restricted" {
+		t.Errorf("the kid clearing its unknown ceiling: %d %q, want 403 profile_restricted", code, reason)
+	}
+	if kid, err := f.q.GetProfile(context.Background(), f.kid.ID); err != nil || kid == nil || kid.MaxAgeRating == "" {
+		t.Errorf("the kid's ceiling after the refused clear: %+v (err %v)", kid, err)
+	}
 }
 
 // TestActivationFailsClosedWhenTheActingProfileIsUnknown: activation skips
@@ -440,5 +468,39 @@ func TestAProfilesDeleteTakesEverySessionBoundToIt(t *testing.T) {
 	}
 	if parentRows != 1 {
 		t.Errorf("the parent's session is gone (%d rows); only the deleted profile's should be", parentRows)
+	}
+}
+
+// TestReDefaultingDoesNotMoveUnboundSessions: a session with no binding acts
+// as the default, so re-defaulting moved it onto the new default, a locked
+// one included, without its PIN. SetDefault skips the PIN for a caller
+// already acting as the target, so the parent could move the kid's unbound
+// session onto the parent's locked profile.
+func TestReDefaultingDoesNotMoveUnboundSessions(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	// The kid is the default, and a fresh (unbound) session acts as it.
+	for _, step := range []struct {
+		sql string
+		id  int64
+	}{
+		{`UPDATE user_profiles SET is_default = FALSE WHERE id = $1`, f.parent.ID},
+		{`UPDATE user_profiles SET is_default = TRUE WHERE id = $1`, f.kid.ID},
+	} {
+		if _, err := pool.Exec(ctx, step.sql, step.id); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	unbound := seedRCRefreshToken(t, f.q, f.userID)
+	if got := f.acting(t, unbound); got != f.kid.ID {
+		t.Fatalf("precondition: the unbound session acts as %d, want the kid (%d)", got, f.kid.ID)
+	}
+	if code, _, body := f.call(t, f.h.SetDefault, http.MethodPost, f.parentRT, f.parent.ID, ""); code != http.StatusOK {
+		t.Fatalf("the parent re-defaulting to itself: %d %s", code, body)
+	}
+	if got := f.acting(t, unbound); got != f.kid.ID {
+		t.Errorf("after re-defaulting, the kid's unbound session acts as %d, want still the kid (%d)", got, f.kid.ID)
 	}
 }

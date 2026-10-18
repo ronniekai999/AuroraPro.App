@@ -33,6 +33,8 @@ class ProfileUnlockTest {
     private val activations = Collections.synchronizedList(mutableListOf<Pair<String, String>>())
     // What GET /api/profiles/active answers; null answers 404, an unknown binding.
     @Volatile private var activeProfile: String? = null
+    // While set, the kid's activation waits on it.
+    @Volatile private var holdKid: java.util.concurrent.CountDownLatch? = null
     private lateinit var vm: TvViewModel
 
     @Before fun start() {
@@ -50,6 +52,7 @@ class ProfileUnlockTest {
                     path.endsWith("/activate") -> {
                         val body = request.body.readUtf8()
                         activations += path to body
+                        if (path == "/api/profiles/2/activate") holdKid?.await(10, java.util.concurrent.TimeUnit.SECONDS)
                         when {
                             path != "/api/profiles/1/activate" -> json("{}")
                             // The server skips the PIN for the profile the session acts as.
@@ -169,6 +172,41 @@ class ProfileUnlockTest {
         val opened = awaitState { it.page == Page.HOME }
         assertNull("No PIN prompt for the bound profile", opened.pinPrompt)
         assertEquals("/api/profiles/1/activate" to "{}", activations.single())
+    }
+
+    @Test fun aSwitchRecordsTheNewBinding() {
+        // Bound to the parent at sign-in; switching to the kid moves the
+        // binding, so going back to the parent asks for its PIN again.
+        activeProfile = """{"id":1,"name":"Ronnie","is_default":true,"has_pin":true}"""
+        vm.login("ronnie", "fixture-password")
+        awaitState { it.page == Page.PROFILES && it.boundProfileId == 1L }
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        awaitState { it.page == Page.HOME && it.boundProfileId == 2L }
+        vm.navigate(Page.PROFILES)
+        awaitState { it.page == Page.PROFILES }
+        vm.selectProfile(parent())
+        val prompted = awaitState { it.pinPrompt != null }
+        assertEquals(1L, prompted.pinPrompt?.id)
+        assertTrue("No activation of the parent before its PIN",
+            activations.none { it.first == "/api/profiles/1/activate" })
+    }
+
+    @Test fun theProfileShowsOnlyOnceTheServerHasBoundIt() {
+        val hold = java.util.concurrent.CountDownLatch(1)
+        holdKid = hold
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        val deadline = System.currentTimeMillis() + 5_000
+        while (activations.none { it.first == "/api/profiles/2/activate" }) {
+            shadowOf(Looper.getMainLooper()).idle()
+            check(System.currentTimeMillis() < deadline) { "the activation never reached the server" }
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        val pending = vm.state.value
+        assertNull("No profile shown while the activation is pending", pending.profile)
+        assertEquals(Page.PROFILES, pending.page)
+        hold.countDown()
+        assertEquals(2L, awaitState { it.page == Page.HOME }.profile?.id)
     }
 
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {

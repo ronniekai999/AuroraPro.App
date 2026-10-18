@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import type { Profile } from './api'
-import { useSessionProfileOnVisible } from './profileSession'
+import { readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from './profileSession'
 
 const profile = (id: number): Profile => ({ id, user_id: 1, name: `p${id}`, is_default: id === 1, created_at: '', updated_at: '' })
 const profiles = [profile(1), profile(2)]
@@ -54,5 +54,16 @@ describe('useSessionProfileOnVisible', () => {
     setup(read, { isSwitching: () => true, switchGeneration: () => 0 })
     await becomeVisible()
     expect(read).not.toHaveBeenCalled()
+  })
+})
+
+describe('the remembered profile', () => {
+  beforeEach(() => { localStorage.clear() })
+  it('round-trips, and reads as none when unset or garbage', () => {
+    expect(readRememberedProfileId()).toBeNull()
+    rememberProfileId(7)
+    expect(readRememberedProfileId()).toBe(7)
+    localStorage.setItem('aurora_active_profile_id', 'x')
+    expect(readRememberedProfileId()).toBeNull()
   })
 })
