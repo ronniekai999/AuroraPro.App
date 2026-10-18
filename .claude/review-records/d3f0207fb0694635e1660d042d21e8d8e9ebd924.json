@@ -1,0 +1,10 @@
+{
+  "sha": "d3f0207fb0694635e1660d042d21e8d8e9ebd924",
+  "verdict": "lows-only",
+  "summary": "Flaky TestValidateCastToken_Tampered, commit d3f0207 (test-only). Cause confirmed empirically: the old tamper wrote \"AA\" over the token's last two characters, a no-op exactly when the 43-char HS256 signature already ended in AA (1 in 1024; 11-25 per 20,000 tokens observed, all of them unchanged tokens). The new test checks the untouched token validates, flips each of the decoded signature's bits and re-encodes (5,000 tokens x 256 flips: always a one-bit change, valid base64, rejected), and tries empty, one-byte-short and one-byte-long signatures. Kills every mutant the old test killed plus 12 more (middle-skip, byte prefix, trailing bytes, top-bit, Hamming<=1, truncated MAC, cache by header.payload, ...); 5-10 ms. Open lows: a non-empty TEXT-prefix compare of the encoded signature is caught only ~6% of runs (fix: add a case cutting one character off the text); no malformed-signature case, so a validator ignoring ErrTokenMalformed and token.Valid survives; EqualFold and checksum-style compares survive any single-bit test; the commit message's rate is a measured band (exact rate 1/1024). Earlier passes: lows-only x3, each low taken.",
+  "reviewer": "independent-agent-casttamper4 (fresh-context read-only; 4th pass)",
+  "findings": "4",
+  "diff_digest": "37093b596d2e670be3710cefef999ee7c9436bbfdd9b318675447cf20ab84f7b",
+  "branch": "claude/gifted-hopper-rfs4s9",
+  "recorded_at": "2026-10-18T22:08:19Z"
+}
