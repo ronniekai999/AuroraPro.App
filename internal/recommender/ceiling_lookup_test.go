@@ -16,22 +16,34 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ceilingFixture is a restricted ("PG") profile with three watched, embedded
 // PG anchors (the taste-history threshold, so Discover reaches its LLM step),
 // beside over-ceiling titles that every recommender surface would pick for it
-// without a ceiling: newest and tmdb-less (they lead PopularUnwatched), rated
-// 10 with 1000 votes (hidden gems), 90 minutes (finish tonight), and embedded
-// next to the anchors (taste and anchor recall). Unwatched G titles sit beyond
-// them, so the real lookup has something allowed to build every surface from.
+// without a ceiling: newest and tmdb-less (they lead PopularUnwatched) and
+// embedded next to the anchors (taste and anchor recall). Unwatched G titles
+// sit beyond them, so the real lookup has something allowed to build every
+// surface from.
+//
+// The engagement rails are the catch. Hidden Gems and Finish It Tonight rank
+// the WHOLE catalog by rating with no tiebreaker, so rows that qualify there
+// crowd other runs of this test and the db package's engagement tests, whose
+// titles must land inside a catalog-wide LIMIT. So the R titles and anchors
+// qualify for neither (rating 6.9 is under Hidden Gems' 7.0, 120 minutes is
+// over Finish It Tonight's 110), and the G titles qualify at the bottom
+// (7.1, 50 votes). The unrestricted engagement proof is Comfort Rewatch, which
+// reads only this profile's own completions: a watched R title, unembedded so
+// it moves neither the taste centroid nor the history count.
 type ceilingFixture struct {
 	q         *db.Queries
 	profileID int64
@@ -70,12 +82,12 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	}
 
 	userID := exec(`INSERT INTO users (username, email, password_hash) VALUES ($1, $2, 'x') RETURNING id`, token, token+"@example.com")
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID) })
+	t.Cleanup(func() { cleanupExec(t, pool, `DELETE FROM users WHERE id = $1`, userID) })
 	profileID := exec(`INSERT INTO user_profiles (user_id, name, is_default, max_age_rating, language, subtitle_mode)
 		VALUES ($1, 'kid', FALSE, 'PG', 'en', 'off') RETURNING id`, userID)
 	libID := exec(`INSERT INTO libraries (name, type, paths, owner_id) VALUES ($1, 'movie', $2, $3) RETURNING id`,
 		token, []string{"/tmp/" + token}, userID)
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM libraries WHERE id = $1`, libID) })
+	t.Cleanup(func() { cleanupExec(t, pool, `DELETE FROM libraries WHERE id = $1`, libID) })
 
 	// Each run's direction is two dimensions picked independently (672..697
 	// and 740..767, clear of the other tests' dimensions), about 700
@@ -85,38 +97,84 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 	// a run would have to draw both to interfere. Titles still count by
 	// rating, not by id, in case it ever does.
 	d1, d2 := 672+int(b[0]%26), 740+int(b[1]%28)
-	vec := func(lead float64) string {
+	vec := func(lead float64) *string {
 		parts := make([]string, 768)
 		for i := range parts {
 			parts[i] = "0"
 		}
 		parts[d1], parts[d2] = "1", "1"
 		parts[699] = fmt.Sprintf("%g", lead)
-		return "[" + strings.Join(parts, ",") + "]"
+		v := "[" + strings.Join(parts, ",") + "]"
+		return &v
 	}
-	item := func(name, rating string, lead float64) int64 {
+	// item seeds a movie; a nil embedding leaves it unembedded.
+	item := func(name, rating string, score float64, votes, runtime int, embedding *string) int64 {
 		return exec(`INSERT INTO media_items
 			   (library_id, type, title, sort_title, year, overview, rating, vote_count, runtime_minutes,
 			    content_rating, poster_path, backdrop_path, embedding)
-			 VALUES ($1, 'movie', $2, $2, 2000, 'An overview.', 10, 1000, 90, $3, '/p.jpg', '/b.jpg', $4::vector)
-			 RETURNING id`, libID, token+" "+name, rating, vec(lead))
+			 VALUES ($1, 'movie', $2, $2, 2000, 'An overview.', $3, $4, $5, $6, '/p.jpg', '/b.jpg', $7::vector)
+			 RETURNING id`, libID, token+" "+name, score, votes, runtime, rating, embedding)
+	}
+	watch := func(itemID int64) {
+		exec(`INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, completed_at, profile_id)
+			VALUES ($1, $2, 5400000, 5400000, TRUE, NOW(), $3) RETURNING id`, userID, itemID, profileID)
 	}
 	for i := 0; i < db.PersonalizationThreshold(); i++ {
-		anchor := item(fmt.Sprintf("anchor %d", i), "PG", -0.01*float64(i+1))
-		exec(`INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, completed_at, profile_id)
-			VALUES ($1, $2, 5400000, 5400000, TRUE, NOW(), $3) RETURNING id`, userID, anchor, profileID)
+		watch(item(fmt.Sprintf("anchor %d", i), "PG", 6.9, 1000, 120, vec(-0.01*float64(i+1))))
 	}
 	for i := 0; i < 8; i++ {
-		item(fmt.Sprintf("over %d", i), "R", 0.01*float64(i+1))
+		item(fmt.Sprintf("over %d", i), "R", 6.9, 1000, 120, vec(0.01*float64(i+1)))
 	}
+	watch(item("watched over", "R", 6.9, 1000, 120, nil))
 	// Allowed titles, enough for an anchor rail (anchorRailMinItems), placed
 	// beyond the R titles so an unrestricted build reaches the R ones first.
 	// They are rated G, the all-ages tier allowedRatings returns on failure,
 	// so a surface that ignored ok would build these and be caught.
 	for i := 0; i < anchorRailMinItems+1; i++ {
-		item(fmt.Sprintf("allowed %d", i), "G", 0.3+0.01*float64(i))
+		item(fmt.Sprintf("allowed %d", i), "G", 7.1, 50, 90, vec(0.3+0.01*float64(i)))
 	}
 	return &ceilingFixture{q: db.NewQueries(pool), profileID: profileID}
+}
+
+// cleanupExec runs a fixture cleanup statement and reports a failure instead
+// of leaking the rows. A concurrent run's cleanup can deadlock with this one
+// over rows that link the two runs' fixtures, so a deadlock is retried.
+func cleanupExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err = pool.Exec(context.Background(), sql, args...); err == nil {
+			return
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "40P01" {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+	}
+	t.Errorf("cleanup %q: %v", sql, err)
+}
+
+// newTestHero is a Hero with anti-repetition off. Recording surfaced picks
+// would link this run's profile to other runs' titles, and the two runs'
+// cleanups then lock those rows in opposite orders and deadlock.
+func newTestHero(q *db.Queries, chat *llm.Client) *Hero {
+	h := New(q, chat)
+	h.SetRepeatWindow(0)
+	return h
+}
+
+// countingLLM is a chat endpoint that records whether it was called and
+// fails every call, so Discover builds nothing past its LLM step either way.
+func countingLLM(t *testing.T) (*llm.Client, *atomic.Bool) {
+	t.Helper()
+	called := &atomic.Bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		http.Error(w, "no chat in this test", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return llm.NewClient(llm.Config{BaseURL: srv.URL}), called
 }
 
 // overPG reports whether a title is over the fixture profile's PG ceiling,
@@ -134,27 +192,35 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	ctx := context.Background()
 
 	// Control 1: the real lookup applies the PG ceiling and still builds.
-	real := New(f.q, nil)
-	picks, err := real.PoolFor(ctx, f.profileID)
+	withCeiling := newTestHero(f.q, nil)
+	picks, err := withCeiling.PoolFor(ctx, f.profileID)
 	if err != nil {
 		t.Fatalf("PoolFor (real lookup): %v", err)
 	}
 	if len(picks) == 0 || anyPickOver(picks, overPG) {
 		t.Errorf("real lookup: hero built %d picks, over-ceiling %v; want some, none over", len(picks), anyPickOver(picks, overPG))
 	}
-	if rail, _ := real.RailFor(ctx, f.profileID, 24); len(rail) == 0 || anyItemOver(rail, overPG) {
+	if rail, _ := withCeiling.RailFor(ctx, f.profileID, 24); len(rail) == 0 || anyItemOver(rail, overPG) {
 		t.Errorf("real lookup: rail built %d items, over-ceiling %v; want some, none over", len(rail), anyItemOver(rail, overPG))
 	}
-	if rails, _ := real.EngagementRailsFor(ctx, f.profileID); len(rails) == 0 || anyEngagementOver(rails, overPG) {
+	if rails, _ := withCeiling.EngagementRailsFor(ctx, f.profileID); len(rails) == 0 || anyEngagementOver(rails, overPG) {
 		t.Errorf("real lookup: %d engagement rails, over-ceiling %v; want some, none over", len(rails), anyEngagementOver(rails, overPG))
 	}
-	if rails, _ := real.AnchorRailsFor(ctx, f.profileID); len(rails) == 0 || anyAnchorOver(rails, overPG) {
+	if rails, _ := withCeiling.AnchorRailsFor(ctx, f.profileID); len(rails) == 0 || anyAnchorOver(rails, overPG) {
 		t.Errorf("real lookup: %d anchor rails, over-ceiling %v; want some, none over", len(rails), anyAnchorOver(rails, overPG))
+	}
+	// Discover reaches its LLM step under the real lookup, so a Discover that
+	// returned early for every restricted profile would be caught here.
+	chat, llmCalled := countingLLM(t)
+	withCeilingLLM := newTestHero(f.q, chat)
+	_, _ = withCeilingLLM.DiscoverFor(ctx, f.profileID)
+	if !llmCalled.Load() {
+		t.Error("real lookup: Discover never reached its LLM step for a restricted profile")
 	}
 
 	// Control 2: without a ceiling the same fixture yields over-ceiling titles
 	// on every surface; this is what a failed lookup used to build, and cache.
-	unrestricted := New(f.q, nil)
+	unrestricted := newTestHero(f.q, nil)
 	unrestricted.profileCeiling = func(context.Context, int64) (string, error) { return "", nil }
 	if picks, _ := unrestricted.PoolFor(ctx, f.profileID); !anyPickOver(picks, overPG) {
 		t.Error("precondition: an unrestricted hero build picks no R title")
@@ -169,7 +235,7 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 		t.Error("precondition: unrestricted anchor rails pick no R title")
 	}
 
-	failing := New(f.q, nil)
+	failing := newTestHero(f.q, nil)
 	failing.profileCeiling = func(context.Context, int64) (string, error) {
 		return "", errors.New("transient ceiling lookup failure")
 	}
@@ -215,28 +281,56 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	// Discover returns before its LLM step when the lookup fails. The fake LLM
 	// records the call (and fails it, so Discover itself builds nothing either
 	// way); the unrestricted run proves the fixture reaches that step.
-	llmCalled := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		llmCalled = true
-		http.Error(w, "no chat in this test", http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-	failingWithLLM := New(f.q, llm.NewClient(llm.Config{BaseURL: srv.URL}))
+	llmCalled.Store(false)
+	failingWithLLM := newTestHero(f.q, chat)
 	failingWithLLM.profileCeiling = failing.profileCeiling
 	if _, err := failingWithLLM.DiscoverFor(ctx, f.profileID); err != nil {
 		t.Errorf("DiscoverFor (failing lookup): %v", err)
 	}
-	if llmCalled {
+	if llmCalled.Load() {
 		t.Error("a failed ceiling lookup still sent the Discover candidates to the LLM")
 	}
 	if _, cached := failingWithLLM.discoverCache.Load(f.profileID); cached {
 		t.Error("a failed ceiling lookup cached Discover rails")
 	}
-	unrestrictedWithLLM := New(f.q, llm.NewClient(llm.Config{BaseURL: srv.URL}))
+	unrestrictedWithLLM := newTestHero(f.q, chat)
 	unrestrictedWithLLM.profileCeiling = unrestricted.profileCeiling
 	_, _ = unrestrictedWithLLM.DiscoverFor(ctx, f.profileID)
-	if !llmCalled {
+	if !llmCalled.Load() {
 		t.Error("precondition: an unrestricted Discover build never reaches its LLM step")
+	}
+}
+
+// TestAllowedRatingsFailsClosed pins the values allowedRatings hands its
+// callers. On a failed lookup it must be a non-empty restriction, never nil
+// or an empty slice: gates that test len(allowed) > 0 read an empty slice as
+// unrestricted, so a caller that ignored ok would fail open on one.
+func TestAllowedRatingsFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	h := New(nil, nil)
+
+	h.profileCeiling = func(context.Context, int64) (string, error) { return "", errors.New("lookup failed") }
+	allowed, ok := h.allowedRatings(ctx, 1)
+	if ok {
+		t.Error("a failed lookup reported ok")
+	}
+	if len(allowed) == 0 {
+		t.Fatalf("a failed lookup returned %v; want a non-empty restriction", allowed)
+	}
+	for _, r := range allowed {
+		if !db.RatingAllowed("G", r) {
+			t.Errorf("a failed lookup allowed %q, above the all-ages tier", r)
+		}
+	}
+
+	h.profileCeiling = func(context.Context, int64) (string, error) { return "", nil }
+	if allowed, ok := h.allowedRatings(ctx, 1); !ok || allowed != nil {
+		t.Errorf("an unrestricted profile got (%v, %v); want (nil, true)", allowed, ok)
+	}
+
+	h.profileCeiling = func(context.Context, int64) (string, error) { return "PG", nil }
+	if allowed, ok := h.allowedRatings(ctx, 1); !ok || len(allowed) == 0 || !db.RatingAllowed("PG", allowed[0]) {
+		t.Errorf("a PG profile got (%v, %v); want the PG ladder and ok", allowed, ok)
 	}
 }
 
