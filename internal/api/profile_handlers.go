@@ -240,52 +240,55 @@ func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, act
 	return ok
 }
 
-// checkUnlockHash is checkUnlock that also returns the hash a presented PIN
-// matched ("" when the password unlocked it, or the profile turned out to
-// have no PIN), so a bind can refuse if the PIN changed in between.
-func (h *ProfileHandler) checkUnlockHash(w http.ResponseWriter, r *http.Request, acting, profile *models.UserProfile, req unlockRequest) (bool, string) {
+// checkUnlockHash is checkUnlock that also returns the PIN state the unlock
+// was judged against, so a bind can refuse if the PIN changed in between: the
+// hash a presented PIN matched, "" when the profile turned out to have no PIN
+// (a PIN removed and set again since must still be asked for), and nil when
+// the account password unlocked it, which stands in for any PIN.
+func (h *ProfileHandler) checkUnlockHash(w http.ResponseWriter, r *http.Request, acting, profile *models.UserProfile, req unlockRequest) (bool, *string) {
 	ctx := r.Context()
+	none := ""
 	if h.authSvc == nil {
 		writeError(w, http.StatusInternalServerError, "profile lock check unavailable")
-		return false, ""
+		return false, nil
 	}
-	verified := ""
+	var judged *string
 	switch {
 	case req.PIN != "":
 		attempt, err := h.queries.ReserveProfilePINAttempt(ctx, profile.ID, profilePINMaxFailures, profilePINLockout)
 		if err != nil {
 			slog.Warn("profiles: reserve pin attempt failed", "profile_id", profile.ID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false, ""
+			return false, nil
 		}
 		if attempt.NoPIN {
-			return true, ""
+			return true, &none
 		}
 		if !attempt.Reserved {
 			writeLockout(w, *attempt.LockedUntil)
-			return false, ""
+			return false, nil
 		}
 		if ok, _ := h.authSvc.VerifyPassword(req.PIN, attempt.Hash); !ok {
 			if attempt.LocksOut {
 				writeLockout(w, time.Now().Add(profilePINLockout))
-				return false, ""
+				return false, nil
 			}
 			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
-			return false, ""
+			return false, nil
 		}
-		verified = attempt.Hash
+		judged = &attempt.Hash
 	case req.Password != "":
 		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
 		if err != nil || st == nil {
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false, ""
+			return false, nil
 		}
 		if st.Hash == "" {
-			return true, ""
+			return true, &none
 		}
 		if h.passwordLimiter != nil && !h.passwordLimiter.Allow(strconv.FormatInt(profile.UserID, 10)+":"+strconv.FormatInt(acting.ID, 10)) {
 			writeLockout(w, time.Now().Add(profilePasswordWindow))
-			return false, ""
+			return false, nil
 		}
 		matched := false
 		if user, uerr := h.queries.GetUserByID(ctx, profile.UserID); uerr == nil && user != nil && user.PasswordHash != "" {
@@ -293,25 +296,25 @@ func (h *ProfileHandler) checkUnlockHash(w http.ResponseWriter, r *http.Request,
 		}
 		if !matched {
 			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
-			return false, ""
+			return false, nil
 		}
 	default:
 		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
 		if err != nil || st == nil {
 			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-			return false, ""
+			return false, nil
 		}
 		if st.Hash == "" {
-			return true, ""
+			return true, &none
 		}
 		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile is locked; enter its PIN")
-		return false, ""
+		return false, nil
 	}
 	// A correct PIN or password clears the count and any lockout.
 	if err := h.queries.ResetProfilePINFailures(ctx, profile.ID); err != nil {
 		slog.Warn("profiles: reset pin failures failed", "profile_id", profile.ID, "error", err)
 	}
-	return true, verified
+	return true, judged
 }
 
 func writeLockout(w http.ResponseWriter, until time.Time) {
@@ -694,13 +697,11 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		}
 		wantHash = nil
 		if acting.ID != profile.ID {
-			ok, verified := h.checkUnlockHash(w, r, acting, profile, unlock)
+			ok, judged := h.checkUnlockHash(w, r, acting, profile, unlock)
 			if !ok {
 				return
 			}
-			if verified != "" {
-				wantHash = &verified
-			}
+			wantHash = judged
 		}
 	}
 

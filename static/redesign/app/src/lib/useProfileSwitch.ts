@@ -11,12 +11,15 @@
 import { useCallback, useRef, useState } from 'react'
 import { activateProfile, profileErrorReason, type Profile, type ProfileUnlock } from './api'
 
-export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId, onError }: {
+export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId, onError, readBinding }: {
   profiles: Profile[]
   activeProfileId: number | null
   setActiveProfileId: (id: number) => void
   /** Reports a switch the server refused for a reason other than a PIN. */
   onError: (profile: Profile) => void
+  /** Reads the session's binding (GET /api/profiles/active) after a failed
+   * switch, whose bind may have happened with only its answer lost. */
+  readBinding?: () => Promise<Profile>
 }) {
   const [pinTarget, setPinTarget] = useState<Profile | null>(null)
   const pinResolveRef = useRef<((switched: boolean) => void) | null>(null)
@@ -56,13 +59,22 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       // The list can be stale: a PIN set from another device since it loaded.
       if (profileErrorReason(e) === 'profile_pin_required') return askForPin()
       onError(target)
+      // A dropped connection can lose the answer to a bind that happened,
+      // so show the binding rather than what was on screen. Still in flight
+      // meanwhile, so no other switch or re-read races it.
+      if (readBinding) {
+        try {
+          const bound = await readBinding()
+          if (bound.id !== activeProfileId && profiles.some(p => p.id === bound.id)) setActiveProfileId(bound.id)
+        } catch { /* the tab-visibility re-read tries again */ }
+      }
       return false
     } finally {
       inFlightRef.current = false
     }
     setActiveProfileId(id)
     return true
-  }, [activeProfileId, profiles, setActiveProfileId, onError])
+  }, [activeProfileId, profiles, setActiveProfileId, onError, readBinding])
 
   // Sends the PIN or password for pinTarget. Rejects with the server's refusal,
   // which the dialog shows; the prompt stays open until this succeeds.

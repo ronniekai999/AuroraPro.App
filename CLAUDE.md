@@ -225,7 +225,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   Clearing a PIN ends nothing. Activation's bind takes the user row FOR
   SHARE and rechecks the PIN state the handler judged
   (`SetActiveProfileForTokenIfPIN`), so a PIN set or changed in between is a
-  403 `profile_pin_required`, not a bind. PIN writes run argon2id twice at
+  403 `profile_pin_required`, not a bind; an attempt that found no PIN binds
+  only while there is still none, so a PIN removed and set again in between
+  is refused too. PIN writes run argon2id twice at
   most and have their own budget, 5 per 15 minutes per account and acting
   profile (`pinWriteLimiter`, in memory), so one session cannot spend the
   owner's.
@@ -306,13 +308,20 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   profile and opens the picker, which cannot be left without a pick, rather
   than guessing the default; if the profile list fails, nothing personalized
   loads at all. Only the latest hero request lands, and a switch clears the
-  previous profile's hero. Its tab-visibility
+  previous profile's hero. A switch also drops the Movies and Shows grids
+  (aborting a Load More), sends an open title back through its `/title/:id`
+  hydration, which leaves for Home if the new profile may not see it, and
+  remounts search, collections, the calendar and member pages
+  (`useOnProfileChange`); the grids used to keep the previous profile's
+  titles for the session. A failed activation re-reads the binding, because
+  a lost answer can follow a bind that happened. Its tab-visibility
   re-read drops an answer once a switch has started since the read. The TV
   stays at the picker until activation succeeds, a refused PIN keeps the
   session's own profile and the page behind the picker, and it does not ask
   for the PIN of the profile the session is bound to (the server would accept
   any digits) or label it locked: an unlock lasts the session's life.
 - Known gaps:
+  - A switch in the web app does not close a player that is already open.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
@@ -334,7 +343,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - PINs are four digits. With the re-lock above, guessing averages about 50
     days of continuous attempts, assuming no correct entry in between: a
     correct PIN or password from anyone resets the count, and a guesser then
-    gets the full five again.
+    gets the full five again. Attempts are counted per profile, so N locked
+    profiles sharing one PIN cut that time N-fold.
   - Anyone on the account can keep a profile's PIN locked out with one wrong
     guess per 15 minutes; the password is the way past it. A restricted
     session can also keep spending the password budget of the profile it
@@ -362,8 +372,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
     App wiring (the switcher and the picker going through `switchProfile`,
     `activeProfileId` starting null, the personalized fetches waiting for
-    `personalProfileReady`, and the hero's latest-request guard) has no
-    App-level test, and the room socket's connect-time profile and its retry
+    `personalProfileReady`, the hero's latest-request guard, and what a
+    switch resets, `resetForProfileChange` and the views' keys, though
+    `useOnProfileChange` itself is tested) has no App-level test, and the
+    room socket's connect-time profile and its retry
     are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
     lock either, nor that activation hands its bind the hash a PIN matched
     (the window is a PIN change between the attempt and the bind; the bind's
@@ -372,7 +384,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     editing the member profile (`PUT /api/me/profile`, whose
     `share_watch_history` switch publishes the default profile's history),
     changing the account password (it needs the current one), approving a
-    device pairing (the device binds to the restricted profile), follows,
+    device pairing (the device binds to the restricted profile, or, when
+    that profile has a PIN, to the most restrictive unlocked one), follows,
     media requests, collections, watch parties and rooms, notifications,
     feedback and referral answers, push subscriptions, and logout, which
     signs out every session on the account.
@@ -391,7 +404,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and acting profile for the password.
   - The room socket keeps the profile it resolved at connect, so a switch
     made while it is open applies to its ceiling check from the next
-    connect.
+    connect. Sockets (party room, party sync, `/ws`) also stay open after a
+    PIN write, a profile delete or a logout ends their session, so a device
+    left on the parent's profile keeps the parent's ceiling for change-media
+    on an open room socket after the parent locks that profile, until it
+    reconnects.
 
 ### Member profiles and follows
 

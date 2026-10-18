@@ -18,11 +18,11 @@ const other = profile(3)
 const refusal = (reason: string) =>
   new APIError(403, 'refused', { error: { code: 403, message: 'refused', reason } })
 
-function setup(activeProfileId = 2) {
+function setup(activeProfileId = 2, readBinding?: () => Promise<Profile>) {
   const setActiveProfileId = vi.fn()
   const onError = vi.fn()
   const hook = renderHook(() => useProfileSwitch({
-    profiles: [parent, kid, other], activeProfileId, setActiveProfileId, onError,
+    profiles: [parent, kid, other], activeProfileId, setActiveProfileId, onError, readBinding,
   }))
   return { hook, setActiveProfileId, onError }
 }
@@ -51,6 +51,43 @@ describe('useProfileSwitch', () => {
     expect(switched).toBe(false)
     expect(setActiveProfileId).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledWith(other)
+  })
+
+  it('shows the binding after a failure whose bind may have happened', async () => {
+    api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
+    const readBinding = vi.fn().mockResolvedValue(other)
+    const { hook, setActiveProfileId, onError } = setup(2, readBinding)
+    let switched = true
+    await act(async () => { switched = await hook.result.current.switchProfile(3) })
+    expect(switched).toBe(false)
+    expect(onError).toHaveBeenCalledWith(other)
+    expect(readBinding).toHaveBeenCalledTimes(1)
+    expect(setActiveProfileId).toHaveBeenCalledWith(3)
+  })
+
+  it('keeps the profile on screen when the binding read agrees or fails', async () => {
+    api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
+    const agrees = setup(2, vi.fn().mockResolvedValue(kid))
+    await act(async () => { await agrees.hook.result.current.switchProfile(3) })
+    expect(agrees.setActiveProfileId).not.toHaveBeenCalled()
+    const fails = setup(2, vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    await act(async () => { await fails.hook.result.current.switchProfile(3) })
+    expect(fails.setActiveProfileId).not.toHaveBeenCalled()
+  })
+
+  it('stays in flight while it reads the binding back', async () => {
+    api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
+    let answer!: (p: Profile) => void
+    const readBinding = vi.fn(() => new Promise<Profile>(r => { answer = r }))
+    const { hook } = setup(2, readBinding)
+    let first: Promise<boolean>
+    await act(async () => { first = hook.result.current.switchProfile(3) })
+    expect(hook.result.current.isSwitching()).toBe(true)
+    let second = true
+    await act(async () => { second = await hook.result.current.switchProfile(1) })
+    expect(second).toBe(false)
+    await act(async () => { answer(kid); await first })
+    expect(hook.result.current.isSwitching()).toBe(false)
   })
 
   it('asks for a locked profile’s PIN and switches once it is accepted', async () => {

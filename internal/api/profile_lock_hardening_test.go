@@ -1096,6 +1096,9 @@ func TestAnEndedSessionCannotManageProfilesOrPair(t *testing.T) {
 	if code, reason, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, ended, f.kid.ID, `{"max_age_rating":"PG"}`); code != http.StatusUnauthorized || reason != "session_ended" {
 		t.Errorf("an ended session changing a ceiling: %d %q, want 401 session_ended", code, reason)
 	}
+	if code, reason, _ := f.call(t, f.h.GetActiveProfile, http.MethodGet, ended, 0, ""); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("an ended session reading its profile: %d %q, want 401 session_ended", code, reason)
+	}
 	rr := httptest.NewRecorder()
 	r := rcClaimsCtx(httptest.NewRequest(http.MethodGet, "/x", nil), f.userID, ended)
 	if !denyRestrictedSession(rr, r, f.q, &auth.JWTClaims{UserID: f.userID, RefreshTokenID: ended}, "do this") || rr.Code != http.StatusUnauthorized {
@@ -1159,5 +1162,65 @@ func TestABindingToAProfileThatIsGoneActsAsTheMostRestrictive(t *testing.T) {
 	}
 	if got := f.acting(t, stray); got != f.kid.ID {
 		t.Errorf("a session bound to another account's profile acts as %d, want the most restrictive, the kid (%d)", got, f.kid.ID)
+	}
+}
+
+// TestAPINRemovedAndSetAgainMidActivationIsAskedFor: an activation whose
+// attempt found the PIN removed bound without rechecking it, so a PIN set
+// again before the bind let a wrong one through.
+func TestAPINRemovedAndSetAgainMidActivationIsAskedFor(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	// The account lock holds the bind until the PIN is set again below.
+	account, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer account.Rollback(ctx)
+	if _, err := account.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	// The removal, uncommitted, holds the attempt after the handler has read
+	// the profile as locked.
+	removal, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer removal.Rollback(ctx)
+	if _, err := removal.Exec(ctx, `UPDATE user_profiles SET pin_hash = NULL WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("remove the PIN: %v", err)
+	}
+	var code int
+	var reason string
+	done := make(chan error, 1)
+	go func() {
+		code, reason, _ = f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"0000"}`)
+		done <- nil
+	}()
+	waitForALockWait(t, pool, done, "UPDATE user_profiles%pin_failed_attempts = pin_failed_attempts + 1%")
+	if len(done) > 0 {
+		t.Fatal("precondition: the activation did not wait on the PIN's removal")
+	}
+	if err := removal.Commit(ctx); err != nil {
+		t.Fatalf("commit the removal: %v", err)
+	}
+	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR SHARE%")
+	if len(done) > 0 {
+		t.Fatal("precondition: the bind did not wait on the account lock")
+	}
+	if _, err := account.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-again' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("set the PIN again: %v", err)
+	}
+	if err := account.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	<-done
+	if code != http.StatusForbidden || reason != "profile_pin_required" {
+		t.Errorf("a wrong PIN across a PIN removed and set again: %d %q, want 403 profile_pin_required", code, reason)
+	}
+	if got := f.acting(t, f.kidRT); got != f.kid.ID {
+		t.Errorf("the kid's session acts as %d, want still the kid (%d)", got, f.kid.ID)
 	}
 }

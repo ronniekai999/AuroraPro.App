@@ -108,6 +108,7 @@ import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
 import { isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
+import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -2936,14 +2937,15 @@ export default function App() {
   // Profile switching goes through the server, and a locked profile asks for
   // its PIN first; see lib/useProfileSwitch.
   const onSwitchRefused = useCallback((p: Profile) => addToast(`Couldn't switch to ${p.name}`, 'error'), [addToast])
+  // What this tab shows is what the server enforces, including after a
+  // switch in another tab (they share one session) or a switch whose answer
+  // was lost.
+  const readSessionBinding = useCallback(() => getActiveProfile(), [])
   const profileSwitch = useProfileSwitch({
-    profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused,
+    profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused, readBinding: readSessionBinding,
   })
   const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = profileSwitch
 
-  // What this tab shows is what the server enforces, including after a
-  // switch in another tab (they share one session).
-  const readSessionBinding = useCallback(() => getActiveProfile(), [])
   useSessionProfileOnVisible({
     enabled: !!user, profiles, read: readSessionBinding, setActiveProfileId, switching: profileSwitch,
   })
@@ -5410,6 +5412,30 @@ export default function App() {
     setHomeHero(null)
     setHomeHeroIsFallback(false)
   }, [activeProfileId])
+  // A switch also drops the browse grids and an open title. The server
+  // filters both by the session's profile when they are fetched, and App
+  // keeps the Movies and Shows grids for the session, so the new profile
+  // kept the old one's titles and Load More appended its own pages to them.
+  // An open title goes back through the /title/:id hydration, which asks the
+  // server again and leaves for Home if the new profile may not see it.
+  // Search, collections, the calendar and member pages remount on a switch
+  // (their keys below).
+  const resetForProfileChange = useCallback(() => {
+    moviesLoadMoreAcRef.current?.abort()
+    moviesLoadMoreAcRef.current = null
+    showsLoadMoreAcRef.current?.abort()
+    showsLoadMoreAcRef.current = null
+    setMoviesList(null)
+    setShowsList(null)
+    setMoviesTotal(null)
+    setShowsTotal(null)
+    setMoviesNextPage(1)
+    setShowsNextPage(1)
+    setMoviesLoadingMore(false)
+    setShowsLoadingMore(false)
+    if (viewRef.current === 'detail') setSelectedMedia(null)
+  }, [])
+  useOnProfileChange(activeProfileId, resetForProfileChange)
   // homeReloadNonce is deliberately a dependency (trigger-only, like the
   // home-rails and continue-watching effects): the hero was the ONE home
   // surface that never refetched after first load, so a star rating or 👎
@@ -6150,7 +6176,7 @@ export default function App() {
           )}
           {view === 'search' && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <SearchView query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />
+              <SearchView key={`profile-${activeProfileId}`} query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />
             </ViewSuspense>
           )}
           {view === 'settings' && (
@@ -6198,7 +6224,7 @@ export default function App() {
                     fetches (connections, follow toggle) can't write into
                     profile B's freshly-seeded state (PR-429 review). */}
                 <UserProfileView
-                  key={uname}
+                  key={`${uname}:${activeProfileId}`}
                   username={uname}
                   onSelect={handleSelect}
                   onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
@@ -6218,6 +6244,7 @@ export default function App() {
           {view === 'collections' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
+                key={`profile-${activeProfileId}`}
                 isAdmin={user.role === 'admin'}
                 rewindNonce={navRewindNonce}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
@@ -6263,6 +6290,7 @@ export default function App() {
           {view === 'calendar' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CalendarView
+                key={`profile-${activeProfileId}`}
                 onOpenMedia={(id) => {
                   handleSelect({
                     id,
