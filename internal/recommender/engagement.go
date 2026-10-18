@@ -91,7 +91,10 @@ func (h *Hero) EngagementRailsFor(ctx context.Context, profileID int64) ([]Engag
 // drops empties, and annotates items (4K + genres) for the card badges. Each
 // query is best-effort: a failure yields an empty rail (dropped), never an error.
 func (h *Hero) buildEngagementRails(ctx context.Context, profileID int64) []EngagementRail {
-	allowed := h.allowedRatings(ctx, profileID)
+	allowed, ok := h.allowedRatings(ctx, profileID)
+	if !ok {
+		return nil // empty: EngagementRailsFor never caches it
+	}
 
 	fetch := func(name string, fn func() ([]*models.MediaItem, error)) []*models.MediaItem {
 		items, err := fn()

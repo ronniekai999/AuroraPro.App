@@ -1,0 +1,10 @@
+{
+  "sha": "5daa7085d2447ae93eed7f9d3010c2207a4c94f5",
+  "verdict": "lows-only",
+  "summary": "Recommender ceiling-lookup failure, commits e171652..5daa708 stacked on the search-ceiling branch (2e3d02e, reviewed and recorded separately as bd0a8c9). Hero.allowedRatings reports ok=false on a failed max_age_rating lookup and every surface (hero pool, RailFor, Discover, engagement, anchor rails) builds nothing, so no cache stores the result; the failure value is the G tier, never nil or empty. Pass 1 fix-first (test flaked under concurrency; fixture crowded db engagement tests; cleanup deadlocks leaked rows), pass 2 fix-first (fixture broke five db tests beside it via unstamped metadata and distance-1.0 ties, and TestNearestUnwatchedDemotion is catalog-wide; same-direction collisions broke the hero precondition), pass 3 lows-only after metadata stamping, a -0.01 weight on dims 0-7, a scoped Demotion test, maturity_pref 2, G at 7.0, a 4xx fake LLM and a logged bounded cleanup retry. 21 recommender mutants killed; 0 failures across 8/32-copy concurrency runs beside the db tests and 1280 forced-collision runs. Open lows: the fixture still blinds the db TestHiddenGems rating-gate and TestTrendingUnwatched min-plays checks under 2+ concurrent copies; Discover's PG filter is unpinned on the success path; the unit test's PG check samples one map-ordered element. Full go test -count=1 ./... green against Postgres 16 + pgvector 0.6.",
+  "reviewer": "independent-subagent-general-purpose (fresh-context read-only, 4 passes)",
+  "findings": "3",
+  "diff_digest": "52e14cd3507d4717943715db3ede5993f6a976eccbd0523fe37f1ef0e163a6f2",
+  "branch": "claude/gifted-hopper-rfs4s9-hero-cache",
+  "recorded_at": "2026-10-18T07:18:19Z"
+}

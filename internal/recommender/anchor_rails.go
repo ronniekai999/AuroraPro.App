@@ -68,7 +68,10 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 		return nil, nil
 	}
 
-	allowed := h.allowedRatings(ctx, profileID)
+	allowed, ok := h.allowedRatings(ctx, profileID)
+	if !ok {
+		return nil, nil
+	}
 	out := make([]AnchorRail, 0, len(anchors))
 	used := make(map[int64]bool)
 	// anchorSeen dedupes anchors by their underlying title so a show
