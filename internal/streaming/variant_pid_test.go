@@ -205,11 +205,16 @@ func TestStartVariant_ReaperCancelIsNotRecordedAsACrash(t *testing.T) {
 	//     poller sees FFmpeg exit with no playlist and records "exited before
 	//     producing playlist" itself, which this test would blame on the
 	//     post-Wait block.
-	// With the playlist on disk every remaining poller path takes its
-	// playlist-found branch — the exit branch re-checks before writing — so, as
-	// in TestStartVariant_RealCrashIsStillRecordedAsOne, v.Err can only come
-	// from the post-Wait block. The playlist, not Ready, is what is awaited:
-	// the poller rechecks only every 500ms, which would add that to every run.
+	// With the playlist on disk the poller's exit branch finds it on its
+	// re-check and writes nothing, and its timeout branch is a remux
+	// readinessTimeout (40s) away against this wait's 10s, so — as in
+	// TestStartVariant_RealCrashIsStillRecordedAsOne — v.Err can only come from
+	// the post-Wait block. That is not quite the reaper's state: it cancels only
+	// once Ready is closed, when the poller has already returned, whereas here
+	// the poller is usually still parked and the cancel wakes it, so this test
+	// also leans on that re-check — delete it and the failure blames the reap.
+	// Waiting on Ready would match the reaper, but the poller rechecks only
+	// every 500ms, which would add that to every run.
 	waitForVariantPlaylist(t, s, v)
 
 	s.variantMu.Lock()
