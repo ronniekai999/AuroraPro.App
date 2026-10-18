@@ -123,7 +123,9 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 // seed stores a movie; an empty vecLit leaves the embedding NULL. tmdb_id
 // stays NULL so cross-library dedup leaves every fixture row alone. Rows are
 // dated a month back so these crowds never fill the "Recently added" windows
-// other packages' tests read from the shared catalog.
+// other packages' tests read from the shared catalog, and stamped as
+// metadata-attempted so they never head the never-attempted page the db
+// package's stale-metadata tests read.
 func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 	f.t.Helper()
 	var vec *string
@@ -134,8 +136,8 @@ func (f *ceilingFixture) seed(title, rating, vecLit string) int64 {
 	if err := f.pool.QueryRow(context.Background(),
 		`INSERT INTO media_items
 		   (library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
-		    content_rating, poster_path, backdrop_path, embedding, added_at)
-		 VALUES ($1, 'movie', $2, $2, 0, '', 0, 0, $3, '', '', $4::vector, NOW() - interval '30 days')
+		    content_rating, poster_path, backdrop_path, embedding, added_at, last_metadata_attempt)
+		 VALUES ($1, 'movie', $2, $2, 0, '', 0, 0, $3, '', '', $4::vector, NOW() - interval '30 days', NOW())
 		 RETURNING id`,
 		f.libID, title, rating, vec).Scan(&id); err != nil {
 		f.t.Fatalf("seed %q: %v", title, err)

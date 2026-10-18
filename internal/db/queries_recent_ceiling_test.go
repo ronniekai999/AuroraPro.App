@@ -51,16 +51,18 @@ func ratingPtr(s string) *string { return &s }
 // TestGetRecentMediaAppliesRatingCeilingBeforeLimit pins two things a later
 // refactor could silently undo:
 //   - the ceiling is applied in SQL, before LIMIT: five over-ceiling titles
-//     newer than the allowed one must not crowd it out of a three-row page
-//     (filtering in Go after LIMIT would return none of the fixture's rows);
+//     newer than every allowed one must not crowd them out of a three-row page
+//     (filtering in Go after LIMIT would return an empty page);
 //   - unrated titles (NULL or empty) are excluded under a restriction, matching
 //     AllowedRatingsForMax's fail-closed contract and GetMediaItems.
 //
-// The catalog is shared, and other tests date allowed rows ahead of NOW()
-// too (some further ahead than this one's G row), so the restricted check is
-// by class: the page must hold an allowed row and nothing else. Every run's
-// five R rows are the newest rows anywhere (+10..14h), so a filter applied
-// after LIMIT still leaves the page empty.
+// The catalog is shared and other tests date rows ahead of NOW() too, so the
+// restricted check is by class: the page must be non-empty and hold only
+// allowed rows, from any run. The ceiling is G, not PG, because the dedup test
+// below and the api package's Recently-added test date PG rows further ahead
+// than this test's unrated rows (+2h and +3h); under a PG ceiling those rows
+// could fill the page and hide a let-through unrated row. No other fixture
+// dates a G row ahead of them.
 func TestGetRecentMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 	q := requireIntegrationDB(t)
 	ctx := context.Background()
@@ -78,22 +80,22 @@ func TestGetRecentMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 		overCeiling[seed(ratingPtr("R"), 10+i)] = true
 	}
 
-	restricted, err := q.GetRecentMedia(ctx, 3, AllowedRatingsForMax("PG"))
+	restricted, err := q.GetRecentMedia(ctx, 3, AllowedRatingsForMax("G"))
 	if err != nil {
 		t.Fatalf("GetRecentMedia (restricted): %v", err)
 	}
 	for _, it := range restricted {
 		switch {
 		case overCeiling[it.ID]:
-			t.Errorf("PG ceiling returned R-rated item %d", it.ID)
+			t.Errorf("G ceiling returned R-rated item %d", it.ID)
 		case it.ID == unratedNull || it.ID == unratedEmpty:
-			t.Errorf("PG ceiling returned unrated item %d; unrated titles must be excluded under a restriction", it.ID)
-		case !RatingAllowed("PG", it.ContentRating):
-			t.Errorf("PG ceiling returned item %d rated %q", it.ID, it.ContentRating)
+			t.Errorf("G ceiling returned unrated item %d; unrated titles must be excluded under a restriction", it.ID)
+		case !RatingAllowed("G", it.ContentRating):
+			t.Errorf("G ceiling returned item %d rated %q", it.ID, it.ContentRating)
 		}
 	}
 	if len(restricted) == 0 {
-		t.Errorf("PG ceiling with limit 3 returned no rows behind five newer R-rated items (this run's G row is %d) — "+
+		t.Errorf("G ceiling with limit 3 returned no rows behind five newer R-rated items (this run's G row is %d) — "+
 			"the ceiling must be applied before LIMIT, not after", allowed)
 	}
 
@@ -127,8 +129,7 @@ func TestGetRecentMediaCeilingAppliesBeforeDedup(t *testing.T) {
 
 	// Dated 20 hours ahead, above every other Recently-added fixture, so rows
 	// other tests date ahead cannot push these out of the 50-row window. The
-	// sibling test above checks its page by class, so this allowed PG row
-	// landing in its three-row restricted page is harmless.
+	// sibling test above restricts to G, so this PG row never enters its page.
 	richR := seedRecentCeilingItem(t, q, libA, token, recentCeilingItem{rating: ratingPtr("R"), hours: 20, tmdbID: tmdbID, rich: true})
 	plainPG := seedRecentCeilingItem(t, q, libB, token, recentCeilingItem{rating: ratingPtr("PG"), hours: 20, tmdbID: tmdbID})
 

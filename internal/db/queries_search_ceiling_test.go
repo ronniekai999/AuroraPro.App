@@ -49,7 +49,9 @@ func exactScanQueries(t *testing.T) *Queries {
 // seedSearchCeilingItem inserts a movie with the given title, rating (nil
 // stores SQL NULL) and embedding (empty leaves it NULL). Unrelated scalars are
 // zero values rather than NULL, as in seedTypedMediaItem. Rows are dated a
-// month back so they never crowd the "Recently added" tests' windows.
+// month back so they never crowd the "Recently added" tests' windows, and
+// stamped as metadata-attempted so they never head GetStaleMetadataItems'
+// never-attempted page, which the stale-metadata tests read.
 func seedSearchCeilingItem(t *testing.T, q *Queries, libID int64, title string, rating *string, vecLit string) int64 {
 	t.Helper()
 	var vec *string
@@ -60,8 +62,8 @@ func seedSearchCeilingItem(t *testing.T, q *Queries, libID int64, title string, 
 	err := q.pool.QueryRow(context.Background(),
 		`INSERT INTO media_items
 		   (library_id, type, title, sort_title, tmdb_id, year, overview, rating, runtime_minutes,
-		    content_rating, poster_path, backdrop_path, embedding, added_at)
-		 VALUES ($1, 'movie', $2, $2, $3, 0, '', 0, 0, $4, '', '', $5::vector, NOW() - interval '30 days')
+		    content_rating, poster_path, backdrop_path, embedding, added_at, last_metadata_attempt)
+		 VALUES ($1, 'movie', $2, $2, $3, 0, '', 0, 0, $4, '', '', $5::vector, NOW() - interval '30 days', NOW())
 		 RETURNING id`,
 		libID, title, uniqueTMDBID(t), rating, vec,
 	).Scan(&id)

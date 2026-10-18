@@ -167,11 +167,16 @@ func newRCFixture(t *testing.T) *rcFixture {
 
 func i64(v int64) string { return strconv.FormatInt(v, 10) }
 
-// rcShiftAddedAt sets items' added_at to NOW() plus shift (a Postgres
-// interval, e.g. "-30 days"). The "Recently added" tests read the newest rows
-// of a shared catalog (this package's 50, the db package's 3), so they date
+// rcDateRows sets items' added_at to NOW() plus shift (a Postgres interval,
+// e.g. "-30 days"). The "Recently added" tests read the newest rows of a
+// shared catalog (50 rows here; 3 and 50 in the db package), so they date
 // their own rows ahead and crowd-seeding tests date theirs back.
-func rcShiftAddedAt(t *testing.T, shift string, ids []int64) {
+//
+// It also stamps last_metadata_attempt. Fixture rows have no metadata
+// progress, so unstamped they sort to the head of GetStaleMetadataItems'
+// never-attempted page, which the db package's stale-metadata tests read
+// while these run. Nothing these tests query reads the column.
+func rcDateRows(t *testing.T, shift string, ids []int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -180,7 +185,7 @@ func rcShiftAddedAt(t *testing.T, shift string, ids []int64) {
 		t.Fatalf("connect to test db: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, `UPDATE media_items SET added_at = NOW() + $2::interval WHERE id = ANY($1)`, ids, shift); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE media_items SET added_at = NOW() + $2::interval, last_metadata_attempt = NOW() WHERE id = ANY($1)`, ids, shift); err != nil {
 		t.Fatalf("shift added_at of seeded items: %v", err)
 	}
 }
@@ -449,6 +454,12 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	if err := f.q.UpsertMediaItem(ctx, allowed); err != nil {
 		t.Fatalf("seed allowed movie: %v", err)
 	}
+	// An unrated title inside the window: a restriction must exclude it.
+	unrated := &models.MediaItem{LibraryID: f.libraryID, Type: models.MediaMovie, Title: "RC Unrated " + reqTestSuffix(t),
+		SortTitle: "rc unrated", ContentRating: ""}
+	if err := f.q.UpsertMediaItem(ctx, unrated); err != nil {
+		t.Fatalf("seed unrated movie: %v", err)
+	}
 	defaultProfile, err := f.q.GetDefaultProfile(ctx, f.userID)
 	if err != nil || defaultProfile == nil {
 		t.Fatalf("load default profile: %v", err)
@@ -458,11 +469,11 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	// killed run leaks ages out of the newest pages within a day. The db
 	// package's Recently-added test dates rows ahead too, some further, and
 	// both tests check those by class so neither depends on the other's dates.
-	rcShiftAddedAt(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID})
+	rcDateRows(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID, unrated.ID})
 
-	recent := func(refreshTokenID int64) []*models.MediaItem {
+	recent := func(refreshTokenID int64, limit int) []*models.MediaItem {
 		t.Helper()
-		r := httptest.NewRequest(http.MethodGet, "/api/media/recent?limit=50&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/media/recent?limit="+strconv.Itoa(limit)+"&max_rating=NC-17&profile_id="+i64(defaultProfile.ID), nil)
 		r = rcClaimsCtx(r, f.userID, refreshTokenID)
 		rr := httptest.NewRecorder()
 		h.Recent(rr, r)
@@ -487,7 +498,7 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	// shared catalog. The restricted id checks rely on this fixture's PG row
 	// being among the 50 newest ALLOWED rows, which its future added_at keeps
 	// true unless 50+ allowed rows dated further ahead appear concurrently.
-	restrictedItems := recent(f.restrictedRefreshID)
+	restrictedItems := recent(f.restrictedRefreshID, 50)
 	for _, it := range restrictedItems {
 		if !db.RatingAllowed("PG", it.ContentRating) {
 			t.Errorf("restricted (PG) session got item %d rated %q from Recently added", it.ID, it.ContentRating)
@@ -501,16 +512,32 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	if !restricted[allowed.ID] {
 		t.Errorf("restricted (PG) session lost the PG title %d from Recently added", allowed.ID)
 	}
+	if restricted[unrated.ID] {
+		t.Errorf("restricted (PG) session saw unrated title %d in Recently added; a restriction excludes unrated titles", unrated.ID)
+	}
 
 	// Unrestricted, by class: the page must hold a title the PG ceiling
 	// rejects. Usually that is this fixture's R movie, but other tests' newer
 	// R rows count too, and under load they can push it out of the window.
 	sawOver := false
-	for _, it := range recent(f.unrestrictedRefreshID) {
+	for _, it := range recent(f.unrestrictedRefreshID, 50) {
 		sawOver = sawOver || !db.RatingAllowed("PG", it.ContentRating)
 	}
 	if !sawOver {
 		t.Errorf("unrestricted session saw no over-ceiling title in Recently added (this fixture's R movie is %d)", f.movieID)
+	}
+
+	// The ceiling goes to SQL before LIMIT at the handler too. With this
+	// fixture's R movie the newest row anywhere (no fixture dates a row
+	// further ahead), a handler that fetched one row and filtered it in Go
+	// would return an empty one-row page.
+	rcDateRows(t, "30 hours", []int64{f.movieID})
+	page := recent(f.restrictedRefreshID, 1)
+	if len(page) != 1 {
+		t.Fatalf("restricted (PG) one-row page returned %d rows behind a newer R title; the ceiling must be applied before LIMIT", len(page))
+	}
+	if !db.RatingAllowed("PG", page[0].ContentRating) {
+		t.Errorf("restricted (PG) one-row page returned item %d rated %q", page[0].ID, page[0].ContentRating)
 	}
 }
 
@@ -557,7 +584,7 @@ func TestMediaSearch_ServerDerivedCeiling(t *testing.T) {
 	for i := 0; i <= crowdFetch; i++ {
 		seed(crowdToken, models.MediaMovie, "R", fmt.Sprintf("r%d", i))
 	}
-	rcShiftAddedAt(t, "-30 days", seeded)
+	rcDateRows(t, "-30 days", seeded)
 	allowed, overR, overTVMA, unrated := pgItem.ID, rItem.ID, tvmaItem.ID, unratedItem.ID
 
 	// search returns the served ids and the X-Search-Mode the handler
