@@ -116,6 +116,13 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 // dereference the result without a separate nil check. This matches the
 // existing "prof == nil means unrestricted" convention in
 // party_invite_handlers.go's send-time ceiling check.
+//
+// A token that names a session row which no longer exists resolves to the
+// account's MOST restrictive profile, not the default. Its binding is
+// unknowable, and the default is usually the unrestricted parent: the purge
+// used to delete revoked rows while their access tokens were still valid, and
+// a kid's stale token then lifted its own ceiling. PurgeExpiredTokens now keeps
+// revoked rows past the access-token lifetime, so this is the backstop.
 func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error) {
 	if refreshTokenID != 0 {
 		var profileID *int64
@@ -123,7 +130,10 @@ func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshToken
 			`SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2`,
 			refreshTokenID, userID,
 		).Scan(&profileID)
-		if err != nil && err != pgx.ErrNoRows {
+		if err == pgx.ErrNoRows {
+			return q.mostRestrictiveProfile(ctx, userID)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("resolve acting profile: %w", err)
 		}
 		if profileID != nil {
@@ -146,24 +156,53 @@ func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshToken
 	return p, nil
 }
 
+// mostRestrictiveProfile returns the account's profile with the tightest
+// ceiling (the fewest allowed ratings), or its default when none has one.
+func (q *Queries) mostRestrictiveProfile(ctx context.Context, userID int64) (*models.UserProfile, error) {
+	profiles, err := q.GetProfilesByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve acting profile: %w", err)
+	}
+	var tightest *models.UserProfile
+	for _, p := range profiles {
+		allowed := AllowedRatingsForMax(p.MaxAgeRating)
+		if allowed == nil {
+			continue
+		}
+		if tightest == nil || len(allowed) < len(AllowedRatingsForMax(tightest.MaxAgeRating)) {
+			tightest = p
+		}
+	}
+	if tightest != nil {
+		return tightest, nil
+	}
+	p, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return &models.UserProfile{UserID: userID}, nil
+	}
+	return p, nil
+}
+
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the
 // session identified by refreshTokenID (issue #462). Returns false if no
 // matching row exists for userID at all — the caller has already validated
 // profileID ownership separately, so this only fails when the row was never
 // created for this account (or a forged/foreign id).
 //
-// Deliberately does NOT filter on `NOT revoked`, matching
-// ResolveActingProfile's read side: the access token minted alongside this
-// refresh_tokens row stays valid — and gets presented — for up to its own
-// 15-minute TTL after the row is revoked (rotation). Filtering here would
-// make a switch silently fail to take (a 409 the SPA's fire-and-forget call
-// swallows) for that whole window, and in the unsafe direction: the session
-// stays on whatever LOOSER profile it already had instead of picking up a
-// stricter one.
+// A revoked row is refused (false). Rotation copies the binding to the row's
+// successor when it revokes it, so writing to the revoked row after that
+// changed only what an old access token saw: the client was told the switch
+// took while the session itself kept the previous profile. The caller answers
+// 409, and the clients, which now show a switch only once the server confirms
+// it, refresh and retry. (This filter used to be left off on purpose, because
+// the web client activated fire-and-forget and swallowed the 409.)
 func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, userID, profileID int64) (bool, error) {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE refresh_tokens SET active_profile_id = $1
-		 WHERE id = $2 AND user_id = $3`,
+		 WHERE id = $2 AND user_id = $3 AND NOT revoked`,
 		profileID, refreshTokenID, userID,
 	)
 	if err != nil {
@@ -224,10 +263,31 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 	return err
 }
 
+// DeleteProfile deletes a non-default profile and every session bound to it,
+// in one transaction. The binding's foreign key is ON DELETE SET NULL, and an
+// unbound session acts as the account default, so without this a kid's
+// devices would wake up on the parent's profile, past its PIN. Deleting the
+// session rows (not just revoking them) means a still-valid access token of
+// theirs finds no row, which resolves to the most restrictive profile; the
+// devices sign in again.
 func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, error) {
-	tag, err := q.pool.Exec(ctx,
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM refresh_tokens
+		 WHERE active_profile_id = $1 AND EXISTS (
+		   SELECT 1 FROM user_profiles WHERE id = $1 AND is_default = FALSE)`, profileID); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx,
 		"DELETE FROM user_profiles WHERE id = $1 AND is_default = FALSE", profileID)
 	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil

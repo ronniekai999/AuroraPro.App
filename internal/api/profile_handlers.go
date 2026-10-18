@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -21,15 +22,25 @@ type ProfileHandler struct {
 	queries *db.Queries
 	hero    HeroProvider  // optional; for cache invalidation on maturity_pref change
 	authSvc *auth.Service // hashes and checks profile PINs and the account password
+	// passwordLimiter is the account password's own budget as a stand-in for
+	// a PIN, keyed by account.
+	passwordLimiter *auth.RateLimiter
+	// resolveActing resolves the session's acting profile; a field so a test
+	// can make it fail and see the management gates fail closed.
+	resolveActing func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 }
 
 // Profile PIN brute-force budget: a four-digit PIN has 10,000 values, so the
 // limit is what makes it a lock. After profilePINMaxFailures consecutive
 // failures the profile refuses attempts for profilePINLockout, and every
-// further failure before a success restarts it.
+// further failure before a success restarts it. The account password, which
+// stands in for a PIN, has a separate budget of profilePasswordAttempts per
+// profilePasswordWindow per account.
 const (
-	profilePINMaxFailures = 5
-	profilePINLockout     = 15 * time.Minute
+	profilePINMaxFailures   = 5
+	profilePINLockout       = 15 * time.Minute
+	profilePasswordAttempts = 5
+	profilePasswordWindow   = 15 * time.Minute
 )
 
 // profilePINRe: profile PINs are exactly four digits, as on a TV remote.
@@ -63,7 +74,11 @@ func maxAgeRatingError() string {
 }
 
 func NewProfileHandler(queries *db.Queries) *ProfileHandler {
-	return &ProfileHandler{queries: queries}
+	return &ProfileHandler{
+		queries:         queries,
+		passwordLimiter: auth.NewRateLimiter(profilePasswordAttempts, profilePasswordWindow),
+		resolveActing:   queries.ResolveActingProfile,
+	}
 }
 
 // SetHeroProvider wires the recommender so a content-tone (maturity_pref) change
@@ -87,8 +102,8 @@ func writeErrorReason(w http.ResponseWriter, status int, reason, message string)
 // write. Unlike discovery, these fail CLOSED: a resolve error must not let a
 // restricted session through.
 func (h *ProfileHandler) actingProfile(w http.ResponseWriter, r *http.Request, claims *auth.JWTClaims) (*models.UserProfile, bool) {
-	acting, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
-	if err != nil {
+	acting, err := h.resolveActing(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil || acting == nil {
 		slog.Warn("profiles: resolve acting profile failed", "user_id", claims.UserID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
 		return nil, false
@@ -113,6 +128,31 @@ func (h *ProfileHandler) requireUnrestricted(w http.ResponseWriter, r *http.Requ
 	return acting, true
 }
 
+// actingProfileResolver is the one query denyRestrictedSession needs.
+type actingProfileResolver interface {
+	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
+}
+
+// denyRestrictedSession refuses an account-level action from a session acting
+// as a restricted profile, writing a 403 profile_restricted and returning
+// true. It fails closed: a resolve error refuses too. Linking a sign-in
+// identity is one such action: a fresh sign-in through it lands on the
+// account default without that profile's PIN.
+func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store actingProfileResolver, claims *auth.JWTClaims) bool {
+	acting, err := store.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil || acting == nil {
+		slog.Warn("resolve acting profile failed", "user_id", claims.UserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
+		return true
+	}
+	if acting.MaxAgeRating != "" {
+		writeErrorReason(w, http.StatusForbidden, "profile_restricted",
+			"switch to a profile without a content rating limit to manage sign-in methods")
+		return true
+	}
+	return false
+}
+
 // unlockRequest carries what can unlock a PIN-protected profile: its PIN, or
 // the account password in its place.
 type unlockRequest struct {
@@ -121,52 +161,81 @@ type unlockRequest struct {
 }
 
 // checkUnlock verifies an unlock attempt for a PIN-protected profile and
-// writes the refusal itself, returning false, when it fails: 403
-// profile_pin_required with nothing supplied (not counted as a failure), 403
-// profile_pin_invalid for a wrong PIN or password (counted), and 429
-// profile_pin_locked while a lockout runs (no check at all, so a correct guess
-// during the lockout cannot confirm itself). The password counts against the
-// same budget, so this route is no password-guessing side door.
+// writes the refusal itself, returning false, when it fails:
+//   - 403 profile_pin_required with nothing supplied (not counted);
+//   - 403 profile_pin_invalid for a wrong PIN or password;
+//   - 429 profile_pin_locked while a PIN lockout runs, or once the password
+//     budget is spent.
+//
+// A PIN attempt is counted before it is checked (ReserveProfilePINAttempt),
+// so concurrent guesses cannot outrun the limit, and none is checked during a
+// lockout. The account password has its own per-account budget instead
+// (passwordLimiter), and a PIN lockout does not block it: the password is the
+// recovery path, and if PIN guesses could lock it too, anyone on the account
+// could keep the owner out indefinitely with one wrong guess per lockout.
 func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, profile *models.UserProfile, req unlockRequest) bool {
 	ctx := r.Context()
-	st, err := h.queries.GetProfilePINState(ctx, profile.ID)
-	if err != nil || st == nil {
-		writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
-		return false
-	}
-	if st.Hash == "" {
-		return true
-	}
-	if st.LockedUntil != nil && st.LockedUntil.After(time.Now()) {
-		writeLockout(w, *st.LockedUntil)
-		return false
-	}
-	if req.PIN == "" && req.Password == "" {
-		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile is locked; enter its PIN")
-		return false
-	}
 	if h.authSvc == nil {
 		writeError(w, http.StatusInternalServerError, "profile lock check unavailable")
 		return false
 	}
-	matched := false
-	if req.PIN != "" {
-		matched, _ = h.authSvc.VerifyPassword(req.PIN, st.Hash)
-	} else if user, uerr := h.queries.GetUserByID(ctx, profile.UserID); uerr == nil && user != nil && user.PasswordHash != "" {
-		matched, _ = h.authSvc.VerifyPassword(req.Password, user.PasswordHash)
-	}
-	if !matched {
-		lockedUntil, ferr := h.queries.RecordProfilePINFailure(ctx, profile.ID, profilePINMaxFailures, profilePINLockout)
-		if ferr != nil {
-			slog.Warn("profiles: record pin failure failed", "profile_id", profile.ID, "error", ferr)
-		}
-		if lockedUntil != nil {
-			writeLockout(w, *lockedUntil)
+	switch {
+	case req.PIN != "":
+		attempt, err := h.queries.ReserveProfilePINAttempt(ctx, profile.ID, profilePINMaxFailures, profilePINLockout)
+		if err != nil {
+			slog.Warn("profiles: reserve pin attempt failed", "profile_id", profile.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
 			return false
 		}
-		writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
+		if attempt.NoPIN {
+			return true
+		}
+		if !attempt.Reserved {
+			writeLockout(w, *attempt.LockedUntil)
+			return false
+		}
+		if ok, _ := h.authSvc.VerifyPassword(req.PIN, attempt.Hash); !ok {
+			if attempt.LocksOut {
+				writeLockout(w, time.Now().Add(profilePINLockout))
+				return false
+			}
+			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
+			return false
+		}
+	case req.Password != "":
+		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
+		if err != nil || st == nil {
+			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
+			return false
+		}
+		if st.Hash == "" {
+			return true
+		}
+		if h.passwordLimiter != nil && !h.passwordLimiter.Allow(strconv.FormatInt(profile.UserID, 10)) {
+			writeLockout(w, time.Now().Add(profilePasswordWindow))
+			return false
+		}
+		matched := false
+		if user, uerr := h.queries.GetUserByID(ctx, profile.UserID); uerr == nil && user != nil && user.PasswordHash != "" {
+			matched, _ = h.authSvc.VerifyPassword(req.Password, user.PasswordHash)
+		}
+		if !matched {
+			writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
+			return false
+		}
+	default:
+		st, err := h.queries.GetProfilePINState(ctx, profile.ID)
+		if err != nil || st == nil {
+			writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
+			return false
+		}
+		if st.Hash == "" {
+			return true
+		}
+		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile is locked; enter its PIN")
 		return false
 	}
+	// A correct PIN or password clears the count and any lockout.
 	if err := h.queries.ResetProfilePINFailures(ctx, profile.ID); err != nil {
 		slog.Warn("profiles: reset pin failures failed", "profile_id", profile.ID, "error", err)
 	}
@@ -489,9 +558,9 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 // ActivateProfile binds profileID as this SESSION's server-side acting
 // profile (issue #462) — the rating-ceiling source of truth for read/
 // playback enforcement, distinct from SetDefault's account-wide persistent
-// default. Called by the SPA's profile switcher alongside (not instead of)
-// its existing localStorage state, so switching still works instantly on
-// the client; this call is what makes the switch hold up server-side.
+// default. Clients switch their display only once this returns 200, so a 200
+// always means the binding took. A locked profile needs its PIN or the
+// account password first.
 func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -534,13 +603,11 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 
 	if claims.RefreshTokenID == 0 {
 		// This access token predates the session-binding feature (or is a
-		// scoped/cast token, which never carries one) — there's no
-		// refresh_tokens row to bind against yet. Not an error: the SPA's
-		// own localStorage switch still works for display, and enforcement
-		// falls back to the account default profile until this session's
-		// next token refresh mints a token that does carry one (access
-		// tokens are short-lived, so that's typically minutes away).
-		writeJSON(w, http.StatusOK, map[string]string{"message": "profile activated locally; will bind server-side after next token refresh"})
+		// scoped/cast token, which never carries one), so there is no
+		// refresh_tokens row to bind. It used to answer 200 "activated
+		// locally", but clients now take a 200 as a confirmed binding, so
+		// this is a 409 like a revoked row: refresh, then retry.
+		writeErrorReason(w, http.StatusConflict, "session_unbound", "this session cannot hold a profile yet; refresh and retry")
 		return
 	}
 

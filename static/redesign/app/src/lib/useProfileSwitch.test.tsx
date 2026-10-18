@@ -93,6 +93,21 @@ describe('useProfileSwitch', () => {
     expect(onError).not.toHaveBeenCalled()
   })
 
+  it('ignores a second switch while one is in flight', async () => {
+    let bind!: () => void
+    api.activateProfile.mockImplementation(() => new Promise<void>(r => { bind = r }))
+    const { hook, setActiveProfileId } = setup()
+    let first: Promise<boolean>
+    act(() => { first = hook.result.current.switchProfile(3) })
+    expect(hook.result.current.isSwitching()).toBe(true)
+    await expect(hook.result.current.switchProfile(1)).resolves.toBe(false)
+    expect(api.activateProfile).toHaveBeenCalledTimes(1)
+    await act(async () => { bind() })
+    await expect(first!).resolves.toBe(true)
+    expect(setActiveProfileId).toHaveBeenCalledWith(3)
+    expect(hook.result.current.isSwitching()).toBe(false)
+  })
+
   it('treats the current profile as already switched', async () => {
     const { hook } = setup(2)
     await expect(hook.result.current.switchProfile(2)).resolves.toBe(true)

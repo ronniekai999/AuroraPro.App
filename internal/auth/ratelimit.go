@@ -151,6 +151,13 @@ func normalizeClientKey(remoteAddr string) string {
 	return masked.String() + "/64"
 }
 
+// Allow counts one request against an arbitrary key, such as a user id, for
+// limits that are not per client address. It reports whether the request is
+// within the limit.
+func (rl *RateLimiter) Allow(key string) bool {
+	return rl.allow(key)
+}
+
 // Middleware returns a chi-compatible middleware that rate limits by IP
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

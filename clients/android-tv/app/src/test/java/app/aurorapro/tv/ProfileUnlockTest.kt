@@ -116,6 +116,23 @@ class ProfileUnlockTest {
         assertTrue(activations.isEmpty())
     }
 
+    @Test fun aRefusedUnlockKeepsTheProfileTheSessionIsActingAs() {
+        // Acting as the kid, open the picker from Home and try the parent.
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        awaitState { it.page == Page.HOME }
+        vm.navigate(Page.PROFILES)
+        awaitState { it.page == Page.PROFILES }
+        vm.selectProfile(parent())
+        awaitState { it.pinPrompt != null }
+        vm.submitUnlock("0000", usePassword = false)
+        val refused = awaitState { it.pinError != null }
+        assertEquals("The picker still shows the kid as selected", 2L, refused.profile?.id)
+        assertEquals(Page.HOME, refused.profileReturnPage)
+        vm.cancelUnlock()
+        vm.back()
+        assertEquals(Page.HOME, awaitState { it.page == Page.HOME }.page)
+    }
+
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {
         vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
         awaitState { it.page == Page.HOME }

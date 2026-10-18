@@ -202,28 +202,50 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 
 - `ActivateProfile` into a locked profile needs its PIN or the account
   password, unless the session already acts as it. The check runs before the
-  unbound-token branch, so no client is told a locked profile is active
-  without one. The password is the recovery path, by the owner's choice.
-- Five consecutive misses, PIN and password counted together, start a
-  15-minute lockout, in one atomic UPDATE. A success resets the count; an
-  expired lockout does not, so after the first one each miss re-locks. A
-  request with neither is 403 `profile_pin_required` and is not counted.
-  Refusals carry `error.reason` (`profile_pin_required`, `profile_pin_invalid`,
-  `profile_pin_locked` with Retry-After, `profile_restricted`).
+  unbound-token branch, and a token with no session row is a 409
+  `session_unbound`, never a 200: clients take a 200 as a confirmed binding.
+  The password is the recovery path, by the owner's choice.
+- PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
+  refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
+  check let concurrent guesses all pass the lockout read; a review drove 40
+  through a limit of 5. The fifth miss starts a 15-minute lockout; a success
+  resets the count; an expired lockout does not, so after the first one each
+  miss re-locks. The database's clock decides lockouts.
+- The account password has its own budget (5 per 15 minutes per account,
+  `passwordLimiter`) and a PIN lockout does not block it. If PIN misses also
+  locked out the password, anyone on the account could keep the owner out
+  indefinitely with one wrong guess per lockout, and even stop them changing
+  the PIN.
+- Refusals carry `error.reason`: `profile_pin_required` (nothing supplied, not
+  counted), `profile_pin_invalid`, `profile_pin_locked` (with Retry-After; also
+  a spent password budget), `profile_restricted`, `session_unbound`.
 - A restricted session is one acting as a profile with a non-empty
   `max_age_rating`. It may edit only its own name, avatar, language, subtitle
   and maturity settings. It cannot create, delete or re-default profiles, set
   or change a PIN, change any ceiling (re-sending its unchanged ceiling
-  passes), or edit another profile. These checks fail closed when the acting
-  profile cannot be resolved.
-- Device pairing approved by a restricted session binds the new device to
-  that profile, never to the account default.
+  passes), edit another profile's settings, or link or unlink a sign-in
+  identity (a fresh sign-in through a new link would land on the default
+  without its PIN). These checks fail closed when the acting profile cannot be
+  resolved.
+- The acting profile must not degrade to the account default for a session
+  the server has lost. Revoked session rows are kept until `revoked_at` is
+  older than the access-token lifetime (migration 061, `PurgeExpiredTokens`),
+  because access tokens name their row and outlive its revocation; and a token
+  whose row is gone anyway resolves to the account's most restrictive profile.
+  Deleting a profile deletes its sessions, since the binding's foreign key
+  would otherwise null them onto the default.
+- Binding a revoked (rotated) session row is refused (409): rotation already
+  copied the old binding to its successor, so the write changed nothing that
+  lasted. The SPA refreshes and retries once.
+- Device pairing binds the new device to the approver's acting profile, so it
+  can neither raise a ceiling nor hand out a locked default.
 - Clients show the server's binding, never a remembered choice: the SPA reads
-  `GET /api/profiles/active` at startup and changes its display only after
-  activation resolves. It used to switch locally and activate
-  fire-and-forget, so a failed call left a kid's UI on the kid profile while
-  the server enforced the parent's ceiling. The TV stays at the picker until
-  activation succeeds.
+  `GET /api/profiles/active` at startup (one retry) and changes its display
+  only after activation resolves, one switch at a time. It used to switch
+  locally and activate fire-and-forget, so a failed call left a kid's UI on
+  the kid profile while the server enforced the parent's ceiling. The TV stays
+  at the picker until activation succeeds, and a refused PIN keeps the
+  session's own profile.
 - Known gaps:
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked unrestricted profile; Settings warns about it.
@@ -236,7 +258,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - The admin role is account-level, so a restricted profile on an admin
     account keeps every admin route.
   - PINs are four digits. With the re-lock above, guessing averages about 50
-    days of continuous attempts, and the account password shares that budget.
+    days of continuous attempts. The password budget is per account, so
+    wrong guesses can spend it and keep the owner waiting up to 15 minutes
+    (a fresh sign-in, under the login limiter, still works).
+  - A deleted profile's devices keep their still-valid access tokens for up
+    to one token lifetime, acting as the account's most restrictive remaining
+    profile, which is the default if that was the only restricted one.
+  - A restricted session can still read and edit other profiles' watchlists
+    and My Library, which check only account ownership (`?profile_id=` and
+    the other routes listed under Parental rating ceiling likewise).
   - Web tabs share one session; a tab re-reads the binding only when it
     becomes visible, so two visible tabs can show different profiles.
   - The macOS client cannot switch profiles at all; it uses the session's

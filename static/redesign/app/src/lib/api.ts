@@ -2246,7 +2246,14 @@ export async function setDefaultProfile(id: number): Promise<void> {
 // locked profile rejects with profileErrorReason 'profile_pin_required'
 // until `unlock` carries its PIN or the account password.
 export async function activateProfile(id: number, unlock?: ProfileUnlock): Promise<void> {
-  await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST', body: unlock })
+  try {
+    await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST', body: unlock })
+  } catch (e) {
+    // 409: the session this request named was rotated or cannot hold a
+    // profile yet. Refresh once and retry; the new session can be bound.
+    if (!(e instanceof APIError) || e.status !== 409 || !(await refreshAccessToken())) throw e
+    await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST', body: unlock })
+  }
 }
 
 // The profile this session is acting as — the one every server-side ceiling

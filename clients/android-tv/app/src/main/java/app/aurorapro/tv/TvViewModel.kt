@@ -184,6 +184,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun activateProfile(profile: Profile, pin: String?, password: String?) = perform {
         val api = requireNotNull(client)
+        val before = state.value
         pendingPlaybackRefresh = null
         // Once activation starts, its server outcome may be uncertain on a
         // network failure. Do not return to content labelled with the old
@@ -195,14 +196,17 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
             api.activate(profile, pin, password)
         } catch (e: AuroraException) {
             // A refused unlock is certain: the server kept the session's
-            // binding. Keep asking rather than surfacing a page-level error.
+            // binding. Keep asking rather than surfacing a page-level error,
+            // and put back the profile and return page, so Back and the
+            // picker still reflect the profile the session is acting as.
             val refusal = when (e.reason) {
                 "profile_pin_required" -> null
                 "profile_pin_invalid" -> if (password != null) "That password is not right." else "That PIN is not right."
                 "profile_pin_locked" -> "Too many wrong attempts. Try again in 15 minutes."
                 else -> throw e
             }
-            update { it.copy(pinPrompt = profile, pinError = refusal) }
+            update { it.copy(pinPrompt = profile, pinError = refusal,
+                profile = before.profile, profileReturnPage = before.profileReturnPage) }
             return@perform
         }
         update { it.copy(page = Page.HOME, profile = profile, pinPrompt = null, pinError = null) }

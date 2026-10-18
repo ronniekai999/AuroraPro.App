@@ -27,10 +27,10 @@ type deviceGrant struct {
 	UserID       int64
 	TokenVersion int
 	// ProfileID binds the new device's session to the approver's acting
-	// profile when that profile is restricted (0 otherwise). An unbound
-	// session acts as the account's default profile, so without this a kid's
-	// session could approve a new device and land it on the unrestricted
-	// default, past any profile PIN.
+	// profile (0 when the account has none). An unbound session acts as the
+	// account's default profile, so without this a kid's session could approve
+	// a new device and land it on the unrestricted default, and any approver
+	// could hand a device a locked default it never unlocked.
 	ProfileID int64
 }
 
@@ -278,18 +278,16 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "sign in again before authorizing this device")
 		return
 	}
-	// A restricted approver passes its own profile on to the device, so
-	// approving cannot raise a ceiling; an unrestricted one leaves the device
-	// unbound (the account default), as before. Fails closed.
+	// The approver passes its own acting profile on to the device. A
+	// restricted approver therefore cannot raise a ceiling by pairing, and an
+	// unrestricted non-default one does not hand the device the account
+	// default, which may be a locked profile it never unlocked. Fails closed.
 	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		writeError(w, http.StatusInternalServerError, "could not check the active profile")
 		return
 	}
-	var bindProfile int64
-	if acting.MaxAgeRating != "" {
-		bindProfile = acting.ID
-	}
+	bindProfile := acting.ID // 0 when the account has no profile yet: unbound
 	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion, bindProfile) {
 		writeError(w, http.StatusNotFound, "device code is expired or already used")
 		return

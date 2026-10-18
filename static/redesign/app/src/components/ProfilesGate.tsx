@@ -155,6 +155,9 @@ export function ProfilesGate({
       setPicking(false)
     }
     if (switched) dismiss()
+    // Not switched (a cancelled PIN prompt, a refused activation): the checked
+    // radio goes back to the profile that is actually active.
+    else setHighlightId(activeProfileId)
   }
 
   // Escape dismisses only when the gate was opened BY HAND. On a first visit it
@@ -241,19 +244,18 @@ export function ProfilesGate({
           role="radiogroup"
           aria-label="Profiles"
           className="mt-10 flex flex-wrap items-start justify-center gap-6 md:gap-9"
-          // Arrows MOVE AND SELECT. The first version only called .focus(), and
-          // that was a real keyboard-reachability failure (WCAG 2.1.1), not a
-          // nicety: `current` was derived from activeProfileId, so with nothing
-          // selecting, `current` never advanced. ArrowRight from the first of
-          // five profiles focused the second, and pressing it again focused the
-          // second again — the third and fourth were unreachable by keyboard at
-          // all, since the roving tabIndex gives the set one tab stop. A pointer
-          // user could pick them; a keyboard user could not.
+          // Arrows MOVE AND CHECK: they advance highlightId, the checked radio,
+          // and focus follows. The first version only called .focus(), and
+          // that was a real keyboard-reachability failure (WCAG 2.1.1): with
+          // nothing advancing the checked index, ArrowRight from the first of
+          // five profiles focused the second and then the second again, and the
+          // rest were unreachable, since the roving tabIndex gives the set one
+          // tab stop.
           //
-          // Settings' dials call their apply+setState before focusing, which is
-          // why `current` advances there. This copied the focus line and dropped
-          // the state change — while a comment claimed it was "the same keyboard
-          // contract Settings' dials use".
+          // Arrows used to check by switching profiles outright (onSelect on
+          // every press). Switches now go through the server and can need a
+          // PIN, so arrows check locally and a pick (click, Enter, Space)
+          // commits; a pick that does not switch puts the check back.
           onKeyDown={e => {
             const n = nextRadioIndex(
               e.key,

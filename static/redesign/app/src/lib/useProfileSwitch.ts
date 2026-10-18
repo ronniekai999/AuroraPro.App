@@ -20,6 +20,10 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
 }) {
   const [pinTarget, setPinTarget] = useState<Profile | null>(null)
   const pinResolveRef = useRef<((switched: boolean) => void) | null>(null)
+  // One switch at a time. Two overlapping activations can land on the server
+  // in either order while their answers come back in another, and the UI
+  // would then show whichever answered last rather than the binding.
+  const inFlightRef = useRef(false)
 
   const settle = useCallback((switched: boolean) => {
     const resolve = pinResolveRef.current
@@ -33,14 +37,15 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
   // "Who's watching?" gate can stay up until it has.
   const switchProfile = useCallback(async (id: number): Promise<boolean> => {
     if (id === activeProfileId) return true
+    if (inFlightRef.current || pinResolveRef.current) return false
     const target = profiles.find(p => p.id === id)
     if (!target) return false
     const askForPin = () => new Promise<boolean>(resolve => {
-      pinResolveRef.current?.(false)
       pinResolveRef.current = resolve
       setPinTarget(target)
     })
     if (target.has_pin) return askForPin()
+    inFlightRef.current = true
     try {
       await activateProfile(id)
     } catch (e) {
@@ -48,6 +53,8 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       if (profileErrorReason(e) === 'profile_pin_required') return askForPin()
       onError(target)
       return false
+    } finally {
+      inFlightRef.current = false
     }
     setActiveProfileId(id)
     return true
@@ -65,5 +72,9 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
 
   const cancelPin = useCallback(() => settle(false), [settle])
 
-  return { pinTarget, switchProfile, unlock, cancelPin }
+  // Whether a switch or a PIN prompt is under way, so a background re-read of
+  // the binding (App's tab-visibility check) does not race it.
+  const isSwitching = useCallback(() => inFlightRef.current || pinResolveRef.current !== null, [])
+
+  return { pinTarget, switchProfile, unlock, cancelPin, isSwitching }
 }

@@ -174,12 +174,11 @@ func TestActivateLockedProfileLocksOutAfterRepeatedFailures(t *testing.T) {
 	if code != http.StatusTooManyRequests || reason != "profile_pin_locked" {
 		t.Fatalf("wrong PIN %d: %d %q, want 429 profile_pin_locked", profilePINMaxFailures, code, reason)
 	}
-	// During the lockout even the right PIN, or the password, is refused
-	// unchecked, so a guess cannot confirm itself.
-	for _, body := range []string{`{"pin":"4321"}`, `{"password":"` + lockTestPassword + `"}`} {
-		if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, body); code != http.StatusTooManyRequests || reason != "profile_pin_locked" {
-			t.Errorf("during the lockout %s: %d %q, want 429 profile_pin_locked", body, code, reason)
-		}
+	// During the lockout even the right PIN is refused unchecked, so a guess
+	// cannot confirm itself. (The account password has its own budget and
+	// still works: TestThePasswordStillUnlocksDuringAPINLockout.)
+	if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"pin":"4321"}`); code != http.StatusTooManyRequests || reason != "profile_pin_locked" {
+		t.Errorf("the right PIN during the lockout: %d %q, want 429 profile_pin_locked", code, reason)
 	}
 	if got := f.acting(t, f.kidRT); got != f.kid.ID {
 		t.Errorf("after the lockout the kid session acts as %d, want the kid profile %d", got, f.kid.ID)

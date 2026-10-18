@@ -394,6 +394,9 @@ private fun ProfileUnlockPanel(profile: Profile, state: TvState, vm: TvViewModel
     // A refused attempt clears the field for the next one.
     LaunchedEffect(state.pinError) { if (state.pinError != null) secret = "" }
     LaunchedEffect(profile.id, usePassword) { field.requestFocus() }
+    // The field is disabled while an attempt is checked, which drops focus;
+    // give it back once the answer is in.
+    LaunchedEffect(state.busy) { if (!state.busy) field.requestFocus() }
     val ready = if (usePassword) secret.isNotEmpty() else secret.length == 4
     val submit = { if (ready && !state.busy) { keyboard?.hide(); vm.submitUnlock(secret, usePassword) } }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

@@ -140,6 +140,9 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if denyRestrictedSession(w, r, h.queries, claims) {
+		return
+	}
 	provider, ok := h.resolveProvider(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "Unknown OAuth provider")
@@ -241,6 +244,9 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 func (h *OAuthHandler) Unlink(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
+		return
+	}
+	if denyRestrictedSession(w, r, h.queries, claims) {
 		return
 	}
 	provider, ok := h.resolveProvider(r)

@@ -290,9 +290,10 @@ func TestDevicePairing_RouterPublicAndProtectedRoutes(t *testing.T) {
 
 // TestDevicePairing_RestrictedApproverBindsTheDevice: an unbound session acts
 // as the account's default profile, so a kid's session approving a new device
-// must not hand that device the unrestricted default. The device's session
-// is bound to the approver's restricted profile instead; an unrestricted
-// approver leaves it unbound, as before.
+// must not hand that device the unrestricted default, and no approver should
+// hand it a default profile that may be locked. The device's session is bound
+// to the approver's acting profile; an account with no profile leaves it
+// unbound.
 func TestDevicePairing_RestrictedApproverBindsTheDevice(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -300,7 +301,8 @@ func TestDevicePairing_RestrictedApproverBindsTheDevice(t *testing.T) {
 		want   *int64
 	}{
 		{"restricted approver", &models.UserProfile{ID: 42, UserID: 7, MaxAgeRating: "PG"}, func() *int64 { v := int64(42); return &v }()},
-		{"unrestricted approver", &models.UserProfile{ID: 41, UserID: 7}, nil},
+		{"unrestricted approver", &models.UserProfile{ID: 41, UserID: 7}, func() *int64 { v := int64(41); return &v }()},
+		{"account with no profile", &models.UserProfile{UserID: 7}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, store := deviceTestHandler()

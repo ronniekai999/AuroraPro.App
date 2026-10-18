@@ -2735,7 +2735,12 @@ export default function App() {
     void (async () => {
       let ps: Profile[]
       try { ps = await listProfiles(ac.signal) } catch { return /* non-fatal — profile features just stay disabled */ }
-      const acting = await getActiveProfile(ac.signal).catch(() => null)
+      // One retry: the binding is the one thing the app should not guess.
+      const acting = await getActiveProfile(ac.signal)
+        .catch(() => new Promise<Profile>((resolve, reject) => {
+          setTimeout(() => { getActiveProfile(ac.signal).then(resolve, reject) }, 1000)
+        }))
+        .catch(() => null)
       if (ac.signal.aborted) return
       const next = await resolveStartupProfile({
         profiles: ps, acting, remembered, activate: id => activateProfile(id),
@@ -2928,7 +2933,7 @@ export default function App() {
   // Profile switching goes through the server, and a locked profile asks for
   // its PIN first; see lib/useProfileSwitch.
   const onSwitchRefused = useCallback((p: Profile) => addToast(`Couldn't switch to ${p.name}`, 'error'), [addToast])
-  const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = useProfileSwitch({
+  const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin, isSwitching } = useProfileSwitch({
     profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused,
   })
 
@@ -2938,14 +2943,17 @@ export default function App() {
   useEffect(() => {
     if (!user) return
     const onVisible = () => {
-      if (document.visibilityState !== 'visible') return
+      if (document.visibilityState !== 'visible' || isSwitching()) return
       void getActiveProfile().then(acting => {
-        setActiveProfileId(prev => (acting && acting.id !== prev ? acting.id : prev))
+        // A switch that started meanwhile owns the answer; an id the list
+        // doesn't hold waits for the next profile load.
+        if (!acting || isSwitching() || !profiles.some(p => p.id === acting.id)) return
+        setActiveProfileId(prev => (acting.id !== prev ? acting.id : prev))
       }).catch(() => { /* keep what we have */ })
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [user])
+  }, [user, profiles, isSwitching])
 
   // Hydrate a /title/:id deep link (cold load, refresh, forward-button,
   // shared link). In-app opens set selectedMedia synchronously in

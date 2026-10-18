@@ -42,9 +42,12 @@ describe('ProfilesGate', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Profile 2/ }))
     expect(onSelect).toHaveBeenCalledWith(2)
     expect(screen.getByRole('dialog', { name: "Who's watching?" })).toBeInTheDocument()
-    // A cancelled PIN prompt.
+    // A cancelled PIN prompt: the gate stays, and the check goes back to the
+    // profile that is actually active.
     await act(async () => { pending.resolve(false) })
     expect(screen.getByRole('dialog', { name: "Who's watching?" })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Profile 1/ })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveAttribute('aria-checked', 'false')
   })
 
   it('closes once the switch succeeds', async () => {

@@ -746,7 +746,9 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				purged, err := queries.PurgeExpiredTokens(context.Background())
+				// Keep revoked rows past the longest-lived access token minted
+				// from them; see PurgeExpiredTokens.
+				purged, err := queries.PurgeExpiredTokens(context.Background(), cfg.Auth.AccessTokenExpiry+time.Minute)
 				if err != nil {
 					slog.Error("token cleanup failed", "error", err)
 				} else if purged > 0 {

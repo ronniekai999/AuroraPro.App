@@ -752,7 +752,12 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         <div className="md:col-span-2">
           {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
-          <ConnectedAccountsCard onToast={onToast} />
+          {/* A restricted session cannot link or unlink sign-in methods (the
+              server refuses: a fresh sign-in through a new link would land on
+              the account default without its PIN). */}
+          {isRestrictedProfile(activeProfile)
+            ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Sign-in methods can only be managed from a profile without a content limit.</p>
+            : <ConnectedAccountsCard onToast={onToast} />}
         </div>
 
         <div className="md:col-span-2">

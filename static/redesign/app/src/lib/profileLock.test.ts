@@ -40,6 +40,18 @@ describe('profile lock API calls', () => {
     ])
   })
 
+  it('refreshes and retries once when the session cannot be bound (409)', async () => {
+    const conflict = () => new Response(
+      JSON.stringify({ error: { code: 409, message: 'refresh and retry', reason: 'session_unbound' } }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    )
+    fetchMock
+      .mockImplementationOnce(async () => conflict())
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ expires_in: 900 }), { headers: { 'Content-Type': 'application/json' } }))
+    await activateProfile(5)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/profiles/5/activate', '/api/auth/refresh', '/api/profiles/5/activate'])
+  })
+
   it('surfaces the server reason on a refused activation', async () => {
     fetchMock.mockImplementation(async () => new Response(
       JSON.stringify({ error: { code: 403, message: 'this profile is locked; enter its PIN', reason: 'profile_pin_required' } }),

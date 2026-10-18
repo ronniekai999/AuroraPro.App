@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { APIError } from '@/lib/api'
 import { ProfilePinDialog, unlockErrorMessage } from './ProfilePinDialog'
@@ -24,7 +24,9 @@ describe('ProfilePinDialog', () => {
   it('submits the PIN as soon as four digits are typed', async () => {
     const onSubmit = vi.fn(async () => {})
     render(<ProfilePinDialog profile={kid} onSubmit={onSubmit} onCancel={vi.fn()} />)
-    await userEvent.type(screen.getByLabelText('Profile PIN'), '12a34')
+    // fireEvent, not userEvent.type: one change event, so the test does not
+    // time out typing key by key on a loaded runner.
+    fireEvent.change(screen.getByLabelText('Profile PIN'), { target: { value: '12a34' } })
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ pin: '1234' }))
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
@@ -33,7 +35,7 @@ describe('ProfilePinDialog', () => {
     const onSubmit = vi.fn(async () => { throw refusal('profile_pin_invalid') })
     render(<ProfilePinDialog profile={kid} onSubmit={onSubmit} onCancel={vi.fn()} />)
     const input = screen.getByLabelText('Profile PIN') as HTMLInputElement
-    await userEvent.type(input, '0000')
+    fireEvent.change(input, { target: { value: '0000' } })
     expect(await screen.findByRole('alert')).toHaveTextContent('That PIN is not right.')
     expect(input.value).toBe('')
   })
@@ -42,7 +44,7 @@ describe('ProfilePinDialog', () => {
     const onSubmit = vi.fn(async () => {})
     render(<ProfilePinDialog profile={kid} onSubmit={onSubmit} onCancel={vi.fn()} />)
     await userEvent.click(screen.getByRole('button', { name: /use the account password/i }))
-    await userEvent.type(screen.getByLabelText('Account password'), 'hunter2')
+    fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'hunter2' } })
     await userEvent.click(screen.getByRole('button', { name: 'Unlock' }))
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ password: 'hunter2' }))
   })
