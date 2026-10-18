@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-media/aurora/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -116,6 +117,8 @@ type hnswFixture struct {
 	allowed map[int64]bool
 	// ranked holds the PG rows' ids, nearest first.
 	ranked []int64
+	// decoys holds the R rows' ids.
+	decoys []int64
 }
 
 // nearest is the set of the n nearest PG rows.
@@ -141,8 +144,8 @@ func seedHNSWFixture(t *testing.T, q *Queries, allowedRows int) hnswFixture {
 	const rOffset, pgOffset = 590, 595
 	f := hnswFixture{query: sparseVec768(map[int]float64{a: 1, b: 1}), allowed: map[int64]bool{}, ranked: make([]int64, allowedRows)}
 	for _, i := range fromBothEnds(60) {
-		seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s r%d", token, i), ratingPtr("R"),
-			sparseVec768(map[int]float64{a: 1, b: 1, rOffset: 0.001 * float64(i+1)}))
+		f.decoys = append(f.decoys, seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s r%d", token, i), ratingPtr("R"),
+			sparseVec768(map[int]float64{a: 1, b: 1, rOffset: 0.001 * float64(i+1)})))
 	}
 	for _, i := range fromBothEnds(allowedRows) {
 		// cos((1,1,x), (1,1)) = 0.8 at x ≈ 1.06: cosine distance ~0.2, and
@@ -202,7 +205,9 @@ func checkAscending(t *testing.T, hits []SemanticHit) {
 // production recall size, 50, so a page one row short is 98% full and any
 // tolerance short of the full limit (90% as a float, limit - limit/10) fails.
 // Five more allowed rows than the page holds lie further out, so a retry
-// that asked for more than the page shows too.
+// that asked for more than the page shows too. The short page also holds one
+// of those, as an approximate page can, so a retry that only topped the page
+// up with the rows it lacks keeps a row from beyond the page and fails.
 func TestSemanticSearchRetriesAShortButNonEmptyPage(t *testing.T) {
 	const limit = 50
 	q := exactScanQueries(t)
@@ -210,10 +215,11 @@ func TestSemanticSearchRetriesAShortButNonEmptyPage(t *testing.T) {
 	firstPass := -1
 	q.testHookSemanticFirstPass = func(hits []SemanticHit) []SemanticHit {
 		firstPass = len(hits)
-		if len(hits) > 1 {
-			hits = hits[:len(hits)-1]
+		if len(hits) < 2 {
+			return hits
 		}
-		return hits
+		beyond := SemanticHit{Item: &models.MediaItem{ID: f.ranked[limit+4]}, Distance: hits[len(hits)-2].Distance}
+		return append(hits[:len(hits)-2:len(hits)-2], beyond)
 	}
 	allowedRatings := AllowedRatingsForMax("PG")
 
@@ -309,6 +315,17 @@ func TestSemanticSearchRetryFailures(t *testing.T) {
 		}
 	})
 
+	t.Run("past its deadline", func(t *testing.T) {
+		q := exactScanQueries(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		q.testHookSemanticFirstPass = short(func() { <-ctx.Done() })
+		hits, err := q.SemanticSearch(ctx, f.query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("a search past its deadline before its retry returned %d hits and err %v; want context.DeadlineExceeded", len(hits), err)
+		}
+	})
+
 	t.Run("failed", func(t *testing.T) {
 		q := exactScanQueries(t)
 		q.testHookSemanticFirstPass = short(q.pool.Close)
@@ -375,7 +392,10 @@ func TestSemanticSearchFillsAPageBeyondTheLargestWindow(t *testing.T) {
 	}
 	_ = tx.Rollback(ctx)
 	if widest >= 5 {
-		t.Fatalf("precondition: under ef_search 1000 the index path returned %d of 5 rows; the fixture no longer puts the allowed rows beyond the window", widest)
+		// HNSW search is approximate. Run alone, this window never reached the
+		// allowed rows; with another run filling the shared index it sometimes
+		// does, and the case then proves nothing, so it skips rather than fail.
+		t.Skipf("precondition: under ef_search 1000 the index path returned %d of 5 rows; the fixture did not put the allowed rows beyond the window here", widest)
 	}
 
 	hits, err := q.SemanticSearch(ctx, query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
@@ -440,5 +460,79 @@ func TestSemanticSearchRunsOneQueryForAFullPage(t *testing.T) {
 	}
 	if got := counter.n.Load(); got != 2 {
 		t.Errorf("a short first page ran %d search queries, want 2", got)
+	}
+}
+
+// TestSemanticSearchRetryKeepsEveryFilter: the retry must fire, and keep its
+// filter, for every filter SemanticSearch takes, not only a ceiling. Each
+// case, with no ceiling, makes the fixture's five farther rows the only ones
+// its filter passes, and its sixty nearer rows fail it.
+func TestSemanticSearchRetryKeepsEveryFilter(t *testing.T) {
+	ctx := context.Background()
+	exec := func(t *testing.T, q *Queries, sql string, args ...any) {
+		t.Helper()
+		if _, err := q.pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("set up the filter: %v", err)
+		}
+	}
+	ids := func(set map[int64]bool) []int64 {
+		out := make([]int64, 0, len(set))
+		for id := range set {
+			out = append(out, id)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter
+	}{
+		{"media type", func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter {
+			exec(t, q, `UPDATE media_items SET type = 'show' WHERE id = ANY($1)`, ids(f.allowed))
+			return SemanticFilter{MediaType: "show"}
+		}},
+		{"year", func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter {
+			exec(t, q, `UPDATE media_items SET year = 2001 WHERE id = ANY($1)`, ids(f.allowed))
+			// Decoys on both sides, so dropping either bound lets some in.
+			exec(t, q, `UPDATE media_items SET year = 1980 WHERE id = ANY($1)`, f.decoys[:30])
+			exec(t, q, `UPDATE media_items SET year = 2020 WHERE id = ANY($1)`, f.decoys[30:])
+			return SemanticFilter{YearMin: 1995, YearMax: 2005}
+		}},
+		{"runtime", func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter {
+			exec(t, q, `UPDATE media_items SET runtime_minutes = 90 WHERE id = ANY($1)`, ids(f.allowed))
+			exec(t, q, `UPDATE media_items SET runtime_minutes = 200 WHERE id = ANY($1)`, f.decoys)
+			return SemanticFilter{RuntimeMax: 120}
+		}},
+		{"exclusions", func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter {
+			return SemanticFilter{ExcludeIDs: f.decoys}
+		}},
+		{"genre", func(t *testing.T, q *Queries, f hnswFixture) SemanticFilter {
+			name := "hnswgenre" + randomSuffix(t)
+			var genreID int64
+			if err := q.pool.QueryRow(ctx, `INSERT INTO genres (name) VALUES ($1) RETURNING id`, name).Scan(&genreID); err != nil {
+				t.Fatalf("seed genre: %v", err)
+			}
+			t.Cleanup(func() { _, _ = q.pool.Exec(context.Background(), `DELETE FROM genres WHERE id = $1`, genreID) })
+			exec(t, q, `INSERT INTO media_genres (media_item_id, genre_id) SELECT unnest($1::bigint[]), $2`, ids(f.allowed), genreID)
+			return SemanticFilter{Genres: []string{name}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := hnswWindowQueries(t, 0)
+			f := seedHNSWFixture(t, q, 5)
+			filter := tc.setup(t, q, f)
+			firstPass := -1
+			q.testHookSemanticFirstPass = func(hits []SemanticHit) []SemanticHit {
+				firstPass = len(hits)
+				return hits
+			}
+			hits, err := q.SemanticSearch(ctx, f.query, filter, 5)
+			if err != nil {
+				t.Fatalf("SemanticSearch: %v", err)
+			}
+			if firstPass < 0 || firstPass >= 5 {
+				t.Fatalf("precondition: the first pass returned %d of 5 rows; the index window no longer comes back short", firstPass)
+			}
+			checkFilledPage(t, hits, f.allowed, 5)
+		})
 	}
 }

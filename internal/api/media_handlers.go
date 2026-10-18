@@ -406,10 +406,10 @@ type MediaHandler struct {
 //
 // allowedRatings is the acting profile's ceiling (db.AllowedRatingsForMax;
 // nil or empty = unrestricted), which the implementation must apply in its
-// recall queries, not to its final page, so a restricted search is filled
-// with allowed titles as far as the catalog has them (SemanticSearch's
-// exact retry refills a short index page; if the retry fails, the page stays
-// short).
+// recall queries, not to its final page, so a restricted search's vector
+// recall is filled with allowed titles as far as the catalog has them
+// (SemanticSearch's exact retry refills a short index page; if the retry
+// fails, the page stays short). The rerank may then trim the result.
 type SemanticSearcher interface {
 	Search(ctx context.Context, query string, limit int, allowedRatings []string) ([]SemanticHit, error)
 }

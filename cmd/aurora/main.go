@@ -158,8 +158,9 @@ func main() {
 
 	// Post-migration smoke test: confirm pgvector is reachable AND
 	// hnsw.ef_search is configured. The expected minimum (100) matches
-	// migration 018; if the value comes back lower, every semantic search
-	// pays for an exact retry and the operator needs to know.
+	// migration 018; if the value comes back below the 50-row recall page,
+	// every semantic search pays for an exact retry, and between 50 and 100
+	// filtered searches do more often, so the operator needs to know.
 	// Non-fatal so installs without pgvector (e.g. test setups) still boot.
 	db.VerifyVectorTuning(ctx, pool, 100)
 

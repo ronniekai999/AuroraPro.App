@@ -51,7 +51,7 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 			return nil
 		}
 		if _, err := conn.Exec(ctx, "SET hnsw.ef_search = 100"); err != nil {
-			slog.Warn("hnsw.ef_search SET failed (kNN quality may be degraded)",
+			slog.Warn("hnsw.ef_search SET failed (semantic search may pay for exact retries)",
 				"error", err)
 		}
 		return nil
@@ -116,8 +116,9 @@ func VerifyVectorTuning(ctx context.Context, pool *pgxpool.Pool, expectedMin int
 		// This is the alarm. Migration 018 should have set this to >= 100;
 		// if we see the default 40 here, the migration didn't take effect
 		// (database renamed and current_database() returned something
-		// else?), and search/hero quality is silently degraded.
-		slog.Warn("hnsw.ef_search below expected minimum — kNN quality may be degraded",
+		// else?), and semantic pages larger than the window come back short
+		// from the index, so each one pays for an exact retry.
+		slog.Warn("hnsw.ef_search below expected minimum — semantic search may pay for exact retries",
 			"actual", efN, "expected_min", expectedMin,
 			"action", "check pool.AfterConnect logs for 'hnsw.ef_search SET failed'")
 		return
