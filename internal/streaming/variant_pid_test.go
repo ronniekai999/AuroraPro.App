@@ -194,15 +194,36 @@ func TestStartVariant_ReaperCancelIsNotRecordedAsACrash(t *testing.T) {
 	s, v := stubVariantLaunch(t, "sess-cancelled",
 		writePlaylistThen("")+fmt.Sprintf("exec sleep %d\n", lingerSleepSecs))
 
-	// Wait for the PID before cancelling. The launch is asynchronous, and a
-	// cancel that lands before cmd.Start() takes the Start-failure path instead
-	// — which sets v.Err and never sets `exited` at all (see the note on that
-	// path in startVariantImpl), so the reap this test is about never happens.
-	waitForVariantPID(t, s, v)
+	// Wait for the stub's playlist before cancelling. The launch is
+	// asynchronous, and an early cancel lands in one of two other paths that
+	// each set v.Err for a reason this test is not about:
+	//   - before cmd.Start(): the Start-failure path, which never sets `exited`
+	//     at all (see the note on that path in startVariantImpl), so the reap
+	//     this test is about never happens;
+	//   - after Start but before the stub has written stream.m3u8 (waiting for
+	//     the PID alone left this open, failing ~2% of runs): the readiness
+	//     poller sees FFmpeg exit with no playlist and records "exited before
+	//     producing playlist" itself, which this test would blame on the
+	//     post-Wait block.
+	// With the playlist on disk the poller's exit branch finds it on its
+	// re-check and writes nothing, and its timeout branch is a remux
+	// readinessTimeout (40s) away against this wait's 10s, so — as in
+	// TestStartVariant_RealCrashIsStillRecordedAsOne — v.Err can only come from
+	// the post-Wait block. That is not quite the reaper's state: it cancels only
+	// once Ready is closed, when the poller has already returned, whereas here
+	// the poller is usually still parked and the cancel wakes it, so this test
+	// also leans on that re-check — delete it and the failure blames the reap.
+	// Waiting on Ready would match the reaper, but the poller rechecks only
+	// every 500ms, which would add that to every run.
+	waitForVariantPlaylist(t, s, v)
 
 	s.variantMu.Lock()
-	cancel := v.Cancel
+	exited, preErr, cancel := ffmpegDone(v), v.Err, v.Cancel
 	s.variantMu.Unlock()
+	if exited || preErr != nil {
+		t.Fatalf("before the cancel: exited = %v, v.Err = %v; want the stub still running "+
+			"with no error recorded", exited, preErr)
+	}
 	if cancel == nil {
 		t.Fatal("variant has no Cancel — the reaper would have nothing to call")
 	}
@@ -305,4 +326,21 @@ func waitForVariantPID(t *testing.T, s *TranscodeSession, v *QualityVariant) int
 	}
 	t.Fatal("launch goroutine never published a PID — ListSessions has nothing to sample /proc with")
 	return 0
+}
+
+// waitForVariantPlaylist blocks until v's playlist exists, checked the way the
+// readiness poller checks it: os.Stat on the same path.
+func waitForVariantPlaylist(t *testing.T, s *TranscodeSession, v *QualityVariant) {
+	t.Helper()
+	s.variantMu.Lock()
+	playlist := filepath.Join(v.OutputDir, variantPlaylistName)
+	s.variantMu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(playlist); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the stub never wrote %s — the readiness poller has no playlist to find", playlist)
 }
