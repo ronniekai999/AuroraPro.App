@@ -238,7 +238,7 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 
 	args = append(args, limit)
 
-	query := func(orderBy string) string {
+	query := func(distance, orderBy string) string {
 		return fmt.Sprintf(`
 		SELECT m.id, m.library_id, m.type, m.title, m.sort_title,
 		       COALESCE(m.year, 0), COALESCE(m.overview, ''),
@@ -246,23 +246,26 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 		       COALESCE(m.content_rating, ''),
 		       COALESCE(m.poster_path, ''), COALESCE(m.backdrop_path, ''),
 		       m.added_at, m.updated_at,
-		       (m.embedding <=> $1::vector) AS distance
+		       %s AS distance
 		FROM media_items m
 		WHERE %s
 		ORDER BY %s
 		LIMIT $%d`,
-			strings.Join(where, " AND "), orderBy, argIdx,
+			distance, strings.Join(where, " AND "), orderBy, argIdx,
 		)
 	}
 
-	hits, err := q.semanticHits(ctx, query(annOrder), args)
+	hits, err := q.semanticHits(ctx, query(annDistance, annDistance), args)
 	if err != nil {
 		return nil, fmt.Errorf("semantic search: %w", err)
+	}
+	if q.testHookSemanticFirstPass != nil {
+		hits = q.testHookSemanticFirstPass(hits)
 	}
 	if len(hits) >= limit {
 		return hits, nil
 	}
-	exact, err := q.semanticHits(ctx, query(exactOrder), args)
+	exact, err := q.semanticHits(ctx, query(exactDistance, "distance"), args)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("semantic search: exact retry: %w", err)
@@ -274,24 +277,27 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 	return exact, nil
 }
 
-// annOrder is the ordering the HNSW index serves: a bare distance to a
-// parameter.
+// annDistance is the ordering the HNSW index serves: a bare distance to a
+// parameter, which the first pass selects and orders by.
 //
-// exactOrder sorts by the same distance through an expression the index
-// cannot serve, because the planner matches an index ordering only against
-// that bare form. Every plan left for it is exact (a sequential or bitmap
-// scan that applies the filters, then distance and a sort over what passes),
-// whatever the session's planner settings and however PostgreSQL caches the
-// statement. It must stay a separate SQL text. The first version re-ran the
-// same text with SET LOCAL enable_indexscan = off, which pgx's statement
-// cache defeated: after five executions PostgreSQL may switch a prepared
-// statement to a generic plan, costed under the settings of whichever
-// execution builds it, and a SET does not re-plan a cached plan. Once a first
-// pass built it, every retry on that connection ran the HNSW scan again and
-// came back as short as the page it was retrying.
+// The exact retry selects exactDistance, the same value through an expression
+// the index cannot serve, and orders by that selected column, so the distance
+// is computed once per row. The index serves only an ordering that LEADS with
+// the bare form; PostgreSQL 17+ will use it for `ORDER BY <bare>, m.id` with
+// an incremental sort, so any tiebreaker must follow the non-bare key. Every
+// plan left for the retry is exact (a sequential, bitmap or btree scan of the
+// partial embedding index that applies the filters, then a sort), whatever
+// the session's planner settings and however PostgreSQL caches the statement.
+// It must stay a separate SQL text. The first version re-ran the same text
+// with SET LOCAL enable_indexscan = off, which pgx's statement cache defeated:
+// after five executions PostgreSQL may switch a prepared statement to a
+// generic plan, costed under the settings of whichever execution builds it,
+// and a SET does not re-plan a cached plan. Once a first pass built it, every
+// retry on that connection ran the HNSW scan again and came back as short as
+// the page it was retrying.
 const (
-	annOrder   = "m.embedding <=> $1::vector"
-	exactOrder = "(m.embedding <=> $1::vector) + 0"
+	annDistance   = "(m.embedding <=> $1::vector)"
+	exactDistance = "(m.embedding <=> $1::vector) + 0"
 )
 
 // semanticHits runs one SemanticSearch query.
