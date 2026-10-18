@@ -168,9 +168,9 @@ func newRCFixture(t *testing.T) *rcFixture {
 func i64(v int64) string { return strconv.FormatInt(v, 10) }
 
 // rcShiftAddedAt sets items' added_at to NOW() plus shift (a Postgres
-// interval, e.g. "-30 days"). The "Recently added" tests read a 50-row window
-// of a shared catalog, so they date their own rows ahead and crowd-seeding
-// tests date theirs back.
+// interval, e.g. "-30 days"). The "Recently added" tests read the newest rows
+// of a shared catalog (this package's 50, the db package's 3), so they date
+// their own rows ahead and crowd-seeding tests date theirs back.
 func rcShiftAddedAt(t *testing.T, shift string, ids []int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -455,7 +455,9 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	}
 	// Dated two hours ahead, so rows other tests insert at NOW() meanwhile
 	// cannot push these out of the 50-row window; hours, not years, so a row a
-	// killed run leaks ages out of the newest pages within a day.
+	// killed run leaks ages out of the newest pages within a day. The db
+	// package's Recently-added test dates rows ahead too, some further, and
+	// both tests check those by class so neither depends on the other's dates.
 	rcShiftAddedAt(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID})
 
 	recent := func(refreshTokenID int64) []*models.MediaItem {
@@ -482,9 +484,9 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	}
 
 	// The ceiling check covers every returned row, whatever else is in the
-	// shared catalog. The id checks rely on this fixture's rows being among the
-	// 50 newest, which their future added_at keeps true unless 50+ rows dated
-	// further ahead appear concurrently.
+	// shared catalog. The restricted id checks rely on this fixture's PG row
+	// being among the 50 newest ALLOWED rows, which its future added_at keeps
+	// true unless 50+ allowed rows dated further ahead appear concurrently.
 	restrictedItems := recent(f.restrictedRefreshID)
 	for _, it := range restrictedItems {
 		if !db.RatingAllowed("PG", it.ContentRating) {
@@ -500,10 +502,15 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 		t.Errorf("restricted (PG) session lost the PG title %d from Recently added", allowed.ID)
 	}
 
-	open := idSet(recent(f.unrestrictedRefreshID))
-	if !open[f.movieID] || !open[allowed.ID] {
-		t.Errorf("unrestricted session must still see every recent title: R movie=%v PG movie=%v",
-			open[f.movieID], open[allowed.ID])
+	// Unrestricted, by class: the page must hold a title the PG ceiling
+	// rejects. Usually that is this fixture's R movie, but other tests' newer
+	// R rows count too, and under load they can push it out of the window.
+	sawOver := false
+	for _, it := range recent(f.unrestrictedRefreshID) {
+		sawOver = sawOver || !db.RatingAllowed("PG", it.ContentRating)
+	}
+	if !sawOver {
+		t.Errorf("unrestricted session saw no over-ceiling title in Recently added (this fixture's R movie is %d)", f.movieID)
 	}
 }
 
