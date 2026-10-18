@@ -2,11 +2,15 @@ package api
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
@@ -15,8 +19,21 @@ import (
 
 type ProfileHandler struct {
 	queries *db.Queries
-	hero    HeroProvider // optional; for cache invalidation on maturity_pref change
+	hero    HeroProvider  // optional; for cache invalidation on maturity_pref change
+	authSvc *auth.Service // hashes and checks profile PINs and the account password
 }
+
+// Profile PIN brute-force budget: a four-digit PIN has 10,000 values, so the
+// limit is what makes it a lock. After profilePINMaxFailures consecutive
+// failures the profile refuses attempts for profilePINLockout, and every
+// further failure before a success restarts it.
+const (
+	profilePINMaxFailures = 5
+	profilePINLockout     = 15 * time.Minute
+)
+
+// profilePINRe: profile PINs are exactly four digits, as on a TV remote.
+var profilePINRe = regexp.MustCompile(`^[0-9]{4}$`)
 
 // nebulaAvatarRe matches the built-in animated-nebula avatar ids the onboarding
 // flow assigns ("nebula:aurora", "nebula:tidal", …). These are short opaque ids,
@@ -53,6 +70,123 @@ func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 // can invalidate the profile's cached hero/discover and re-curate promptly.
 func (h *ProfileHandler) SetHeroProvider(p HeroProvider) { h.hero = p }
 
+// SetAuthService wires the password hasher used for profile PINs and for the
+// account password that stands in for a forgotten PIN.
+func (h *ProfileHandler) SetAuthService(s *auth.Service) { h.authSvc = s }
+
+// writeErrorReason is writeError with a machine-readable reason that clients
+// branch on (the message is for people): "profile_pin_required",
+// "profile_pin_invalid", "profile_pin_locked" and "profile_restricted".
+func writeErrorReason(w http.ResponseWriter, status int, reason, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{"code": status, "message": message, "reason": reason},
+	})
+}
+
+// actingProfile resolves the session's acting profile for a profile-management
+// write. Unlike discovery, these fail CLOSED: a resolve error must not let a
+// restricted session through.
+func (h *ProfileHandler) actingProfile(w http.ResponseWriter, r *http.Request, claims *auth.JWTClaims) (*models.UserProfile, bool) {
+	acting, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		slog.Warn("profiles: resolve acting profile failed", "user_id", claims.UserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
+		return nil, false
+	}
+	return acting, true
+}
+
+// requireUnrestricted refuses profile management from a session acting as a
+// restricted (ceilinged) profile. Creating an unrestricted profile, deleting
+// or re-defaulting one, changing a ceiling or a PIN: each would let the
+// restricted session undo its own ceiling.
+func (h *ProfileHandler) requireUnrestricted(w http.ResponseWriter, r *http.Request, claims *auth.JWTClaims) (*models.UserProfile, bool) {
+	acting, ok := h.actingProfile(w, r, claims)
+	if !ok {
+		return nil, false
+	}
+	if acting.MaxAgeRating != "" {
+		writeErrorReason(w, http.StatusForbidden, "profile_restricted",
+			"switch to a profile without a content rating limit to manage profiles")
+		return nil, false
+	}
+	return acting, true
+}
+
+// unlockRequest carries what can unlock a PIN-protected profile: its PIN, or
+// the account password in its place.
+type unlockRequest struct {
+	PIN      string `json:"pin"`
+	Password string `json:"password"`
+}
+
+// checkUnlock verifies an unlock attempt for a PIN-protected profile and
+// writes the refusal itself, returning false, when it fails: 403
+// profile_pin_required with nothing supplied (not counted as a failure), 403
+// profile_pin_invalid for a wrong PIN or password (counted), and 429
+// profile_pin_locked while a lockout runs (no check at all, so a correct guess
+// during the lockout cannot confirm itself). The password counts against the
+// same budget, so this route is no password-guessing side door.
+func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, profile *models.UserProfile, req unlockRequest) bool {
+	ctx := r.Context()
+	st, err := h.queries.GetProfilePINState(ctx, profile.ID)
+	if err != nil || st == nil {
+		writeError(w, http.StatusInternalServerError, "failed to check the profile lock")
+		return false
+	}
+	if st.Hash == "" {
+		return true
+	}
+	if st.LockedUntil != nil && st.LockedUntil.After(time.Now()) {
+		writeLockout(w, *st.LockedUntil)
+		return false
+	}
+	if req.PIN == "" && req.Password == "" {
+		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile is locked; enter its PIN")
+		return false
+	}
+	if h.authSvc == nil {
+		writeError(w, http.StatusInternalServerError, "profile lock check unavailable")
+		return false
+	}
+	matched := false
+	if req.PIN != "" {
+		matched, _ = h.authSvc.VerifyPassword(req.PIN, st.Hash)
+	} else if user, uerr := h.queries.GetUserByID(ctx, profile.UserID); uerr == nil && user != nil && user.PasswordHash != "" {
+		matched, _ = h.authSvc.VerifyPassword(req.Password, user.PasswordHash)
+	}
+	if !matched {
+		lockedUntil, ferr := h.queries.RecordProfilePINFailure(ctx, profile.ID, profilePINMaxFailures, profilePINLockout)
+		if ferr != nil {
+			slog.Warn("profiles: record pin failure failed", "profile_id", profile.ID, "error", ferr)
+		}
+		if lockedUntil != nil {
+			writeLockout(w, *lockedUntil)
+			return false
+		}
+		writeErrorReason(w, http.StatusForbidden, "profile_pin_invalid", "wrong PIN or password")
+		return false
+	}
+	if err := h.queries.ResetProfilePINFailures(ctx, profile.ID); err != nil {
+		slog.Warn("profiles: reset pin failures failed", "profile_id", profile.ID, "error", err)
+	}
+	return true
+}
+
+func writeLockout(w http.ResponseWriter, until time.Time) {
+	secs := int(time.Until(until).Seconds()) + 1
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeErrorReason(w, http.StatusTooManyRequests, "profile_pin_locked", "too many wrong attempts; try again later")
+}
+
+// decodeOptionalJSON decodes a request body that clients may leave empty.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	if err := decodeJSON(w, r, v); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
 // ListProfiles returns all profiles for the authenticated user.
 func (h *ProfileHandler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
@@ -85,6 +219,11 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" || len(req.Name) > 100 {
 		writeError(w, http.StatusBadRequest, "name is required (max 100 characters)")
+		return
+	}
+	// A restricted session creating an unrestricted profile and switching to
+	// it would undo its own ceiling.
+	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
 		return
 	}
 
@@ -233,6 +372,26 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		req.MaxAgeRating = &maxRating
 	}
 
+	// A session acting as a restricted profile may edit only that profile's
+	// own cosmetic settings: never another profile, and never a ceiling. A
+	// client that round-trips the unchanged ceiling is fine.
+	acting, ok := h.actingProfile(w, r, claims)
+	if !ok {
+		return
+	}
+	if acting.MaxAgeRating != "" {
+		if profile.ID != acting.ID {
+			writeErrorReason(w, http.StatusForbidden, "profile_restricted", "a restricted profile can only edit itself")
+			return
+		}
+		if req.MaxAgeRating != nil {
+			if current, ok := db.CanonicalMaxRating(profile.MaxAgeRating); !ok || current != *req.MaxAgeRating {
+				writeErrorReason(w, http.StatusForbidden, "profile_restricted", "a restricted profile cannot change its content rating limit")
+				return
+			}
+		}
+	}
+
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
 		return
@@ -276,6 +435,9 @@ func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cannot delete default profile")
 		return
 	}
+	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
+		return
+	}
 
 	deleted, err := h.queries.DeleteProfile(r.Context(), profileID)
 	if err != nil {
@@ -290,10 +452,14 @@ func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "profile deleted"})
 }
 
-// SetDefault sets a profile as the user's default.
+// SetDefault sets a profile as the user's default. Restricted sessions may
+// not: the default profile is where an unbound session lands.
 func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
+		return
+	}
+	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
 		return
 	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -347,6 +513,25 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A locked profile needs its PIN (or the account password), unless this
+	// session is already acting as it. Checked before the unbound-token
+	// branch below, so no client is told a locked profile is active without
+	// one.
+	var unlock unlockRequest
+	if err := decodeOptionalJSON(w, r, &unlock); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if profile.HasPIN {
+		acting, ok := h.actingProfile(w, r, claims)
+		if !ok {
+			return
+		}
+		if acting.ID != profile.ID && !h.checkUnlock(w, r, profile, unlock) {
+			return
+		}
+	}
+
 	if claims.RefreshTokenID == 0 {
 		// This access token predates the session-binding feature (or is a
 		// scoped/cast token, which never carries one) — there's no
@@ -375,6 +560,86 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "profile activated"})
+}
+
+// GetActiveProfile returns the profile this session is acting as, which is
+// what every server-side ceiling uses. Clients read it at startup instead of
+// trusting a locally remembered choice, so the UI cannot show one profile
+// while the server enforces another.
+func (h *ProfileHandler) GetActiveProfile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	acting, ok := h.actingProfile(w, r, claims)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, acting)
+}
+
+// SetProfilePIN sets, changes or removes a profile's PIN:
+// {"pin": "1234"} sets it, {"pin": ""} removes it. Changing or removing an
+// existing PIN also needs that PIN ("current_pin") or the account password
+// ("password"), with the same attempt budget as activation. Only sessions
+// acting as an unrestricted profile may manage PINs.
+func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid profile id")
+		return
+	}
+	var req struct {
+		PIN        *string `json:"pin"`
+		CurrentPIN string  `json:"current_pin"`
+		Password   string  `json:"password"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil || req.PIN == nil {
+		writeError(w, http.StatusBadRequest, `body must be {"pin": "1234"} to set a PIN or {"pin": ""} to remove it`)
+		return
+	}
+	if *req.PIN != "" && !profilePINRe.MatchString(*req.PIN) {
+		writeError(w, http.StatusBadRequest, "a profile PIN is exactly four digits")
+		return
+	}
+
+	profile, err := h.queries.GetProfile(r.Context(), profileID)
+	if err != nil || profile == nil {
+		writeError(w, http.StatusNotFound, "profile not found")
+		return
+	}
+	if profile.UserID != claims.UserID {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
+		return
+	}
+	if profile.HasPIN && !h.checkUnlock(w, r, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password}) {
+		return
+	}
+	if h.authSvc == nil {
+		writeError(w, http.StatusInternalServerError, "profile lock unavailable")
+		return
+	}
+
+	hash := ""
+	if *req.PIN != "" {
+		if hash, err = h.authSvc.HashPassword(*req.PIN); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to set the PIN")
+			return
+		}
+	}
+	if err := h.queries.SetProfilePIN(r.Context(), profileID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set the PIN")
+		return
+	}
+	updated, _ := h.queries.GetProfile(r.Context(), profileID)
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // ============================================================

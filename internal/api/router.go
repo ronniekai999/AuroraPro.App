@@ -441,6 +441,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	progressH.SetRecapService(recapH.Service())
 	gamifyH := NewGamificationHandler(deps.Queries)
 	profileH := NewProfileHandler(deps.Queries)
+	profileH.SetAuthService(deps.AuthSvc)
 	if deps.HeroProv != nil {
 		profileH.SetHeroProvider(deps.HeroProv)
 	}
@@ -1042,6 +1043,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Route("/api/profiles", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
 				r.Get("/", profileH.ListProfiles)
+				r.Get("/active", profileH.GetActiveProfile)
 				r.Post("/", profileH.CreateProfile)
 				r.Get("/{id}", profileH.GetProfile)
 				r.Put("/{id}", profileH.UpdateProfile)
@@ -1051,6 +1053,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// SetDefault's account-wide persistent default; this is what
 				// read/playback rating-ceiling enforcement consults.
 				r.Post("/{id}/activate", profileH.ActivateProfile)
+				r.Put("/{id}/pin", profileH.SetProfilePIN)
 
 				// Watchlists (nested under profile)
 				r.Get("/{profileId}/watchlists", profileH.ListWatchlists)

@@ -26,6 +26,12 @@ type deviceGrant struct {
 	Expires      time.Time
 	UserID       int64
 	TokenVersion int
+	// ProfileID binds the new device's session to the approver's acting
+	// profile when that profile is restricted (0 otherwise). An unbound
+	// session acts as the account's default profile, so without this a kid's
+	// session could approve a new device and land it on the unrestricted
+	// default, past any profile PIN.
+	ProfileID int64
 }
 
 type deviceBudget struct {
@@ -130,7 +136,7 @@ func (g *deviceGrants) preview(code string) (deviceGrant, bool) {
 	return grant, grant.UserID == 0
 }
 
-func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int) bool {
+func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int, profileID int64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.pruneLocked(g.now())
@@ -142,7 +148,7 @@ func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int) bo
 	if grant.UserID != 0 {
 		return false
 	}
-	grant.UserID, grant.TokenVersion = userID, tokenVersion
+	grant.UserID, grant.TokenVersion, grant.ProfileID = userID, tokenVersion, profileID
 	g.byToken[token] = grant
 	return true
 }
@@ -168,6 +174,7 @@ func (g *deviceGrants) take(secret string) (deviceGrant, string) {
 
 type deviceSessionStore interface {
 	GetUserByID(context.Context, int64) (*models.User, error)
+	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 	CreateRefreshTokenAtVersion(context.Context, *models.RefreshToken, int) (bool, error)
 	RevokeRefreshToken(context.Context, string) error
 }
@@ -271,7 +278,19 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "sign in again before authorizing this device")
 		return
 	}
-	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion) {
+	// A restricted approver passes its own profile on to the device, so
+	// approving cannot raise a ceiling; an unrestricted one leaves the device
+	// unbound (the account default), as before. Fails closed.
+	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil || acting == nil {
+		writeError(w, http.StatusInternalServerError, "could not check the active profile")
+		return
+	}
+	var bindProfile int64
+	if acting.MaxAgeRating != "" {
+		bindProfile = acting.ID
+	}
+	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion, bindProfile) {
 		writeError(w, http.StatusNotFound, "device code is expired or already used")
 		return
 	}
@@ -305,6 +324,9 @@ func (h *DeviceAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt := &models.RefreshToken{UserID: user.ID, Token: refresh, ExpiresAt: h.authSvc.RefreshTokenExpiry(), DeviceInfo: grant.Name}
+	if grant.ProfileID != 0 {
+		rt.ActiveProfileID = &grant.ProfileID
+	}
 	created, err := h.sessions.CreateRefreshTokenAtVersion(r.Context(), rt, grant.TokenVersion)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not sign in this device")

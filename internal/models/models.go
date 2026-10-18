@@ -776,6 +776,9 @@ type UserProfile struct {
 	SubtitleMode string    `json:"subtitle_mode"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// HasPIN reports that switching into this profile needs its PIN (or the
+	// account password). The hash itself never leaves the db package.
+	HasPIN bool `json:"has_pin"`
 	// TasteOnboardingCompleted flips true once the profile finishes the
 	// "Pick What You Love" flow; gates the one-time first-run redirect.
 	TasteOnboardingCompleted bool `json:"taste_onboarding_completed"`

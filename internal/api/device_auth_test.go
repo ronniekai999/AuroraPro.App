@@ -23,6 +23,17 @@ type deviceTestStore struct {
 	user       models.User
 	created    []models.RefreshToken
 	failCreate bool
+	acting     *models.UserProfile // nil: an unrestricted acting profile
+}
+
+func (s *deviceTestStore) ResolveActingProfile(_ context.Context, userID, _ int64) (*models.UserProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.acting != nil {
+		p := *s.acting
+		return &p, nil
+	}
+	return &models.UserProfile{UserID: userID}, nil
 }
 
 func (s *deviceTestStore) GetUserByID(_ context.Context, id int64) (*models.User, error) {
@@ -141,7 +152,7 @@ func TestDevicePairing_RevocationAndFailedExchange(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			h, store := deviceTestHandler()
 			secret, grant, err := h.grants.start("TV")
-			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3) {
+			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3, 0) {
 				t.Fatal("grant failed")
 			}
 			switch failure {
@@ -212,7 +223,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	now := time.Now()
 	g.now = func() time.Time { return now }
 	secret, grant, _ := g.start("TV")
-	if !g.authorize(grant.UserCode, 7, 3) {
+	if !g.authorize(grant.UserCode, 7, 3, 0) {
 		t.Fatal("authorize failed")
 	}
 	var successes atomic.Int32
@@ -230,7 +241,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	}
 	secret, grant, _ = g.start("TV")
 	now = now.Add(deviceGrantTTL)
-	if g.authorize(grant.UserCode, 7, 3) {
+	if g.authorize(grant.UserCode, 7, 3, 0) {
 		t.Fatal("expired grant approved")
 	}
 	if _, status := g.take(secret); status != "expired_token" {
@@ -274,5 +285,40 @@ func TestDevicePairing_RouterPublicAndProtectedRoutes(t *testing.T) {
 		if w.Code != route.status {
 			t.Errorf("%s: %d %s", route.path, w.Code, w.Body)
 		}
+	}
+}
+
+// TestDevicePairing_RestrictedApproverBindsTheDevice: an unbound session acts
+// as the account's default profile, so a kid's session approving a new device
+// must not hand that device the unrestricted default. The device's session
+// is bound to the approver's restricted profile instead; an unrestricted
+// approver leaves it unbound, as before.
+func TestDevicePairing_RestrictedApproverBindsTheDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		acting *models.UserProfile
+		want   *int64
+	}{
+		{"restricted approver", &models.UserProfile{ID: 42, UserID: 7, MaxAgeRating: "PG"}, func() *int64 { v := int64(42); return &v }()},
+		{"unrestricted approver", &models.UserProfile{ID: 41, UserID: 7}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, store := deviceTestHandler()
+			store.acting = tc.acting
+			secret, grant, err := h.grants.start("Kid's phone")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true); w.Code != 200 {
+				t.Fatalf("authorize: %d %s", w.Code, w.Body)
+			}
+			if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false); w.Code != 200 || len(store.created) != 1 {
+				t.Fatalf("poll: %d %s, sessions %d", w.Code, w.Body, len(store.created))
+			}
+			got := store.created[0].ActiveProfileID
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Errorf("paired device session bound to %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

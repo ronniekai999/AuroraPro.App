@@ -30,7 +30,7 @@ func (q *Queries) GetProfilesByUser(ctx context.Context, userID int64) ([]*model
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
 		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
 		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
-		       maturity_pref
+		       maturity_pref, (pin_hash IS NOT NULL)
 		FROM user_profiles WHERE user_id = $1
 		ORDER BY is_default DESC, name`, userID)
 	if err != nil {
@@ -43,7 +43,7 @@ func (q *Queries) GetProfilesByUser(ctx context.Context, userID int64) ([]*model
 		p := &models.UserProfile{}
 		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
 			&p.MaxAgeRating, &p.Language, &p.SubtitleLang, &p.SubtitleMode,
-			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref); err != nil {
+			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref, &p.HasPIN); err != nil {
 			return nil, err
 		}
 		profiles = append(profiles, p)
@@ -57,11 +57,11 @@ func (q *Queries) GetProfile(ctx context.Context, profileID int64) (*models.User
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
 		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
 		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
-		       maturity_pref
+		       maturity_pref, (pin_hash IS NOT NULL)
 		FROM user_profiles WHERE id = $1`, profileID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
 			&p.MaxAgeRating, &p.Language, &p.SubtitleLang, &p.SubtitleMode,
-			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref)
+			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref, &p.HasPIN)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -77,11 +77,11 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
 		       COALESCE(max_age_rating, ''), COALESCE(language, ''), COALESCE(subtitle_lang, ''),
 		       COALESCE(subtitle_mode, ''), created_at, updated_at, taste_onboarding_completed,
-		       maturity_pref
+		       maturity_pref, (pin_hash IS NOT NULL)
 		FROM user_profiles WHERE user_id = $1 AND is_default = TRUE`, userID).
 		Scan(&p.ID, &p.UserID, &p.Name, &p.AvatarURL, &p.IsDefault,
 			&p.MaxAgeRating, &p.Language, &p.SubtitleLang, &p.SubtitleMode,
-			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref)
+			&p.CreatedAt, &p.UpdatedAt, &p.TasteOnboardingCompleted, &p.MaturityPref, &p.HasPIN)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
