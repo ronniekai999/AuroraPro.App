@@ -529,6 +529,19 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Only the account password stands in for a PIN, so a linked identity's
+	// sign-in is bound to a profile it may act as without one.
+	signInProfile, err := oauthSignInProfile(r.Context(), h.queries, user.ID, user.PasswordHash != "")
+	if errors.Is(err, errEveryProfileLocked) {
+		h.renderError(w, "Every profile on this account has a PIN. Sign in with the account password instead.")
+		return
+	}
+	if err != nil {
+		slog.Error("oauth callback: choose the sign-in profile", "error", err)
+		h.renderError(w, "Authentication succeeded but the profile check failed. Try again.")
+		return
+	}
+
 	// Issue tokens — same path as the password login flow. Refresh token row
 	// first (issue #462) so its id is known for the access token's "rtid"
 	// claim.
@@ -544,10 +557,27 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		DeviceInfo: r.UserAgent(),
 		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
 	}
-	if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
-		slog.Error("oauth callback: refresh token persist", "error", err)
-		h.renderError(w, "Authentication succeeded but token issuance failed.")
-		return
+	if signInProfile == nil {
+		// Unbound, acting as the default: see oauthSignInProfile.
+		if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
+			slog.Error("oauth callback: refresh token persist", "error", err)
+			h.renderError(w, "Authentication succeeded but token issuance failed.")
+			return
+		}
+	} else {
+		// Inserted under the account lock with the profile's PIN rechecked,
+		// so a PIN set since the choice above creates nothing.
+		newRT.ActiveProfileID = &signInProfile.ID
+		created, err := h.queries.CreateRefreshTokenAtVersion(r.Context(), newRT, user.TokenVersion)
+		if err != nil {
+			slog.Error("oauth callback: refresh token persist", "error", err)
+			h.renderError(w, "Authentication succeeded but token issuance failed.")
+			return
+		}
+		if !created {
+			h.renderError(w, "A profile on this account changed while you signed in. Try again.")
+			return
+		}
 	}
 
 	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion, newRT.ID)
@@ -1132,4 +1162,48 @@ body{background:#0c0a18;color:#f4f0ff;font-family:system-ui,sans-serif;display:f
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusBadRequest)
 	_ = tpl.Execute(w, map[string]string{"Message": message})
+}
+
+// errEveryProfileLocked refuses a sign-in through a linked identity when
+// every profile on the account has a PIN.
+var errEveryProfileLocked = errors.New("every profile on the account has a PIN")
+
+// oauthSignInProfiles is what oauthSignInProfile reads.
+type oauthSignInProfiles interface {
+	GetDefaultProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
+	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
+}
+
+// oauthSignInProfile picks the profile a sign-in through a linked identity
+// binds its session to. The account password stands in for any PIN, by the
+// owner's choice, and a linked identity does not: on a family computer where
+// a parent stays signed in to the provider, it would otherwise be one click
+// past the default profile's lock. So the session gets the default when it
+// has no PIN, else the account's most restrictive unlocked profile, as device
+// pairing does; with every profile locked it is refused (errEveryProfileLocked)
+// and the password is the way in.
+//
+// Nil, nil leaves the session unbound, acting as the default: for an account
+// with no password, whose linked identity is its only credential and so
+// stands in for a PIN the way a password does (refusing it would lock the
+// owner out), and for an account with no profile yet.
+func oauthSignInProfile(ctx context.Context, q oauthSignInProfiles, userID int64, hasPassword bool) (*models.UserProfile, error) {
+	if !hasPassword {
+		return nil, nil
+	}
+	def, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil || def == nil {
+		return nil, err
+	}
+	if !def.HasPIN {
+		return def, nil
+	}
+	unlocked, err := q.MostRestrictiveUnlockedProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if unlocked == nil {
+		return nil, errEveryProfileLocked
+	}
+	return unlocked, nil
 }

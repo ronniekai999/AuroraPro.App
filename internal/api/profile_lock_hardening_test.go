@@ -1372,3 +1372,41 @@ func TestACeilingWriteRefusesALimitChangedMeanwhile(t *testing.T) {
 		t.Errorf("the same write uncontended: %d %s", code, body)
 	}
 }
+
+// TestAnOAuthSignInDoesNotStandInForAPIN: a sign-in through a linked identity
+// landed on the account default without its PIN; only the account password
+// stands in for one. It now gets the default only while that has no PIN.
+func TestAnOAuthSignInDoesNotStandInForAPIN(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); err != nil || p == nil || p.ID != f.parent.ID {
+		t.Fatalf("an unlocked default: %+v (err %v), want the default %d", p, err, f.parent.ID)
+	}
+	f.setPIN(t, "4321")
+	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); err != nil || p == nil || p.ID != f.kid.ID {
+		t.Errorf("a locked default: %+v (err %v), want the most restrictive unlocked profile, the kid %d", p, err, f.kid.ID)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("lock the kid: %d %s", code, body)
+	}
+	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); !errors.Is(err, errEveryProfileLocked) {
+		t.Errorf("every profile locked: %+v (err %v), want errEveryProfileLocked", p, err)
+	}
+	// An account with no password has only its linked identity, which then
+	// stands in for a PIN as a password does; refusing it would lock the
+	// owner out. Unbound, the session acts as the default.
+	if p, err := oauthSignInProfile(ctx, f.q, f.userID, false); err != nil || p != nil {
+		t.Errorf("no password, every profile locked: %+v (err %v), want unbound", p, err)
+	}
+	// The session insert rechecks the chosen profile's PIN under the account
+	// lock, so a PIN set after the choice creates nothing.
+	rt := &models.RefreshToken{UserID: f.userID, Token: fmt.Sprintf("oauth-%d", time.Now().UnixNano()),
+		ExpiresAt: time.Now().Add(time.Hour), ActiveProfileID: &f.parent.ID}
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	if created, err := f.q.CreateRefreshTokenAtVersion(ctx, rt, u.TokenVersion); err != nil || created {
+		t.Errorf("a session bound to a profile locked since the choice: created %v (err %v), want none", created, err)
+	}
+}

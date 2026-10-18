@@ -371,9 +371,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
     (it has no rating ladder of its own, so it also lists stricter ones).
-  - A new login binds the account default without its PIN: the password
-    that signed in stands in for it. So does a sign-in through an already
-    linked identity, which needs no password.
+  - A password login binds the account default without its PIN: the
+    password that signed in stands in for it. A sign-in through a linked
+    identity does not (`oauthSignInProfile`): it binds the default only
+    while that has no PIN, else the account's most restrictive unlocked
+    profile, as pairing does, and with every profile locked it is refused;
+    the session insert rechecks that profile's PIN under the account lock.
+    An account with no password is the exception: its linked identity is its
+    only credential, so it stands in for a PIN as the password does, and on
+    a family computer a parent left signed in to the provider is one click
+    past the default's lock. The callback's use of the helper has no
+    end-to-end test.
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. So does an account whose every profile is
     restricted: nothing on it can lift a ceiling or create an unrestricted
