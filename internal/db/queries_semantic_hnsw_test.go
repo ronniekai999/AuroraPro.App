@@ -8,6 +8,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -30,9 +31,10 @@ import (
 // idx_media_items_embedding_version (partial, on embedding IS NOT NULL) plus a
 // sort is exact too, and the planner flips to it as statistics change. With
 // sorts off as well, the HNSW scan is the only plan with no disabled node.
-// The exact retry still has no HNSW plan at all, which is what it relies on;
-// a retry that only disabled index scans lost to HNSW here on PostgreSQL 18,
-// which breaks ties between disabled plans on cost.
+// The exact retry still has no HNSW plan at all, which is what it relies on; a
+// retry that only disabled index scans loses to HNSW under these settings
+// (through cost penalties, or on PostgreSQL 18 by breaking ties between
+// disabled plans on cost).
 //
 // hnsw.ef_search is 1, a one-candidate window; extra holds further session
 // settings; maxConns > 0 caps the pool.
@@ -104,8 +106,9 @@ func TestSemanticSearchFillsAFilteredPageUnderTheHNSWIndex(t *testing.T) {
 
 // hnswFixture is sixty R rows nearest a per-run query direction and
 // allowedRows PG rows further out (cosine distance 0.2 to 0.3). Each set is
-// inserted farthest first, so ids do not follow distance and a sort by id
-// cannot pass for one by distance.
+// inserted alternately from its two ends (nearest, farthest, second nearest,
+// ...), so ids follow distance in neither direction and a sort by id, either
+// way, cannot pass for one by distance.
 type hnswFixture struct {
 	query   string
 	allowed map[int64]bool
@@ -124,17 +127,29 @@ func seedHNSWFixture(t *testing.T, q *Queries, allowedRows int) hnswFixture {
 	a, b := 400+rand.Intn(90), 500+rand.Intn(90)
 	const rOffset, pgOffset = 590, 595
 	f := hnswFixture{query: sparseVec768(map[int]float64{a: 1, b: 1}), allowed: map[int64]bool{}}
-	for i := 59; i >= 0; i-- {
+	for _, i := range fromBothEnds(60) {
 		seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s r%d", token, i), ratingPtr("R"),
 			sparseVec768(map[int]float64{a: 1, b: 1, rOffset: 0.001 * float64(i+1)}))
 	}
-	for i := allowedRows - 1; i >= 0; i-- {
+	for _, i := range fromBothEnds(allowedRows) {
 		// cos((1,1,x), (1,1)) = 0.8 at x ≈ 1.06: cosine distance ~0.2, and
 		// about 0.3 at the fiftieth row, still short of a concurrent run's 0.5.
 		f.allowed[seedSearchCeilingItem(t, q, libID, fmt.Sprintf("%s pg%d", token, i), ratingPtr("PG"),
 			sparseVec768(map[int]float64{a: 1, b: 1, pgOffset: 1.06 + 0.005*float64(i)}))] = true
 	}
 	return f
+}
+
+// fromBothEnds is 0..n-1 taken alternately from each end: 0, n-1, 1, n-2, ...
+func fromBothEnds(n int) []int {
+	out := make([]int, 0, n)
+	for lo, hi := 0, n-1; lo <= hi; lo, hi = lo+1, hi-1 {
+		out = append(out, lo)
+		if hi != lo {
+			out = append(out, hi)
+		}
+	}
+	return out
 }
 
 // directIndexCount runs the first pass's plain index query under a ceiling
@@ -235,4 +250,45 @@ func checkHNSWWindowFill(t *testing.T, q *Queries) {
 		}
 	}
 	checkAscending(t, hits)
+}
+
+// TestSemanticSearchRetryFailures pins what a short page does when its exact
+// retry fails: a cancelled search reports the cancellation, and any other
+// failure falls back to the short page rather than failing the search.
+func TestSemanticSearchRetryFailures(t *testing.T) {
+	seeder := exactScanQueries(t)
+	f := seedHNSWFixture(t, seeder, 5)
+	allowedRatings := AllowedRatingsForMax("PG")
+	short := func(before func()) func([]SemanticHit) []SemanticHit {
+		return func(hits []SemanticHit) []SemanticHit {
+			before()
+			if len(hits) > 1 {
+				hits = hits[:len(hits)-1]
+			}
+			return hits
+		}
+	}
+
+	t.Run("cancelled", func(t *testing.T) {
+		q := exactScanQueries(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		q.testHookSemanticFirstPass = short(cancel)
+		hits, err := q.SemanticSearch(ctx, f.query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("a search cancelled before its retry returned %d hits and err %v; want context.Canceled", len(hits), err)
+		}
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		q := exactScanQueries(t)
+		q.testHookSemanticFirstPass = short(q.pool.Close)
+		hits, err := q.SemanticSearch(context.Background(), f.query, SemanticFilter{AllowedRatings: allowedRatings}, 5)
+		if err != nil {
+			t.Fatalf("a failed retry failed the search: %v; want the short page", err)
+		}
+		if len(hits) != 4 {
+			t.Errorf("a failed retry returned %d hits, want the first pass's 4", len(hits))
+		}
+	})
 }

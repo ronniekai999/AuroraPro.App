@@ -179,13 +179,14 @@ type SemanticHit struct {
 // retry: it is as good as an unfiltered ANN query of the same depth, which is
 // approximate (HNSW recall is lowest at the tail of its window), and making
 // ANN exact is not the retry's job. A page that is short because fewer rows
-// match pays for one exact scan, filtered before any distance is computed:
-// about 15 ms on a 20k-row catalog under a PG ceiling. A short page under a
-// filter that passes nearly everything scores every embedded row, about 140-
-// 180 ms there; that is every search with a limit above ef_search, including
-// all of them if pool.go's SET hnsw.ef_search fails and pgvector's default of
-// 40 applies. If the retry fails for any reason but cancellation, the short
-// page is returned.
+// match pays for one exact scan, filtered before any distance is computed,
+// so its cost follows the share of rows the filter passes: reviews measured
+// roughly 15-50 ms on a 20k-row catalog with a fifth of it allowed. A short
+// page under a filter that passes nearly everything scores every embedded
+// row, roughly 90-180 ms there; that is every search with a limit above
+// ef_search, including all of them if pool.go's SET hnsw.ef_search fails and
+// pgvector's default of 40 applies. If the retry fails for any reason but
+// cancellation, the short page is returned.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {
