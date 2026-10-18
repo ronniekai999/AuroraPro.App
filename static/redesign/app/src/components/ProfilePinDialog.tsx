@@ -129,11 +129,20 @@ export function ProfilePinDialog({
               className="mt-5 w-40 rounded-xl border border-white/15 bg-white/[0.06] px-4 py-3 text-center font-display text-2xl tracking-[0.6em] text-white"
             />
           ) : (
+            // Never offered the saved account password: it unlocks every
+            // profile, so on a browser a child uses, one click from a
+            // password manager here would undo every lock. "new-password"
+            // is what browsers honour for that; the data attributes ask the
+            // common password-manager extensions to stay out as well.
             <input
               id="profile-unlock-input"
               ref={inputRef}
               type="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
+              data-form-type="other"
               value={value}
               disabled={busy}
               aria-invalid={!!error}

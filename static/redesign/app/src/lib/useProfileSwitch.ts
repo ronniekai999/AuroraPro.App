@@ -9,7 +9,7 @@
 // ProfilePinDialog wired to `unlock` and `cancelPin`.
 
 import { useCallback, useRef, useState } from 'react'
-import { activateProfile, APIError, profileErrorReason, type Profile, type ProfileUnlock } from './api'
+import { activateProfile, profileErrorReason, type Profile, type ProfileUnlock } from './api'
 
 export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId, onError, readBinding, onBound }: {
   profiles: Profile[]
@@ -103,10 +103,11 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
     try {
       await activateProfile(target.id, credential)
     } catch (e) {
-      // A refusal (wrong PIN, lockout) is the server's answer. Anything else
+      // A refusal (wrong PIN, lockout) is the server's answer, and carries a
+      // reason. Anything else (a dropped connection, a proxy's 502 or 504)
       // can have lost the answer to a bind that happened: if the session is
       // now on the profile, the switch is done.
-      if (!(e instanceof APIError) && readBinding) {
+      if (!profileErrorReason(e) && readBinding) {
         let bound: Profile | null = null
         try { bound = await readBinding() } catch { /* the dialog shows the first error */ }
         if (bound?.id === target.id) {

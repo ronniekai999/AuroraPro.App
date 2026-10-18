@@ -75,8 +75,11 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	companion := r.URL.Query().Get("companion") == "1"
 
 	// Resolved once, while the session row is live: the socket outlives it
-	// (see Manager.CallerProfile).
-	caller := h.manager.CallerProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	// (see Manager.CallerProfile). Bounded, since every connect waits on it;
+	// a lookup that times out is retried at the next change-media.
+	connectCtx, cancelConnect := context.WithTimeout(r.Context(), 2*time.Second)
+	caller := h.manager.CallerProfile(connectCtx, claims.UserID, claims.RefreshTokenID)
+	cancelConnect()
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {

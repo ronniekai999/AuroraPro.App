@@ -3399,13 +3399,16 @@ export default function App() {
     // Record the in-flight op so a concurrent reconcile preserves it.
     pendingLibOpsRef.current.set(m.id, wasSaved ? 'remove' : 'add')
     const settle = () => pendingLibOpsRef.current.delete(m.id)
+    // The list this change was made on. A switch before the answer swaps in
+    // another profile's, which a rollback must not edit.
+    const owner = libraryOwnerRef.current
     const req = wasSaved
       ? removeFromLibrary(activeProfileId, m.id)
       : addToLibrary(activeProfileId, m.id)
     req.then(settle).catch(() => {
       settle()
       // Roll back the optimistic change and tell the user it didn't stick.
-      setLibrary(wasSaved ? addLocal : removeLocal)
+      if (libraryOwnerRef.current === owner) setLibrary(wasSaved ? addLocal : removeLocal)
       addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
     })
   }, [library, activeProfileId, addToast])

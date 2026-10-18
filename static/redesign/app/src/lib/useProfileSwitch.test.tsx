@@ -152,6 +152,17 @@ describe('useProfileSwitch', () => {
     expect(hook.result.current.pinTarget).toBe(parent)
   })
 
+  it('reads the binding back after a gateway error on an unlock', async () => {
+    api.activateProfile.mockRejectedValue(new APIError(502, 'Bad Gateway', null))
+    const readBinding = vi.fn().mockResolvedValue(parent)
+    const { hook, setActiveProfileId } = setup(2, readBinding, vi.fn())
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(1) })
+    await act(async () => { await hook.result.current.unlock({ pin: '1234' }) })
+    expect(setActiveProfileId).toHaveBeenCalledWith(1)
+    expect(await switched!).toBe(true)
+  })
+
   it('does not re-read the binding after a refused unlock', async () => {
     api.activateProfile.mockRejectedValue(refusal('profile_pin_invalid'))
     const readBinding = vi.fn().mockResolvedValue(parent)

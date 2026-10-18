@@ -49,6 +49,17 @@ describe('ProfilePinDialog', () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ password: 'hunter2' }))
   })
 
+  // The account password unlocks every profile, so a password manager must
+  // not fill it in for whoever is at the browser.
+  it('does not invite the saved account password', async () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn(async () => {})} onCancel={vi.fn()} />)
+    await userEvent.click(screen.getByRole('button', { name: /use the account password/i }))
+    const field = screen.getByLabelText('Account password')
+    expect(field.getAttribute('autocomplete')).toBe('new-password')
+    expect(field.getAttribute('data-1p-ignore')).toBe('true')
+    expect(field.getAttribute('data-lpignore')).toBe('true')
+  })
+
   it('cancels without submitting', async () => {
     const onSubmit = vi.fn(async () => {})
     const onCancel = vi.fn()
