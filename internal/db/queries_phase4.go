@@ -263,31 +263,17 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 	return err
 }
 
-// DeleteProfile deletes a non-default profile and every session bound to it,
-// in one transaction. The binding's foreign key is ON DELETE SET NULL, and an
-// unbound session acts as the account default, so without this a kid's
-// devices would wake up on the parent's profile, past its PIN. Deleting the
-// session rows (not just revoking them) means a still-valid access token of
+// DeleteProfile deletes a non-default profile. Every session bound to it goes
+// with it: the binding's foreign key cascades (migration 062). It used to be
+// ON DELETE SET NULL, and an unbound session acts as the account default, so
+// a kid's devices woke up on the parent's profile, past its PIN. Deleting the
+// session rows (not just unbinding them) means a still-valid access token of
 // theirs finds no row, which resolves to the most restrictive profile; the
 // devices sign in again.
 func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM refresh_tokens
-		 WHERE active_profile_id = $1 AND EXISTS (
-		   SELECT 1 FROM user_profiles WHERE id = $1 AND is_default = FALSE)`, profileID); err != nil {
-		return false, err
-	}
-	tag, err := tx.Exec(ctx,
+	tag, err := q.pool.Exec(ctx,
 		"DELETE FROM user_profiles WHERE id = $1 AND is_default = FALSE", profileID)
 	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil

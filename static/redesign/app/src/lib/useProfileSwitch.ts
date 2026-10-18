@@ -24,6 +24,9 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
   // in either order while their answers come back in another, and the UI
   // would then show whichever answered last rather than the binding.
   const inFlightRef = useRef(false)
+  // Counts switches started, so a background read of the binding can tell
+  // that one started (and perhaps finished) while it was in flight.
+  const generationRef = useRef(0)
 
   const settle = useCallback((switched: boolean) => {
     const resolve = pinResolveRef.current
@@ -44,6 +47,7 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       pinResolveRef.current = resolve
       setPinTarget(target)
     })
+    generationRef.current++
     if (target.has_pin) return askForPin()
     inFlightRef.current = true
     try {
@@ -75,6 +79,7 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
   // Whether a switch or a PIN prompt is under way, so a background re-read of
   // the binding (App's tab-visibility check) does not race it.
   const isSwitching = useCallback(() => inFlightRef.current || pinResolveRef.current !== null, [])
+  const switchGeneration = useCallback(() => generationRef.current, [])
 
-  return { pinTarget, switchProfile, unlock, cancelPin, isSwitching }
+  return { pinTarget, switchProfile, unlock, cancelPin, isSwitching, switchGeneration }
 }

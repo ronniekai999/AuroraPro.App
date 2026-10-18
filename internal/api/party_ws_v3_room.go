@@ -73,6 +73,10 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// degrades to the historical (non-companion) behavior rather than erroring.
 	companion := r.URL.Query().Get("companion") == "1"
 
+	// Resolved once, while the session row is live: the socket outlives it
+	// (see Manager.CallerProfile).
+	caller := h.manager.CallerProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("v3 room upgrade failed", "err", err, "user_id", claims.UserID)
@@ -314,7 +318,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// server-side, so this is the only path that needs the guard.
 			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
 			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
-			if err := h.manager.ChangeMedia(code, claims.UserID, claims.RefreshTokenID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
+			if err := h.manager.ChangeMedia(code, claims.UserID, caller, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))
 			}
 

@@ -4,8 +4,11 @@
 // `onSubmit` resolving is the only way it closes as unlocked.
 //
 // The account password stands in for any PIN (the recovery path when a PIN is
-// forgotten), so the dialog offers it as a second mode. Both share the server's
-// attempt budget: five misses start a 15-minute lockout.
+// forgotten), so the dialog offers it as a second mode. Each has its own
+// server-side budget: five PIN misses lock the profile for 15 minutes, and
+// five password misses pause the password for 15 minutes for the
+// sessions acting as the same profile, and a PIN lockout does not stop the
+// password.
 
 import { useEffect, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'

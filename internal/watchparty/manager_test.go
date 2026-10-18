@@ -1630,9 +1630,9 @@ func changeMediaParty() *PartyState {
 	}
 }
 
-// TestChangeMedia_NonHostRejected pins that the new hostRefreshTokenID
-// parameter didn't loosen the existing host-only authorization — a
-// non-host caller must still be rejected regardless of what it passes.
+// TestChangeMedia_NonHostRejected pins that the caller-profile parameter
+// didn't loosen the existing host-only authorization — a non-host caller
+// must still be rejected regardless of what it passes.
 func TestChangeMedia_NonHostRejected(t *testing.T) {
 	m := mockPartyManager()
 	ps := changeMediaParty()
@@ -1640,7 +1640,7 @@ func TestChangeMedia_NonHostRejected(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.ChangeMedia("ABCDEF", 2 /* not the host */, 0, 200, nil, "new title", "")
+	err := m.ChangeMedia("ABCDEF", 2 /* not the host */, nil, 200, nil, "new title", "")
 	if err == nil {
 		t.Fatal("ChangeMedia should reject a non-host caller")
 	}
@@ -1666,7 +1666,7 @@ func TestChangeMedia_NilQueriesSkipsValidation(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	if err := m.ChangeMedia("ABCDEF", 1, 0, 200, nil, "new title", "poster.jpg"); err != nil {
+	if err := m.ChangeMedia("ABCDEF", 1, nil, 200, nil, "new title", "poster.jpg"); err != nil {
 		t.Fatalf("host swap with nil queries should succeed, got: %v", err)
 	}
 	ps.mu.Lock()

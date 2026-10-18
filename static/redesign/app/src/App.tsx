@@ -106,7 +106,7 @@ import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { resolveStartupProfile } from '@/lib/profileSession'
+import { readSessionProfile, resolveStartupProfile, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
@@ -2735,12 +2735,7 @@ export default function App() {
     void (async () => {
       let ps: Profile[]
       try { ps = await listProfiles(ac.signal) } catch { return /* non-fatal — profile features just stay disabled */ }
-      // One retry: the binding is the one thing the app should not guess.
-      const acting = await getActiveProfile(ac.signal)
-        .catch(() => new Promise<Profile>((resolve, reject) => {
-          setTimeout(() => { getActiveProfile(ac.signal).then(resolve, reject) }, 1000)
-        }))
-        .catch(() => null)
+      const acting = await readSessionProfile(() => getActiveProfile(ac.signal))
       if (ac.signal.aborted) return
       const next = await resolveStartupProfile({
         profiles: ps, acting, remembered, activate: id => activateProfile(id),
@@ -2749,6 +2744,9 @@ export default function App() {
       setProfiles(ps)
       setActiveProfileId(next)
       setProfilesLoaded(true)
+      // The binding could not be read: ask rather than guess. The pick binds
+      // the session.
+      if (next === null && ps.length > 1) setProfilesGateForced(true)
     })()
     return () => ac.abort()
   // activeProfileId intentionally excluded — we set it inside the
@@ -2933,27 +2931,17 @@ export default function App() {
   // Profile switching goes through the server, and a locked profile asks for
   // its PIN first; see lib/useProfileSwitch.
   const onSwitchRefused = useCallback((p: Profile) => addToast(`Couldn't switch to ${p.name}`, 'error'), [addToast])
-  const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin, isSwitching } = useProfileSwitch({
+  const profileSwitch = useProfileSwitch({
     profiles, activeProfileId, setActiveProfileId, onError: onSwitchRefused,
   })
+  const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = profileSwitch
 
-  // Tabs share one session, so a switch in another tab moves this tab's
-  // server binding too. Re-read it when the tab comes back into view, so
-  // what this tab shows is what the server enforces.
-  useEffect(() => {
-    if (!user) return
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible' || isSwitching()) return
-      void getActiveProfile().then(acting => {
-        // A switch that started meanwhile owns the answer; an id the list
-        // doesn't hold waits for the next profile load.
-        if (!acting || isSwitching() || !profiles.some(p => p.id === acting.id)) return
-        setActiveProfileId(prev => (acting.id !== prev ? acting.id : prev))
-      }).catch(() => { /* keep what we have */ })
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [user, profiles, isSwitching])
+  // What this tab shows is what the server enforces, including after a
+  // switch in another tab (they share one session).
+  const readSessionBinding = useCallback(() => getActiveProfile(), [])
+  useSessionProfileOnVisible({
+    enabled: !!user, profiles, read: readSessionBinding, setActiveProfileId, switching: profileSwitch,
+  })
 
   // Hydrate a /title/:id deep link (cold load, refresh, forward-button,
   // shared link). In-app opens set selectedMedia synchronously in

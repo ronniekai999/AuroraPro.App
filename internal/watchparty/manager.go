@@ -2803,11 +2803,33 @@ const changeMediaValidateTimeout = 2 * time.Second
 // each client (re-)opens it, OR the next tick / pause broadcast carries
 // the new anchor — but in practice clients teardown+reopen their sync
 // socket as part of the player re-init, so they receive a fresh hello.
-// callerUserID/callerRefreshTokenID identify whoever SENT the change-media
+// callerUserID/callerProfile identify whoever SENT the change-media
 // message, not necessarily the host — the host-only check below runs AFTER
 // the DB validation block (see that block's own comment for why), so
 // naming these "host*" would be misleading about what's verified when.
-func (m *Manager) ChangeMedia(code string, callerUserID int64, callerRefreshTokenID int64, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
+// callerProfile is the caller's acting profile as CallerProfile resolved it
+// when the socket connected; nil skips the ceiling check.
+// CallerProfile resolves a socket caller's acting profile once, at connect,
+// while its session row is certainly live. A socket outlives that row: the
+// client rotates its session about every 15 minutes, the purge deletes the
+// old row soon after, and a row that is gone resolves to the account's most
+// restrictive profile, which refused an unrestricted host's next episode an
+// hour into a party. nil when there is no pool or the lookup fails, which
+// skips ChangeMedia's best-effort ceiling check, as a failed lookup did
+// before.
+func (m *Manager) CallerProfile(ctx context.Context, userID, refreshTokenID int64) *models.UserProfile {
+	if m.queries == nil {
+		return nil
+	}
+	profile, err := m.queries.ResolveActingProfile(ctx, userID, refreshTokenID)
+	if err != nil {
+		slog.Warn("party: resolve the caller's acting profile failed", "user_id", userID, "error", err)
+		return nil
+	}
+	return profile
+}
+
+func (m *Manager) ChangeMedia(code string, callerUserID int64, callerProfile *models.UserProfile, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
@@ -2862,9 +2884,9 @@ func (m *Manager) ChangeMedia(code string, callerUserID int64, callerRefreshToke
 		// scoped by ResolveActingProfile), so a non-host learns nothing
 		// beyond "would this exceed MY OWN ceiling" — the same answer
 		// GetEnriched already gives them directly for any media id.
-		if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
-			if profile, perr := m.queries.ResolveActingProfile(ctx, callerUserID, callerRefreshTokenID); perr == nil && profile != nil {
-				if !db.RatingAllowed(profile.MaxAgeRating, item.ContentRating) {
+		if callerProfile != nil {
+			if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
+				if !db.RatingAllowed(callerProfile.MaxAgeRating, item.ContentRating) {
 					return errUser("media exceeds this profile's content rating")
 				}
 			}

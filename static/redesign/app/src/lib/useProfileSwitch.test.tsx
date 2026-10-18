@@ -108,6 +108,16 @@ describe('useProfileSwitch', () => {
     expect(hook.result.current.isSwitching()).toBe(false)
   })
 
+  it('counts each switch it starts, so a background read can tell it is stale', async () => {
+    api.activateProfile.mockResolvedValue(undefined)
+    const { hook } = setup()
+    expect(hook.result.current.switchGeneration()).toBe(0)
+    await act(async () => { await hook.result.current.switchProfile(3) })
+    expect(hook.result.current.switchGeneration()).toBe(1)
+    act(() => { void hook.result.current.switchProfile(1) }) // asks for a PIN
+    expect(hook.result.current.switchGeneration()).toBe(2)
+  })
+
   it('treats the current profile as already switched', async () => {
     const { hook } = setup(2)
     await expect(hook.result.current.switchProfile(2)).resolves.toBe(true)

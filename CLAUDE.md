@@ -189,9 +189,10 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - Watch parties: creating one applies no ceiling, and changing a party's
     media skips its ceiling check when the media or profile lookup errors or
     finds nothing; both are persisted.
-  - The profile lock (below) stops a restricted session switching profiles
-    or changing ceilings. It does not stop the reads above: `?profile_id=`
-    routes still accept any owned profile, and listings stay unfiltered.
+  - The profile lock (below) stops a restricted session switching into a
+    locked profile or changing ceilings. It does not stop the reads above:
+    `?profile_id=` routes still accept any owned profile, and listings stay
+    unfiltered.
 
 ### Profile lock (PIN)
 
@@ -202,20 +203,25 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 
 - `ActivateProfile` into a locked profile needs its PIN or the account
   password, unless the session already acts as it. The check runs before the
-  unbound-token branch, and a token with no session row is a 409
-  `session_unbound`, never a 200: clients take a 200 as a confirmed binding.
-  The password is the recovery path, by the owner's choice.
+  unbound-token branch. A token with no session id is a 409
+  `session_unbound`, and a missing or revoked session row a 409 with no
+  reason, never a 200: clients take a 200 as a confirmed binding. The
+  password is the recovery path, by the owner's choice. Making a locked
+  profile the default (`SetDefault`) needs the same, since every session with
+  no binding acts as the default.
 - PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
   refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
   check let concurrent guesses all pass the lockout read; a review drove 40
   through a limit of 5. The fifth miss starts a 15-minute lockout; a success
   resets the count; an expired lockout does not, so after the first one each
   miss re-locks. The database's clock decides lockouts.
-- The account password has its own budget (5 per 15 minutes per account,
-  `passwordLimiter`) and a PIN lockout does not block it. If PIN misses also
-  locked out the password, anyone on the account could keep the owner out
-  indefinitely with one wrong guess per lockout, and even stop them changing
-  the PIN.
+- The account password has its own budget (5 per 15 minutes per account and
+  acting profile, `passwordLimiter`) and a PIN lockout does not block it. If
+  PIN misses also locked out the password, anyone on the account could keep
+  the owner out indefinitely with one wrong guess per lockout, and even stop
+  them changing the PIN. Per account alone, a kid's session spending the
+  budget kept the owner's password out of every session; per session, a kid
+  could multiply it by pairing devices, which all act as the kid.
 - Refusals carry `error.reason`: `profile_pin_required` (nothing supplied, not
   counted), `profile_pin_invalid`, `profile_pin_locked` (with Retry-After; also
   a spent password budget), `profile_restricted`, `session_unbound`.
@@ -232,20 +238,30 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   older than the access-token lifetime (migration 061, `PurgeExpiredTokens`),
   because access tokens name their row and outlive its revocation; and a token
   whose row is gone anyway resolves to the account's most restrictive profile.
-  Deleting a profile deletes its sessions, since the binding's foreign key
-  would otherwise null them onto the default.
+  Deleting a profile deletes its sessions: the binding's foreign key
+  cascades (migration 062). It used to be `ON DELETE SET NULL`, which put
+  them on the default; deleting the rows first missed one bound in between by
+  a refresh or a switch. A long-lived socket resolves its profile once, at
+  connect (`Manager.CallerProfile`): the session row it names is rotated and
+  purged while the socket stays open, and would then resolve to the most
+  restrictive profile.
 - Binding a revoked (rotated) session row is refused (409): rotation already
   copied the old binding to its successor, so the write changed nothing that
   lasted. The SPA refreshes and retries once.
 - Device pairing binds the new device to the approver's acting profile, so it
   can neither raise a ceiling nor hand out a locked default.
 - Clients show the server's binding, never a remembered choice: the SPA reads
-  `GET /api/profiles/active` at startup (one retry) and changes its display
-  only after activation resolves, one switch at a time. It used to switch
-  locally and activate fire-and-forget, so a failed call left a kid's UI on
-  the kid profile while the server enforced the parent's ceiling. The TV stays
-  at the picker until activation succeeds, and a refused PIN keeps the
-  session's own profile.
+  `GET /api/profiles/active` at startup (one retry, `readSessionProfile`)
+  and changes its display only after activation resolves, one switch at a
+  time. It used to switch locally and activate fire-and-forget, so a failed
+  call left a kid's UI on the kid profile while the server enforced the
+  parent's ceiling. When the binding cannot be read it shows no profile and
+  opens the picker, rather than guessing the default. Its tab-visibility
+  re-read drops an answer once a switch has started since the read. The TV
+  stays at the picker until activation succeeds, a refused PIN keeps the
+  session's own profile and the page behind the picker, and it does not ask
+  for the PIN of the profile the session is bound to (the server would accept
+  any digits).
 - Known gaps:
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked unrestricted profile; Settings warns about it.
@@ -258,9 +274,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - The admin role is account-level, so a restricted profile on an admin
     account keeps every admin route.
   - PINs are four digits. With the re-lock above, guessing averages about 50
-    days of continuous attempts. The password budget is per account, so
-    wrong guesses can spend it and keep the owner waiting up to 15 minutes
-    (a fresh sign-in, under the login limiter, still works).
+    days of continuous attempts.
+  - Anyone on the account can keep a profile's PIN locked out with one wrong
+    guess per 15 minutes; the password is the way past it. A restricted
+    session can also keep spending the password budget of the profile it
+    acts as (and of any unlocked profile it can switch into), so on the
+    kid's own device the owner's password can be held off indefinitely. A
+    session acting as another profile, or a fresh sign-in, still works.
   - A deleted profile's devices keep their still-valid access tokens for up
     to one token lifetime, acting as the account's most restrictive remaining
     profile, which is the default if that was the only restricted one.
@@ -272,6 +292,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device.
+  - Account-level actions still open to a restricted session: editing the
+    member profile (`PUT /api/me/profile`, whose `share_watch_history`
+    switch publishes the default profile's history), push subscriptions, and
+    logout, which signs out every session on the account.
+  - The room socket keeps the profile it resolved at connect, so a switch
+    made while it is open applies to its ceiling check from the next
+    connect.
 
 ### Member profiles and follows
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activateProfile, APIError, getActiveProfile, profileErrorReason, setProfilePin, type Profile } from './api'
-import { isRestrictedProfile, resolveStartupProfile } from './profileSession'
+import { isRestrictedProfile, readSessionProfile, resolveStartupProfile } from './profileSession'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `p${id}`, is_default: false, created_at: '', updated_at: '', ...extra,
@@ -117,16 +117,38 @@ describe('resolveStartupProfile', () => {
     expect(activate).not.toHaveBeenCalled()
   })
 
-  it('falls back to the default only when the binding is unknown', async () => {
+  // Showing the default for an unknown binding showed a kid's device the
+  // parent's name while the server enforced the kid's ceiling.
+  it('shows no profile when the binding is unknown, so the host asks', async () => {
     const refuse = vi.fn(async () => { throw new Error('down') })
-    expect(await resolveStartupProfile({ profiles, acting: null, remembered: null, activate: refuse })).toBe(1)
-    expect(await resolveStartupProfile({ profiles, acting: null, remembered: 2, activate: refuse })).toBe(1)
+    expect(await resolveStartupProfile({ profiles, acting: null, remembered: null, activate: refuse })).toBeNull()
+    expect(await resolveStartupProfile({ profiles, acting: null, remembered: 2, activate: refuse })).toBeNull()
+    // A remembered profile the server accepts is a binding, not a guess.
     expect(await resolveStartupProfile({ profiles, acting: null, remembered: 2, activate: vi.fn(async () => {}) })).toBe(2)
     // A binding to a profile this list doesn't hold reads as unknown.
-    expect(await resolveStartupProfile({ profiles, acting: profile(99), remembered: null, activate: refuse })).toBe(1)
+    expect(await resolveStartupProfile({ profiles, acting: profile(99), remembered: null, activate: refuse })).toBeNull()
+    // With one profile there is nothing to guess.
+    expect(await resolveStartupProfile({ profiles: [parent], acting: null, remembered: null, activate: refuse })).toBe(1)
   })
 
   it('has nothing to show without profiles', async () => {
     expect(await resolveStartupProfile({ profiles: [], acting: null, remembered: 2, activate: vi.fn() })).toBeNull()
+  })
+})
+
+describe('readSessionProfile', () => {
+  it('retries a failed read once, and gives up after two', async () => {
+    const ok = profile(2)
+    const flaky = vi.fn().mockRejectedValueOnce(new Error('blip')).mockResolvedValueOnce(ok)
+    expect(await readSessionProfile(flaky, 0)).toBe(ok)
+    expect(flaky).toHaveBeenCalledTimes(2)
+
+    const down = vi.fn().mockRejectedValue(new Error('down'))
+    expect(await readSessionProfile(down, 0)).toBeNull()
+    expect(down).toHaveBeenCalledTimes(2)
+
+    const fine = vi.fn().mockResolvedValue(ok)
+    expect(await readSessionProfile(fine, 0)).toBe(ok)
+    expect(fine).toHaveBeenCalledTimes(1)
   })
 })

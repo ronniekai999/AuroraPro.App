@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.aurorapro.tv.data.AuroraException
+import app.aurorapro.tv.data.Media
 import java.util.Collections
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -30,6 +31,8 @@ class ProfileUnlockTest {
     private val application = ApplicationProvider.getApplicationContext<Application>()
     private val server = MockWebServer()
     private val activations = Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+    // What GET /api/profiles/active answers; null answers 404, an unknown binding.
+    @Volatile private var activeProfile: String? = null
     private lateinit var vm: TvViewModel
 
     @Before fun start() {
@@ -41,11 +44,16 @@ class ProfileUnlockTest {
                     path == "/api/auth/me" || path == "/api/auth/refresh" -> MockResponse().setResponseCode(401)
                     path == "/api/auth/login" -> json("""{"user":{"id":1,"username":"ronnie"}}""")
                     path == "/api/profiles/" -> json(PROFILES)
+                    path == "/api/profiles/active" -> activeProfile?.let { json(it) } ?: MockResponse().setResponseCode(404)
+                    path == "/api/media/30" -> json("""{"id":30,"title":"Movie"}""")
+                    path == "/api/media/30/files" -> json("""[{"id":30,"duration_ms":60000}]""")
                     path.endsWith("/activate") -> {
                         val body = request.body.readUtf8()
                         activations += path to body
                         when {
                             path != "/api/profiles/1/activate" -> json("{}")
+                            // The server skips the PIN for the profile the session acts as.
+                            activeProfile != null -> json("{}")
                             "\"pin\":\"1234\"" in body || "\"password\":\"hunter2\"" in body -> json("{}")
                             "\"pin\"" in body || "\"password\"" in body -> refusal(403, "profile_pin_invalid")
                             else -> refusal(403, "profile_pin_required")
@@ -131,6 +139,36 @@ class ProfileUnlockTest {
         vm.cancelUnlock()
         vm.back()
         assertEquals(Page.HOME, awaitState { it.page == Page.HOME }.page)
+    }
+
+    @Test fun aRefusedUnlockPutsBackThePageBehindThePicker() {
+        // Acting as the kid, open the picker from a title's page and try the parent.
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        awaitState { it.page == Page.HOME }
+        vm.detail(Media(30, "Movie"))
+        awaitState { it.page == Page.DETAIL && it.files.isNotEmpty() }
+        vm.navigate(Page.PROFILES)
+        awaitState { it.page == Page.PROFILES }
+        vm.selectProfile(parent())
+        awaitState { it.pinPrompt != null }
+        vm.submitUnlock("0000", usePassword = false)
+        awaitState { it.pinError != null }
+        vm.cancelUnlock()
+        vm.back()
+        val back = awaitState { it.page == Page.DETAIL }
+        assertEquals("The title's page is back, not an empty one", 30L, back.detail?.id)
+    }
+
+    @Test fun theProfileTheSessionIsBoundToNeedsNoPin() {
+        // A fresh sign-in binds the account default. Asking for its PIN would
+        // accept any digits, since the server does not check the session's own.
+        activeProfile = """{"id":1,"name":"Ronnie","is_default":true,"has_pin":true}"""
+        vm.login("ronnie", "fixture-password")
+        awaitState { it.page == Page.PROFILES && it.boundProfileId == 1L }
+        vm.selectProfile(parent())
+        val opened = awaitState { it.page == Page.HOME }
+        assertNull("No PIN prompt for the bound profile", opened.pinPrompt)
+        assertEquals("/api/profiles/1/activate" to "{}", activations.single())
     }
 
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {

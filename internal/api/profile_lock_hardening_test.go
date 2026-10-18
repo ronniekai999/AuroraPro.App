@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -156,6 +157,148 @@ func TestProfileManagementFailsClosedWhenTheActingProfileIsUnknown(t *testing.T)
 	}
 }
 
+// TestActivationFailsClosedWhenTheActingProfileIsUnknown: activation skips
+// the PIN for the profile the session already acts as, so a lookup error
+// that fell back to "no acting profile check" would skip it for any.
+func TestActivationFailsClosedWhenTheActingProfileIsUnknown(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	f.h.resolveActing = func(context.Context, int64, int64) (*models.UserProfile, error) {
+		return nil, errors.New("database down")
+	}
+	if code, _, body := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, ""); code != http.StatusInternalServerError {
+		t.Errorf("activating the locked parent with the acting profile unknown: %d %s, want 500", code, body)
+	}
+	if got := f.acting(t, f.kidRT); got != f.kid.ID {
+		t.Errorf("the kid's session now acts as profile %d, want the kid (%d)", got, f.kid.ID)
+	}
+}
+
+// failingActingResolver fails every lookup.
+type failingActingResolver struct{}
+
+func (failingActingResolver) ResolveActingProfile(context.Context, int64, int64) (*models.UserProfile, error) {
+	return nil, errors.New("database down")
+}
+
+func TestDenyRestrictedSessionFailsClosed(t *testing.T) {
+	rr := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/x", nil)
+	if !denyRestrictedSession(rr, r, failingActingResolver{}, &auth.JWTClaims{UserID: 1, RefreshTokenID: 2}, "do this") {
+		t.Fatal("a lookup error let the action through")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rr.Code)
+	}
+}
+
+// TestAStaleSessionActsAsTheTightestCeiling: with several restricted
+// profiles, a token whose session row is gone acts as the one with the
+// fewest allowed ratings, not whichever the query lists first.
+func TestAStaleSessionActsAsTheTightestCeiling(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	// The kid is PG. Add a G profile, which allows fewer ratings, and a
+	// PG-13 one after it.
+	var tightest int64
+	for _, rating := range []string{"G", "PG-13"} {
+		p := &models.UserProfile{UserID: f.userID, Name: "kid " + rating, MaxAgeRating: rating, Language: "en", SubtitleMode: "off"}
+		if err := f.q.CreateProfile(ctx, p); err != nil {
+			t.Fatalf("seed a %s profile: %v", rating, err)
+		}
+		if rating == "G" {
+			tightest = p.ID
+		}
+	}
+	if _, err := lockTestPool(t).Exec(ctx, `DELETE FROM refresh_tokens WHERE id = $1`, f.kidRT); err != nil {
+		t.Fatalf("drop the session row: %v", err)
+	}
+	if got := f.acting(t, f.kidRT); got != tightest {
+		t.Errorf("a token with no session row acts as profile %d, want the G profile (%d)", got, tightest)
+	}
+}
+
+// TestProfileListsReportTheirLock: clients decide whether to ask for a PIN
+// from has_pin before they activate.
+func TestProfileListsReportTheirLock(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	profiles, err := f.q.GetProfilesByUser(context.Background(), f.userID)
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	for _, p := range profiles {
+		if want := p.ID == f.parent.ID; p.HasPIN != want {
+			t.Errorf("profile %q has_pin=%v, want %v", p.Name, p.HasPIN, want)
+		}
+	}
+}
+
+// TestRotationStampsWhenTheOldSessionWasRevoked: the purge keeps a revoked
+// row until revoked_at is older than the access-token lifetime, so a
+// rotation that left revoked_at unset would have the purge delete every
+// refreshed row at once, and their access tokens would act as the most
+// restrictive profile.
+func TestRotationStampsWhenTheOldSessionWasRevoked(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	old := &models.RefreshToken{UserID: f.userID, Token: "rotate-me-" + reqTestSuffix(t), ExpiresAt: time.Now().Add(time.Hour)}
+	if err := f.q.CreateRefreshToken(ctx, old); err != nil {
+		t.Fatalf("seed a session: %v", err)
+	}
+	next := &models.RefreshToken{UserID: f.userID, Token: "rotated-" + reqTestSuffix(t), ExpiresAt: time.Now().Add(time.Hour)}
+	if _, err := f.q.RotateRefreshToken(ctx, old.Token, next); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	var revoked bool
+	var revokedAt *time.Time
+	if err := lockTestPool(t).QueryRow(ctx, `SELECT revoked, revoked_at FROM refresh_tokens WHERE id = $1`, old.ID).Scan(&revoked, &revokedAt); err != nil {
+		t.Fatalf("read the old session: %v", err)
+	}
+	if !revoked || revokedAt == nil {
+		t.Errorf("after rotation the old session has revoked=%v revoked_at=%v; want both set", revoked, revokedAt)
+	}
+}
+
+// TestASpentPasswordBudgetDoesNotKeepTheOwnerOut: the password budget was
+// per account, so a kid's session spending it every 15 minutes blocked the
+// owner's password everywhere, PIN removal included. It is per acting
+// profile now.
+func TestASpentPasswordBudgetDoesNotKeepTheOwnerOut(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	for i := 0; i <= profilePasswordAttempts; i++ {
+		f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"password":"guess"}`)
+	}
+	if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID,
+		`{"password":"`+lockTestPassword+`"}`); code != http.StatusTooManyRequests || reason != "profile_pin_locked" {
+		t.Fatalf("precondition: the kid's session should have spent its budget, got %d %q", code, reason)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.parent.ID,
+		`{"pin":"","password":"`+lockTestPassword+`"}`); code != http.StatusOK {
+		t.Errorf("the owner removing the PIN with the password from the parent's session: %d %s", code, body)
+	}
+}
+
+// TestMakingALockedProfileTheDefaultNeedsItsPIN: a session with no binding
+// acts as the default, so re-defaulting onto a locked profile handed it to
+// every such session without its PIN.
+func TestMakingALockedProfileTheDefaultNeedsItsPIN(t *testing.T) {
+	f := newLockFixture(t)
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("lock the kid profile: %d %s", code, body)
+	}
+	if code, reason, _ := f.call(t, f.h.SetDefault, http.MethodPost, f.parentRT, f.kid.ID, ""); code != http.StatusForbidden || reason != "profile_pin_required" {
+		t.Errorf("re-defaulting onto the locked kid with no PIN: %d %q, want 403 profile_pin_required", code, reason)
+	}
+	if p, err := f.q.GetDefaultProfile(context.Background(), f.userID); err != nil || p == nil || p.ID != f.parent.ID {
+		t.Fatalf("the refused re-default moved the default: %+v (err %v)", p, err)
+	}
+	if code, _, body := f.call(t, f.h.SetDefault, http.MethodPost, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Errorf("re-defaulting onto the locked kid with its PIN: %d %s", code, body)
+	}
+}
+
 // TestAStaleSessionActsAsTheMostRestrictiveProfile: the hourly purge deleted
 // revoked session rows while their access tokens were still valid, and the
 // lookup then fell back to the account default, so a kid's stale token could
@@ -269,4 +412,33 @@ func errorReasonOf(rr *httptest.ResponseRecorder) string {
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &env)
 	return env.Error.Reason
+}
+
+// TestAProfilesDeleteTakesEverySessionBoundToIt: DeleteProfile deleted the
+// profile's sessions and then the profile, so a session bound to it in
+// between (a token refresh, or a switch) kept its row, and the profile's
+// delete nulled its binding onto the account default. The binding's foreign
+// key now cascades, so the profile's own delete takes every bound row.
+func TestAProfilesDeleteTakesEverySessionBoundToIt(t *testing.T) {
+	f := newLockFixture(t)
+	late := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, late, f.kid.ID)
+	pool := lockTestPool(t)
+	ctx := context.Background()
+	// The profile's delete alone, as if the session rows had been bound after
+	// DeleteProfile's own clean-up ran.
+	if _, err := pool.Exec(ctx, `DELETE FROM user_profiles WHERE id = $1`, f.kid.ID); err != nil {
+		t.Fatalf("delete the kid profile: %v", err)
+	}
+	var kidRows, parentRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE id = ANY($1)), count(*) FILTER (WHERE id = $2)
+		FROM refresh_tokens`, []int64{f.kidRT, late}, f.parentRT).Scan(&kidRows, &parentRows); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if kidRows != 0 {
+		t.Errorf("%d of the deleted profile's sessions survived; each would act as the account default", kidRows)
+	}
+	if parentRows != 1 {
+		t.Errorf("the parent's session is gone (%d rows); only the deleted profile's should be", parentRows)
+	}
 }

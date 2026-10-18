@@ -193,6 +193,8 @@ class AuroraClient(val origin: HttpUrl, val cookies: SessionCookies) {
         return AuroraClient(origin, cookies.nextSession())
     }
     suspend fun profiles(): List<Profile> = list("/api/profiles/")
+    // The profile this session is bound to on the server.
+    suspend fun activeProfile(): Profile = get("/api/profiles/active")
     // A locked profile needs `pin`, or the account `password` in its place;
     // without one the server refuses with reason profile_pin_required.
     suspend fun activate(profile: Profile, pin: String? = null, password: String? = null): Unit = withContext(Dispatchers.IO) {

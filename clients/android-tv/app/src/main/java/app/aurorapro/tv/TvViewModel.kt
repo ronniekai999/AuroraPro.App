@@ -27,6 +27,10 @@ data class TvState(
     val user: User? = null,
     val profiles: List<Profile> = emptyList(),
     val profile: Profile? = null,
+    // The profile the server session is bound to, when known: read at sign-in
+    // and set by each accepted activation. Its PIN is never asked for, because
+    // the server does not check it (any digits would pass).
+    val boundProfileId: Long? = null,
     val profileReturnPage: Page? = null,
     val home: HomeData? = null,
     val items: List<Media> = emptyList(),
@@ -117,7 +121,10 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         val api = requireNotNull(client)
         var profiles = api.profiles()
         if (profiles.isEmpty()) profiles = listOf(api.createDefaultProfile(user.username))
-        update { it.copy(page = Page.PROFILES, user = user, profiles = profiles, profile = null, profileReturnPage = null, grant = null) }
+        // Unknown on a failed read, which only means the prompt asks as before.
+        val bound = try { api.activeProfile().id } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+        update { it.copy(page = Page.PROFILES, user = user, profiles = profiles, profile = null, boundProfileId = bound,
+            profileReturnPage = null, grant = null) }
     }
 
     private suspend fun newAuthenticationAttempt(): AuroraClient {
@@ -161,7 +168,8 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     fun selectProfile(profile: Profile) {
         if (state.value.busy) return
         // A locked profile asks first; the session's own profile never does.
-        if (profile.hasPin && state.value.profile?.id != profile.id) {
+        val bound = profile.id == state.value.profile?.id || profile.id == state.value.boundProfileId
+        if (profile.hasPin && !bound) {
             update { it.copy(pinPrompt = profile, pinError = null, error = null) }
             return
         }
@@ -205,11 +213,16 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
                 "profile_pin_locked" -> "Too many wrong attempts. Try again in 15 minutes."
                 else -> throw e
             }
+            // Put back the content cleared above too, so Back from the picker
+            // returns to the page as it was rather than an empty one.
             update { it.copy(pinPrompt = profile, pinError = refusal,
-                profile = before.profile, profileReturnPage = before.profileReturnPage) }
+                profile = before.profile, profileReturnPage = before.profileReturnPage,
+                home = before.home, items = before.items, detail = before.detail, query = before.query,
+                searchKind = before.searchKind, browsePage = before.browsePage, browseGenre = before.browseGenre,
+                browseSort = before.browseSort, genres = before.genres) }
             return@perform
         }
-        update { it.copy(page = Page.HOME, profile = profile, pinPrompt = null, pinError = null) }
+        update { it.copy(page = Page.HOME, profile = profile, boundProfileId = profile.id, pinPrompt = null, pinError = null) }
         awaitPlaybackSave()
         val home = api.home(profile.id)
         update { it.copy(home = home) }

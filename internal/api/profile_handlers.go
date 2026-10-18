@@ -134,11 +134,11 @@ type actingProfileResolver interface {
 }
 
 // denyRestrictedSession refuses an account-level action from a session acting
-// as a restricted profile, writing a 403 profile_restricted and returning
-// true. It fails closed: a resolve error refuses too. Linking a sign-in
-// identity is one such action: a fresh sign-in through it lands on the
-// account default without that profile's PIN.
-func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store actingProfileResolver, claims *auth.JWTClaims) bool {
+// as a restricted profile, writing a 403 profile_restricted that names the
+// action and returning true. It fails closed: a resolve error refuses too.
+// Linking a sign-in identity is one such action: a fresh sign-in through it
+// lands on the account default without that profile's PIN.
+func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store actingProfileResolver, claims *auth.JWTClaims, action string) bool {
 	acting, err := store.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		slog.Warn("resolve acting profile failed", "user_id", claims.UserID, "error", err)
@@ -147,7 +147,7 @@ func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store actingP
 	}
 	if acting.MaxAgeRating != "" {
 		writeErrorReason(w, http.StatusForbidden, "profile_restricted",
-			"switch to a profile without a content rating limit to manage sign-in methods")
+			"switch to a profile without a content rating limit to "+action)
 		return true
 	}
 	return false
@@ -169,11 +169,18 @@ type unlockRequest struct {
 //
 // A PIN attempt is counted before it is checked (ReserveProfilePINAttempt),
 // so concurrent guesses cannot outrun the limit, and none is checked during a
-// lockout. The account password has its own per-account budget instead
-// (passwordLimiter), and a PIN lockout does not block it: the password is the
-// recovery path, and if PIN guesses could lock it too, anyone on the account
-// could keep the owner out indefinitely with one wrong guess per lockout.
-func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, profile *models.UserProfile, req unlockRequest) bool {
+// lockout. The account password has its own budget instead (passwordLimiter),
+// and a PIN lockout does not block it: the password is the recovery path, and
+// if PIN guesses could lock it too, anyone on the account could keep the
+// owner out indefinitely with one wrong guess per lockout.
+//
+// The password budget is per account AND acting profile. Per account alone,
+// a kid's session spending it every 15 minutes kept the owner's password out
+// of every session. Per session, a kid could multiply it by pairing devices.
+// Keyed by the acting profile, a restricted session spends only its own
+// profile's budget (and that of any unlocked profile it can switch into),
+// and every session it can open acts as that profile.
+func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, acting, profile *models.UserProfile, req unlockRequest) bool {
 	ctx := r.Context()
 	if h.authSvc == nil {
 		writeError(w, http.StatusInternalServerError, "profile lock check unavailable")
@@ -211,7 +218,7 @@ func (h *ProfileHandler) checkUnlock(w http.ResponseWriter, r *http.Request, pro
 		if st.Hash == "" {
 			return true
 		}
-		if h.passwordLimiter != nil && !h.passwordLimiter.Allow(strconv.FormatInt(profile.UserID, 10)) {
+		if h.passwordLimiter != nil && !h.passwordLimiter.Allow(strconv.FormatInt(profile.UserID, 10)+":"+strconv.FormatInt(acting.ID, 10)) {
 			writeLockout(w, time.Now().Add(profilePasswordWindow))
 			return false
 		}
@@ -528,7 +535,8 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
+	acting, ok := h.requireUnrestricted(w, r, claims)
+	if !ok {
 		return
 	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -544,6 +552,17 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	}
 	if profile.UserID != claims.UserID {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	// A session with no binding acts as the default, so making a locked
+	// profile the default hands it to every such session without its PIN.
+	// It needs the PIN or the password, like activating it.
+	var unlock unlockRequest
+	if err := decodeOptionalJSON(w, r, &unlock); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if profile.HasPIN && acting.ID != profile.ID && !h.checkUnlock(w, r, acting, profile, unlock) {
 		return
 	}
 
@@ -596,7 +615,7 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		if !ok {
 			return
 		}
-		if acting.ID != profile.ID && !h.checkUnlock(w, r, profile, unlock) {
+		if acting.ID != profile.ID && !h.checkUnlock(w, r, acting, profile, unlock) {
 			return
 		}
 	}
@@ -683,10 +702,11 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-	if _, ok := h.requireUnrestricted(w, r, claims); !ok {
+	acting, ok := h.requireUnrestricted(w, r, claims)
+	if !ok {
 		return
 	}
-	if profile.HasPIN && !h.checkUnlock(w, r, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password}) {
+	if profile.HasPIN && !h.checkUnlock(w, r, acting, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password}) {
 		return
 	}
 	if h.authSvc == nil {

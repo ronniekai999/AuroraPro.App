@@ -140,7 +140,7 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if denyRestrictedSession(w, r, h.queries, claims) {
+	if denyRestrictedSession(w, r, h.queries, claims, "manage sign-in methods") {
 		return
 	}
 	provider, ok := h.resolveProvider(r)
@@ -246,7 +246,7 @@ func (h *OAuthHandler) Unlink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if denyRestrictedSession(w, r, h.queries, claims) {
+	if denyRestrictedSession(w, r, h.queries, claims, "manage sign-in methods") {
 		return
 	}
 	provider, ok := h.resolveProvider(r)

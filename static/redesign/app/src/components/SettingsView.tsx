@@ -752,12 +752,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         <div className="md:col-span-2">
           {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
-          {/* A restricted session cannot link or unlink sign-in methods (the
-              server refuses: a fresh sign-in through a new link would land on
-              the account default without its PIN). */}
-          {isRestrictedProfile(activeProfile)
-            ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Sign-in methods can only be managed from a profile without a content limit.</p>
-            : <ConnectedAccountsCard onToast={onToast} />}
+          <SignInMethodsCard activeProfile={activeProfile ?? null} onToast={onToast} />
         </div>
 
         <div className="md:col-span-2">
@@ -978,6 +973,18 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
 // On mount it also consumes a ?linked=<provider> marker left by the link-mode
 // callback redirect: shows a success toast and strips the param so a refresh
 // doesn't re-toast.
+// A restricted session cannot link or unlink sign-in methods (the server
+// refuses: a fresh sign-in through a new link would land on the account
+// default without its PIN), so it gets a note instead of the card.
+export function SignInMethodsCard({ activeProfile, onToast }: {
+  activeProfile: Profile | null
+  onToast?: (message: string, type?: Toast['type']) => void
+}) {
+  return isRestrictedProfile(activeProfile)
+    ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Sign-in methods can only be managed from a profile without a content limit.</p>
+    : <ConnectedAccountsCard onToast={onToast} />
+}
+
 function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?: Toast['type']) => void }) {
   const [links, setLinks] = useState<OAuthLinksResponse | null>(null)
   const [err, setErr] = useState<string | null>(null)

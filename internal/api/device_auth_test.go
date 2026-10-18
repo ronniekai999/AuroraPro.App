@@ -24,11 +24,15 @@ type deviceTestStore struct {
 	created    []models.RefreshToken
 	failCreate bool
 	acting     *models.UserProfile // nil: an unrestricted acting profile
+	failActing bool
 }
 
 func (s *deviceTestStore) ResolveActingProfile(_ context.Context, userID, _ int64) (*models.UserProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failActing {
+		return nil, errors.New("database down")
+	}
 	if s.acting != nil {
 		p := *s.acting
 		return &p, nil
@@ -322,5 +326,23 @@ func TestDevicePairing_RestrictedApproverBindsTheDevice(t *testing.T) {
 				t.Errorf("paired device session bound to %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDevicePairing_FailsClosedWhenTheActingProfileIsUnknown: the device is
+// bound to the approver's acting profile, so an approval that cannot read it
+// must not go through and pair the device as the account default.
+func TestDevicePairing_FailsClosedWhenTheActingProfileIsUnknown(t *testing.T) {
+	h, store := deviceTestHandler()
+	store.failActing = true
+	secret, grant, err := h.grants.start("Kid's phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true); w.Code != http.StatusInternalServerError {
+		t.Fatalf("authorize with the acting profile unknown: %d %s, want 500", w.Code, w.Body)
+	}
+	if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false); len(store.created) != 0 {
+		t.Errorf("the refused approval still paired the device: poll %d %s, sessions %d", w.Code, w.Body, len(store.created))
 	}
 }
