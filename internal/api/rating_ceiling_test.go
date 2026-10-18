@@ -466,7 +466,8 @@ func TestMediaRecent_ServerDerivedCeiling(t *testing.T) {
 	}
 	// Dated two hours ahead, so rows other tests insert at NOW() meanwhile
 	// cannot push these out of the 50-row window; hours, not years, so a row a
-	// killed run leaks ages out of the newest pages within a day. The db
+	// killed run leaks ages out of the newest pages within a day or so (the R
+	// movie, moved to +30h below, within 30 hours). The db
 	// package's Recently-added test dates rows ahead too, some further, and
 	// both tests check those by class so neither depends on the other's dates.
 	rcDateRows(t, "2 hours", []int64{f.movieID, f.showID, allowed.ID, unrated.ID})

@@ -127,9 +127,10 @@ func TestGetRecentMediaCeilingAppliesBeforeDedup(t *testing.T) {
 	token := randomSuffix(t)
 	tmdbID := uniqueTMDBID(t)
 
-	// Dated 20 hours ahead, above every other Recently-added fixture, so rows
-	// other tests date ahead cannot push these out of the 50-row window. The
-	// sibling test above restricts to G, so this PG row never enters its page.
+	// Dated 20 hours ahead, above every other Recently-added fixture but the
+	// api test's single R row at +30h, so rows other tests date ahead cannot
+	// push these out of the 50-row window. The sibling test above restricts to
+	// G, so this PG row never enters its page.
 	richR := seedRecentCeilingItem(t, q, libA, token, recentCeilingItem{rating: ratingPtr("R"), hours: 20, tmdbID: tmdbID, rich: true})
 	plainPG := seedRecentCeilingItem(t, q, libB, token, recentCeilingItem{rating: ratingPtr("PG"), hours: 20, tmdbID: tmdbID})
 
