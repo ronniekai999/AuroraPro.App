@@ -285,9 +285,11 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 // is computed once per row. The index serves only an ordering that LEADS with
 // the bare form; PostgreSQL 17+ will use it for `ORDER BY <bare>, m.id` with
 // an incremental sort, so any tiebreaker must follow the non-bare key. Every
-// plan left for the retry is exact (a sequential, bitmap or btree scan of the
-// partial embedding index that applies the filters, then a sort), whatever
-// the session's planner settings and however PostgreSQL caches the statement.
+// plan left for the retry is exact: some scan that applies the filters
+// (sequential or parallel, or a bitmap or btree scan of whichever index the
+// planner picks, the partial embedding index among them), then a sort. That
+// holds whatever the session's planner settings and however PostgreSQL caches
+// the statement.
 // It must stay a separate SQL text. The first version re-ran the same text
 // with SET LOCAL enable_indexscan = off, which pgx's statement cache defeated:
 // after five executions PostgreSQL may switch a prepared statement to a

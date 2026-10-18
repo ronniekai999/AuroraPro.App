@@ -135,7 +135,8 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   filters apply to only about `hnsw.ef_search` (100) candidates, so a selective
   filter comes back short. A short page is re-run once as an exact scan; a full
   page is as approximate as an unfiltered ANN query of that depth. The retry
-  is a separate SQL text ordered by `exactOrder`, which the index cannot serve.
+  is a separate SQL text that selects `exactDistance` and orders by that
+  column, which the index cannot serve.
   Never retry the same text under changed planner settings: a cached generic
   plan ignores them. A retry that fails (other than by cancellation) returns
   the short page. The recommender and onboarding kNN queries order by their
