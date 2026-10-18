@@ -216,9 +216,9 @@ func TestValidateAccessToken_Expired(t *testing.T) {
 
 // A token whose signature no longer matches its header and payload must be
 // rejected. The edit has to leave the token well-formed: the parser decodes
-// the header and payload before it reads the signature, so corrupting the
-// payload's base64 (as this test once did) is rejected there and passes even
-// with signature verification removed.
+// the header and payload before it reads the signature, so overwriting payload
+// characters (as this test once did, which left invalid JSON) is rejected
+// there and passes even with signature verification removed.
 func TestValidateAccessToken_Tampered(t *testing.T) {
 	svc := newTestService()
 
@@ -248,6 +248,9 @@ func TestValidateAccessToken_ForgedPayload(t *testing.T) {
 	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
+	}
+	if _, err := svc.ValidateAccessToken(tokenStr); err != nil {
+		t.Fatalf("ValidateAccessToken(original) = %v, want nil", err)
 	}
 	parts := splitJWT(tokenStr)
 	if len(parts) != 3 {
