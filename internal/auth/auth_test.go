@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -212,6 +214,11 @@ func TestValidateAccessToken_Expired(t *testing.T) {
 	}
 }
 
+// A token whose signature no longer matches its header and payload must be
+// rejected. The edit has to leave the token well-formed: the parser decodes
+// the header and payload before it reads the signature, so overwriting payload
+// characters (as this test once did, which left invalid JSON) is rejected
+// there and passes even with signature verification removed.
 func TestValidateAccessToken_Tampered(t *testing.T) {
 	svc := newTestService()
 
@@ -219,32 +226,94 @@ func TestValidateAccessToken_Tampered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
+	if _, err := svc.ValidateAccessToken(tokenStr); err != nil {
+		t.Fatalf("ValidateAccessToken(untampered) = %v, want nil", err)
+	}
 
-	// Tamper with the token payload (middle segment) to ensure signature mismatch.
-	// JWT has 3 dot-separated segments: header.payload.signature
-	// We modify the payload to reliably invalidate the signature.
+	for _, at := range []int{0, -1} {
+		tampered := tamperSignature(t, tokenStr, at)
+		if _, err := svc.ValidateAccessToken(tampered); err != ErrInvalidToken {
+			t.Errorf("ValidateAccessToken(signature byte %d flipped) = %v, want ErrInvalidToken", at, err)
+		}
+	}
+}
+
+// A payload rewritten to name another user, presented under the original
+// signature, must be rejected. The rewritten payload is valid JSON with valid
+// claims (correctly signed, it is accepted below), so the rejection can only
+// come from the signature check.
+func TestValidateAccessToken_ForgedPayload(t *testing.T) {
+	svc := newTestService()
+
+	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0, 0)
+	if err != nil {
+		t.Fatalf("GenerateAccessToken() error: %v", err)
+	}
+	if _, err := svc.ValidateAccessToken(tokenStr); err != nil {
+		t.Fatalf("ValidateAccessToken(original) = %v, want nil", err)
+	}
 	parts := splitJWT(tokenStr)
 	if len(parts) != 3 {
 		t.Fatalf("expected 3 JWT parts, got %d", len(parts))
 	}
 
-	// Flip bytes in the payload (middle segment)
-	payload := []byte(parts[1])
-	if len(payload) > 5 {
-		// Change several characters to ensure base64 corruption of the payload
-		payload[2] = 'A'
-		payload[3] = 'B'
-		payload[4] = 'C'
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
 	}
-	tampered := parts[0] + "." + string(payload) + "." + parts[2]
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	payload["user_id"] = json.RawMessage("2")
+	forged, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	signingInput := parts[0] + "." + base64.RawURLEncoding.EncodeToString(forged)
 
-	_, err = svc.ValidateAccessToken(tampered)
-	if err == nil {
-		t.Error("ValidateAccessToken() should return error for tampered token")
+	sig, err := jwt.SigningMethodHS256.Sign(signingInput, []byte(svc.cfg.JWTSecret))
+	if err != nil {
+		t.Fatalf("sign forged payload: %v", err)
 	}
-	if err != ErrInvalidToken {
-		t.Errorf("error = %v, want ErrInvalidToken", err)
+	claims, err := svc.ValidateAccessToken(signingInput + "." + base64.RawURLEncoding.EncodeToString(sig))
+	if err != nil {
+		t.Fatalf("ValidateAccessToken(forged payload, re-signed) = %v, want nil", err)
 	}
+	if claims.UserID != 2 {
+		t.Fatalf("re-signed forged payload: claims.UserID = %d, want 2", claims.UserID)
+	}
+
+	if _, err := svc.ValidateAccessToken(signingInput + "." + parts[2]); err != ErrInvalidToken {
+		t.Errorf("ValidateAccessToken(forged payload, original signature) = %v, want ErrInvalidToken", err)
+	}
+}
+
+// tamperSignature returns tok with one bit flipped in its decoded signature at
+// byte at (negative counts from the end, so -1 is the last byte), re-encoded
+// so the token stays well-formed and the parser reaches the HMAC comparison.
+// Editing the encoded characters instead is unreliable: the last character of
+// a 32-byte signature carries two unused bits that the parser's lenient
+// decoding ignores, so a swapped character there can decode to the same bytes.
+func tamperSignature(t *testing.T, tok string, at int) string {
+	t.Helper()
+	parts := splitJWT(tok)
+	if len(parts) != 3 {
+		t.Fatalf("tamperSignature: expected 3 JWT parts, got %d", len(parts))
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("tamperSignature: decode signature: %v", err)
+	}
+	i := at
+	if i < 0 {
+		i += len(sig)
+	}
+	if i < 0 || i >= len(sig) {
+		t.Fatalf("tamperSignature: byte %d out of range for a %d-byte signature", at, len(sig))
+	}
+	sig[i] ^= 0x01
+	return parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
 // splitJWT splits a JWT into its 3 dot-separated segments.
