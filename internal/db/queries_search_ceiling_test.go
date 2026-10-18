@@ -20,8 +20,9 @@ import (
 // exactScanQueries is a Queries on its own pool with index scans disabled, so
 // a kNN query is an exact sequential scan whatever the shared catalog holds.
 // With enough embedded rows the planner picks the HNSW index, whose candidate
-// window (see SemanticSearch) would make a fixture's result depend on
-// unrelated rows. That window is a documented gap, not what these tests pin.
+// window (see SemanticSearch) would make a fixture's first pass depend on
+// unrelated rows. TestSemanticSearchFillsAFilteredPageUnderTheHNSWIndex pins
+// the window's handling; these tests pin where the filter sits.
 func exactScanQueries(t *testing.T) *Queries {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -149,7 +150,7 @@ func TestSearchMediaAppliesRatingCeilingBeforeLimit(t *testing.T) {
 // the vector leg: rows nearer the query but over the ceiling (or unrated) must
 // not crowd an allowed, farther row out of the kNN page. It pins the filter's
 // placement in the query, under exact scans (exactScanQueries); the HNSW
-// candidate window SemanticSearch documents is not exercised here.
+// candidate window is TestSemanticSearchFillsAFilteredPageUnderTheHNSWIndex's.
 //
 // Every run of this test seeds the same vectors, so concurrent runs' allowed
 // rows tie with this one at distance 0.2. The restricted assertion therefore

@@ -1,0 +1,10 @@
+{
+  "sha": "c924dd79543a313d8b99875dfdec03ff01975473",
+  "verdict": "lows-only",
+  "summary": "Rebase of the reviewed commit 2c2e7ad onto main after #529 (squash) and #530 merged. No review was re-run: outside CLAUDE.md, git diff main..c924dd7 is byte-identical to the reviewed git diff 2e3d02e..2c2e7ad (cmp); in CLAUDE.md the changed lines are identical and only their context moved, because the one rebase conflict was the known-gaps list where #530 had removed the Hero.allowedRatings gap and this branch removes the HNSW gap (both are now gone). go build, go vet and go test -count=1 ./... pass on the rebased tree against PostgreSQL. The verdict carried over is the seventh pass's lows-only on 2c2e7ad (record 2c2e7adce1e3f42566acbdea165b7141cd1384a1.json); its two open lows stand: no test pins a retry for an unfiltered short page, and an exact first pass under a short filtered page runs the same scan twice.",
+  "reviewer": "independent-agent-hnsw7",
+  "findings": "2",
+  "diff_digest": "13518308bdff883011e64a19026e376d781aa84dfe63306dd5bb80001b3a065d",
+  "branch": "HEAD",
+  "recorded_at": "2026-10-18T18:45:44Z"
+}
