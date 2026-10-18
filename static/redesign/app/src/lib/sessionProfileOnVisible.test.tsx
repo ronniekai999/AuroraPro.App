@@ -90,6 +90,22 @@ describe('useSessionProfileOnVisible', () => {
     expect(view.shown()).toBe(1)
   })
 
+  // Two windows can both stay visible; a switch in one records the profile in
+  // localStorage, which the other hears about.
+  it('re-reads when another window records a switch', async () => {
+    const read = vi.fn(async () => profile(2))
+    const view = setup(read)
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'aurora_active_profile_id', newValue: '2' }))
+    })
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(view.shown()).toBe(2)
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'something_else', newValue: 'x' }))
+    })
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
   it('does not read while a switch is under way', async () => {
     const read = vi.fn(async () => profile(2))
     setup(read, { isSwitching: () => true, switchGeneration: () => 0 })

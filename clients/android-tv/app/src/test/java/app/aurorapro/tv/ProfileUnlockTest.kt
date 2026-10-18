@@ -237,6 +237,15 @@ class ProfileUnlockTest {
         assertEquals(2L, awaitState { it.page == Page.HOME }.profile?.id)
     }
 
+    // The picker's copy can predate an edit from another device.
+    @Test fun aSwitchShowsTheServersRecordOfTheProfile() {
+        activeProfile = """{"id":2,"name":"Kids renamed","max_age_rating":"G"}"""
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        val home = awaitState { it.page == Page.HOME }
+        assertEquals("Kids renamed", home.profile?.name)
+        assertEquals("G", home.profile?.maxAgeRating)
+    }
+
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {
         vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
         awaitState { it.page == Page.HOME }

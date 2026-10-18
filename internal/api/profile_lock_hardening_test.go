@@ -632,7 +632,7 @@ func TestTheLastUnrestrictedCheckWaitsForTheAccountLock(t *testing.T) {
 
 	pg := "PG"
 	done := make(chan error, 1)
-	go func() { done <- f.q.UpdateProfile(ctx, f.parent.ID, &models.UpdateProfileRequest{MaxAgeRating: &pg}) }()
+	go func() { done <- f.q.UpdateProfile(ctx, f.parent.ID, &models.UpdateProfileRequest{MaxAgeRating: &pg}, nil) }()
 	var result error
 	finished := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
@@ -1278,5 +1278,97 @@ func TestAPINRemovedAndSetAgainMidActivationIsAskedFor(t *testing.T) {
 	}
 	if got := f.acting(t, f.kidRT); got != f.kid.ID {
 		t.Errorf("the kid's session acts as %d, want still the kid (%d)", got, f.kid.ID)
+	}
+}
+
+// ceilingRace runs a profile write while another transaction holds the
+// account lock and has written ceiling to the profile `target`, uncommitted.
+// It returns the write's status and reason once that transaction commits,
+// and the target's stored ceiling then.
+func ceilingRace(t *testing.T, f *lockFixture, target int64, ceiling string, rt, profileID int64, body string) (int, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = $2 WHERE id = $1`, target, ceiling); err != nil {
+		t.Fatalf("write the ceiling: %v", err)
+	}
+	var code int
+	var reason string
+	done := make(chan error, 1)
+	go func() {
+		code, reason, _ = f.call(t, f.h.UpdateProfile, http.MethodPut, rt, profileID, body)
+		done <- nil
+	}()
+	waitForALockWait(t, pool, done, "%user_profiles%")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	<-done
+	var stored string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max_age_rating, '') FROM user_profiles WHERE id = $1`, target).Scan(&stored); err != nil {
+		t.Fatalf("read the ceiling: %v", err)
+	}
+	return code, reason, stored
+}
+
+// TestARestrictedSessionCannotPutBackATightenedLimit: a kid's edit that
+// re-sends its unchanged ceiling was checked against a read taken before any
+// lock, so a parent tightening the ceiling in between saw it put back.
+func TestARestrictedSessionCannotPutBackATightenedLimit(t *testing.T) {
+	f := newLockFixture(t)
+	code, reason, stored := ceilingRace(t, f, f.kid.ID, "G", f.kidRT, f.kid.ID, `{"name":"kiddo","max_age_rating":"PG"}`)
+	if code != http.StatusOK {
+		t.Errorf("the kid's own edit: %d %q, want 200", code, reason)
+	}
+	if stored != "G" {
+		t.Errorf("the kid's ceiling after the parent tightened it to G: %q, want G", stored)
+	}
+	if p, err := f.q.GetProfile(context.Background(), f.kid.ID); err != nil || p.Name != "kiddo" {
+		t.Errorf("the kid's name: %+v (err %v), want kiddo", p, err)
+	}
+}
+
+// TestACeilingWriteRechecksTheSessionsOwnProfile: a session judged free of a
+// limit kept that judgement while its write waited, so its own profile being
+// restricted in between did not stop it lifting another's ceiling.
+func TestACeilingWriteRechecksTheSessionsOwnProfile(t *testing.T) {
+	f := newLockFixture(t)
+	// Another profile without a limit, so the parent's may gain one.
+	guest := &models.UserProfile{UserID: f.userID, Name: "guest", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(context.Background(), guest); err != nil {
+		t.Fatalf("seed guest: %v", err)
+	}
+	code, reason, _ := ceilingRace(t, f, f.parent.ID, "PG", f.parentRT, f.kid.ID, `{"max_age_rating":""}`)
+	if code != http.StatusForbidden || reason != "profile_restricted" {
+		t.Errorf("lifting the kid's ceiling from a profile restricted meanwhile: %d %q, want 403 profile_restricted", code, reason)
+	}
+	if p, err := f.q.GetProfile(context.Background(), f.kid.ID); err != nil || p.MaxAgeRating != "PG" {
+		t.Errorf("the kid's ceiling: %+v (err %v), want still PG", p, err)
+	}
+}
+
+// TestACeilingWriteRefusesALimitChangedMeanwhile: the edit is judged against
+// the ceiling read before the lock, so one written in between is a conflict,
+// not something to overwrite.
+func TestACeilingWriteRefusesALimitChangedMeanwhile(t *testing.T) {
+	f := newLockFixture(t)
+	code, reason, stored := ceilingRace(t, f, f.kid.ID, "G", f.parentRT, f.kid.ID, `{"max_age_rating":"TV-14"}`)
+	if code != http.StatusConflict || reason != "profile_changed" {
+		t.Errorf("changing a ceiling that changed meanwhile: %d %q, want 409 profile_changed", code, reason)
+	}
+	if stored != "G" {
+		t.Errorf("the kid's ceiling: %q, want the G written meanwhile", stored)
+	}
+	// Uncontended, the same write goes through.
+	if code, _, body := f.call(t, f.h.UpdateProfile, http.MethodPut, f.parentRT, f.kid.ID, `{"max_age_rating":"TV-14"}`); code != http.StatusOK {
+		t.Errorf("the same write uncontended: %d %s", code, body)
 	}
 }

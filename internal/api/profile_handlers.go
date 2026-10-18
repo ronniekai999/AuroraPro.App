@@ -533,12 +533,31 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 				writeErrorReason(w, http.StatusForbidden, "profile_restricted", "a restricted profile cannot change its content rating limit")
 				return
 			}
+			// Unchanged, so not written. Written, the read above would be its
+			// only check, and a parent tightening the limit in between would
+			// see it put back.
+			req.MaxAgeRating = nil
 		}
 	}
+	// Anyone else's ceiling write rechecks, under the account lock, that the
+	// session's profile still has no limit and the edited one still has the
+	// limit read above.
+	var judged *db.CeilingJudgement
+	if req.MaxAgeRating != nil {
+		judged = &db.CeilingJudgement{ActingProfileID: acting.ID, Was: profile.MaxAgeRating}
+	}
 
-	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {
+	if err := h.queries.UpdateProfile(r.Context(), profileID, &req, judged); err != nil {
 		if errors.Is(err, db.ErrLastUnrestrictedProfile) {
 			denyLastUnrestricted(w)
+			return
+		}
+		if errors.Is(err, db.ErrActingProfileRestricted) {
+			writeErrorReason(w, http.StatusForbidden, "profile_restricted", "this profile now has a content rating limit")
+			return
+		}
+		if errors.Is(err, db.ErrProfileCeilingChanged) {
+			writeErrorReason(w, http.StatusConflict, "profile_changed", "this profile's content rating limit just changed; reload and try again")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to update profile")

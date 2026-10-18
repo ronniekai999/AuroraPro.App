@@ -222,9 +222,15 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
                 browseSort = before.browseSort, genres = before.genres) }
             return@perform
         }
-        update { it.copy(page = Page.HOME, profile = profile, boundProfileId = profile.id, pinPrompt = null, pinError = null) }
+        // The server's record of the profile, not the picker list's copy,
+        // which another device may have edited since it loaded (a new name,
+        // limit or PIN). The copy only when that read fails.
+        val bound = try {
+            api.activeProfile().takeIf { it.id == profile.id }
+        } catch (e: CancellationException) { throw e } catch (e: Exception) { null } ?: profile
+        update { it.copy(page = Page.HOME, profile = bound, boundProfileId = bound.id, pinPrompt = null, pinError = null) }
         awaitPlaybackSave()
-        val home = api.home(profile.id)
+        val home = api.home(bound.id)
         update { it.copy(home = home) }
     }
 

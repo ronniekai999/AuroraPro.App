@@ -1301,7 +1301,14 @@ function ProfileLockPanel({ profile, profiles, newPin, setNewPin, busy, onSave, 
           type="password"
           inputMode="numeric"
           pattern="[0-9]*"
-          autoComplete="off"
+          // Browsers ignore "off" on password fields and offer to save the
+          // PIN as the site's password, or to overwrite the saved account
+          // password with it. See ProfilePinDialog.
+          autoComplete="new-password"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
+          data-form-type="other"
           maxLength={4}
           value={newPin}
           onChange={e => setNewPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}

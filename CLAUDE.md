@@ -253,13 +253,18 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   `max_age_rating`. It may edit only its own name, avatar, language, subtitle
   and maturity settings. It cannot create, delete or re-default profiles, set
   or change a PIN, change any ceiling (re-sending its unchanged ceiling
-  passes), edit another profile's settings, or link or unlink a sign-in
-  identity (a fresh sign-in through a new link would land on the default
-  without its PIN). These checks fail closed when the acting profile cannot be
-  resolved, and refuse a session whose row is gone (401 `session_ended`,
-  `requireLiveSession`): its still-valid access token acts as the most
-  restrictive profile, which with no restricted profile left is the
-  unrestricted default.
+  passes, and is not written), edit another profile's settings, or link or
+  unlink a sign-in identity (a fresh sign-in through a new link would land on
+  the default without its PIN). These checks fail closed when the acting
+  profile cannot be resolved, and refuse a session whose row is gone (401
+  `session_ended`, `requireLiveSession`): its still-valid access token acts as
+  the most restrictive profile, which with no restricted profile left is the
+  unrestricted default. The handler's checks run before any lock, so a ceiling
+  write rechecks under the account lock (`CeilingJudgement`) that the
+  session's own profile still has no limit (403 `profile_restricted`) and the
+  edited profile still has the limit the handler read (409 `profile_changed`);
+  otherwise a parent tightening a kid's limit could see a request judged a
+  moment earlier put it back or lift it.
 - An account keeps at least one profile without a ceiling: a ceiling on its
   last one, or that profile's delete, is a 409 `last_unrestricted_profile`
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
@@ -293,10 +298,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (`MostRestrictiveUnlockedProfile`), which can be looser than a locked
   restricted approver's own, though never looser than a profile it could
   switch to without a PIN; with every profile locked the approval is a 409
-  `profile_locked` (the account password can still sign the device in). The grant waits up to ten minutes for the
-  device's poll, so the session insert rechecks under the user-row lock: a
-  grant whose profile has gained a PIN since creates nothing, and the device
-  pairs again. An approver whose own session row is gone cannot pair.
+  `profile_locked` (the account password can still sign the device in). The
+  grant waits up to ten minutes for the device's poll, so the session insert
+  rechecks under the user-row lock: a grant whose profile has gained a PIN
+  since creates nothing, and the device pairs again. An approver whose own
+  session row is gone cannot pair.
 - Clients show the server's binding, never a remembered choice: the SPA reads
   `GET /api/profiles/active` at startup (one retry, `readSessionProfile`,
   alongside the profile list) and changes its display only after activation
@@ -336,22 +342,26 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   succeeded. A failed activation (a switch, a PIN unlock, the startup
   re-selection) re-reads the binding, because a lost answer can follow a bind
   that happened. The tab-visibility re-read starts once the startup load
-  settles, and drops an answer once a switch has started since the read. The
-  TV re-lists the profiles each time its picker opens, shows the bound profile
-  as that list has it, and stays at the picker until activation succeeds, a
-  refused PIN keeps the session's own profile and the page behind the picker,
-  and it does not ask for the PIN of the profile the session is bound to (the
-  server would accept any digits) or label it locked: an unlock lasts the
-  session's life.
+  settles, also runs when another window of the browser records a switch (the
+  `storage` event on the remembered profile), and drops an answer once a
+  switch has started since the read. The TV re-lists the profiles each time
+  its picker opens, shows the server's record of the bound profile (the list's
+  copy when that read fails), and stays at the picker until activation
+  succeeds, a refused PIN keeps the session's own profile and the page behind
+  the picker, and it does not ask for the PIN of the profile the session is
+  bound to (the server would accept any digits) or label it locked: an unlock
+  lasts the session's life.
 - Known gaps:
   - The lock is only as strong as the account password, which unlocks every
     profile and can be guessed through the sign-in and password-change
     routes at about 10 tries a minute per client address each (the profile
-    budget does not cover them). The PIN prompt's password field asks browsers and the common
-    password managers not to fill it (`autocomplete="new-password"`, ignore
-    attributes), but a password saved on a browser a child uses still signs
-    in on the login page, and a manager that ignores those hints can still
-    offer it in the prompt.
+    budget does not cover them). The PIN prompt's fields and Settings' PIN
+    field ask browsers and the common password managers not to fill or save
+    them (`autocomplete="new-password"`, ignore attributes; "off" is ignored
+    on password fields), but a password saved on a browser a child uses
+    still signs in on the login page, and a browser or manager that ignores
+    those hints can still offer it in the prompt, or offer to save what was
+    typed there. None of this is tested in a real browser.
   - A switch in the web app does not close a player that is already open.
   - A profile another device edits shows its new name, ceiling and lock in
     an open web tab at the next switch or tab-visibility re-read; until then
@@ -400,8 +410,6 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A restricted session can still read and edit other profiles' watchlists
     and My Library, which check only account ownership (`?profile_id=` and
     the other routes listed under Parental rating ceiling likewise).
-  - Web tabs share one session; a tab re-reads the binding only when it
-    becomes visible, so two visible tabs can show different profiles.
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
@@ -442,13 +450,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - Nothing bounds concurrent argon2 checks server-wide (64 MiB each): one
     account can burst about five per locked profile, plus five per account
     and acting profile for the password.
-  - The room socket keeps the profile it resolved at connect, so a switch
-    made while it is open applies to its ceiling check from the next
-    connect. Sockets (party room, party sync, `/ws`) also stay open after a
-    PIN write, a profile delete or a logout ends their session, so a device
-    left on the parent's profile keeps the parent's ceiling for change-media
-    on an open room socket after the parent locks that profile, until it
-    reconnects.
+  - The room socket keeps the profile it resolved at connect, ceiling
+    included, so a switch made while it is open, or a change to that profile's
+    ceiling, applies to its ceiling check from the next connect. Sockets
+    (party room, party sync, `/ws`) also stay open after a PIN write, a
+    profile delete or a logout ends their session, so a device left on the
+    parent's profile keeps the parent's ceiling for change-media on an open
+    room socket after the parent locks that profile, until it reconnects.
 
 ### Member profiles and follows
 

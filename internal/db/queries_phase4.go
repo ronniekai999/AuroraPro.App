@@ -298,7 +298,32 @@ func (q *Queries) MostRestrictiveUnlockedProfile(ctx context.Context, userID int
 	return pick, nil
 }
 
-func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *models.UpdateProfileRequest) error {
+// CeilingJudgement is what a handler judged before writing a profile's
+// ceiling: the acting profile of the session asking, which must still have no
+// limit when the write lands, and the edited profile's ceiling as it read it
+// (raw, as GetProfile returns it).
+type CeilingJudgement struct {
+	ActingProfileID int64
+	Was             string
+}
+
+var (
+	// ErrActingProfileRestricted refuses a ceiling write whose session's own
+	// profile gained a limit after the handler judged it free of one.
+	ErrActingProfileRestricted = errors.New("the acting profile gained a content rating limit")
+	// ErrProfileCeilingChanged refuses a ceiling write whose profile's
+	// ceiling changed after the handler read it.
+	ErrProfileCeilingChanged = errors.New("the profile's content rating limit changed meanwhile")
+)
+
+// UpdateProfile writes the fields req sets. A ceiling write runs under the
+// account's user-row lock, which every ceiling write and the last-unrestricted
+// check take, and with judged it first rechecks what the handler judged: the
+// handler's checks ran before any lock, so a ceiling another session wrote in
+// between (a parent tightening a kid's, or restricting the asking session's
+// own profile) would otherwise be overwritten or lifted by a session that no
+// longer had the right to.
+func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *models.UpdateProfileRequest, judged *CeilingJudgement) error {
 	setClauses := []string{}
 	args := []interface{}{}
 	idx := 1
@@ -346,7 +371,7 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		strings.Join(setClauses, ", "), idx)
 	args = append(args, profileID)
 
-	if req.MaxAgeRating == nil || *req.MaxAgeRating == "" {
+	if req.MaxAgeRating == nil {
 		_, err := q.pool.Exec(ctx, query, args...)
 		return err
 	}
@@ -355,8 +380,33 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := keepAnUnrestrictedProfile(ctx, tx, profileID); err != nil {
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
+		WHERE p.id = $1 FOR UPDATE OF u`, profileID); err != nil {
 		return err
+	}
+	if judged != nil {
+		var actingFree bool
+		var was string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE((SELECT NULLIF(btrim(max_age_rating), '') IS NULL
+			                 FROM user_profiles WHERE id = $1), false),
+			       COALESCE((SELECT COALESCE(max_age_rating, '')
+			                 FROM user_profiles WHERE id = $2), '')`,
+			judged.ActingProfileID, profileID).Scan(&actingFree, &was); err != nil {
+			return err
+		}
+		if !actingFree {
+			return ErrActingProfileRestricted
+		}
+		if was != judged.Was {
+			return ErrProfileCeilingChanged
+		}
+	}
+	if *req.MaxAgeRating != "" {
+		if err := keepAnUnrestrictedProfile(ctx, tx, profileID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, query, args...); err != nil {
 		return err

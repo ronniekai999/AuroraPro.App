@@ -115,7 +115,11 @@ export function ProfilePinDialog({
               type="password"
               inputMode="numeric"
               pattern="[0-9]*"
-              autoComplete="off"
+              autoComplete="new-password"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
+              data-form-type="other"
               maxLength={4}
               value={value}
               disabled={busy}
@@ -132,8 +136,10 @@ export function ProfilePinDialog({
             // Never offered the saved account password: it unlocks every
             // profile, so on a browser a child uses, one click from a
             // password manager here would undo every lock. "new-password"
-            // is what browsers honour for that; the data attributes ask the
-            // common password-manager extensions to stay out as well.
+            // is what browsers honour for that ("off" is ignored on password
+            // fields, so the PIN field above uses it too); the data
+            // attributes ask the common password-manager extensions to stay
+            // out as well.
             <input
               id="profile-unlock-input"
               ref={inputRef}

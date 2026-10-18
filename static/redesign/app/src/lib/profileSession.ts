@@ -150,8 +150,8 @@ export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveP
   const { isSwitching, switchGeneration } = switching
   useEffect(() => {
     if (!enabled) return
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible' || isSwitching()) return
+    const reread = () => {
+      if (isSwitching()) return
       const generation = switchGeneration()
       const stale = () => isSwitching() || switchGeneration() !== generation
       const listed = reloadProfiles && setProfiles ? reloadProfiles().catch(() => null) : Promise.resolve(null)
@@ -162,7 +162,20 @@ export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveP
         setActiveProfileId(prev => (acting.id !== prev ? acting.id : prev))
       }).catch(() => { /* keep what we have */ })
     }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reread()
+    }
+    // A switch in another window of this browser records the profile it
+    // showed (rememberProfileId), which fires here even while both windows
+    // stay visible.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === REMEMBERED_PROFILE_KEY) reread()
+    }
     document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('storage', onStorage)
+    }
   }, [enabled, profiles, read, setActiveProfileId, isSwitching, switchGeneration, reloadProfiles, setProfiles])
 }

@@ -60,6 +60,13 @@ describe('ProfilePinDialog', () => {
     expect(field.getAttribute('data-lpignore')).toBe('true')
   })
 
+  it('keeps password managers off the PIN field too', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn(async () => {})} onCancel={vi.fn()} />)
+    const field = screen.getByLabelText('Profile PIN')
+    expect(field.getAttribute('autocomplete')).toBe('new-password')
+    expect(field.getAttribute('data-1p-ignore')).toBe('true')
+  })
+
   it('cancels without submitting', async () => {
     const onSubmit = vi.fn(async () => {})
     const onCancel = vi.fn()
