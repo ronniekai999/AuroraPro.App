@@ -189,9 +189,59 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - Watch parties: creating one applies no ceiling, and changing a party's
     media skips its ceiling check when the media or profile lookup errors or
     finds nothing; both are persisted.
-  - No PIN anywhere: any session on the account can change any of its
-    profiles' ceilings, and `ActivateProfile` checks only ownership, so a
-    restricted session can switch itself to an unrestricted profile.
+  - The profile lock (below) stops a restricted session switching profiles
+    or changing ceilings. It does not stop the reads above: `?profile_id=`
+    routes still accept any owned profile, and listings stay unfiltered.
+
+### Profile lock (PIN)
+
+Opt-in, per profile: `user_profiles.pin_hash` (migration 060), argon2id
+through `auth.Service`. Code: `internal/api/profile_handlers.go`,
+`internal/db/queries_profile_pin.go`, SPA `lib/useProfileSwitch.ts` and
+`ProfilePinDialog`, TV `TvViewModel.selectProfile`.
+
+- `ActivateProfile` into a locked profile needs its PIN or the account
+  password, unless the session already acts as it. The check runs before the
+  unbound-token branch, so no client is told a locked profile is active
+  without one. The password is the recovery path, by the owner's choice.
+- Five consecutive misses, PIN and password counted together, start a
+  15-minute lockout, in one atomic UPDATE. A success resets the count; an
+  expired lockout does not, so after the first one each miss re-locks. A
+  request with neither is 403 `profile_pin_required` and is not counted.
+  Refusals carry `error.reason` (`profile_pin_required`, `profile_pin_invalid`,
+  `profile_pin_locked` with Retry-After, `profile_restricted`).
+- A restricted session is one acting as a profile with a non-empty
+  `max_age_rating`. It may edit only its own name, avatar, language, subtitle
+  and maturity settings. It cannot create, delete or re-default profiles, set
+  or change a PIN, change any ceiling (re-sending its unchanged ceiling
+  passes), or edit another profile. These checks fail closed when the acting
+  profile cannot be resolved.
+- Device pairing approved by a restricted session binds the new device to
+  that profile, never to the account default.
+- Clients show the server's binding, never a remembered choice: the SPA reads
+  `GET /api/profiles/active` at startup and changes its display only after
+  activation resolves. It used to switch locally and activate
+  fire-and-forget, so a failed call left a kid's UI on the kid profile while
+  the server enforced the parent's ceiling. The TV stays at the picker until
+  activation succeeds.
+- Known gaps:
+  - A lock protects only the profile it is on. A restricted profile can
+    switch to any unlocked unrestricted profile; Settings warns about it.
+  - A new login binds the account default without its PIN. The password that
+    signed in already stands in for any PIN.
+  - An account with no password (OAuth-only) has no recovery for a forgotten
+    PIN short of the database. So does an account whose every profile is
+    restricted: nothing on it can lift a ceiling or create an unrestricted
+    profile.
+  - The admin role is account-level, so a restricted profile on an admin
+    account keeps every admin route.
+  - PINs are four digits. With the re-lock above, guessing averages about 50
+    days of continuous attempts, and the account password shares that budget.
+  - Web tabs share one session; a tab re-reads the binding only when it
+    becomes visible, so two visible tabs can show different profiles.
+  - The macOS client cannot switch profiles at all; it uses the session's
+    binding.
+  - Nothing tests the TV's PIN panel or Back handling on a device.
 
 ### Member profiles and follows
 
