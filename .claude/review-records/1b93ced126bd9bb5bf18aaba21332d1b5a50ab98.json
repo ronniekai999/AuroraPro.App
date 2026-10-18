@@ -1,0 +1,10 @@
+{
+  "sha": "1b93ced126bd9bb5bf18aaba21332d1b5a50ab98",
+  "verdict": "lows-only",
+  "summary": "Merge of main (d78e2c4, carrying #532) into the #533 branch, commit 1b93ced. Faithful: #532's tamperSignature(t, tok, at), TestValidateAccessToken_Tampered, _ForgedPayload and the imports are byte-identical to main; the PR's cast-token test is the reviewed d3f0207 version with its helper renamed flipSignatureBit and one accurate doc-comment clause added; nothing else in the tree differs from main. go build/vet/test -count=1 ./... pass; the four tamper/forged tests pass 300x and 50x under -race; 4,000-token helper sweeps clean. 20 mutants x 40 runs: the cast test kills every partial-compare mutant except text-prefix, case-insensitive and XOR-checksum (known lows). Low: the PR description's line about TestValidateAccessToken_Tampered is stale after #532. Informational, pre-existing on main: #532's access tests miss a minlen compare (empty signature forges any access token) and a first-and-last-byte compare; the cast test's cases would catch both.",
+  "reviewer": "independent-agent-533merge (fresh-context read-only)",
+  "findings": "1",
+  "diff_digest": "b80f75b1f34bb19ae641fccfbcb502c36219f41e8ac0983386b24878cd1dbf3a",
+  "branch": "claude/gifted-hopper-rfs4s9",
+  "recorded_at": "2026-10-18T23:14:24Z"
+}
