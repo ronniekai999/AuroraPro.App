@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -149,9 +150,9 @@ type SemanticFilter struct {
 	RuntimeMax int      // minutes; 0 = no cap
 	ExcludeIDs []int64  // e.g. items already in user history
 	// AllowedRatings is the acting profile's ceiling (AllowedRatingsForMax);
-	// nil or empty = unrestricted. No over-ceiling row is ever returned, but
-	// under the HNSW index a restricted search can return fewer than limit
-	// rows (see SemanticSearch).
+	// nil or empty = unrestricted. SemanticSearch fills a restricted page with
+	// allowed rows even under the HNSW index, through its exact retry; a retry
+	// that fails returns the short page.
 	AllowedRatings []string
 }
 
@@ -165,15 +166,28 @@ type SemanticHit struct {
 // SemanticSearch runs a kNN query against media_items.embedding using the
 // supplied vector literal (e.g. "[0.1,...]" — produced by llm.FormatVector).
 //
-// Filters are a WHERE clause, so no returned row ever fails one, but they do
-// not always run before the LIMIT. When the planner uses the HNSW index, the
-// scan yields about hnsw.ef_search candidates (100, set in pool.go) and the
-// filters apply to those; pgvector before 0.8 has no fallback, and 0.8's
-// iterative scan is off by default. A filter that rejects most of the nearest
-// neighbours therefore returns fewer than limit rows, possibly none, although
-// matching rows exist further out. A sequential scan (small or tightly
-// filtered tables) is exact. This holds for MediaType and AllowedRatings
-// alike, and for the recommender's kNN queries.
+// Filters are a WHERE clause, so no returned row ever fails one. When the
+// planner uses the HNSW index, though, the scan yields only about
+// hnsw.ef_search candidates (100, set in pool.go) and the filters apply to
+// those; pgvector before 0.8 has no fallback, and 0.8's iterative scan is off
+// by default. A filter that rejects most of the nearest neighbours (a kid
+// profile's rating ceiling on an adult-heavy catalog, a media type the catalog
+// has few of) then comes back short, possibly empty, although matching rows
+// exist further out. A limit above ef_search does the same unfiltered.
+//
+// So a short page is re-run once as an exact scan. A full page needs no
+// retry: it is as good as an unfiltered ANN query of the same depth, which is
+// approximate (HNSW recall is lowest at the tail of its window), and making
+// ANN exact is not the retry's job. A page that is short because fewer rows
+// match pays for one exact scan, filtered before any distance is computed,
+// so its cost follows the share of rows the filter passes: reviews measured
+// roughly 15-50 ms on a 20k-row catalog with a fifth of it allowed. A short
+// page under a filter that passes nearly everything scores every embedded
+// row, roughly 90-180 ms there; that is every search with a limit above
+// ef_search, including all of them if pool.go's SET hnsw.ef_search fails and
+// pgvector's default of 40 applies. If the retry fails for any reason but
+// the context ending (cancelled or past its deadline), the short page is
+// returned.
 //
 // Returns hits sorted by ascending distance. Limit defaults to 30.
 func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter SemanticFilter, limit int) ([]SemanticHit, error) {
@@ -226,24 +240,75 @@ func (q *Queries) SemanticSearch(ctx context.Context, vectorLit string, filter S
 
 	args = append(args, limit)
 
-	sql := fmt.Sprintf(`
+	query := func(distance, orderBy string) string {
+		return fmt.Sprintf(`
 		SELECT m.id, m.library_id, m.type, m.title, m.sort_title,
 		       COALESCE(m.year, 0), COALESCE(m.overview, ''),
 		       COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
 		       COALESCE(m.content_rating, ''),
 		       COALESCE(m.poster_path, ''), COALESCE(m.backdrop_path, ''),
 		       m.added_at, m.updated_at,
-		       (m.embedding <=> $1::vector) AS distance
+		       %s AS distance
 		FROM media_items m
 		WHERE %s
-		ORDER BY m.embedding <=> $1::vector
+		ORDER BY %s
 		LIMIT $%d`,
-		strings.Join(where, " AND "), argIdx,
-	)
+			distance, strings.Join(where, " AND "), orderBy, argIdx,
+		)
+	}
 
-	rows, err := q.pool.Query(ctx, sql, args...)
+	hits, err := q.semanticHits(ctx, query(annDistance, annDistance), args)
 	if err != nil {
 		return nil, fmt.Errorf("semantic search: %w", err)
+	}
+	if q.testHookSemanticFirstPass != nil {
+		hits = q.testHookSemanticFirstPass(hits)
+	}
+	if len(hits) >= limit {
+		return hits, nil
+	}
+	exact, err := q.semanticHits(ctx, query(exactDistance, "distance"), args)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("semantic search: exact retry: %w", err)
+		}
+		slog.Warn("semantic search: exact retry of a short page failed; returning the short page",
+			"rows", len(hits), "limit", limit, "error", err)
+		return hits, nil
+	}
+	return exact, nil
+}
+
+// annDistance is the ordering the HNSW index serves: a bare distance to a
+// parameter, which the first pass selects and orders by.
+//
+// The exact retry selects exactDistance, the same value through an expression
+// the index cannot serve, and orders by that selected column, so the distance
+// is computed once per row. The index serves only an ordering that LEADS with
+// the bare form; PostgreSQL 17+ will use it for `ORDER BY <bare>, m.id` with
+// an incremental sort, so any tiebreaker must follow the non-bare key. Every
+// plan left for the retry is exact: some scan that applies the filters
+// (sequential or parallel, or a bitmap or btree scan of whichever index the
+// planner picks, the partial embedding index among them), then a sort. That
+// holds whatever the session's planner settings and however PostgreSQL caches
+// the statement.
+// It must stay a separate SQL text. The first version re-ran the same text
+// with SET LOCAL enable_indexscan = off, which pgx's statement cache defeated:
+// after five executions PostgreSQL may switch a prepared statement to a
+// generic plan, costed under the settings of whichever execution builds it,
+// and a SET does not re-plan a cached plan. Once a first pass built it, every
+// retry on that connection ran the HNSW scan again and came back as short as
+// the page it was retrying.
+const (
+	annDistance   = "(m.embedding <=> $1::vector)"
+	exactDistance = "(m.embedding <=> $1::vector) + 0"
+)
+
+// semanticHits runs one SemanticSearch query.
+func (q *Queries) semanticHits(ctx context.Context, sql string, args []any) ([]SemanticHit, error) {
+	rows, err := q.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 

@@ -25,8 +25,9 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 	poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
 
 	// Bump pgvector HNSW search-list size on every connection. Default 40
-	// is below our vectorRecallSize=50 — without this, kNN queries
-	// silently truncate the candidate set and produce lower-quality results.
+	// is below our vectorRecallSize=50 — without this, every 50-row
+	// semantic page would come back short from the index, and
+	// SemanticSearch would pay for its exact retry on every search.
 	//
 	// Sequence matters: pgvector's GUC isn't registered until its shared
 	// library is loaded into the backend, which happens lazily on first
@@ -50,7 +51,7 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 			return nil
 		}
 		if _, err := conn.Exec(ctx, "SET hnsw.ef_search = 100"); err != nil {
-			slog.Warn("hnsw.ef_search SET failed (kNN quality may be degraded)",
+			slog.Warn("hnsw.ef_search SET failed (semantic search may pay for exact retries)",
 				"error", err)
 		}
 		return nil
@@ -77,8 +78,8 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 // The tuning itself is done by `pool.AfterConnect` (see NewPool comment),
 // which forces pgvector load via a `'[0]'::vector(1)` cast and then runs a
 // session-level `SET hnsw.ef_search = 100`. This function checks that the
-// session-level SET actually took effect — without it, kNN queries would
-// silently truncate candidate sets and quality-regress without any signal.
+// session-level SET actually took effect — without it, every semantic search
+// would fall back to its slower exact retry, with no other signal.
 //
 // Non-fatal: we LOG mismatches at WARN rather than fail-start, because:
 //   - pgvector may not be installed at all (e.g. CI against vanilla PG)
@@ -115,8 +116,9 @@ func VerifyVectorTuning(ctx context.Context, pool *pgxpool.Pool, expectedMin int
 		// This is the alarm. Migration 018 should have set this to >= 100;
 		// if we see the default 40 here, the migration didn't take effect
 		// (database renamed and current_database() returned something
-		// else?), and search/hero quality is silently degraded.
-		slog.Warn("hnsw.ef_search below expected minimum — kNN quality may be degraded",
+		// else?), and semantic pages larger than the window come back short
+		// from the index, so each one pays for an exact retry.
+		slog.Warn("hnsw.ef_search below expected minimum — semantic search may pay for exact retries",
 			"actual", efN, "expected_min", expectedMin,
 			"action", "check pool.AfterConnect logs for 'hnsw.ef_search SET failed'")
 		return

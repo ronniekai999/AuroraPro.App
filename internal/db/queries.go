@@ -49,6 +49,13 @@ type Queries struct {
 	// lock. Scoped to this Queries instance and nil in production, so tests
 	// can commit account revocation at that exact interleaving without races.
 	testHookBeforeRefreshUserLock func()
+
+	// Replaces SemanticSearch's first-pass hits before the short-page check.
+	// Nil in production. HNSW decides how many rows a window yields, and on a
+	// small, churned test database a dead index entry can fill it, so a
+	// short-but-not-empty first pass cannot be produced reliably through the
+	// index; this lets a test hand the check exactly that.
+	testHookSemanticFirstPass func([]SemanticHit) []SemanticHit
 }
 
 func NewQueries(pool *pgxpool.Pool) *Queries {
