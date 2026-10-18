@@ -897,6 +897,59 @@ func TestAPINWriteClearsTheLockout(t *testing.T) {
 	if attempts != 0 || locked {
 		t.Errorf("after a new PIN: %d failed attempts, lockout set %v; want 0 and none", attempts, locked)
 	}
+	// The write clears them itself: the unlock above already did, so this
+	// checks the write alone, as a write whose unlock reset failed (that
+	// failure is only logged) relies on.
+	pool := lockTestPool(t)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE user_profiles SET pin_failed_attempts = 3, pin_locked_until = NOW() + interval '1 hour' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("seed a lockout: %v", err)
+	}
+	if _, err := f.q.SetProfilePIN(context.Background(), f.userID, f.parent.ID, "another-hash", f.parentRT); err != nil {
+		t.Fatalf("write the PIN: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(),
+		`SELECT pin_failed_attempts, pin_locked_until IS NOT NULL FROM user_profiles WHERE id = $1`, f.parent.ID).Scan(&attempts, &locked); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if attempts != 0 || locked {
+		t.Errorf("after SetProfilePIN alone: %d failed attempts, lockout set %v; want 0 and none", attempts, locked)
+	}
+}
+
+// TestTheUnlockReportsThePINStateItJudged: the bind rechecks what the unlock
+// saw. A profile found without a PIN must be reported as "", so a PIN set
+// before the bind is still asked for, on every path; only the password,
+// which stands in for any PIN, reports nothing to recheck.
+func TestTheUnlockReportsThePINStateItJudged(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	check := func(req unlockRequest) (bool, *string) {
+		t.Helper()
+		profile, err := f.q.GetProfile(ctx, f.parent.ID)
+		if err != nil || profile == nil {
+			t.Fatalf("read the parent: %v", err)
+		}
+		r := rcClaimsCtx(httptest.NewRequest(http.MethodPost, "/x", nil), f.userID, f.kidRT)
+		return f.h.checkUnlockHash(httptest.NewRecorder(), r, f.kid, profile, req)
+	}
+	for name, req := range map[string]unlockRequest{
+		"a PIN":      {PIN: "1234"},
+		"a password": {Password: lockTestPassword},
+		"nothing":    {},
+	} {
+		ok, judged := check(req)
+		if !ok || judged == nil || *judged != "" {
+			t.Errorf("no PIN, unlocked with %s: ok=%v judged=%v, want ok and \"\"", name, ok, judged)
+		}
+	}
+	f.setPIN(t, "4321")
+	if ok, judged := check(unlockRequest{PIN: "4321"}); !ok || judged == nil || *judged == "" {
+		t.Errorf("the right PIN: ok=%v judged=%v, want ok and the matched hash", ok, judged)
+	}
+	if ok, judged := check(unlockRequest{Password: lockTestPassword}); !ok || judged != nil {
+		t.Errorf("the password: ok=%v judged=%v, want ok and nothing to recheck", ok, judged)
+	}
 }
 
 // TestTheMostRestrictiveUnlockedProfileSkipsLockedOnes: pairing binds a
@@ -1098,6 +1151,9 @@ func TestAnEndedSessionCannotManageProfilesOrPair(t *testing.T) {
 	}
 	if code, reason, _ := f.call(t, f.h.GetActiveProfile, http.MethodGet, ended, 0, ""); code != http.StatusUnauthorized || reason != "session_ended" {
 		t.Errorf("an ended session reading its profile: %d %q, want 401 session_ended", code, reason)
+	}
+	if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, ended, f.kid.ID, ""); code != http.StatusUnauthorized || reason != "session_ended" {
+		t.Errorf("an ended session activating an unlocked profile: %d %q, want 401 session_ended", code, reason)
 	}
 	rr := httptest.NewRecorder()
 	r := rcClaimsCtx(httptest.NewRequest(http.MethodGet, "/x", nil), f.userID, ended)

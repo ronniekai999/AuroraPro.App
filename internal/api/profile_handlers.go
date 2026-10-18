@@ -661,6 +661,12 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	// A session whose row is gone is refused the same way whichever profile
+	// it asks for, before the PIN check (which would refuse it too, but only
+	// for a locked profile).
+	if !requireLiveSession(w, r, h.sessionLive, claims) {
+		return
+	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid profile id")

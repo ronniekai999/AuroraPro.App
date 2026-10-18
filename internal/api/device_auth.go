@@ -287,14 +287,16 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The approver passes its own acting profile on to the device. A
-	// restricted approver therefore cannot raise a ceiling by pairing, and an
-	// unrestricted non-default one does not hand the device the account
-	// default, which may be a locked profile it never unlocked. A locked
-	// acting profile is not passed on either: a device acting as it would
-	// skip its PIN, so anyone at the new device could pick it. The device
-	// gets the account's most restrictive unlocked profile instead, and with
-	// every profile locked the pairing is refused (the account password can
-	// still sign the device in). Fails closed.
+	// restricted approver on an unlocked profile therefore cannot raise a
+	// ceiling by pairing, and an unrestricted non-default one does not hand
+	// the device the account default, which may be a locked profile it never
+	// unlocked. A locked acting profile is not passed on: a device acting as
+	// it would skip its PIN, so anyone at the new device could pick it. The
+	// device gets the account's most restrictive unlocked profile instead,
+	// which can be looser than a locked restricted approver's own, though
+	// never looser than a profile the approver could switch to without a
+	// PIN; with every profile locked the pairing is refused (the account
+	// password can still sign the device in). Fails closed.
 	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		writeError(w, http.StatusInternalServerError, "could not check the active profile")

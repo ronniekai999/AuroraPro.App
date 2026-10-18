@@ -39,7 +39,7 @@ export function openDoorProfiles(profiles: Profile[]): Profile[] {
   return profiles.filter(p => !p.has_pin && (!isRestrictedProfile(p) || [...restricted].some(l => l !== limit(p))))
 }
 
-export async function resolveStartupProfile({ profiles, acting, remembered, activate }: {
+export async function resolveStartupProfile({ profiles, acting, remembered, activate, reread }: {
   profiles: Profile[]
   /** The session's binding, or null when it could not be read. */
   acting: Pick<Profile, 'id'> | null
@@ -47,6 +47,8 @@ export async function resolveStartupProfile({ profiles, acting, remembered, acti
   remembered: number | null
   /** Binds a profile server-side; rejects when the server refuses. */
   activate: (id: number) => Promise<void>
+  /** Reads the binding again after a failed re-selection. */
+  reread?: () => Promise<Pick<Profile, 'id'>>
 }): Promise<number | null> {
   if (profiles.length === 0) return null
   let next = acting && profiles.some(p => p.id === acting.id) ? acting.id : null
@@ -55,7 +57,16 @@ export async function resolveStartupProfile({ profiles, acting, remembered, acti
     try {
       await activate(want.id)
       next = want.id
-    } catch { /* keep the server's binding */ }
+    } catch {
+      // Keep the server's binding. A lost answer can follow a bind that
+      // happened, so read it again; unreadable, it is unknown.
+      if (reread) {
+        try {
+          const now = await reread()
+          next = profiles.some(p => p.id === now.id) ? now.id : null
+        } catch { next = null }
+      }
+    }
   }
   // The binding is unknown when it could not be read, or names a profile the
   // list does not hold. With one profile there is nothing to guess. With
@@ -98,7 +109,7 @@ export async function loadStartupProfiles({ list, read, activate, remembered, si
   try { profiles = await list() } catch { return null }
   const acting = await readSessionProfile(read, retryMs)
   if (signal?.aborted) return null
-  const activeId = await resolveStartupProfile({ profiles, acting, remembered, activate })
+  const activeId = await resolveStartupProfile({ profiles, acting, remembered, activate, reread: read })
   if (signal?.aborted) return null
   return { profiles, activeId, askForProfile: activeId === null && profiles.length > 1 }
 }
@@ -119,15 +130,19 @@ export async function readSessionProfile(
 /** Tabs share one session, so a switch in another tab moves this tab's
  * server binding too. Re-reads the binding whenever the tab comes back into
  * view and shows it, unless a switch is under way or started while the read
- * was in flight (that switch owns the answer), or the binding names a profile
- * the list doesn't hold (it waits for the next profile load). */
-export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveProfileId, switching }: {
+ * was in flight (that switch owns the answer). A binding to a profile the
+ * list doesn't hold (another tab created it) re-lists the profiles first and
+ * shows it if the new list has it. */
+export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveProfileId, switching, reloadProfiles, setProfiles }: {
   enabled: boolean
   profiles: Profile[]
   read: () => Promise<Profile>
   setActiveProfileId: (update: (prev: number | null) => number | null) => void
   /** isSwitching and switchGeneration from useProfileSwitch. */
   switching: { isSwitching: () => boolean; switchGeneration: () => number }
+  /** Lists the account's profiles again, and stores the list. */
+  reloadProfiles?: () => Promise<Profile[]>
+  setProfiles?: (profiles: Profile[]) => void
 }) {
   const { isSwitching, switchGeneration } = switching
   useEffect(() => {
@@ -135,13 +150,20 @@ export function useSessionProfileOnVisible({ enabled, profiles, read, setActiveP
     const onVisible = () => {
       if (document.visibilityState !== 'visible' || isSwitching()) return
       const generation = switchGeneration()
-      void read().then(acting => {
-        if (!acting || isSwitching() || switchGeneration() !== generation) return
-        if (!profiles.some(p => p.id === acting.id)) return
+      const stale = () => isSwitching() || switchGeneration() !== generation
+      void read().then(async acting => {
+        if (!acting || stale()) return
+        if (!profiles.some(p => p.id === acting.id)) {
+          if (!reloadProfiles || !setProfiles) return
+          const list = await reloadProfiles()
+          if (stale()) return
+          setProfiles(list)
+          if (!list.some(p => p.id === acting.id)) return
+        }
         setActiveProfileId(prev => (acting.id !== prev ? acting.id : prev))
       }).catch(() => { /* keep what we have */ })
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [enabled, profiles, read, setActiveProfileId, isSwitching, switchGeneration])
+  }, [enabled, profiles, read, setActiveProfileId, isSwitching, switchGeneration, reloadProfiles, setProfiles])
 }

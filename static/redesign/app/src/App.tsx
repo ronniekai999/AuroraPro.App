@@ -2308,6 +2308,16 @@ export default function App() {
   // the binding is unknown, or the profile list failed to load, nothing
   // personalized loads at all.
   const personalProfileReady = activeProfileId !== null || (profilesLoaded && profiles.length === 0)
+  // The startup profile load has finished, whatever it found (a binding, no
+  // binding to read, or no list at all).
+  const [profilesSettled, setProfilesSettled] = useState(false)
+  // The catalog (Home's core rails, the browse grids) waits for the binding
+  // to be read, unless it cannot be: the server filters it by the session's
+  // profile, and startup can re-select a remembered profile, so a catalog
+  // fetched before then is cleared by the switch reset and fetched again.
+  // When the profile list fails, or the binding is unreadable and the picker
+  // is up, it loads anyway, as it did before.
+  const catalogProfileSettled = activeProfileId !== null || profilesSettled
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2737,7 +2747,7 @@ export default function App() {
   // Load profiles once the user is logged in, and take the active profile
   // from the server's session binding rather than the remembered one.
   useEffect(() => {
-    if (!user) { setProfiles([]); setProfilesLoaded(false); setActiveProfileId(null); return }
+    if (!user) { setProfiles([]); setProfilesLoaded(false); setProfilesSettled(false); setActiveProfileId(null); return }
     const ac = new AbortController()
     void loadStartupProfiles({
       list: () => listProfiles(ac.signal),
@@ -2746,15 +2756,17 @@ export default function App() {
       remembered: rememberedProfileIdRef.current,
       signal: ac.signal,
     }).then(result => {
+      if (ac.signal.aborted) return
+      setProfilesSettled(true)
       // No list: profile features just stay disabled.
-      if (!result || ac.signal.aborted) return
+      if (!result) return
       setProfiles(result.profiles)
       setActiveProfileId(result.activeId)
       setProfilesLoaded(true)
       // The binding could not be read: ask rather than guess. The pick binds
       // the session.
       if (result.askForProfile) setProfilesGateForced(true)
-    })
+    }).catch(() => { if (!ac.signal.aborted) setProfilesSettled(true) })
     return () => ac.abort()
   }, [user])
   // `null` rails = not yet fetched. Empty arrays inside rails are
@@ -2802,15 +2814,21 @@ export default function App() {
   // (Enter), not per-keystroke, to bound LLM cost.
   const [convoQuery, setConvoQuery] = useState('')
   const [convoResults, setConvoResults] = useState<Media[]>([])
+  // Counts runs; only the latest one's answer lands, and a profile switch or
+  // sign-out bumps it so an answer fetched under the old session is dropped.
+  const convoGenRef = useRef(0)
   const runConversational = useCallback((q: string) => {
     const query = q.trim()
+    const gen = ++convoGenRef.current
     if (!query) { setConvoQuery(''); setConvoResults([]); return }
     setConvoQuery(query)
     setConvoLoading(true)
     void searchMedia(query, 12, undefined, 'semantic').then(res => {
+      if (gen !== convoGenRef.current) return
       setConvoResults(res.items as Media[])
       setConvoLoading(false)
     }).catch(() => {
+      if (gen !== convoGenRef.current) return
       setConvoLoading(false)
       /* keep prior results; the input retains the query */
     })
@@ -2946,8 +2964,10 @@ export default function App() {
   })
   const { pinTarget, switchProfile, unlock: unlockProfile, cancelPin } = profileSwitch
 
+  const reloadProfiles = useCallback(() => listProfiles(), [])
   useSessionProfileOnVisible({
     enabled: !!user, profiles, read: readSessionBinding, setActiveProfileId, switching: profileSwitch,
+    reloadProfiles, setProfiles,
   })
 
   // Hydrate a /title/:id deep link (cold load, refresh, forward-button,
@@ -3817,6 +3837,10 @@ export default function App() {
     // would recompose user B's home with user A's feed spliced in.
     followingRailRef.current = []
     setContinueItems([])
+    convoGenRef.current++
+    setConvoQuery('')
+    setConvoResults([])
+    setConvoLoading(false)
     setMoviesList(null)
     setShowsList(null)
     setMoviesTotal(null)
@@ -4083,13 +4107,27 @@ export default function App() {
   }, [activeProfileId, personalProfileReady, refetchDiscover, addToast])
 
   useEffect(() => {
-    if (!user) return
+    if (!user || !catalogProfileSettled) return
     const ac = new AbortController()
     let cancelled = false
     ;(async () => {
+      // The rails on screen belong to another profile (or none yet).
+      const profileChanged = shouldResetPersonalizedRails(railsProfileRef.current, activeProfileId)
       // Cold = nothing on screen yet. Captured BEFORE the attempt stamp below,
-      // because that stamp is what makes a load stop looking cold.
-      const cold = lastHomeLoadRef.current === 0
+      // because that stamp is what makes a load stop looking cold. A profile
+      // switch is cold too: the previous profile's rails come down now, not
+      // when the new ones land, so a slow or failed load shows the skeleton or
+      // the error rather than titles fetched under the old profile's ceiling.
+      const cold = lastHomeLoadRef.current === 0 || profileChanged
+      if (profileChanged) {
+        setHomeRails(undefined)
+        coreRailsRef.current = []
+        discoverRailsRef.current = []
+        anchorRailsRef.current = []
+        engagementRailsRef.current = []
+        followingRailRef.current = []
+        setDiscoverBuilding(false)
+      }
       // Stamp on ATTEMPT, not on success. Stamping only after the fetch
       // resolved left the staleness gate armed for the whole load, so every return
       // to Home during a slow one aborted and restarted it — six bounces during
@@ -4185,7 +4223,6 @@ export default function App() {
         // most-visited screen in the app. Keeping them lets recomposeHomeRails
         // splice the fresh core in underneath, and each personalized source
         // overwrites its own buffer as it re-resolves.
-        const profileChanged = shouldResetPersonalizedRails(railsProfileRef.current, activeProfileId)
         railsProfileRef.current = activeProfileId
         coreRailsRef.current = coreRails
         if (profileChanged) {
@@ -4257,7 +4294,7 @@ export default function App() {
       cancelled = true
       ac.abort()
     }
-  }, [user, retryNonce, activeProfileId, personalProfileReady, homeReloadNonce])
+  }, [user, retryNonce, activeProfileId, personalProfileReady, homeReloadNonce, catalogProfileSettled])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -4311,7 +4348,7 @@ export default function App() {
   }, [view])
 
   useEffect(() => {
-    if (!user || view !== 'movies' || moviesList !== null) return
+    if (!user || view !== 'movies' || moviesList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
     // Server-side sort + genre — single source of truth. Client-side
@@ -4339,7 +4376,10 @@ export default function App() {
     // moviesSort + moviesGenre included in deps so changes (which
     // clear moviesList to null via the handlers below) re-run this
     // effect with the new filter set.
-  }, [user, view, moviesList, moviesSort, moviesGenre, nextToastId])
+    // activeProfileId too: a first page still in flight when the profile
+    // changes is aborted and fetched again (the reset leaves a null list
+    // null, which alone would not re-run this).
+  }, [user, view, moviesList, moviesSort, moviesGenre, nextToastId, activeProfileId, catalogProfileSettled])
 
   // One-time fetch of the canonical genre catalog per browse view.
   // Doesn't need to re-fire on sort/page changes — genre set doesn't
@@ -4356,7 +4396,7 @@ export default function App() {
   }, [user, view, moviesGenres])
 
   useEffect(() => {
-    if (!user || view !== 'shows' || showsList !== null) return
+    if (!user || view !== 'shows' || showsList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
     listMediaWithTotal({
@@ -4375,7 +4415,7 @@ export default function App() {
         setToasts(prev => [...prev, { id, message: 'Failed to load shows', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, showsList, showsSort, showsGenre, nextToastId])
+  }, [user, view, showsList, showsSort, showsGenre, nextToastId, activeProfileId, catalogProfileSettled])
 
   useEffect(() => {
     if (!user || view !== 'shows' || showsGenres !== null) return
@@ -5412,14 +5452,16 @@ export default function App() {
     setHomeHero(null)
     setHomeHeroIsFallback(false)
   }, [activeProfileId])
-  // A switch also drops the browse grids and an open title. The server
-  // filters both by the session's profile when they are fetched, and App
-  // keeps the Movies and Shows grids for the session, so the new profile
-  // kept the old one's titles and Load More appended its own pages to them.
-  // An open title goes back through the /title/:id hydration, which asks the
-  // server again and leaves for Home if the new profile may not see it.
-  // Search, collections, the calendar and member pages remount on a switch
-  // (their keys below).
+  // A switch also drops everything else App keeps that the server filtered
+  // by the previous profile: the browse grids, Continue Watching, the
+  // conversational rail and My Library (each refetches for the new profile;
+  // a failed fetch leaves it empty rather than the old profile's), and an
+  // open title, which goes back through the /title/:id hydration, asks the
+  // server again and leaves for Home if the new profile may not see it. The
+  // grids used to keep the old profile's titles for the session, with Load
+  // More appending the new profile's pages to them. Home's rails come down
+  // in the home-rails effect, which loads cold on a switch. Search,
+  // collections, the calendar and member pages remount (their keys below).
   const resetForProfileChange = useCallback(() => {
     moviesLoadMoreAcRef.current?.abort()
     moviesLoadMoreAcRef.current = null
@@ -5433,6 +5475,12 @@ export default function App() {
     setShowsNextPage(1)
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
+    setContinueItems([])
+    convoGenRef.current++
+    setConvoQuery('')
+    setConvoResults([])
+    setConvoLoading(false)
+    setLibrary([])
     if (viewRef.current === 'detail') setSelectedMedia(null)
   }, [])
   useOnProfileChange(activeProfileId, resetForProfileChange)

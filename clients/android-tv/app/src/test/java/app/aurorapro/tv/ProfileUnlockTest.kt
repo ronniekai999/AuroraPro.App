@@ -209,6 +209,34 @@ class ProfileUnlockTest {
         assertEquals(2L, awaitState { it.page == Page.HOME }.profile?.id)
     }
 
+    // A switch from a profile on screen, not only the first pick after sign-in
+    // (where nothing is shown yet): the old profile and its Home come down
+    // while the activation is pending.
+    @Test fun aSwitchHidesThePreviousProfileWhileTheActivationIsPending() {
+        vm.selectProfile(parent())
+        awaitState { it.pinPrompt != null }
+        vm.submitUnlock("1234", usePassword = false)
+        val onParent = awaitState { it.page == Page.HOME && it.home != null }
+        assertEquals(1L, onParent.profile?.id)
+        vm.navigate(Page.PROFILES)
+        awaitState { it.page == Page.PROFILES }
+        val hold = java.util.concurrent.CountDownLatch(1)
+        holdKid = hold
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        val deadline = System.currentTimeMillis() + 5_000
+        while (activations.none { it.first == "/api/profiles/2/activate" }) {
+            shadowOf(Looper.getMainLooper()).idle()
+            check(System.currentTimeMillis() < deadline) { "the activation never reached the server" }
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        val pending = vm.state.value
+        assertNull("No profile shown while the switch is pending", pending.profile)
+        assertNull("No Home of the previous profile while the switch is pending", pending.home)
+        hold.countDown()
+        assertEquals(2L, awaitState { it.page == Page.HOME }.profile?.id)
+    }
+
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {
         vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
         awaitState { it.page == Page.HOME }

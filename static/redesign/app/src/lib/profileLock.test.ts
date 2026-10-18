@@ -110,6 +110,21 @@ describe('resolveStartupProfile', () => {
     expect(await resolveStartupProfile({ profiles, acting: parent, remembered: 2, activate: refuse })).toBe(1)
   })
 
+  it('reads the binding again when a re-selection fails', async () => {
+    const lost = vi.fn(async () => { throw new TypeError('Failed to fetch') })
+    // The bind happened; only its answer was lost.
+    expect(await resolveStartupProfile({
+      profiles, acting: parent, remembered: 2, activate: lost, reread: async () => kid,
+    })).toBe(2)
+    expect(await resolveStartupProfile({
+      profiles, acting: parent, remembered: 2, activate: lost, reread: async () => parent,
+    })).toBe(1)
+    // Unreadable: the binding is unknown, so the host asks.
+    expect(await resolveStartupProfile({
+      profiles, acting: parent, remembered: 2, activate: lost, reread: async () => { throw new Error('down') },
+    })).toBeNull()
+  })
+
   it('never re-selects a remembered locked profile without its PIN', async () => {
     const activate = vi.fn(async () => {})
     expect(await resolveStartupProfile({ profiles, acting: kid, remembered: 1, activate })).toBe(2)

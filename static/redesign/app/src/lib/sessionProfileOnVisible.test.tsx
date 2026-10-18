@@ -8,11 +8,15 @@ import { readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible 
 const profile = (id: number): Profile => ({ id, user_id: 1, name: `p${id}`, is_default: id === 1, created_at: '', updated_at: '' })
 const profiles = [profile(1), profile(2)]
 
-function setup(read: () => Promise<Profile>, switching = { isSwitching: () => false, switchGeneration: () => 0 }) {
+function setup(read: () => Promise<Profile>, switching = { isSwitching: () => false, switchGeneration: () => 0 },
+  reloadProfiles?: () => Promise<Profile[]>) {
   let shown: number | null = 1
   const setActiveProfileId = vi.fn((update: (prev: number | null) => number | null) => { shown = update(shown) })
-  renderHook(() => useSessionProfileOnVisible({ enabled: true, profiles, read, setActiveProfileId, switching }))
-  return { shown: () => shown, setActiveProfileId }
+  const setProfiles = vi.fn()
+  renderHook(() => useSessionProfileOnVisible({
+    enabled: true, profiles, read, setActiveProfileId, switching, reloadProfiles, setProfiles,
+  }))
+  return { shown: () => shown, setActiveProfileId, setProfiles }
 }
 
 async function becomeVisible() {
@@ -29,9 +33,30 @@ describe('useSessionProfileOnVisible', () => {
     expect(view.shown()).toBe(2)
   })
 
-  it('waits for the next profile load when the binding names a profile the list lacks', async () => {
-    const view = setup(async () => profile(9))
+  it('re-lists the profiles when the binding names one the list lacks', async () => {
+    const fresh = [...profiles, profile(9)]
+    const view = setup(async () => profile(9), undefined, async () => fresh)
     await becomeVisible()
+    expect(view.setProfiles).toHaveBeenCalledWith(fresh)
+    expect(view.shown()).toBe(9)
+  })
+
+  it('keeps the profile on screen when the new list still lacks the binding', async () => {
+    const view = setup(async () => profile(9), undefined, async () => profiles)
+    await becomeVisible()
+    expect(view.setProfiles).toHaveBeenCalledWith(profiles)
+    expect(view.shown()).toBe(1)
+  })
+
+  it('drops a re-list once a switch has started since the read', async () => {
+    let generation = 0
+    let listed!: (ps: Profile[]) => void
+    const view = setup(async () => profile(9), { isSwitching: () => false, switchGeneration: () => generation },
+      () => new Promise<Profile[]>(r => { listed = r }))
+    await becomeVisible()
+    generation++
+    await act(async () => { listed([...profiles, profile(9)]) })
+    expect(view.setProfiles).not.toHaveBeenCalled()
     expect(view.shown()).toBe(1)
   })
 

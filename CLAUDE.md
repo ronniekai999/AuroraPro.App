@@ -204,8 +204,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 - `ActivateProfile` into a locked profile needs its PIN or the account
   password, unless the session already acts as it. The check runs before the
   unbound-token branch. A token with no session id is a 409
-  `session_unbound`, and a missing or revoked session row a 409 with no
-  reason, never a 200: clients take a 200 as a confirmed binding. The
+  `session_unbound`, a session row that is gone a 401 `session_ended`, and a
+  revoked (rotated) one a 409 with no reason, never a 200: clients take a 200
+  as a confirmed binding. The
   password is the recovery path, by the owner's choice. Making a locked
   profile the default (`SetDefault`) needs the same, since every session with
   no binding acts as the default, and `SetDefaultProfile` first binds the
@@ -285,19 +286,25 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 - Binding a revoked (rotated) session row is refused (409): rotation already
   copied the old binding to its successor, so the write changed nothing that
   lasted. The SPA refreshes and retries once.
-- Device pairing binds the new device to the approver's acting profile, so it
-  can neither raise a ceiling nor hand out a locked default; when that
-  profile itself has a PIN, the device gets the account's most restrictive
-  unlocked profile instead (`MostRestrictiveUnlockedProfile`), and with every
-  profile locked the approval is a 409 `profile_locked` (the account password
-  can still sign the device in). The grant waits up to ten minutes for the
+- Device pairing binds the new device to the approver's acting profile, so an
+  approver on an unlocked profile can neither raise a ceiling nor hand out a
+  locked default. When that profile itself has a PIN, the device gets the
+  account's most restrictive unlocked profile instead
+  (`MostRestrictiveUnlockedProfile`), which can be looser than a locked
+  restricted approver's own, though never looser than a profile it could
+  switch to without a PIN; with every profile locked the approval is a 409
+  `profile_locked` (the account password can still sign the device in). The grant waits up to ten minutes for the
   device's poll, so the session insert rechecks under the user-row lock: a
   grant whose profile has gained a PIN since creates nothing, and the device
   pairs again. An approver whose own session row is gone cannot pair.
 - Clients show the server's binding, never a remembered choice: the SPA reads
   `GET /api/profiles/active` at startup (one retry, `readSessionProfile`)
   and changes its display only after activation resolves, one switch at a
-  time. It used to switch locally and activate fire-and-forget, so a failed
+  time. The remembered choice only steers startup: the SPA re-activates the
+  profile this browser last showed when it is unlocked
+  (`resolveStartupProfile`), and shows it once the server has bound it, so a
+  fresh sign-in on a browser a kid last used lands on the kid's profile, and
+  one a parent last used on the parent's. It used to switch locally and activate fire-and-forget, so a failed
   call left a kid's UI on the kid profile while the server enforced the
   parent's ceiling. Nothing personalized (hero, personalized rails, Continue
   Watching, taste onboarding, a title's recap and star rating) loads until
@@ -307,21 +314,34 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   hero pick on every load. When the binding cannot be read it shows no
   profile and opens the picker, which cannot be left without a pick, rather
   than guessing the default; if the profile list fails, nothing personalized
-  loads at all. Only the latest hero request lands, and a switch clears the
-  previous profile's hero. A switch also drops the Movies and Shows grids
-  (aborting a Load More), sends an open title back through its `/title/:id`
-  hydration, which leaves for Home if the new profile may not see it, and
-  remounts search, collections, the calendar and member pages
-  (`useOnProfileChange`); the grids used to keep the previous profile's
-  titles for the session. A failed activation re-reads the binding, because
-  a lost answer can follow a bind that happened. Its tab-visibility
-  re-read drops an answer once a switch has started since the read. The TV
+  loads at all. The catalog (Home's core rails, the browse grids) waits for
+  the startup binding too, unless it cannot be read or the list fails
+  (`catalogProfileSettled`). Only the latest hero request lands, and a switch
+  clears the previous profile's hero. A switch also loads Home cold (its
+  rails come down at once, so a slow or failed load shows the skeleton or
+  the error, not the old rails), drops the Movies and Shows grids (aborting
+  a Load More or a first page in flight), Continue Watching, the
+  conversational rail and My Library, sends an open title back through its
+  `/title/:id` hydration, which leaves for Home if the new profile may not
+  see it, and remounts search, collections, the calendar and member pages
+  (`useOnProfileChange`). Each of these used to keep the previous profile's
+  titles: the grids for the session, the conversational rail until the next
+  search, Home's rails and Continue Watching until a refetch succeeded. A
+  failed activation (a switch, a PIN unlock, the startup re-selection)
+  re-reads the binding, because a lost answer can follow a bind that
+  happened. Its tab-visibility re-read drops an answer once a switch has
+  started since the read, and re-lists the profiles when the binding names
+  one this tab does not know (another tab created it). The TV
   stays at the picker until activation succeeds, a refused PIN keeps the
   session's own profile and the page behind the picker, and it does not ask
   for the PIN of the profile the session is bound to (the server would accept
   any digits) or label it locked: an unlock lasts the session's life.
 - Known gaps:
   - A switch in the web app does not close a player that is already open.
+  - The web app's profile list is read at sign-in and after a Settings
+    change, so the name, ceiling and lock it shows for a profile another
+    device has since edited, and the restricted-session checks that read
+    them, are as of that read. The server enforces the current values.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
@@ -372,9 +392,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
     App wiring (the switcher and the picker going through `switchProfile`,
     `activeProfileId` starting null, the personalized fetches waiting for
-    `personalProfileReady`, the hero's latest-request guard, and what a
-    switch resets, `resetForProfileChange` and the views' keys, though
-    `useOnProfileChange` itself is tested) has no App-level test, and the
+    `personalProfileReady`, `catalogProfileSettled`, the hero's
+    latest-request guard, and what a switch resets: `resetForProfileChange`,
+    the cold Home load, the grid effects' profile dependency and the views'
+    keys, though `useOnProfileChange` itself is tested) has no App-level
+    test, and the
     room socket's connect-time profile and its retry
     are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
     lock either, nor that activation hands its bind the hash a PIN matched

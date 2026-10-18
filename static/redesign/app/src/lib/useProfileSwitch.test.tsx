@@ -90,6 +90,43 @@ describe('useProfileSwitch', () => {
     expect(hook.result.current.isSwitching()).toBe(false)
   })
 
+  it('finishes a PIN unlock whose answer was lost if the session is on the profile', async () => {
+    api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
+    const readBinding = vi.fn().mockResolvedValue(parent)
+    const { hook, setActiveProfileId } = setup(2, readBinding)
+    let switched: Promise<boolean>
+    act(() => { switched = hook.result.current.switchProfile(1) })
+    expect(hook.result.current.pinTarget).toBe(parent)
+    await act(async () => { await hook.result.current.unlock({ pin: '1234' }) })
+    expect(setActiveProfileId).toHaveBeenCalledWith(1)
+    expect(await switched!).toBe(true)
+    expect(hook.result.current.pinTarget).toBeNull()
+  })
+
+  it('keeps the PIN prompt up when an unlock fails and the session is elsewhere', async () => {
+    api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
+    const readBinding = vi.fn().mockResolvedValue(kid)
+    const { hook, setActiveProfileId } = setup(2, readBinding)
+    act(() => { void hook.result.current.switchProfile(1) })
+    await act(async () => {
+      await expect(hook.result.current.unlock({ pin: '1234' })).rejects.toThrow('Failed to fetch')
+    })
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+    expect(hook.result.current.pinTarget).toBe(parent)
+  })
+
+  it('does not re-read the binding after a refused unlock', async () => {
+    api.activateProfile.mockRejectedValue(refusal('profile_pin_invalid'))
+    const readBinding = vi.fn().mockResolvedValue(parent)
+    const { hook, setActiveProfileId } = setup(2, readBinding)
+    act(() => { void hook.result.current.switchProfile(1) })
+    await act(async () => {
+      await expect(hook.result.current.unlock({ pin: '0000' })).rejects.toBeInstanceOf(APIError)
+    })
+    expect(readBinding).not.toHaveBeenCalled()
+    expect(setActiveProfileId).not.toHaveBeenCalled()
+  })
+
   it('asks for a locked profile’s PIN and switches once it is accepted', async () => {
     api.activateProfile.mockResolvedValue(undefined)
     const { hook, setActiveProfileId } = setup()
