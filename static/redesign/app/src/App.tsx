@@ -106,7 +106,7 @@ import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
+import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, showsAdminUI, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { TopNav } from '@/components/TopNav'
@@ -2318,6 +2318,12 @@ export default function App() {
   // When the profile list fails, or the binding is unreadable and the picker
   // is up, it loads anyway, as it did before.
   const catalogProfileSettled = activeProfileId !== null || profilesSettled
+  // The admin pages and controls. The server refuses the admin role's powers
+  // to a session acting as a restricted profile, so a kid's session on an
+  // admin account sees none of them; they wait for the binding like
+  // personalized content does.
+  const adminUI = showsAdminUI(user ? user.role : undefined, profiles, profilesLoaded, activeProfileId)
+  const actingRestricted = activeProfileId !== null && isRestrictedProfile(profiles.find(p => p.id === activeProfileId))
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2377,7 +2383,7 @@ export default function App() {
     if (profiles.length > 0) {
       items.push({ label: 'Add to Watchlist…', onClick: () => setAddToListMedia(m) })
     }
-    if (user && user.role === 'admin') {
+    if (adminUI) {
       items.push({ label: 'Refresh Metadata', onClick: () => { void handleRefreshMetadata(m) } })
     }
     // anchorFor, not raw clientX/clientY. A keyboard-opened context menu
@@ -2389,7 +2395,7 @@ export default function App() {
     setContextMenu({ ...anchorFor(e), items, title: m.title })
   // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, user, activeProfileId])
+  }, [profiles, user, activeProfileId, adminUI])
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
   // Phase 6 — Collections modal open state. Triggered by the
@@ -2957,11 +2963,14 @@ export default function App() {
   // We wait until `user` is a resolved ApiUser so we don't redirect
   // during the boot/loading window (user === null) — once revalidated,
   // a non-admin gets kicked to home. Uses the same role signal as the link.
+  // A session known to act as a restricted profile leaves too (a switch to
+  // the kid's profile while on /admin); one whose binding is still unknown
+  // waits, or every reload of /admin would land on Home.
   useEffect(() => {
-    if (user && user.role !== 'admin' && pathToView(location.pathname) === 'admin') {
+    if (user && (user.role !== 'admin' || actingRestricted) && pathToView(location.pathname) === 'admin') {
       navigate('/')
     }
-  }, [user, location.pathname, navigate])
+  }, [user, actingRestricted, location.pathname, navigate])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
@@ -5841,13 +5850,13 @@ export default function App() {
 
       <ServerPanel
         open={serverOpen}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onClose={() => setServerOpen(false)}
       />
 
       <NotificationPanel
         open={notifOpen}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onClose={() => setNotifOpen(false)}
         notifications={notifications}
         partyInvites={myPartyInvites}
@@ -5939,9 +5948,10 @@ export default function App() {
               it changes the height of this whole sticky stack — which is
               why chromeRef publishes the measured height as --chrome-h
               (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={user.role === 'admin'} onScanComplete={refreshHomeData} />
+          <ScanProgressBar isAdmin={adminUI} onScanComplete={refreshHomeData} />
           <TopNav
             user={user}
+            adminUI={adminUI}
             currentView={view}
             onNavigate={handleNavigate}
             onPrefetch={prefetchView}
@@ -6230,9 +6240,9 @@ export default function App() {
                 selectedSeason={detailSelectedSeason}
                 onSelectSeason={setDetailSelectedSeason}
                 onAddToWatchlist={profiles.length > 0 ? (m) => setAddToListMedia(m) : undefined}
-                onRefreshMetadata={user.role === 'admin' ? handleRefreshMetadata : undefined}
-                onIdentify={user.role === 'admin' ? handleIdentify : undefined}
-                onDeleteMedia={user.role === 'admin' ? handleDeleteMedia : undefined}
+                onRefreshMetadata={adminUI ? handleRefreshMetadata : undefined}
+                onIdentify={adminUI ? handleIdentify : undefined}
+                onDeleteMedia={adminUI ? handleDeleteMedia : undefined}
                 files={detailFiles}
                 onPlayFile={handlePlayFile}
                 // 2026-05-27 — Continue Watching resume. If the user has
@@ -6344,7 +6354,7 @@ export default function App() {
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
                 key={`profile-${activeProfileId}`}
-                isAdmin={user.role === 'admin'}
+                isAdmin={adminUI}
                 rewindNonce={navRewindNonce}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
                 onOpenMedia={(id) => {
@@ -6433,8 +6443,9 @@ export default function App() {
               The sidebar link is admin-only, but typing /admin would otherwise
               mount AdminView for any signed-in user (server data is 403-backstopped,
               but the UI must not mount). A non-admin who lands here is redirected
-              home by the effect below. */}
-          {view === 'admin' && user.role === 'admin' && (
+              home by the effect below. adminUI also needs the session to act
+              as an unrestricted profile, as the server's admin routes do. */}
+          {view === 'admin' && adminUI && (
             <ViewSuspense fallback={<ViewFallback />}>
               <AdminView currentAdminId={user.id} />
             </ViewSuspense>
@@ -6456,7 +6467,7 @@ export default function App() {
         profileId={activeProfileId}
         onEnded={handlePlaybackEnded}
         onPartyAdvance={handlePartyAdvance}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onRemoteActiveChange={(active) => { playerRemoteActiveRef.current = active }}
         onSurfaceChange={setPlayerSurface}
         onToast={addToast}
@@ -6719,7 +6730,7 @@ export default function App() {
 
       {collectionsModalOpen && (
         <CollectionsModal
-          isAdmin={user.role === 'admin'}
+          isAdmin={adminUI}
           onClose={() => setCollectionsModalOpen(false)}
           onCreated={(c) => {
             const id = nextToastId()

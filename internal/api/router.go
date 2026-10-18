@@ -385,6 +385,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 	// Token-version store + handlers
 	tokenVerStore := auth.NewTokenVersionStore(deps.Queries)
+	// Admin routes need the admin role and a session not acting as a
+	// restricted profile (see refuseRestrictedAdmin).
+	refuseRestricted := refuseRestrictedAdmin(deps.Queries)
+	requireAdmin := func(next http.Handler) http.Handler {
+		return auth.RequireAdmin(refuseRestricted(next))
+	}
 	authH := NewAuthHandler(deps.AuthSvc, deps.Queries, deps.Activity)
 	deviceAuthH := NewDeviceAuthHandler(deps.AuthSvc, deps.Queries, deps.Activity, cfg.Server.SecureCookies)
 	// Phase 3 (Google OAuth): handles /api/auth/oauth/google/{start,callback}.
@@ -555,6 +561,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// secureCookies threads through so the encoded URL's scheme is https
 	// behind a TLS-terminating proxy (same hint the auth cookies use).
 	partyQRH := NewPartyQRHandler(deps.PartyManager, cfg.Server.SecureCookies)
+	partyQRH.sessions = deps.Queries
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.
@@ -793,7 +800,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// Users (admin only)
 			r.Route("/api/users", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
-				r.Use(auth.RequireAdmin)
+				r.Use(requireAdmin)
 				r.Get("/", authH.ListUsers)
 				r.Post("/invite", authH.CreateInvite)
 				r.Put("/{id}/role", authH.UpdateUserRole)
@@ -827,7 +834,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/", libH.List)
 
 				r.Group(func(r chi.Router) {
-					r.Use(auth.RequireAdmin)
+					r.Use(requireAdmin)
 					r.Post("/", libH.Create)
 					r.Put("/{id}", libH.Update)
 					r.Delete("/{id}", libH.Delete)
@@ -884,17 +891,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Metadata
 				r.Get("/{id}/artwork", metaH.GetArtwork)
 				r.Get("/{id}/cast", metaH.GetCast)
-				r.With(auth.RequireAdmin).Post("/{id}/refresh-metadata", metaH.RefreshMetadata)
-				r.With(auth.RequireAdmin).Post("/{id}/match", metaH.ManualMatch)
+				r.With(requireAdmin).Post("/{id}/refresh-metadata", metaH.RefreshMetadata)
+				r.With(requireAdmin).Post("/{id}/match", metaH.ManualMatch)
 				// Remove a show/movie from the catalog (admin only). Does not
 				// touch files on disk — only deletes Aurora's library entry and
 				// its child rows. Manual counterpart to the scanner's automatic
 				// empty-item cleanup.
-				r.With(auth.RequireAdmin).Delete("/{id}", mediaH.DeleteItem)
+				r.With(requireAdmin).Delete("/{id}", mediaH.DeleteItem)
 			})
 
 			// TMDB Search (for manual matching) — admin-only since RefreshMetadata and ManualMatch are admin-only
-			r.With(middleware.Timeout(60*time.Second), auth.RequireAdmin).Get("/api/tmdb/search", metaH.SearchTMDB)
+			r.With(middleware.Timeout(60*time.Second), requireAdmin).Get("/api/tmdb/search", metaH.SearchTMDB)
 
 			// Streaming (Phase 3: adaptive HLS + session management)
 			r.Route("/api/stream", func(r chi.Router) {
@@ -923,7 +930,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 				// Phase 3: Transcode session management
 				r.Post("/sessions", streamH.CreateSession)
-				r.With(auth.RequireAdmin).Get("/sessions", streamH.ListSessions)
+				r.With(requireAdmin).Get("/sessions", streamH.ListSessions)
 				r.Delete("/sessions/{sessionID}", streamH.DeleteSession)
 				r.Post("/sessions/{sessionID}/keepalive", streamH.KeepAlive)
 				// Mint a cast-scoped token for handing to Chromecast/AirPlay
@@ -1131,7 +1138,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// Admin (Phase 4)
 			r.Route("/api/admin", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
-				r.Use(auth.RequireAdmin)
+				r.Use(requireAdmin)
 				r.Get("/dashboard", adminH.Dashboard)
 				r.Get("/activity", adminH.Activity)
 				// Distinct event types for the Activity tab's filter. Static
@@ -1213,7 +1220,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// the 60s timeout middleware above would kill it. Auth is
 			// still admin-only via the wrapping authenticated group +
 			// explicit RequireAdmin.
-			r.With(auth.RequireAdmin).Get("/api/admin/backup", adminH.Backup)
+			r.With(requireAdmin).Get("/api/admin/backup", adminH.Backup)
 			// 2026-05-18 — admin restore endpoint. Same rationale (long-
 			// running). Streams the uploaded pg_dump custom-format
 			// archive to a temp file via MultipartReader (bounded
@@ -1222,7 +1229,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// wipe that preserves installed extensions before invoking
 			// pg_restore. See admin_backup.go header for the full
 			// pipeline rationale.
-			r.With(auth.RequireAdmin).Post("/api/admin/restore", adminH.Restore)
+			r.With(requireAdmin).Post("/api/admin/restore", adminH.Restore)
 
 			// Requests (media request + ARR integration)
 			r.Route("/api/requests", func(r chi.Router) {
@@ -1372,7 +1379,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 			if !ok {
 				return
 			}
-			deps.Hub.HandleConnectAuth(w, r, claims.UserID, claims.Role)
+			// The hub sends an admin-role socket the admin-only events (now
+			// playing, server-wide) for the connection's life; a session
+			// acting as a restricted profile connects as a user.
+			role := claims.Role
+			if role == "admin" && !adminPowers(r.Context(), deps.Queries, claims) {
+				role = "user"
+			}
+			deps.Hub.HandleConnectAuth(w, r, claims.UserID, role)
 		})
 
 		// Watch Party V3 — dual-socket model (Running/Paused, ticks at 250ms

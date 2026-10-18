@@ -108,7 +108,7 @@ func (h *PartyHandler) GetReactions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) {
+	if !h.manager.IsParticipantOrHost(code, claims.UserID) && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusNotFound, "party not found")
 		return
 	}
@@ -162,7 +162,7 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 	// Membership gate against the DB audit rows of THAT session (the party
 	// is long gone from the manager's memory by the time the reel exists).
 	// Single round trip — this runs per HTTP Range request during playback.
-	if claims.Role != "admin" {
+	if !adminPowers(r.Context(), h.queries, claims) {
 		found, member, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to authorize")
@@ -437,7 +437,7 @@ func (h *PartyHandler) GetInfo(w http.ResponseWriter, r *http.Request) {
 		includeRoster := false
 		claims := getClaimsFromRequest(r)
 		if claims != nil &&
-			(claims.Role == "admin" || h.manager.IsParticipantOrHost(code, claims.UserID)) {
+			(h.manager.IsParticipantOrHost(code, claims.UserID) || adminPowers(r.Context(), h.queries, claims)) {
 			includeRoster = true
 		}
 		// Build response under the party-level lock

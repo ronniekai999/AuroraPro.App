@@ -53,6 +53,8 @@ const (
 type PartyQRHandler struct {
 	manager       watchpartyManager
 	secureCookies bool
+	// sessions decides the admin role's reach (adminPowers); nil means none.
+	sessions sessionStore
 }
 
 // watchpartyManager is the subset of *watchparty.Manager this handler needs.
@@ -87,7 +89,7 @@ func (h *PartyQRHandler) ServeQR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) {
+	if !h.manager.IsParticipantOrHost(code, claims.UserID) && (h.sessions == nil || !adminPowers(r.Context(), h.sessions, claims)) {
 		writeError(w, http.StatusNotFound, "party not found")
 		return
 	}

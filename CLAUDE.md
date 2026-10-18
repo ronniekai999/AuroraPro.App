@@ -389,6 +389,18 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   the picker, and it does not ask for the PIN of the profile the session is
   bound to (the server would accept any digits) or label it locked: an unlock
   lasts the session's life.
+- The admin role belongs to the account, but a session acting as a restricted
+  profile has none of its powers. The admin routes refuse it with 403
+  `profile_restricted` (`refuseRestrictedAdmin`, behind `auth.RequireAdmin`).
+  Outside them `adminPowers` decides, failing closed: reading other members'
+  private collections and editing or deleting theirs, making a collection
+  public, any party's reactions, info, highlight reel and QR code, other
+  accounts' transcode sessions, the admin view and quota of media requests,
+  and the event socket's admin-only now-playing feed (the role is fixed when
+  `/ws` connects). The web app shows its Admin tab, admin controls and server
+  panel only once the session is known to act as an unrestricted profile, or
+  the account has none (`showsAdminUI`), and leaves `/admin` on a switch to a
+  restricted one.
 - Known gaps:
   - The lock is only as strong as the account password, which unlocks every
     profile and can be guessed through the sign-in and password-change
@@ -404,7 +416,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A profile another device edits shows its new name, ceiling and lock in
     an open web tab at the next switch or tab-visibility re-read; until then
     that tab's restricted-session UI (Settings' controls, onboarding's age
-    step) follows the old values. The server enforces the current ones.
+    step, the admin UI) follows the old values. The server enforces the
+    current ones.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
@@ -475,10 +488,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - With a provider's invite bypass on (`BypassInviteEnabled`), anyone with
     an account there, a child included, can sign up a separate account with
     no ceiling at all.
-  - The admin role is account-level, so a restricted profile on an admin
-    account keeps every admin route: it can invite a new, unrestricted
-    account or restore a backup. The README tells owners to keep children
-    on an account that is not an admin.
+  - An event socket keeps the role it connected with: a session that
+    switches to a restricted profile keeps receiving the now-playing feed
+    until it reconnects. The feedback config still reports the GitHub
+    token's health to a restricted admin session. Only the admin routes'
+    refusal, the collections list and the socket's role are pinned through
+    a request (`admin_restricted_test.go`), plus the party QR code at the
+    handler; the other `adminPowers` sites are not, and the SPA's App wiring
+    of `showsAdminUI` (the admin view's mount, its redirect, the detail
+    page's admin actions) has no App-level test, though TopNav's use of it
+    does.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

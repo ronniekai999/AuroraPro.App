@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/auth"
+	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -110,6 +111,7 @@ func TestPartyQR_NonMember(t *testing.T) {
 func TestPartyQR_AdminBypassesMembership(t *testing.T) {
 	mgr := &fakeQRManager{member: false}
 	h := NewPartyQRHandler(mgr, false)
+	h.sessions = fakeSessions{acting: &models.UserProfile{ID: 1}}
 
 	admin := &auth.JWTClaims{UserID: 1, Username: "admin", Role: "admin"}
 	rec := httptest.NewRecorder()

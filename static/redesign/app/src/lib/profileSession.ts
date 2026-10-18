@@ -17,6 +17,19 @@ export function isRestrictedProfile(p: Pick<Profile, 'max_age_rating'> | null | 
   return !!p?.max_age_rating?.trim()
 }
 
+/** Whether the app shows the admin role's pages and controls. The role
+ * belongs to the account, but the server refuses its powers to a session
+ * acting as a restricted profile (403 profile_restricted), so they show only
+ * once the session is known to act as an unrestricted profile, or the account
+ * is known to have no profile at all. While the binding is unknown, or the
+ * profile list failed to load, they stay hidden. */
+export function showsAdminUI(role: string | undefined, profiles: Profile[], profilesLoaded: boolean, activeId: number | null): boolean {
+  if (role !== 'admin') return false
+  if (activeId === null) return profilesLoaded && profiles.length === 0
+  const acting = profiles.find(p => p.id === activeId)
+  return !!acting && !isRestrictedProfile(acting)
+}
+
 /** Whether id is the account's only profile without a content limit. The
  * server refuses to give that profile a limit, or to delete it (409
  * last_unrestricted_profile): only a session acting as such a profile can
