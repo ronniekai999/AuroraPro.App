@@ -168,11 +168,14 @@ type HeroPick struct {
 // Invalidate() clears both so a watch-progress-driven invalidation
 // refreshes everything at once.
 type Hero struct {
-	q             *db.Queries
-	llm           *llm.Client
-	cache         sync.Map // key: profileID (int64), val: cacheEntry
-	candidatePool int
-	poolSize      int
+	q   *db.Queries
+	llm *llm.Client
+	// profileCeiling reads a profile's max_age_rating; nil means
+	// q.ProfileMaxAgeRating. A field so a test can make the lookup fail.
+	profileCeiling func(ctx context.Context, profileID int64) (string, error)
+	cache          sync.Map // key: profileID (int64), val: cacheEntry
+	candidatePool  int
+	poolSize       int
 	// repeatWindow is the Phase B2 anti-repetition horizon: items shown to a
 	// profile are demoted from that surface's recall for this long. 0 disables
 	// the feature (no surface arg passed → NearestUnwatched behaves as before).
@@ -397,7 +400,10 @@ func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*mode
 		limit = 24
 	}
 
-	allowed := h.allowedRatings(ctx, profileID)
+	allowed, ok := h.allowedRatings(ctx, profileID)
+	if !ok {
+		return nil, nil
+	}
 	var items []*models.MediaItem
 	vec, err := h.q.BuildProfileVector(ctx, profileID)
 	if err == nil {
@@ -603,7 +609,10 @@ func (h *Hero) epochFor(profileID int64) *atomic.Int64 {
 func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQuality, error) {
 	var picks []HeroPick
 	var quality poolQuality
-	allowed := h.allowedRatings(ctx, profileID)
+	allowed, ok := h.allowedRatings(ctx, profileID)
+	if !ok {
+		return nil, qualityFallback, nil // empty: PoolFor never caches it
+	}
 
 	// Tier 1: personalized via taste vector(s). tasteRecall clusters the
 	// profile's recency slice into K taste modes (Phase E1) and merges
@@ -1626,19 +1635,27 @@ type cacheEntry struct {
 
 // allowedRatings resolves the content ratings a profile may be recommended,
 // expanding its max_age_rating through the shared ladder (db.AllowedRatingsForMax).
-// Returns nil for an unrestricted profile, and also nil on a lookup error
-// (logged) so a transient failure degrades to today's behavior rather than
-// emptying every rail; the builds cache that unrestricted result (a known gap,
-// see CLAUDE.md). The candidate queries treat a nil slice as "no age filter";
-// most test `$n::text[] IS NULL`, so an empty non-nil slice would allow
-// nothing. Without this, restricted/kid profiles received recommendations
-// above their rating — browse was age-gated but the recommender was not.
-func (h *Hero) allowedRatings(ctx context.Context, profileID int64) []string {
-	maxRating, err := h.q.ProfileMaxAgeRating(ctx, profileID)
-	if err != nil {
-		slog.Warn("recommender: profile age-rating lookup failed; not age-filtering this build",
-			"profile", profileID, "error", err)
-		return nil
+// It returns nil for an unrestricted profile. The candidate queries treat a nil
+// slice as "no age filter"; most test `$n::text[] IS NULL`, so an empty non-nil
+// slice would allow nothing. Without this, restricted/kid profiles received
+// recommendations above their rating — browse was age-gated but the
+// recommender was not.
+//
+// ok is false when the lookup failed, and every caller then builds NOTHING.
+// These builds are cached (the hero pool for up to a day), so the old fallback
+// to "unrestricted" served a restricted profile unfiltered picks long after a
+// transient error. An empty result is never cached, so the next request
+// simply tries again.
+func (h *Hero) allowedRatings(ctx context.Context, profileID int64) (allowed []string, ok bool) {
+	lookup := h.q.ProfileMaxAgeRating
+	if h.profileCeiling != nil {
+		lookup = h.profileCeiling
 	}
-	return db.AllowedRatingsForMax(maxRating)
+	maxRating, err := lookup(ctx, profileID)
+	if err != nil {
+		slog.Warn("recommender: profile age-rating lookup failed; building nothing",
+			"profile", profileID, "error", err)
+		return nil, false
+	}
+	return db.AllowedRatingsForMax(maxRating), true
 }

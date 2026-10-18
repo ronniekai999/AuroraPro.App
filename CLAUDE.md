@@ -120,8 +120,9 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   theirs.) Not every existing route follows the rule yet; see the gaps below.
   Discovery responses fail open on a resolve error, with the gated detail and
   playback routes as the boundary. Persisted results fail closed: AI-collection
-  seeding, invite sending and taste-onboarding seed validation do; party media
-  changes and the recommender caches do not (see the gaps).
+  seeding, invite sending, taste-onboarding seed validation and the
+  recommender (whose hero, discover and engagement builds are cached) do; party
+  media changes do not (see the gaps).
 - `internal/db/ratings.go` is the only ladder a gate may use, through
   `AllowedRatingsForMax` or `RatingAllowed`; nil means unrestricted. An empty
   slice is ambiguous: gates testing `len(allowed) > 0` read it as unrestricted,
@@ -141,7 +142,9 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   migration `canonicalizeProfileRatings` rewrites stored values to that meaning
   so the API and clients report the enforced ceiling.
 - A ceiling change invalidates the profile's recommender caches, which are built
-  under the ceiling it reads at build time and otherwise live up to 24h.
+  under the ceiling it reads at build time and otherwise live up to 24h. When
+  that read fails (`Hero.allowedRatings` ok=false), every recommender surface
+  builds nothing; an empty result is never cached, so the next request retries.
 - Coverage is NOT complete, and no route-by-route audit exists. Server-derived
   enforcement covers: the #462 routes (media detail, seasons and episodes,
   media/episode/direct file streaming, subtitles, transcode-session creation,
@@ -153,10 +156,6 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     candidates, so a restricted semantic search on a large catalog can return
     fewer allowed rows than its limit (no leak; `MediaType` and the
     recommender's kNN queries share this).
-  - `Hero.allowedRatings` returns nil (unrestricted) when the ceiling lookup
-    fails, and the hero, discover and engagement builds cache that result, so
-    one database error can serve a restricted profile unfiltered picks for up
-    to a day.
   - Ceiling taken from an owned `?profile_id=`, or the account's default
     profile without one, never the acting profile: the discovery routes behind
     `HeroHandler.resolveProfileID` (hero, recommendations, discover, anchor and

@@ -340,7 +340,10 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		return nil, nil
 	}
 
-	allowed := h.allowedRatings(ctx, profileID)
+	allowed, ok := h.allowedRatings(ctx, profileID)
+	if !ok {
+		return nil, nil // empty: DiscoverFor never caches it
+	}
 	surface, within := h.surfaceArgs(surfaceDiscover)
 	// Phase E1: multi-centroid taste recall (falls back to the single averaged
 	// centroid). Cold-start (insufficient history) or any error → no rails:
