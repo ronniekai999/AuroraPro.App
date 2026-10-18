@@ -618,11 +618,66 @@ func TestValidateCastToken_Tampered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCastToken() error: %v", err)
 	}
-	// Flip a character in the signature segment.
-	tampered := tok[:len(tok)-2] + "AA"
-	if _, err := svc.ValidateCastToken(tampered); err != ErrInvalidToken {
-		t.Errorf("ValidateCastToken(tampered) = %v, want ErrInvalidToken", err)
+	// The untouched token validates, so each rejection below is the
+	// signature's doing.
+	if _, err := svc.ValidateCastToken(tok); err != nil {
+		t.Fatalf("ValidateCastToken(untampered) error: %v", err)
 	}
+	// Every bit of the signature, so a check that skips any part of a
+	// same-length signature fails.
+	for bit, bits := 0, signatureBits(t, tok); bit < bits; bit++ {
+		if _, err := svc.ValidateCastToken(flipSignatureBit(t, tok, bit)); err != ErrInvalidToken {
+			t.Fatalf("ValidateCastToken(signature bit %d flipped) = %v, want ErrInvalidToken", bit, err)
+		}
+	}
+	// And signatures of another length, so a check that compares only as much
+	// as the token supplies fails too. An empty one would forge any token.
+	parts, sig := decodeSignature(t, tok)
+	for name, forged := range map[string][]byte{
+		"empty":     {},
+		"one short": sig[:len(sig)-1],
+		"one extra": append(append([]byte{}, sig...), 0),
+	} {
+		tampered := parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(forged)
+		if _, err := svc.ValidateCastToken(tampered); err != ErrInvalidToken {
+			t.Errorf("ValidateCastToken(signature %s) = %v, want ErrInvalidToken", name, err)
+		}
+	}
+}
+
+// decodeSignature returns tok's parts and its decoded signature.
+func decodeSignature(t *testing.T, tok string) ([]string, []byte) {
+	t.Helper()
+	parts := splitJWT(tok)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 JWT parts, got %d", len(parts))
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(sig) == 0 {
+		t.Fatalf("decode signature: %v (%d bytes)", err, len(sig))
+	}
+	return parts, sig
+}
+
+// signatureBits is the number of bits in tok's decoded signature.
+func signatureBits(t *testing.T, tok string) int {
+	t.Helper()
+	_, sig := decodeSignature(t, tok)
+	return len(sig) * 8
+}
+
+// flipSignatureBit returns tok with one bit of its decoded signature flipped,
+// re-encoded; tamperSignature does the same for one bit of a chosen byte.
+// Writing a fixed "AA" over the token's last two characters left it
+// unchanged whenever the signature already ended in "AA" (about one token in
+// a thousand), and the test then failed. Editing the decoded bytes always
+// changes the signature, and never only the base64 padding bits a lenient
+// decoder ignores.
+func flipSignatureBit(t *testing.T, tok string, bit int) string {
+	t.Helper()
+	parts, sig := decodeSignature(t, tok)
+	sig[bit/8] ^= 1 << (bit % 8)
+	return parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
 // Cast tokens fall back to a sensible default TTL (4h) when config is unset,
