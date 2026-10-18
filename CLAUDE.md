@@ -144,7 +144,9 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
 - A ceiling change invalidates the profile's recommender caches, which are built
   under the ceiling it reads at build time and otherwise live up to 24h. When
   that read fails (`Hero.allowedRatings` ok=false), every recommender surface
-  builds nothing; an empty result is never cached, so the next request retries.
+  builds nothing. No recommender cache stores an empty result, so the next
+  request retries; Discover's handler still waits out its 60-second empty
+  window.
 - Coverage is NOT complete, and no route-by-route audit exists. Server-derived
   enforcement covers: the #462 routes (media detail, seasons and episodes,
   media/episode/direct file streaming, subtitles, transcode-session creation,

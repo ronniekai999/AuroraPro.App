@@ -30,11 +30,11 @@ import (
 // beside over-ceiling titles that every recommender surface would pick for it
 // without a ceiling: newest and tmdb-less (they lead PopularUnwatched), rated
 // 10 with 1000 votes (hidden gems), 90 minutes (finish tonight), and embedded
-// next to the anchors (taste and anchor recall).
+// next to the anchors (taste and anchor recall). Unwatched G titles sit beyond
+// them, so the real lookup has something allowed to build every surface from.
 type ceilingFixture struct {
 	q         *db.Queries
 	profileID int64
-	over      map[int64]bool
 }
 
 func newCeilingFixture(t *testing.T) *ceilingFixture {
@@ -77,14 +77,21 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 		token, []string{"/tmp/" + token}, userID)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM libraries WHERE id = $1`, libID) })
 
-	// A dimension of its own, so the shared catalog sits at distance ~1.
+	// Each run's direction is two dimensions picked independently (672..697
+	// and 740..767, clear of the other tests' dimensions), about 700
+	// combinations, with each title's offset on a shared third one. The rest
+	// of the catalog sits at distance ~1, and a concurrent run sharing one of
+	// the two dimensions at ~0.5, far beyond this fixture's titles (< 0.05);
+	// a run would have to draw both to interfere. Titles still count by
+	// rating, not by id, in case it ever does.
+	d1, d2 := 672+int(b[0]%26), 740+int(b[1]%28)
 	vec := func(lead float64) string {
 		parts := make([]string, 768)
 		for i := range parts {
 			parts[i] = "0"
 		}
-		parts[730] = "1"
-		parts[731] = fmt.Sprintf("%g", lead)
+		parts[d1], parts[d2] = "1", "1"
+		parts[699] = fmt.Sprintf("%g", lead)
 		return "[" + strings.Join(parts, ",") + "]"
 	}
 	item := func(name, rating string, lead float64) int64 {
@@ -99,40 +106,67 @@ func newCeilingFixture(t *testing.T) *ceilingFixture {
 		exec(`INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, completed_at, profile_id)
 			VALUES ($1, $2, 5400000, 5400000, TRUE, NOW(), $3) RETURNING id`, userID, anchor, profileID)
 	}
-	over := map[int64]bool{}
 	for i := 0; i < 8; i++ {
-		over[item(fmt.Sprintf("over %d", i), "R", 0.01*float64(i+1))] = true
+		item(fmt.Sprintf("over %d", i), "R", 0.01*float64(i+1))
 	}
-	return &ceilingFixture{q: db.NewQueries(pool), profileID: profileID, over: over}
+	// Allowed titles, enough for an anchor rail (anchorRailMinItems), placed
+	// beyond the R titles so an unrestricted build reaches the R ones first.
+	// They are rated G, the all-ages tier allowedRatings returns on failure,
+	// so a surface that ignored ok would build these and be caught.
+	for i := 0; i < anchorRailMinItems+1; i++ {
+		item(fmt.Sprintf("allowed %d", i), "G", 0.3+0.01*float64(i))
+	}
+	return &ceilingFixture{q: db.NewQueries(pool), profileID: profileID}
 }
 
+// overPG reports whether a title is over the fixture profile's PG ceiling,
+// judged by its rating, so concurrent runs' titles count too.
+func overPG(it *models.MediaItem) bool { return it != nil && !db.RatingAllowed("PG", it.ContentRating) }
+
 // TestRecommenderCeilingLookupFailureBuildsNothing: when the ceiling cannot
-// be read, every surface builds nothing, and nothing is cached. The control
-// run with a working lookup proves the fixture reaches each surface and that
-// the ceiling, not an empty catalog, is what keeps the R titles out.
+// be read, every surface builds nothing, and nothing is cached. Two controls
+// prove the fixture reaches each surface: with the real lookup every surface
+// builds something and nothing over the ceiling, and unrestricted every
+// surface builds the R titles. The first also catches a lookup that always
+// fails, which would blank every profile's Home page.
 func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	f := newCeilingFixture(t)
 	ctx := context.Background()
-	overCeiling := func(id int64) bool { return f.over[id] }
 
-	// Control: the real lookup applies the PG ceiling on every surface.
-	h := New(f.q, nil)
-	picks, err := h.PoolFor(ctx, f.profileID)
+	// Control 1: the real lookup applies the PG ceiling and still builds.
+	real := New(f.q, nil)
+	picks, err := real.PoolFor(ctx, f.profileID)
 	if err != nil {
-		t.Fatalf("PoolFor (control): %v", err)
+		t.Fatalf("PoolFor (real lookup): %v", err)
 	}
-	for _, p := range picks {
-		if overCeiling(p.Item.ID) {
-			t.Errorf("control: hero pick %d is over the PG ceiling", p.Item.ID)
-		}
+	if len(picks) == 0 || anyPickOver(picks, overPG) {
+		t.Errorf("real lookup: hero built %d picks, over-ceiling %v; want some, none over", len(picks), anyPickOver(picks, overPG))
+	}
+	if rail, _ := real.RailFor(ctx, f.profileID, 24); len(rail) == 0 || anyItemOver(rail, overPG) {
+		t.Errorf("real lookup: rail built %d items, over-ceiling %v; want some, none over", len(rail), anyItemOver(rail, overPG))
+	}
+	if rails, _ := real.EngagementRailsFor(ctx, f.profileID); len(rails) == 0 || anyEngagementOver(rails, overPG) {
+		t.Errorf("real lookup: %d engagement rails, over-ceiling %v; want some, none over", len(rails), anyEngagementOver(rails, overPG))
+	}
+	if rails, _ := real.AnchorRailsFor(ctx, f.profileID); len(rails) == 0 || anyAnchorOver(rails, overPG) {
+		t.Errorf("real lookup: %d anchor rails, over-ceiling %v; want some, none over", len(rails), anyAnchorOver(rails, overPG))
 	}
 
-	// Without a ceiling the same fixture yields over-ceiling titles on every
-	// surface; this is what a failed lookup used to build, and cache.
+	// Control 2: without a ceiling the same fixture yields over-ceiling titles
+	// on every surface; this is what a failed lookup used to build, and cache.
 	unrestricted := New(f.q, nil)
 	unrestricted.profileCeiling = func(context.Context, int64) (string, error) { return "", nil }
-	if picks, _ := unrestricted.PoolFor(ctx, f.profileID); !anyPickOver(picks, overCeiling) {
-		t.Fatal("precondition: an unrestricted hero build picks none of the R titles; the fixture no longer reaches it")
+	if picks, _ := unrestricted.PoolFor(ctx, f.profileID); !anyPickOver(picks, overPG) {
+		t.Error("precondition: an unrestricted hero build picks no R title")
+	}
+	if rail, _ := unrestricted.RailFor(ctx, f.profileID, 24); !anyItemOver(rail, overPG) {
+		t.Error("precondition: an unrestricted rail picks no R title")
+	}
+	if rails, _ := unrestricted.EngagementRailsFor(ctx, f.profileID); !anyEngagementOver(rails, overPG) {
+		t.Error("precondition: unrestricted engagement rails pick no R title")
+	}
+	if rails, _ := unrestricted.AnchorRailsFor(ctx, f.profileID); !anyAnchorOver(rails, overPG) {
+		t.Error("precondition: unrestricted anchor rails pick no R title")
 	}
 
 	failing := New(f.q, nil)
@@ -145,7 +179,7 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 		t.Fatalf("PoolFor (failing lookup): %v", err)
 	}
 	if len(picks) != 0 {
-		t.Errorf("a failed ceiling lookup still built %d hero picks (over-ceiling: %v)", len(picks), anyPickOver(picks, overCeiling))
+		t.Errorf("a failed ceiling lookup still built %d hero picks (over-ceiling: %v)", len(picks), anyPickOver(picks, overPG))
 	}
 	if _, cached := failing.cache.Load(f.profileID); cached {
 		t.Error("a failed ceiling lookup cached a hero pool")
@@ -179,7 +213,8 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	}
 
 	// Discover returns before its LLM step when the lookup fails. The fake LLM
-	// records the call; the unrestricted run proves the fixture reaches it.
+	// records the call (and fails it, so Discover itself builds nothing either
+	// way); the unrestricted run proves the fixture reaches that step.
 	llmCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		llmCalled = true
@@ -188,8 +223,8 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	t.Cleanup(srv.Close)
 	failingWithLLM := New(f.q, llm.NewClient(llm.Config{BaseURL: srv.URL}))
 	failingWithLLM.profileCeiling = failing.profileCeiling
-	if rails, err := failingWithLLM.DiscoverFor(ctx, f.profileID); err != nil || len(rails) != 0 {
-		t.Errorf("a failed ceiling lookup still built Discover: %d rails, err %v", len(rails), err)
+	if _, err := failingWithLLM.DiscoverFor(ctx, f.profileID); err != nil {
+		t.Errorf("DiscoverFor (failing lookup): %v", err)
 	}
 	if llmCalled {
 		t.Error("a failed ceiling lookup still sent the Discover candidates to the LLM")
@@ -203,32 +238,38 @@ func TestRecommenderCeilingLookupFailureBuildsNothing(t *testing.T) {
 	if !llmCalled {
 		t.Error("precondition: an unrestricted Discover build never reaches its LLM step")
 	}
-
-	// The same surfaces unrestricted, so each empty result above came from
-	// the failed lookup rather than from a fixture that reaches nothing.
-	if rail, _ := unrestricted.RailFor(ctx, f.profileID, 24); !anyItemOver(rail, overCeiling) {
-		t.Error("precondition: an unrestricted rail picks none of the R titles")
-	}
-	if rails, _ := unrestricted.EngagementRailsFor(ctx, f.profileID); len(rails) == 0 {
-		t.Error("precondition: an unrestricted build produces no engagement rails")
-	}
-	if rails, _ := unrestricted.AnchorRailsFor(ctx, f.profileID); len(rails) == 0 {
-		t.Error("precondition: an unrestricted build produces no anchor rails")
-	}
 }
 
-func anyPickOver(picks []HeroPick, over func(int64) bool) bool {
+func anyPickOver(picks []HeroPick, over func(*models.MediaItem) bool) bool {
 	for _, p := range picks {
-		if p.Item != nil && over(p.Item.ID) {
+		if over(p.Item) {
 			return true
 		}
 	}
 	return false
 }
 
-func anyItemOver(items []*models.MediaItem, over func(int64) bool) bool {
+func anyItemOver(items []*models.MediaItem, over func(*models.MediaItem) bool) bool {
 	for _, it := range items {
-		if it != nil && over(it.ID) {
+		if over(it) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyEngagementOver(rails []EngagementRail, over func(*models.MediaItem) bool) bool {
+	for _, r := range rails {
+		if anyItemOver(r.Items, over) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyAnchorOver(rails []AnchorRail, over func(*models.MediaItem) bool) bool {
+	for _, r := range rails {
+		if anyItemOver(r.Items, over) {
 			return true
 		}
 	}

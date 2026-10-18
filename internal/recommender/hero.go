@@ -1644,8 +1644,10 @@ type cacheEntry struct {
 // ok is false when the lookup failed, and every caller then builds NOTHING.
 // These builds are cached (the hero pool for up to a day), so the old fallback
 // to "unrestricted" served a restricted profile unfiltered picks long after a
-// transient error. An empty result is never cached, so the next request
-// simply tries again.
+// transient error. No recommender cache stores an empty result, so the next
+// request tries again (Discover's handler still waits out its own 60-second
+// empty window). The failure value is the all-ages tier rather than nil, so a
+// caller that ever ignores ok fails closed, not open.
 func (h *Hero) allowedRatings(ctx context.Context, profileID int64) (allowed []string, ok bool) {
 	lookup := h.q.ProfileMaxAgeRating
 	if h.profileCeiling != nil {
@@ -1655,7 +1657,7 @@ func (h *Hero) allowedRatings(ctx context.Context, profileID int64) (allowed []s
 	if err != nil {
 		slog.Warn("recommender: profile age-rating lookup failed; building nothing",
 			"profile", profileID, "error", err)
-		return nil, false
+		return db.AllowedRatingsForMax("G"), false
 	}
 	return db.AllowedRatingsForMax(maxRating), true
 }
