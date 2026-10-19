@@ -1,0 +1,10 @@
+{
+  "sha": "43e95350d77c983d46e46bde4d60aca3fa80a548",
+  "verdict": "clean",
+  "summary": "Independent fresh-context read-only reviews of the 2a stack (restricted sessions address only their own profile) over several rounds, the last covering 1cd2331..43e9535. Every earlier 2a finding is resolved: the route map, CLAUDE.md onboarding and ended-session sentences, the SPA's profileKnown gate and stale comments, and request_profile.go's stand-in comment, which now names a session row that no longer exists (checked against ResolveActingProfile and RevokeRefreshToken: logout revokes rather than deletes, and a revoked row's binding is honoured). All four stand-in paths traced; a named id never comes back as ID 0. go build/vet clean; go test -count=1 ./..., tsc, vitest, npm run audit and the TV unit tests pass. No open findings.",
+  "reviewer": "claude-subagent-general-purpose-fresh-context",
+  "findings": "0",
+  "diff_digest": "b596363a0a50c65dea9ed1bc31d84615d4329fa91903ce18484be7f4fa8cde47",
+  "branch": "claude/gifted-hopper-rfs4s9-ceiling-audit",
+  "recorded_at": "2026-10-19T15:05:07Z"
+}
