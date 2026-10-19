@@ -1,0 +1,10 @@
+{
+  "sha": "6b0dd7503745f6d4138c1a0d5583c0c8789464ea",
+  "verdict": "lows-only",
+  "summary": "Independent fresh-context read-only reviews of the 2c stack (acting-profile ceiling on the calendar, live parties, invites, collections and party highlight reels) over several rounds, the last three on 3be5a39, 43fc82a and db81492, plus a confirmation of 6b0dd75. The reel is now cut from the title the ended row records (EndWatchPartyOn returns it via RETURNING; the generator runs after the end), so reel and gate cannot diverge; a failed end cuts no reel. The end splits title/episode checks, blanks text only on SQLSTATE 22, and falls back to a plain end. A row-scoped trigger harness refuses and counts updates; every party-end mutant tried was killed (reel from memory, hook position, unguarded retry, retry without the episode check, missing plain end, title/season/episode-row checks, failed-end fallback to memory). Last round: one low (stale test header comment), fixed in 6b0dd75, which is comment-only (token streams and comment-free ASTs identical). Residual gaps listed in the PR: a party whose every write fails stays active; the retry's episode check is pinned only as a whole; the change-media NUL strip is tested as a helper only. go build/vet clean; go test -count=1 ./..., tsc, vitest, npm run audit and TV unit tests pass.",
+  "reviewer": "claude-subagent-general-purpose-fresh-context",
+  "findings": "1",
+  "diff_digest": "9362e6ae8149c2e0a6c510a2f7472343d2f11f3c1df6b208311245ef6afd6c28",
+  "branch": "claude/gifted-hopper-rfs4s9-ceiling-listings",
+  "recorded_at": "2026-10-19T15:15:48Z"
+}
