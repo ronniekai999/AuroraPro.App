@@ -57,7 +57,7 @@ func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 				writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
 				return
 			}
-			if strings.TrimSpace(acting.MaxAgeRating) != "" {
+			if hasCeiling(acting.MaxAgeRating) {
 				none, err := noUnrestrictedProfile(r.Context(), store, claims.UserID)
 				if err != nil {
 					slog.Warn("check for an unrestricted profile failed", "user_id", claims.UserID, "error", err)
@@ -97,11 +97,19 @@ func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims
 	if err != nil || acting == nil {
 		return false
 	}
-	if strings.TrimSpace(acting.MaxAgeRating) == "" {
+	if !hasCeiling(acting.MaxAgeRating) {
 		return true
 	}
 	none, err := noUnrestrictedProfile(ctx, store, claims.UserID)
 	return err == nil && none
+}
+
+// hasCeiling reads a stored ceiling as the exception's query does (SQL
+// btrim, which strips spaces only), so the two cannot disagree about one
+// profile: a ceiling of spaces is none, and anything else, a tab included, is
+// one (the ladder restricts an unknown value to the all-ages tier).
+func hasCeiling(maxAgeRating string) bool {
+	return strings.Trim(maxAgeRating, " ") != ""
 }
 
 // unrestrictedProfiles is the store method behind the exception above.

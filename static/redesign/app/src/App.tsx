@@ -6444,7 +6444,10 @@ export default function App() {
               <RequestsView
                 requests={requestsList}
                 onRequestSubmitted={(r) => {
-                  setRequestsList(prev => prev ? [r, ...prev] : [r])
+                  // Not loaded yet (or dropped on a switch): leave it to the
+                  // fetch, which will include this one, rather than show it
+                  // alone and cancel the fetch.
+                  setRequestsList(prev => prev ? [r, ...prev] : prev)
                   const id = nextToastId()
                   setToasts(prev => [...prev, {
                     id,

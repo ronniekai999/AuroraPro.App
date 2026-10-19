@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
 		// A whitespace-only ceiling (hand-written; boot rewrites it) reads as
 		// none, as the ladder, HasUnrestrictedProfile and the web app read it.
 		{"an admin on a whitespace-only ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "  "}}, true},
+		// A tab is not one of the spaces btrim strips, so the exception's
+		// query reads it as a ceiling; so must this.
+		{"an admin on a tab for a ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "\t"}}, false},
 		// With no unrestricted profile on the account, nothing else could use
 		// the admin powers, so a restricted session keeps them.
 		{"a restricted admin on an account with no unrestricted profile", admin, fakeSessions{acting: kid, noneUnrestricted: true}, true},
@@ -405,5 +409,23 @@ func TestTheAdminExceptionNeedsAnAccountWithNoUnrestrictedProfile(t *testing.T) 
 	}
 	if err := f.q.CreateProfileFor(ctx, first, nil); err != nil {
 		t.Errorf("a ceilinged profile beside an unrestricted one: %v", err)
+	}
+}
+
+// TestEveryAdminRouteGoesThroughTheRestrictedSessionGuard: the router wraps
+// auth.RequireAdmin as requireAdmin, which adds refuseRestrictedAdmin, and the
+// route test drives today's routes. A route added later with auth.RequireAdmin
+// directly would reopen every admin power to a restricted session with no
+// test noticing, so the router may name it only inside that wrapper.
+func TestEveryAdminRouteGoesThroughTheRestrictedSessionGuard(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	if n := strings.Count(string(src), "auth.RequireAdmin"); n != 1 {
+		t.Errorf("router.go names auth.RequireAdmin %d times; want once, inside requireAdmin, so every admin route also refuses a restricted session", n)
+	}
+	if !strings.Contains(string(src), "return auth.RequireAdmin(refuseRestricted(next))") {
+		t.Error("requireAdmin no longer wraps refuseRestrictedAdmin")
 	}
 }

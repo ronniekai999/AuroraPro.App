@@ -417,12 +417,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   `/admin`. What it fetched with admin powers goes when they do: the
   requests list is dropped (and waits for the startup binding), collections
   remount, and the bug-report token's health is hidden and fetched again.
-  Its event socket opens only once the startup profile load settles
-  (`catalogProfileSettled`) and, for an admin, reopens whenever the
-  session's profile or that profile's admin powers change (`useRealtime`'s
-  `connectionKey`): a new sign-in binds the default before the startup
-  re-selection moves it, so a socket opened then handed a kid's session the
-  admin events. Anyone else's socket never reopens; its role cannot change.
+  An admin's event socket opens only once the startup profile load settles
+  (`catalogProfileSettled`) and reopens whenever the session's profile or
+  that profile's admin powers change (`useRealtime`'s `connectionKey`): a
+  new sign-in binds the default before the startup re-selection moves it,
+  so a socket opened then handed a kid's session the admin events. Anyone
+  else's socket opens at once and never reopens; its role cannot change.
 - This holds only while the session stays restricted. A switch to any
   unlocked unrestricted profile restores every admin power, restore and role
   changes included, so on an admin account each unrestricted profile's PIN
@@ -530,14 +530,24 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     elsewhere, a hand-opened one) keeps the admin events after a switch to a
     restricted profile until it reconnects. No first-party client reads
     those events (`useRealtime` ignores them), but the browser still
-    receives them. While the web app's socket is closed (until startup
+    receives them. While an admin's web app socket is closed (until startup
     settles, and for a moment at each reopen) a notification or request
     status is missed live; the bell has it on the next load.
   - An admin account with no profile that creates one in Settings keeps
     acting as the server's unrestricted stand-in (the new profile is not
     the default), but the web app then knows a profile and no binding, so
-    its admin UI hides until a reload and a pick from the profile picker;
-    the tab-visibility re-read does not restore it.
+    its admin UI hides until a reload (which falls back to the account's
+    only profile, or asks for a pick when there are more); the
+    tab-visibility re-read does not restore it.
+  - The exception covers an account with no unrestricted profile, not one
+    whose unrestricted profile cannot be reached: on an admin account with
+    no password, a parent profile whose PIN is forgotten, or kept locked
+    out by one wrong guess per 15 minutes (the password is the usual way
+    past that, and there is none), leaves the server with no usable admin.
+    The README tells owners of such accounts to set a password.
+  - Nothing structural stops a future admin route skipping the guard beyond
+    a test that `router.go` names `auth.RequireAdmin` only inside
+    `requireAdmin`; another file mounting admin routes would not be seen.
   - A request already past the admin guard completes after a switch to a
     restricted profile (a backup or restore already running, say). `/ws`
     fixes its role when it connects, so a database error then leaves an
@@ -554,7 +564,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and scoped-token cases at the middleware, `adminPowers`' cases, the
     collections list and the socket's role through a request, the
     exception through the router and its predicate against the database
-    (`''` and whitespace read as no ceiling, a store that cannot say grants
+    (`''` and spaces read as no ceiling, as Go's `hasCeiling` and SQL's
+    `btrim` both strip spaces only, a store that cannot say grants
     nothing, a ceilinged first profile refused), and the party QR code and
     the feedback config at the handler (`admin_restricted_test.go`,
     `party_qr_test.go`). The other `adminPowers`
