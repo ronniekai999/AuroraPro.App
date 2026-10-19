@@ -1,10 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -26,10 +26,13 @@ import (
 // account's default sub-profile only (see GetMemberRecentWatches).
 type SocialHandler struct {
 	queries *db.Queries
+	// resolveActing is queries.ResolveActingProfile; a field so a test can
+	// make it fail and see the member page refuse rather than fail open.
+	resolveActing func(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 }
 
 func NewSocialHandler(queries *db.Queries) *SocialHandler {
-	return &SocialHandler{queries: queries}
+	return &SocialHandler{queries: queries, resolveActing: queries.ResolveActingProfile}
 }
 
 // Per-network handle shapes. Handles are stored bare (no "@", no URL); the
@@ -193,6 +196,11 @@ func (h *SocialHandler) UpdateMyProfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The member profile is the account's, not a profile's, and its
+	// share_watch_history switch publishes the default profile's history.
+	if denyRestrictedSession(w, r, h.queries, claims, "edit the member profile") {
+		return
+	}
 	found, err := h.queries.UpdateMemberProfile(r.Context(), claims.UserID, &req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
@@ -254,6 +262,12 @@ func (h *SocialHandler) resolveMemberParam(w http.ResponseWriter, r *http.Reques
 // may call it; the watch strip is included only when the subject opted in
 // (share_watch_history) — or when the viewer IS the subject, so their own
 // page previews exactly what sharing would reveal.
+//
+// The strip is the subject's DEFAULT profile's history, under the viewing
+// session's ceiling. A session acting as a restricted non-default profile
+// gets no strip on its own account's page: that history is another
+// profile's, which a restricted session may not read. A restricted default
+// profile sees its own.
 func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -277,8 +291,19 @@ func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.FollowerCount, resp.FollowingCount, resp.IsFollowing = followers, following, isFollowing
 	if p.ShareWatchHistory || resp.IsMe {
+		viewer, err := h.resolveActing(r.Context(), claims.UserID, claims.RefreshTokenID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
+			return
+		}
+		allowed := db.AllowedRatingsForMax(viewer.MaxAgeRating)
+		// "Restricted" is the same test resolveRequestProfile uses.
+		if resp.IsMe && viewer.MaxAgeRating != "" && !viewer.IsDefault {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		resp.HistoryVisible = true
-		watches, err := h.queries.GetMemberRecentWatches(r.Context(), p.UserID, recentWatchesLimit)
+		watches, err := h.queries.GetMemberRecentWatches(r.Context(), p.UserID, recentWatchesLimit, allowed)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load recent watches")
 			return
@@ -408,33 +433,12 @@ func (h *SocialHandler) Following(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filteredMemberList(members))
 }
 
-// resolveViewerProfile mirrors HeroHandler.resolveProfileID (?profile_id=
-// validated for ownership, else the default profile) but returns the whole
-// profile row — the feed needs max_age_rating, not just the id.
-func (h *SocialHandler) resolveViewerProfile(w http.ResponseWriter, r *http.Request, userID int64) (*models.UserProfile, bool) {
-	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
-		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
-		if parseErr != nil || profileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return nil, false
-		}
-		profile, err := h.queries.GetProfile(r.Context(), profileID)
-		if err != nil || profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return nil, false
-		}
-		if profile.UserID != userID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
-			return nil, false
-		}
-		return profile, true
-	}
-	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
-	if err != nil || profile == nil {
-		writeError(w, http.StatusNotFound, "no default profile")
-		return nil, false
-	}
-	return profile, true
+// resolveViewerProfile mirrors HeroHandler.resolveProfileID (the acting
+// profile, or an owned ?profile_id= a restricted session may not point
+// anywhere but itself) but returns the whole profile row — the feed needs
+// max_age_rating, not just the id.
+func (h *SocialHandler) resolveViewerProfile(w http.ResponseWriter, r *http.Request, _ int64) (*models.UserProfile, bool) {
+	return resolveQueryProfile(w, r, h.queries)
 }
 
 // FollowingRecent feeds the "From People You Follow" home rail. Empty when

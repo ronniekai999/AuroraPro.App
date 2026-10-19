@@ -200,6 +200,30 @@ class PlaybackContinuationTest {
         assertNull(vm.state.value.home)
     }
 
+    // The outgoing title's final save names the profile that was playing. Once
+    // the session is bound to a restricted profile the server refuses a write
+    // for any other one, so activation must wait for that save.
+    @Test fun switchingProfileWaitsForTheOutgoingFinalSave() = withFixture {
+        openShow()
+        act { it.continueSeries() }; idle()
+        val target = requireNotNull(vm.state.value.target)
+        val saved = CompletableDeferred<Unit>()
+        act { it.playbackClosed(saved) }
+        act { it.navigate(Page.PROFILES) }; idle()
+        act { it.selectProfile(Profile(8, "Kid")) }
+        delay(100)
+        assertTrue("No activation while the final save is pending",
+            requests.none { it.requestUrl!!.encodedPath == "/api/profiles/8/activate" })
+        api.saveFinalProgress(target, 60_000, 60_000)
+        saved.complete(Unit)
+        idle()
+        val paths = requests.map { it.method + " " + it.requestUrl!!.encodedPath }
+        val put = paths.lastIndexOf("PUT /api/progress/20")
+        val activation = paths.indexOf("POST /api/profiles/8/activate")
+        assertTrue("The final save ($put) lands before the activation ($activation)", put in 0 until activation)
+        assertEquals(8L, vm.state.value.profile?.id)
+    }
+
     @Test fun returningFromProfilesRestartsARefreshCancelledBeforeTheFinalSave() = returnFromProfiles(savePending = true)
 
     @Test fun returningFromProfilesRestartsARefreshCancelledAfterTheFinalSave() = returnFromProfiles(savePending = false)
@@ -285,7 +309,7 @@ class PlaybackContinuationTest {
                     requests += request
                     val path = request.requestUrl!!.encodedPath
                     val body = when (path) {
-                        "/api/profiles/7/activate" -> "{}"
+                        "/api/profiles/7/activate", "/api/profiles/8/activate" -> "{}"
                         "/api/profiles/" -> """[{"id":7,"name":"Viewer"}]"""
                         "/api/media/recent" -> "[]"
                         "/api/me/hero" -> """{"picks":[]}"""

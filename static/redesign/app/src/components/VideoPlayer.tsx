@@ -3151,9 +3151,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               decision: stream.decision,
               decisionReason: stream.reason_code,
               // May still be null while the profile gate resolves, in which
-              // case the server falls back to the account default for this
-              // row. Playback started that early is rare and the row is not
-              // rewritten afterwards — noted rather than papered over.
+              // case the server files the row under the session's acting
+              // profile. Playback started that early is rare and the row is
+              // not rewritten afterwards — noted rather than papered over.
               profileId: profileId ?? undefined,
               clickAtMs: playRequestedAtRef.current ?? undefined,
             })

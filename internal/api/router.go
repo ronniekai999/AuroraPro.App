@@ -1084,7 +1084,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 			// Taste onboarding ("Pick What You Love") — seeds the recommender
 			// for a brand-new profile so personalization works on first load.
-			// Per-profile (?profile_id= or the caller's default). Gated server-
+			// Per-profile (the acting profile, or a ?profile_id= it may name). Gated server-
 			// side on the library being embedded (restricted profiles are
 			// age-filtered, not excluded).
 			r.Route("/api/onboarding", func(r chi.Router) {

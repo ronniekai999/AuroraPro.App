@@ -2651,23 +2651,14 @@ func (h *ProgressHandler) prebuildRecapAsync(profileID, mediaItemID int64) {
 	}()
 }
 
+// resolveProgressProfileID picks the profile a progress read or write acts
+// on: a named profile_id through resolveRequestProfile (owned, and a
+// restricted session only ever its own), else the acting profile, creating a
+// default one on demand for an account that has none.
 func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *http.Request, userID int64, requested *int64) (int64, bool) {
 	if requested != nil && *requested != 0 {
-		if *requested < 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return 0, false
-		}
-		profile, err := h.queries.GetProfile(r.Context(), *requested)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to validate profile")
-			return 0, false
-		}
-		if profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return 0, false
-		}
-		if profile.UserID != userID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
+		profile, ok := resolveRequestProfile(w, r, h.queries, *requested)
+		if !ok {
 			return 0, false
 		}
 		return profile.ID, true
@@ -2852,38 +2843,17 @@ func (h *ProgressHandler) ContinueWatching(w http.ResponseWriter, r *http.Reques
 		limit = 20
 	}
 
-	// Profile-scoped filtering: if profile_id is provided, validate ownership
-	// and return only progress entries for that profile.
-	var items []models.ContinueWatchingItem
-	var err error
-
-	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
-		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
-		if parseErr != nil || profileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return
-		}
-
-		// Validate that the profile belongs to the authenticated user
-		profile, profileErr := h.queries.GetProfile(r.Context(), profileID)
-		if profileErr != nil || profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return
-		}
-		if profile.UserID != claims.UserID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
-			return
-		}
-
-		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profileID, limit)
-	} else {
-		profile, profileErr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
-		if profileErr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
-			return
-		}
-		items, err = h.queries.GetContinueWatchingByProfile(r.Context(), profile.ID, limit)
+	// The acting profile, or an owned ?profile_id= that a restricted session
+	// may not point anywhere but itself. The rows come from that profile's
+	// progress and under its ceiling: progress can predate a ceiling, and a
+	// restricted profile's Continue Watching must not show what it no longer
+	// allows.
+	profile, ok := resolveQueryProfileAllowingNone(w, r, h.queries)
+	if !ok {
+		return
 	}
+	items, err := h.queries.GetContinueWatchingByProfile(r.Context(), profile.ID, limit,
+		db.AllowedRatingsForMax(profile.MaxAgeRating))
 
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get continue watching")
@@ -3070,7 +3040,11 @@ func (h *ProgressHandler) RecentlyWatched(w http.ResponseWriter, r *http.Request
 		limit = 20
 	}
 
-	items, err := h.queries.GetRecentlyWatched(r.Context(), claims.UserID, limit)
+	scope, ok := h.historyScope(w, r)
+	if !ok {
+		return
+	}
+	items, err := h.queries.GetRecentlyWatched(r.Context(), claims.UserID, limit, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get recently watched")
 		return
@@ -3082,6 +3056,22 @@ func (h *ProgressHandler) RecentlyWatched(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, items)
 }
 
+// historyScope is what the account-wide history routes may show this
+// session. An unrestricted session sees every profile's history, as before. A
+// session acting as a restricted profile sees only that profile's, under its
+// ceiling: the account's history otherwise lists every title the parents
+// watched. Fails closed on a resolve error.
+func (h *ProgressHandler) historyScope(w http.ResponseWriter, r *http.Request) (db.HistoryScope, bool) {
+	acting, ok := resolveRequestProfile(w, r, h.queries, 0)
+	if !ok {
+		return db.HistoryScope{}, false
+	}
+	if acting.MaxAgeRating == "" {
+		return db.HistoryScope{}, true
+	}
+	return db.HistoryScope{ProfileID: acting.ID, AllowedRatings: db.AllowedRatingsForMax(acting.MaxAgeRating)}, true
+}
+
 // WatchHistory returns full paginated watch history.
 func (h *ProgressHandler) WatchHistory(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
@@ -3090,8 +3080,12 @@ func (h *ProgressHandler) WatchHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scope, ok := h.historyScope(w, r)
+	if !ok {
+		return
+	}
 	params := paginate(r)
-	items, total, err := h.queries.GetWatchHistory(r.Context(), claims.UserID, params)
+	items, total, err := h.queries.GetWatchHistory(r.Context(), claims.UserID, params, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get watch history")
 		return

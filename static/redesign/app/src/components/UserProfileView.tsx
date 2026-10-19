@@ -327,7 +327,11 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
         ) : (
           <p className="text-white/40 text-sm flex items-center gap-2">
             <Icon name="eye" size={14} className="text-white/25" />
-            {shownName} keeps their watch history private.
+            {isMe
+              // The server hides the strip from a profile with a content
+              // limit: it is the account default's history, not this one's.
+              ? 'This account’s watch history isn’t shown to profiles with a content limit.'
+              : `${shownName} keeps their watch history private.`}
           </p>
         )}
       </div>

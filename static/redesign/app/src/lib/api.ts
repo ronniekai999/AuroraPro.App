@@ -3583,8 +3583,8 @@ export async function getAdminReferralSummary(
 //
 // Seeds the recommender for a brand-new profile so hero / recommendations /
 // discover / anchor-rails personalize on first load. All endpoints are
-// per-profile: pass the active profile id, or omit it to use the account's
-// default profile (the server resolves it).
+// per-profile: pass the active profile id, or omit it to use the session's
+// acting profile (the server resolves it).
 
 export interface OnboardingStatus {
   profile_id: number

@@ -1923,8 +1923,11 @@ func (q *Queries) GetContinueWatching(ctx context.Context, userID int64, limit i
 	return scanContinueWatchingRows(rows)
 }
 
-// GetContinueWatchingByProfile returns in-progress items scoped to a specific profile.
-func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID int64, limit int) ([]models.ContinueWatchingItem, error) {
+// GetContinueWatchingByProfile lists a profile's in-progress titles, newest
+// first. allowedRatings is a ceiling (AllowedRatingsForMax; nil means none),
+// applied before the dedup and LIMIT so over-ceiling progress cannot crowd an
+// allowed title out of the page. A show's rows carry the show's rating.
+func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID int64, limit int, allowedRatings []string) ([]models.ContinueWatchingItem, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
@@ -1950,10 +1953,11 @@ func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID in
 		  LEFT JOIN tv_episodes e ON e.id = wp.episode_id
 		  LEFT JOIN tv_seasons s ON s.id = e.season_id
 		  WHERE wp.profile_id = $1 AND wp.completed = FALSE AND wp.position_ms > 0
+		    AND ($3::text[] IS NULL OR mi.content_rating = ANY($3))
 		  ORDER BY wp.media_item_id, wp.updated_at DESC
 		) dedup
 		ORDER BY updated_at DESC
-		LIMIT $2`, profileID, limit)
+		LIMIT $2`, profileID, limit, allowedRatings)
 	if err != nil {
 		return nil, err
 	}

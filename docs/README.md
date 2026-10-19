@@ -25,6 +25,9 @@ history rather than in the working tree once their decision has been made.
   independent-review workflow.
 - [`native-client-caps.md`](native-client-caps.md) — direct-play capability
   contract shared by the server and native clients.
+- [`parental-ceiling.md`](parental-ceiling.md) — which routes apply a
+  profile's parental rating ceiling, which take the profile from the session,
+  and which apply none.
 - [`match-report.md`](match-report.md) — privacy-bounded recommender calibration
   report.
 - [`playback-casting-review-2026-09.md`](playback-casting-review-2026-09.md) —

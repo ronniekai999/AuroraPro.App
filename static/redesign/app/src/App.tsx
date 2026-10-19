@@ -2303,8 +2303,10 @@ export default function App() {
   // Personalized content (the hero, the personalized Home rails, Continue
   // Watching, taste onboarding) loads only once the session's profile is
   // known, or the account has no profile to know. A request sent before then
-  // carries no profile_id, and some routes answer that for the account
-  // default: a kid's Home showed the parent's hero pick on every load. While
+  // carries no profile_id, which the discovery routes used to answer for the
+  // account default: a kid's Home showed the parent's hero pick on every
+  // load. They now answer for the acting profile, and the wait still keeps
+  // the app from showing content for a profile it has not confirmed. While
   // the binding is unknown, or the profile list failed to load, nothing
   // personalized loads at all.
   const personalProfileReady = activeProfileId !== null || (profilesLoaded && profiles.length === 0)

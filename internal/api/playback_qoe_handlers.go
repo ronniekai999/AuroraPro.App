@@ -387,20 +387,20 @@ func (h *PlaybackQoEHandler) deliveryFacts(userID int64, decision, sessionID str
 	return streaming.DirectPlayQoEFacts()
 }
 
-// resolveProfile maps the request to a profile this user owns, defaulting to
-// their default profile. An explicitly-supplied profile_id is verified against
-// the caller — telemetry is still per-profile history and must not be
-// attributable to somebody else's.
+// resolveProfile maps the request to the profile its telemetry belongs to, by
+// resolveRequestProfile's rule: the session's acting profile when none is
+// named, a named one only if the account owns it, and for a session acting as
+// a restricted profile only that profile. Telemetry is per-profile history,
+// and each profile has its own hourly budget, so a kid's session must not
+// spend or write the parent's. A refusal is silent (the callers answer 204):
+// these are fire-and-forget beacons.
 func (h *PlaybackQoEHandler) resolveProfile(r *http.Request, userID, requested int64) (int64, bool) {
-	if requested > 0 {
-		profile, err := h.queries.GetProfile(r.Context(), requested)
-		if err != nil || profile == nil || profile.UserID != userID {
-			return 0, false
-		}
-		return profile.ID, true
+	claims := auth.GetClaims(r.Context())
+	if claims == nil || claims.UserID != userID {
+		return 0, false
 	}
-	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
-	if err != nil || profile == nil {
+	profile, refusal := pickRequestProfile(r.Context(), h.queries, claims, requested)
+	if refusal != nil || profile.ID == 0 {
 		return 0, false
 	}
 	return profile.ID, true

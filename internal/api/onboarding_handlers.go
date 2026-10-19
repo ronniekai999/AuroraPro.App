@@ -312,35 +312,14 @@ func (h *OnboardingHandler) Skip(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"skipped": true})
 }
 
-// resolveProfile returns the profile to operate on — ?profile_id=N (validated
-// to belong to the caller) wins, else the user's default profile — and a bool
-// indicating whether to proceed. On failure it writes the response and returns
-// false. Mirrors HeroHandler.resolveProfileID but returns the full profile so
-// callers can read max_age_rating / the onboarding flag without a second query.
-func (h *OnboardingHandler) resolveProfile(w http.ResponseWriter, r *http.Request, userID int64) (*models.UserProfile, bool) {
-	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
-		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
-		if parseErr != nil || profileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return nil, false
-		}
-		profile, err := h.queries.GetProfile(r.Context(), profileID)
-		if err != nil || profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return nil, false
-		}
-		if profile.UserID != userID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
-			return nil, false
-		}
-		return profile, true
-	}
-	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
-	if err != nil || profile == nil {
-		writeError(w, http.StatusNotFound, "no default profile")
-		return nil, false
-	}
-	return profile, true
+// resolveProfile returns the profile to operate on — the acting profile, or an
+// owned ?profile_id= that a restricted session may not point anywhere but
+// itself (resolveRequestProfile) — and a bool indicating whether to proceed.
+// On failure it writes the response and returns false. Returns the full
+// profile so callers can read max_age_rating / the onboarding flag without a
+// second query.
+func (h *OnboardingHandler) resolveProfile(w http.ResponseWriter, r *http.Request, _ int64) (*models.UserProfile, bool) {
+	return resolveQueryProfile(w, r, h.queries)
 }
 
 // eligibility reports (eligible, libraryEmbedded, error). Onboarding is offered

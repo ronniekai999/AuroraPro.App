@@ -161,9 +161,10 @@ func (h *HeroHandler) SetHub(b HubBroadcaster) {
 
 // Get returns the personalized hero pool for the active profile.
 //
-// Profile resolution: ?profile_id=N (validated) wins; otherwise the user's
-// default profile. Returns {"picks": [...]} so the response can grow new
-// top-level fields (e.g. "generated_at") without breaking clients.
+// Profile resolution: the session's acting profile, or an owned ?profile_id=
+// it may name (resolveRequestProfile). Returns {"picks": [...]} so the
+// response can grow new top-level fields (e.g. "generated_at") without
+// breaking clients.
 func (h *HeroHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if h.hero == nil {
 		writeError(w, http.StatusServiceUnavailable, "personalized hero not configured")
@@ -635,8 +636,7 @@ func (h *HeroHandler) SetRating(w http.ResponseWriter, r *http.Request) {
 // GetRating returns the profile's own star rating for one title:
 // {"media_item_id": N, "stars": 0-5} (0 = unrated). Drives the detail page's
 // star widget initial state. ?media_item_id=N required; ?profile_id=N
-// optional (validated), defaulting to the user's default profile like every
-// other /api/me endpoint.
+// optional, resolved like every other /api/me endpoint (resolveRequestProfile).
 func (h *HeroHandler) GetRating(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
@@ -665,29 +665,12 @@ func (h *HeroHandler) GetRating(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveProfileID returns the profile to personalize for and a bool
-// indicating whether to proceed. On validation failure it writes the
-// response itself and returns false.
-func (h *HeroHandler) resolveProfileID(w http.ResponseWriter, r *http.Request, userID int64) (int64, bool) {
-	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
-		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
-		if parseErr != nil || profileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return 0, false
-		}
-		profile, err := h.queries.GetProfile(r.Context(), profileID)
-		if err != nil || profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return 0, false
-		}
-		if profile.UserID != userID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
-			return 0, false
-		}
-		return profileID, true
-	}
-	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
-	if err != nil || profile == nil {
-		writeError(w, http.StatusNotFound, "no default profile")
+// indicating whether to proceed: the acting profile, or an owned
+// ?profile_id= that a restricted session may not point anywhere but itself
+// (resolveRequestProfile). On failure it writes the response itself.
+func (h *HeroHandler) resolveProfileID(w http.ResponseWriter, r *http.Request, _ int64) (int64, bool) {
+	profile, ok := resolveQueryProfile(w, r, h.queries)
+	if !ok {
 		return 0, false
 	}
 	return profile.ID, true

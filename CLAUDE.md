@@ -157,25 +157,25 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   builds nothing. No recommender cache stores an empty result, so the next
   request retries; Discover's handler still waits out its 60-second empty
   window.
-- Coverage is NOT complete, and no route-by-route audit exists. Server-derived
-  enforcement covers: the #462 routes (media detail, seasons and episodes,
-  media/episode/direct file streaming, subtitles, transcode-session creation,
-  direct-play cast-token minting), browse, Recently added, library search, and
-  AI-collection seeding. Never infer coverage elsewhere from this list; check
-  the handler.
+- Profile-keyed routes (`?profile_id=`, a body `profile_id`, a `{profileId}`
+  segment) resolve through `resolveRequestProfile`: the acting profile when
+  none is named, never the account default; a named profile must be the
+  account's; a restricted session may name only itself (403
+  `profile_restricted`). Fails closed on a resolve error. The account-wide
+  history routes show a restricted session only its own rows, under its
+  ceiling.
+- Coverage is NOT complete. `docs/parental-ceiling.md` is the route-by-route
+  map; change its row when you change a route's gate. Never infer coverage
+  from a summary; check the handler.
 - Known gaps (examples, not exhaustive):
-  - Ceiling taken from an owned `?profile_id=`, or the account's default
-    profile without one, never the acting profile: the discovery routes behind
-    `HeroHandler.resolveProfileID` (hero, recommendations, discover, anchor and
-    engagement rails), the follow feed (`resolveViewerProfile`) and taste
-    onboarding (`resolveProfile`).
-  - Profile chosen the same way and no ceiling at all: the recap routes
-    (`RecapHandler.resolveProfileID`), and continue-watching, which falls back
-    to the acting profile rather than the default.
-  - No ceiling on listings: the account's watch history
-    (`/api/progress/recent`, `/history`), another member's recent watches,
-    every live party server-wide (`/api/parties/active`, with title and
-    poster), and `/api/calendar` (every show's upcoming episodes by date).
+  - Profile-keyed but with no ceiling on the data: recaps, progress reads and
+    writes, ratings and feedback, watchlist items and My Library. A restricted
+    session reaches only its own profile, but can write progress or a list
+    entry for any media id and read it back (a recap of an over-ceiling show,
+    for one).
+  - No ceiling on listings: every live and scheduled party server-wide
+    (`/api/parties/active`, with title and poster), and `/api/calendar`
+    (every show's upcoming episodes by date).
   - No ceiling on lookups by id: `/api/media/{id}/files`, `/next-episode`,
     episode files, artwork, cast, `/api/stream/info/{fileID}` (tracks and
     external subtitle filenames), and a party's `highlight.mp4` (membership
@@ -190,9 +190,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     media skips its ceiling check when the media or profile lookup errors or
     finds nothing; both are persisted.
   - The profile lock (below) stops a restricted session switching into a
-    locked profile or changing ceilings. It does not stop the reads above:
-    `?profile_id=` routes still accept any owned profile, and listings stay
-    unfiltered.
+    locked profile or changing ceilings, and `resolveRequestProfile` stops it
+    naming another profile. Neither filters the listings and lookups above.
+  - An unrestricted session may name any of the account's profiles, a
+    PIN-locked one included, and read or write that profile's data. By
+    design: the lock guards switching, not the data.
+  - WS `/ws` sends every profile's progress events (media ids and
+    positions) to all of the account's devices.
 
 ### Profile lock (PIN)
 
@@ -265,9 +269,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   and maturity settings. It cannot create, delete or re-default profiles, set
   or change a PIN, change any ceiling (re-sending its unchanged ceiling
   passes, and is not written), edit another profile's settings through the
-  profile routes, or link or unlink a sign-in identity (a new link would let
-  it sign in again without the password, after its session ends). These
-  checks fail closed when the acting
+  profile routes, link or unlink a sign-in identity (a new link would let it
+  sign in again without the password, after its session ends), or edit the
+  account's member profile (its `share_watch_history` switch publishes the
+  default profile's history). These checks fail closed when the acting
   profile cannot be resolved, and refuse a session whose row is gone (401
   `session_ended`, `requireLiveSession`): its still-valid access token acts as
   the most restrictive profile, which with no restricted profile left is the
@@ -358,9 +363,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (hero, personalized rails, Continue Watching, taste onboarding, a title's
   recap and star rating, the My Library snapshot) loads until the session's
   profile is known (`personalProfileReady`); the snapshot is kept per account
-  and profile. Requests without a `profile_id` are answered for the account
-  default on some routes, so a kid's Home showed the parent's hero pick on
-  every load. When the binding cannot be read it shows no profile and opens
+  and profile. A request without a `profile_id` was answered for the account
+  default on the discovery routes, so a kid's Home showed the parent's hero
+  pick on every load; those routes now answer for the acting profile, and the
+  wait keeps the app from showing content for a profile it has not confirmed.
+  When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
   catalog (Home's core rails, the browse grids) and a deep-linked `/title/:id`
@@ -654,9 +661,6 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - The web app has no screen for changing another profile's ceiling or the
     default profile; ceilings are set in a profile's own onboarding or
     through the API.
-  - A restricted session can still read and edit other profiles' watchlists
-    and My Library, which check only account ownership (`?profile_id=` and
-    the other routes listed under Parental rating ceiling likewise).
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
@@ -686,8 +690,6 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     is tested at its patch helper only; the server refuses the change
     regardless.
   - Account-level actions still open to a restricted session, for example:
-    editing the member profile (`PUT /api/me/profile`, whose
-    `share_watch_history` switch publishes the default profile's history),
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when
     that profile has a PIN, to the most restrictive unlocked one, or, on an
@@ -721,14 +723,28 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     profile delete or a logout ends their session, so a device left on the
     parent's profile keeps the parent's ceiling for change-media on an open
     room socket after the parent locks that profile, until it reconnects.
+  - Switching the SPA to a restricted profile while it casts: the cast's
+    later progress writes keep the outgoing profile, as the playback contract
+    requires, so the server refuses them (403 `profile_restricted`) and the
+    receiver's last position is lost, with a "could not save" toast on
+    completion. The TV waits for the final save before activating; the SPA
+    does not.
+  - The same holds without casting: web tabs share one session, so when one
+    tab switches it to a restricted profile, another tab's ongoing playback
+    keeps writing progress for the outgoing profile and is refused.
+  - The SPA does not re-read the session's profile after a 403
+    `profile_restricted` on a data route.
 
 ### Member profiles and follows
 
 - Watch-history sharing is opt-in and rechecked on every read. Shared history
   uses only the account's default profile and completed rows.
 - Follow feeds apply the viewing profile's parental ceiling, where the viewing
-  profile is an owned `?profile_id=` or the default, not the acting profile
-  (see Parental rating ceiling).
+  profile is the session's acting profile or an owned `?profile_id=` it may
+  name (`resolveRequestProfile`; see Parental rating ceiling).
+- A member page's watch strip applies the viewing session's ceiling, and a
+  session acting as a restricted non-default profile gets no strip on its own
+  account's page: that history is the default profile's.
 - Member responses never expose email, role, or auth data. Avatars pass through
   `memberSafeAvatar`; social handles are bare and network-validated.
 - Member routes stay under `/api/members/*`; `/api/users` remains admin-only.
