@@ -100,6 +100,10 @@ func TestTheAdminRefusalFailsClosed(t *testing.T) {
 		{"an unrestricted session", fakeSessions{acting: free}, http.StatusOK, ""},
 		{"a restricted session", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}, http.StatusForbidden, "profile_restricted"},
 		{"a whitespace-only ceiling", fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "  "}}, http.StatusOK, ""},
+		// Read as the ladder does: a tab is none, and an unknown value
+		// restricts to the all-ages tier.
+		{"a tab for a ceiling", fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "\t"}}, http.StatusOK, ""},
+		{"an unknown ceiling", fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "XYZ"}}, http.StatusForbidden, "profile_restricted"},
 		{"a restricted session with no unrestricted profile on the account", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true}, http.StatusOK, ""},
 		{"a failed check for an unrestricted profile", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true, unrestrictedErr: errors.New("down")}, http.StatusInternalServerError, ""},
 		{"an ended session", fakeSessions{acting: free, gone: true}, http.StatusUnauthorized, "session_ended"},

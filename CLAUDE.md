@@ -564,14 +564,19 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     a ceiling more strictly (the handlers' checks any non-empty value, the
     SQL rechecks `btrim`), so a session on a whitespace value, which boot
     rewrites, can use the admin pages but not manage profiles. The write
-    guards read the other profiles that strictly too, and
+    guards read the other profiles as the SQL rechecks do, and
     `keepAnUnrestrictedProfile` reads the profile written as the ladder
-    does, so such a value only refuses more there: limiting or deleting a
-    profile stored with one needs another profile free of a limit by every
-    reading, and a write cannot put the account in the exception's state.
+    does, so such a value never lets through a write the ladder's reading
+    would refuse, and a write cannot put the account in the exception's
+    state. A spaces-only value on another profile is free to the guards but
+    a ceiling to the handlers, so the last other unrestricted profile can be
+    limited beside one, and then no session can manage profiles until boot.
     The web app trims as JavaScript does, which differs from Go on a few
     Unicode characters, so for such a value it can show or hide admin UI the
-    server refuses or grants.
+    server refuses or grants. It also shows a session on a whitespace value
+    Settings' profile-management controls, which the handlers refuse (403),
+    and reads other profiles more loosely than the guards, so it can offer a
+    limit or delete they refuse (409).
   - When the startup binding cannot be read, or the profile list fails, the
     startup load settles anyway (waiting would leave the app stuck), so
     collections and the requests list mount, and an admin's socket opens,

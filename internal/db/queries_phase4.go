@@ -648,11 +648,13 @@ var ErrLastUnrestrictedProfile = errors.New("the account's last profile without 
 // re-sending a limit is how a restricted session's own edits round-trip it.
 //
 // The profile written is read loosely, as the ladder does (HasCeiling), and
-// the others strictly, as the management rechecks do (btrim, which strips
-// spaces only), so a hand-written whitespace ceiling only refuses more: one
-// on the profile written counts as free, so limiting or deleting it cannot
-// leave the account in internal/api's admin exception, and one on another
-// profile counts as limited, since those rechecks refuse its sessions.
+// the others as the SQL rechecks do (btrim, which strips spaces only), so a
+// hand-written whitespace ceiling never lets through a write the ladder's
+// reading would refuse: one on the profile written counts as free, so
+// limiting or deleting it cannot leave the account in internal/api's admin
+// exception, and a tab on another profile counts as limited. Spaces there
+// count as free, though the handlers' checks, which read any non-empty value
+// as a ceiling, refuse that profile's sessions until boot rewrites it.
 func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
