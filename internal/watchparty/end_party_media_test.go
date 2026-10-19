@@ -12,7 +12,8 @@ import (
 // reel was cut from the final title but gated on the row's, so a kid could be
 // served a reel of an R title the row said was G. Here the in-memory title
 // moves with no save at all, the worst case of that race. Every case also
-// checks that the reel generator is handed the title the row records.
+// checks that the reel generator is handed the title the row records, or
+// nothing when the end failed and the row was left active.
 func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	q, pool := requireRehydrateDB(t)
 	ctx := context.Background()
