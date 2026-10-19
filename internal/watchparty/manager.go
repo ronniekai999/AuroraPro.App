@@ -1941,7 +1941,8 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel, dbID)
 
 	// Mark inactive in DB, on the title the reel is cut from (its gate reads
-	// the row's).
+	// the row's), when that title and its episode still exist; the id is
+	// recorded even when its name or poster cannot be.
 	if dbID > 0 {
 		if err := m.queries.EndWatchPartyOn(context.Background(), dbID, mediaItemIDForReel, episodeIDAtEnd, mediaTitleForReel, mediaPosterAtEnd); err != nil {
 			slog.Warn("failed to end party in DB", "error", err)
