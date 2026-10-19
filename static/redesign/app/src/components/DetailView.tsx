@@ -72,7 +72,7 @@ interface DetailViewProps {
   // dialog; DetailView just calls the callback with the media item.
   onAddToWatchlist?: (m: Media) => void
   // Phase 5.2 — admin-only refresh-metadata. Only rendered when
-  // the caller is admin (App gates with user.role === 'admin').
+  // the caller is admin (App gates with adminUI).
   onRefreshMetadata?: (m: Media) => void
   // Admin-only manual identify. Opens ManualMatchModal so the admin
   // can pick a specific TMDB/TVDB id when the auto-matcher landed on

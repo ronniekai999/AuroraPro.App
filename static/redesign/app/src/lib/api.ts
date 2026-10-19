@@ -3344,7 +3344,8 @@ export function withToken(url: string): string {
 export interface BugReportConfig {
   enabled: boolean
   // 2026-05-27 — PAT health diagnostics. Server populates these
-  // ONLY when the requester is an admin (claims.Role == "admin");
+  // ONLY when the requester has the admin role's powers (adminPowers:
+  // an admin session not acting as a restricted profile);
   // regular users get them omitted. Used by the BugReportModal
   // to show an amber banner to admins when the configured GitHub
   // PAT is expired / revoked / missing scope.

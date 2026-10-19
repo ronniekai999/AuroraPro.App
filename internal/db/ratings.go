@@ -72,6 +72,14 @@ func AllowedRatingsForMax(maxRating string) []string {
 	return allowed
 }
 
+// HasCeiling reports whether the ladder restricts a profile with this stored
+// ceiling: blank or all whitespace is none, and anything else, an unknown
+// value included, is one. The admin checks read a ceiling through it, so they
+// cannot disagree with what the gates enforce.
+func HasCeiling(maxRating string) bool {
+	return AllowedRatingsForMax(maxRating) != nil
+}
+
 // CanonicalMaxRating validates a profile ceiling on write. It returns the
 // ladder's spelling of the rating ("pg " → "PG"), "" for no restriction, and
 // ok=false for anything the ladder doesn't know, so a value that would

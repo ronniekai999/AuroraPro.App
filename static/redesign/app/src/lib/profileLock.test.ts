@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activateProfile, APIError, getActiveProfile, profileErrorReason, setProfilePin, type Profile } from './api'
-import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, openDoorProfiles, readSessionProfile, resolveStartupProfile } from './profileSession'
+import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, openDoorProfiles, readSessionProfile, resolveStartupProfile, showsAdminUI } from './profileSession'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `p${id}`, is_default: false, created_at: '', updated_at: '', ...extra,
@@ -85,6 +85,42 @@ describe('isRestrictedProfile', () => {
     expect(isRestrictedProfile(profile(1, { max_age_rating: '' }))).toBe(false)
     expect(isRestrictedProfile(profile(1))).toBe(false)
     expect(isRestrictedProfile(null)).toBe(false)
+  })
+})
+
+describe('showsAdminUI', () => {
+  const parent = profile(1, { is_default: true })
+  const kid = profile(2, { max_age_rating: 'PG' })
+
+  it('shows the admin UI to an admin session bound to an unrestricted profile', () => {
+    expect(showsAdminUI('admin', [parent, kid], true, 1)).toBe(true)
+  })
+
+  it('hides it while the session acts as a restricted profile', () => {
+    expect(showsAdminUI('admin', [parent, kid], true, 2)).toBe(false)
+  })
+
+  it('hides it while the binding is unknown or the bound profile is not in the list', () => {
+    expect(showsAdminUI('admin', [parent, kid], true, null)).toBe(false)
+    expect(showsAdminUI('admin', [parent], true, 2)).toBe(false)
+    // The profile list failed to load: nothing is known.
+    expect(showsAdminUI('admin', [], false, null)).toBe(false)
+  })
+
+  it('shows it to a restricted session on an account with no unrestricted profile', () => {
+    // Nothing else on the account could use the admin pages; the server
+    // keeps the powers there too.
+    expect(showsAdminUI('admin', [kid, profile(3, { max_age_rating: 'PG-13' })], true, 2)).toBe(true)
+  })
+
+  it('shows it to an admin account with no profile at all', () => {
+    expect(showsAdminUI('admin', [], true, null)).toBe(true)
+  })
+
+  it('never shows it to a non-admin', () => {
+    expect(showsAdminUI('user', [parent], true, 1)).toBe(false)
+    expect(showsAdminUI(undefined, [], true, null)).toBe(false)
+    expect(showsAdminUI('Admin', [parent], true, 1)).toBe(false)
   })
 })
 

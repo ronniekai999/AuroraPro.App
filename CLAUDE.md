@@ -389,6 +389,46 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   the picker, and it does not ask for the PIN of the profile the session is
   bound to (the server would accept any digits) or label it locked: an unlock
   lasts the session's life.
+- The admin role belongs to the account, but a session acting as a restricted
+  profile has none of its powers. The admin routes refuse it with 403
+  `profile_restricted` (`refuseRestrictedAdmin`, behind `auth.RequireAdmin`).
+  Outside them `adminPowers` decides, failing closed (a scoped token such as a
+  cast token, which copies its minter's role, has none): reading other
+  members' private collections and editing or deleting theirs, making a
+  collection public, any party's reactions, info, highlight reel and QR code,
+  other accounts' transcode sessions, every member's media requests (listing
+  them, deleting another's, skipping the request quota), the bug-report
+  token's health, and the event socket's admin-only events (now playing,
+  transcode status, server health; the role is fixed when `/ws` connects).
+  The admin routes' guard refuses a non-admin and a scoped token itself,
+  though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The
+  one exception is an admin account with no unrestricted profile at all
+  (`HasUnrestrictedProfile`): profile writes cannot produce one (the last
+  unrestricted profile keeps its place, and an account's first profile
+  cannot carry a ceiling, `CreateProfileFor`), but older data, a restore or
+  hand-written SQL can, and a restricted session cannot
+  repair it, so refusing there would leave the account, and on a one-admin
+  install the server, with no admin at all. Its restricted sessions keep the
+  admin powers. The web app shows its Admin tab, admin controls, scan bar
+  and server panel only once the session is known to act as an unrestricted
+  profile, or the account has none, or none without a limit
+  (`showsAdminUI`); on `/admin` until then it says it is checking, or that it
+  could not confirm the profile, and a switch to a restricted one leaves
+  `/admin`. What it fetched with admin powers goes when they do: the
+  requests list is dropped and collections remount, both waiting until the
+  startup profile load settles (`catalogProfileSettled`), as the catalog
+  does, and the bug-report token's health is hidden and fetched again.
+  An admin's event socket opens only once the startup profile load settles
+  (`catalogProfileSettled`) and reopens whenever the session's profile or
+  that profile's admin powers change (`useRealtime`'s `connectionKey`): a
+  new sign-in binds the default before the startup re-selection moves it,
+  so a socket opened then handed a kid's session the admin events. Anyone
+  else's socket opens at once and never reopens; its role cannot change.
+- This holds only while the session stays restricted. A switch to any
+  unlocked unrestricted profile restores every admin power, restore and role
+  changes included, so on an admin account each unrestricted profile's PIN
+  and the account password are the only barrier; the README still points
+  owners to a separate, non-admin account for children as the stronger setup.
 - Known gaps:
   - The lock is only as strong as the account password, which unlocks every
     profile and can be guessed through the sign-in and password-change
@@ -404,7 +444,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A profile another device edits shows its new name, ceiling and lock in
     an open web tab at the next switch or tab-visibility re-read; until then
     that tab's restricted-session UI (Settings' controls, onboarding's age
-    step) follows the old values. The server enforces the current ones.
+    step, the admin UI) follows the old values. The server enforces the
+    current ones.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
@@ -475,10 +516,114 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - With a provider's invite bypass on (`BypassInviteEnabled`), anyone with
     an account there, a child included, can sign up a separate account with
     no ceiling at all.
-  - The admin role is account-level, so a restricted profile on an admin
-    account keeps every admin route: it can invite a new, unrestricted
-    account or restore a backup. The README tells owners to keep children
-    on an account that is not an admin.
+  - Admin alerts (`internal/notify`: a member's new media request, with its
+    title, and scan completions) go to the admin ACCOUNT, so a restricted
+    session on it sees them in the notification list, over `/ws` and by web
+    push; notifications have no profile, and push cannot be filtered by one.
+    Scan progress (with the current file name) and library updates go to
+    every socket, whatever its role or profile.
+  - A restricted session on an admin account is held to the request quota,
+    and the new-request alert skips its requester, so on a one-admin install
+    a request it has held for approval alerts nobody.
+  - An event socket keeps the role it connected with, either way. The web app
+    reopens its own when its profile or that profile's admin powers change;
+    any other socket on the session (a second device, a switch made
+    elsewhere, a hand-opened one) keeps the admin events after a switch to a
+    restricted profile until it reconnects. No first-party client reads
+    those events (`useRealtime` ignores them), but the browser still
+    receives them. While an admin's web app socket is closed (until startup
+    settles, and for a moment at each reopen) a notification or request
+    status is missed live; the bell has it on the next load.
+  - An admin account with no profile that creates one in Settings keeps
+    acting as the server's unrestricted stand-in (the new profile is not
+    the default), but the web app then knows a profile and no binding, so
+    its admin UI hides until a reload (which falls back to the account's
+    only profile, or asks for a pick when there are more); the
+    tab-visibility re-read does not restore it.
+  - The exception covers an account with no unrestricted profile, not one
+    whose unrestricted profile cannot be reached: on an admin account with
+    no password, a parent profile whose PIN is forgotten, or kept locked
+    out by one wrong guess per 15 minutes (the password is the usual way
+    past that, and there is none), leaves the server with no usable admin.
+    The README tells owners of such accounts to set a password.
+  - Nothing structural stops a future admin route skipping the guard beyond
+    a test that `router.go` names `auth.RequireAdmin` only inside
+    `requireAdmin`; another file mounting admin routes, a helper wrapping
+    `auth.RequireAdmin`, or a handler checking `claims.Role` itself would
+    not be seen.
+  - In the exception's state, every restricted profile on the account keeps
+    the admin powers, a child's included, not only the loosest; nothing
+    reports such accounts, and leaving the state takes SQL or a restore
+    (the web app cannot lift a ceiling from a restricted session).
+  - The admin checks read a ceiling as the ladder enforces it
+    (`db.HasCeiling`, which `HasUnrestrictedProfile` applies to each profile
+    in Go): blank or any whitespace is none, an unknown value is one. They
+    used to read it as SQL's `btrim` does, which strips spaces only, so a
+    parent stored with a hand-written tab counted as restricted and the
+    kid's session kept the admin powers. The profile-management checks read
+    a ceiling more strictly (the handlers' checks any non-empty value, the
+    SQL rechecks `btrim`), so a session on a whitespace value, which boot
+    rewrites, can use the admin pages but not manage profiles. The write
+    guards read the other profiles as the SQL rechecks do, and
+    `keepAnUnrestrictedProfile` reads the profile written as the ladder
+    does, so such a value never lets through a write the ladder's reading
+    would refuse, and a write cannot put the account in the exception's
+    state. A spaces-only value on another profile is free to the guards but
+    a ceiling to the handlers, so the last other unrestricted profile can be
+    limited or deleted beside one, and then no session bound to a profile
+    can manage profiles until boot. The web app reads a ceiling as
+    JavaScript's trim does, which differs from Go's on two characters
+    (U+0085 and U+FEFF) and is looser than the handlers' reading and the
+    guards' reading of the other profiles, so for such a value it can show or
+    hide admin UI the server refuses or grants, and offer profile, sign-in
+    method or onboarding actions the server then refuses (403 or 409).
+  - When the startup binding cannot be read, or the profile list fails, the
+    startup load settles anyway (waiting would leave the app stuck), so
+    collections and the requests list mount, and an admin's socket opens,
+    under whatever the server has bound: after a fresh sign-in, the account
+    default, not the profile this browser last used. With the binding
+    unreadable they sit behind the profile picker, which covers the page but
+    does not make it inert; a pick drops the requests list, remounts
+    collections and reopens an admin's socket.
+  - A request already past the admin guard completes after a switch to a
+    restricted profile (a backup or restore already running, say). `/ws`
+    fixes its role when it connects, so a database error then leaves an
+    unrestricted admin's socket a user's until it reconnects (closed, and
+    no first-party client reads those events).
+  - Every admin-route request, and every admin-power check outside them that
+    is reached, costs about three queries (the session row, its binding, the
+    profile), one more for a restricted session (the exception's check); the
+    scan bar's 4-second status poll is the steady one. A highlight reel
+    checks membership first, so a member pays one query per Range request
+    as before, a non-member admin about four, and a failed membership query
+    is a 500 for an admin too.
+  - Pinned: the admin routes' refusal through the router and its fail-closed
+    and scoped-token cases at the middleware, `adminPowers`' cases, the
+    collections list and the socket's role through a request, the
+    exception through the router and its predicate against the database
+    (`''`, spaces and a tab read as no ceiling and an unknown value as one,
+    as the ladder reads them, `TestHasCeiling`; a result cut off mid-read
+    and a store that cannot say grant nothing; a ceilinged first profile
+    refused; limiting or deleting a tab-stored profile beside only
+    restricted ones refused), and the party QR code and the feedback config
+    at the handler (`admin_restricted_test.go`, `party_qr_test.go`,
+    `queries_unrestricted_profile_test.go`). The other `adminPowers` sites
+    are not, nor is the write guards' `btrim` reading of the other profiles
+    (read as the ladder does, a guard refuses less), nor are the admin
+    guard's readings of whitespace beyond spaces and a tab (a newline, say),
+    nor is an admin account with no
+    profile through a real database, nor the router's
+    wiring of the QR and feedback handlers' store (dropped, an unrestricted
+    admin silently loses those two powers). In the SPA, `showsAdminUI`,
+    TopNav's use of its `adminUI` prop, the scan bar's hiding and the
+    socket's reconnect are tested; the App wiring (computing `adminUI` and
+    passing it to TopNav, the scan bar, the panels, collections and the
+    player; the admin view's mount and its notice, the redirect, the detail
+    page's admin actions, the socket's gate and key, collections and the
+    requests list waiting for the startup load, dropping the requests list,
+    remounting collections, hiding the token's health) has no App-level
+    test. Settings still labels the account's role, admin included, in a
+    restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

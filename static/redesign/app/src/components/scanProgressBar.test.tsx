@@ -80,6 +80,21 @@ describe('ScanProgressBar — scan completion signal', () => {
     expect(onScanComplete).not.toHaveBeenCalled()
   })
 
+  it('hides a running scan, file name included, once the session stops being an admin', async () => {
+    // A switch to a restricted profile on an admin account: the polling stops,
+    // and the bar must not stay frozen on the last scan it saw.
+    const onScanComplete = vi.fn()
+    getScanStatus.mockResolvedValue({ ...status('running'), current_file: '/m/Some Film (2020).mkv' })
+    const { container, rerender } = render(<ScanProgressBar isAdmin onScanComplete={onScanComplete} />)
+    await waitFor(() => expect(container.textContent).toContain('Some Film'))
+
+    rerender(<ScanProgressBar isAdmin={false} onScanComplete={onScanComplete} />)
+    expect(container.textContent).not.toContain('Movies')
+    expect(container.textContent).not.toContain('Some Film')
+    await tick()
+    expect(onScanComplete).not.toHaveBeenCalled()
+  })
+
   it('does NOT fire when a poll transiently fails mid-scan', async () => {
     // The map used to be rebuilt from empty each poll, so one rejected request
     // dropped that library and read as "not running" — identical to finishing.

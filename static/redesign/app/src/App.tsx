@@ -106,7 +106,7 @@ import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { ProfilesGate } from '@/components/ProfilesGate'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
-import { isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, useSessionProfileOnVisible } from '@/lib/profileSession'
+import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, showsAdminUI, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { TopNav } from '@/components/TopNav'
@@ -2318,6 +2318,12 @@ export default function App() {
   // When the profile list fails, or the binding is unreadable and the picker
   // is up, it loads anyway, as it did before.
   const catalogProfileSettled = activeProfileId !== null || profilesSettled
+  // The admin pages and controls. The server refuses the admin role's powers
+  // to a session acting as a restricted profile, so a kid's session on an
+  // admin account sees none of them; they wait for the binding like
+  // personalized content does.
+  const adminUI = showsAdminUI(user ? user.role : undefined, profiles, profilesLoaded, activeProfileId)
+  const actingRestricted = activeProfileId !== null && isRestrictedProfile(profiles.find(p => p.id === activeProfileId))
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2377,7 +2383,7 @@ export default function App() {
     if (profiles.length > 0) {
       items.push({ label: 'Add to Watchlist…', onClick: () => setAddToListMedia(m) })
     }
-    if (user && user.role === 'admin') {
+    if (adminUI) {
       items.push({ label: 'Refresh Metadata', onClick: () => { void handleRefreshMetadata(m) } })
     }
     // anchorFor, not raw clientX/clientY. A keyboard-opened context menu
@@ -2389,7 +2395,7 @@ export default function App() {
     setContextMenu({ ...anchorFor(e), items, title: m.title })
   // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, user, activeProfileId])
+  }, [profiles, user, activeProfileId, adminUI])
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
   // Phase 6 — Collections modal open state. Triggered by the
@@ -2957,11 +2963,14 @@ export default function App() {
   // We wait until `user` is a resolved ApiUser so we don't redirect
   // during the boot/loading window (user === null) — once revalidated,
   // a non-admin gets kicked to home. Uses the same role signal as the link.
+  // A session known to act as a restricted profile leaves too (a switch to
+  // the kid's profile while on /admin); one whose binding is still unknown
+  // waits, or every reload of /admin would land on Home.
   useEffect(() => {
-    if (user && user.role !== 'admin' && pathToView(location.pathname) === 'admin') {
+    if (user && (user.role !== 'admin' || (actingRestricted && !adminUI)) && pathToView(location.pathname) === 'admin') {
       navigate('/')
     }
-  }, [user, location.pathname, navigate])
+  }, [user, actingRestricted, adminUI, location.pathname, navigate])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
@@ -3041,7 +3050,16 @@ export default function App() {
     })
   }, [realtimeUserId])
   useRealtime({
-    enabled: realtimeUserId != null,
+    // An admin's socket waits until the startup profile load settles
+    // (catalogProfileSettled) and reopens when the profile or its admin
+    // powers change: the server
+    // fixes the socket's role when it connects, and a new sign-in binds the
+    // default before the startup re-selection moves it, so a socket opened
+    // then gave a kid's session the admin-only events. A ceiling given to, or
+    // lifted from, the session's own profile changes the role too. Anyone
+    // else's role cannot change, so their socket neither waits nor reopens.
+    enabled: realtimeUserId != null && ((!!user && user.role !== 'admin') || catalogProfileSettled),
+    connectionKey: user && user.role === 'admin' ? `${activeProfileId}:${adminUI}` : 'user',
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
       // flow already optimistically prepends the new row, and the failure
@@ -5785,11 +5803,29 @@ export default function App() {
         console.warn('[Aurora] bug-report config fetch failed', err)
       })
     return () => { ac.abort() }
-  }, [userIdForBugReport])
+    // adminUI: the server sends the token's health only with admin powers.
+  }, [userIdForBugReport, adminUI])
 
-  // Requests list — lazy-fetch on first visit to the tab.
+  // An admin's list holds every member's requests (with their usernames) and
+  // a restricted session's only the account's own, so it is dropped when the
+  // session's profile or its admin powers change: a switch to the kid's
+  // profile kept the parent's list on screen, and so did a pick of the kid's
+  // when the startup binding could not be read (the app shows no admin UI
+  // then, but the list was fetched under whatever the server had bound).
+  // Dropped during the render that sees the change, not in an effect after
+  // it, so that render never commits the old list.
+  const requestsKey = `${activeProfileId}:${adminUI}`
+  const [requestsFor, setRequestsFor] = useState(requestsKey)
+  if (requestsFor !== requestsKey) {
+    setRequestsFor(requestsKey)
+    setRequestsList(null)
+  }
+  // Requests list — lazy-fetch on first visit to the tab, once the startup
+  // profile load settles (catalogProfileSettled), so a list fetched for the
+  // default before the startup re-selection moves the session is not shown.
+  // A fetch in flight across a change of profile is dropped with it.
   useEffect(() => {
-    if (!user || view !== 'requests' || requestsList !== null) return
+    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
     listRequests(ac.signal)
@@ -5800,7 +5836,7 @@ export default function App() {
         setRequestsList([])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, requestsList])
+  }, [user, view, requestsList, catalogProfileSettled, requestsKey])
 
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
@@ -5841,13 +5877,13 @@ export default function App() {
 
       <ServerPanel
         open={serverOpen}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onClose={() => setServerOpen(false)}
       />
 
       <NotificationPanel
         open={notifOpen}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onClose={() => setNotifOpen(false)}
         notifications={notifications}
         partyInvites={myPartyInvites}
@@ -5939,9 +5975,10 @@ export default function App() {
               it changes the height of this whole sticky stack — which is
               why chromeRef publishes the measured height as --chrome-h
               (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={user.role === 'admin'} onScanComplete={refreshHomeData} />
+          <ScanProgressBar isAdmin={adminUI} onScanComplete={refreshHomeData} />
           <TopNav
             user={user}
+            adminUI={adminUI}
             currentView={view}
             onNavigate={handleNavigate}
             onPrefetch={prefetchView}
@@ -6230,9 +6267,9 @@ export default function App() {
                 selectedSeason={detailSelectedSeason}
                 onSelectSeason={setDetailSelectedSeason}
                 onAddToWatchlist={profiles.length > 0 ? (m) => setAddToListMedia(m) : undefined}
-                onRefreshMetadata={user.role === 'admin' ? handleRefreshMetadata : undefined}
-                onIdentify={user.role === 'admin' ? handleIdentify : undefined}
-                onDeleteMedia={user.role === 'admin' ? handleDeleteMedia : undefined}
+                onRefreshMetadata={adminUI ? handleRefreshMetadata : undefined}
+                onIdentify={adminUI ? handleIdentify : undefined}
+                onDeleteMedia={adminUI ? handleDeleteMedia : undefined}
                 files={detailFiles}
                 onPlayFile={handlePlayFile}
                 // 2026-05-27 — Continue Watching resume. If the user has
@@ -6340,11 +6377,20 @@ export default function App() {
               />
             </ViewSuspense>
           )}
-          {view === 'collections' && (
+          {/* Not before the startup profile load settles
+              (catalogProfileSettled): it fetches on mount, and a fresh
+              sign-in is bound to the default (an admin's powers) until the
+              startup re-selection moves it, so it showed other members'
+              private collections to the kid's tab. The load settles too when
+              the binding cannot be read or the profile list fails, and the
+              view then mounts under whatever the server has bound, as the
+              catalog does. */}
+          {view === 'collections' && !catalogProfileSettled && <ViewFallback />}
+          {view === 'collections' && catalogProfileSettled && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
-                key={`profile-${activeProfileId}`}
-                isAdmin={user.role === 'admin'}
+                key={`profile-${activeProfileId}-${adminUI}`}
+                isAdmin={adminUI}
                 rewindNonce={navRewindNonce}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
                 onOpenMedia={(id) => {
@@ -6413,7 +6459,10 @@ export default function App() {
               <RequestsView
                 requests={requestsList}
                 onRequestSubmitted={(r) => {
-                  setRequestsList(prev => prev ? [r, ...prev] : [r])
+                  // Not loaded yet (or dropped on a switch): leave it to the
+                  // fetch, which will include this one, rather than show it
+                  // alone and cancel the fetch.
+                  setRequestsList(prev => prev ? [r, ...prev] : prev)
                   const id = nextToastId()
                   setToasts(prev => [...prev, {
                     id,
@@ -6433,11 +6482,24 @@ export default function App() {
               The sidebar link is admin-only, but typing /admin would otherwise
               mount AdminView for any signed-in user (server data is 403-backstopped,
               but the UI must not mount). A non-admin who lands here is redirected
-              home by the effect below. */}
-          {view === 'admin' && user.role === 'admin' && (
+              home by the effect below. adminUI also needs the session to act
+              as an unrestricted profile, as the server's admin routes do. */}
+          {view === 'admin' && adminUI && (
             <ViewSuspense fallback={<ViewFallback />}>
               <AdminView currentAdminId={user.id} />
             </ViewSuspense>
+          )}
+          {/* An admin whose session's profile is not known yet (startup), or
+              could not be read (the profile list failed): say so, rather than
+              a blank page. A known restricted profile is sent home instead. */}
+          {view === 'admin' && user.role === 'admin' && !adminUI && !actingRestricted && (
+            <p role="status" className="text-white/50 text-sm text-center py-16">
+              {!profilesSettled
+                ? 'Checking your profile…'
+                : profilesGateForced
+                  ? 'Pick a profile to continue.'
+                  : "Couldn't confirm which profile this session uses, so the admin pages are hidden. Reload to try again."}
+            </p>
           )}
         </div>
       </main>
@@ -6456,7 +6518,7 @@ export default function App() {
         profileId={activeProfileId}
         onEnded={handlePlaybackEnded}
         onPartyAdvance={handlePartyAdvance}
-        isAdmin={user.role === 'admin'}
+        isAdmin={adminUI}
         onRemoteActiveChange={(active) => { playerRemoteActiveRef.current = active }}
         onSurfaceChange={setPlayerSurface}
         onToast={addToast}
@@ -6719,7 +6781,7 @@ export default function App() {
 
       {collectionsModalOpen && (
         <CollectionsModal
-          isAdmin={user.role === 'admin'}
+          isAdmin={adminUI}
           onClose={() => setCollectionsModalOpen(false)}
           onCreated={(c) => {
             const id = nextToastId()
@@ -6867,8 +6929,10 @@ export default function App() {
           // 2026-05-27 — PAT health diagnostics. Server populates
           // these fields only for admin requesters; the modal shows
           // a warning banner when token_healthy === false.
-          tokenHealthy={bugReportConfig.token_healthy}
-          tokenHealthReason={bugReportConfig.token_health_reason}
+          // The token's health is an admin's; a switch to a restricted
+          // profile hides it at once, ahead of the refetch below.
+          tokenHealthy={adminUI ? bugReportConfig.token_healthy : undefined}
+          tokenHealthReason={adminUI ? bugReportConfig.token_health_reason : undefined}
           onRefreshConfig={refreshBugReportConfig}
         />
       )}

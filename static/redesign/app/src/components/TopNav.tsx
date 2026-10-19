@@ -84,11 +84,14 @@ function AvatarMenu({
   notifCount,
   onOpenMyProfile,
   onOpenMembers,
+  showAdmin,
 }: {
   user: ApiUser
   avatarUrl?: string
   onNavigate: (v: string) => void
   onSignOut: () => void
+  /** Shows the Admin row (TopNavProps.adminUI). */
+  showAdmin: boolean
   /** Undefined for non-admins — the panel is admin-only, so no dead row. */
   onOpenServer?: () => void
   onOpenNotifications: () => void
@@ -241,7 +244,7 @@ function AvatarMenu({
         ref={triggerRef}
         type="button"
         onClick={() => setOpen(o => !o)}
-        title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
+        title={`Signed in as ${user.username}${showAdmin ? ' (admin)' : ''}`}
         // "true", not "menu" — see the note above `itemRefs`: this opens a
         // disclosure panel of links and buttons, not a menu widget.
         aria-haspopup="true"
@@ -284,7 +287,7 @@ function AvatarMenu({
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
             <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
-              {user.role === 'admin' ? (
+              {showAdmin ? (
                 <>
                   <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
                   Account
@@ -351,7 +354,7 @@ function AvatarMenu({
             <Icon name="settings" size={14} className="text-white/50" />
             Settings
           </button>
-          {user.role === 'admin' && (
+          {showAdmin && (
             <button
               ref={el => { itemRefs.current[5] = el }}
               type="button"
@@ -622,6 +625,10 @@ export interface TopNavProps {
   onOpenMyProfile?: () => void
   /** Opens the member directory (social phase 2). */
   onOpenMembers?: () => void
+  /** Shows the Admin tab and the admin-only controls: the account is an
+   *  admin's AND the session acts as an unrestricted profile (showsAdminUI).
+   *  The role alone is not enough; the server refuses a restricted session. */
+  adminUI: boolean
 }
 
 export function TopNav({
@@ -655,9 +662,10 @@ export function TopNav({
   onSignOut,
   onOpenMyProfile,
   onOpenMembers,
+  adminUI,
 }: TopNavProps) {
-  const isAdmin = user.role === 'admin'
-  const tabs = useMemo(() => navTabsFor(user.role), [user.role])
+  const isAdmin = adminUI
+  const tabs = useMemo(() => navTabsFor(isAdmin ? user.role : undefined), [isAdmin, user.role])
   const [sheetOpen, setSheetOpen] = useState(false)
   // The sheet stays mounted for its exit fade after sheetOpen flips false.
   const sheetExit = useExitTransition(sheetOpen)
@@ -945,6 +953,7 @@ export function TopNav({
           // also dismiss the mobile sheet if it's open behind it.
           onNavigate={go}
           onSignOut={onSignOut}
+          showAdmin={isAdmin}
           onOpenServer={isAdmin ? onOpenServerPanel : undefined}
           onOpenNotifications={onOpenNotificationsPanel}
           notifCount={notifCount}

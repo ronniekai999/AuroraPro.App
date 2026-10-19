@@ -43,8 +43,13 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 	}
 	// A profile with a ceiling on an account with none free of one (an
 	// account with no profile at all, whose session acts as an unrestricted
-	// stand-in) would leave nothing on it able to manage profiles.
-	if strings.TrimSpace(p.MaxAgeRating) != "" {
+	// stand-in) would leave nothing on it able to manage profiles, and turn
+	// on the admin exception for an admin account (internal/api
+	// refuseRestrictedAdmin): its restricted sessions would keep the admin
+	// powers. The existing profiles are read as the management rechecks read
+	// them (btrim, which strips spaces only), more strictly than the
+	// exception does, so a hand-written whitespace ceiling only refuses more.
+	if HasCeiling(p.MaxAgeRating) {
 		var has bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
 			WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, p.UserID).Scan(&has); err != nil {
@@ -285,6 +290,43 @@ func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID, prefer 
 		return nil, nil, fmt.Errorf("read the profile's PIN: %w", err)
 	}
 	return p, hash, nil
+}
+
+// HasUnrestrictedProfile reports whether the account has a profile without a
+// ceiling. An admin account with none keeps its admin powers in a restricted
+// session (internal/api refuseRestrictedAdmin), or it would have no way back
+// to them.
+func (q *Queries) HasUnrestrictedProfile(ctx context.Context, userID int64) (bool, error) {
+	has, err := hasUnrestrictedProfile(ctx, q.pool, userID)
+	if err != nil {
+		return false, fmt.Errorf("check for an unrestricted profile: %w", err)
+	}
+	return has, nil
+}
+
+// hasUnrestrictedProfile reads each ceiling through HasCeiling, as the gates
+// enforce it, not in SQL: btrim strips spaces only, so a hand-written tab
+// read as a ceiling there, and a profile the gates leave unrestricted did not
+// count, granting the exception to an account that has one.
+func hasUnrestrictedProfile(ctx context.Context, querier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, userID int64) (bool, error) {
+	rows, err := querier.Query(ctx, `SELECT COALESCE(max_age_rating, '') FROM user_profiles WHERE user_id = $1`, userID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	has := false
+	for rows.Next() {
+		var rating string
+		if err := rows.Scan(&rating); err != nil {
+			return false, err
+		}
+		if !HasCeiling(rating) {
+			has = true
+		}
+	}
+	return has, rows.Err()
 }
 
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the
@@ -604,27 +646,38 @@ var ErrLastUnrestrictedProfile = errors.New("the account's last profile without 
 // account's user row first, so two such writes cannot each see the other's
 // profile as the one left free. A profile that already has a limit passes:
 // re-sending a limit is how a restricted session's own edits round-trip it.
+//
+// The profile written is read loosely, as the ladder does (HasCeiling), and
+// the others as the SQL rechecks do (btrim, which strips spaces only), so a
+// hand-written whitespace ceiling never lets through a write the ladder's
+// reading would refuse: one on the profile written counts as free, so
+// limiting or deleting it cannot leave the account in internal/api's admin
+// exception, and a tab on another profile counts as limited. Spaces there
+// count as free, though the handlers' checks, which read any non-empty value
+// as a ceiling, refuse that profile's sessions until boot rewrites it, so
+// limiting or deleting the last other free profile beside one leaves no
+// session able to manage profiles until then.
 func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
 		WHERE p.id = $1 FOR NO KEY UPDATE OF u`, profileID); err != nil {
 		return err
 	}
-	var last bool
+	var rating string
+	var otherFree bool
 	err := tx.QueryRow(ctx, `
-		SELECT NULLIF(btrim(p.max_age_rating), '') IS NULL
-		       AND NOT EXISTS (
+		SELECT COALESCE(p.max_age_rating, ''), EXISTS (
 		         SELECT 1 FROM user_profiles o
 		         WHERE o.user_id = p.user_id AND o.id <> p.id
 		           AND NULLIF(btrim(o.max_age_rating), '') IS NULL)
-		FROM user_profiles p WHERE p.id = $1`, profileID).Scan(&last)
+		FROM user_profiles p WHERE p.id = $1`, profileID).Scan(&rating, &otherFree)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if last {
+	if !HasCeiling(rating) && !otherFree {
 		return ErrLastUnrestrictedProfile
 	}
 	return nil

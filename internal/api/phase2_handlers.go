@@ -1343,7 +1343,7 @@ func (h *StreamHandler) requireSessionAccess(w http.ResponseWriter, r *http.Requ
 	// session ID existed). Other users' sessions are simply not visible.
 	// Admins still pass the ownership check below and reach any session.
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
+	if owner < 0 || (owner != claims.UserID && !adminPowers(r.Context(), h.queries, claims)) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return false
 	}
@@ -1443,7 +1443,7 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// Uniform 404 for "doesn't exist" and "not yours" — same enumeration
 	// hardening as requireSessionAccess (review finding S3).
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
+	if owner < 0 || (owner != claims.UserID && !adminPowers(r.Context(), h.queries, claims)) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -1911,7 +1911,7 @@ func (h *StreamHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	// Retrieve session info before stopping so we can log the file name.
 	// Uniform 404 for missing vs not-owned (review finding S3).
 	session, found := h.transcode.GetSession(sessionID)
-	if !found || (session.UserID != claims.UserID && claims.Role != "admin") {
+	if !found || (session.UserID != claims.UserID && !adminPowers(r.Context(), h.queries, claims)) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -1953,7 +1953,7 @@ func (h *StreamHandler) KeepAlive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if owner != claims.UserID && claims.Role != "admin" {
+	if owner != claims.UserID && !adminPowers(r.Context(), h.queries, claims) {
 		// The session exists, it just isn't theirs. Same 404 on the wire,
 		// but not a stale client — it must not consume the watcher's budget
 		// or raise a warning that names the wrong problem.

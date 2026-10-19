@@ -158,7 +158,7 @@ func (h *RequestHandler) List(w http.ResponseWriter, r *http.Request) {
 	var requests []models.Request
 	var err error
 
-	if claims.Role == "admin" {
+	if adminPowers(r.Context(), h.queries, claims) {
 		requests, err = h.queries.GetAllRequests(r.Context())
 		if err != nil {
 			slog.Error("failed to get all requests", "error", err)
@@ -296,7 +296,7 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// pushes to every admin's phone. Past double the daily quota the held
 	// rows still land in the Requests view, but the pings stop.
 	suppressAdminAlert := false
-	if claims.Role != string(models.RoleAdmin) {
+	if !adminPowers(r.Context(), h.queries, claims) {
 		activeMax, dailyMax := h.requestQuota(r.Context())
 
 		activeCount, err := h.queries.CountActiveRequestsByUser(r.Context(), claims.UserID)
@@ -832,7 +832,7 @@ func (h *RequestHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ownership check: users can only delete their own requests
-	if claims.Role != "admin" && req.UserID != claims.UserID {
+	if req.UserID != claims.UserID && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusForbidden, "you can only delete your own requests")
 		return
 	}

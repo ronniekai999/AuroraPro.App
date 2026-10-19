@@ -62,7 +62,7 @@ func (h *CollectionsHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	// Audit M1 fix — admins see all collections (incl. others'
 	// private ones). Regular users see owned + public.
-	out, err := h.queries.ListCollectionsForUser(r.Context(), claims.UserID, claims.Role == "admin")
+	out, err := h.queries.ListCollectionsForUser(r.Context(), claims.UserID, adminPowers(r.Context(), h.queries, claims))
 	if err != nil {
 		slog.Warn("collections list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list collections")
@@ -98,7 +98,7 @@ func (h *CollectionsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	// Visibility: owner OR public-readable OR admin (audit M1).
 	// Admins can already mutate any collection — making them able
 	// to READ what they can mutate removes a confusing asymmetry.
-	if c.OwnerUserID != claims.UserID && !c.IsPublic && claims.Role != "admin" {
+	if c.OwnerUserID != claims.UserID && !c.IsPublic && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusForbidden, "not your collection")
 		return
 	}
@@ -141,7 +141,7 @@ func (h *CollectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Only admins may flip is_public. Non-admin requests get
 	// is_public=false regardless of the body payload — match other
 	// is_public surfaces in Aurora (e.g. watchparty rooms).
-	isPublic := req.IsPublic && claims.Role == "admin"
+	isPublic := req.IsPublic && adminPowers(r.Context(), h.queries, claims)
 
 	if req.Kind == "ai" {
 		if h.semantic == nil {
@@ -238,7 +238,7 @@ func (h *CollectionsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "collection not found")
 		return
 	}
-	if c.OwnerUserID != claims.UserID && claims.Role != "admin" {
+	if c.OwnerUserID != claims.UserID && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusForbidden, "not your collection")
 		return
 	}
@@ -266,7 +266,7 @@ func (h *CollectionsHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "collection not found")
 		return
 	}
-	if c.OwnerUserID != claims.UserID && claims.Role != "admin" {
+	if c.OwnerUserID != claims.UserID && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusForbidden, "not your collection")
 		return
 	}
@@ -309,7 +309,7 @@ func (h *CollectionsHandler) RemoveItem(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "collection not found")
 		return
 	}
-	if c.OwnerUserID != claims.UserID && claims.Role != "admin" {
+	if c.OwnerUserID != claims.UserID && !adminPowers(r.Context(), h.queries, claims) {
 		writeError(w, http.StatusForbidden, "not your collection")
 		return
 	}
