@@ -17,12 +17,19 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// fakeSessions is a sessionStore answering with a fixed acting profile.
+// fakeSessions is a sessionStore answering with a fixed acting profile. The
+// account has an unrestricted profile unless noneUnrestricted is set.
 type fakeSessions struct {
-	acting  *models.UserProfile
-	err     error
-	gone    bool
-	liveErr error
+	acting           *models.UserProfile
+	err              error
+	gone             bool
+	liveErr          error
+	noneUnrestricted bool
+	unrestrictedErr  error
+}
+
+func (f fakeSessions) HasUnrestrictedProfile(context.Context, int64) (bool, error) {
+	return !f.noneUnrestricted, f.unrestrictedErr
 }
 
 func (f fakeSessions) ResolveActingProfile(context.Context, int64, int64) (*models.UserProfile, error) {
@@ -46,6 +53,10 @@ func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
 	}{
 		{"an unrestricted admin", admin, fakeSessions{acting: free}, true},
 		{"a restricted admin", admin, fakeSessions{acting: kid}, false},
+		// With no unrestricted profile on the account, nothing else could use
+		// the admin powers, so a restricted session keeps them.
+		{"a restricted admin on an account with no unrestricted profile", admin, fakeSessions{acting: kid, noneUnrestricted: true}, true},
+		{"a failed check for an unrestricted profile", admin, fakeSessions{acting: kid, noneUnrestricted: true, unrestrictedErr: errors.New("down")}, false},
 		{"a resolve error", admin, fakeSessions{err: errors.New("down")}, false},
 		{"no acting profile", admin, fakeSessions{}, false},
 		{"a session whose row is gone", admin, fakeSessions{acting: free, gone: true}, false},
@@ -79,6 +90,8 @@ func TestTheAdminRefusalFailsClosed(t *testing.T) {
 	}{
 		{"an unrestricted session", fakeSessions{acting: free}, http.StatusOK, ""},
 		{"a restricted session", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}, http.StatusForbidden, "profile_restricted"},
+		{"a restricted session with no unrestricted profile on the account", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true}, http.StatusOK, ""},
+		{"a failed check for an unrestricted profile", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true, unrestrictedErr: errors.New("down")}, http.StatusInternalServerError, ""},
 		{"an ended session", fakeSessions{acting: free, gone: true}, http.StatusUnauthorized, "session_ended"},
 		{"a session check that fails", fakeSessions{acting: free, liveErr: errors.New("down")}, http.StatusInternalServerError, ""},
 		{"a resolve error", fakeSessions{err: errors.New("down")}, http.StatusInternalServerError, ""},
@@ -186,6 +199,15 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 	// The parent's session, unrestricted, is let through.
 	if code, reason := do(http.MethodGet, "/api/users", f.parentRT); code != http.StatusOK {
 		t.Errorf("GET /api/users as the parent: %d %q, want 200", code, reason)
+	}
+	// With no unrestricted profile left on the account (data from before the
+	// rule, a restore, hand-written SQL), the restricted session is all it
+	// has, and keeps the admin powers.
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatalf("restrict every profile: %v", err)
+	}
+	if code, reason := do(http.MethodGet, "/api/users", f.kidRT); code != http.StatusOK {
+		t.Errorf("GET /api/users as the kid with no unrestricted profile left: %d %q, want 200", code, reason)
 	}
 }
 

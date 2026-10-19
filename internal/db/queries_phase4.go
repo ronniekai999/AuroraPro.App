@@ -287,6 +287,20 @@ func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID, prefer 
 	return p, hash, nil
 }
 
+// HasUnrestrictedProfile reports whether the account has a profile without a
+// ceiling. An admin account with none keeps its admin powers in a restricted
+// session (internal/api refuseRestrictedAdmin), or it would have no way back
+// to them.
+func (q *Queries) HasUnrestrictedProfile(ctx context.Context, userID int64) (bool, error) {
+	var has bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
+		WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, userID).Scan(&has)
+	if err != nil {
+		return false, fmt.Errorf("check for an unrestricted profile: %w", err)
+	}
+	return has, nil
+}
+
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the
 // session identified by refreshTokenID (issue #462). Returns false if no
 // matching row exists for userID at all — the caller has already validated

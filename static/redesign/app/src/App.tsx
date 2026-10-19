@@ -2967,10 +2967,10 @@ export default function App() {
   // the kid's profile while on /admin); one whose binding is still unknown
   // waits, or every reload of /admin would land on Home.
   useEffect(() => {
-    if (user && (user.role !== 'admin' || actingRestricted) && pathToView(location.pathname) === 'admin') {
+    if (user && (user.role !== 'admin' || (actingRestricted && !adminUI)) && pathToView(location.pathname) === 'admin') {
       navigate('/')
     }
-  }, [user, actingRestricted, location.pathname, navigate])
+  }, [user, actingRestricted, adminUI, location.pathname, navigate])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
@@ -3056,9 +3056,10 @@ export default function App() {
     // re-selection moves it, so a socket opened then gave a kid's session the
     // admin-only events.
     enabled: realtimeUserId != null && catalogProfileSettled,
-    // The profile and whether it has admin powers: a ceiling given to, or
-    // lifted from, the session's own profile changes the role too.
-    connectionKey: `${activeProfileId}:${adminUI}`,
+    // An admin's socket follows the profile and whether it has admin powers:
+    // a ceiling given to, or lifted from, the session's own profile changes
+    // the role too. Anyone else's role cannot change, so it never reopens.
+    connectionKey: user && user.role === 'admin' ? `${activeProfileId}:${adminUI}` : 'user',
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
       // flow already optimistically prepends the new row, and the failure
@@ -5802,11 +5803,19 @@ export default function App() {
         console.warn('[Aurora] bug-report config fetch failed', err)
       })
     return () => { ac.abort() }
-  }, [userIdForBugReport])
+    // adminUI: the server sends the token's health only with admin powers.
+  }, [userIdForBugReport, adminUI])
 
-  // Requests list — lazy-fetch on first visit to the tab.
+  // An admin's list holds every member's requests (with their usernames) and
+  // a restricted session's only the account's own, so it is dropped when the
+  // session's admin powers change: a switch to the kid's profile kept the
+  // parent's list on screen.
+  useEffect(() => { setRequestsList(null) }, [adminUI])
+  // Requests list — lazy-fetch on first visit to the tab, once the session's
+  // profile is known (catalogProfileSettled), so a list fetched for the
+  // default before the startup re-selection moves the session is not shown.
   useEffect(() => {
-    if (!user || view !== 'requests' || requestsList !== null) return
+    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
     listRequests(ac.signal)
@@ -5817,7 +5826,7 @@ export default function App() {
         setRequestsList([])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, requestsList])
+  }, [user, view, requestsList, catalogProfileSettled, adminUI])
 
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
@@ -6361,7 +6370,7 @@ export default function App() {
           {view === 'collections' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
-                key={`profile-${activeProfileId}`}
+                key={`profile-${activeProfileId}-${adminUI}`}
                 isAdmin={adminUI}
                 rewindNonce={navRewindNonce}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
@@ -6898,8 +6907,10 @@ export default function App() {
           // 2026-05-27 — PAT health diagnostics. Server populates
           // these fields only for admin requesters; the modal shows
           // a warning banner when token_healthy === false.
-          tokenHealthy={bugReportConfig.token_healthy}
-          tokenHealthReason={bugReportConfig.token_health_reason}
+          // The token's health is an admin's; a switch to a restricted
+          // profile hides it at once, ahead of the refetch below.
+          tokenHealthy={adminUI ? bugReportConfig.token_healthy : undefined}
+          tokenHealthReason={adminUI ? bugReportConfig.token_health_reason : undefined}
           onRefreshConfig={refreshBugReportConfig}
         />
       )}

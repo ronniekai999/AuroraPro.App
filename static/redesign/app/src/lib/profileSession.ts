@@ -22,12 +22,14 @@ export function isRestrictedProfile(p: Pick<Profile, 'max_age_rating'> | null | 
  * acting as a restricted profile (403 profile_restricted), so they show only
  * once the session is known to act as an unrestricted profile, or the account
  * is known to have no profile at all. While the binding is unknown, or the
- * profile list failed to load, they stay hidden. */
+ * profile list failed to load, they stay hidden. As on the server, an account
+ * with no unrestricted profile keeps them in a restricted session: nothing
+ * else on it could use them. */
 export function showsAdminUI(role: string | undefined, profiles: Profile[], profilesLoaded: boolean, activeId: number | null): boolean {
   if (role !== 'admin') return false
   if (activeId === null) return profilesLoaded && profiles.length === 0
   const acting = profiles.find(p => p.id === activeId)
-  return !!acting && !isRestrictedProfile(acting)
+  return !!acting && (!isRestrictedProfile(acting) || profiles.every(isRestrictedProfile))
 }
 
 /** Whether id is the account's only profile without a content limit. The

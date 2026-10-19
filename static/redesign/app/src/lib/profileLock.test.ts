@@ -107,6 +107,12 @@ describe('showsAdminUI', () => {
     expect(showsAdminUI('admin', [], false, null)).toBe(false)
   })
 
+  it('shows it to a restricted session on an account with no unrestricted profile', () => {
+    // Nothing else on the account could use the admin pages; the server
+    // keeps the powers there too.
+    expect(showsAdminUI('admin', [kid, profile(3, { max_age_rating: 'PG-13' })], true, 2)).toBe(true)
+  })
+
   it('shows it to an admin account with no profile at all', () => {
     expect(showsAdminUI('admin', [], true, null)).toBe(true)
   })

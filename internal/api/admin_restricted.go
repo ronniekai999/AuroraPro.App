@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -13,6 +14,14 @@ import (
 // backup, or read any member's private collections. Such a session is treated
 // as not an admin. An admin switches to an unrestricted profile (with its PIN,
 // if it has one) to use them.
+//
+// The one exception is an admin account with no unrestricted profile at all.
+// Profile changes cannot produce one (keepAnUnrestrictedProfile), but data
+// from before that rule, a backup restore or hand-written SQL can, and a
+// restricted session cannot lift a ceiling or create a profile. Refused there
+// too, the account would have no admin powers and no way back to them inside
+// the app; on a one-admin install, the server no admin. Its restricted
+// sessions keep the admin powers.
 
 // refuseRestrictedAdmin is middleware for the admin routes, run after
 // auth.RequireAdmin: it refuses (403 profile_restricted) a session acting as
@@ -37,8 +46,27 @@ func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 				writeError(w, http.StatusForbidden, "this token cannot use the admin pages")
 				return
 			}
-			if denyRestrictedSession(w, r, store, claims, "use the admin pages") {
+			if !requireLiveSession(w, r, store.SessionLive, claims) {
 				return
+			}
+			acting, err := store.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+			if err != nil || acting == nil {
+				slog.Warn("resolve acting profile failed", "user_id", claims.UserID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
+				return
+			}
+			if acting.MaxAgeRating != "" {
+				none, err := noUnrestrictedProfile(r.Context(), store, claims.UserID)
+				if err != nil {
+					slog.Warn("check for an unrestricted profile failed", "user_id", claims.UserID, "error", err)
+					writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
+					return
+				}
+				if !none {
+					writeErrorReason(w, http.StatusForbidden, "profile_restricted",
+						"switch to a profile without a content rating limit to use the admin pages")
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -64,5 +92,32 @@ func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims
 		}
 	}
 	acting, err := store.ResolveActingProfile(ctx, claims.UserID, claims.RefreshTokenID)
-	return err == nil && acting != nil && acting.MaxAgeRating == ""
+	if err != nil || acting == nil {
+		return false
+	}
+	if acting.MaxAgeRating == "" {
+		return true
+	}
+	none, err := noUnrestrictedProfile(ctx, store, claims.UserID)
+	return err == nil && none
+}
+
+// unrestrictedProfiles is the store method behind the exception above.
+type unrestrictedProfiles interface {
+	HasUnrestrictedProfile(ctx context.Context, userID int64) (bool, error)
+}
+
+// noUnrestrictedProfile reports that the account has no profile without a
+// ceiling. A store without the method reports false, so there is no
+// exception: it fails closed.
+func noUnrestrictedProfile(ctx context.Context, store sessionStore, userID int64) (bool, error) {
+	u, ok := store.(unrestrictedProfiles)
+	if !ok {
+		return false, nil
+	}
+	has, err := u.HasUnrestrictedProfile(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return !has, nil
 }

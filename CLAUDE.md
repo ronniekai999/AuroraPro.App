@@ -401,16 +401,26 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   token's health, and the event socket's admin-only events (now playing,
   transcode status, server health; the role is fixed when `/ws` connects).
   The admin routes' guard refuses a non-admin and a scoped token itself,
-  though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The web app shows its Admin tab, admin controls,
-  scan bar and server panel only once the session is known to act as an
-  unrestricted profile, or the account has none (`showsAdminUI`); on `/admin`
-  until then it says it is checking, or that it could not confirm the
-  profile, and a switch to a restricted one leaves `/admin`. Its event socket
-  opens only once the startup profile load settles (`catalogProfileSettled`)
-  and reopens whenever the session's profile, or that profile's admin powers,
-  change (`useRealtime`'s `connectionKey`): a new sign-in binds the default
-  before the startup re-selection moves it, so a socket opened then handed a
-  kid's session the admin events.
+  though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The
+  one exception is an admin account with no unrestricted profile at all
+  (`HasUnrestrictedProfile`): profile writes cannot produce one, but older
+  data, a restore or hand-written SQL can, and a restricted session cannot
+  repair it, so refusing there would leave the account, and on a one-admin
+  install the server, with no admin at all. Its restricted sessions keep the
+  admin powers. The web app shows its Admin tab, admin controls, scan bar
+  and server panel only once the session is known to act as an unrestricted
+  profile, or the account has none, or none without a limit
+  (`showsAdminUI`); on `/admin` until then it says it is checking, or that it
+  could not confirm the profile, and a switch to a restricted one leaves
+  `/admin`. What it fetched with admin powers goes when they do: the
+  requests list is dropped (and waits for the startup binding), collections
+  remount, and the bug-report token's health is hidden and fetched again.
+  Its event socket opens only once the startup profile load settles
+  (`catalogProfileSettled`) and, for an admin, reopens whenever the
+  session's profile or that profile's admin powers change (`useRealtime`'s
+  `connectionKey`): a new sign-in binds the default before the startup
+  re-selection moves it, so a socket opened then handed a kid's session the
+  admin events. Anyone else's socket never reopens; its role cannot change.
 - This holds only while the session stays restricted. A switch to any
   unlocked unrestricted profile restores every admin power, restore and role
   changes included, so on an admin account each unrestricted profile's PIN
@@ -521,9 +531,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     receives them. While the web app's socket is closed (until startup
     settles, and for a moment at each reopen) a notification or request
     status is missed live; the bell has it on the next load.
-  - An admin account with no profile that creates one in Settings is bound
-    to it by the server, but the web app keeps showing no profile, so its
-    admin UI hides until the next reload or tab-visibility re-read.
+  - An admin account with no profile that creates one in Settings keeps no
+    binding (the server resolves the new default for it), but the web app
+    keeps showing no profile, so its admin UI hides until the next reload or
+    tab-visibility re-read.
   - Every admin-route request, and every admin-power check outside them that
     is reached, costs about three queries (the session row, its binding, the
     profile); the scan bar's 4-second status poll is the steady one.
@@ -539,8 +550,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     hiding and the socket's reconnect are tested; the App wiring (computing
     `adminUI` and passing it to TopNav, the scan bar, the panels, collections
     and the player; the admin view's mount and its notice, the redirect, the
-    detail page's admin actions, the socket's gate and key) has no App-level
-    test. Settings still labels the account's role, admin included, in a
+    detail page's admin actions, the socket's gate and key, dropping the
+    requests list, remounting collections, hiding the token's health) has no
+    App-level test. Settings still labels the account's role, admin included, in a
     restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
