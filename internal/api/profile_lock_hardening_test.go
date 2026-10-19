@@ -2116,3 +2116,223 @@ func TestPairingAndSignInGetARealProfileWithoutADefault(t *testing.T) {
 		t.Errorf("an account with a profile but no default: %+v (err %v), want that profile %d", p, err, only.ID)
 	}
 }
+
+// TestAnAccountsFirstProfileCannotCarryACeiling: an account with no profile
+// acts as an unrestricted stand-in, so a ceilinged first profile left none
+// free of a ceiling, and nothing on the account could manage profiles again.
+func TestAnAccountsFirstProfileCannotCarryACeiling(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	bare := seedReqUser(t, f.q)
+	rt := seedRCRefreshToken(t, f.q, bare)
+	create := func(body string) (int, string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/api/profiles", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.h.CreateProfile(rr, rcClaimsCtx(r, bare, rt))
+		return rr.Code, errorReasonOf(rr)
+	}
+	if code, reason := create(`{"name":"kid","max_age_rating":"PG"}`); code != http.StatusConflict || reason != "last_unrestricted_profile" {
+		t.Errorf("a ceilinged first profile: %d %q, want 409 last_unrestricted_profile", code, reason)
+	}
+	if profiles, err := f.q.GetProfilesByUser(ctx, bare); err != nil || len(profiles) != 0 {
+		t.Fatalf("after the refusal the account has %d profiles (%v), want none", len(profiles), err)
+	}
+	if code, _ := create(`{"name":"parent"}`); code != http.StatusCreated {
+		t.Fatalf("an unrestricted first profile: %d, want 201", code)
+	}
+	if code, _ := create(`{"name":"kid","max_age_rating":"PG"}`); code != http.StatusCreated {
+		t.Errorf("a ceilinged second profile: %d, want 201", code)
+	}
+}
+
+// TestARedefaultWithNoDefaultSignsOutTheOtherUnboundSessions: unbound
+// sessions act as the default, and with no default they acted as an
+// unrestricted stand-in that a re-default bound to nothing, so a re-default
+// to a locked profile moved every other device onto it past its PIN. Those
+// are signed out now; the asking session, which gave the PIN, is kept. With
+// no PIN on the new default there is nothing to get past, and they stay.
+func TestARedefaultWithNoDefaultSignsOutTheOtherUnboundSessions(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	for _, locked := range []bool{true, false} {
+		bare := seedReqUser(t, f.q)
+		target := &models.UserProfile{UserID: bare, Name: "target", Language: "en", SubtitleMode: "off"}
+		if err := f.q.CreateProfile(ctx, target); err != nil {
+			t.Fatalf("seed a profile: %v", err)
+		}
+		var pin *string
+		if locked {
+			hash := "a-pin-hash"
+			pin = &hash
+			if _, err := pool.Exec(ctx, `UPDATE user_profiles SET pin_hash = $2 WHERE id = $1`, target.ID, hash); err != nil {
+				t.Fatalf("lock the profile: %v", err)
+			}
+		} else {
+			empty := ""
+			pin = &empty
+		}
+		asking, other := seedRCRefreshToken(t, f.q, bare), seedRCRefreshToken(t, f.q, bare)
+		judged := &db.ManagerJudgement{UserID: bare, RefreshTokenID: asking, TargetPIN: pin}
+		if err := f.q.SetDefaultProfile(ctx, bare, target.ID, judged); err != nil {
+			t.Fatalf("locked=%v: re-default: %v", locked, err)
+		}
+		live := func(id int64) bool {
+			var n int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = $1`, id).Scan(&n); err != nil {
+				t.Fatalf("read session %d: %v", id, err)
+			}
+			return n == 1
+		}
+		if !live(asking) {
+			t.Errorf("locked=%v: the asking session was signed out", locked)
+		}
+		if live(other) == locked {
+			t.Errorf("locked=%v: the other unbound session kept = %v, want %v", locked, live(other), !locked)
+		}
+	}
+}
+
+// TestAWriteToAProfileDeletedMeanwhileIsNotFound: a PIN write or an edit
+// whose profile another device deleted after the handler found it changed
+// nothing and answered 200 with no profile, so the web app reported the PIN
+// set.
+func TestAWriteToAProfileDeletedMeanwhileIsNotFound(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	gone := &models.UserProfile{UserID: f.userID, Name: "spare", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, gone); err != nil {
+		t.Fatalf("seed a profile: %v", err)
+	}
+	code, _ := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM user_profiles WHERE id = $1`, gone.ID)
+		return err
+	}, func() (int, string) {
+		code, reason, _ := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, gone.ID, `{"pin":"2468"}`)
+		return code, reason
+	})
+	if code != http.StatusNotFound {
+		t.Errorf("a PIN write to a profile deleted meanwhile: %d, want 404", code)
+	}
+	name, pg := "renamed", "PG"
+	for _, req := range []*models.UpdateProfileRequest{{Name: &name}, {MaxAgeRating: &pg}} {
+		if err := f.q.UpdateProfile(ctx, gone.ID, req, nil); !errors.Is(err, db.ErrProfileGone) {
+			t.Errorf("an edit of a deleted profile (ceiling %v): %v, want ErrProfileGone", req.MaxAgeRating != nil, err)
+		}
+	}
+}
+
+// TestARotationInFlightCannotCarryABindingPastAWrite: a PIN write deletes
+// the sessions acting as its profile, and a re-default binds the unbound
+// ones to the old default, but a refresh already rotating one of them
+// inserts a successor with the same binding. Rotation locks the user row
+// before it touches the token, so either write waits for it and sees the
+// successor; without that lock the write waited on the old row only and
+// missed the successor, which kept the newly locked profile, or acted as the
+// new default.
+func TestARotationInFlightCannotCarryABindingPastAWrite(t *testing.T) {
+	ctx := context.Background()
+	race := func(t *testing.T, f *lockFixture, bindTo *int64, write func() error) {
+		t.Helper()
+		pool := lockTestPool(t)
+		old := &models.RefreshToken{UserID: f.userID, Token: "rotating-" + reqTestSuffix(t), ExpiresAt: time.Now().Add(time.Hour)}
+		if err := f.q.CreateRefreshToken(ctx, old); err != nil {
+			t.Fatalf("seed a session: %v", err)
+		}
+		if bindTo != nil {
+			f.bind(t, old.ID, *bindTo)
+		}
+		// Hold the old row, so the rotation waits there with whatever lock
+		// it took on the account.
+		hold, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer hold.Rollback(ctx)
+		var holder int
+		if err := hold.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+			t.Fatalf("read the backend pid: %v", err)
+		}
+		if _, err := hold.Exec(ctx, `SELECT 1 FROM refresh_tokens WHERE id = $1 FOR UPDATE`, old.ID); err != nil {
+			t.Fatalf("hold the old session: %v", err)
+		}
+		waitFor := func(what string, blockedBy func() (bool, error)) {
+			t.Helper()
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				ok, err := blockedBy()
+				if err != nil {
+					t.Fatalf("read pg_stat_activity: %v", err)
+				}
+				if ok {
+					return
+				}
+			}
+			t.Fatalf("%s never waited", what)
+		}
+		next := &models.RefreshToken{UserID: f.userID, Token: "rotated-" + reqTestSuffix(t), ExpiresAt: time.Now().Add(time.Hour)}
+		rotated := make(chan error, 1)
+		go func() {
+			_, err := f.q.RotateRefreshToken(ctx, old.Token, next)
+			rotated <- err
+		}()
+		var rotation int
+		waitFor("the rotation", func() (bool, error) {
+			err := pool.QueryRow(ctx, `SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) LIMIT 1`, holder).Scan(&rotation)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, nil
+			}
+			return err == nil, err
+		})
+		written := make(chan error, 1)
+		go func() { written <- write() }()
+		// Queued behind the rotation (its user-row lock) or, without that
+		// lock, behind the held old row.
+		waitFor("the write", func() (bool, error) {
+			var ok bool
+			err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+				WHERE pid <> $2 AND pg_blocking_pids(pid) && ARRAY[$1, $2]::int[])`, holder, rotation).Scan(&ok)
+			return ok, err
+		})
+		if err := hold.Commit(ctx); err != nil {
+			t.Fatalf("release the old session: %v", err)
+		}
+		if err := <-rotated; err != nil {
+			t.Fatalf("rotate: %v", err)
+		}
+		if err := <-written; err != nil {
+			t.Fatalf("the write: %v", err)
+		}
+	}
+
+	t.Run("a PIN write", func(t *testing.T) {
+		f := newLockFixture(t)
+		race(t, f, &f.parent.ID, func() error {
+			_, err := f.q.SetProfilePIN(ctx, f.userID, f.parent.ID, "a-pin-hash", f.parentRT, nil)
+			return err
+		})
+		var n int
+		if err := lockTestPool(t).QueryRow(ctx, `SELECT count(*) FROM refresh_tokens
+			WHERE user_id = $1 AND active_profile_id = $2 AND id <> $3`, f.userID, f.parent.ID, f.parentRT).Scan(&n); err != nil {
+			t.Fatalf("count the sessions: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("%d session(s) still bound to the newly locked profile", n)
+		}
+	})
+	t.Run("a re-default", func(t *testing.T) {
+		f := newLockFixture(t)
+		race(t, f, nil, func() error {
+			return f.q.SetDefaultProfile(ctx, f.userID, f.kid.ID, nil)
+		})
+		var n int
+		if err := lockTestPool(t).QueryRow(ctx, `SELECT count(*) FROM refresh_tokens
+			WHERE user_id = $1 AND active_profile_id IS NULL`, f.userID).Scan(&n); err != nil {
+			t.Fatalf("count the sessions: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("%d unbound session(s) now act as the new default", n)
+		}
+	})
+}

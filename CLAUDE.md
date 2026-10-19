@@ -212,7 +212,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   no binding acts as the default, and `SetDefaultProfile` first binds the
   account's unbound sessions to the old default (revoked rows too: an access
   token resolves through its row after rotation), so re-defaulting moves no
-  other device.
+  other device. An account with no default has none to bind them to, so
+  there, when the new default has a PIN, its other unbound sessions are
+  signed out instead; the asking one, which gave the PIN, stays.
 - Setting or changing a PIN ends the account's other sessions that act as
   the profile, including ones that entered the old PIN: those bound to it,
   and the unbound ones when it is the default, revoked rows included
@@ -276,7 +278,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 - An account keeps at least one profile without a ceiling: a ceiling on its
   last one, or that profile's delete, is a 409 `last_unrestricted_profile`
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
-  writes cannot each count the other's profile as the one left). The
+  writes cannot each count the other's profile as the one left), and so is
+  a ceiling on an account's first profile (`CreateProfileFor`): an account
+  with no profile acts as an unrestricted stand-in. The
   management writes lock the user row `FOR NO KEY UPDATE`: that conflicts
   with itself, with activation's and a link's `FOR SHARE` and with the
   `FOR UPDATE` of rotation and the bound session inserts
@@ -407,7 +411,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     so one from a session a PIN write ends in between can still land; a
     pairing's bound profile is still rechecked for its PIN when the device
     collects the grant.
-  - A re-default whose profile was deleted meanwhile is refused (404), but
+  - A re-default, a PIN write or an edit whose profile was deleted meanwhile
+    is refused (404), but
     an account can still have profiles and no default (the TV creates a
     first profile that is not the default on an account with none; a restore
     or hand-written SQL), and nothing reports it. Its unbound sessions then
@@ -509,9 +514,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and end to end only for a PIN removed and set again mid-activation; the
     bind's recheck itself is pinned, and its lock mode with it: the race
     tests hold the account lock as the PIN write does (`FOR NO KEY UPDATE`),
-    so weakening any write's lock fails one. Nothing tests the onboarding age step's
-    lock for a restricted profile (`ceilingLocked`); the server refuses the
-    change regardless.
+    so weakening any management write's or bound session insert's lock fails
+    one, and rotation's `FOR UPDATE` is pinned by a rotation racing a PIN
+    write and a re-default (`TestARotationInFlightCannotCarryABindingPastAWrite`).
+    The onboarding age step's lock for a restricted profile (`ceilingLocked`)
+    is tested at its patch helper only; the server refuses the change
+    regardless.
   - Account-level actions still open to a restricted session, for example:
     editing the member profile (`PUT /api/me/profile`, whose
     `share_watch_history` switch publishes the default profile's history),

@@ -451,6 +451,10 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.queries.CreateProfileFor(r.Context(), profile, managerJudgement(claims, nil)); err != nil {
+		if errors.Is(err, db.ErrLastUnrestrictedProfile) {
+			denyLastUnrestricted(w)
+			return
+		}
 		if denyManagerRecheck(w, err) {
 			return
 		}
@@ -586,6 +590,10 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, db.ErrProfileCeilingChanged) {
 			writeErrorReason(w, http.StatusConflict, "profile_changed", "this profile's content rating limit just changed; reload and try again")
+			return
+		}
+		if errors.Is(err, db.ErrProfileGone) {
+			writeError(w, http.StatusNotFound, "profile not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
@@ -907,6 +915,10 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 	revoked, err := h.queries.SetProfilePIN(r.Context(), claims.UserID, profileID, hash, claims.RefreshTokenID, managerJudgement(claims, targetPIN))
 	if err != nil {
 		if denyManagerRecheck(w, err) {
+			return
+		}
+		if errors.Is(err, db.ErrProfileGone) {
+			writeError(w, http.StatusNotFound, "profile not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to set the PIN")

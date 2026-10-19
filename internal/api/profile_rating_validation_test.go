@@ -54,6 +54,11 @@ func TestCreateProfile_MaxAgeRatingValidated(t *testing.T) {
 		return rr, stored
 	}
 
+	// An account's first profile cannot carry a ceiling (CreateProfileFor),
+	// so the account gets one without first.
+	if err := q.CreateProfile(ctx, &models.UserProfile{UserID: userID, Name: "unrestricted", Language: "en", SubtitleMode: "off"}); err != nil {
+		t.Fatalf("seed an unrestricted profile: %v", err)
+	}
 	for in, want := range map[string]string{" pg ": "PG", "tv-14": "TV-14", "NC-17": "NC-17", "": ""} {
 		rr, stored := create(t, in)
 		if stored == nil {

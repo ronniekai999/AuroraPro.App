@@ -66,12 +66,18 @@ func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, ha
 	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`UPDATE user_profiles
 		 SET pin_hash = $2, pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = NOW()
 		 WHERE id = $1 AND user_id = $3`,
-		profileID, nilIfEmpty(hash), userID); err != nil {
+		profileID, nilIfEmpty(hash), userID)
+	if err != nil {
 		return 0, fmt.Errorf("set profile pin: %w", err)
+	}
+	// A profile deleted meanwhile (the delete takes the same lock, so it ran
+	// wholly before) has no PIN to set.
+	if tag.RowsAffected() == 0 {
+		return 0, ErrProfileGone
 	}
 	var revoked int64
 	if hash != "" {

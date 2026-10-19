@@ -41,6 +41,19 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 	if err := recheckManager(ctx, tx, 0, judged); err != nil {
 		return err
 	}
+	// A profile with a ceiling on an account with none free of one (an
+	// account with no profile at all, whose session acts as an unrestricted
+	// stand-in) would leave nothing on it able to manage profiles.
+	if strings.TrimSpace(p.MaxAgeRating) != "" {
+		var has bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
+			WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, p.UserID).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			return ErrLastUnrestrictedProfile
+		}
+	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO user_profiles (user_id, name, avatar_url, is_default, max_age_rating, language, subtitle_lang, subtitle_mode)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -529,8 +542,13 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		strings.Join(setClauses, ", "), idx)
 	args = append(args, profileID)
 
+	// A profile deleted meanwhile updates no row; the handler answers 404
+	// rather than the profile it no longer has.
 	if req.MaxAgeRating == nil {
-		_, err := q.pool.Exec(ctx, query, args...)
+		tag, err := q.pool.Exec(ctx, query, args...)
+		if err == nil && tag.RowsAffected() == 0 {
+			return ErrProfileGone
+		}
 		return err
 	}
 	tx, err := q.pool.Begin(ctx)
@@ -563,8 +581,12 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, query, args...); err != nil {
+	tag, err := tx.Exec(ctx, query, args...)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProfileGone
 	}
 	return tx.Commit(ctx)
 }
@@ -646,9 +668,13 @@ func (q *Queries) DeleteProfile(ctx context.Context, profileID int64, judged *Ma
 // binding acts as the default, so it is first bound to the OLD default:
 // re-defaulting must not move another device onto a profile, locked or not,
 // that it never switched to. Revoked rows are bound too, because an access
-// token outlives its row's rotation and resolves through it. The user row is
-// locked like RotateRefreshToken locks it, so a rotation cannot slip an
-// unbound row in between.
+// token outlives its row's rotation and resolves through it. An account with
+// no default has none to bind them to (its unbound sessions act as an
+// unrestricted stand-in), so there, when the new default has a PIN, the
+// other unbound sessions are deleted instead, as a PIN write ends a
+// profile's sessions: they sign in again. The user row is locked like
+// RotateRefreshToken locks it, so a rotation cannot slip an unbound row in
+// between.
 func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64, judged *ManagerJudgement) error {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
@@ -662,10 +688,26 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
-		UPDATE refresh_tokens SET active_profile_id =
-		  (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE)
-		WHERE user_id = $1 AND active_profile_id IS NULL`, userID)
+	var oldDefault *int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE`,
+		userID).Scan(&oldDefault); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if oldDefault != nil {
+		_, err = tx.Exec(ctx, `
+			UPDATE refresh_tokens SET active_profile_id = $2
+			WHERE user_id = $1 AND active_profile_id IS NULL`, userID, *oldDefault)
+	} else {
+		var keep int64
+		if judged != nil {
+			keep = judged.RefreshTokenID
+		}
+		_, err = tx.Exec(ctx, `
+			DELETE FROM refresh_tokens
+			WHERE user_id = $1 AND active_profile_id IS NULL AND id <> $3
+			  AND EXISTS (SELECT 1 FROM user_profiles WHERE id = $2 AND user_id = $1 AND pin_hash IS NOT NULL)`,
+			userID, profileID, keep)
+	}
 	if err != nil {
 		return err
 	}
