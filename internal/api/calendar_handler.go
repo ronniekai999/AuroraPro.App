@@ -17,7 +17,8 @@ import (
 //   payload. Returns []UpcomingEpisode pre-sorted by air_date asc.
 //
 // Public for any authenticated user — TV shows are an inherently
-// shared property of the server library, not per-user.
+// shared property of the server library, not per-user — under the
+// acting profile's rating ceiling.
 
 const (
 	calendarDefaultDays = 30
@@ -76,7 +77,8 @@ func (h *CalendarHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	episodes, err := h.queries.UpcomingEpisodes(r.Context(), from, to)
+	allowed := listingAllowedRatings(r.Context(), h.queries, claims, "calendar")
+	episodes, err := h.queries.UpcomingEpisodes(r.Context(), from, to, allowed)
 	if err != nil {
 		slog.Warn("calendar upcoming failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to load calendar")

@@ -382,7 +382,8 @@ func (h *PartyInviteHandler) MyInvites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	invites, err := h.queries.ListUpcomingInvitesForUser(r.Context(), claims.UserID)
+	allowed := listingAllowedRatings(r.Context(), h.queries, claims, "party invites")
+	invites, err := h.queries.ListUpcomingInvitesForUser(r.Context(), claims.UserID, allowed)
 	if err != nil {
 		slog.Error("my invites: list failed", "user_id", claims.UserID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to load invites")

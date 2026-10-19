@@ -61,8 +61,11 @@ func (h *CollectionsHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Audit M1 fix — admins see all collections (incl. others'
-	// private ones). Regular users see owned + public.
-	out, err := h.queries.ListCollectionsForUser(r.Context(), claims.UserID, adminPowers(r.Context(), h.queries, claims))
+	// private ones). Regular users see owned + public. Either way the
+	// counts, mosaic and cover leave out members over the acting
+	// profile's ceiling.
+	allowed := listingAllowedRatings(r.Context(), h.queries, claims, "collections")
+	out, err := h.queries.ListCollectionsForUser(r.Context(), claims.UserID, adminPowers(r.Context(), h.queries, claims), allowed)
 	if err != nil {
 		slog.Warn("collections list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list collections")
@@ -86,7 +89,8 @@ func (h *CollectionsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	c, err := h.queries.GetCollection(r.Context(), id)
+	allowed := listingAllowedRatings(r.Context(), h.queries, claims, "collection")
+	c, err := h.queries.GetCollection(r.Context(), id, allowed)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "lookup failed")
 		return
@@ -102,7 +106,7 @@ func (h *CollectionsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "not your collection")
 		return
 	}
-	items, err := h.queries.ListCollectionItems(r.Context(), id)
+	items, err := h.queries.ListCollectionItems(r.Context(), id, allowed)
 	if err != nil {
 		slog.Warn("collection items fetch failed", "id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to load items")
@@ -177,8 +181,9 @@ func (h *CollectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// creator's acting-profile ceiling exactly as /api/media/search does;
 	// otherwise a restricted profile could read any title back by prompting
 	// a collection for it. Unlike that handler it does NOT fail open: the seed
-	// is saved, and collection contents are read back without a ceiling, so a
-	// resolve error skips the seed and returns the empty collection instead.
+	// is saved and shared, and a reader whose ceiling cannot be resolved is
+	// shown it unfiltered, so a resolve error skips the seed and returns the
+	// empty collection instead.
 	if req.Kind == "ai" {
 		c = h.seedAICollection(r, claims, c)
 	}
@@ -215,7 +220,7 @@ func (h *CollectionsHandler) seedAICollection(r *http.Request, claims *auth.JWTC
 		}
 	}
 	// Re-load to update ItemCount in the response.
-	if reloaded, _ := h.queries.GetCollection(r.Context(), c.ID); reloaded != nil {
+	if reloaded, _ := h.queries.GetCollection(r.Context(), c.ID, db.AllowedRatingsForMax(profile.MaxAgeRating)); reloaded != nil {
 		c = reloaded
 	}
 	return c
@@ -233,7 +238,7 @@ func (h *CollectionsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	c, err := h.queries.GetCollection(r.Context(), id)
+	c, err := h.queries.GetCollection(r.Context(), id, nil)
 	if err != nil || c == nil {
 		writeError(w, http.StatusNotFound, "collection not found")
 		return
@@ -261,7 +266,7 @@ func (h *CollectionsHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	c, gerr := h.queries.GetCollection(r.Context(), id)
+	c, gerr := h.queries.GetCollection(r.Context(), id, nil)
 	if gerr != nil || c == nil {
 		writeError(w, http.StatusNotFound, "collection not found")
 		return
@@ -273,6 +278,13 @@ func (h *CollectionsHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 	var req models.AddToCollectionRequest
 	if derr := json.NewDecoder(r.Body).Decode(&req); derr != nil || req.MediaItemID <= 0 {
 		writeError(w, http.StatusBadRequest, "media_item_id is required")
+		return
+	}
+	// The by-id gate: a title over the acting profile's ceiling reads as
+	// missing. A collection is shared beyond this session, so adding is the
+	// same probe as a lookup.
+	if hidden, herr := actingMediaHidden(r.Context(), h.queries, claims, req.MediaItemID); herr != nil || hidden {
+		denyHiddenMedia(w, req.MediaItemID, herr)
 		return
 	}
 	if aerr := h.queries.AddToCollection(r.Context(), id, req.MediaItemID); aerr != nil {
@@ -304,7 +316,7 @@ func (h *CollectionsHandler) RemoveItem(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid item id")
 		return
 	}
-	c, gerr := h.queries.GetCollection(r.Context(), id)
+	c, gerr := h.queries.GetCollection(r.Context(), id, nil)
 	if gerr != nil || c == nil {
 		writeError(w, http.StatusNotFound, "collection not found")
 		return

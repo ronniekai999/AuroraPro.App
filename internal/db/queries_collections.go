@@ -13,6 +13,12 @@ import (
 //
 // Visibility rule: a user sees their OWN collections + any public ones.
 // Mutations require ownership (or admin role, gated at the handler).
+//
+// Reads take allowedRatings, the reader's ceiling (db.AllowedRatingsForMax;
+// nil is unrestricted): members over it are left out of the items, the
+// counts, the poster mosaic and the cover. A collection is shared (public
+// ones with every user, private ones with the owner's whole account), so its
+// contents are filtered per reader rather than when they are added.
 
 // ListCollectionsForUser returns all collections visible to userID.
 // When isAdmin is true the visibility filter is dropped — admins
@@ -39,37 +45,43 @@ const posterPathsSelect = `
 	            JOIN media_items mi ON mi.id = ci.media_item_id
 	           WHERE ci.collection_id = c.id
 	             AND COALESCE(mi.poster_path, '') <> ''
+	             AND ($1::text[] IS NULL OR mi.content_rating = ANY($1))
 	           ORDER BY ci.position, ci.id
 	           LIMIT 4) p
 	), '{}') AS poster_paths`
 
-func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAdmin bool) ([]*models.Collection, error) {
-	var sql string
-	var args []any
-	if isAdmin {
-		sql = `
-			SELECT c.id, c.owner_user_id, c.name, COALESCE(c.description, ''),
-			       c.kind, COALESCE(c.prompt, ''), c.is_public,
-			       COALESCE(c.cover_path, ''),
-			       (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS item_count,
-			       c.created_at, c.updated_at,` + posterPathsSelect + `
-			  FROM collections c
-			 ORDER BY c.updated_at DESC
-		`
-	} else {
-		sql = `
-			SELECT c.id, c.owner_user_id, c.name, COALESCE(c.description, ''),
-			       c.kind, COALESCE(c.prompt, ''), c.is_public,
-			       COALESCE(c.cover_path, ''),
-			       (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS item_count,
-			       c.created_at, c.updated_at,` + posterPathsSelect + `
-			  FROM collections c
-			 WHERE c.owner_user_id = $1 OR c.is_public = true
-			 ORDER BY c.updated_at DESC
-		`
-		args = append(args, userID)
-	}
-	rows, err := q.pool.Query(ctx, sql, args...)
+// collectionSummarySelect is a collection row's columns as the reader with
+// ceiling $1 sees them. Under a ceiling the cover is the first allowed
+// member's poster: the stored cover_path is copied from whichever title was
+// added first, which may be over it.
+const collectionSummarySelect = `
+	c.id, c.owner_user_id, c.name, COALESCE(c.description, ''),
+	c.kind, COALESCE(c.prompt, ''), c.is_public,
+	CASE WHEN $1::text[] IS NULL THEN COALESCE(c.cover_path, '')
+	     ELSE COALESCE((
+	       SELECT mi.poster_path
+	         FROM collection_items ci
+	         JOIN media_items mi ON mi.id = ci.media_item_id
+	        WHERE ci.collection_id = c.id
+	          AND COALESCE(mi.poster_path, '') <> ''
+	          AND mi.content_rating = ANY($1)
+	        ORDER BY ci.position, ci.id
+	        LIMIT 1), '') END,
+	(SELECT COUNT(*)
+	   FROM collection_items ci
+	   JOIN media_items mi ON mi.id = ci.media_item_id
+	  WHERE ci.collection_id = c.id
+	    AND ($1::text[] IS NULL OR mi.content_rating = ANY($1))) AS item_count,
+	c.created_at, c.updated_at`
+
+func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAdmin bool, allowedRatings []string) ([]*models.Collection, error) {
+	sql := `
+		SELECT` + collectionSummarySelect + `,` + posterPathsSelect + `
+		  FROM collections c
+		 WHERE $3::bool OR c.owner_user_id = $2 OR c.is_public = true
+		 ORDER BY c.updated_at DESC
+	`
+	rows, err := q.pool.Query(ctx, sql, allowedRatings, userID, isAdmin)
 	if err != nil {
 		return nil, fmt.Errorf("list collections: %w", err)
 	}
@@ -87,16 +99,14 @@ func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAd
 	return out, rows.Err()
 }
 
-func (q *Queries) GetCollection(ctx context.Context, id int64) (*models.Collection, error) {
+// GetCollection reads one collection as a reader with allowedRatings sees it
+// (nil for an ownership check, which needs no member data).
+func (q *Queries) GetCollection(ctx context.Context, id int64, allowedRatings []string) (*models.Collection, error) {
 	c := &models.Collection{}
 	err := q.pool.QueryRow(ctx, `
-		SELECT id, owner_user_id, name, COALESCE(description, ''),
-		       kind, COALESCE(prompt, ''), is_public,
-		       COALESCE(cover_path, ''),
-		       (SELECT COUNT(*) FROM collection_items WHERE collection_id = $1),
-		       created_at, updated_at
-		  FROM collections WHERE id = $1
-	`, id).Scan(&c.ID, &c.OwnerUserID, &c.Name, &c.Description,
+		SELECT`+collectionSummarySelect+`
+		  FROM collections c WHERE c.id = $2
+	`, allowedRatings, id).Scan(&c.ID, &c.OwnerUserID, &c.Name, &c.Description,
 		&c.Kind, &c.Prompt, &c.IsPublic, &c.CoverPath, &c.ItemCount,
 		&c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
@@ -126,11 +136,11 @@ func (q *Queries) DeleteCollection(ctx context.Context, id int64) error {
 	return err
 }
 
-// ListCollectionItems returns the media items in a collection, joined
-// to media_items so callers get titles/posters in one round-trip.
-// Ordered by position then added_at to maintain explicit-order +
-// stable tie-break.
-func (q *Queries) ListCollectionItems(ctx context.Context, collectionID int64) ([]*models.MediaItem, error) {
+// ListCollectionItems returns the media items in a collection that
+// allowedRatings allows (nil: all of them), joined to media_items so callers
+// get titles/posters in one round-trip. Ordered by position then added_at to
+// maintain explicit-order + stable tie-break.
+func (q *Queries) ListCollectionItems(ctx context.Context, collectionID int64, allowedRatings []string) ([]*models.MediaItem, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT m.id, m.library_id, m.title, COALESCE(m.sort_title, ''), m.type,
 		       COALESCE(m.year, 0), COALESCE(m.overview, ''), COALESCE(m.rating, 0),
@@ -140,8 +150,9 @@ func (q *Queries) ListCollectionItems(ctx context.Context, collectionID int64) (
 		  FROM collection_items ci
 		  JOIN media_items m ON m.id = ci.media_item_id
 		 WHERE ci.collection_id = $1
+		   AND ($2::text[] IS NULL OR m.content_rating = ANY($2))
 		 ORDER BY ci.position ASC, ci.added_at ASC
-	`, collectionID)
+	`, collectionID, allowedRatings)
 	if err != nil {
 		return nil, fmt.Errorf("list collection items: %w", err)
 	}
