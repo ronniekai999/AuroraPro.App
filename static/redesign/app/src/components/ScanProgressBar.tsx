@@ -107,7 +107,11 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
     const s = statuses.get(lib.id)
     if (s && s.status === 'running') active.push({ library: lib, status: s })
   }
-  if (active.length === 0) return null
+  // Not admin (a switch to a restricted profile on an admin account): show
+  // nothing, including the last scan polled while it was. The state is kept,
+  // not cleared, so the completion edge above does not read the switch as a
+  // scan finishing; polling restarts if the session is an admin's again.
+  if (!isAdmin || active.length === 0) return null
 
   // Phase 5.3 final QA — flow positioning. Previously the bar was
   // `fixed top-0` which collided with the page's sticky top header

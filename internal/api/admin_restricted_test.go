@@ -101,6 +101,16 @@ func TestTheAdminRefusalFailsClosed(t *testing.T) {
 			t.Errorf("%s: the handler ran = %v", c.name, reached)
 		}
 	}
+	// A cast token copies its minter's role but names no session.
+	reached := false
+	guard := refuseRestrictedAdmin(fakeSessions{acting: free})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	cast := &auth.JWTClaims{UserID: 1, Role: "admin", Scope: auth.ScopeCast, SessionID: "s"}
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	rr := httptest.NewRecorder()
+	guard.ServeHTTP(rr, req.WithContext(context.WithValue(req.Context(), auth.ClaimsContextKey, cast)))
+	if rr.Code != http.StatusForbidden || reached {
+		t.Errorf("a cast token: %d, the handler ran = %v; want 403 and not run", rr.Code, reached)
+	}
 }
 
 // TestAdminRoutesRefuseARestrictedSession: the admin role belongs to the
@@ -133,8 +143,9 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 		return rr.Code, errorReasonOf(rr)
 	}
 	// One route per guard in the router. The ids are ones no row has and the
-	// POSTs carry no body, so if a guard regresses the handler behind it finds
-	// nothing to change in the shared test database.
+	// POSTs carry no body, so if a guard regresses the handlers behind them
+	// find nothing to change, except the invite, which defaults its body and
+	// inserts a code; that row goes with the fixture's user.
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/users"},
 		{http.MethodPost, "/api/users/invite"},

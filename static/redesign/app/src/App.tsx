@@ -3050,7 +3050,13 @@ export default function App() {
     })
   }, [realtimeUserId])
   useRealtime({
-    enabled: realtimeUserId != null,
+    // Not before the startup binding is read (catalogProfileSettled), and
+    // reopened on every switch: the server fixes the socket's role when it
+    // connects, and a new sign-in binds the default before the startup
+    // re-selection moves it, so a socket opened then gave a kid's session the
+    // admin-only events.
+    enabled: realtimeUserId != null && catalogProfileSettled,
+    connectionKey: activeProfileId,
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
       // flow already optimistically prepends the new row, and the failure
@@ -6455,9 +6461,11 @@ export default function App() {
               a blank page. A known restricted profile is sent home instead. */}
           {view === 'admin' && user.role === 'admin' && !adminUI && !actingRestricted && (
             <p role="status" className="text-white/50 text-sm text-center py-16">
-              {profilesSettled
-                ? "Couldn't confirm which profile this session uses, so the admin pages are hidden. Reload to try again."
-                : 'Checking your profile…'}
+              {!profilesSettled
+                ? 'Checking your profile…'
+                : profilesGateForced
+                  ? 'Pick a profile to continue.'
+                  : "Couldn't confirm which profile this session uses, so the admin pages are hidden. Reload to try again."}
             </p>
           )}
         </div>

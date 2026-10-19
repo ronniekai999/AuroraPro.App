@@ -23,6 +23,10 @@ export interface DiscoverReadyEvent {
 export interface RealtimeHandlers {
   // Gate: open the socket only while logged in. Flipping false tears it down.
   enabled: boolean
+  // A change reopens the socket. The server fixes a socket's role when it
+  // connects (a session acting as a restricted profile gets the user's
+  // events, not the admin's), so the app passes the session's profile.
+  connectionKey?: string | number | null
   onRequestStatus?: (ev: RequestStatusEvent) => void
   onNotification?: (n: AppNotification) => void
   onDiscoverReady?: (ev: DiscoverReadyEvent) => void
@@ -38,7 +42,8 @@ export interface RealtimeHandlers {
 // the browser auto-pongs, so no client-side heartbeat is required.
 //
 // Callbacks are read through a ref so changing their identity each render does
-// NOT reconnect the socket — only `enabled` drives connect/teardown.
+// NOT reconnect the socket — only `enabled` and `connectionKey` drive
+// connect/teardown.
 export function useRealtime(handlers: RealtimeHandlers): void {
   const handlersRef = useRef(handlers)
 
@@ -47,6 +52,7 @@ export function useRealtime(handlers: RealtimeHandlers): void {
   }, [handlers])
 
   const enabled = handlers.enabled
+  const connectionKey = handlers.connectionKey
 
   useEffect(() => {
     if (!enabled) return
@@ -151,5 +157,5 @@ export function useRealtime(handlers: RealtimeHandlers): void {
         ws = null
       }
     }
-  }, [enabled])
+  }, [enabled, connectionKey])
 }

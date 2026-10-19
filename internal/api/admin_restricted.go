@@ -16,13 +16,19 @@ import (
 
 // refuseRestrictedAdmin is middleware for the admin routes, run after
 // auth.RequireAdmin: it refuses (403 profile_restricted) a session acting as
-// a restricted profile, and fails closed like denyRestrictedSession.
+// a restricted profile, and fails closed like denyRestrictedSession. It also
+// refuses a scoped token itself (RequireAuth already does, ahead of it), as
+// adminPowers does: one names no session, so it would resolve to the default.
 func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims := auth.GetClaims(r.Context())
 			if claims == nil {
 				writeError(w, http.StatusUnauthorized, "not authenticated")
+				return
+			}
+			if claims.Scope != "" {
+				writeError(w, http.StatusForbidden, "this token cannot use the admin pages")
 				return
 			}
 			if denyRestrictedSession(w, r, store, claims, "use the admin pages") {
@@ -39,7 +45,9 @@ func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 // one whose session row is gone, or one whose profile cannot be resolved has
 // none: it fails closed. So does a scoped token (a cast token copies its
 // minter's role but names no session, so it would resolve to the account
-// default), and a handler given no store.
+// default), and a handler given no store: a nil interface, as PartyQRHandler
+// and FeedbackHandler hold without one. A nil *db.Queries is not a nil
+// interface; it panics, which the recoverer answers with a 500.
 func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims) bool {
 	if claims == nil || claims.Role != "admin" || claims.Scope != "" || store == nil {
 		return false
