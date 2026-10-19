@@ -195,12 +195,13 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     its item DELETE takes, so they go only with the whole list. `GET
     /api/me/rating` returns the profile's own stars for any id (no title
     data). Pre-ceiling taste seeds reach the Discover prompts
-    (`TasteSeedAnchors`), and pre-ceiling favourites, want-to-watch entries,
-    thumbs-up and 4-5 star ratings still pull the taste vector, which steers
-    results but names no title.
+    (`TasteSeedAnchors`), and every pre-ceiling taste signal (seeds,
+    progress, favourites, want-to-watch entries, thumbs-up, 4-5 star
+    ratings) still pulls the taste vector, whose query has no rating filter;
+    that steers results but names no title.
   - Timing: under a ceiling a missing id and an over-ceiling one get the
     same body, not the same time. The stream-info and detail routes answer a
-    missing id after one query and an over-ceiling one after two to four, as
+    missing id after one query and an over-ceiling one after two to five, as
     the stream routes do, so repeated timing can tell them apart.
   - Cross-library copies: the detail, files, episodes and next-episode
     lookups add files of other items with the same TMDB id without checking
