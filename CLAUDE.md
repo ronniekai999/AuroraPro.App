@@ -702,9 +702,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     one token lifetime, acting as the account's most restrictive profile, as
     a deleted profile's sessions do; it can read and write that profile's
     data (and, when no profile on the account is restricted, so that it acts
-    as an unrestricted one, other profiles' through the `?profile_id=`
-    routes), but cannot manage profiles, pair a device or finish a sign-in
-    link.
+    as an unrestricted one, other profiles' through the profile-keyed
+    routes), but cannot manage profiles, switch profiles, pair a device,
+    start, finish or remove a sign-in link, edit the member profile, or use
+    the admin pages or powers.
   - A PIN write keeps only the session row its access token names, so a tab
     whose token predates its session's latest rotation ends its own session
     too; it signs in again.

@@ -305,8 +305,8 @@ interface VideoPlayerProps {
   // parent to advance even with the autoplay preference off — an
   // explicit click outranks the passive-behavior setting.
   // Active sub-profile, so playback telemetry is attributed to the profile
-  // that actually watched rather than falling back to the account default —
-  // which mis-filed every kids-profile playback.
+  // that actually watched. The server takes the session's acting profile
+  // when it is omitted, and refuses a restricted session naming another.
   profileId?: number | null
   onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
   // Issue #460 — the next-up card's party counterpart. In a watch party

@@ -2909,8 +2909,8 @@ export async function listContinueWatching(
   limit = 20, profileId?: number, signal?: AbortSignal,
 ): Promise<ContinueWatchingItem[]> {
   // Phase 5 — profile-aware. When profileId is set, server scopes
-  // progress entries to that profile. Without it, the response is
-  // user-global (V1's default behavior pre-profiles).
+  // progress entries to that profile; without it, to the session's acting
+  // profile.
   const params = new URLSearchParams({ limit: String(limit) })
   if (profileId) params.set('profile_id', String(profileId))
   const items = await apiFetch<ContinueWatchingItem[]>(

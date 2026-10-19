@@ -31,8 +31,9 @@ type requestProfileStore interface {
 //
 // It writes the refusal itself and fails closed: an acting-profile resolve
 // error is a 500, never a fallback. The returned profile has ID 0 only when
-// nothing was named and the account has no profile yet; callers decide what
-// that means.
+// nothing was named and the session acts as the unrestricted stand-in (an
+// unbound session on an account with no default, profiles or not); callers
+// decide what that means.
 func resolveRequestProfile(w http.ResponseWriter, r *http.Request, store requestProfileStore, requested int64) (*models.UserProfile, bool) {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
@@ -123,8 +124,8 @@ func resolveQueryProfile(w http.ResponseWriter, r *http.Request, store requestPr
 }
 
 // resolveQueryProfileAllowingNone is resolveRequestProfile for ?profile_id=,
-// for read routes where an account with no profile yet simply has nothing to
-// show: it returns the acting profile with ID 0 then, not a 404.
+// for read routes where the stand-in (ID 0, see above) simply has nothing to
+// show: it returns it then, not a 404.
 func resolveQueryProfileAllowingNone(w http.ResponseWriter, r *http.Request, store requestProfileStore) (*models.UserProfile, bool) {
 	requested, ok := queryProfileID(w, r)
 	if !ok {
