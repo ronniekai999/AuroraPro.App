@@ -140,6 +140,9 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if denyRestrictedSession(w, r, h.queries, claims, "manage sign-in methods") {
+		return
+	}
 	provider, ok := h.resolveProvider(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "Unknown OAuth provider")
@@ -243,6 +246,9 @@ func (h *OAuthHandler) Unlink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if denyRestrictedSession(w, r, h.queries, claims, "manage sign-in methods") {
+		return
+	}
 	provider, ok := h.resolveProvider(r)
 	if !ok {
 		writeError(w, http.StatusNotFound, "Unknown OAuth provider")
@@ -333,7 +339,8 @@ func (h *OAuthHandler) handleLinkCallback(w http.ResponseWriter, r *http.Request
 	// mid-link, which should abort rather than attach the provider to whoever
 	// the transaction names) and the adversarial one (somebody replaying a
 	// transaction token they should not hold).
-	if !h.linkSessionMatches(r.Context(), r, linkUID) {
+	sessionID, live := h.linkSession(r.Context(), r, linkUID)
+	if !live {
 		slog.Warn("oauth link callback: no live session for link target",
 			"provider", providerName, "link_uid", linkUID)
 		h.renderError(w, "Session changed or expired during linking. Sign in and try again from Settings.")
@@ -351,8 +358,13 @@ func (h *OAuthHandler) handleLinkCallback(w http.ResponseWriter, r *http.Request
 
 	// Attach the identity. Map the conflict sentinels to user-facing messages
 	// (same wording as resolveOAuthUser's Tier-2 link errors for consistency).
-	if err := h.queries.AddOAuthIdentity(r.Context(), linkUID, providerName, profile.Subject); err != nil {
+	// Rechecked under the account lock with the insert: the check above ran
+	// before the provider round trip.
+	judged := &db.ManagerJudgement{UserID: linkUID, RefreshTokenID: sessionID}
+	if err := h.queries.AddOAuthIdentityFor(r.Context(), linkUID, providerName, profile.Subject, judged); err != nil {
 		switch {
+		case errors.Is(err, db.ErrSessionEnded), errors.Is(err, db.ErrActingProfileRestricted):
+			h.renderError(w, "Session changed or expired during linking. Sign in and try again from Settings.")
 		case errors.Is(err, db.ErrOAuthIdentityConflict):
 			h.renderError(w, fmt.Sprintf("This %s account is already linked to a different Aurora user.", strings.Title(providerName)))
 		case errors.Is(err, db.ErrOAuthProviderAlreadyLinked):

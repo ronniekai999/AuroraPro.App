@@ -26,6 +26,16 @@ type deviceGrant struct {
 	Expires      time.Time
 	UserID       int64
 	TokenVersion int
+	// ProfileID binds the new device's session to the approver's acting
+	// profile (0 when the account has none). An unbound session acts as the
+	// account's default profile, so without this a kid's session could approve
+	// a new device and land it on the unrestricted default, and any approver
+	// could hand a device a locked default it never unlocked.
+	ProfileID int64
+	// PINHash is the PIN state ProfileID was judged under: nil for an
+	// unlocked profile, else its hash (an account with no password whose
+	// every profile is locked). The session insert rechecks it.
+	PINHash *string
 }
 
 type deviceBudget struct {
@@ -130,7 +140,7 @@ func (g *deviceGrants) preview(code string) (deviceGrant, bool) {
 	return grant, grant.UserID == 0
 }
 
-func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int) bool {
+func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int, profileID int64, pinHash *string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.pruneLocked(g.now())
@@ -142,7 +152,7 @@ func (g *deviceGrants) authorize(code string, userID int64, tokenVersion int) bo
 	if grant.UserID != 0 {
 		return false
 	}
-	grant.UserID, grant.TokenVersion = userID, tokenVersion
+	grant.UserID, grant.TokenVersion, grant.ProfileID, grant.PINHash = userID, tokenVersion, profileID, pinHash
 	g.byToken[token] = grant
 	return true
 }
@@ -168,6 +178,10 @@ func (g *deviceGrants) take(secret string) (deviceGrant, string) {
 
 type deviceSessionStore interface {
 	GetUserByID(context.Context, int64) (*models.User, error)
+	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
+	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
+	MostRestrictiveProfilePIN(ctx context.Context, userID, prefer int64) (*models.UserProfile, *string, error)
+	SessionLive(ctx context.Context, userID, refreshTokenID int64) (bool, error)
 	CreateRefreshTokenAtVersion(context.Context, *models.RefreshToken, int) (bool, error)
 	RevokeRefreshToken(context.Context, string) error
 }
@@ -271,7 +285,60 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "sign in again before authorizing this device")
 		return
 	}
-	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion) {
+	// An approver whose own session has ended (its row deleted by a PIN write,
+	// a profile delete or the purge) cannot pair: the new session would
+	// outlive the one that approved it.
+	if !requireLiveSession(w, r, h.sessions.SessionLive, claims) {
+		return
+	}
+	// The approver passes its own acting profile on to the device. A
+	// restricted approver on an unlocked profile therefore cannot raise a
+	// ceiling by pairing, and an unrestricted non-default one does not hand
+	// the device the account default, which may be a locked profile it never
+	// unlocked. A locked acting profile is not passed on: a device acting as
+	// it would skip its PIN, so anyone at the new device could pick it. The
+	// device gets the account's most restrictive unlocked profile instead,
+	// which can be looser than a locked restricted approver's own, though
+	// never looser than a profile the approver could switch to without a
+	// PIN. With every profile locked the pairing is refused, since the
+	// account password can still sign the device in, unless the account has
+	// no password: then pairing is the device's only way in, and refusing it
+	// would lock the owner's devices out for good (no route can give an
+	// account a password). The device then gets the account's most
+	// restrictive profile without its PIN (the approver's own when it ties),
+	// which is never looser than any other profile on it; as the linked
+	// sign-in does for such an account, the approver's own sign-in stands in
+	// for that one PIN. Fails closed.
+	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
+	if err != nil || acting == nil {
+		writeError(w, http.StatusInternalServerError, "could not check the active profile")
+		return
+	}
+	var pinHash *string // the PIN state the bound profile is judged under
+	if acting.HasPIN {
+		unlocked, uerr := h.sessions.MostRestrictiveUnlockedProfile(r.Context(), claims.UserID)
+		if uerr != nil {
+			writeError(w, http.StatusInternalServerError, "could not check the active profile")
+			return
+		}
+		switch {
+		case unlocked != nil:
+			acting = unlocked
+		case user.PasswordHash != "":
+			writeErrorReason(w, http.StatusConflict, "profile_locked",
+				"every profile on this account has a PIN; sign in on the device with the account password instead")
+			return
+		default:
+			locked, hash, lerr := h.sessions.MostRestrictiveProfilePIN(r.Context(), claims.UserID, acting.ID)
+			if lerr != nil || locked == nil || locked.ID == 0 {
+				writeError(w, http.StatusInternalServerError, "could not check the active profile")
+				return
+			}
+			acting, pinHash = locked, hash
+		}
+	}
+	bindProfile := acting.ID // 0 when the account has no profile yet: unbound
+	if !h.grants.authorize(req.Code, user.ID, user.TokenVersion, bindProfile, pinHash) {
 		writeError(w, http.StatusNotFound, "device code is expired or already used")
 		return
 	}
@@ -305,6 +372,10 @@ func (h *DeviceAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt := &models.RefreshToken{UserID: user.ID, Token: refresh, ExpiresAt: h.authSvc.RefreshTokenExpiry(), DeviceInfo: grant.Name}
+	if grant.ProfileID != 0 {
+		rt.ActiveProfileID = &grant.ProfileID
+		rt.BoundPINHash = grant.PINHash
+	}
 	created, err := h.sessions.CreateRefreshTokenAtVersion(r.Context(), rt, grant.TokenVersion)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not sign in this device")

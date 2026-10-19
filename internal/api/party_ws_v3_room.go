@@ -13,6 +13,7 @@ package api
 // Client → server:  join-party, leave-party, chat-message, reaction
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -72,6 +73,13 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// string "1" is treated as not-a-companion, so a malformed/garbage value
 	// degrades to the historical (non-companion) behavior rather than erroring.
 	companion := r.URL.Query().Get("companion") == "1"
+
+	// Resolved once, while the session row is live: the socket outlives it
+	// (see Manager.CallerProfile). Bounded, since every connect waits on it;
+	// a lookup that times out is retried at the next change-media.
+	connectCtx, cancelConnect := context.WithTimeout(r.Context(), 2*time.Second)
+	caller := h.manager.CallerProfile(connectCtx, claims.UserID, claims.RefreshTokenID)
+	cancelConnect()
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -314,7 +322,15 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// server-side, so this is the only path that needs the guard.
 			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
 			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
-			if err := h.manager.ChangeMedia(code, claims.UserID, claims.RefreshTokenID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
+			if caller == nil {
+				// The connect-time lookup failed; one failure must not
+				// turn the check off for the socket's life. Bounded like
+				// ChangeMedia's own validation, since it holds the read loop.
+				lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+				caller = h.manager.CallerProfile(lookupCtx, claims.UserID, claims.RefreshTokenID)
+				cancel()
+			}
+			if err := h.manager.ChangeMedia(code, claims.UserID, caller, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))
 			}
 

@@ -189,9 +189,393 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - Watch parties: creating one applies no ceiling, and changing a party's
     media skips its ceiling check when the media or profile lookup errors or
     finds nothing; both are persisted.
-  - No PIN anywhere: any session on the account can change any of its
-    profiles' ceilings, and `ActivateProfile` checks only ownership, so a
-    restricted session can switch itself to an unrestricted profile.
+  - The profile lock (below) stops a restricted session switching into a
+    locked profile or changing ceilings. It does not stop the reads above:
+    `?profile_id=` routes still accept any owned profile, and listings stay
+    unfiltered.
+
+### Profile lock (PIN)
+
+Opt-in, per profile: `user_profiles.pin_hash` (migration 060), argon2id
+through `auth.Service`. Code: `internal/api/profile_handlers.go`,
+`internal/db/queries_profile_pin.go`, SPA `lib/useProfileSwitch.ts` and
+`ProfilePinDialog`, TV `TvViewModel.selectProfile`.
+
+- `ActivateProfile` into a locked profile needs its PIN or the account
+  password, unless the session already acts as it. The check runs before the
+  unbound-token branch. A token with no session id is a 409
+  `session_unbound`, a session row that is gone a 401 `session_ended`, and a
+  revoked (rotated) one a 409 with no reason, never a 200: clients take a 200
+  as a confirmed binding. The
+  password is the recovery path, by the owner's choice. Making a locked
+  profile the default (`SetDefault`) needs the same, since every session with
+  no binding acts as the default, and `SetDefaultProfile` first binds the
+  account's unbound sessions to the old default (revoked rows too: an access
+  token resolves through its row after rotation), so on an account with a
+  default, re-defaulting moves no other session whose row exists when it
+  runs. It can move what has no row
+  to bind: an ended session's still-valid access token acts as the account's
+  most restrictive profile, ties going to the default, and a token naming no
+  session acts as the default, so for up to a token lifetime a re-default
+  can change which profile either acts as, to the new default without its
+  PIN among others. An account with no default
+  has none to bind them to: there, when the new default has a PIN, its other
+  unbound sessions are signed out instead, keeping only the row the asking
+  session's access token names (a token older than its session's latest
+  rotation keeps the old row, so that device signs in again too); with no
+  PIN they move from the stand-in onto the new default, past no PIN.
+- Setting or changing a PIN ends the account's other sessions that act as
+  the profile, including ones that entered the old PIN: those bound to it,
+  and the unbound ones when it is the default, revoked rows included
+  (`SetProfilePIN`, under the user-row lock rotation takes). The rows are
+  DELETED: a revoked row keeps resolving to its binding for its access
+  token's lifetime, and a review used that window to lift the kid's ceiling
+  and create an unrestricted profile. The caller's own session is kept; the
+  others sign in again. Without this a kid's device left on the parent's
+  profile (switching was free before the lock), or one that used a leaked
+  PIN, kept it, since a session already acting as a profile skips its PIN.
+  Clearing a PIN ends nothing. Activation's bind takes the user row FOR
+  SHARE and rechecks the PIN state the handler judged
+  (`SetActiveProfileForTokenIfPIN`), so a PIN set or changed in between is a
+  403 `profile_pin_required`, not a bind; an attempt that found no PIN binds
+  only while there is still none, so a PIN removed and set again in between
+  is refused too. PIN writes run argon2id twice at
+  most and have their own budget, 5 per 15 minutes per account and acting
+  profile (`pinWriteLimiter`, in memory), so one session cannot spend the
+  owner's.
+- PIN attempts: each is counted BEFORE its argon2 check, in one UPDATE that
+  refuses while a lockout runs (`ReserveProfilePINAttempt`). Counting after the
+  check let concurrent guesses all pass the lockout read; a review drove 40
+  through a limit of 5. The fifth miss starts a 15-minute lockout; a success
+  resets the count; an expired lockout does not, so after the first one each
+  miss re-locks. The database's clock decides lockouts.
+- The account password has its own budget (5 per 15 minutes per account and
+  acting profile, `passwordLimiter`) and a PIN lockout does not block it. If
+  PIN misses also locked out the password, anyone on the account could keep
+  the owner out indefinitely with one wrong guess per lockout, and even stop
+  them changing the PIN. Per account alone, a kid's session spending the
+  budget kept the owner's password out of every session; per session, a kid
+  could multiply it by pairing devices, which all act as the kid.
+- Refusals carry `error.reason`: `profile_pin_required` (nothing supplied, not
+  counted), `profile_pin_invalid`, `profile_pin_locked` (with Retry-After; also
+  a spent password budget), `profile_restricted`, `session_unbound`,
+  `session_ended`.
+- A restricted session is one acting as a profile with a non-empty
+  `max_age_rating`. It may edit only its own name, avatar, language, subtitle
+  and maturity settings. It cannot create, delete or re-default profiles, set
+  or change a PIN, change any ceiling (re-sending its unchanged ceiling
+  passes, and is not written), edit another profile's settings through the
+  profile routes, or link or unlink a sign-in identity (a new link would let
+  it sign in again without the password, after its session ends). These
+  checks fail closed when the acting
+  profile cannot be resolved, and refuse a session whose row is gone (401
+  `session_ended`, `requireLiveSession`): its still-valid access token acts as
+  the most restrictive profile, which with no restricted profile left is the
+  unrestricted default. The handler's checks run before any lock, so every
+  management write (create, delete, re-default, a PIN, a ceiling) rechecks
+  under the account lock what its handler judged (`ManagerJudgement`,
+  `recheckManager`): the session's row still exists (401 `session_ended`),
+  the profile it acts as still has no limit (403 `profile_restricted`), and,
+  for a PIN write or a re-default, the profile's PIN is still the one judged
+  (403 `profile_pin_required`); a ceiling write also that the edited profile
+  still has the limit the handler read (409 `profile_changed`, under
+  `CeilingJudgement`). A PIN write ends the sessions acting as its profile,
+  and a request from one of them already past its checks used to land after
+  it, replacing the PIN just set or lifting a kid's limit; a parent
+  tightening a kid's limit could likewise see a request judged a moment
+  earlier put it back or lift it.
+- An account keeps at least one profile without a ceiling: a ceiling on its
+  last one, or that profile's delete, is a 409 `last_unrestricted_profile`
+  (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
+  writes cannot each count the other's profile as the one left), and so is
+  a ceiling on an account's first profile (`CreateProfileFor`): an account
+  with no profile acts as an unrestricted stand-in. The
+  management writes lock the user row `FOR NO KEY UPDATE`: that conflicts
+  with itself, with activation's and a link's `FOR SHARE` and with the
+  `FOR UPDATE` of rotation and the bound session inserts
+  (`CreateRefreshTokenAtVersion`; a password login's or a registration's
+  unbound insert takes no lock), but not with the foreign-key lock an
+  insert of the account's children takes. `FOR UPDATE` deadlocked a profile
+  delete with a recap question, which inserts a child of the profile and
+  then one of the account. Without the last-unrestricted rule
+  nothing on the account could manage profiles again, and onboarding's age
+  step reached that on a single-profile account in one move; that step now
+  gives the account's only such profile the tone lean and no ceiling. A
+  profile that already has a ceiling passes, so a restricted session's own
+  edits still round-trip it.
+- The acting profile must not degrade to the account default for a session
+  the server has lost. Revoked session rows are kept until `revoked_at` is
+  older than the access-token lifetime (migration 061, `PurgeExpiredTokens`),
+  because access tokens name their row and outlive its revocation; and a token
+  whose row is gone anyway, or whose row names a profile that is gone or not
+  the account's, resolves to the account's most restrictive profile.
+  Deleting a profile deletes its sessions: the binding's foreign key
+  cascades (migration 062). It used to be `ON DELETE SET NULL`, which put
+  them on the default; deleting the rows first missed one bound in between by
+  a refresh or a switch. A long-lived socket resolves its profile once, at
+  connect (`Manager.CallerProfile`): the session row it names is rotated and
+  purged while the socket stays open, and would then resolve to the most
+  restrictive profile. A failed connect-time lookup is retried at the next
+  change-media rather than leaving the check off for the socket's life.
+- Binding a revoked (rotated) session row is refused (409): rotation already
+  copied the old binding to its successor, so the write changed nothing that
+  lasted. The SPA refreshes and retries once.
+- Device pairing binds the new device to the approver's acting profile, so an
+  approver on an unlocked profile can neither raise a ceiling nor hand out a
+  locked default. When that profile itself has a PIN, the device gets the
+  account's most restrictive unlocked profile instead
+  (`MostRestrictiveUnlockedProfile`), which can be looser than a locked
+  restricted approver's own, though never looser than a profile it could
+  switch to without a PIN. With every profile locked the approval is a 409
+  `profile_locked`, since the account password can still sign the device in,
+  except on an account with no password, where pairing is the device's only
+  way in and no route can give the account a password: the device then gets
+  the account's most restrictive profile without its PIN, the approver's own
+  when it ties (`MostRestrictiveProfilePIN`), never looser than any other
+  profile on it. It still crosses that one profile's PIN: a kid on a locked
+  profile can put a device on a sibling's that is more restrictive, or on
+  the default when no profile has a limit, and the device reaches that
+  profile's history and lists.
+  The grant waits up to ten minutes for the device's poll, so the session
+  insert rechecks under the user-row lock that the profile's PIN state is the
+  one judged (`RefreshToken.BoundPINHash`: none, or the same hash): a grant
+  whose profile has gained or changed a PIN since creates nothing, and the
+  device pairs again. An approver whose own session row is gone cannot pair.
+- Clients show the server's binding, never a remembered choice: the SPA reads
+  `GET /api/profiles/active` at startup (one retry, `readSessionProfile`,
+  alongside the profile list) and changes its display only after activation
+  resolves, one switch at a time. It used to switch locally and activate
+  fire-and-forget, so a failed call left a kid's UI on the kid profile while
+  the server enforced the parent's ceiling. After a switch it shows the
+  server's record of the bound profile (the same read), not the list's copy,
+  which can predate an edit from another device (it falls back to the copy
+  only when that read fails); the tab-visibility re-read re-lists the profiles
+  each time for the same reason. The remembered choice only steers startup:
+  the SPA re-activates the profile this browser last showed when it is
+  unlocked (`resolveStartupProfile`), and shows it once the server has bound
+  it, so a fresh sign-in on a browser a kid last used lands on the kid's
+  profile, and one a parent last used on the parent's. Nothing personalized
+  (hero, personalized rails, Continue Watching, taste onboarding, a title's
+  recap and star rating, the My Library snapshot) loads until the session's
+  profile is known (`personalProfileReady`); the snapshot is kept per account
+  and profile. Requests without a `profile_id` are answered for the account
+  default on some routes, so a kid's Home showed the parent's hero pick on
+  every load. When the binding cannot be read it shows no profile and opens
+  the picker, which cannot be left without a pick, rather than guessing the
+  default; if the profile list fails, nothing personalized loads at all. The
+  catalog (Home's core rails, the browse grids) and a deep-linked `/title/:id`
+  wait for the startup binding too, unless it cannot be read or the list fails
+  (`catalogProfileSettled`), so the binding arriving at startup is not a
+  switch and resets nothing. Only the latest hero request lands, and a switch
+  clears the previous profile's hero. A switch also loads Home cold (its rails
+  come down at once, so a slow or failed load shows the skeleton or the error,
+  not the old rails), drops the Movies and Shows grids (aborting a Load More
+  or a first page in flight), Continue Watching and the conversational rail,
+  swaps My Library to the new profile's snapshot, sends an open title back
+  through its `/title/:id` hydration, which leaves for Home if the new profile
+  may not see it, and remounts search, collections, the calendar and member
+  pages (`useOnProfileChange`). Each of these used to keep the previous
+  profile's titles: the grids for the session, the conversational rail until
+  the next search, Home's rails and Continue Watching until a refetch
+  succeeded. A failed activation (a switch, a PIN unlock, the startup
+  re-selection) re-reads the binding, because a lost answer can follow a bind
+  that happened. The tab-visibility re-read starts once the startup load
+  settles, also runs when another window of the browser records a switch (the
+  `storage` event on the remembered profile), and drops an answer once a
+  switch has started since the read. The TV re-lists the profiles each time
+  its picker opens, shows the server's record of the bound profile (the list's
+  copy when that read fails), and stays at the picker until activation
+  succeeds, a refused PIN keeps the session's own profile and the page behind
+  the picker, and it does not ask for the PIN of the profile the session is
+  bound to (the server would accept any digits) or label it locked: an unlock
+  lasts the session's life.
+- Known gaps:
+  - The lock is only as strong as the account password, which unlocks every
+    profile and can be guessed through the sign-in and password-change
+    routes at about 10 tries a minute per client address each (the profile
+    budget does not cover them). The PIN prompt's fields and Settings' PIN
+    field ask browsers and the common password managers not to fill or save
+    them (`autocomplete="new-password"`, ignore attributes; "off" is ignored
+    on password fields), but a password saved on a browser a child uses
+    still signs in on the login page, and a browser or manager that ignores
+    those hints can still offer it in the prompt, or offer to save what was
+    typed there. None of this is tested in a real browser.
+  - A switch in the web app does not close a player that is already open.
+  - A profile another device edits shows its new name, ceiling and lock in
+    an open web tab at the next switch or tab-visibility re-read; until then
+    that tab's restricted-session UI (Settings' controls, onboarding's age
+    step) follows the old values. The server enforces the current ones.
+  - A lock protects only the profile it is on. A restricted profile can
+    switch to any unlocked profile, including one with a looser limit or
+    none; Settings warns about the unlocked profiles whose limit differs
+    (it has no rating ladder of its own, so it also lists stricter ones).
+  - A lock guards switching into a profile, not changing it: an unrestricted
+    session can rename, restrict or delete a locked profile without its PIN,
+    and a delete takes the profile's history with it.
+  - A pairing grant's session insert rechecks the bound profile's PIN state
+    only, not the ceilings: "most restrictive" is judged at approval, up to
+    ten minutes before the device collects the grant.
+  - Writes outside the management list (a rename or other cosmetic edit, a
+    pairing approval, an unlink) do not recheck the session under the lock,
+    so one from a session a PIN write ends in between can still land; a
+    pairing's bound profile is still rechecked for its PIN when the device
+    collects the grant.
+  - A re-default, a PIN write or an edit whose profile was deleted meanwhile
+    is refused (404; a ceiling edit gets 409 `profile_changed` when the
+    deleted profile had a limit, and an edit with nothing to write still
+    answers 200 with no profile), but
+    an account can still have profiles and no default (the TV creates a
+    first profile that is not the default on an account with none; a restore
+    or hand-written SQL), and nothing reports it. Its unbound sessions then
+    act as an unrestricted stand-in, whatever its profiles' ceilings, until
+    one's first progress write creates an unrestricted, unlocked default
+    (which linked sign-ins then land on). A linked sign-in picks a real
+    profile (`MostRestrictiveProfilePIN`), and so does pairing in its
+    no-password, every-profile-locked branch; an unbound approver otherwise
+    hands the device an unbound session, the same stand-in, or, when the
+    account is re-defaulted before the device collects the grant, the new
+    default without its PIN. The web app,
+    for a single such profile, shows it without activating it while the
+    server acts as the stand-in. A linked sign-in on an account with no
+    profile at all inserts an unbound session with no lock or recheck.
+  - A password login binds the account default without its PIN: the
+    password that signed in stands in for it. A sign-in through a linked
+    identity does not (`oauthSignInProfile`): it binds the default only
+    while that has no PIN, else the account's most restrictive unlocked
+    profile, as pairing does, and with every profile locked it is refused;
+    the session insert rechecks that profile's PIN under the account lock.
+    An account with no password has no other way in, so there, with every
+    profile locked, the sign-in gets the most restrictive profile without
+    its PIN, as pairing does. It used to land on the default without its PIN
+    whenever the account had no password, so anyone who had linked their own
+    identity while on an unlocked profile kept a way past a PIN set later; a
+    PIN write leaves linked identities in place, and they now land where any
+    linked sign-in does. A link's callback checks that the session whose
+    cookies it carries is live and unrestricted (`linkSessionMayManage`),
+    since its access token outlives a PIN write, and the identity insert
+    rechecks it under the account lock (`AddOAuthIdentityFor`), since the
+    check runs before the provider round trip. The sign-in callback's use of
+    the helper is pinned through `Callback` with a fake provider: the
+    binding, the password refusal, and the no-password landing that needs
+    the PIN state carried to the insert. That the insert is the rechecking
+    one (`CreateRefreshTokenAtVersion`, against a PIN set mid sign-in) is
+    pinned only at the query, not through the callback. The link's recheck
+    reads the session row and its profile but not the token version, and a
+    revoked row counts as live (`SessionLive`), so a logout or password
+    change during the provider round trip still links the identity.
+  - An account with no password (OAuth-only) has no recovery for a forgotten
+    PIN short of the database. Nor does a password account whose owner has
+    forgotten the password while every profile is locked: there is no
+    password-reset route, and a linked sign-in is refused there. So does an
+    account whose every profile is restricted: nothing on it can lift a
+    ceiling or create an unrestricted profile. Writes can no longer produce
+    one, but data from before the rule (onboarding on main restricted a
+    single-profile account's only profile), a backup restore or hand-written
+    SQL can, and nothing reports such accounts.
+  - With a provider's invite bypass on (`BypassInviteEnabled`), anyone with
+    an account there, a child included, can sign up a separate account with
+    no ceiling at all.
+  - The admin role is account-level, so a restricted profile on an admin
+    account keeps every admin route: it can invite a new, unrestricted
+    account or restore a backup. The README tells owners to keep children
+    on an account that is not an admin.
+  - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
+    holding a backup can recover them offline.
+  - PINs are four digits. With the re-lock above, guessing averages about 50
+    days of continuous attempts, assuming no correct entry in between: a
+    correct PIN or password from anyone resets the count, and a guesser then
+    gets the full five again. Attempts are counted per profile, so N locked
+    profiles sharing one PIN cut that time N-fold.
+  - Anyone on the account can keep a profile's PIN locked out with one wrong
+    guess per 15 minutes; the password is the way past it. An account with
+    no password has none: a restricted session can hold the owner out of a
+    locked profile for as long as it keeps guessing, and logout, which it
+    may call, ends every session on the account, the owner's included; the
+    owner's next linked sign-in lands on the most restrictive unlocked
+    profile. A restricted
+    session can also keep spending the password budget of the profile it
+    acts as (and of any unlocked profile it can switch into), so on the
+    kid's own device the owner's password can be held off indefinitely. A
+    session acting as another profile, or a fresh sign-in, still works. The
+    budget is in memory, so it resets on a restart, and its fixed window
+    allows two bursts across a window boundary; a spent budget's Retry-After
+    gives the whole window, not the time left.
+  - A deleted profile's devices keep their still-valid access tokens for up
+    to one token lifetime, acting as the account's most restrictive remaining
+    profile (ties go to the default, so it is the default when no remaining
+    profile is stricter); their
+    progress and feedback writes land on that profile. A backup restore can
+    leave tokens in the same state.
+  - The web app has no screen for changing another profile's ceiling or the
+    default profile; ceilings are set in a profile's own onboarding or
+    through the API.
+  - A restricted session can still read and edit other profiles' watchlists
+    and My Library, which check only account ownership (`?profile_id=` and
+    the other routes listed under Parental rating ceiling likewise).
+  - The macOS client cannot switch profiles at all; it uses the session's
+    binding.
+  - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
+    App wiring (the switcher and the picker going through `switchProfile`,
+    `activeProfileId` starting null, the personalized fetches waiting for
+    `personalProfileReady`, `catalogProfileSettled`, the hero's
+    latest-request guard, the keyed My Library snapshot, and what a switch
+    resets: `resetForProfileChange` and its startup exemption, the cold Home
+    load, the grid effects' profile dependency and the views' keys, though
+    `useOnProfileChange` itself is tested) has no App-level test, and the
+    room socket's connect-time profile and its retry
+    are pinned only at the manager. The PIN state activation hands its bind is pinned at
+    `checkUnlockHash` for every path (`TestTheUnlockReportsThePINStateItJudged`)
+    and end to end only for a PIN removed and set again mid-activation; the
+    bind's recheck itself is pinned. Most tests that wait on the account
+    lock hold it `FOR NO KEY UPDATE`, so weakening any of its takers to `FOR
+    KEY SHARE` fails one (activation, a link, each management write, the
+    bound session insert, rotation; the last through
+    `TestARotationInFlightCannotCarryABindingPastAWrite`), but weakening one
+    to `FOR SHARE` fails a test only for the PIN write and
+    `keepAnUnrestrictedProfile` (through a delete; a ceiling edit already
+    holds its own lock), whose tests hold `FOR SHARE`: a create, a
+    re-default, a ceiling edit's own lock, the bound session insert and
+    rotation would pass. Unpinned besides: that the no-default re-default
+    spares bound sessions, and the edit handler's 404.
+    The onboarding age step's lock for a restricted profile (`ceilingLocked`)
+    is tested at its patch helper only; the server refuses the change
+    regardless.
+  - Account-level actions still open to a restricted session, for example:
+    editing the member profile (`PUT /api/me/profile`, whose
+    `share_watch_history` switch publishes the default profile's history),
+    changing the account password (it needs the current one), approving a
+    device pairing (the device binds to the restricted profile, or, when
+    that profile has a PIN, to the most restrictive unlocked one, or, on an
+    account with no password whose every profile is locked, to the most
+    restrictive one without its PIN), the
+    taste-onboarding routes (`/api/onboarding/skip`, `/seeds`, `DELETE
+    /seeds`), which take any `?profile_id=` on the account, so a restricted
+    session can mark another profile's onboarding done or change its seeds,
+    follows,
+    media requests, collections, watch parties and rooms, notifications,
+    feedback and referral answers, push subscriptions, and logout, which
+    signs out every session on the account.
+  - A session a PIN write ended keeps its still-valid access token for up to
+    one token lifetime, acting as the account's most restrictive profile, as
+    a deleted profile's sessions do; it can read and write that profile's
+    data, and other profiles' through the `?profile_id=` routes, but cannot
+    manage profiles, pair a device or finish a sign-in link.
+  - A PIN write keeps only the session row its access token names, so a tab
+    whose token predates its session's latest rotation ends its own session
+    too; it signs in again.
+  - Locking a kid's own profile signs out the kid's devices; signing one
+    back in lands on the default, and the web app does not re-select the
+    now-locked profile, so someone picks it with its PIN.
+  - Nothing bounds concurrent argon2 checks server-wide (64 MiB each): one
+    account can burst about five per locked profile, plus five per account
+    and acting profile for the password.
+  - The room socket keeps the profile it resolved at connect, ceiling
+    included, so a switch made while it is open, or a change to that profile's
+    ceiling, applies to its ceiling check from the next connect. Sockets
+    (party room, party sync, `/ws`) also stay open after a PIN write, a
+    profile delete or a logout ends their session, so a device left on the
+    parent's profile keeps the parent's ceiling for change-media on an open
+    room socket after the parent locks that profile, until it reconnects.
 
 ### Member profiles and follows
 

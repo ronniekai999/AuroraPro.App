@@ -481,6 +481,26 @@ func (q *Queries) CreateRefreshTokenAtVersion(ctx context.Context, rt *models.Re
 	if version != expectedVersion {
 		return false, nil
 	}
+	// A pairing grant names the profile its approver could pass on, judged
+	// up to ten minutes earlier. A PIN set or changed since then would
+	// otherwise land the device on the newly locked profile without it
+	// (SetProfilePIN only sees existing rows). Under the same user lock, a
+	// profile whose PIN state is not the one judged (rt.BoundPINHash: none,
+	// or the hash it had) creates nothing; the device pairs again.
+	if rt.ActiveProfileID != nil {
+		var pinHash *string
+		err := tx.QueryRow(ctx, `SELECT pin_hash FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			*rt.ActiveProfileID, rt.UserID).Scan(&pinHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if (pinHash == nil) != (rt.BoundPINHash == nil) || (pinHash != nil && *pinHash != *rt.BoundPINHash) {
+			return false, nil
+		}
+	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
 		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
@@ -533,7 +553,7 @@ func (q *Queries) RotateRefreshToken(ctx context.Context, token string, replacem
 	// Recheck after acquiring the user lock. A revocation or another rotation
 	// may have retired the token while the initial lookup was still visible.
 	if err := tx.QueryRow(ctx,
-		`UPDATE refresh_tokens SET revoked = TRUE
+		`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW())
 		 WHERE token = $1 AND NOT revoked AND expires_at > clock_timestamp()
 		 RETURNING active_profile_id`, hashed,
 	).Scan(&replacement.ActiveProfileID); err != nil {
@@ -568,7 +588,7 @@ func (q *Queries) RevokeAllUserSessions(ctx context.Context, userID int64) (int,
 	if err := tx.QueryRow(ctx, `UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`, userID).Scan(&version); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, userID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1`, userID); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -596,7 +616,7 @@ func (q *Queries) GetRefreshToken(ctx context.Context, token string) (*models.Re
 
 func (q *Queries) RevokeRefreshToken(ctx context.Context, token string) error {
 	hashed := hashToken(token)
-	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1`, hashed)
+	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()) WHERE token = $1`, hashed)
 	return err
 }
 
@@ -606,7 +626,7 @@ func (q *Queries) RevokeAndGetRefreshToken(ctx context.Context, token string) (*
 	hashed := hashToken(token)
 	rt := &models.RefreshToken{}
 	err := q.pool.QueryRow(ctx,
-		`UPDATE refresh_tokens SET revoked = TRUE
+		`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW())
 		 WHERE token = $1 AND NOT revoked AND expires_at > NOW()
 		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, ''), active_profile_id`,
 		hashed,
@@ -621,14 +641,26 @@ func (q *Queries) RevokeAndGetRefreshToken(ctx context.Context, token string) (*
 }
 
 func (q *Queries) RevokeAllUserTokens(ctx context.Context, userID int64) error {
-	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, userID)
+	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1`, userID)
 	return err
 }
 
-// PurgeExpiredTokens deletes tokens that are either revoked or expired.
-// Should be called periodically (e.g. every hour) to keep the table bounded.
-func (q *Queries) PurgeExpiredTokens(ctx context.Context) (int64, error) {
-	result, err := q.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE revoked = TRUE OR expires_at < NOW()`)
+// PurgeExpiredTokens deletes expired tokens, and revoked ones once they were
+// revoked longer than keepRevoked ago. Should be called periodically (e.g.
+// every hour) to keep the table bounded.
+//
+// keepRevoked must be at least the access-token lifetime. An access token
+// names its refresh row ("rtid"), and the session's acting profile is bound
+// on that row; rotation and logout revoke the row while access tokens minted
+// from it stay valid. Deleting it at once made the acting-profile lookup find
+// no binding, and a kid's still-valid token acted as the account default. A
+// row revoked before revoked_at existed has none and goes at once.
+func (q *Queries) PurgeExpiredTokens(ctx context.Context, keepRevoked time.Duration) (int64, error) {
+	result, err := q.pool.Exec(ctx, `
+		DELETE FROM refresh_tokens
+		WHERE expires_at < NOW()
+		   OR (revoked AND COALESCE(revoked_at, '-infinity'::timestamptz) < NOW() - make_interval(secs => $1))`,
+		keepRevoked.Seconds())
 	if err != nil {
 		return 0, err
 	}

@@ -108,6 +108,8 @@ func TestResolveActingProfile(t *testing.T) {
 	// resolved even if it somehow ended up referenced — ResolveActingProfile
 	// re-validates ownership independently of SetActiveProfileForToken's own
 	// check, so a stale/foreign binding can't leak another account's ceiling.
+	// The session was bound to a profile, so it falls back to the account's
+	// most restrictive one (the kid), never the default.
 	otherProfileID := seedDefaultProfile(t, q, otherUser)
 	if _, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET active_profile_id = $1 WHERE id = $2`, otherProfileID, rtID); err != nil {
 		t.Fatalf("force cross-account binding: %v", err)
@@ -116,8 +118,8 @@ func TestResolveActingProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve (cross-account binding): %v", err)
 	}
-	if got == nil || got.ID != defaultProfileID {
-		t.Fatalf("resolve (cross-account binding) = %+v, want fallback to default profile %d (not the foreign profile)", got, defaultProfileID)
+	if got == nil || got.ID != kid.ID {
+		t.Fatalf("resolve (cross-account binding) = %+v, want the most restrictive profile, the kid %d (not the foreign profile or the default)", got, kid.ID)
 	}
 }
 

@@ -59,13 +59,17 @@ import {
   deleteWatchlist,
   getMyProfile,
   updateMyProfile,
+  setProfilePin,
   type User as ApiUser,
   type Profile,
+  type ProfileUnlock,
   type OAuthLinksResponse,
   type Watchlist,
   type MemberProfile,
 } from '@/lib/api'
 import { SOCIAL_NETWORKS, normalizeHandleInput } from '@/lib/socialLinks'
+import { ProfilePinDialog } from '@/components/ProfilePinDialog'
+import { isRestrictedProfile, openDoorProfiles } from '@/lib/profileSession'
 
 /* ─────────────────────── SETTINGS VIEW ─────────────────────── */
 interface SettingsViewProps {
@@ -73,13 +77,21 @@ interface SettingsViewProps {
   onLogout?: () => void
   onToast?: (message: string, type?: Toast['type']) => void
   activeProfile?: Profile | null
+  /** Whether the session's profile is known (App's personalProfileReady): a
+   *  binding read, or an account with no profile. While it is not, the
+   *  profile and sign-in management controls stay hidden, as for a
+   *  restricted profile, since the session could be acting as one. */
+  profileKnown?: boolean
   onMaturityChange?: (pref: number) => void | Promise<void>
   onAvatarChange?: (avatarUrl: string) => void | Promise<void>
   /** Opens /user/:username for the signed-in user (threaded from App's
    *  navigate — SettingsView itself doesn't own routing). */
   onOpenMyProfile?: () => void
+  /** Called after a change to profiles App also holds (a PIN set or removed),
+   *  so its copy, which decides whether a switch prompts, is re-read. */
+  onProfilesChanged?: () => void
 }
-export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange, onAvatarChange, onOpenMyProfile }: SettingsViewProps = {}) {
+export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, profileKnown = false, onMaturityChange, onAvatarChange, onOpenMyProfile, onProfilesChanged }: SettingsViewProps = {}) {
   // Phase E2c content-tone dial. Optimistic local override so the chip flips
   // instantly; reset when the active profile changes (server value wins again).
   const [localMaturity, setLocalMaturity] = useState<number | null>(null)
@@ -745,11 +757,11 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         <div className="md:col-span-2">
           {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
-          <ConnectedAccountsCard onToast={onToast} />
+          <SignInMethodsCard activeProfile={activeProfile ?? null} profileKnown={profileKnown} onToast={onToast} />
         </div>
 
         <div className="md:col-span-2">
-          <ProfilesAndWatchlistsCard />
+          <ProfilesAndWatchlistsCard actingProfile={activeProfile ?? null} profileKnown={profileKnown} onToast={onToast} onProfilesChanged={onProfilesChanged} />
         </div>
 
         {/* Gamification: XP card + achievements grid. */}
@@ -966,6 +978,20 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
 // On mount it also consumes a ?linked=<provider> marker left by the link-mode
 // callback redirect: shows a success toast and strips the param so a refresh
 // doesn't re-toast.
+// A restricted session cannot link or unlink sign-in methods (the server
+// refuses: a new link would let it sign in again without the password,
+// after its session ends), so it gets a note instead of the card.
+export function SignInMethodsCard({ activeProfile, profileKnown, onToast }: {
+  activeProfile: Profile | null
+  /** False while the session's profile is unknown: then it is treated as restricted. */
+  profileKnown: boolean
+  onToast?: (message: string, type?: Toast['type']) => void
+}) {
+  return !profileKnown || isRestrictedProfile(activeProfile)
+    ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Sign-in methods can only be managed from a profile without a content limit.</p>
+    : <ConnectedAccountsCard onToast={onToast} />
+}
+
 function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?: Toast['type']) => void }) {
   const [links, setLinks] = useState<OAuthLinksResponse | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1073,8 +1099,20 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
 
 
 // Profiles + Watchlists card. Lists profiles (CRUD-lite), expands
-// into watchlists per profile (lazy-loaded).
-function ProfilesAndWatchlistsCard() {
+// into watchlists per profile (lazy-loaded), and manages each profile's PIN.
+//
+// A session acting as a restricted profile (one with a content limit) gets no
+// management controls: the server refuses those writes from it anyway, and a
+// kid's session should not be shown a way to try.
+function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast, onProfilesChanged }: {
+  actingProfile: Profile | null
+  /** False while the session's profile is unknown: then it is treated as restricted. */
+  profileKnown: boolean
+  onToast?: (message: string, type?: Toast['type']) => void
+  onProfilesChanged?: () => void
+}) {
+  // An unknown profile (the startup list failed) could be a restricted one.
+  const restricted = !profileKnown || isRestrictedProfile(actingProfile)
   const [profiles, setProfiles] = useState<Profile[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
@@ -1082,6 +1120,10 @@ function ProfilesAndWatchlistsCard() {
   const [listsLoading, setListsLoading] = useState(false)
   const [newProfileName, setNewProfileName] = useState('')
   const [newListName, setNewListName] = useState('')
+  const [newPin, setNewPin] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
+  // A PIN change or removal waiting for the current PIN (or the password).
+  const [pinConfirm, setPinConfirm] = useState<{ profile: Profile; pin: string } | null>(null)
 
   const reloadProfiles = useCallback(async () => {
     try {
@@ -1093,6 +1135,24 @@ function ProfilesAndWatchlistsCard() {
     } catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [activeProfileId])
   useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+
+  useEffect(() => { setNewPin('') }, [activeProfileId])
+
+  const savePin = async (profile: Profile, pin: string, current?: ProfileUnlock) => {
+    await setProfilePin(profile.id, pin, current)
+    setNewPin('')
+    await reloadProfiles()
+    onProfilesChanged?.()
+    onToast?.(pin ? `PIN set for ${profile.name}` : `PIN removed from ${profile.name}`, 'success')
+  }
+  const requestPinChange = async (profile: Profile, pin: string) => {
+    // An existing PIN must be confirmed first; a first PIN needs nothing.
+    if (profile.has_pin) { setPinConfirm({ profile, pin }); return }
+    setPinBusy(true)
+    try { await savePin(profile, pin) } catch (e) {
+      onToast?.(e instanceof Error ? e.message : 'Could not set the PIN', 'error')
+    } finally { setPinBusy(false) }
+  }
 
   useEffect(() => {
     if (!activeProfileId) { setLists([]); return }
@@ -1126,18 +1186,51 @@ function ProfilesAndWatchlistsCard() {
                     : 'bg-white/[0.04] border-white/[0.06] text-white/70 hover:bg-white/[0.08]'
                 }`}
               >
-                {p.name}{p.is_default && ' ★'}
+                {p.name}{p.is_default && ' ★'}{p.has_pin && <span className="sr-only"> (locked)</span>}
+                {p.has_pin && <Icon name="lock" size={11} className="ml-1 inline-block align-[-1px] opacity-70" />}
               </button>
             ))}
-            <div className="flex items-center gap-1">
-              <input value={newProfileName} onChange={e => setNewProfileName(e.target.value)} placeholder="New profile" className="px-2 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-xs text-white w-32" />
-              <button
-                disabled={!newProfileName.trim()}
-                onClick={async () => { try { await createProfile(newProfileName.trim()); setNewProfileName(''); await reloadProfiles() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }}
-                className="px-2 py-1.5 bg-purple-600/40 hover:bg-purple-600/60 text-white text-xs rounded disabled:opacity-40"
-              >+</button>
-            </div>
+            {!restricted && (
+              <div className="flex items-center gap-1">
+                <input value={newProfileName} onChange={e => setNewProfileName(e.target.value)} placeholder="New profile" className="px-2 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-xs text-white w-32" />
+                <button
+                  disabled={!newProfileName.trim()}
+                  onClick={async () => { try { await createProfile(newProfileName.trim()); setNewProfileName(''); await reloadProfiles(); onProfilesChanged?.() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }}
+                  className="px-2 py-1.5 bg-purple-600/40 hover:bg-purple-600/60 text-white text-xs rounded disabled:opacity-40"
+                >+</button>
+              </div>
+            )}
           </div>
+          {restricted ? (
+            <p className="text-white/50 text-xs mb-4">
+              {actingProfile
+                ? `${actingProfile.name} has a content limit, so profiles and PINs can only be managed from a profile without one.`
+                : "This session's profile could not be confirmed, so profiles and PINs can only be managed after a reload."}
+            </p>
+          ) : (
+            <ProfileLockPanel
+              profile={profiles.find(p => p.id === activeProfileId) ?? null}
+              profiles={profiles}
+              newPin={newPin}
+              setNewPin={setNewPin}
+              busy={pinBusy}
+              onSave={pin => { const p = profiles.find(x => x.id === activeProfileId); if (p) void requestPinChange(p, pin) }}
+              onRemove={() => { const p = profiles.find(x => x.id === activeProfileId); if (p) setPinConfirm({ profile: p, pin: '' }) }}
+            />
+          )}
+          {pinConfirm && (
+            <ProfilePinDialog
+              profile={pinConfirm.profile}
+              title={pinConfirm.pin ? `Change ${pinConfirm.profile.name}’s PIN` : `Remove ${pinConfirm.profile.name}’s PIN`}
+              description="Enter the current PIN, or the account password, to confirm."
+              submitLabel={pinConfirm.pin ? 'Change PIN' : 'Remove PIN'}
+              onSubmit={async unlock => {
+                await savePin(pinConfirm.profile, pinConfirm.pin, unlock)
+                setPinConfirm(null)
+              }}
+              onCancel={() => setPinConfirm(null)}
+            />
+          )}
           {activeProfileId && (
             <>
               <div className="flex items-center justify-between mb-2">
@@ -1175,6 +1268,83 @@ function ProfilesAndWatchlistsCard() {
           <a href="https://thetvdb.com" target="_blank" rel="noreferrer" className="text-white/60 hover:text-white/90 underline">TheTVDB</a>.
         </p>
       </div>
+    </div>
+  )
+}
+
+// ProfileLockPanel sets, changes or removes the selected profile's PIN, and
+// says plainly what an unlocked profile means: anyone on the account can
+// switch to it, which undoes every restricted profile's limit if it has none.
+function ProfileLockPanel({ profile, profiles, newPin, setNewPin, busy, onSave, onRemove }: {
+  profile: Profile | null
+  profiles: Profile[]
+  newPin: string
+  setNewPin: (pin: string) => void
+  busy: boolean
+  onSave: (pin: string) => void
+  onRemove: () => void
+}) {
+  if (!profile) return null
+  const openDoors = openDoorProfiles(profiles)
+  const pinOk = /^[0-9]{4}$/.test(newPin)
+  return (
+    <div className="mb-5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+      <p id="profile-lock-label" className="text-white/80 text-sm font-medium">Profile lock for {profile.name}</p>
+      <p className="text-white/55 text-xs mt-0.5">
+        {profile.has_pin
+          ? 'Switching to this profile needs its PIN or the account password.'
+          : 'No PIN: anyone signed in to this account can switch to it.'}
+        {' '}Setting or changing the PIN signs out the account’s other devices using this profile
+        {profile.is_default ? ', and those that never picked one' : ''}; they need to sign in again.
+      </p>
+      {openDoors.length > 0 && (
+        <p className="text-amber-200/80 text-xs mt-2">
+          Profiles with a content limit can switch to {openDoors.map(p => p.name).join(', ')} without a PIN,
+          and each may have a looser limit or none. Set a PIN on any that does to keep the limits in place.
+        </p>
+      )}
+      <form
+        className="mt-3 flex flex-wrap items-center gap-2"
+        onSubmit={e => { e.preventDefault(); if (pinOk && !busy) onSave(newPin) }}
+      >
+        <label htmlFor="profile-new-pin" className="sr-only">{profile.has_pin ? 'New PIN' : 'PIN'}</label>
+        <input
+          id="profile-new-pin"
+          type="password"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          // Browsers ignore "off" on password fields and offer to save the
+          // PIN as the site's password, or to overwrite the saved account
+          // password with it. See ProfilePinDialog.
+          autoComplete="new-password"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
+          data-form-type="other"
+          maxLength={4}
+          value={newPin}
+          onChange={e => setNewPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+          placeholder={profile.has_pin ? 'New PIN' : '4 digits'}
+          className="w-28 px-2 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-xs text-white tracking-[0.3em]"
+        />
+        <button
+          type="submit"
+          disabled={!pinOk || busy}
+          className="px-3 py-1.5 bg-purple-600/40 hover:bg-purple-600/60 text-white text-xs rounded disabled:opacity-40"
+        >
+          {profile.has_pin ? 'Change PIN' : 'Set PIN'}
+        </button>
+        {profile.has_pin && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onRemove}
+            className="px-3 py-1.5 text-red-300/80 hover:text-red-200 text-xs rounded disabled:opacity-40"
+          >
+            Remove PIN
+          </button>
+        )}
+      </form>
     </div>
   )
 }

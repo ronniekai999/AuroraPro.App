@@ -130,3 +130,24 @@ describe('DetailView Previously affordance', () => {
     expect(screen.getByLabelText('Generating recap')).toBeInTheDocument()
   })
 })
+
+describe('DetailView before the session\'s profile is known', () => {
+  // Without a profile_id the server answers for its own choice of profile,
+  // so on a cold deep link the recap and star rating showed (and could take
+  // a rating for) a profile the app had not confirmed. They wait.
+  it('fetches neither the recap status nor the rating until the profile is ready', async () => {
+    api.getRecapStatus.mockResolvedValue({ available: true, has_ask_history: false })
+    const props = {
+      media: show, selectedSeason: 8, apiEpisodes: [], onBack: () => {}, onPlay: () => {},
+      onToggleLib: () => {}, inLibrary: true,
+    }
+    const { rerender } = render(<DetailView {...props} profileId={null} profileReady={false} />)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(api.getRecapStatus).not.toHaveBeenCalled()
+    expect(api.getUserRating).not.toHaveBeenCalled()
+
+    rerender(<DetailView {...props} profileId={7} profileReady />)
+    await waitFor(() => expect(api.getRecapStatus).toHaveBeenCalledWith(42, 7, expect.any(AbortSignal)))
+    expect(api.getUserRating).toHaveBeenCalledWith(42, 7)
+  })
+})

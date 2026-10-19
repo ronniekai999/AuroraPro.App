@@ -74,7 +74,7 @@ func TestDevicePairing_RevocationBetweenLookupAndInsert(t *testing.T) {
 				}
 			}}
 			secret, grant, _ := h.grants.start("TV")
-			if !h.grants.authorize(grant.UserCode, userID, 0) {
+			if !h.grants.authorize(grant.UserCode, userID, 0, 0, nil) {
 				t.Fatal("authorize failed")
 			}
 			w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
@@ -99,7 +99,7 @@ func TestDevicePairing_RevocationAfterInsertCannotRenew(t *testing.T) {
 		}
 	}}
 	secret, grant, _ := h.grants.start("TV")
-	h.grants.authorize(grant.UserCode, userID, 0)
+	h.grants.authorize(grant.UserCode, userID, 0, 0, nil)
 	w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
 	if w.Code != http.StatusOK {
 		t.Fatalf("exchange: %d %s", w.Code, w.Body)
@@ -124,7 +124,7 @@ func TestDevicePairing_RefreshCarriesActingProfileAndNewRole(t *testing.T) {
 	h, _ := deviceTestHandler()
 	h.sessions = q
 	secret, grant, _ := h.grants.start("TV")
-	h.grants.authorize(grant.UserCode, userID, 0)
+	h.grants.authorize(grant.UserCode, userID, 0, 0, nil)
 	w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
 	if w.Code != http.StatusOK {
 		t.Fatalf("exchange: %d %s", w.Code, w.Body)

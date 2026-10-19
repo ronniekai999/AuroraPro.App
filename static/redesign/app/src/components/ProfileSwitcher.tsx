@@ -6,6 +6,8 @@ import { maturityLeanLabel } from '@/lib/maturity'
 interface ProfileSwitcherProps {
   profiles: Profile[]
   activeProfileId: number | null
+  // Asks the host to switch. The host may first prompt for a locked profile's
+  // PIN, so the active profile can change after the menu closes, or not at all.
   onSelect: (id: number) => void
   // Navigates to where profiles are created (Settings). Optional so the
   // component renders without it; the Add-Profile row is simply absent.
@@ -29,8 +31,10 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
   // Includes the Add-Profile row, so Down from the last profile reaches it.
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
 
-  const active =
-    profiles.find((p) => p.id === activeProfileId) ?? profiles.find((p) => p.is_default) ?? profiles[0]
+  // Only the profile the server confirmed. While the binding is unknown the
+  // host forces the picker open, and naming the default here would show a
+  // guess behind it.
+  const active = profiles.find((p) => p.id === activeProfileId)
   const canSwitch = profiles.length > 1
 
   // Closing always returns focus to the trigger.
@@ -177,7 +181,7 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
                       'Default' spelled out rather than a ★ glyph: NVDA reads
                       U+2605 as "black star", right before the word it decorates. */}
                   <span className="block truncate text-[11px] text-white/50">
-                    {[p.is_default ? 'Default' : null, maturityLeanLabel(p.maturity_pref)]
+                    {[p.is_default ? 'Default' : null, p.has_pin ? 'Locked' : null, maturityLeanLabel(p.maturity_pref)]
                       .filter(Boolean)
                       .join(' · ') || 'Profile'}
                   </span>

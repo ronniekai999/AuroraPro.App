@@ -54,6 +54,11 @@ func TestCreateProfile_MaxAgeRatingValidated(t *testing.T) {
 		return rr, stored
 	}
 
+	// An account's first profile cannot carry a ceiling (CreateProfileFor),
+	// so the account gets one without first.
+	if err := q.CreateProfile(ctx, &models.UserProfile{UserID: userID, Name: "unrestricted", Language: "en", SubtitleMode: "off"}); err != nil {
+		t.Fatalf("seed an unrestricted profile: %v", err)
+	}
 	for in, want := range map[string]string{" pg ": "PG", "tv-14": "TV-14", "NC-17": "NC-17", "": ""} {
 		rr, stored := create(t, in)
 		if stored == nil {
@@ -87,6 +92,11 @@ func TestUpdateProfile_MaxAgeRatingValidatedAndInvalidatesHero(t *testing.T) {
 	q := requireRequestTestDB(t)
 	userID := seedReqUser(t, q)
 	ctx := context.Background()
+	// The parent keeps the account a profile without a ceiling, which a
+	// ceiling on its only profile would take away (409).
+	if _, err := q.CreateDefaultProfileForUser(ctx, userID, "parent"); err != nil {
+		t.Fatalf("seed parent profile: %v", err)
+	}
 	p := &models.UserProfile{UserID: userID, Name: "kid", Language: "en", SubtitleMode: "off"}
 	if err := q.CreateProfile(ctx, p); err != nil {
 		t.Fatalf("seed profile: %v", err)

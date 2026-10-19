@@ -15,7 +15,7 @@ profile restrictions. Optional integrations retain their configured availability
 | --- | --- | --- | --- |
 | Connect server; password login; refresh; logout | `/api/health`, `/api/auth/login`, `/refresh`, `/logout`, `/me` | All accounts | Implemented; encrypted cookies; account-wide logout disclosed |
 | Sign in through existing OAuth providers | Browser OAuth + `/api/auth/device/*`, `/v2/device` | All accounts | Implemented browser-assisted pairing |
-| Choose an existing profile | `/api/profiles/`, `/{id}/activate` | Profile owner | Implemented; saved avatar/orb; session-bound activation precedes browsing |
+| Choose an existing profile | `/api/profiles/`, `/api/profiles/active`, `/{id}/activate` | Profile owner | Implemented; saved avatar/orb; session-bound activation precedes browsing; a locked profile asks for its PIN or the account password, except the profile the session is already bound to |
 | Create/edit/delete profiles; language, captions, rating ceiling, avatar, taste setup | Profile handlers; web Settings/profile onboarding | Profile owner | Milestone 4; existing playback preferences read now |
 | View Home, recent additions, Continue Watching, hero recommendations | `/api/media/recent`, `/api/progress/continue`, `/api/me/hero` with profile ID | All accounts | Implemented basic Home; optional hero can be unavailable |
 | Browse/search titles; open details and versions | `/api/media/`, `/search`, `/{id}`, `/{id}/files` | All accounts; rating ceiling applies to browse, search and details, not to `/{id}/files` (see CLAUDE.md) | Implemented pagination, sorting, genre/type filters, debounced search and Aurora details |

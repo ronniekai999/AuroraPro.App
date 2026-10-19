@@ -25,7 +25,13 @@ import { lockBodyScroll } from '@/lib/scrollLock'
 interface ProfilesGateProps {
   profiles: Profile[]
   activeProfileId: number | null
-  onSelect: (id: number) => void
+  /**
+   * Switches to a profile. Resolve false when the switch did not happen (a
+   * cancelled PIN prompt, a refused activation); the gate then stays up. It
+   * is called only on a pick, never while arrowing: a locked profile prompts
+   * for its PIN, and arrowing past one must not.
+   */
+  onSelect: (id: number) => boolean | Promise<boolean>
   /** Routes to where profiles are created (Settings). */
   onAddProfile?: () => void
   /** True once the signed-in user and their profile list have loaded. */
@@ -72,6 +78,11 @@ export function ProfilesGate({
   // On Home an unrelated 9s hero-rotation interval re-rendered the tree and the
   // gate closed "eventually", which is exactly why this survived a manual pass.
   const [seen, setSeen] = useState(() => hasSeenProfileGate())
+  // The radio the keyboard has moved to. Arrowing used to call onSelect on
+  // every press, which made it a real profile switch; switches now go through
+  // the server and can need a PIN, so arrows move this and a pick commits it.
+  const [highlightId, setHighlightId] = useState<number | null>(activeProfileId)
+  const [picking, setPicking] = useState(false)
   const open = shouldShowProfileGate({
     profileCount: profiles.length,
     seen,
@@ -89,6 +100,7 @@ export function ProfilesGate({
   // dropping it on the floor.
   useEffect(() => {
     if (!open) return
+    setHighlightId(activeProfileId)
     const opener = document.activeElement as HTMLElement | null
     const i = Math.max(0, profiles.findIndex(p => p.id === activeProfileId))
     const t = window.setTimeout(() => itemRefs.current[i]?.focus(), 0)
@@ -132,16 +144,29 @@ export function ProfilesGate({
     onDismiss?.()
   }
 
-  const pick = (id: number) => {
-    onSelect(id)
-    dismiss()
+  const pick = async (id: number) => {
+    if (picking) return
+    setHighlightId(id)
+    setPicking(true)
+    let switched = false
+    try {
+      switched = await onSelect(id)
+    } finally {
+      setPicking(false)
+    }
+    if (switched) dismiss()
+    // Not switched (a cancelled PIN prompt, a refused activation): the checked
+    // radio goes back to the profile that is actually active.
+    else setHighlightId(activeProfileId)
   }
 
   // Escape dismisses only when the gate was opened BY HAND. On a first visit it
   // is a genuine gate — dismissing it without a choice would leave the app
   // running as whichever profile happened to be stored, which is the ambiguity
-  // the gate exists to remove.
-  const dismissable = forced
+  // the gate exists to remove. Nor when no profile is active: the host forces
+  // the gate open when it could not read the session's binding, and there is
+  // no current profile to keep watching as.
+  const dismissable = forced && activeProfileId !== null
 
   return (
     <div
@@ -221,36 +246,35 @@ export function ProfilesGate({
           role="radiogroup"
           aria-label="Profiles"
           className="mt-10 flex flex-wrap items-start justify-center gap-6 md:gap-9"
-          // Arrows MOVE AND SELECT. The first version only called .focus(), and
-          // that was a real keyboard-reachability failure (WCAG 2.1.1), not a
-          // nicety: `current` was derived from activeProfileId, so with nothing
-          // selecting, `current` never advanced. ArrowRight from the first of
-          // five profiles focused the second, and pressing it again focused the
-          // second again — the third and fourth were unreachable by keyboard at
-          // all, since the roving tabIndex gives the set one tab stop. A pointer
-          // user could pick them; a keyboard user could not.
+          // Arrows MOVE AND CHECK: they advance highlightId, the checked radio,
+          // and focus follows. The first version only called .focus(), and
+          // that was a real keyboard-reachability failure (WCAG 2.1.1): with
+          // nothing advancing the checked index, ArrowRight from the first of
+          // five profiles focused the second and then the second again, and the
+          // rest were unreachable, since the roving tabIndex gives the set one
+          // tab stop.
           //
-          // Settings' dials call their apply+setState before focusing, which is
-          // why `current` advances there. This copied the focus line and dropped
-          // the state change — while a comment claimed it was "the same keyboard
-          // contract Settings' dials use".
+          // Arrows used to check by switching profiles outright (onSelect on
+          // every press). Switches now go through the server and can need a
+          // PIN, so arrows check locally and a pick (click, Enter, Space)
+          // commits; a pick that does not switch puts the check back.
           onKeyDown={e => {
             const n = nextRadioIndex(
               e.key,
-              Math.max(0, profiles.findIndex(p => p.id === activeProfileId)),
+              Math.max(0, profiles.findIndex(p => p.id === highlightId)),
               profiles.length,
             )
             if (n === null) return
             e.preventDefault()
-            // Selection only — NOT pick(), which also marks the gate seen and
-            // dismisses it. Arrowing through the set must not commit and close.
-            onSelect(profiles[n].id)
+            // Selection only — NOT pick(), which switches profiles, marks the
+            // gate seen and dismisses it. Arrowing must not commit and close.
+            setHighlightId(profiles[n].id)
             itemRefs.current[n]?.focus()
           }}
         >
           {profiles.map((p, i) => {
-            const sel = p.id === activeProfileId
-            const sub = [p.is_default ? 'Default' : null, maturityLeanLabel(p.maturity_pref)]
+            const sel = p.id === highlightId
+            const sub = [p.is_default ? 'Default' : null, p.has_pin ? 'Locked' : null, maturityLeanLabel(p.maturity_pref)]
               .filter(Boolean).join(' · ')
             return (
               <button
@@ -260,7 +284,11 @@ export function ProfilesGate({
                 role="radio"
                 aria-checked={sel}
                 tabIndex={sel ? 0 : -1}
-                onClick={() => pick(p.id)}
+                // Not disabled while a pick is pending: disabling the focused
+                // orb would blur it, and focus would return to <body>, outside
+                // the gate's Tab trap, when a PIN prompt over it is cancelled.
+                // pick() ignores a second click instead.
+                onClick={() => { void pick(p.id) }}
                 // The lift is `.stage-orb`, not `hover:scale-[1.04]
                 // focus-visible:scale-[1.04]`: those two sat outside every one
                 // of the file's prefers-reduced-motion blocks (WCAG 2.3.3), and
@@ -299,7 +327,9 @@ export function ProfilesGate({
             stop in a set documented as having exactly one. Wrapped so it keeps
             flowing on the same visual line as the orbs. */}
         <div className="mt-6 flex flex-wrap items-start justify-center gap-6 md:gap-9">
-          {onAddProfile && (
+          {/* Not while no profile is active: leaving for Settings would
+              leave the gate without a pick (see dismissable). */}
+          {onAddProfile && activeProfileId !== null && (
             <button
               type="button"
               onClick={() => { onAddProfile(); dismiss() }}

@@ -180,6 +180,11 @@ type RefreshToken struct {
 	// db.ResolveActingProfile. nil = no explicit switch yet, falls back to
 	// the account default profile.
 	ActiveProfileID *int64 `json:"active_profile_id,omitempty"`
+	// BoundPINHash is the PIN state ActiveProfileID was judged under when a
+	// new session is created (CreateRefreshTokenAtVersion): nil for a profile
+	// that must still have no PIN, else the hash it must still have. Not
+	// stored.
+	BoundPINHash *string `json:"-"`
 }
 
 type InviteCode struct {
@@ -776,6 +781,9 @@ type UserProfile struct {
 	SubtitleMode string    `json:"subtitle_mode"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// HasPIN reports that switching into this profile needs its PIN (or the
+	// account password). The hash itself never leaves the db package.
+	HasPIN bool `json:"has_pin"`
 	// TasteOnboardingCompleted flips true once the profile finishes the
 	// "Pick What You Love" flow; gates the one-time first-run redirect.
 	TasteOnboardingCompleted bool `json:"taste_onboarding_completed"`

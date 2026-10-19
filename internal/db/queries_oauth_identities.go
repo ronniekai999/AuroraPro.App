@@ -102,37 +102,94 @@ func (q *Queries) AddOAuthIdentity(ctx context.Context, userID int64, provider, 
 		userID, provider, subject,
 	)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			switch pgErr.ConstraintName {
-			case constraintOAuthIdentityProviderSubject:
-				// The (provider, subject) is taken. Determine by whom: if it's
-				// already this user, treat as an idempotent success; otherwise
-				// it's a genuine cross-user conflict.
-				var ownerID int64
-				qErr := q.pool.QueryRow(ctx,
-					`SELECT user_id FROM oauth_identities WHERE provider = $1 AND subject = $2`,
-					provider, subject,
-				).Scan(&ownerID)
-				if qErr != nil {
-					if qErr == pgx.ErrNoRows {
-						// Raced with a concurrent delete; the slot is free again.
-						// Surface the original conflict rather than guessing.
-						return ErrOAuthIdentityConflict
-					}
-					return fmt.Errorf("add oauth identity: resolve owner: %w", qErr)
-				}
-				if ownerID == userID {
-					return nil // idempotent re-link of the same identity
-				}
-				return ErrOAuthIdentityConflict
-			case constraintOAuthIdentityUserProvider:
-				return ErrOAuthProviderAlreadyLinked
-			}
-		}
+		return classifyIdentityInsert(ctx, q.pool, err, userID, provider, subject)
+	}
+	return q.mirrorLegacyIdentity(ctx, userID, provider, subject)
+}
+
+// AddOAuthIdentityFor is AddOAuthIdentity for a session's request, the link
+// callback: under the account's user-row lock, FOR SHARE (it conflicts with
+// the management writes' FOR NO KEY UPDATE, so a PIN write runs wholly before
+// or after it), it rechecks what the link's start judged about the session
+// (recheckManager). The callback's own check runs before the provider round
+// trip, so a session a PIN write ended, or that became restricted, during it
+// would otherwise still link an identity, a lasting way back in.
+func (q *Queries) AddOAuthIdentityFor(ctx context.Context, userID int64, provider, subject string, judged *ManagerJudgement) error {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
 		return fmt.Errorf("add oauth identity: %w", err)
 	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
+		return fmt.Errorf("add oauth identity: %w", err)
+	}
+	if err := recheckManager(ctx, tx, 0, judged); err != nil {
+		return err
+	}
+	// A savepoint, so a unique violation leaves the transaction usable for
+	// classifying it.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("add oauth identity: %w", err)
+	}
+	if _, err := sp.Exec(ctx,
+		`INSERT INTO oauth_identities (user_id, provider, subject) VALUES ($1, $2, $3)`,
+		userID, provider, subject,
+	); err != nil {
+		_ = sp.Rollback(ctx)
+		return classifyIdentityInsert(ctx, tx, err, userID, provider, subject)
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return fmt.Errorf("add oauth identity: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("add oauth identity: %w", err)
+	}
+	return q.mirrorLegacyIdentity(ctx, userID, provider, subject)
+}
 
+// rowQuerier is what classifyIdentityInsert reads through: the pool or a
+// transaction.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// classifyIdentityInsert maps a failed identity insert to the conflict
+// sentinels by the unique index its 23505 names (see AddOAuthIdentity).
+func classifyIdentityInsert(ctx context.Context, q rowQuerier, err error, userID int64, provider, subject string) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch pgErr.ConstraintName {
+		case constraintOAuthIdentityProviderSubject:
+			// The (provider, subject) is taken. Determine by whom: if it's
+			// already this user, treat as an idempotent success; otherwise
+			// it's a genuine cross-user conflict.
+			var ownerID int64
+			qErr := q.QueryRow(ctx,
+				`SELECT user_id FROM oauth_identities WHERE provider = $1 AND subject = $2`,
+				provider, subject,
+			).Scan(&ownerID)
+			if qErr != nil {
+				if qErr == pgx.ErrNoRows {
+					// Raced with a concurrent delete; the slot is free again.
+					// Surface the original conflict rather than guessing.
+					return ErrOAuthIdentityConflict
+				}
+				return fmt.Errorf("add oauth identity: resolve owner: %w", qErr)
+			}
+			if ownerID == userID {
+				return nil // idempotent re-link of the same identity
+			}
+			return ErrOAuthIdentityConflict
+		case constraintOAuthIdentityUserProvider:
+			return ErrOAuthProviderAlreadyLinked
+		}
+	}
+	return fmt.Errorf("add oauth identity: %w", err)
+}
+
+// mirrorLegacyIdentity is AddOAuthIdentity's tail after a successful insert.
+func (q *Queries) mirrorLegacyIdentity(ctx context.Context, userID int64, provider, subject string) error {
 	// Best-effort mirror onto the legacy primary-identity columns, only when
 	// they're still empty. Ignore a 23505 here — that can only come from
 	// migration 020's partial unique index idx_users_oauth_identity on

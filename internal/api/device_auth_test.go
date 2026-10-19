@@ -23,6 +23,43 @@ type deviceTestStore struct {
 	user       models.User
 	created    []models.RefreshToken
 	failCreate bool
+	acting     *models.UserProfile // nil: an unrestricted acting profile
+	failActing bool
+	unlocked   *models.UserProfile // MostRestrictiveUnlockedProfile's answer
+	ended      bool                // SessionLive answers false
+	// MostRestrictiveProfilePIN's answer.
+	mostRestrictive    *models.UserProfile
+	mostRestrictivePIN *string
+	preferred          int64 // the prefer MostRestrictiveProfilePIN was asked for
+}
+
+func (s *deviceTestStore) SessionLive(context.Context, int64, int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.ended, nil
+}
+
+func (s *deviceTestStore) MostRestrictiveUnlockedProfile(context.Context, int64) (*models.UserProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unlocked == nil {
+		return nil, nil
+	}
+	p := *s.unlocked
+	return &p, nil
+}
+
+func (s *deviceTestStore) ResolveActingProfile(_ context.Context, userID, _ int64) (*models.UserProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failActing {
+		return nil, errors.New("database down")
+	}
+	if s.acting != nil {
+		p := *s.acting
+		return &p, nil
+	}
+	return &models.UserProfile{UserID: userID}, nil
 }
 
 func (s *deviceTestStore) GetUserByID(_ context.Context, id int64) (*models.User, error) {
@@ -141,7 +178,7 @@ func TestDevicePairing_RevocationAndFailedExchange(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			h, store := deviceTestHandler()
 			secret, grant, err := h.grants.start("TV")
-			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3) {
+			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3, 0, nil) {
 				t.Fatal("grant failed")
 			}
 			switch failure {
@@ -212,7 +249,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	now := time.Now()
 	g.now = func() time.Time { return now }
 	secret, grant, _ := g.start("TV")
-	if !g.authorize(grant.UserCode, 7, 3) {
+	if !g.authorize(grant.UserCode, 7, 3, 0, nil) {
 		t.Fatal("authorize failed")
 	}
 	var successes atomic.Int32
@@ -230,7 +267,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	}
 	secret, grant, _ = g.start("TV")
 	now = now.Add(deviceGrantTTL)
-	if g.authorize(grant.UserCode, 7, 3) {
+	if g.authorize(grant.UserCode, 7, 3, 0, nil) {
 		t.Fatal("expired grant approved")
 	}
 	if _, status := g.take(secret); status != "expired_token" {
@@ -275,4 +312,125 @@ func TestDevicePairing_RouterPublicAndProtectedRoutes(t *testing.T) {
 			t.Errorf("%s: %d %s", route.path, w.Code, w.Body)
 		}
 	}
+}
+
+// TestDevicePairing_RestrictedApproverBindsTheDevice: an unbound session acts
+// as the account's default profile, so a kid's session approving a new device
+// must not hand that device the unrestricted default, and no approver should
+// hand it a default profile that may be locked. The device's session is bound
+// to the approver's acting profile; an account with no profile leaves it
+// unbound.
+func TestDevicePairing_RestrictedApproverBindsTheDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		acting *models.UserProfile
+		want   *int64
+	}{
+		{"restricted approver", &models.UserProfile{ID: 42, UserID: 7, MaxAgeRating: "PG"}, func() *int64 { v := int64(42); return &v }()},
+		{"unrestricted approver", &models.UserProfile{ID: 41, UserID: 7}, func() *int64 { v := int64(41); return &v }()},
+		{"account with no profile", &models.UserProfile{UserID: 7}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, store := deviceTestHandler()
+			store.acting = tc.acting
+			secret, grant, err := h.grants.start("Kid's phone")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true); w.Code != 200 {
+				t.Fatalf("authorize: %d %s", w.Code, w.Body)
+			}
+			if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false); w.Code != 200 || len(store.created) != 1 {
+				t.Fatalf("poll: %d %s, sessions %d", w.Code, w.Body, len(store.created))
+			}
+			got := store.created[0].ActiveProfileID
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Errorf("paired device session bound to %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDevicePairing_FailsClosedWhenTheActingProfileIsUnknown: the device is
+// bound to the approver's acting profile, so an approval that cannot read it
+// must not go through and pair the device as the account default.
+func TestDevicePairing_FailsClosedWhenTheActingProfileIsUnknown(t *testing.T) {
+	h, store := deviceTestHandler()
+	store.failActing = true
+	secret, grant, err := h.grants.start("Kid's phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true); w.Code != http.StatusInternalServerError {
+		t.Fatalf("authorize with the acting profile unknown: %d %s, want 500", w.Code, w.Body)
+	}
+	if w := deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false); len(store.created) != 0 {
+		t.Errorf("the refused approval still paired the device: poll %d %s, sessions %d", w.Code, w.Body, len(store.created))
+	}
+}
+
+// TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn: a device acting
+// as a locked profile skips its PIN, so a parent pairing the family TV from
+// a session on its locked profile left that profile open to anyone at the
+// TV. The device gets the account's most restrictive unlocked profile, and
+// with every profile locked the approval is refused.
+func TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn(t *testing.T) {
+	pair := func(t *testing.T, store *deviceTestStore, h *DeviceAuthHandler) (int, []models.RefreshToken) {
+		t.Helper()
+		secret, grant, err := h.grants.start("Family TV")
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := deviceRequest(h.Authorize, "POST", "/api/auth/device/authorize", fmt.Sprintf(`{"user_code":%q,"expected_user_id":7}`, grant.UserCode), true)
+		deviceRequest(h.Poll, "POST", "/api/auth/device/poll", fmt.Sprintf(`{"device_code":%q}`, secret), false)
+		return w.Code, store.created
+	}
+	t.Run("an unlocked profile exists", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		store.unlocked = &models.UserProfile{ID: 42, UserID: 7, MaxAgeRating: "PG"}
+		code, created := pair(t, store, h)
+		if code != http.StatusOK || len(created) != 1 || created[0].ActiveProfileID == nil || *created[0].ActiveProfileID != 42 {
+			t.Errorf("approval %d, sessions %+v; want the device bound to the unlocked profile 42", code, created)
+		}
+	})
+	t.Run("every profile is locked", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		code, created := pair(t, store, h)
+		if code != http.StatusConflict || len(created) != 0 {
+			t.Errorf("approval %d with %d sessions created; want 409 and none", code, len(created))
+		}
+	})
+	// With no password the device has no other way in, so it gets the most
+	// restrictive profile, PIN and all; the session insert rechecks that PIN.
+	t.Run("every profile is locked on an account with no password", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.user.PasswordHash = ""
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		hash := "argon2-of-the-kid's-pin"
+		store.mostRestrictive = &models.UserProfile{ID: 43, UserID: 7, MaxAgeRating: "PG", HasPIN: true}
+		store.mostRestrictivePIN = &hash
+		code, created := pair(t, store, h)
+		if code != http.StatusOK || len(created) != 1 || created[0].ActiveProfileID == nil || *created[0].ActiveProfileID != 43 {
+			t.Fatalf("approval %d, sessions %+v; want the device bound to the most restrictive profile 43", code, created)
+		}
+		if created[0].BoundPINHash == nil || *created[0].BoundPINHash != hash {
+			t.Errorf("the session was judged under PIN %v, want the profile's hash", created[0].BoundPINHash)
+		}
+		if store.preferred != 41 {
+			t.Errorf("asked for the most restrictive profile preferring %d, want the approver's own 41", store.preferred)
+		}
+	})
+}
+
+func (s *deviceTestStore) MostRestrictiveProfilePIN(_ context.Context, _ int64, prefer int64) (*models.UserProfile, *string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preferred = prefer
+	if s.mostRestrictive == nil {
+		return nil, nil, errors.New("no profile")
+	}
+	p := *s.mostRestrictive
+	return &p, s.mostRestrictivePIN, nil
 }

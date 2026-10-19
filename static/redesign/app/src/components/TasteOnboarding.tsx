@@ -14,6 +14,8 @@ interface TasteOnboardingGateProps {
   /** The active profile, used to PRE-FILL the flow (name, avatar, current age
    *  rating) so returning users don't have their existing settings clobbered. */
   profile?: Profile | null
+  /** The profile is the account's only one without a content limit. */
+  soleUnrestricted?: boolean
   /** Called after the user finishes or skips — host can refresh Home. */
   onComplete?: () => void
 }
@@ -44,7 +46,7 @@ type Phase = 'checking' | 'show' | 'hidden'
  * close. When only the referral is owed, the flow collapses to that one
  * question plus a send-off (see buildSteps).
  */
-export function TasteOnboardingGate({ profileId, profile, onComplete }: TasteOnboardingGateProps) {
+export function TasteOnboardingGate({ profileId, profile, soleUnrestricted, onComplete }: TasteOnboardingGateProps) {
   const [phase, setPhase] = useState<Phase>('checking')
   const [status, setStatus] = useState<OnboardingStatus | null>(null)
   const [taste, setTaste] = useState(false)
@@ -102,6 +104,7 @@ export function TasteOnboardingGate({ profileId, profile, onComplete }: TasteOnb
       status={effectiveStatus}
       taste={taste}
       referral={referral}
+      soleUnrestricted={soleUnrestricted}
       onDone={() => {
         setPhase('hidden')
         onComplete?.()
