@@ -2303,8 +2303,10 @@ export default function App() {
   // Personalized content (the hero, the personalized Home rails, Continue
   // Watching, taste onboarding) loads only once the session's profile is
   // known, or the account has no profile to know. A request sent before then
-  // carries no profile_id, and some routes answer that for the account
-  // default: a kid's Home showed the parent's hero pick on every load. While
+  // carries no profile_id, which the discovery routes used to answer for the
+  // account default: a kid's Home showed the parent's hero pick on every
+  // load. They now answer for the acting profile, and the wait still keeps
+  // the app from showing content for a profile it has not confirmed. While
   // the binding is unknown, or the profile list failed to load, nothing
   // personalized loads at all.
   const personalProfileReady = activeProfileId !== null || (profilesLoaded && profiles.length === 0)
@@ -4019,8 +4021,9 @@ export default function App() {
   const lastHomeLoadRef = useRef(0)
   // Which profile the rails currently on screen belong to. Distinguishes a
   // profile switch (must wipe the personalized rails) from a same-profile
-  // refresh (must not). null is a real value here — "the account default" —
-  // so it starts undefined to force the first load down the switch path.
+  // refresh (must not). null is a real value here — "the session's acting
+  // profile" — so it starts undefined to force the first load down the
+  // switch path.
   const railsProfileRef = useRef<number | null | undefined>(undefined)
   // Read by the focus listener below, which must not re-bind on every
   // navigation just to know where the user currently is. Written in an effect,

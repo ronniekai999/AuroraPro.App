@@ -189,7 +189,9 @@ type actingProfileResolver interface {
 // as a restricted profile, writing a 403 profile_restricted that names the
 // action and returning true. It fails closed: a resolve error refuses too.
 // Linking a sign-in identity is one such action: a fresh sign-in through it
-// lands on the account default without that profile's PIN.
+// lands on the account default without that profile's PIN. Editing the
+// member profile is another: it is the account's public identity, and its
+// share_watch_history switch publishes the default profile's history.
 func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store sessionStore, claims *auth.JWTClaims, action string) bool {
 	if !requireLiveSession(w, r, store.SessionLive, claims) {
 		return true
@@ -936,27 +938,25 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 // Watchlist Handlers
 // ============================================================
 
+// requireProfileOwnership resolves the {profileId} of a watchlist or My
+// Library route: one of the account's profiles, and for a session acting as a
+// restricted profile only that profile (resolveRequestProfile). Those lists
+// read titles back with no ceiling, so another profile's lists would show a
+// restricted session whatever that profile had saved.
 func (h *ProfileHandler) requireProfileOwnership(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	claims, ok := requireClaims(w, r)
-	if !ok {
+	if _, ok := requireClaims(w, r); !ok {
 		return 0, false
 	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "profileId"), 10, 64)
-	if err != nil {
+	if err != nil || profileID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
 		return 0, false
 	}
-
-	profile, err := h.queries.GetProfile(r.Context(), profileID)
-	if err != nil || profile == nil {
-		writeError(w, http.StatusNotFound, "profile not found")
+	profile, ok := resolveRequestProfile(w, r, h.queries, profileID)
+	if !ok {
 		return 0, false
 	}
-	if profile.UserID != claims.UserID {
-		writeError(w, http.StatusForbidden, "access denied")
-		return 0, false
-	}
-	return profileID, true
+	return profile.ID, true
 }
 
 func (h *ProfileHandler) requireWatchlistOwnership(w http.ResponseWriter, r *http.Request, profileID int64) (int64, bool) {

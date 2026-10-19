@@ -1343,7 +1343,15 @@ func (q *Queries) DeleteWatchProgressForProfile(ctx context.Context, userID, pro
 	return err
 }
 
-func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit int) ([]models.ContinueWatchingItem, error) {
+// HistoryScope narrows the account's watch history. ProfileID 0 means every
+// profile on the account; AllowedRatings is a ceiling (AllowedRatingsForMax,
+// nil for none), applied in SQL before LIMIT and in the count.
+type HistoryScope struct {
+	ProfileID      int64
+	AllowedRatings []string
+}
+
+func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit int, scope HistoryScope) ([]models.ContinueWatchingItem, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
@@ -1361,8 +1369,10 @@ func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit in
 		LEFT JOIN tv_episodes e ON e.id = wp.episode_id
 		LEFT JOIN tv_seasons s ON s.id = e.season_id
 		WHERE wp.user_id = $1
+		  AND ($3::bigint = 0 OR wp.profile_id = $3)
+		  AND ($4::text[] IS NULL OR mi.content_rating = ANY($4))
 		ORDER BY wp.updated_at DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, limit, scope.ProfileID, scope.AllowedRatings)
 	if err != nil {
 		return nil, err
 	}
@@ -1371,10 +1381,15 @@ func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit in
 	return scanContinueWatchingRows(rows)
 }
 
-func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params models.PaginationParams) ([]models.ContinueWatchingItem, int64, error) {
+func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params models.PaginationParams, scope HistoryScope) ([]models.ContinueWatchingItem, int64, error) {
 	var total int64
-	err := q.pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM watch_progress WHERE user_id = $1", userID).Scan(&total)
+	err := q.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM watch_progress wp
+		JOIN media_items mi ON mi.id = wp.media_item_id
+		WHERE wp.user_id = $1
+		  AND ($2::bigint = 0 OR wp.profile_id = $2)
+		  AND ($3::text[] IS NULL OR mi.content_rating = ANY($3))`,
+		userID, scope.ProfileID, scope.AllowedRatings).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1393,8 +1408,10 @@ func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params mode
 		LEFT JOIN tv_episodes e ON e.id = wp.episode_id
 		LEFT JOIN tv_seasons s ON s.id = e.season_id
 		WHERE wp.user_id = $1
+		  AND ($4::bigint = 0 OR wp.profile_id = $4)
+		  AND ($5::text[] IS NULL OR mi.content_rating = ANY($5))
 		ORDER BY wp.updated_at DESC
-		LIMIT $2 OFFSET $3`, userID, params.PerPage, offset)
+		LIMIT $2 OFFSET $3`, userID, params.PerPage, offset, scope.ProfileID, scope.AllowedRatings)
 	if err != nil {
 		return nil, 0, err
 	}

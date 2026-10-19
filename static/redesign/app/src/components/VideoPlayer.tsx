@@ -305,8 +305,8 @@ interface VideoPlayerProps {
   // parent to advance even with the autoplay preference off — an
   // explicit click outranks the passive-behavior setting.
   // Active sub-profile, so playback telemetry is attributed to the profile
-  // that actually watched rather than falling back to the account default —
-  // which mis-filed every kids-profile playback.
+  // that actually watched. The server takes the session's acting profile
+  // when it is omitted, and refuses a restricted session naming another.
   profileId?: number | null
   onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
   // Issue #460 — the next-up card's party counterpart. In a watch party
@@ -3151,9 +3151,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               decision: stream.decision,
               decisionReason: stream.reason_code,
               // May still be null while the profile gate resolves, in which
-              // case the server falls back to the account default for this
-              // row. Playback started that early is rare and the row is not
-              // rewritten afterwards — noted rather than papered over.
+              // case the server files the row under the session's acting
+              // profile. Playback started that early is rare and the row is
+              // not rewritten afterwards — noted rather than papered over.
               profileId: profileId ?? undefined,
               clickAtMs: playRequestedAtRef.current ?? undefined,
             })

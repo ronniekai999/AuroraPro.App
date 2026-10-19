@@ -2909,8 +2909,8 @@ export async function listContinueWatching(
   limit = 20, profileId?: number, signal?: AbortSignal,
 ): Promise<ContinueWatchingItem[]> {
   // Phase 5 — profile-aware. When profileId is set, server scopes
-  // progress entries to that profile. Without it, the response is
-  // user-global (V1's default behavior pre-profiles).
+  // progress entries to that profile; without it, to the session's acting
+  // profile.
   const params = new URLSearchParams({ limit: String(limit) })
   if (profileId) params.set('profile_id', String(profileId))
   const items = await apiFetch<ContinueWatchingItem[]>(
@@ -3583,8 +3583,8 @@ export async function getAdminReferralSummary(
 //
 // Seeds the recommender for a brand-new profile so hero / recommendations /
 // discover / anchor-rails personalize on first load. All endpoints are
-// per-profile: pass the active profile id, or omit it to use the account's
-// default profile (the server resolves it).
+// per-profile: pass the active profile id, or omit it to use the session's
+// acting profile (the server resolves it).
 
 export interface OnboardingStatus {
   profile_id: number

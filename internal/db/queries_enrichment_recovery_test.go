@@ -373,13 +373,13 @@ func TestContinueWatchingSurvivesNullYear(t *testing.T) {
 	cw, err := q.GetContinueWatching(ctx, owner, 50)
 	check("GetContinueWatching", cw, err)
 
-	cwp, err := q.GetContinueWatchingByProfile(ctx, profile, 50)
+	cwp, err := q.GetContinueWatchingByProfile(ctx, profile, 50, nil)
 	check("GetContinueWatchingByProfile", cwp, err)
 
-	rw, err := q.GetRecentlyWatched(ctx, owner, 50)
+	rw, err := q.GetRecentlyWatched(ctx, owner, 50, HistoryScope{})
 	check("GetRecentlyWatched", rw, err)
 
-	hist, _, err := q.GetWatchHistory(ctx, owner, models.PaginationParams{Page: 1, PerPage: 50})
+	hist, _, err := q.GetWatchHistory(ctx, owner, models.PaginationParams{Page: 1, PerPage: 50}, HistoryScope{})
 	check("GetWatchHistory", hist, err)
 }
 

@@ -520,30 +520,12 @@ func recapQuestionHash(question string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-// resolveProfileID mirrors HeroHandler.resolveProfileID: honor ?profile_id=
-// (validated against the caller's account), else fall back to the default
-// profile. Kept local so the recap route is self-contained.
-func (h *RecapHandler) resolveProfileID(w http.ResponseWriter, r *http.Request, userID int64) (int64, bool) {
-	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
-		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
-		if parseErr != nil || profileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid profile_id")
-			return 0, false
-		}
-		profile, err := h.queries.GetProfile(r.Context(), profileID)
-		if err != nil || profile == nil {
-			writeError(w, http.StatusNotFound, "profile not found")
-			return 0, false
-		}
-		if profile.UserID != userID {
-			writeError(w, http.StatusForbidden, "profile does not belong to this user")
-			return 0, false
-		}
-		return profileID, true
-	}
-	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
-	if err != nil || profile == nil {
-		writeError(w, http.StatusNotFound, "no default profile")
+// resolveProfileID mirrors HeroHandler.resolveProfileID: the acting profile,
+// or an owned ?profile_id= that a restricted session may not point anywhere
+// but itself (resolveRequestProfile).
+func (h *RecapHandler) resolveProfileID(w http.ResponseWriter, r *http.Request, _ int64) (int64, bool) {
+	profile, ok := resolveQueryProfile(w, r, h.queries)
+	if !ok {
 		return 0, false
 	}
 	return profile.ID, true

@@ -9,7 +9,7 @@ import {
 import { OnboardingFlow } from './OnboardingFlow'
 
 interface TasteOnboardingGateProps {
-  /** Active profile id, or null to use the account's default profile. */
+  /** Active profile id, or null for the session's acting profile. */
   profileId: number | null
   /** The active profile, used to PRE-FILL the flow (name, avatar, current age
    *  rating) so returning users don't have their existing settings clobbered. */

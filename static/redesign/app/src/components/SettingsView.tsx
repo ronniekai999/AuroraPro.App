@@ -751,8 +751,11 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             list. */}
         <div className="md:col-span-2">
           {/* My Profile — member-visible identity (social phase 1): display
-              name, bio, social handles, watch-history sharing. */}
-          <MemberProfileCard onToast={onToast} onOpenMyProfile={onOpenMyProfile} />
+              name, bio, social handles, watch-history sharing. A restricted
+              session cannot edit it (the server refuses: it is the account's
+              public identity, and sharing publishes the default profile's
+              history). */}
+          <MemberProfileSection activeProfile={activeProfile ?? null} profileKnown={profileKnown} onToast={onToast} onOpenMyProfile={onOpenMyProfile} />
         </div>
 
         <div className="md:col-span-2">
@@ -978,6 +981,21 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
 // On mount it also consumes a ?linked=<provider> marker left by the link-mode
 // callback redirect: shows a success toast and strips the param so a refresh
 // doesn't re-toast.
+// A restricted session cannot edit the account's member profile (the server
+// refuses: it is the account's public identity, and its sharing switch
+// publishes the default profile's history), so it gets a note instead.
+export function MemberProfileSection({ activeProfile, profileKnown, onToast, onOpenMyProfile }: {
+  activeProfile: Profile | null
+  /** False while the session's profile is unknown: then it is treated as restricted. */
+  profileKnown: boolean
+  onToast?: (message: string, type?: Toast['type']) => void
+  onOpenMyProfile?: () => void
+}) {
+  return !profileKnown || isRestrictedProfile(activeProfile)
+    ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Your member profile can only be edited from a profile without a content limit.</p>
+    : <MemberProfileCard onToast={onToast} onOpenMyProfile={onOpenMyProfile} />
+}
+
 // A restricted session cannot link or unlink sign-in methods (the server
 // refuses: a new link would let it sign in again without the password,
 // after its session ends), so it gets a note instead of the card.
@@ -1104,7 +1122,7 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
 // A session acting as a restricted profile (one with a content limit) gets no
 // management controls: the server refuses those writes from it anyway, and a
 // kid's session should not be shown a way to try.
-function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast, onProfilesChanged }: {
+export function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast, onProfilesChanged }: {
   actingProfile: Profile | null
   /** False while the session's profile is unknown: then it is treated as restricted. */
   profileKnown: boolean
@@ -1125,15 +1143,25 @@ function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast, onPro
   // A PIN change or removal waiting for the current PIN (or the password).
   const [pinConfirm, setPinConfirm] = useState<{ profile: Profile; pin: string } | null>(null)
 
+  // Each load supersedes the ones before it, so an answer from before the
+  // acting profile was known cannot land last and list every profile.
+  const loadGenRef = useRef(0)
   const reloadProfiles = useCallback(async () => {
+    const gen = ++loadGenRef.current
     try {
-      const ps = await listProfiles()
+      // A restricted session may read only its own watchlists (the server
+      // refuses any other profile's), so it is shown only its own profile.
+      const all = await listProfiles()
+      if (gen !== loadGenRef.current) return
+      const ps = restricted ? all.filter(p => p.id === actingProfile?.id) : all
       setProfiles(ps)
-      if (!activeProfileId && ps.length > 0) {
-        setActiveProfileId(ps.find(p => p.is_default)?.id ?? ps[0].id)
-      }
+      // Keep the selection only while it is still listed: the acting profile
+      // can arrive after the first load, or change while Settings is open, and
+      // a restricted session must not stay on a profile it cannot read.
+      setActiveProfileId(cur =>
+        cur !== null && ps.some(p => p.id === cur) ? cur : (ps.find(p => p.is_default)?.id ?? ps[0]?.id ?? null))
     } catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
-  }, [activeProfileId])
+  }, [restricted, actingProfile?.id])
   useEffect(() => { void reloadProfiles() }, [reloadProfiles])
 
   useEffect(() => { setNewPin('') }, [activeProfileId])

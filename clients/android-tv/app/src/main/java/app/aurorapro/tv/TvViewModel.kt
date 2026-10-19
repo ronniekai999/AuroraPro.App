@@ -194,6 +194,10 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
         val api = requireNotNull(client)
         val before = state.value
         pendingPlaybackRefresh = null
+        // Let the last player's final progress save land first: it names the
+        // profile that was playing, and once the session is bound to a
+        // restricted profile the server refuses a write for any other one.
+        awaitPlaybackSave()
         // Once activation starts, its server outcome may be uncertain on a
         // network failure. Do not return to content labelled with the old
         // profile; remain at the picker until a selection is acknowledged.

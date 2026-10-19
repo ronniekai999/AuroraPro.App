@@ -314,8 +314,10 @@ func (q *Queries) GetFollowedRecentWatches(ctx context.Context, viewerID int64, 
 //     keeps a later partial rewatch from reshuffling history.
 //
 // Callers gate on users.share_watch_history — this query does not re-check,
-// so the owner's own settings preview can reuse it.
-func (q *Queries) GetMemberRecentWatches(ctx context.Context, userID int64, limit int) ([]models.MemberRecentWatch, error) {
+// so the owner's own settings preview can reuse it. allowedRatings is the
+// VIEWER's ceiling (AllowedRatingsForMax; nil means none), applied before the
+// dedup and LIMIT.
+func (q *Queries) GetMemberRecentWatches(ctx context.Context, userID int64, limit int, allowedRatings []string) ([]models.MemberRecentWatch, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 18
 	}
@@ -336,10 +338,11 @@ func (q *Queries) GetMemberRecentWatches(ctx context.Context, userID int64, limi
 		    AND up.is_default = TRUE
 		    AND wp.completed = TRUE
 		    AND wp.completed_at IS NOT NULL
+		    AND ($3::text[] IS NULL OR mi.content_rating = ANY($3))
 		  ORDER BY wp.media_item_id, wp.completed_at DESC
 		) dedup
 		ORDER BY watched_at DESC, id DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, limit, allowedRatings)
 	if err != nil {
 		return nil, fmt.Errorf("get member recent watches: %w", err)
 	}
