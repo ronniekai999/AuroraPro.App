@@ -33,9 +33,9 @@ type requestProfileStore interface {
 // error is a 500, never a fallback. The returned profile has ID 0 only when
 // nothing was named and the session acts as the unrestricted stand-in, which
 // ResolveActingProfile returns on an account with no default (profiles or
-// not) for an unbound session, a token naming no session, and an ended or
-// orphaned binding when no profile is restricted; callers decide what that
-// means.
+// not) for an unbound session, a token naming no session, and, when no
+// profile is restricted, a session row that no longer exists or an orphaned
+// binding; callers decide what that means.
 func resolveRequestProfile(w http.ResponseWriter, r *http.Request, store requestProfileStore, requested int64) (*models.UserProfile, bool) {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {

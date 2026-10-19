@@ -218,7 +218,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   token resolves through its row after rotation), so on an account with a
   default, re-defaulting moves no other session whose row exists when it
   runs. It can move what has no row
-  to bind: an ended session's still-valid access token acts as the account's
+  to bind: the still-valid access token of a session whose row is gone (a
+  revoked row is kept) acts as the account's
   most restrictive profile, ties going to the default, and a token naming no
   session acts as the default, so for up to a token lifetime a re-default
   can change which profile either acts as, to the new default without its
