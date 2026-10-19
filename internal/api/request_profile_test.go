@@ -414,6 +414,12 @@ func TestProfileKeyedWritesRefuseARestrictedSessionNamingAnother(t *testing.T) {
 		"My Library add":     {f.h.AddToLibrary, http.MethodPost, segment, false, `{"media_item_id":1}`},
 		"My Library remove": {f.h.RemoveFromLibrary, http.MethodDelete,
 			map[string]string{"profileId": parent, "mediaItemId": "1"}, false, ""},
+		"watchlist add": {f.h.AddToWatchlist, http.MethodPost,
+			map[string]string{"profileId": parent, "listId": "1"}, false, `{"media_item_id":1}`},
+		"watchlist remove": {f.h.RemoveFromWatchlist, http.MethodDelete,
+			map[string]string{"profileId": parent, "listId": "1", "itemId": "1"}, false, ""},
+		"watchlist delete": {f.h.DeleteWatchlist, http.MethodDelete,
+			map[string]string{"profileId": parent, "listId": "1"}, false, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			target := "/x"

@@ -35,7 +35,7 @@ import {
 import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
 
 interface OnboardingFlowProps {
-  /** Active profile id, or null to use the account's default profile. */
+  /** Active profile id, or null for the session's acting profile. */
   profileId: number | null
   /** The active profile, used to PRE-FILL identity steps so returning users
    *  aren't forced to re-enter (and their existing settings aren't clobbered). */

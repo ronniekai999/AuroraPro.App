@@ -694,19 +694,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     device pairing (the device binds to the restricted profile, or, when
     that profile has a PIN, to the most restrictive unlocked one, or, on an
     account with no password whose every profile is locked, to the most
-    restrictive one without its PIN), the
-    taste-onboarding routes (`/api/onboarding/skip`, `/seeds`, `DELETE
-    /seeds`), which take any `?profile_id=` on the account, so a restricted
-    session can mark another profile's onboarding done or change its seeds,
-    follows,
+    restrictive one without its PIN), follows,
     media requests, collections, watch parties and rooms, notifications,
     feedback and referral answers, push subscriptions, and logout, which
     signs out every session on the account.
   - A session a PIN write ended keeps its still-valid access token for up to
     one token lifetime, acting as the account's most restrictive profile, as
     a deleted profile's sessions do; it can read and write that profile's
-    data, and other profiles' through the `?profile_id=` routes, but cannot
-    manage profiles, pair a device or finish a sign-in link.
+    data (and, when no profile on the account is restricted, so that it acts
+    as an unrestricted one, other profiles' through the `?profile_id=`
+    routes), but cannot manage profiles, pair a device or finish a sign-in
+    link.
   - A PIN write keeps only the session row its access token names, so a tab
     whose token predates its session's latest rotation ends its own session
     too; it signs in again.

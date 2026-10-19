@@ -9,8 +9,9 @@ route's gate, change its row here.
 Terms:
 
 - **Acting profile**: the session's bound profile (`ResolveActingProfile`),
-  or the account default when the session has no binding. A token whose
-  session row is gone acts as the account's most restrictive profile.
+  or the account default when the session has no binding, or, on an account
+  with no default, an unrestricted stand-in with ID 0. A token whose session
+  row is gone acts as the account's most restrictive profile.
 - **Restricted session**: one whose acting profile has a ceiling.
 - **Profile-keyed**: the route takes a profile from `?profile_id=`, a body
   field or a `{profileId}` URL segment, through `resolveRequestProfile` (the

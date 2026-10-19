@@ -4021,8 +4021,9 @@ export default function App() {
   const lastHomeLoadRef = useRef(0)
   // Which profile the rails currently on screen belong to. Distinguishes a
   // profile switch (must wipe the personalized rails) from a same-profile
-  // refresh (must not). null is a real value here — "the account default" —
-  // so it starts undefined to force the first load down the switch path.
+  // refresh (must not). null is a real value here — "the session's acting
+  // profile" — so it starts undefined to force the first load down the
+  // switch path.
   const railsProfileRef = useRef<number | null | undefined>(undefined)
   // Read by the focus listener below, which must not re-bind on every
   // navigation just to know where the user currently is. Written in an effect,

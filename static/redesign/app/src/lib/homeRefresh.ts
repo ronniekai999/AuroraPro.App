@@ -42,7 +42,7 @@ export function shouldRefreshHome(opts: {
  *
  * `railsProfile` is `undefined` before the first load, which counts as a
  * change — nothing is on screen to preserve. `null` is a real value meaning
- * "the account's default profile", so it must not be conflated with undefined.
+ * "the session's acting profile", so it must not be conflated with undefined.
  */
 export function shouldResetPersonalizedRails(
   railsProfile: number | null | undefined,
