@@ -400,16 +400,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   them, deleting another's, skipping the request quota), the bug-report
   token's health, and the event socket's admin-only events (now playing,
   transcode status, server health; the role is fixed when `/ws` connects).
-  The admin routes' guard refuses a scoped token itself, though `RequireAuth`
-  ahead of it already does. The web app shows its Admin tab, admin controls,
+  The admin routes' guard refuses a non-admin and a scoped token itself,
+  though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The web app shows its Admin tab, admin controls,
   scan bar and server panel only once the session is known to act as an
   unrestricted profile, or the account has none (`showsAdminUI`); on `/admin`
   until then it says it is checking, or that it could not confirm the
   profile, and a switch to a restricted one leaves `/admin`. Its event socket
-  opens only once the startup binding is read and reopens on every switch
-  (`useRealtime`'s `connectionKey`): a new sign-in binds the default before
-  the startup re-selection moves it, so a socket opened then handed a kid's
-  session the admin events.
+  opens only once the startup profile load settles (`catalogProfileSettled`)
+  and reopens whenever the session's profile, or that profile's admin powers,
+  change (`useRealtime`'s `connectionKey`): a new sign-in binds the default
+  before the startup re-selection moves it, so a socket opened then handed a
+  kid's session the admin events.
 - This holds only while the session stays restricted. A switch to any
   unlocked unrestricted profile restores every admin power, restore and role
   changes included, so on an admin account each unrestricted profile's PIN
@@ -506,12 +507,23 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     title, and scan completions) go to the admin ACCOUNT, so a restricted
     session on it sees them in the notification list, over `/ws` and by web
     push; notifications have no profile, and push cannot be filtered by one.
+    Scan progress (with the current file name) and library updates go to
+    every socket, whatever its role or profile.
+  - A restricted session on an admin account is held to the request quota,
+    and the new-request alert skips its requester, so on a one-admin install
+    a request it has held for approval alerts nobody.
   - An event socket keeps the role it connected with, either way. The web app
-    reopens its own on a switch; any other socket on the session (a second
-    device, a switch made elsewhere, a hand-opened one) keeps the admin
-    events after a switch to a restricted profile until it reconnects. No
-    first-party client reads those events (`useRealtime` ignores them), but
-    the browser still receives them.
+    reopens its own when its profile or that profile's admin powers change;
+    any other socket on the session (a second device, a switch made
+    elsewhere, a hand-opened one) keeps the admin events after a switch to a
+    restricted profile until it reconnects. No first-party client reads
+    those events (`useRealtime` ignores them), but the browser still
+    receives them. While the web app's socket is closed (until startup
+    settles, and for a moment at each reopen) a notification or request
+    status is missed live; the bell has it on the next load.
+  - An admin account with no profile that creates one in Settings is bound
+    to it by the server, but the web app keeps showing no profile, so its
+    admin UI hides until the next reload or tab-visibility re-read.
   - Every admin-route request, and every admin-power check outside them that
     is reached, costs about three queries (the session row, its binding, the
     profile); the scan bar's 4-second status poll is the steady one.
@@ -521,11 +533,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     QR code and the feedback config at the handler
     (`admin_restricted_test.go`, `party_qr_test.go`). The other `adminPowers`
     sites are not, nor is an admin account with no profile through a real
-    database. In the SPA, TopNav's use of `showsAdminUI`, the scan bar's
-    hiding and the socket's reconnect are tested; the App wiring (the admin
-    view's mount and its notice, the redirect, the detail page's admin
-    actions, the socket's gate and key) has no App-level test. Settings still
-    labels the account's role, admin included, in a restricted session.
+    database, nor the router's wiring of the QR and feedback handlers' store
+    (dropped, an unrestricted admin silently loses those two powers). In the
+    SPA, `showsAdminUI`, TopNav's use of its `adminUI` prop, the scan bar's
+    hiding and the socket's reconnect are tested; the App wiring (computing
+    `adminUI` and passing it to TopNav, the scan bar, the panels, collections
+    and the player; the admin view's mount and its notice, the redirect, the
+    detail page's admin actions, the socket's gate and key) has no App-level
+    test. Settings still labels the account's role, admin included, in a
+    restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

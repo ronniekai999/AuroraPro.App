@@ -3056,7 +3056,9 @@ export default function App() {
     // re-selection moves it, so a socket opened then gave a kid's session the
     // admin-only events.
     enabled: realtimeUserId != null && catalogProfileSettled,
-    connectionKey: activeProfileId,
+    // The profile and whether it has admin powers: a ceiling given to, or
+    // lifted from, the session's own profile changes the role too.
+    connectionKey: `${activeProfileId}:${adminUI}`,
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
       // flow already optimistically prepends the new row, and the failure

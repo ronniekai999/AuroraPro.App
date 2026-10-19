@@ -17,14 +17,20 @@ import (
 // refuseRestrictedAdmin is middleware for the admin routes, run after
 // auth.RequireAdmin: it refuses (403 profile_restricted) a session acting as
 // a restricted profile, and fails closed like denyRestrictedSession. It also
-// refuses a scoped token itself (RequireAuth already does, ahead of it), as
-// adminPowers does: one names no session, so it would resolve to the default.
+// refuses a non-admin and a scoped token itself, though auth.RequireAdmin and
+// RequireAuth ahead of it already do, so the guard does not rest on its
+// placement: a scoped token names no session, so it would resolve to the
+// default.
 func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims := auth.GetClaims(r.Context())
 			if claims == nil {
 				writeError(w, http.StatusUnauthorized, "not authenticated")
+				return
+			}
+			if claims.Role != "admin" {
+				writeError(w, http.StatusForbidden, "admin access required")
 				return
 			}
 			if claims.Scope != "" {

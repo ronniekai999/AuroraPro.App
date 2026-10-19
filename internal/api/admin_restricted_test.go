@@ -101,6 +101,16 @@ func TestTheAdminRefusalFailsClosed(t *testing.T) {
 			t.Errorf("%s: the handler ran = %v", c.name, reached)
 		}
 	}
+	// A non-admin is refused here too, not only by auth.RequireAdmin ahead of it.
+	user := &auth.JWTClaims{UserID: 1, Role: "user", RefreshTokenID: 2}
+	userReached := false
+	userGuard := refuseRestrictedAdmin(fakeSessions{acting: free})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { userReached = true }))
+	userReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	userRR := httptest.NewRecorder()
+	userGuard.ServeHTTP(userRR, userReq.WithContext(context.WithValue(userReq.Context(), auth.ClaimsContextKey, user)))
+	if userRR.Code != http.StatusForbidden || userReached {
+		t.Errorf("a non-admin: %d, the handler ran = %v; want 403 and not run", userRR.Code, userReached)
+	}
 	// A cast token copies its minter's role but names no session.
 	reached := false
 	guard := refuseRestrictedAdmin(fakeSessions{acting: free})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
@@ -128,8 +138,9 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 	}
 	svc := healthTestService()
 	router := NewRouter(RouterDeps{Cfg: &config.Config{}, AuthSvc: svc, Queries: f.q, StartTime: time.Now()})
+	role := "admin"
 	token := func(rt int64) string {
-		tok, _, err := svc.GenerateAccessToken(f.userID, u.Username, "admin", u.TokenVersion, rt)
+		tok, _, err := svc.GenerateAccessToken(f.userID, u.Username, role, u.TokenVersion, rt)
 		if err != nil {
 			t.Fatalf("mint a token: %v", err)
 		}
@@ -159,6 +170,14 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 		{http.MethodGet, "/api/admin/backup"},
 		{http.MethodPost, "/api/admin/restore"},
 	}
+	// A user's token is refused every one of them, unrestricted session or not.
+	role = "user"
+	for _, rt := range routes {
+		if code, _ := do(rt.method, rt.path, f.parentRT); code != http.StatusForbidden {
+			t.Errorf("%s %s as a user: %d, want 403", rt.method, rt.path, code)
+		}
+	}
+	role = "admin"
 	for _, rt := range routes {
 		if code, reason := do(rt.method, rt.path, f.kidRT); code != http.StatusForbidden || reason != "profile_restricted" {
 			t.Errorf("%s %s as the kid: %d %q, want 403 profile_restricted", rt.method, rt.path, code, reason)
