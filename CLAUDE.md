@@ -570,10 +570,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     would refuse, and a write cannot put the account in the exception's
     state. A spaces-only value on another profile is free to the guards but
     a ceiling to the handlers, so the last other unrestricted profile can be
-    limited or deleted beside one, and then no session can manage profiles
-    until boot. The web app reads a ceiling as JavaScript's trim does, which
-    differs from Go's on a few Unicode characters and is looser than the
-    handlers' and the guards' readings, so for such a value it can show or
+    limited or deleted beside one, and then no session bound to a profile
+    can manage profiles until boot. The web app reads a ceiling as
+    JavaScript's trim does, which differs from Go's on two characters
+    (U+0085 and U+FEFF) and is looser than the handlers' reading and the
+    guards' reading of the other profiles, so for such a value it can show or
     hide admin UI the server refuses or grants, and offer profile, sign-in
     method or onboarding actions the server then refuses (403 or 409).
   - When the startup binding cannot be read, or the profile list fails, the
