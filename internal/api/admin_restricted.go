@@ -107,7 +107,8 @@ func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims
 // hasCeiling reads a stored ceiling as the exception's query does (SQL
 // btrim, which strips spaces only), so the two cannot disagree about one
 // profile: a ceiling of spaces is none, and anything else, a tab included, is
-// one (the ladder restricts an unknown value to the all-ages tier).
+// one. (The ladder and the web app trim all whitespace, so a hand-written tab
+// is no ceiling to them; boot's canonicalization rewrites it.)
 func hasCeiling(maxAgeRating string) bool {
 	return strings.Trim(maxAgeRating, " ") != ""
 }

@@ -415,8 +415,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (`showsAdminUI`); on `/admin` until then it says it is checking, or that it
   could not confirm the profile, and a switch to a restricted one leaves
   `/admin`. What it fetched with admin powers goes when they do: the
-  requests list is dropped (and waits for the startup binding), collections
-  remount, and the bug-report token's health is hidden and fetched again.
+  requests list is dropped and collections remount, both waiting for the
+  startup binding first, and the bug-report token's health is hidden and
+  fetched again.
   An admin's event socket opens only once the startup profile load settles
   (`catalogProfileSettled`) and reopens whenever the session's profile or
   that profile's admin powers change (`useRealtime`'s `connectionKey`): a
@@ -547,7 +548,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     The README tells owners of such accounts to set a password.
   - Nothing structural stops a future admin route skipping the guard beyond
     a test that `router.go` names `auth.RequireAdmin` only inside
-    `requireAdmin`; another file mounting admin routes would not be seen.
+    `requireAdmin`; another file mounting admin routes, a helper wrapping
+    `auth.RequireAdmin`, or a handler checking `claims.Role` itself would
+    not be seen.
+  - In the exception's state, every restricted profile on the account keeps
+    the admin powers, a child's included, not only the loosest; nothing
+    reports such accounts, and leaving the state takes SQL or a restore
+    (the web app cannot lift a ceiling from a restricted session). A
+    hand-written tab for a ceiling is one to the server's admin checks and
+    none to the web app (which trims all whitespace), so the web app can
+    show admin UI the server refuses until boot rewrites the value.
   - A request already past the admin guard completes after a switch to a
     restricted profile (a backup or restore already running, say). `/ws`
     fixes its role when it connects, so a database error then leaves an
@@ -564,8 +574,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and scoped-token cases at the middleware, `adminPowers`' cases, the
     collections list and the socket's role through a request, the
     exception through the router and its predicate against the database
-    (`''` and spaces read as no ceiling, as Go's `hasCeiling` and SQL's
-    `btrim` both strip spaces only, a store that cannot say grants
+    (`''` and spaces read as no ceiling and a tab as one, as Go's
+    `hasCeiling` and SQL's `btrim` both strip spaces only, a store that
+    cannot say grants
     nothing, a ceilinged first profile refused), and the party QR code and
     the feedback config at the handler (`admin_restricted_test.go`,
     `party_qr_test.go`). The other `adminPowers`

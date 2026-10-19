@@ -6371,7 +6371,12 @@ export default function App() {
               />
             </ViewSuspense>
           )}
-          {view === 'collections' && (
+          {/* Not before the startup binding is read: it fetches on mount,
+              and a fresh sign-in is bound to the default (an admin's powers)
+              until the startup re-selection moves it, so it showed other
+              members' private collections to the kid's tab. */}
+          {view === 'collections' && !catalogProfileSettled && <ViewFallback />}
+          {view === 'collections' && catalogProfileSettled && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
                 key={`profile-${activeProfileId}-${adminUI}`}

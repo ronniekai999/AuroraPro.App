@@ -390,6 +390,17 @@ func TestTheAdminExceptionNeedsAnAccountWithNoUnrestrictedProfile(t *testing.T) 
 			t.Errorf("a stored ceiling of %q read as a ceiling", stored)
 		}
 	}
+	// btrim strips spaces only, as hasCeiling does: a tab is a ceiling to
+	// both, so they cannot disagree about one profile.
+	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = E'\t' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("store a tab: %v", err)
+	}
+	if has() {
+		t.Error("a stored ceiling of a tab read as none in SQL, though hasCeiling reads it as one")
+	}
+	if !hasCeiling("\t") {
+		t.Error("hasCeiling read a tab as no ceiling, though the exception's SQL reads it as one")
+	}
 	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
 		t.Fatalf("restrict every profile: %v", err)
 	}
