@@ -1,0 +1,10 @@
+{
+  "sha": "715d35272b4b9ff5b0eefbdbb2ae8cae242268ea",
+  "verdict": "lows-only",
+  "summary": "Full diff 4368e44..00b3a06 reviewed (review 18: one medium, the unpinned rotation lock, fixed in ec62b53 with a race test, plus three lows fixed). ec62b53 reviewed (lows-only); doc commits a45f3d7, c2969aa and 715d352 each reviewed; the last pass left three wording lows (a password login landing mid-re-default, the deleted-profile tie rule on an account with no default, phrasing), listed in the PR as not covered.",
+  "reviewer": "fresh-agent-lock-r18-r19-docs",
+  "findings": "3",
+  "diff_digest": "78634c5976fd7ff2629502762596f61a103f357d627ac930f48182ecfb9574e5",
+  "branch": "claude/gifted-hopper-rfs4s9-profile-lock",
+  "recorded_at": "2026-10-19T08:21:13Z"
+}
