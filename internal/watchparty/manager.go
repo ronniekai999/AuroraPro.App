@@ -1855,6 +1855,7 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// not hostship, gates access).
 	hostForReel := ps.HostUserID
 	mediaTitleForReel := ps.MediaTitle
+	episodeIDAtEnd, mediaPosterAtEnd := ps.EpisodeID, ps.MediaPoster
 
 	slog.Info("watch party ending — diagnostic snapshot",
 		"code", code,
@@ -1942,7 +1943,7 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// Mark inactive in DB, on the title the reel is cut from (its gate reads
 	// the row's).
 	if dbID > 0 {
-		if err := m.queries.EndWatchPartyOn(context.Background(), dbID, mediaItemIDForReel); err != nil {
+		if err := m.queries.EndWatchPartyOn(context.Background(), dbID, mediaItemIDForReel, episodeIDAtEnd, mediaTitleForReel, mediaPosterAtEnd); err != nil {
 			slog.Warn("failed to end party in DB", "error", err)
 		}
 	}

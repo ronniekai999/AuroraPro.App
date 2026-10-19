@@ -293,18 +293,42 @@ func (q *Queries) EndWatchParty(ctx context.Context, id int64) error {
 	return nil
 }
 
-// EndWatchPartyOn ends a party and records the title it ended on. A
-// change-media saves the new title in the background, and that save skips an
-// inactive row, so a change just before the end used to leave the row on the
-// earlier title; the highlight reel, cut from the final one, is gated on the
-// row's.
-func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64) error {
-	_, err := q.pool.Exec(ctx,
-		`UPDATE watch_parties SET is_active = false, ended_at = $1, media_item_id = $3 WHERE id = $2`,
-		time.Now(), id, mediaItemID,
+// EndWatchPartyOn ends a party and records the title it ended on: id,
+// episode, name and poster together, so the row never pairs one title's id
+// with another's name (issue #460). A change-media saves the new title in
+// the background, and that save skips an inactive row, so a change just
+// before the end used to leave the row on the earlier title; the highlight
+// reel, cut from the final one, is gated on the row's.
+//
+// The title is recorded only while it still exists, with its episode still
+// its own: a merge deletes the duplicate a live party may still name, and
+// the foreign key would then fail the whole statement and leave the party
+// active for good, blocking its room. Ending matters more than the title, so
+// if the write still fails (the title deleted between the check and the
+// write) the party is ended on the row's own title.
+func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64, episodeID *int64, mediaTitle, mediaPoster string) error {
+	_, err := q.pool.Exec(ctx, `
+		UPDATE watch_parties p
+		   SET is_active     = false,
+		       ended_at      = $1,
+		       media_item_id = CASE WHEN t.ok THEN $3 ELSE p.media_item_id END,
+		       episode_id    = CASE WHEN t.ok THEN $4 ELSE p.episode_id END,
+		       media_title   = CASE WHEN t.ok THEN $5 ELSE p.media_title END,
+		       media_poster  = CASE WHEN t.ok THEN $6 ELSE p.media_poster END
+		  FROM (SELECT EXISTS (SELECT 1 FROM media_items WHERE id = $3)
+		           AND ($4::bigint IS NULL OR EXISTS (
+		                 SELECT 1
+		                   FROM tv_episodes e
+		                   JOIN tv_seasons  s ON s.id = e.season_id
+		                  WHERE e.id = $4 AND e.media_item_id = $3 AND s.media_item_id = $3)) AS ok) t
+		 WHERE p.id = $2`,
+		time.Now(), id, mediaItemID, episodeID, mediaTitle, mediaPoster,
 	)
-	if err != nil {
-		return fmt.Errorf("end watch party: %w", err)
+	if err == nil {
+		return nil
+	}
+	if endErr := q.EndWatchParty(ctx, id); endErr != nil {
+		return fmt.Errorf("end watch party: %w (recording its title: %v)", endErr, err)
 	}
 	return nil
 }

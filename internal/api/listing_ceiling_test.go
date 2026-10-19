@@ -320,6 +320,11 @@ func TestTheHighlightReelHidesATitleOverTheCeiling(t *testing.T) {
 	if got := serve(f.parentRT, "admin", otherCode, otherID); got != http.StatusOK {
 		t.Errorf("an admin who was not in the party fetching its reel: %d, want 200", got)
 	}
+	// A session acting as a restricted profile has no admin powers, so it
+	// does not skip the membership check either (adminPowers).
+	if got := serve(f.kidRT, "admin", otherCode, otherID); got != http.StatusNotFound {
+		t.Errorf("a restricted session on an admin account fetching a reel of a party it was not in: %d, want 404", got)
+	}
 	for _, role := range []string{"user", "admin"} {
 		if got := serve(f.kidRT, role, rCode, rID); got != http.StatusNotFound {
 			t.Errorf("the kid (%s) fetching the R party's reel: %d, want 404", role, got)
