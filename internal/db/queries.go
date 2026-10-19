@@ -482,19 +482,23 @@ func (q *Queries) CreateRefreshTokenAtVersion(ctx context.Context, rt *models.Re
 		return false, nil
 	}
 	// A pairing grant names the profile its approver could pass on, judged
-	// up to ten minutes earlier. A PIN set since then would otherwise land
-	// the device on the newly locked profile without it (SetProfilePIN only
-	// sees existing rows). Under the same user lock, a profile that now has
-	// a PIN creates nothing; the device pairs again.
+	// up to ten minutes earlier. A PIN set or changed since then would
+	// otherwise land the device on the newly locked profile without it
+	// (SetProfilePIN only sees existing rows). Under the same user lock, a
+	// profile whose PIN state is not the one judged (rt.BoundPINHash: none,
+	// or the hash it had) creates nothing; the device pairs again.
 	if rt.ActiveProfileID != nil {
-		var locked bool
-		err := tx.QueryRow(ctx, `SELECT pin_hash IS NOT NULL FROM user_profiles WHERE id = $1 AND user_id = $2`,
-			*rt.ActiveProfileID, rt.UserID).Scan(&locked)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && locked) {
+		var pinHash *string
+		err := tx.QueryRow(ctx, `SELECT pin_hash FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			*rt.ActiveProfileID, rt.UserID).Scan(&pinHash)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
+		}
+		if (pinHash == nil) != (rt.BoundPINHash == nil) || (pinHash != nil && *pinHash != *rt.BoundPINHash) {
+			return false, nil
 		}
 	}
 	if err := tx.QueryRow(ctx,

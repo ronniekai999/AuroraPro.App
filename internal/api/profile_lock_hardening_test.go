@@ -1111,7 +1111,7 @@ func TestAPairingApprovedBeforeAPINExpires(t *testing.T) {
 	if err != nil || u == nil {
 		t.Fatalf("read user: %v", err)
 	}
-	if !h.grants.authorize(grant.UserCode, f.userID, u.TokenVersion, f.parent.ID) {
+	if !h.grants.authorize(grant.UserCode, f.userID, u.TokenVersion, f.parent.ID, nil) {
 		t.Fatal("authorize the grant")
 	}
 	f.setPIN(t, "4321")
@@ -1408,5 +1408,125 @@ func TestAnOAuthSignInDoesNotStandInForAPIN(t *testing.T) {
 	}
 	if created, err := f.q.CreateRefreshTokenAtVersion(ctx, rt, u.TokenVersion); err != nil || created {
 		t.Errorf("a session bound to a profile locked since the choice: created %v (err %v), want none", created, err)
+	}
+}
+
+// TestAPairingOnAnAccountWithNoPasswordGetsTheMostRestrictiveProfile: with
+// every profile locked, pairing was refused in favour of a password sign-in,
+// which an account with no password cannot make, so its devices could never
+// get in. The device gets the most restrictive profile, PIN and all, and the
+// session insert rechecks that PIN.
+func TestAPairingOnAnAccountWithNoPasswordGetsTheMostRestrictiveProfile(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	f.setPIN(t, "4321")
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("lock the kid: %d %s", code, body)
+	}
+	p, hash, err := f.q.MostRestrictiveProfilePIN(ctx, f.userID)
+	if err != nil || p == nil || p.ID != f.kid.ID || hash == nil {
+		t.Fatalf("most restrictive: %+v, PIN %v (err %v); want the kid %d with its PIN", p, hash, err, f.kid.ID)
+	}
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	session := func(judged *string) bool {
+		t.Helper()
+		rt := &models.RefreshToken{UserID: f.userID, Token: fmt.Sprintf("pair-%d", time.Now().UnixNano()),
+			ExpiresAt: time.Now().Add(time.Hour), ActiveProfileID: &f.kid.ID, BoundPINHash: judged}
+		created, err := f.q.CreateRefreshTokenAtVersion(ctx, rt, u.TokenVersion)
+		if err != nil {
+			t.Fatalf("create the session: %v", err)
+		}
+		return created
+	}
+	if !session(hash) {
+		t.Error("a session judged under the kid's current PIN was not created")
+	}
+	if session(nil) {
+		t.Error("a session judged as unlocked was created on a locked profile")
+	}
+	// A PIN changed after the approval creates nothing; the device pairs again.
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"1357","current_pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("change the kid's PIN: %d %s", code, body)
+	}
+	if session(hash) {
+		t.Error("a session judged under the kid's old PIN was created after the PIN changed")
+	}
+}
+
+// TestThePasswordUnlocksNothingOnAnAccountWithNoPassword: the account
+// password stands in for any PIN, so on an account that has none, a
+// "password" must match nothing rather than everything.
+func TestThePasswordUnlocksNothingOnAnAccountWithNoPassword(t *testing.T) {
+	f := newLockFixture(t)
+	f.setPIN(t, "4321")
+	if _, err := lockTestPool(t).Exec(context.Background(), `UPDATE users SET password_hash = '' WHERE id = $1`, f.userID); err != nil {
+		t.Fatalf("clear the password: %v", err)
+	}
+	if code, reason, _ := f.call(t, f.h.ActivateProfile, http.MethodPost, f.kidRT, f.parent.ID, `{"password":"anything"}`); code != http.StatusForbidden || reason != "profile_pin_invalid" {
+		t.Errorf("a password on an account with none: %d %q, want 403 profile_pin_invalid", code, reason)
+	}
+}
+
+// TestDeletingAProfileWaitsForTheAccountLock: the delete path's only lock is
+// the one keepAnUnrestrictedProfile takes, so a delete racing a ceiling
+// written on the account's other unrestricted profile must wait for it, then
+// see that it is now the last one.
+func TestDeletingAProfileWaitsForTheAccountLock(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	spare := &models.UserProfile{UserID: f.userID, Name: "spare", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, spare); err != nil {
+		t.Fatalf("seed spare profile: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, f.userID); err != nil {
+		t.Fatalf("lock the user row: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("limit the parent: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.q.DeleteProfile(ctx, spare.ID)
+		done <- err
+	}()
+	var result error
+	finished := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && !finished; {
+		select {
+		case result = <-done:
+			finished = true
+			continue
+		default:
+		}
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF u%')`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if !finished {
+		result = <-done
+	}
+	if !errors.Is(result, db.ErrLastUnrestrictedProfile) {
+		t.Errorf("deleting the spare while the parent's limit was being set: %v; want ErrLastUnrestrictedProfile", result)
+	}
+	if p, err := f.q.GetProfile(ctx, spare.ID); err != nil || p == nil {
+		t.Errorf("the spare after the race: %+v, %v; want it kept", p, err)
 	}
 }

@@ -85,7 +85,10 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       if (readBinding) {
         try {
           const bound = await readBinding()
-          if (bound.id !== activeProfileId && profiles.some(p => p.id === bound.id)) setActiveProfileId(bound.id)
+          if (bound.id !== activeProfileId && profiles.some(p => p.id === bound.id)) {
+            onBound?.(bound)
+            setActiveProfileId(bound.id)
+          }
         } catch { /* the tab-visibility re-read tries again */ }
       }
       return false
@@ -93,7 +96,7 @@ export function useProfileSwitch({ profiles, activeProfileId, setActiveProfileId
       inFlightRef.current = false
     }
     return true
-  }, [activeProfileId, profiles, setActiveProfileId, onError, readBinding, showBinding])
+  }, [activeProfileId, profiles, setActiveProfileId, onError, readBinding, showBinding, onBound])
 
   // Sends the PIN or password for pinTarget. Rejects with the server's refusal,
   // which the dialog shows; the prompt stays open until this succeeds.

@@ -253,9 +253,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   `max_age_rating`. It may edit only its own name, avatar, language, subtitle
   and maturity settings. It cannot create, delete or re-default profiles, set
   or change a PIN, change any ceiling (re-sending its unchanged ceiling
-  passes, and is not written), edit another profile's settings, or link or
-  unlink a sign-in identity (a fresh sign-in through a new link would land on
-  the default without its PIN). These checks fail closed when the acting
+  passes, and is not written), edit another profile's settings through the
+  profile routes, or link or unlink a sign-in identity (a new link would let
+  it sign in again without the password, and on an account with no password
+  land on the default without its PIN). These checks fail closed when the acting
   profile cannot be resolved, and refuse a session whose row is gone (401
   `session_ended`, `requireLiveSession`): its still-valid access token acts as
   the most restrictive profile, which with no restricted profile left is the
@@ -297,12 +298,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   account's most restrictive unlocked profile instead
   (`MostRestrictiveUnlockedProfile`), which can be looser than a locked
   restricted approver's own, though never looser than a profile it could
-  switch to without a PIN; with every profile locked the approval is a 409
-  `profile_locked` (the account password can still sign the device in). The
-  grant waits up to ten minutes for the device's poll, so the session insert
-  rechecks under the user-row lock: a grant whose profile has gained a PIN
-  since creates nothing, and the device pairs again. An approver whose own
-  session row is gone cannot pair.
+  switch to without a PIN. With every profile locked the approval is a 409
+  `profile_locked`, since the account password can still sign the device in,
+  except on an account with no password, where pairing is the device's only
+  way in and no route can give the account a password: the device then gets
+  the account's most restrictive profile, PIN and all
+  (`MostRestrictiveProfilePIN`), never looser than any other profile on it.
+  The grant waits up to ten minutes for the device's poll, so the session
+  insert rechecks under the user-row lock that the profile's PIN state is the
+  one judged (`RefreshToken.BoundPINHash`: none, or the same hash): a grant
+  whose profile has gained or changed a PIN since creates nothing, and the
+  device pairs again. An approver whose own session row is gone cannot pair.
 - Clients show the server's binding, never a remembered choice: the SPA reads
   `GET /api/profiles/active` at startup (one retry, `readSessionProfile`,
   alongside the profile list) and changes its display only after activation
@@ -383,10 +389,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     past the default's lock. The callback's use of the helper has no
     end-to-end test.
   - An account with no password (OAuth-only) has no recovery for a forgotten
-    PIN short of the database. So does an account whose every profile is
-    restricted: nothing on it can lift a ceiling or create an unrestricted
-    profile. Writes can no longer produce one, but data from before the rule,
-    a backup restore or hand-written SQL can.
+    PIN short of the database. Nor does a password account whose owner has
+    forgotten the password while every profile is locked: there is no
+    password-reset route, and a linked sign-in is refused there. So does an
+    account whose every profile is restricted: nothing on it can lift a
+    ceiling or create an unrestricted profile. Writes can no longer produce
+    one, but data from before the rule (onboarding on main restricted a
+    single-profile account's only profile), a backup restore or hand-written
+    SQL can, and nothing reports such accounts.
+  - With a provider's invite bypass on (`BypassInviteEnabled`), anyone with
+    an account there, a child included, can sign up a separate account with
+    no ceiling at all.
   - The admin role is account-level, so a restricted profile on an admin
     account keeps every admin route: it can invite a new, unrestricted
     account or restore a backup. The README tells owners to keep children
@@ -441,7 +454,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     `share_watch_history` switch publishes the default profile's history),
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when
-    that profile has a PIN, to the most restrictive unlocked one), follows,
+    that profile has a PIN, to the most restrictive unlocked one), the
+    taste-onboarding routes (`/api/onboarding/skip`, `/seeds`, `DELETE
+    /seeds`), which take any `?profile_id=` on the account, so a restricted
+    session can mark another profile's onboarding done or change its seeds,
+    follows,
     media requests, collections, watch parties and rooms, notifications,
     feedback and referral answers, push subscriptions, and logout, which
     signs out every session on the account.

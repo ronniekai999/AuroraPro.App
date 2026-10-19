@@ -202,6 +202,23 @@ func (q *Queries) mostRestrictiveProfile(ctx context.Context, userID int64) (*mo
 	return p, nil
 }
 
+// MostRestrictiveProfilePIN returns the account's most restrictive profile
+// (mostRestrictiveProfile) and its PIN hash, nil when it has none. Pairing
+// uses it on an account with no password whose every profile is locked; the
+// hash goes with the grant, so a PIN changed before the device collects it
+// creates no session.
+func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID int64) (*models.UserProfile, *string, error) {
+	p, err := q.mostRestrictiveProfile(ctx, userID)
+	if err != nil || p == nil || p.ID == 0 {
+		return p, nil, err
+	}
+	var hash *string
+	if err := q.pool.QueryRow(ctx, `SELECT pin_hash FROM user_profiles WHERE id = $1 AND user_id = $2`, p.ID, userID).Scan(&hash); err != nil {
+		return nil, nil, fmt.Errorf("read the profile's PIN: %w", err)
+	}
+	return p, hash, nil
+}
+
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the
 // session identified by refreshTokenID (issue #462). Returns false if no
 // matching row exists for userID at all — the caller has already validated

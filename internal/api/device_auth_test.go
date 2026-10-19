@@ -27,6 +27,9 @@ type deviceTestStore struct {
 	failActing bool
 	unlocked   *models.UserProfile // MostRestrictiveUnlockedProfile's answer
 	ended      bool                // SessionLive answers false
+	// MostRestrictiveProfilePIN's answer.
+	mostRestrictive    *models.UserProfile
+	mostRestrictivePIN *string
 }
 
 func (s *deviceTestStore) SessionLive(context.Context, int64, int64) (bool, error) {
@@ -174,7 +177,7 @@ func TestDevicePairing_RevocationAndFailedExchange(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			h, store := deviceTestHandler()
 			secret, grant, err := h.grants.start("TV")
-			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3, 0) {
+			if err != nil || !h.grants.authorize(grant.UserCode, 7, 3, 0, nil) {
 				t.Fatal("grant failed")
 			}
 			switch failure {
@@ -245,7 +248,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	now := time.Now()
 	g.now = func() time.Time { return now }
 	secret, grant, _ := g.start("TV")
-	if !g.authorize(grant.UserCode, 7, 3, 0) {
+	if !g.authorize(grant.UserCode, 7, 3, 0, nil) {
 		t.Fatal("authorize failed")
 	}
 	var successes atomic.Int32
@@ -263,7 +266,7 @@ func TestDeviceGrants_ConcurrentPollExpirationAndBounds(t *testing.T) {
 	}
 	secret, grant, _ = g.start("TV")
 	now = now.Add(deviceGrantTTL)
-	if g.authorize(grant.UserCode, 7, 3, 0) {
+	if g.authorize(grant.UserCode, 7, 3, 0, nil) {
 		t.Fatal("expired grant approved")
 	}
 	if _, status := g.take(secret); status != "expired_token" {
@@ -398,4 +401,31 @@ func TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn(t *testing.T) {
 			t.Errorf("approval %d with %d sessions created; want 409 and none", code, len(created))
 		}
 	})
+	// With no password the device has no other way in, so it gets the most
+	// restrictive profile, PIN and all; the session insert rechecks that PIN.
+	t.Run("every profile is locked on an account with no password", func(t *testing.T) {
+		h, store := deviceTestHandler()
+		store.user.PasswordHash = ""
+		store.acting = &models.UserProfile{ID: 41, UserID: 7, HasPIN: true}
+		hash := "argon2-of-the-kid's-pin"
+		store.mostRestrictive = &models.UserProfile{ID: 43, UserID: 7, MaxAgeRating: "PG", HasPIN: true}
+		store.mostRestrictivePIN = &hash
+		code, created := pair(t, store, h)
+		if code != http.StatusOK || len(created) != 1 || created[0].ActiveProfileID == nil || *created[0].ActiveProfileID != 43 {
+			t.Fatalf("approval %d, sessions %+v; want the device bound to the most restrictive profile 43", code, created)
+		}
+		if created[0].BoundPINHash == nil || *created[0].BoundPINHash != hash {
+			t.Errorf("the session was judged under PIN %v, want the profile's hash", created[0].BoundPINHash)
+		}
+	})
+}
+
+func (s *deviceTestStore) MostRestrictiveProfilePIN(context.Context, int64) (*models.UserProfile, *string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mostRestrictive == nil {
+		return nil, nil, errors.New("no profile")
+	}
+	p := *s.mostRestrictive
+	return &p, s.mostRestrictivePIN, nil
 }

@@ -92,14 +92,18 @@ describe('useProfileSwitch', () => {
 
   it('shows the binding after a failure whose bind may have happened', async () => {
     api.activateProfile.mockRejectedValue(new TypeError('Failed to fetch'))
-    const readBinding = vi.fn().mockResolvedValue(other)
-    const { hook, setActiveProfileId, onError } = setup(2, readBinding)
+    const serverRecord = { ...other, name: 'renamed elsewhere' }
+    const readBinding = vi.fn().mockResolvedValue(serverRecord)
+    const onBound = vi.fn()
+    const { hook, setActiveProfileId, onError } = setup(2, readBinding, onBound)
     let switched = true
     await act(async () => { switched = await hook.result.current.switchProfile(3) })
     expect(switched).toBe(false)
     expect(onError).toHaveBeenCalledWith(other)
     expect(readBinding).toHaveBeenCalledTimes(1)
     expect(setActiveProfileId).toHaveBeenCalledWith(3)
+    // The server's record of the profile, not the list's copy.
+    expect(onBound).toHaveBeenCalledWith(serverRecord)
   })
 
   it('keeps the profile on screen when the binding read agrees or fails', async () => {

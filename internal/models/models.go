@@ -180,6 +180,11 @@ type RefreshToken struct {
 	// db.ResolveActingProfile. nil = no explicit switch yet, falls back to
 	// the account default profile.
 	ActiveProfileID *int64 `json:"active_profile_id,omitempty"`
+	// BoundPINHash is the PIN state ActiveProfileID was judged under when a
+	// new session is created (CreateRefreshTokenAtVersion): nil for a profile
+	// that must still have no PIN, else the hash it must still have. Not
+	// stored.
+	BoundPINHash *string `json:"-"`
 }
 
 type InviteCode struct {
