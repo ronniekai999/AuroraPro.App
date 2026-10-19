@@ -643,9 +643,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     is reached, costs about three queries (the session row, its binding, the
     profile), one more for a restricted session (the exception's check); the
     scan bar's 4-second status poll is the steady one. A highlight reel
-    checks membership first, so a member pays one query per Range request
-    as before, a non-member admin about four, and a failed membership query
-    is a 500 for an admin too.
+    checks membership first and then everyone's ceiling, so a member pays
+    about three queries per Range request (four for a restricted profile), a
+    non-member admin about six, and a failed membership query is a 500 for
+    an admin too.
   - Pinned: the admin routes' refusal through the router and its fail-closed
     and scoped-token cases at the middleware, `adminPowers`' cases, the
     collections list and the socket's role through a request, the

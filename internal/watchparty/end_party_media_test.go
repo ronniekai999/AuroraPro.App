@@ -12,7 +12,7 @@ import (
 // reel was cut from the final title but gated on the row's, so a kid could be
 // served a reel of an R title the row said was G. Here the in-memory title
 // moves with no save at all, the worst case of that race. Every case also
-// checks that the reel is cut from the title the row records.
+// checks that the reel generator is handed the title the row records.
 func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	q, pool := requireRehydrateDB(t)
 	ctx := context.Background()
@@ -38,16 +38,22 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		return scalar(`INSERT INTO media_items (library_id, type, title, sort_title, content_rating, last_metadata_attempt)
 			VALUES ($1, $2, $3, $3, $4, NOW()) RETURNING id`, lib, kind, name, rating)
 	}
-	season := func(show int64) int64 {
-		return scalar(`INSERT INTO tv_seasons (media_item_id, season_number) VALUES ($1, 1) RETURNING id`, show)
+	season := func(show int64, number int) int64 {
+		return scalar(`INSERT INTO tv_seasons (media_item_id, season_number) VALUES ($1, $2) RETURNING id`, show, number)
 	}
 	episode := func(season, show int64, number int) int64 {
 		return scalar(`INSERT INTO tv_episodes (season_id, media_item_id, episode_number) VALUES ($1, $2, $3) RETURNING id`, season, show, number)
 	}
 	gMovie, rMovie := title(movies, "movie", "endmedia g", "G"), title(movies, "movie", "endmedia r", "R")
 	showA, showB := title(shows, "show", "endmedia show a", "TV-G"), title(shows, "show", "endmedia show b", "TV-MA")
-	seasonA := season(showA)
-	episodeA, episodeB := episode(seasonA, showA, 1), episode(season(showB), showB, 1)
+	seasonA := season(showA, 1)
+	episodeA, episodeB := episode(seasonA, showA, 1), episode(season(showB, 1), showB, 1)
+	// Two episodes whose rows disagree with their seasons: one in show A's
+	// season naming show B, one in show B's naming show A.
+	inSeasonOfA, namingA := episode(seasonA, showB, 2), episode(season(showB, 2), showA, 1)
+	// Titles a subtest deletes before the party ends. Seeded here, as every
+	// fixture is, so a seed failure fails this test rather than a subtest.
+	gone, goneToo := title(movies, "movie", "endmedia gone", "G"), title(movies, "movie", "endmedia gone too", "G")
 
 	m := NewManager(q, nil)
 	t.Cleanup(m.Shutdown)
@@ -63,7 +69,7 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	// end starts a party on (media, ep, name), runs before (database work,
 	// outside the party's lock), moves its in-memory title as change does,
 	// with no save, ends it, and reads its row back. It fails the test unless
-	// the reel was handed the row's title id and name.
+	// the reel generator was handed the row's title id and name.
 	end := func(t *testing.T, media int64, ep *int64, name string, before func(partyID int64), change func(ps *PartyState)) row {
 		t.Helper()
 		ps, err := m.CreateParty(ctx, hostID, "host", media, ep, "Movie Night", name, "", 8,
@@ -156,7 +162,6 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	// good, blocking its room. It now ends on the row's own title, name kept,
 	// in one update: the existence check, not the fallbacks, keeps the id out.
 	t.Run("a title deleted meanwhile", func(t *testing.T) {
-		gone := title(movies, "movie", "endmedia gone", "G")
 		var updates func() int64
 		r := end(t, gMovie, nil, "endmedia g", func(partyID int64) {
 			if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, gone); err != nil {
@@ -220,6 +225,26 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		}
 	})
 
+	// The retry is the same guarded write: a title gone by then still
+	// leaves the row on its own, in two updates, not three.
+	t.Run("a title deleted meanwhile, and the first write refused", func(t *testing.T) {
+		var updates func() int64
+		r := end(t, gMovie, nil, "endmedia g", func(partyID int64) {
+			if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, goneToo); err != nil {
+				t.Fatalf("delete the title: %v", err)
+			}
+			updates = refuse(t, partyID, 1)
+		}, func(ps *PartyState) {
+			ps.MediaItemID, ps.MediaTitle = goneToo, "endmedia gone too"
+		})
+		if r.active || r.media != gMovie || r.title != "endmedia g" {
+			t.Errorf("row %+v; want ended on its own title %d, name kept", r, gMovie)
+		}
+		if n := updates(); n != 2 {
+			t.Errorf("%d updates reached the row; want 2", n)
+		}
+	})
+
 	// An episode that is not the title's own would pair one show's id with
 	// another's episode, so the row takes the title alone, with no episode,
 	// name or poster from the same suspect change.
@@ -232,12 +257,20 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		}
 	})
 
-	// The episode's own row can name the show while its season is another
-	// show's; the season decides too.
+	// An episode's own row and its season each name a show, and both must
+	// name the title: each case here fails exactly one of the two checks.
 	t.Run("an episode in another show's season", func(t *testing.T) {
-		stray := episode(seasonA, showB, 2)
 		r := end(t, showA, &episodeA, "endmedia show a", nil, func(ps *PartyState) {
-			ep := stray
+			ep := inSeasonOfA
+			ps.MediaItemID, ps.EpisodeID, ps.MediaTitle = showB, &ep, "endmedia show b"
+		})
+		if r.active || r.media != showB || r.episode != nil || r.title != "" {
+			t.Errorf("row %+v; want ended on show %d alone", r, showB)
+		}
+	})
+	t.Run("an episode whose own row names another show", func(t *testing.T) {
+		r := end(t, showA, &episodeA, "endmedia show a", nil, func(ps *PartyState) {
+			ep := namingA
 			ps.MediaItemID, ps.EpisodeID, ps.MediaTitle = showB, &ep, "endmedia show b"
 		})
 		if r.active || r.media != showB || r.episode != nil || r.title != "" {

@@ -556,8 +556,9 @@ type Manager struct {
 	// on m.mu.
 	shareCacheInvalidator atomic.Pointer[func(code string)]
 
-	// onReelForTest, when set, sees the title each ending party's highlight
-	// reel is cut from. Tests only; set it before any party ends.
+	// onReelForTest, when set, sees the title id and name each ending
+	// party's highlight reel is handed, before anything can skip the reel.
+	// Tests only; set it before any party ends.
 	onReelForTest func(mediaItemID int64, mediaTitle string)
 
 	// M9/M1 — server-lifecycle context for parent-of background work
@@ -1957,9 +1958,6 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// It is cut from the title the row ended on, not the one in memory:
 	// its gate reads the row, so the two must name the same title on every
 	// path, including the ones where the final title could not be recorded.
-	if m.onReelForTest != nil {
-		m.onReelForTest(reelMediaID, reelTitle)
-	}
 	m.generateHighlightReelAsync(code, reactionsForReel, reelMediaID, hostForReel, reelTitle, dbID)
 
 	// M3 room lifecycle: persistent rooms survive the session end (touch
@@ -2266,6 +2264,9 @@ type highlightMoment struct {
 // Called from endPartyInternal AFTER the ps.mu lock is released so the
 // long-running ffmpeg job doesn't block other parties.
 func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID, hostUserID int64, mediaTitle string, partyDBID int64) {
+	if m.onReelForTest != nil {
+		m.onReelForTest(mediaItemID, mediaTitle)
+	}
 	m.mu.RLock()
 	dir := m.highlightCacheDir
 	queries := m.queries
