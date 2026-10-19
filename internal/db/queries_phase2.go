@@ -2181,6 +2181,22 @@ func (q *Queries) GetContentRatingForEpisodeFile(ctx context.Context, episodeFil
 	return rating, nil
 }
 
+// GetContentRatingForEpisode returns the content_rating of the show that owns
+// episodeID, with the same contract as GetContentRatingForEpisodeFile: empty
+// means unrated, and a missing episode returns pgx.ErrNoRows.
+func (q *Queries) GetContentRatingForEpisode(ctx context.Context, episodeID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(mi.content_rating, '')
+		FROM tv_episodes e
+		JOIN media_items mi ON mi.id = e.media_item_id
+		WHERE e.id = $1`, episodeID).Scan(&rating)
+	if err != nil {
+		return "", err
+	}
+	return rating, nil
+}
+
 // GetContentRatingForMediaFile is the movie-file counterpart of
 // GetContentRatingForEpisodeFile (issue #462).
 func (q *Queries) GetContentRatingForMediaFile(ctx context.Context, mediaFileID int64) (string, error) {

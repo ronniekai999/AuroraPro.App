@@ -682,9 +682,17 @@ func (h *MediaHandler) ListGenres(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MediaHandler) GetFiles(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
+		return
+	}
+	if hidden, err := actingMediaHidden(r.Context(), h.queries, claims, id); err != nil || hidden {
+		denyHiddenMedia(w, id, err)
 		return
 	}
 

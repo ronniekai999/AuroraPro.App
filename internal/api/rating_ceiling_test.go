@@ -380,14 +380,24 @@ func TestCreateSession_RatingCeiling(t *testing.T) {
 		{"episode", f.episodeFileID, "episode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{"file_id":` + i64(tc.fileID) + `,"file_type":"` + tc.fileType + `"}`
-			r := httptest.NewRequest(http.MethodPost, "/api/stream/sessions", strings.NewReader(body))
-			r.Header.Set("Content-Type", "application/json")
-			r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
-			rr := httptest.NewRecorder()
-			h.CreateSession(rr, r)
+			create := func(fileID int64) *httptest.ResponseRecorder {
+				body := `{"file_id":` + i64(fileID) + `,"file_type":"` + tc.fileType + `"}`
+				r := httptest.NewRequest(http.MethodPost, "/api/stream/sessions", strings.NewReader(body))
+				r.Header.Set("Content-Type", "application/json")
+				r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+				rr := httptest.NewRecorder()
+				h.CreateSession(rr, r)
+				return rr
+			}
+			rr := create(tc.fileID)
 			if rr.Code != http.StatusNotFound {
 				t.Errorf("restricted profile: CreateSession(%s) status = %d, want 404", tc.name, rr.Code)
+			}
+			// A missing file used to get its own wording ("media file not
+			// found"), which told a restricted profile which ids exist.
+			if missing := create(1 << 60); missing.Code != rr.Code || missing.Body.String() != rr.Body.String() {
+				t.Errorf("restricted profile: CreateSession(%s) answers a missing file %d %s and an over-ceiling one %d %s; want the same",
+					tc.name, missing.Code, missing.Body.String(), rr.Code, rr.Body.String())
 			}
 		})
 	}

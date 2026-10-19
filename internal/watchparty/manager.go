@@ -2880,11 +2880,11 @@ func (m *Manager) ChangeMedia(code string, callerUserID int64, callerProfile *mo
 		// on a lookup error, matching the existence check above — this
 		// check exists for a good error message, not enforcement.
 		//
-		// Running this before the host-only check below is safe: it only
-		// ever resolves and applies the CALLER's own ceiling (ownership-
-		// scoped by ResolveActingProfile), so a non-host learns nothing
-		// beyond "would this exceed MY OWN ceiling" — the same answer
-		// GetEnriched already gives them directly for any media id.
+		// It runs before the host-only check below and applies only the
+		// CALLER's own ceiling (ownership-scoped by ResolveActingProfile).
+		// Its error differs from the existence check's, though, so any
+		// participant can tell a missing id from an over-ceiling one, which
+		// the by-id routes no longer reveal (a documented gap).
 		if callerProfile != nil {
 			if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
 				if !db.RatingAllowed(callerProfile.MaxAgeRating, item.ContentRating) {

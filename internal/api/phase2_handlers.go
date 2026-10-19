@@ -90,28 +90,6 @@ func NewTVHandler(queries *db.Queries) *TVHandler {
 	return &TVHandler{queries: queries}
 }
 
-// ratingCeilingBlocksMedia reports whether mediaID's content_rating exceeds
-// claims' acting sub-profile's rating ceiling (issue #462). Returns
-// blocked=false, err=nil when the media item doesn't exist at all — that's
-// a "nothing to protect" case, not a bypass, and existing callers already
-// degrade gracefully (empty seasons/episodes) for an unknown id. Fails
-// CLOSED on a genuine lookup/resolve error, same rationale as
-// StreamHandler.ratingCeilingBlocks: this is the security boundary.
-func (h *TVHandler) ratingCeilingBlocksMedia(ctx context.Context, claims *auth.JWTClaims, mediaID int64) (bool, error) {
-	item, err := h.queries.GetMediaItem(ctx, mediaID)
-	if err != nil {
-		return true, err
-	}
-	if item == nil {
-		return false, nil
-	}
-	profile, err := h.queries.ResolveActingProfile(ctx, claims.UserID, claims.RefreshTokenID)
-	if err != nil {
-		return true, err
-	}
-	return !db.RatingAllowed(profile.MaxAgeRating, item.ContentRating), nil
-}
-
 // GetSeasons returns all seasons for a TV show.
 func (h *TVHandler) GetSeasons(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
@@ -123,8 +101,8 @@ func (h *TVHandler) GetSeasons(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid media id")
 		return
 	}
-	if blocked, err := h.ratingCeilingBlocksMedia(r.Context(), claims, mediaID); err != nil || blocked {
-		denyRatingCeiling(w, mediaID, err)
+	if hidden, err := actingMediaHidden(r.Context(), h.queries, claims, mediaID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
 		return
 	}
 
@@ -155,8 +133,8 @@ func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid season number")
 		return
 	}
-	if blocked, err := h.ratingCeilingBlocksMedia(r.Context(), claims, mediaID); err != nil || blocked {
-		denyRatingCeiling(w, mediaID, err)
+	if hidden, err := actingMediaHidden(r.Context(), h.queries, claims, mediaID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
 		return
 	}
 
@@ -235,6 +213,10 @@ func (h *TVHandler) GetNextEpisode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
 		return
 	}
+	if hidden, err := mediaHidden(r.Context(), h.queries, profile, mediaID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
+		return
+	}
 	ep, err := h.queries.GetNextEpisodeForProfile(r.Context(), claims.UserID, profile.ID, mediaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -281,9 +263,17 @@ func (h *TVHandler) GetNextEpisode(w http.ResponseWriter, r *http.Request) {
 // GetEpisodeFiles returns files for a specific episode ID.
 // Used by watch party auto-play to resolve episode files without per-user next-episode logic.
 func (h *TVHandler) GetEpisodeFiles(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	episodeID, err := strconv.ParseInt(chi.URLParam(r, "episodeId"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid episode id")
+		return
+	}
+	if hidden, err := actingEpisodeHidden(r.Context(), h.queries, claims, episodeID); err != nil || hidden {
+		denyHiddenMedia(w, episodeID, err)
 		return
 	}
 
@@ -335,15 +325,15 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rating-ceiling enforcement (issue #462) — 404 (not distinguishable
-	// from true not-found) rather than exposing metadata for a title the
-	// acting profile can't see.
+	// Rating-ceiling enforcement (issue #462) — the same 404 as a missing
+	// title above, rather than exposing metadata for a title the acting
+	// profile can't see.
 	profile, perr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if perr != nil {
-		denyRatingCeiling(w, id, perr)
+		denyHiddenMedia(w, id, perr)
 		return
 	} else if !db.RatingAllowed(profile.MaxAgeRating, enriched.ContentRating) {
-		denyRatingCeiling(w, id, nil)
+		denyHiddenMedia(w, id, nil)
 		return
 	}
 
@@ -620,9 +610,17 @@ func (h *MetadataHandler) ManualMatch(w http.ResponseWriter, r *http.Request) {
 
 // GetArtwork returns all artwork for a media item.
 func (h *MetadataHandler) GetArtwork(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
+		return
+	}
+	if hidden, err := actingMediaHidden(r.Context(), h.queries, claims, id); err != nil || hidden {
+		denyHiddenMedia(w, id, err)
 		return
 	}
 
@@ -639,9 +637,17 @@ func (h *MetadataHandler) GetArtwork(w http.ResponseWriter, r *http.Request) {
 
 // GetCast returns cast and crew for a media item.
 func (h *MetadataHandler) GetCast(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
+		return
+	}
+	if hidden, err := actingMediaHidden(r.Context(), h.queries, claims, id); err != nil || hidden {
+		denyHiddenMedia(w, id, err)
 		return
 	}
 
@@ -1616,7 +1622,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if req.FileType == "episode" {
 		f, err := h.queries.GetEpisodeFileByID(r.Context(), req.FileID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "episode file not found")
+			// The ceiling refusal's wording, so the two are indistinguishable.
+			writeError(w, http.StatusNotFound, "file not found")
 			return
 		}
 		filePath = f.Path
@@ -1630,7 +1637,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), req.FileID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "media file not found")
+			writeError(w, http.StatusNotFound, "file not found")
 			return
 		}
 		filePath = f.Path
@@ -2079,6 +2086,10 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	fileType := r.URL.Query().Get("type") // "media" or "episode"
 
 	// Parse optional client capabilities
@@ -2141,6 +2152,13 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		videoPixFmt = f.VideoPixFmt
 		colorTransfer = f.ColorTransfer
 		colorPrimaries = f.ColorPrimaries
+	}
+
+	// The track list names external subtitle files, so an over-ceiling file
+	// gets the same 404 as a missing one (the file lookups above).
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, fileType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
+		return
 	}
 
 	// Synthesize a single-track list if no multi-track info stored
@@ -2651,17 +2669,13 @@ func (h *ProgressHandler) prebuildRecapAsync(profileID, mediaItemID int64) {
 	}()
 }
 
-// resolveProgressProfileID picks the profile a progress read or write acts
-// on: a named profile_id through resolveRequestProfile (owned, and a
-// restricted session only ever its own), else the acting profile, creating a
-// default one on demand for an account that has none.
-func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *http.Request, userID int64, requested *int64) (int64, bool) {
+// resolveProgressProfile picks the profile a progress read or write acts on:
+// a named profile_id through resolveRequestProfile (owned, and a restricted
+// session only ever its own), else the acting profile, creating a default one
+// on demand for an account that has none.
+func (h *ProgressHandler) resolveProgressProfile(w http.ResponseWriter, r *http.Request, userID int64, requested *int64) (*models.UserProfile, bool) {
 	if requested != nil && *requested != 0 {
-		profile, ok := resolveRequestProfile(w, r, h.queries, *requested)
-		if !ok {
-			return 0, false
-		}
-		return profile.ID, true
+		return resolveRequestProfile(w, r, h.queries, *requested)
 	}
 
 	claims := auth.GetClaims(r.Context())
@@ -2672,10 +2686,10 @@ func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *htt
 	dp, err := h.queries.ResolveActingProfile(r.Context(), userID, refreshTokenID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve acting profile")
-		return 0, false
+		return nil, false
 	}
 	if dp != nil && dp.ID > 0 {
-		return dp.ID, true
+		return dp, true
 	}
 
 	// No default profile yet. This happens for an OAuth signup (the callback
@@ -2693,12 +2707,30 @@ func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *htt
 		// Likely a race — a concurrent request created the default first (the
 		// one-default-per-user partial unique index rejects the second). Re-read.
 		if dp2, rerr := h.queries.GetDefaultProfile(r.Context(), userID); rerr == nil && dp2 != nil {
-			return dp2.ID, true
+			return dp2, true
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create default profile")
-		return 0, false
+		return nil, false
 	}
-	return created.ID, true
+	return created, true
+}
+
+// resolveVisibleProgressProfile is resolveProgressProfile for a progress read
+// or write that names a title: the profile's ceiling must allow the title and
+// the episode, or the answer is the 404 a missing title gets. Otherwise a
+// restricted profile could file progress on any id and read the title back
+// through its history and recommendations. Deleting progress stays ungated,
+// so a profile can still clear what it can no longer see.
+func (h *ProgressHandler) resolveVisibleProgressProfile(w http.ResponseWriter, r *http.Request, userID int64, requested *int64, mediaID int64, episodeID *int64) (*models.UserProfile, bool) {
+	profile, ok := h.resolveProgressProfile(w, r, userID, requested)
+	if !ok {
+		return nil, false
+	}
+	if hidden, err := progressHidden(r.Context(), h.queries, profile, mediaID, episodeID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
+		return nil, false
+	}
+	return profile, true
 }
 
 // UpdateProgress reports playback position.
@@ -2726,10 +2758,11 @@ func (h *ProgressHandler) UpdateProgress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, req.ProfileID)
+	profile, ok := h.resolveVisibleProgressProfile(w, r, claims.UserID, req.ProfileID, mediaID, req.EpisodeID)
 	if !ok {
 		return
 	}
+	profileID := profile.ID
 
 	wp := &models.WatchProgress{
 		UserID:      claims.UserID,
@@ -2814,11 +2847,11 @@ func (h *ProgressHandler) GetProgress(w http.ResponseWriter, r *http.Request) {
 		}
 		requested = &id
 	}
-	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, requested)
+	profile, ok := h.resolveVisibleProgressProfile(w, r, claims.UserID, requested, mediaID, episodeID)
 	if !ok {
 		return
 	}
-	progress, err := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profileID, mediaID, episodeID)
+	progress, err := h.queries.GetWatchProgressForProfile(r.Context(), claims.UserID, profile.ID, mediaID, episodeID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no progress found")
 		return
@@ -2905,10 +2938,11 @@ func (h *ProgressHandler) MarkWatched(w http.ResponseWriter, r *http.Request) {
 	}
 	decodeJSON(w, r, &req) // Body is optional
 
-	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, req.ProfileID)
+	profile, ok := h.resolveVisibleProgressProfile(w, r, claims.UserID, req.ProfileID, mediaID, req.EpisodeID)
 	if !ok {
 		return
 	}
+	profileID := profile.ID
 
 	wp := &models.WatchProgress{
 		UserID:      claims.UserID,
@@ -2995,10 +3029,11 @@ func (h *ProgressHandler) DeleteProgress(w http.ResponseWriter, r *http.Request)
 		}
 		requestedProfile = &id
 	}
-	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, requestedProfile)
+	profile, ok := h.resolveProgressProfile(w, r, claims.UserID, requestedProfile)
 	if !ok {
 		return
 	}
+	profileID := profile.ID
 
 	var episodeID *int64
 	if epStr := r.URL.Query().Get("episode_id"); epStr != "" {
