@@ -824,13 +824,19 @@ func (q *Queries) CreateWatchlist(ctx context.Context, wl *models.Watchlist) err
 	).Scan(&wl.ID, &wl.CreatedAt, &wl.UpdatedAt)
 }
 
-func (q *Queries) GetWatchlistsByProfile(ctx context.Context, profileID int64) ([]*models.Watchlist, error) {
+// GetWatchlistsByProfile lists a profile's watchlists. Each item_count counts
+// only titles under allowedRatings (AllowedRatingsForMax; nil means none), so
+// the index agrees with what GetWatchlistItems lists.
+func (q *Queries) GetWatchlistsByProfile(ctx context.Context, profileID int64, allowedRatings []string) ([]*models.Watchlist, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT w.id, w.profile_id, w.name, w.list_type,
-		       (SELECT COUNT(*) FROM watchlist_items wi WHERE wi.watchlist_id = w.id),
+		       (SELECT COUNT(*) FROM watchlist_items wi
+		        JOIN media_items mi ON mi.id = wi.media_item_id
+		        WHERE wi.watchlist_id = w.id
+		          AND ($2::text[] IS NULL OR mi.content_rating = ANY($2))),
 		       w.created_at, w.updated_at
 		FROM watchlists w WHERE w.profile_id = $1
-		ORDER BY w.name`, profileID)
+		ORDER BY w.name`, profileID, allowedRatings)
 	if err != nil {
 		return nil, err
 	}
@@ -966,15 +972,17 @@ func (q *Queries) GetOrCreateLibraryWatchlist(ctx context.Context, profileID int
 // GetAllWatchlistItems returns every item in a watchlist (no pagination),
 // newest-saved first. Used by the library sync, where the client needs the
 // full authoritative set to reconcile against its local cache. Bounded by the
-// user's own save count.
-func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64) ([]*models.WatchlistItem, error) {
+// user's own save count. allowedRatings is a ceiling (AllowedRatingsForMax;
+// nil means none).
+func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64, allowedRatings []string) ([]*models.WatchlistItem, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
 		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.year, 0), mi.type
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
-		ORDER BY wi.added_at DESC`, watchlistID)
+		  AND ($2::text[] IS NULL OR mi.content_rating = ANY($2))
+		ORDER BY wi.added_at DESC`, watchlistID, allowedRatings)
 	if err != nil {
 		return nil, err
 	}
@@ -992,10 +1000,17 @@ func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64) (
 	return items, rows.Err()
 }
 
-func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, params models.PaginationParams) ([]*models.WatchlistItem, int64, error) {
+// GetWatchlistItems returns one page of a watchlist and the count it pages
+// over. allowedRatings is a ceiling (AllowedRatingsForMax; nil means none),
+// applied to the count and before LIMIT.
+func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, params models.PaginationParams, allowedRatings []string) ([]*models.WatchlistItem, int64, error) {
 	var total int64
-	err := q.pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM watchlist_items WHERE watchlist_id = $1", watchlistID).Scan(&total)
+	err := q.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM watchlist_items wi
+		JOIN media_items mi ON mi.id = wi.media_item_id
+		WHERE wi.watchlist_id = $1
+		  AND ($2::text[] IS NULL OR mi.content_rating = ANY($2))`, watchlistID, allowedRatings).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1007,8 +1022,9 @@ func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, para
 		FROM watchlist_items wi
 		JOIN media_items mi ON mi.id = wi.media_item_id
 		WHERE wi.watchlist_id = $1
+		  AND ($4::text[] IS NULL OR mi.content_rating = ANY($4))
 		ORDER BY wi.sort_order, wi.added_at DESC
-		LIMIT $2 OFFSET $3`, watchlistID, params.PerPage, offset)
+		LIMIT $2 OFFSET $3`, watchlistID, params.PerPage, offset, allowedRatings)
 	if err != nil {
 		return nil, 0, err
 	}

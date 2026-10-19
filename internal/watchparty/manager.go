@@ -556,6 +556,11 @@ type Manager struct {
 	// on m.mu.
 	shareCacheInvalidator atomic.Pointer[func(code string)]
 
+	// onReelForTest, when set, sees the title id and name each ending
+	// party's highlight reel is handed, before anything can skip the reel.
+	// Tests only; set it before any party ends.
+	onReelForTest func(mediaItemID int64, mediaTitle string)
+
 	// M9/M1 — server-lifecycle context for parent-of background work
 	// (highlight-reel ffmpeg jobs, daily reaper). On SIGTERM this
 	// context cancels, in-flight goroutines unwind cleanly rather than
@@ -1848,13 +1853,15 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// effort: empty reactions → no reel (handled by generator).
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
-	mediaItemIDForReel := ps.MediaItemID
 	// Since host succession this is the FINAL host, not necessarily the
 	// creator — deliberate: the last steward gets the reel-ready bell. A
 	// creator who handed off can still fetch the reel (party membership,
 	// not hostship, gates access).
 	hostForReel := ps.HostUserID
-	mediaTitleForReel := ps.MediaTitle
+	// The title the party ends on, for its row; the reel takes the title
+	// the row records.
+	mediaIDAtEnd, episodeIDAtEnd := ps.MediaItemID, ps.EpisodeID
+	mediaTitleAtEnd, mediaPosterAtEnd := ps.MediaTitle, ps.MediaPoster
 
 	slog.Info("watch party ending — diagnostic snapshot",
 		"code", code,
@@ -1927,6 +1934,17 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 		_ = c.Close()
 	}
 
+	// Mark inactive in DB, recording the final title when it still exists
+	// (see EndWatchPartyOn).
+	reelMediaID, reelTitle := int64(0), ""
+	if dbID > 0 {
+		var err error
+		reelMediaID, reelTitle, err = m.queries.EndWatchPartyOn(context.Background(), dbID, mediaIDAtEnd, episodeIDAtEnd, mediaTitleAtEnd, mediaPosterAtEnd)
+		if err != nil {
+			slog.Warn("failed to end party in DB", "error", err)
+		}
+	}
+
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
 	// minutes later (best-effort). Empty reactions → no reel, returns
@@ -1937,14 +1955,10 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// party codes REUSE codes across sessions, so a code-only file would
 	// let a later session's reel be served under an earlier session's
 	// notification (and vice versa for authorization).
-	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel, dbID)
-
-	// Mark inactive in DB
-	if dbID > 0 {
-		if err := m.queries.EndWatchParty(context.Background(), dbID); err != nil {
-			slog.Warn("failed to end party in DB", "error", err)
-		}
-	}
+	// It is cut from the title the row ended on, not the one in memory:
+	// its gate reads the row, so the two must name the same title on every
+	// path, including the ones where the final title could not be recorded.
+	m.generateHighlightReelAsync(code, reactionsForReel, reelMediaID, hostForReel, reelTitle, dbID)
 
 	// M3 room lifecycle: persistent rooms survive the session end (touch
 	// last_active_at so the "My Rooms" list orders correctly). Non-persistent
@@ -2250,6 +2264,9 @@ type highlightMoment struct {
 // Called from endPartyInternal AFTER the ps.mu lock is released so the
 // long-running ffmpeg job doesn't block other parties.
 func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID, hostUserID int64, mediaTitle string, partyDBID int64) {
+	if m.onReelForTest != nil {
+		m.onReelForTest(mediaItemID, mediaTitle)
+	}
 	m.mu.RLock()
 	dir := m.highlightCacheDir
 	queries := m.queries
@@ -2880,11 +2897,11 @@ func (m *Manager) ChangeMedia(code string, callerUserID int64, callerProfile *mo
 		// on a lookup error, matching the existence check above — this
 		// check exists for a good error message, not enforcement.
 		//
-		// Running this before the host-only check below is safe: it only
-		// ever resolves and applies the CALLER's own ceiling (ownership-
-		// scoped by ResolveActingProfile), so a non-host learns nothing
-		// beyond "would this exceed MY OWN ceiling" — the same answer
-		// GetEnriched already gives them directly for any media id.
+		// It runs before the host-only check below and applies only the
+		// CALLER's own ceiling (ownership-scoped by ResolveActingProfile).
+		// Its error differs from the existence check's, though, so any
+		// participant can tell a missing id from an over-ceiling one, which
+		// the by-id routes no longer reveal (a documented gap).
 		if callerProfile != nil {
 			if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
 				if !db.RatingAllowed(callerProfile.MaxAgeRating, item.ContentRating) {
@@ -3367,6 +3384,7 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 			"code":               ps.Code,
 			"host_user_id":       ps.HostUserID,
 			"party_name":         ps.PartyName,
+			"media_item_id":      ps.MediaItemID,
 			"media_title":        ps.MediaTitle,
 			"media_poster":       ps.MediaPoster,
 			"participant_count":  len(ps.Participants),

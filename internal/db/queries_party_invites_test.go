@@ -204,7 +204,7 @@ func TestListUpcomingInvitesForUser_DropsEndedParties(t *testing.T) {
 		t.Fatalf("end party: %v", err)
 	}
 
-	feed, err := q.ListUpcomingInvitesForUser(ctx, invitee)
+	feed, err := q.ListUpcomingInvitesForUser(ctx, invitee, nil)
 	if err != nil {
 		t.Fatalf("feed: %v", err)
 	}

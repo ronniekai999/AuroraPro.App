@@ -38,7 +38,10 @@ type UpcomingEpisode struct {
 // "shows the user is currently watching" (joined to watch_progress)
 // for a personalized calendar, but library-wide is the right
 // default — TV shows on the server are inherently of interest.
-func (q *Queries) UpcomingEpisodes(ctx context.Context, from, to time.Time) ([]*UpcomingEpisode, error) {
+//
+// allowedRatings is the viewer's ceiling (db.AllowedRatingsForMax; nil is
+// unrestricted): a show over it is left out, before the LIMIT.
+func (q *Queries) UpcomingEpisodes(ctx context.Context, from, to time.Time, allowedRatings []string) ([]*UpcomingEpisode, error) {
 	// 2026-05-19 audit (BE-M8) — LIMIT 1000. Aurora's calendar UI
 	// shows a forward-looking window of upcoming episodes; even a
 	// massive library wouldn't sensibly display more than ~1000
@@ -55,9 +58,10 @@ func (q *Queries) UpcomingEpisodes(ctx context.Context, from, to time.Time) ([]*
 		   AND e.air_date >= $1
 		   AND e.air_date <= $2
 		   AND m.type = 'show'
+		   AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
 		 ORDER BY e.air_date ASC, m.title ASC
 		 LIMIT 1000
-	`, from, to)
+	`, from, to, allowedRatings)
 	if err != nil {
 		return nil, fmt.Errorf("upcoming episodes: %w", err)
 	}

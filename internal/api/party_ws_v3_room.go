@@ -316,12 +316,13 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 			// The title is client-supplied and lands in PartyState, the
 			// party row (VARCHAR(500)), every room broadcast, and the
-			// unauthenticated /api/code/{code}/info response. Clamp it
-			// rather than let an oversized value silently fail the DB write
-			// and leave memory diverged from disk. Create derives the title
-			// server-side, so this is the only path that needs the guard.
-			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
-			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
+			// unauthenticated /api/code/{code}/info response. Make it
+			// storable rather than let an oversized value or a NUL silently
+			// fail the DB write and leave memory diverged from disk. This is
+			// the one path that rewrites a live row's title from the wire
+			// (see partyMediaTextMaxRunes).
+			p.MediaTitle = partyMediaText(p.MediaTitle)
+			p.MediaPoster = partyMediaText(p.MediaPoster)
 			if caller == nil {
 				// The connect-time lookup failed; one failure must not
 				// turn the check off for the socket's life. Bounded like

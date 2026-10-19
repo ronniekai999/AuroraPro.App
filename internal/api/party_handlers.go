@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -161,14 +163,27 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 	}
 	// Membership gate against the DB audit rows of THAT session (the party
 	// is long gone from the manager's memory by the time the reel exists).
-	// Single round trip for a member — this runs per HTTP Range request
-	// during playback. Only a non-member pays for the admin check.
-	found, member, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
+	// This runs per HTTP Range request during playback: one round trip for
+	// the membership and the party's title, the admin check only for a
+	// non-member, then the acting profile's ceiling check (resolving the
+	// profile, usually two more, and the title's rating for a restricted
+	// one). A session with admin powers skips the membership check but not
+	// the rating ceiling: a reel is clips of the party's title (the one its
+	// row records, which the reel is cut from), and the ceiling is the
+	// acting profile's, whatever the account's role.
+	found, member, mediaID, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to authorize")
 		return
 	}
-	if (!found || !member) && !adminPowers(r.Context(), h.queries, claims) {
+	if !found || (!member && !adminPowers(r.Context(), h.queries, claims)) {
+		writeError(w, http.StatusNotFound, "highlight reel not available")
+		return
+	}
+	if hidden, herr := actingMediaHidden(r.Context(), h.queries, claims, mediaID); herr != nil || hidden {
+		if herr != nil {
+			slog.Error("highlight reel: rating ceiling check failed, denying by default", "code", code, "error", herr)
+		}
 		writeError(w, http.StatusNotFound, "highlight reel not available")
 		return
 	}
@@ -180,6 +195,35 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	http.ServeFile(w, r, path)
+}
+
+// contentRatingsReader is the one query partiesWithin needs.
+type contentRatingsReader interface {
+	GetContentRatings(ctx context.Context, ids []int64) (map[int64]string, error)
+}
+
+// partiesWithin keeps the parties whose media is allowed. It fails closed:
+// when the ratings cannot be read, it keeps none.
+func partiesWithin(ctx context.Context, q contentRatingsReader, parties []map[string]interface{}, allowed []string) []map[string]interface{} {
+	ids := make([]int64, 0, len(parties))
+	for _, p := range parties {
+		if id, ok := p["media_item_id"].(int64); ok {
+			ids = append(ids, id)
+		}
+	}
+	ratings, err := q.GetContentRatings(ctx, ids)
+	if err != nil {
+		slog.Error("active parties: read media ratings failed, listing none", "error", err)
+		return []map[string]interface{}{}
+	}
+	kept := make([]map[string]interface{}, 0, len(parties))
+	for _, p := range parties {
+		id, _ := p["media_item_id"].(int64)
+		if rating, ok := ratings[id]; ok && slices.Contains(allowed, rating) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // createPartyRequest is the expected JSON body for creating a party.
@@ -653,6 +697,9 @@ func (h *PartyHandler) End(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListActive handles GET /api/parties/active -- returns active parties visible to the user.
+// Every live party on the server is listed with its title and poster, so
+// under the acting profile's ceiling a party showing a title over it (or one
+// whose title cannot be found) is left out.
 func (h *PartyHandler) ListActive(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
@@ -662,6 +709,9 @@ func (h *PartyHandler) ListActive(w http.ResponseWriter, r *http.Request) {
 
 	// Return live state from the manager (more up-to-date than DB)
 	parties := h.manager.ActiveParties()
+	if allowed := listingAllowedRatings(r.Context(), h.queries, claims, "active parties"); allowed != nil {
+		parties = partiesWithin(r.Context(), h.queries, parties, allowed)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"parties": parties,

@@ -92,7 +92,11 @@ func TestProfileKeyedRoutesScopeARestrictedSessionToItself(t *testing.T) {
 				id, _ := strconv.ParseInt(raw, 10, 64)
 				requested = &id
 			}
-			return NewProgressHandler(f.q, nil).resolveProgressProfileID(w, r, f.userID, requested)
+			p, ok := NewProgressHandler(f.q, nil).resolveProgressProfile(w, r, f.userID, requested)
+			if !ok {
+				return 0, false
+			}
+			return p.ID, true
 		},
 		"watchlists and My Library": func(w http.ResponseWriter, r *http.Request) (int64, bool) {
 			// {profileId} comes from the URL here, so a request "naming" a

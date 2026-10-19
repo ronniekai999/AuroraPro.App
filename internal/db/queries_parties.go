@@ -2,11 +2,15 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ============================================================
@@ -260,24 +264,25 @@ func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*mod
 // partyDBID, additionally requiring that row to carry code — so a URL can't
 // mix one session's code with another session's id. found=false when no such
 // (id, code) row exists. Single round trip on purpose: the highlight-reel
-// handler runs this per HTTP Range request during MP4 playback.
-func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, err error) {
+// handler runs this per HTTP Range request during MP4 playback. mediaItemID
+// is the party's last media (0 if none), which is what its reel shows.
+func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, mediaItemID int64, err error) {
 	err = q.pool.QueryRow(ctx, `
 		SELECT host_user_id = $3 OR EXISTS (
 			SELECT 1 FROM watch_party_participants
 			WHERE party_id = $1 AND user_id = $3
-		)
+		), COALESCE(media_item_id, 0)
 		FROM watch_parties
 		WHERE id = $1 AND party_code = $2`,
 		partyDBID, code, userID,
-	).Scan(&member)
+	).Scan(&member, &mediaItemID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return false, false, nil
+			return false, false, 0, nil
 		}
-		return false, false, fmt.Errorf("is party member: %w", err)
+		return false, false, 0, fmt.Errorf("is party member: %w", err)
 	}
-	return true, member, nil
+	return true, member, mediaItemID, nil
 }
 
 // EndWatchParty marks a watch party as inactive and records the end time.
@@ -290,6 +295,74 @@ func (q *Queries) EndWatchParty(ctx context.Context, id int64) error {
 		return fmt.Errorf("end watch party: %w", err)
 	}
 	return nil
+}
+
+// EndWatchPartyOn ends a party and records the title it ended on: id,
+// episode, name and poster together, so the row never pairs one title's id
+// with another's name (issue #460). A change-media saves the new title in
+// the background, and that save skips an inactive row, so a change just
+// before the end used to leave the row on the earlier title.
+//
+// It returns the title id and name the row ended on. The highlight reel is
+// cut from those, because its gate reads the same row: cutting it from the
+// title in memory let the two differ whenever the title was not recorded.
+// The id is 0 when the party could not be ended or has no row, and then
+// there is no reel.
+//
+// A merge deletes the duplicate a live party may still name, and writing
+// that id would fail the foreign key, so the title is recorded only while
+// it exists. Its episode, name and poster go with it only when the episode
+// is the title's own; otherwise the row takes the title alone, which is
+// coherent. A title that does not exist leaves the row on its own title.
+// Ending the party matters most, so a write that fails is retried, with
+// the name and poster blanked when the database refused their text (a data
+// exception, such as a NUL), and then made as a plain end that keeps the
+// row's title.
+func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64, episodeID *int64, mediaTitle, mediaPoster string) (endedOn int64, endedTitle string, err error) {
+	const end = `
+		UPDATE watch_parties p
+		   SET is_active     = false,
+		       ended_at      = $1,
+		       media_item_id = CASE WHEN t.title_ok THEN $3 ELSE p.media_item_id END,
+		       episode_id    = CASE WHEN NOT t.title_ok THEN p.episode_id WHEN t.episode_ok THEN $4 END,
+		       media_title   = CASE WHEN NOT t.title_ok THEN p.media_title WHEN t.episode_ok THEN $5 ELSE '' END,
+		       media_poster  = CASE WHEN NOT t.title_ok THEN p.media_poster WHEN t.episode_ok THEN $6 ELSE '' END
+		  FROM (SELECT EXISTS (SELECT 1 FROM media_items WHERE id = $3) AS title_ok,
+		               $4::bigint IS NULL OR EXISTS (
+		                 SELECT 1
+		                   FROM tv_episodes e
+		                   JOIN tv_seasons  s ON s.id = e.season_id
+		                  WHERE e.id = $4 AND e.media_item_id = $3 AND s.media_item_id = $3) AS episode_ok) t
+		 WHERE p.id = $2
+		RETURNING p.media_item_id, p.media_title`
+	now := time.Now()
+	record := func(title, poster string) error {
+		return q.pool.QueryRow(ctx, end, now, id, mediaItemID, episodeID, title, poster).Scan(&endedOn, &endedTitle)
+	}
+	failed := func(err error) bool { return err != nil && !errors.Is(err, pgx.ErrNoRows) }
+	err = record(mediaTitle, mediaPoster)
+	if failed(err) {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "22") {
+			mediaTitle, mediaPoster = "", ""
+		}
+		slog.Warn("end watch party: recording its title failed; retrying", "party_id", id, "error", err)
+		err = record(mediaTitle, mediaPoster)
+	}
+	if failed(err) {
+		slog.Warn("end watch party: recording its title failed again; ending it on its own title", "party_id", id, "error", err)
+		err = q.pool.QueryRow(ctx,
+			`UPDATE watch_parties SET is_active = false, ended_at = $1 WHERE id = $2 RETURNING media_item_id, media_title`,
+			now, id,
+		).Scan(&endedOn, &endedTitle)
+	}
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, "", nil
+	case err != nil:
+		return 0, "", fmt.Errorf("end watch party: %w", err)
+	}
+	return endedOn, endedTitle, nil
 }
 
 // ============================================================

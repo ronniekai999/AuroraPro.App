@@ -164,24 +164,65 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   `profile_restricted`). Fails closed on a resolve error. The account-wide
   history routes show a restricted session only its own rows, under its
   ceiling.
+- The gated by-id routes (`docs/parental-ceiling.md` lists them) go through
+  `internal/api/ceiling_gate.go`: lookups by id with the acting profile,
+  profile-keyed routes with the resolved profile (so a parent naming the kid
+  gets the kid's ceiling). The stream routes keep their own file check. Under a
+  ceiling a missing id gets the same 404 body as an over-ceiling one, so these
+  routes do not say which ids exist; for an unrestricted profile the gate
+  skips the title lookup. The detail route (`GET /api/media/{id}`) does its
+  own check on the title it loads (`RatingAllowed`), with the same 404 body;
+  it always looks the title up, and a lookup error there is a 500. The gated
+  writes (progress, mark watched, thumbs, star ratings, watchlist, My Library
+  and collection adds) are gated because history, anchor rails and the lists
+  read the title back. Party creation and party media changes still take any
+  id (see the gaps). Deleting and
+  clearing are not gated, so a profile can remove what it can no longer see,
+  where it can name it. A progress write's episode is judged on its own show,
+  not the id it is filed under.
 - Coverage is NOT complete. `docs/parental-ceiling.md` is the route-by-route
   map; change its row when you change a route's gate. Never infer coverage
   from a summary; check the handler.
 - Known gaps (examples, not exhaustive):
-  - Profile-keyed but with no ceiling on the data: recaps, progress reads and
-    writes, ratings and feedback, watchlist items and My Library. A restricted
-    session reaches only its own profile, but can write progress or a list
-    entry for any media id and read it back (a recap of an over-ceiling show,
-    for one).
-  - No ceiling on listings: every live and scheduled party server-wide
-    (`/api/parties/active`, with title and poster), and `/api/calendar`
-    (every show's upcoming episodes by date).
-  - No ceiling on lookups by id: `/api/media/{id}/files`, `/next-episode`,
-    episode files, artwork, cast, `/api/stream/info/{fileID}` (tracks and
-    external subtitle filenames), and a party's `highlight.mp4` (membership
-    only). Collections, watchlists and My Library accept any media id and read
-    items back unfiltered, so a restricted profile can enumerate the library
-    through them.
+  - Data recorded before a ceiling: the recommender's anchors come from
+    history with no ceiling, so pre-ceiling progress can still name an
+    over-ceiling title in an anchor rail's "Because you watched", in the
+    `nearest_anchor` captions on `/api/me/recommendations`, and in the LLM
+    prompts behind the hero, discover and rail blurbs. Pre-ceiling 1-2 star
+    ratings of over-ceiling titles likewise reach the hero and discover
+    prompts (`LowRatedAnchors`). A watchlist's pre-ceiling entries (any list
+    but My Library) are hidden from its reads, which also hides the row ids
+    its item DELETE takes, so they go only with the whole list. `GET
+    /api/me/rating` returns the profile's own stars for any id (no title
+    data). Pre-ceiling taste seeds reach the Discover prompts
+    (`TasteSeedAnchors`), and every pre-ceiling taste signal (seeds,
+    progress, favourites, want-to-watch entries, thumbs-up, 4-5 star
+    ratings) still pulls the taste vector, whose query has no rating filter;
+    that steers results but names no title.
+  - Timing: under a ceiling a missing id and an over-ceiling one get the
+    same body, not the same time. The stream-info and detail routes answer a
+    missing id after one query and an over-ceiling one after two to five, as
+    the stream routes do, so repeated timing can tell them apart.
+  - Cross-library copies: the detail, files, episodes and next-episode
+    lookups add files of other items with the same TMDB id without checking
+    those items' ratings, so a restricted profile can be offered a version
+    (with its media id) whose stream then 404s.
+  - Party media changes answer "unknown media for this party" for a missing
+    id and "media exceeds this profile's content rating" for an over-ceiling
+    one, before the host check, so any participant can tell the two apart.
+  - The SPA's My Library snapshot is the profile's own (per account and
+    profile), but can hold titles saved before its ceiling was set or
+    lowered; they show until the server's filtered list arrives, or while
+    offline.
+  - The calendar, live-party, invite and collection listings fail open on
+    a resolve error, like browse; a collection's name, description and AI
+    prompt are shown as written; and a party's title still reaches a
+    restricted session by code (`GET /api/parties/{code}`, and the public
+    `/api/code/{code}/info`) and in notification text written when the
+    invite, RSVP, reminder or reel was sent. The live-party and invite
+    listings judge the party's title id; the title text and poster they show
+    are the host's own for room starts and media changes, so a host can
+    label an allowed title with another's name.
   - Transcode sessions rely on their creation-time check: the session cast
     token (`CreateCastToken`) and the session's playlists and segments check
     only account ownership, so a restricted session holding another profile's
@@ -602,9 +643,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     is reached, costs about three queries (the session row, its binding, the
     profile), one more for a restricted session (the exception's check); the
     scan bar's 4-second status poll is the steady one. A highlight reel
-    checks membership first, so a member pays one query per Range request
-    as before, a non-member admin about four, and a failed membership query
-    is a 500 for an admin too.
+    checks membership first and then everyone's ceiling, so a member pays
+    about three queries per Range request (four for a restricted profile), a
+    non-member admin about six, and a failed membership query is a 500 for
+    an admin too.
   - Pinned: the admin routes' refusal through the router and its fail-closed
     and scoped-token cases at the middleware, `adminPowers`' cases, the
     collections list and the socket's role through a request, the

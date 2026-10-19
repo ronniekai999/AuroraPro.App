@@ -1,0 +1,10 @@
+{
+  "sha": "240fea567cdbdb87e8c763f405c07caa44cabbe1",
+  "verdict": "lows-only",
+  "summary": "Restack of the reviewed 2b and 2c stack onto main 3d1d4c7 after 2a's squash merge (#537, tree identical to the reviewed b2490da), for PR #538, which now carries 2c because #539 was squash-merged into the 2b branch as 2f0931c. Independent fresh-context check, read-only git: range-diff marks all 12 replayed commits '=' (2b c0b02f7 -> 3bba1be, 2c 6b0dd75 -> 240fea5, records included); the combined 2b+2c code diff against 3d1d4c7, records excluded, is byte-identical (index lines stripped, 3,635 lines, 35 files) to the reviewed diff against 43e9535; the replay differs from GitHub's 2f0931c only by 2a's review record, whose blob main already carries. Substantive verdicts carried over: 2b clean (c0b02f7), 2c lows-only (6b0dd75; its one low, a stale test comment, fixed; residual gaps listed in the PR). go build ./..., go test -count=1 ./... against PostgreSQL, tsc, vitest, npm run audit and the TV unit tests pass on both replayed heads.",
+  "reviewer": "claude-subagent-general-purpose-fresh-context",
+  "findings": "1",
+  "diff_digest": "5d1cd60a2868a68b7d67e9c195e7aa0c1c38485f5c4d47a0850ce0f46a50580d",
+  "branch": "HEAD",
+  "recorded_at": "2026-10-19T16:10:52Z"
+}

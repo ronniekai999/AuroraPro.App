@@ -1,0 +1,10 @@
+{
+  "sha": "c0b02f7c879f8b68711ea89573942079f87436fd",
+  "verdict": "clean",
+  "summary": "Independent fresh-context read-only reviews of the 2b stack (over-ceiling title ids get the same 404 as missing ones on lookups, recaps and writes) over several rounds. The last full review covered c68e95e and found its taste-vector sentence (all six signal sources unfiltered, only 1-2 star excluded) and its two-to-five-queries timing sentence accurate; c0b02f7 is that commit rebased onto 43e9535, content-identical (range-diff shows = for all three commits). Earlier findings (onboarding handler pins, the low-star gate, detail own check, cross-library rows, timing gap, taste seeds) are resolved with tests or documented gaps. go build/vet clean; go test -count=1 ./..., tsc, vitest, npm run audit and the TV unit tests pass. No open findings.",
+  "reviewer": "claude-subagent-general-purpose-fresh-context",
+  "findings": "0",
+  "diff_digest": "decbc08bbc7bf90ebb84dd25bd68726efcc73002e0b60759981980711e36d425",
+  "branch": "claude/gifted-hopper-rfs4s9-ceiling-lookups",
+  "recorded_at": "2026-10-19T15:05:19Z"
+}

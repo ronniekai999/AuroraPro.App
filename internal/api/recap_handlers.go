@@ -97,7 +97,7 @@ func (h *RecapHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profileID, ok := h.resolveVisibleProfileID(w, r, mediaID)
 	if !ok {
 		return
 	}
@@ -145,7 +145,7 @@ func (h *RecapHandler) Status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profileID, ok := h.resolveVisibleProfileID(w, r, mediaID)
 	if !ok {
 		return
 	}
@@ -180,7 +180,7 @@ func (h *RecapHandler) Conversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profileID, ok := h.resolveVisibleProfileID(w, r, mediaID)
 	if !ok {
 		return
 	}
@@ -250,7 +250,7 @@ func (h *RecapHandler) AskTurn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profileID, ok := h.resolveVisibleProfileID(w, r, mediaID)
 	if !ok {
 		return
 	}
@@ -526,6 +526,24 @@ func recapQuestionHash(question string) string {
 func (h *RecapHandler) resolveProfileID(w http.ResponseWriter, r *http.Request, _ int64) (int64, bool) {
 	profile, ok := resolveQueryProfile(w, r, h.queries)
 	if !ok {
+		return 0, false
+	}
+	return profile.ID, true
+}
+
+// resolveVisibleProfileID is resolveProfileID for the routes that show or
+// generate a recap: the resolved profile's ceiling must allow the show, or the
+// answer is the 404 a missing title gets. A recap is built from episode titles
+// and overviews, and a profile's history on an over-ceiling show can predate
+// its ceiling. Clearing a conversation stays ungated, so a profile can still
+// delete what it can no longer see.
+func (h *RecapHandler) resolveVisibleProfileID(w http.ResponseWriter, r *http.Request, mediaID int64) (int64, bool) {
+	profile, ok := resolveQueryProfile(w, r, h.queries)
+	if !ok {
+		return 0, false
+	}
+	if hidden, err := mediaHidden(r.Context(), h.queries, profile, mediaID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
 		return 0, false
 	}
 	return profile.ID, true

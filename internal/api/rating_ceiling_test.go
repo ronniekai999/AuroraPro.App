@@ -380,14 +380,24 @@ func TestCreateSession_RatingCeiling(t *testing.T) {
 		{"episode", f.episodeFileID, "episode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{"file_id":` + i64(tc.fileID) + `,"file_type":"` + tc.fileType + `"}`
-			r := httptest.NewRequest(http.MethodPost, "/api/stream/sessions", strings.NewReader(body))
-			r.Header.Set("Content-Type", "application/json")
-			r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
-			rr := httptest.NewRecorder()
-			h.CreateSession(rr, r)
+			create := func(fileID int64) *httptest.ResponseRecorder {
+				body := `{"file_id":` + i64(fileID) + `,"file_type":"` + tc.fileType + `"}`
+				r := httptest.NewRequest(http.MethodPost, "/api/stream/sessions", strings.NewReader(body))
+				r.Header.Set("Content-Type", "application/json")
+				r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+				rr := httptest.NewRecorder()
+				h.CreateSession(rr, r)
+				return rr
+			}
+			rr := create(tc.fileID)
 			if rr.Code != http.StatusNotFound {
 				t.Errorf("restricted profile: CreateSession(%s) status = %d, want 404", tc.name, rr.Code)
+			}
+			// A missing file used to get its own wording ("media file not
+			// found"), which told a restricted profile which ids exist.
+			if missing := create(1 << 60); missing.Code != rr.Code || missing.Body.String() != rr.Body.String() {
+				t.Errorf("restricted profile: CreateSession(%s) answers a missing file %d %s and an over-ceiling one %d %s; want the same",
+					tc.name, missing.Code, missing.Body.String(), rr.Code, rr.Body.String())
 			}
 		})
 	}
@@ -810,7 +820,7 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 			if !sameRatings(fake.allowedRatings, tc.want) {
 				t.Errorf("AI collection seed passed allowedRatings %v, want %v", fake.allowedRatings, tc.want)
 			}
-			items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+			items, err := f.q.ListCollectionItems(context.Background(), c.ID, nil)
 			if err != nil {
 				t.Fatalf("list collection items: %v", err)
 			}
@@ -862,7 +872,7 @@ func TestAICollectionSeed_ResolveErrorSkipsSeed(t *testing.T) {
 	if fake.called {
 		t.Error("a failed profile lookup still ran the seed search")
 	}
-	items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+	items, err := f.q.ListCollectionItems(context.Background(), c.ID, nil)
 	if err != nil {
 		t.Fatalf("list collection items: %v", err)
 	}

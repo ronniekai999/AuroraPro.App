@@ -111,9 +111,9 @@ func (h *OnboardingHandler) Grid(w http.ResponseWriter, r *http.Request) {
 	// Reactive mode: once enough titles are picked, bias the grid toward them
 	// (nearest neighbors of the partial taste vector) so picking surfaces "more
 	// like your picks". Falls back to the popularity grid when there aren't
-	// enough embedded picks yet (or the partial vector can't be built).
+	// enough embedded, allowed picks yet (or the partial vector can't be built).
 	if selected := parseIDList(r.URL.Query().Get("selected"), onboardingMaxSeeds); len(selected) >= db.PersonalizationThreshold() {
-		if vec, verr := h.queries.PartialTasteVector(r.Context(), selected); verr == nil {
+		if vec, verr := h.queries.PartialTasteVector(r.Context(), selected, allowed); verr == nil {
 			ritems, gerr := h.queries.OnboardingGridReactive(r.Context(), profile.ID, vec, limit, offset, allowed)
 			if gerr != nil {
 				slog.Warn("onboarding: reactive grid failed", "profile", profile.ID, "error", gerr)
@@ -151,16 +151,18 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
-	vec, err := h.queries.PartialTasteVector(r.Context(), selected)
+	// Only allowed picks count toward the vector, and NearestUnwatched
+	// age-filters its results by `allowed` in SQL, so no Go-side rating pass
+	// is needed here.
+	allowed := allowedRatingsForMax(profile.MaxAgeRating)
+	vec, err := h.queries.PartialTasteVector(r.Context(), selected, allowed)
 	if err != nil {
-		// ErrInsufficientHistory (e.g. picks not embedded) → empty rail, not a 500.
+		// ErrInsufficientHistory (e.g. picks not embedded, or over the ceiling)
+		// → empty rail, not a 500.
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
 	// Over-fetch so the pick-exclusion below still leaves a full rail.
-	// NearestUnwatched already age-filters by `allowed` in SQL, so no Go-side
-	// rating pass is needed here.
-	allowed := allowedRatingsForMax(profile.MaxAgeRating)
 	// applyTonePenalty=true: the preview should mirror the real centroid
 	// surfaces it advertises (hero/rails pass true). Mid-onboarding a brand
 	// new profile has no watches or saved seeds, so the derived lean resolves
@@ -220,19 +222,11 @@ func (h *OnboardingHandler) SaveSeeds(w http.ResponseWriter, r *http.Request) {
 	if len(ids) > onboardingMaxSeeds {
 		ids = ids[:onboardingMaxSeeds]
 	}
-	// Guarantee the seed actually unlocks personalization: enough of the picks
-	// must be embedded to clear BuildProfileVector's threshold.
-	embedded, err := h.queries.CountEmbeddedItems(r.Context(), ids)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to validate picks")
-		return
-	}
-	if embedded < db.PersonalizationThreshold() {
-		writeError(w, http.StatusBadRequest, "selected titles aren't ready for personalization yet")
-		return
-	}
 	// For a restricted profile, refuse picks above its rating so the taste
 	// vector (and everything it drives) can't be steered toward adult content.
+	// A missing id is refused the same way, and this runs before the embedded
+	// count below, whose answer depends on which ids exist: otherwise the two
+	// refusals told a missing id from an over-ceiling one.
 	if allowed := allowedRatingsForMax(profile.MaxAgeRating); allowed != nil {
 		bad, rErr := h.queries.CountSeedsOutsideRatings(r.Context(), ids, allowed)
 		if rErr != nil {
@@ -243,6 +237,17 @@ func (h *OnboardingHandler) SaveSeeds(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "some picks aren't allowed for this profile's age rating")
 			return
 		}
+	}
+	// Guarantee the seed actually unlocks personalization: enough of the picks
+	// must be embedded to clear BuildProfileVector's threshold.
+	embedded, err := h.queries.CountEmbeddedItems(r.Context(), ids)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to validate picks")
+		return
+	}
+	if embedded < db.PersonalizationThreshold() {
+		writeError(w, http.StatusBadRequest, "selected titles aren't ready for personalization yet")
+		return
 	}
 	if err := h.queries.AddTasteSeeds(r.Context(), profile.ID, ids, "onboarding"); err != nil {
 		slog.Error("onboarding: add seeds failed", "profile", profile.ID, "error", err)
