@@ -378,6 +378,9 @@ func TestThumbsAndRatingsHideOverCeilingTitles(t *testing.T) {
 		{"thumb up", route(h.Feedback, `"direction":"up"`), g.movieOK, g.movieR},
 		{"thumb down", route(h.Feedback, `"direction":"down"`), g.movieOK, g.movieR},
 		{"star rating", route(h.SetRating, `"stars":4`), g.movieOK, g.movieR},
+		// A low rating is gated too: 1-2 stars reach the hero and discover
+		// prompts as anchors (LowRatedAnchors).
+		{"one-star rating", route(h.SetRating, `"stars":1`), g.movieOK, g.movieR},
 	})
 	for name, rr := range map[string]*httptest.ResponseRecorder{
 		"clear thumb":  route(h.Feedback, `"direction":"clear"`)(g.kidRT, g.movieR),
@@ -528,8 +531,12 @@ func TestListsHideOverCeilingTitles(t *testing.T) {
 // a popularity no other fixture uses so they head the popularity grid.
 type onboardingFixture struct {
 	*gateFixture
-	picks         []int64
+	picks, rPicks []int64
 	nearPG, nearR int64
+	// nearRPicks is a PG title at the R picks' centroid with no popularity,
+	// so the popularity grid never reaches it and a grid built from the R
+	// picks lists it first.
+	nearRPicks int64
 }
 
 func newOnboardingFixture(t *testing.T) *onboardingFixture {
@@ -564,8 +571,13 @@ func newOnboardingFixture(t *testing.T) *onboardingFixture {
 	o := &onboardingFixture{gateFixture: f}
 	for i := 0; i < 3; i++ {
 		o.picks = append(o.picks, item(fmt.Sprintf("pick %d", i), "PG", 0.01*float64(i)))
+		o.rPicks = append(o.rPicks, item(fmt.Sprintf("r pick %d", i), "R", 0.06+0.01*float64(i)))
 	}
 	o.nearPG, o.nearR = item("near pg", "PG", 0.05), item("near r", "R", 0.04)
+	o.nearRPicks = item("near r picks", "PG", 0.07)
+	if _, err := pool.Exec(ctx, `UPDATE media_items SET popularity = 0 WHERE id = $1`, o.nearRPicks); err != nil {
+		t.Fatalf("lower a popularity: %v", err)
+	}
 	return o
 }
 
@@ -603,6 +615,10 @@ func TestTheOnboardingGridAndPreviewApplyTheCeiling(t *testing.T) {
 		{"grid", func(rt int64) *httptest.ResponseRecorder {
 			return gateCall(o.lockFixture, h.Grid, http.MethodGet, rt, nil, "limit=100", "")
 		}},
+		// With picks the grid takes its reactive branch, a query of its own.
+		{"reactive grid", func(rt int64) *httptest.ResponseRecorder {
+			return gateCall(o.lockFixture, h.Grid, http.MethodGet, rt, nil, "limit=100&"+selected, "")
+		}},
 		{"preview", func(rt int64) *httptest.ResponseRecorder {
 			return gateCall(o.lockFixture, h.Preview, http.MethodGet, rt, nil, selected, "")
 		}},
@@ -614,6 +630,56 @@ func TestTheOnboardingGridAndPreviewApplyTheCeiling(t *testing.T) {
 			}
 			if parent := onboardingItemIDs(t, tc.call(o.parentRT)); !parent[o.nearR] || !parent[o.nearPG] {
 				t.Errorf("the parent's %s is missing a title: R %v, PG %v", tc.name, parent[o.nearR], parent[o.nearPG])
+			}
+		})
+	}
+}
+
+// TestOnboardingPicksOverTheCeilingCountAsMissing: the grid's and preview's
+// taste vector counted a selected pick whatever its rating, so a kid could
+// steer either toward an R title's neighbours, and an answer built from real
+// ids differed from one built from missing ids. Under a ceiling, R picks and
+// missing ids now give the same answer.
+func TestOnboardingPicksOverTheCeilingCountAsMissing(t *testing.T) {
+	o := newOnboardingFixture(t)
+	h := NewOnboardingHandler(o.q)
+	rPicks := fmt.Sprintf("selected=%d,%d,%d", o.rPicks[0], o.rPicks[1], o.rPicks[2])
+	missing := "selected=9000000001,9000000002,9000000003"
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		extra   string
+	}{
+		// Four is the number of allowed titles at the top of the popularity
+		// grid (three PG picks and the PG neighbour), so it is the same set
+		// on every call, and nearRPicks is in it only if the R picks built
+		// the vector.
+		{"grid", h.Grid, "limit=4&"},
+		{"preview", h.Preview, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := func(query string) *httptest.ResponseRecorder {
+				return gateCall(o.lockFixture, tc.handler, http.MethodGet, o.kidRT, nil, tc.extra+query, "")
+			}
+			fromR, fromMissing := call(rPicks), call(missing)
+			if fromR.Code != fromMissing.Code {
+				t.Fatalf("the kid's %s: %d for R picks, %d for missing ids; want the same", tc.name, fromR.Code, fromMissing.Code)
+			}
+			if fromR.Code != http.StatusOK {
+				return
+			}
+			r, m := onboardingItemIDs(t, fromR), onboardingItemIDs(t, fromMissing)
+			if len(r) != len(m) {
+				t.Fatalf("the kid's %s: %d titles for R picks, %d for missing ids; want the same answer", tc.name, len(r), len(m))
+			}
+			for id := range r {
+				if !m[id] {
+					t.Fatalf("the kid's %s lists %d for R picks but not for missing ids", tc.name, id)
+				}
+			}
+			if r[o.nearR] || r[o.nearRPicks] {
+				t.Errorf("the kid's %s follows the R picks: the R neighbour %v, the PG title at their centre %v",
+					tc.name, r[o.nearR], r[o.nearRPicks])
 			}
 		})
 	}

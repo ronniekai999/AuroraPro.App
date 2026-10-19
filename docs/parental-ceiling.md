@@ -29,8 +29,8 @@ Terms:
 | Routes | Gate |
 |---|---|
 | `GET /api/media`, `/api/media/recent`, `/api/media/search` | SQL before LIMIT; fails open to unrestricted on a resolve error (discovery) |
-| `GET /api/media/{id}`, `/seasons`, `/seasons/{n}/episodes` | By-id gate. The detail also lists other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
-| `GET /api/media/{id}/files`, `/artwork`, `/cast`, `/next-episode`, `/api/media/episodes/{episodeId}/files` | By-id gate (an episode by its show's rating). Files, episodes and next episode also list other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
+| `GET /api/media/{id}`, `/seasons`, `/seasons/{n}/episodes` | By-id gate on seasons and episodes. The detail checks the title it loads (`RatingAllowed`), with the same 404 body as a missing id; it always looks the title up, and a lookup error is a 500. The detail and a season's episodes also list other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
+| `GET /api/media/{id}/files`, `/artwork`, `/cast`, `/next-episode`, `/api/media/episodes/{episodeId}/files` | By-id gate (an episode by its show's rating). Files and the next episode also list other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
 | `GET /api/stream/info/{fileID}` | Go, the stream routes' file check; fails closed, same 404 as a missing file |
 | `GET/HEAD /api/stream/media/{fileID}`, `/episode/{fileID}`, `/{fileID}/direct`, `/direct/{fileID}` | Go; fails closed. A file-bound cast token relies on its mint-time check |
 | `POST /api/stream/{fileID}/cast-token`, `POST /api/stream/sessions` | Go at creation; fails closed |
