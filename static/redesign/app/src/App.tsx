@@ -3050,15 +3050,14 @@ export default function App() {
     })
   }, [realtimeUserId])
   useRealtime({
-    // Not before the startup binding is read (catalogProfileSettled), and
-    // reopened on every switch: the server fixes the socket's role when it
-    // connects, and a new sign-in binds the default before the startup
-    // re-selection moves it, so a socket opened then gave a kid's session the
-    // admin-only events.
-    enabled: realtimeUserId != null && catalogProfileSettled,
-    // An admin's socket follows the profile and whether it has admin powers:
-    // a ceiling given to, or lifted from, the session's own profile changes
-    // the role too. Anyone else's role cannot change, so it never reopens.
+    // An admin's socket waits for the startup binding (catalogProfileSettled)
+    // and reopens when the profile or its admin powers change: the server
+    // fixes the socket's role when it connects, and a new sign-in binds the
+    // default before the startup re-selection moves it, so a socket opened
+    // then gave a kid's session the admin-only events. A ceiling given to, or
+    // lifted from, the session's own profile changes the role too. Anyone
+    // else's role cannot change, so their socket neither waits nor reopens.
+    enabled: realtimeUserId != null && ((!!user && user.role !== 'admin') || catalogProfileSettled),
     connectionKey: user && user.role === 'admin' ? `${activeProfileId}:${adminUI}` : 'user',
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
@@ -5809,8 +5808,13 @@ export default function App() {
   // An admin's list holds every member's requests (with their usernames) and
   // a restricted session's only the account's own, so it is dropped when the
   // session's admin powers change: a switch to the kid's profile kept the
-  // parent's list on screen.
-  useEffect(() => { setRequestsList(null) }, [adminUI])
+  // parent's list on screen. Dropped during the render that sees the change,
+  // not in an effect after it, so that render never commits the old list.
+  const [requestsAdminUI, setRequestsAdminUI] = useState(adminUI)
+  if (requestsAdminUI !== adminUI) {
+    setRequestsAdminUI(adminUI)
+    setRequestsList(null)
+  }
   // Requests list — lazy-fetch on first visit to the tab, once the session's
   // profile is known (catalogProfileSettled), so a list fetched for the
   // default before the startup re-selection moves the session is not shown.

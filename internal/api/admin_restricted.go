@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/aurora-media/aurora/internal/auth"
 )
@@ -16,8 +17,9 @@ import (
 // if it has one) to use them.
 //
 // The one exception is an admin account with no unrestricted profile at all.
-// Profile changes cannot produce one (keepAnUnrestrictedProfile), but data
-// from before that rule, a backup restore or hand-written SQL can, and a
+// Profile changes cannot produce one (keepAnUnrestrictedProfile, and
+// CreateProfileFor for an account's first profile), but data from before
+// that rule, a backup restore or hand-written SQL can, and a
 // restricted session cannot lift a ceiling or create a profile. Refused there
 // too, the account would have no admin powers and no way back to them inside
 // the app; on a one-admin install, the server no admin. Its restricted
@@ -55,7 +57,7 @@ func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 				writeError(w, http.StatusInternalServerError, "failed to resolve the active profile")
 				return
 			}
-			if acting.MaxAgeRating != "" {
+			if strings.TrimSpace(acting.MaxAgeRating) != "" {
 				none, err := noUnrestrictedProfile(r.Context(), store, claims.UserID)
 				if err != nil {
 					slog.Warn("check for an unrestricted profile failed", "user_id", claims.UserID, "error", err)
@@ -95,7 +97,7 @@ func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims
 	if err != nil || acting == nil {
 		return false
 	}
-	if acting.MaxAgeRating == "" {
+	if strings.TrimSpace(acting.MaxAgeRating) == "" {
 		return true
 	}
 	none, err := noUnrestrictedProfile(ctx, store, claims.UserID)

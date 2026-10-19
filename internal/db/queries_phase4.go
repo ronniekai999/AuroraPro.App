@@ -43,7 +43,10 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 	}
 	// A profile with a ceiling on an account with none free of one (an
 	// account with no profile at all, whose session acts as an unrestricted
-	// stand-in) would leave nothing on it able to manage profiles.
+	// stand-in) would leave nothing on it able to manage profiles, and turn
+	// on the admin exception for an admin account (internal/api
+	// refuseRestrictedAdmin): its restricted sessions would keep the admin
+	// powers.
 	if strings.TrimSpace(p.MaxAgeRating) != "" {
 		var has bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles

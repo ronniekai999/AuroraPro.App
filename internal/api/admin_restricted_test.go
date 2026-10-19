@@ -12,6 +12,7 @@ import (
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/config"
+	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/gorilla/websocket"
@@ -53,6 +54,9 @@ func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
 	}{
 		{"an unrestricted admin", admin, fakeSessions{acting: free}, true},
 		{"a restricted admin", admin, fakeSessions{acting: kid}, false},
+		// A whitespace-only ceiling (hand-written; boot rewrites it) reads as
+		// none, as the ladder, HasUnrestrictedProfile and the web app read it.
+		{"an admin on a whitespace-only ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "  "}}, true},
 		// With no unrestricted profile on the account, nothing else could use
 		// the admin powers, so a restricted session keeps them.
 		{"a restricted admin on an account with no unrestricted profile", admin, fakeSessions{acting: kid, noneUnrestricted: true}, true},
@@ -90,6 +94,7 @@ func TestTheAdminRefusalFailsClosed(t *testing.T) {
 	}{
 		{"an unrestricted session", fakeSessions{acting: free}, http.StatusOK, ""},
 		{"a restricted session", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}, http.StatusForbidden, "profile_restricted"},
+		{"a whitespace-only ceiling", fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "  "}}, http.StatusOK, ""},
 		{"a restricted session with no unrestricted profile on the account", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true}, http.StatusOK, ""},
 		{"a failed check for an unrestricted profile", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}, noneUnrestricted: true, unrestrictedErr: errors.New("down")}, http.StatusInternalServerError, ""},
 		{"an ended session", fakeSessions{acting: free, gone: true}, http.StatusUnauthorized, "session_ended"},
@@ -337,5 +342,68 @@ func TestTheFeedbackTokenHealthIsForAdminPowersOnly(t *testing.T) {
 	}
 	if shown(fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}) {
 		t.Error("a restricted admin session saw the token's health")
+	}
+}
+
+// plainSessions is a sessionStore without HasUnrestrictedProfile.
+type plainSessions struct{ acting *models.UserProfile }
+
+func (p plainSessions) ResolveActingProfile(context.Context, int64, int64) (*models.UserProfile, error) {
+	return p.acting, nil
+}
+func (plainSessions) SessionLive(context.Context, int64, int64) (bool, error) { return true, nil }
+
+// TestTheAdminExceptionNeedsAnAccountWithNoUnrestrictedProfile: a restricted
+// session keeps the admin powers only on an account none of whose profiles is
+// free of a ceiling, as stored (” and whitespace read as none), and a store
+// that cannot say grants nothing. An account's first profile cannot carry a
+// ceiling, so profile writes cannot produce that state.
+func TestTheAdminExceptionNeedsAnAccountWithNoUnrestrictedProfile(t *testing.T) {
+	admin := &auth.JWTClaims{UserID: 1, Role: "admin", RefreshTokenID: 2}
+	if adminPowers(context.Background(), plainSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}, admin) {
+		t.Error("a store without HasUnrestrictedProfile granted a restricted session the admin powers")
+	}
+
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	has := func() bool {
+		t.Helper()
+		ok, err := f.q.HasUnrestrictedProfile(ctx, f.userID)
+		if err != nil {
+			t.Fatalf("HasUnrestrictedProfile: %v", err)
+		}
+		return ok
+	}
+	if !has() {
+		t.Fatal("the fixture's parent has no ceiling, but the account read as having no unrestricted profile")
+	}
+	for _, stored := range []string{"", "  "} {
+		if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = $2 WHERE id = $1`, f.parent.ID, stored); err != nil {
+			t.Fatalf("store %q: %v", stored, err)
+		}
+		if !has() {
+			t.Errorf("a stored ceiling of %q read as a ceiling", stored)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatalf("restrict every profile: %v", err)
+	}
+	if has() {
+		t.Error("an account whose every profile is restricted read as having an unrestricted one")
+	}
+
+	// An account with no profile at all: its first profile cannot carry one.
+	bare := seedReqUser(t, f.q)
+	first := &models.UserProfile{UserID: bare, Name: "kid", MaxAgeRating: "PG", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfileFor(ctx, first, nil); !errors.Is(err, db.ErrLastUnrestrictedProfile) {
+		t.Errorf("a ceilinged first profile: %v, want ErrLastUnrestrictedProfile", err)
+	}
+	free := &models.UserProfile{UserID: bare, Name: "parent", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfileFor(ctx, free, nil); err != nil {
+		t.Fatalf("an unrestricted first profile: %v", err)
+	}
+	if err := f.q.CreateProfileFor(ctx, first, nil); err != nil {
+		t.Errorf("a ceilinged profile beside an unrestricted one: %v", err)
 	}
 }

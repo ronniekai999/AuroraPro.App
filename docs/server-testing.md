@@ -18,7 +18,7 @@ is pushed to GitHub.
 
 | Env var | Required | Meaning |
 |---------|----------|---------|
-| `AURORA_TEST_USER` | yes | Test-account username. Must be an **admin** to use the remote update trigger. |
+| `AURORA_TEST_USER` | yes | Test-account username. Must be an **admin** to use the remote update trigger, and its default profile must have no content rating limit: a password sign-in lands there, and a session on a restricted profile is refused the admin routes. |
 | `AURORA_TEST_PASS` | yes | Test-account password. |
 | `AURORA_BASE` | no | Server base URL. Defaults to `https://aurorapro.app`. |
 

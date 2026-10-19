@@ -403,8 +403,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   The admin routes' guard refuses a non-admin and a scoped token itself,
   though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The
   one exception is an admin account with no unrestricted profile at all
-  (`HasUnrestrictedProfile`): profile writes cannot produce one, but older
-  data, a restore or hand-written SQL can, and a restricted session cannot
+  (`HasUnrestrictedProfile`): profile writes cannot produce one (the last
+  unrestricted profile keeps its place, and an account's first profile
+  cannot carry a ceiling, `CreateProfileFor`), but older data, a restore or
+  hand-written SQL can, and a restricted session cannot
   repair it, so refusing there would leave the account, and on a one-admin
   install the server, with no admin at all. Its restricted sessions keep the
   admin powers. The web app shows its Admin tab, admin controls, scan bar
@@ -531,18 +533,31 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     receives them. While the web app's socket is closed (until startup
     settles, and for a moment at each reopen) a notification or request
     status is missed live; the bell has it on the next load.
-  - An admin account with no profile that creates one in Settings keeps no
-    binding (the server resolves the new default for it), but the web app
-    keeps showing no profile, so its admin UI hides until the next reload or
-    tab-visibility re-read.
+  - An admin account with no profile that creates one in Settings keeps
+    acting as the server's unrestricted stand-in (the new profile is not
+    the default), but the web app then knows a profile and no binding, so
+    its admin UI hides until a reload and a pick from the profile picker;
+    the tab-visibility re-read does not restore it.
+  - A request already past the admin guard completes after a switch to a
+    restricted profile (a backup or restore already running, say). `/ws`
+    fixes its role when it connects, so a database error then leaves an
+    unrestricted admin's socket a user's until it reconnects (closed, and
+    no first-party client reads those events).
   - Every admin-route request, and every admin-power check outside them that
     is reached, costs about three queries (the session row, its binding, the
-    profile); the scan bar's 4-second status poll is the steady one.
+    profile), one more for a restricted session (the exception's check); the
+    scan bar's 4-second status poll is the steady one. A highlight reel
+    checks membership first, so a member pays one query per Range request
+    as before, a non-member admin about four, and a failed membership query
+    is a 500 for an admin too.
   - Pinned: the admin routes' refusal through the router and its fail-closed
     and scoped-token cases at the middleware, `adminPowers`' cases, the
-    collections list and the socket's role through a request, and the party
-    QR code and the feedback config at the handler
-    (`admin_restricted_test.go`, `party_qr_test.go`). The other `adminPowers`
+    collections list and the socket's role through a request, the
+    exception through the router and its predicate against the database
+    (`''` and whitespace read as no ceiling, a store that cannot say grants
+    nothing, a ceilinged first profile refused), and the party QR code and
+    the feedback config at the handler (`admin_restricted_test.go`,
+    `party_qr_test.go`). The other `adminPowers`
     sites are not, nor is an admin account with no profile through a real
     database, nor the router's wiring of the QR and feedback handlers' store
     (dropped, an unrestricted admin silently loses those two powers). In the
