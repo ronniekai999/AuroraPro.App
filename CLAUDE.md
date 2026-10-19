@@ -170,7 +170,10 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   gets the kid's ceiling). The stream routes keep their own file check. Under a
   ceiling a missing id gets the same 404 body as an over-ceiling one, so these
   routes do not say which ids exist; for an unrestricted profile the gate
-  skips the title lookup. The gated writes (progress, mark watched, thumbs,
+  skips the title lookup. The detail route (`GET /api/media/{id}`) does its
+  own check on the title it loads (`RatingAllowed`), with the same 404 body;
+  it always looks the title up, and a lookup error there is a 500. The gated
+  writes (progress, mark watched, thumbs,
   star ratings, watchlist and My Library adds) are gated because history,
   anchor rails and the lists read the title back. Collections, party creation
   and party media changes still take any id (see the gaps). Deleting and
@@ -191,7 +194,14 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     but My Library) are hidden from its reads, which also hides the row ids
     its item DELETE takes, so they go only with the whole list. `GET
     /api/me/rating` returns the profile's own stars for any id (no title
-    data).
+    data). Pre-ceiling taste seeds reach the Discover prompts
+    (`TasteSeedAnchors`), and pre-ceiling favourites, want-to-watch entries,
+    thumbs-up and 4-5 star ratings still pull the taste vector, which steers
+    results but names no title.
+  - Timing: under a ceiling a missing id and an over-ceiling one get the
+    same body, not the same time. The stream-info and detail routes answer a
+    missing id after one query and an over-ceiling one after two to four, as
+    the stream routes do, so repeated timing can tell them apart.
   - Cross-library copies: the detail, files, episodes and next-episode
     lookups add files of other items with the same TMDB id without checking
     those items' ratings, so a restricted profile can be offered a version
