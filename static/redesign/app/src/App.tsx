@@ -1396,7 +1396,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
       {effectiveRails.length > 0 && (
         <>
           <YourWeekBand />
-          <WatchTogetherCard onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
+          {/* Keyed by profile: its list is filtered by the acting profile's
+              ceiling, and a switch would otherwise keep the previous
+              profile's parties up until the next 15-second poll. */}
+          <WatchTogetherCard key={`watch-together-${activeProfileId}`} onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
         </>
       )}
       <div className="h-16" />

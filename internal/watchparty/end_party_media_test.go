@@ -45,19 +45,50 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM watch_parties WHERE party_code = $1`, ps.Code)
 	})
 	ps.mu.Lock()
-	ps.MediaItemID = rMovie
+	ps.MediaItemID, ps.MediaTitle = rMovie, "endmedia r"
 	ps.mu.Unlock()
 
 	if err := m.EndParty(ps.Code, hostID); err != nil {
 		t.Fatalf("end party: %v", err)
 	}
 	var mediaID int64
+	var title string
 	var active bool
-	if err := pool.QueryRow(ctx, `SELECT media_item_id, is_active FROM watch_parties WHERE party_code = $1`, ps.Code).
-		Scan(&mediaID, &active); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT media_item_id, COALESCE(media_title, ''), is_active FROM watch_parties WHERE party_code = $1`, ps.Code).
+		Scan(&mediaID, &title, &active); err != nil {
 		t.Fatalf("read the party row: %v", err)
 	}
-	if active || mediaID != rMovie {
-		t.Errorf("the ended party's row: active %v, media %d; want ended on the R title %d it ended on", active, mediaID, rMovie)
+	if active || mediaID != rMovie || title != "endmedia r" {
+		t.Errorf("the ended party's row: active %v, media %d %q; want ended on the R title %d it ended on, with its name",
+			active, mediaID, title, rMovie)
+	}
+
+	// A merge can delete the title a live party still names. The end used to
+	// write that id too, fail its foreign key, and leave the party active for
+	// good, blocking its room; now it ends on the row's own title.
+	gone := movie("endmedia gone", "G")
+	ps2, err := m.CreateParty(ctx, hostID, "host", gMovie, nil, "Movie Night 2", "endmedia g", "", 8,
+		PartySettings{AllowPause: true, AllowChat: true}, 0, nil)
+	if err != nil {
+		t.Fatalf("create the second party: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM watch_parties WHERE party_code = $1`, ps2.Code)
+	})
+	ps2.mu.Lock()
+	ps2.MediaItemID, ps2.MediaTitle = gone, "endmedia gone"
+	ps2.mu.Unlock()
+	if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, gone); err != nil {
+		t.Fatalf("delete the title: %v", err)
+	}
+	if err := m.EndParty(ps2.Code, hostID); err != nil {
+		t.Fatalf("end the second party: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT media_item_id, COALESCE(media_title, ''), is_active FROM watch_parties WHERE party_code = $1`, ps2.Code).
+		Scan(&mediaID, &title, &active); err != nil {
+		t.Fatalf("read the second party row: %v", err)
+	}
+	if active || mediaID != gMovie || title != "endmedia g" {
+		t.Errorf("a party ended on a deleted title: active %v, media %d %q; want ended on its row's own title %d", active, mediaID, title, gMovie)
 	}
 }
