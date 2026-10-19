@@ -180,6 +180,8 @@ class ProfileUnlockTest {
         activeProfile = """{"id":1,"name":"Ronnie","is_default":true,"has_pin":true}"""
         vm.login("ronnie", "fixture-password")
         awaitState { it.page == Page.PROFILES && it.boundProfileId == 1L }
+        // The server's binding once the switch lands, which the TV shows.
+        activeProfile = """{"id":2,"name":"Kids","max_age_rating":"PG"}"""
         vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
         awaitState { it.page == Page.HOME && it.boundProfileId == 2L }
         vm.navigate(Page.PROFILES)
@@ -244,6 +246,16 @@ class ProfileUnlockTest {
         val home = awaitState { it.page == Page.HOME }
         assertEquals("Kids renamed", home.profile?.name)
         assertEquals("G", home.profile?.maxAgeRating)
+    }
+
+    @Test fun aSwitchShowsTheBindingTheServerReportsEvenForAnotherProfile() {
+        // Another switch landed between the activation and the read: the
+        // server enforces its binding, so that is what the TV shows.
+        activeProfile = """{"id":1,"name":"Parent","max_age_rating":""}"""
+        vm.selectProfile(vm.state.value.profiles.first { it.id == 2L })
+        val home = awaitState { it.page == Page.HOME }
+        assertEquals(1L, home.profile?.id)
+        assertEquals(1L, home.boundProfileId)
     }
 
     @Test fun anUnlockedProfileActivatesWithAnEmptyBody() {

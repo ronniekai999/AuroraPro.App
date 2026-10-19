@@ -806,7 +806,7 @@ func TestAPINWriteWaitsForTheAccountLock(t *testing.T) {
 		_, err := f.q.SetProfilePIN(ctx, f.userID, f.kid.ID, "$argon2id$placeholder", f.parentRT, nil)
 		done <- err
 	}()
-	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE%")
+	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE%")
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -833,7 +833,7 @@ func TestActivationRechecksThePINUnderTheAccountLock(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, f.userID); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID); err != nil {
@@ -1070,7 +1070,7 @@ func TestActivatingAProfileLockedMeanwhileIsRefused(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, f.userID); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID); err != nil {
@@ -1242,7 +1242,7 @@ func TestAPINRemovedAndSetAgainMidActivationIsAskedFor(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer account.Rollback(ctx)
-	if _, err := account.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+	if _, err := account.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, f.userID); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	// The removal, uncommitted, holds the attempt after the handler has read
@@ -1301,7 +1301,7 @@ func ceilingRace(t *testing.T, f *lockFixture, target int64, ceiling string, rt,
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, f.userID); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = $2 WHERE id = $1`, target, ceiling); err != nil {
@@ -1589,7 +1589,7 @@ func (f *lockFixture) raceTheAccountLock(t *testing.T, change func(tx pgx.Tx) er
 	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
 		t.Fatalf("read the backend pid: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, f.userID); err != nil {
 		t.Fatalf("lock the user row: %v", err)
 	}
 	if err := change(tx); err != nil {
@@ -2080,6 +2080,20 @@ func TestAnOAuthSignInThroughTheCallbackBindsTheChosenProfile(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "Every profile on this account has a PIN") {
 		t.Errorf("the callback answered %q, want the every-profile-locked page", w.Body.String())
+	}
+	// An account with no password has no other way in: the sign-in lands on
+	// the most restrictive profile, PIN and all, and the session insert must
+	// carry that PIN's state, or it refuses the bind and the owner can never
+	// sign in again.
+	if _, err := pool.Exec(ctx, `UPDATE users SET password_hash = '' WHERE id = $1`, f.userID); err != nil {
+		t.Fatalf("clear the password: %v", err)
+	}
+	before, _ = sessions()
+	w = runOAuthCallback(t, f, h, db.OAuthTxnModeLogin, nil)
+	after, bound = sessions()
+	if after != before+1 || bound == nil || *bound != f.kid.ID {
+		t.Errorf("a no-password sign-in with every profile locked: %d new sessions, bound to %v (page %q); want one, bound to the kid %d",
+			after-before, bound, w.Body.String(), f.kid.ID)
 	}
 }
 

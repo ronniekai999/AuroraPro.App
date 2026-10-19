@@ -573,7 +573,7 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	// limit read above.
 	var judged *db.CeilingJudgement
 	if req.MaxAgeRating != nil {
-		judged = &db.CeilingJudgement{ManagerJudgement: *managerJudgement(claims, nil), ActingProfileID: acting.ID, Was: profile.MaxAgeRating}
+		judged = &db.CeilingJudgement{ManagerJudgement: *managerJudgement(claims, nil), Was: profile.MaxAgeRating}
 	}
 
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req, judged); err != nil {

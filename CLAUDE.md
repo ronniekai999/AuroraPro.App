@@ -410,10 +410,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A re-default whose profile was deleted meanwhile is refused (404), but
     an account can still have profiles and no default (the TV creates a
     first profile that is not the default on an account with none; a restore
-    or hand-written SQL), and nothing reports or repairs it. Its unbound
-    sessions then act as an unrestricted stand-in, whatever its profiles'
-    ceilings; pairing and a linked sign-in pick a real profile instead
-    (`MostRestrictiveProfilePIN`).
+    or hand-written SQL), and nothing reports it. Its unbound sessions then
+    act as an unrestricted stand-in, whatever its profiles' ceilings, until
+    one's first progress write creates an unrestricted, unlocked default
+    (which linked sign-ins then land on). A linked sign-in picks a real
+    profile (`MostRestrictiveProfilePIN`), and so does pairing in its
+    no-password, every-profile-locked branch; an unbound approver otherwise
+    hands the device an unbound session, the same stand-in. The web app,
+    for a single such profile, shows it without activating it while the
+    server acts as the stand-in. A linked sign-in on an account with no
+    profile at all inserts an unbound session with no lock or recheck.
   - A password login binds the account default without its PIN: the
     password that signed in stands in for it. A sign-in through a linked
     identity does not (`oauthSignInProfile`): it binds the default only
@@ -431,8 +437,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     since its access token outlives a PIN write, and the identity insert
     rechecks it under the account lock (`AddOAuthIdentityFor`), since the
     check runs before the provider round trip. The sign-in callback's use of
-    the helper (its binding, the PIN recheck, the refusal) is pinned through
-    `Callback` with a fake provider.
+    the helper is pinned through `Callback` with a fake provider: the
+    binding, the password refusal, and the no-password landing that needs
+    the PIN state carried to the insert. That the insert is the rechecking
+    one (`CreateRefreshTokenAtVersion`, against a PIN set mid sign-in) is
+    pinned only at the query, not through the callback. The link's recheck
+    reads the session row and its profile but not the token version, and a
+    revoked row counts as live (`SessionLive`), so a logout or password
+    change during the provider round trip still links the identity.
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. Nor does a password account whose owner has
     forgotten the password while every profile is locked: there is no
@@ -495,7 +507,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     are pinned only at the manager. The PIN state activation hands its bind is pinned at
     `checkUnlockHash` for every path (`TestTheUnlockReportsThePINStateItJudged`)
     and end to end only for a PIN removed and set again mid-activation; the
-    bind's recheck itself is pinned. Nothing tests the onboarding age step's
+    bind's recheck itself is pinned, and its lock mode with it: the race
+    tests hold the account lock as the PIN write does (`FOR NO KEY UPDATE`),
+    so weakening any write's lock fails one. Nothing tests the onboarding age step's
     lock for a restricted profile (`ceilingLocked`); the server refuses the
     change regardless.
   - Account-level actions still open to a restricted session, for example:

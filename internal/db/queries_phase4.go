@@ -371,14 +371,13 @@ func (q *Queries) MostRestrictiveUnlockedProfile(ctx context.Context, userID int
 }
 
 // CeilingJudgement is what a handler judged before writing a profile's
-// ceiling: the acting profile of the session asking, which must still have no
-// limit when the write lands, and the edited profile's ceiling as it read it
-// (raw, as GetProfile returns it). The session itself is rechecked as every
-// management write rechecks it (ManagerJudgement).
+// ceiling: the session asking, rechecked as every management write rechecks
+// it (ManagerJudgement: its row live, the profile it acts as free of a
+// limit), and the edited profile's ceiling as it read it (raw, as GetProfile
+// returns it).
 type CeilingJudgement struct {
 	ManagerJudgement
-	ActingProfileID int64
-	Was             string
+	Was string
 }
 
 // ManagerJudgement is what a profile-management handler judged about the
@@ -548,18 +547,12 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		if err := recheckManager(ctx, tx, profileID, &judged.ManagerJudgement); err != nil {
 			return err
 		}
-		var actingFree bool
 		var was string
 		if err := tx.QueryRow(ctx, `
-			SELECT COALESCE((SELECT NULLIF(btrim(max_age_rating), '') IS NULL
-			                 FROM user_profiles WHERE id = $1), false),
-			       COALESCE((SELECT COALESCE(max_age_rating, '')
-			                 FROM user_profiles WHERE id = $2), '')`,
-			judged.ActingProfileID, profileID).Scan(&actingFree, &was); err != nil {
+			SELECT COALESCE((SELECT COALESCE(max_age_rating, '')
+			                 FROM user_profiles WHERE id = $1), '')`,
+			profileID).Scan(&was); err != nil {
 			return err
-		}
-		if !actingFree {
-			return ErrActingProfileRestricted
 		}
 		if was != judged.Was {
 			return ErrProfileCeilingChanged

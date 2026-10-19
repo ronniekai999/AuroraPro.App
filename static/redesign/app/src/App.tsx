@@ -6279,7 +6279,12 @@ export default function App() {
                 onLogout={handleLogout}
                 onToast={addToast}
                 activeProfile={profiles.find(p => p.id === activeProfileId) ?? null}
-                profileKnown={personalProfileReady}
+                // Known only when the bound profile is in the list (a profile
+                // deleted on another device leaves an id the list lacks), or
+                // the account has none.
+                profileKnown={activeProfileId !== null
+                  ? profiles.some(p => p.id === activeProfileId)
+                  : profilesLoaded && profiles.length === 0}
                 onMaturityChange={(pref) => {
                   if (!activeProfileId) return
                   // Return the promise so SettingsView can roll back its optimistic
