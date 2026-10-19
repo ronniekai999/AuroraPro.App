@@ -212,9 +212,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   no binding acts as the default, and `SetDefaultProfile` first binds the
   account's unbound sessions to the old default (revoked rows too: an access
   token resolves through its row after rotation), so re-defaulting moves no
-  other device. An account with no default has none to bind them to, so
-  there, when the new default has a PIN, its other unbound sessions are
-  signed out instead; the asking one, which gave the PIN, stays.
+  other device onto a profile it did not act as. An account with no default
+  has none to bind them to: there, when the new default has a PIN, its other
+  unbound sessions are signed out instead, keeping only the row the asking
+  session's access token names (a token older than its session's latest
+  rotation keeps the old row, so that device signs in again too); with no
+  PIN they move from the stand-in onto the new default, past no PIN.
 - Setting or changing a PIN ends the account's other sessions that act as
   the profile, including ones that entered the old PIN: those bound to it,
   and the unbound ones when it is the default, revoked rows included
@@ -412,7 +415,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     pairing's bound profile is still rechecked for its PIN when the device
     collects the grant.
   - A re-default, a PIN write or an edit whose profile was deleted meanwhile
-    is refused (404), but
+    is refused (404; a ceiling edit gets 409 `profile_changed` when the
+    deleted profile had a limit, and an edit with nothing to write still
+    answers 200 with no profile), but
     an account can still have profiles and no default (the TV creates a
     first profile that is not the default on an account with none; a restore
     or hand-written SQL), and nothing reports it. Its unbound sessions then
@@ -421,7 +426,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     (which linked sign-ins then land on). A linked sign-in picks a real
     profile (`MostRestrictiveProfilePIN`), and so does pairing in its
     no-password, every-profile-locked branch; an unbound approver otherwise
-    hands the device an unbound session, the same stand-in. The web app,
+    hands the device an unbound session, the same stand-in, or, when the
+    account is re-defaulted before the device collects the grant, the new
+    default without its PIN. The web app,
     for a single such profile, shows it without activating it while the
     server acts as the stand-in. A linked sign-in on an account with no
     profile at all inserts an unbound session with no lock or recheck.
@@ -514,9 +521,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and end to end only for a PIN removed and set again mid-activation; the
     bind's recheck itself is pinned, and its lock mode with it: the race
     tests hold the account lock as the PIN write does (`FOR NO KEY UPDATE`),
-    so weakening any management write's or bound session insert's lock fails
-    one, and rotation's `FOR UPDATE` is pinned by a rotation racing a PIN
-    write and a re-default (`TestARotationInFlightCannotCarryABindingPastAWrite`).
+    so weakening any management write's lock fails one, as weakening a bound
+    session insert's fails a revocation test
+    (`TestDeviceSessionIssuanceWaitsForRevocationUserLock`). Rotation's
+    user-row lock is pinned only as one that conflicts with `FOR NO KEY
+    UPDATE`, by a rotation racing a PIN write and a re-default
+    (`TestARotationInFlightCannotCarryABindingPastAWrite`): `FOR SHARE`
+    would pass. Unpinned besides: that the no-default re-default spares
+    bound sessions, and the edit handler's 404.
     The onboarding age step's lock for a restricted profile (`ceilingLocked`)
     is tested at its patch helper only; the server refuses the change
     regardless.
