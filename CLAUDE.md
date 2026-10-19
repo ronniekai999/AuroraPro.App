@@ -278,13 +278,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
   writes cannot each count the other's profile as the one left). The
   management writes lock the user row `FOR NO KEY UPDATE`: that conflicts
-  with itself, with activation's `FOR SHARE` and with the `FOR UPDATE` of
-  rotation and the session inserts, but not with the foreign-key lock an
+  with itself, with activation's and a link's `FOR SHARE` and with the
+  `FOR UPDATE` of rotation and the bound session inserts
+  (`CreateRefreshTokenAtVersion`; a password login's or a registration's
+  unbound insert takes no lock), but not with the foreign-key lock an
   insert of the account's children takes. `FOR UPDATE` deadlocked a profile
   delete with a recap question, which inserts a child of the profile and
-  then one of the account. A re-default whose profile was deleted meanwhile
-  is refused (404) rather than leaving the account with no default, which
-  nothing reports or repairs. Without it
+  then one of the account. Without the last-unrestricted rule
   nothing on the account could manage profiles again, and onboarding's age
   step reached that on a single-profile account in one move; that step now
   gives the account's only such profile the tone lean and no ceiling. A
@@ -403,10 +403,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     only, not the ceilings: "most restrictive" is judged at approval, up to
     ten minutes before the device collects the grant.
   - Writes outside the management list (a rename or other cosmetic edit, a
-    pairing approval) do not recheck the session under the lock, so one
-    from a session a PIN write ends in between can still land; a pairing's
-    bound profile is still rechecked for its PIN when the device collects
-    the grant.
+    pairing approval, an unlink) do not recheck the session under the lock,
+    so one from a session a PIN write ends in between can still land; a
+    pairing's bound profile is still rechecked for its PIN when the device
+    collects the grant.
+  - A re-default whose profile was deleted meanwhile is refused (404), but
+    an account can still have profiles and no default (the TV creates a
+    first profile that is not the default on an account with none; a restore
+    or hand-written SQL), and nothing reports or repairs it. Its unbound
+    sessions then act as an unrestricted stand-in, whatever its profiles'
+    ceilings; pairing and a linked sign-in pick a real profile instead
+    (`MostRestrictiveProfilePIN`).
   - A password login binds the account default without its PIN: the
     password that signed in stands in for it. A sign-in through a linked
     identity does not (`oauthSignInProfile`): it binds the default only
@@ -419,10 +426,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     whenever the account had no password, so anyone who had linked their own
     identity while on an unlocked profile kept a way past a PIN set later; a
     PIN write leaves linked identities in place, and they now land where any
-    linked sign-in does. A link's callback rechecks that the session it
-    started from is still live and unrestricted (`linkSessionMayManage`),
-    since its access token outlives a PIN write. The callback's use of the
-    helper has no end-to-end test.
+    linked sign-in does. A link's callback checks that the session whose
+    cookies it carries is live and unrestricted (`linkSessionMayManage`),
+    since its access token outlives a PIN write, and the identity insert
+    rechecks it under the account lock (`AddOAuthIdentityFor`), since the
+    check runs before the provider round trip. The sign-in callback's use of
+    the helper (its binding, the PIN recheck, the refusal) is pinned through
+    `Callback` with a fake provider.
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. Nor does a password account whose owner has
     forgotten the password while every profile is locked: there is no
@@ -447,7 +457,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     gets the full five again. Attempts are counted per profile, so N locked
     profiles sharing one PIN cut that time N-fold.
   - Anyone on the account can keep a profile's PIN locked out with one wrong
-    guess per 15 minutes; the password is the way past it. A restricted
+    guess per 15 minutes; the password is the way past it. An account with
+    no password has none: a restricted session can hold the owner out of a
+    locked profile for as long as it keeps guessing, and logout, which it
+    may call, ends every session on the account, the owner's included; the
+    owner's next linked sign-in lands on the most restrictive unlocked
+    profile. A restricted
     session can also keep spending the password budget of the profile it
     acts as (and of any unlocked profile it can switch into), so on the
     kid's own device the owner's password can be held off indefinitely. A
@@ -477,8 +492,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     load, the grid effects' profile dependency and the views' keys, though
     `useOnProfileChange` itself is tested) has no App-level test, and the
     room socket's connect-time profile and its retry
-    are pinned only at the manager. Nothing pins `SetDefaultProfile`'s user-row
-    lock either. The PIN state activation hands its bind is pinned at
+    are pinned only at the manager. The PIN state activation hands its bind is pinned at
     `checkUnlockHash` for every path (`TestTheUnlockReportsThePINStateItJudged`)
     and end to end only for a PIN removed and set again mid-activation; the
     bind's recheck itself is pinned. Nothing tests the onboarding age step's

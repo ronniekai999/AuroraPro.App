@@ -18,14 +18,26 @@ describe('SignInMethodsCard', () => {
   // A fresh sign-in through a link a kid added would land on the account
   // default without its PIN; the server refuses, and the card is not offered.
   it('offers a restricted session a note, not the sign-in methods', () => {
-    render(<SignInMethodsCard activeProfile={profile({ max_age_rating: 'PG' })} />)
+    render(<SignInMethodsCard activeProfile={profile({ max_age_rating: 'PG' })} profileKnown />)
     expect(screen.getByText(/can only be managed from a profile without a content limit/)).toBeTruthy()
     expect(api.listOAuthLinks).not.toHaveBeenCalled()
   })
 
   it('shows an unrestricted session its sign-in methods', async () => {
-    render(<SignInMethodsCard activeProfile={profile()} />)
+    render(<SignInMethodsCard activeProfile={profile()} profileKnown />)
     await waitFor(() => expect(api.listOAuthLinks).toHaveBeenCalled())
     expect(screen.queryByText(/can only be managed from a profile without a content limit/)).toBeNull()
+  })
+
+  // The startup profile list failed: the session could be a kid's.
+  it('treats a session whose profile is unknown as restricted', () => {
+    render(<SignInMethodsCard activeProfile={null} profileKnown={false} />)
+    expect(screen.getByText(/can only be managed from a profile without a content limit/)).toBeTruthy()
+    expect(api.listOAuthLinks).not.toHaveBeenCalled()
+  })
+
+  it('shows an account with no profile at all its sign-in methods', async () => {
+    render(<SignInMethodsCard activeProfile={null} profileKnown />)
+    await waitFor(() => expect(api.listOAuthLinks).toHaveBeenCalled())
   })
 })

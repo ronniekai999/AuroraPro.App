@@ -1921,3 +1921,184 @@ func TestDeletingAProfileDoesNotDeadlockWithAChildInsert(t *testing.T) {
 		t.Errorf("the delete: %v, want it to complete", err)
 	}
 }
+
+// hookProvider completes a real code exchange, then runs during before handing
+// back its profile: the provider round trip a session can end in.
+type hookProvider struct {
+	exchangingProvider
+	during func()
+}
+
+func (p hookProvider) FetchUserInfo(context.Context, *http.Client) (*OAuthProfile, error) {
+	if p.during != nil {
+		p.during()
+	}
+	return p.profile, nil
+}
+
+func newHookHandler(t *testing.T, f *lockFixture, profile *OAuthProfile, during func()) *OAuthHandler {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"Bearer","expires_in":3600}`))
+	}))
+	t.Cleanup(srv.Close)
+	h := newTxnTestHandler(t, f.q)
+	h.providers = map[string]Provider{"google": hookProvider{exchangingProvider{tokenURL: srv.URL, profile: profile}, during}}
+	return h
+}
+
+// runOAuthCallback drives h.Callback for a transaction of mode, with the
+// given cookies, as the provider's redirect would.
+func runOAuthCallback(t *testing.T, f *lockFixture, h *OAuthHandler, mode db.OAuthTxnMode, linkUID *int64, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	state := fmt.Sprintf("state-%d", time.Now().UnixNano())
+	token := mintTxn(t, f.q, lockTestPool(t), mode, "google", state, linkUID, nil)
+	r := callbackRequest(token, state)
+	r.URL.RawQuery = "state=" + state + "&code=auth-code"
+	r.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: state})
+	for _, c := range cookies {
+		r.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+	return w
+}
+
+// TestALinkWhoseSessionEndsDuringTheProviderRoundTripLinksNothing: the link
+// callback checked its session before the provider round trip and inserted
+// the identity after it, so a PIN write ending the session in between still
+// linked it, a lasting way back in. The insert now rechecks under the lock.
+func TestALinkWhoseSessionEndsDuringTheProviderRoundTripLinksNothing(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil || u == nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	linked := func(subject string) int {
+		t.Helper()
+		var n int
+		if err := lockTestPool(t).QueryRow(ctx, `SELECT count(*) FROM oauth_identities WHERE user_id = $1 AND subject = $2`,
+			f.userID, subject).Scan(&n); err != nil {
+			t.Fatalf("count identities: %v", err)
+		}
+		return n
+	}
+	link := func(rt int64, subject string, during func()) *httptest.ResponseRecorder {
+		t.Helper()
+		h := newHookHandler(t, f, &OAuthProfile{Subject: subject, Email: subject + "@example.com", EmailVerified: true}, during)
+		tok, _, err := h.authSvc.GenerateAccessToken(f.userID, u.Username, "user", u.TokenVersion, rt)
+		if err != nil {
+			t.Fatalf("mint an access token: %v", err)
+		}
+		return runOAuthCallback(t, f, h, db.OAuthTxnModeLink, &f.userID, &http.Cookie{Name: auth.AccessCookieName, Value: tok})
+	}
+	if link(f.parentRT, "link-live", nil); linked("link-live") != 1 {
+		t.Fatal("precondition: a live, unrestricted session's link was not recorded")
+	}
+	stray := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, stray, f.parent.ID)
+	w := link(stray, "link-ended", func() { f.setPIN(t, "4321") })
+	if n := linked("link-ended"); n != 0 {
+		t.Errorf("a session the PIN write ended during the round trip linked %d identities", n)
+	}
+	if !strings.Contains(w.Body.String(), "Session changed or expired") {
+		t.Errorf("the callback answered %q, want the session-changed page", w.Body.String())
+	}
+}
+
+// TestALinkLandingRechecksUnderTheAccountLock: the identity insert waits on a
+// PIN write holding the account lock, then sees the session it ended.
+func TestALinkLandingRechecksUnderTheAccountLock(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	stray := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, stray, f.parent.ID)
+	var linkErr error
+	f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE id = $1`, stray)
+		return err
+	}, func() (int, string) {
+		linkErr = f.q.AddOAuthIdentityFor(ctx, f.userID, "google", fmt.Sprintf("link-lock-%d", time.Now().UnixNano()),
+			&db.ManagerJudgement{UserID: f.userID, RefreshTokenID: stray})
+		return 0, ""
+	})
+	if !errors.Is(linkErr, db.ErrSessionEnded) {
+		t.Errorf("a link from a session ended while it waited: %v, want ErrSessionEnded", linkErr)
+	}
+	if err := f.q.AddOAuthIdentityFor(ctx, f.userID, "google", "link-lock-live", &db.ManagerJudgement{UserID: f.userID, RefreshTokenID: f.parentRT}); err != nil {
+		t.Errorf("a link from a live, unrestricted session: %v", err)
+	}
+	// The conflict sentinels survive the transaction: the same identity again
+	// is an idempotent success, and another subject for the provider refused.
+	if err := f.q.AddOAuthIdentityFor(ctx, f.userID, "google", "link-lock-live", &db.ManagerJudgement{UserID: f.userID, RefreshTokenID: f.parentRT}); err != nil {
+		t.Errorf("re-linking the same identity: %v, want success", err)
+	}
+	if err := f.q.AddOAuthIdentityFor(ctx, f.userID, "google", "link-lock-other", &db.ManagerJudgement{UserID: f.userID, RefreshTokenID: f.parentRT}); !errors.Is(err, db.ErrOAuthProviderAlreadyLinked) {
+		t.Errorf("a second subject for the provider: %v, want ErrOAuthProviderAlreadyLinked", err)
+	}
+}
+
+// TestAnOAuthSignInThroughTheCallbackBindsTheChosenProfile pins the
+// callback's use of oauthSignInProfile: the session it creates is bound to
+// the chosen profile with its PIN rechecked, and a password account whose
+// every profile is locked is refused.
+func TestAnOAuthSignInThroughTheCallbackBindsTheChosenProfile(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	subject := fmt.Sprintf("signin-%d", time.Now().UnixNano())
+	if err := f.q.AddOAuthIdentity(ctx, f.userID, "google", subject); err != nil {
+		t.Fatalf("link an identity: %v", err)
+	}
+	f.setPIN(t, "4321")
+	h := newHookHandler(t, f, &OAuthProfile{Subject: subject, Email: subject + "@example.com", EmailVerified: true}, nil)
+	sessions := func() (int, *int64) {
+		t.Helper()
+		var n int
+		var bound *int64
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE user_id = $1`, f.userID).Scan(&n); err != nil {
+			t.Fatalf("count sessions: %v", err)
+		}
+		_ = pool.QueryRow(ctx, `SELECT active_profile_id FROM refresh_tokens WHERE user_id = $1 ORDER BY id DESC LIMIT 1`, f.userID).Scan(&bound)
+		return n, bound
+	}
+	before, _ := sessions()
+	runOAuthCallback(t, f, h, db.OAuthTxnModeLogin, nil)
+	after, bound := sessions()
+	if after != before+1 || bound == nil || *bound != f.kid.ID {
+		t.Fatalf("a sign-in with the default locked: %d new sessions, bound to %v; want one, bound to the kid %d", after-before, bound, f.kid.ID)
+	}
+	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
+		t.Fatalf("lock the kid: %d %s", code, body)
+	}
+	before, _ = sessions()
+	w := runOAuthCallback(t, f, h, db.OAuthTxnModeLogin, nil)
+	if after, _ := sessions(); after != before {
+		t.Errorf("a sign-in with every profile locked on a password account created %d sessions, want none", after-before)
+	}
+	if !strings.Contains(w.Body.String(), "Every profile on this account has a PIN") {
+		t.Errorf("the callback answered %q, want the every-profile-locked page", w.Body.String())
+	}
+}
+
+// TestPairingAndSignInGetARealProfileWithoutADefault: an account with
+// profiles but no default (the TV creates a first profile that is not the
+// default) read as having none, so a no-password sign-in or pairing with
+// every profile locked handed out the unrestricted stand-in.
+func TestPairingAndSignInGetARealProfileWithoutADefault(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	bare := seedReqUser(t, f.q)
+	if p, _, err := f.q.MostRestrictiveProfilePIN(ctx, bare, 0); err != nil || p == nil || p.ID != 0 {
+		t.Fatalf("an account with no profile: %+v (err %v), want the stand-in", p, err)
+	}
+	only := &models.UserProfile{UserID: bare, Name: "first", Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, only); err != nil {
+		t.Fatalf("create a non-default profile: %v", err)
+	}
+	if p, _, err := f.q.MostRestrictiveProfilePIN(ctx, bare, 0); err != nil || p == nil || p.ID != only.ID {
+		t.Errorf("an account with a profile but no default: %+v (err %v), want that profile %d", p, err, only.ID)
+	}
+}

@@ -77,6 +77,11 @@ interface SettingsViewProps {
   onLogout?: () => void
   onToast?: (message: string, type?: Toast['type']) => void
   activeProfile?: Profile | null
+  /** Whether the session's profile is known (App's personalProfileReady): a
+   *  binding read, or an account with no profile. While it is not, the
+   *  profile and sign-in management controls stay hidden, as for a
+   *  restricted profile, since the session could be acting as one. */
+  profileKnown?: boolean
   onMaturityChange?: (pref: number) => void | Promise<void>
   onAvatarChange?: (avatarUrl: string) => void | Promise<void>
   /** Opens /user/:username for the signed-in user (threaded from App's
@@ -86,7 +91,7 @@ interface SettingsViewProps {
    *  so its copy, which decides whether a switch prompts, is re-read. */
   onProfilesChanged?: () => void
 }
-export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange, onAvatarChange, onOpenMyProfile, onProfilesChanged }: SettingsViewProps = {}) {
+export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, profileKnown = false, onMaturityChange, onAvatarChange, onOpenMyProfile, onProfilesChanged }: SettingsViewProps = {}) {
   // Phase E2c content-tone dial. Optimistic local override so the chip flips
   // instantly; reset when the active profile changes (server value wins again).
   const [localMaturity, setLocalMaturity] = useState<number | null>(null)
@@ -752,11 +757,11 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         <div className="md:col-span-2">
           {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
-          <SignInMethodsCard activeProfile={activeProfile ?? null} onToast={onToast} />
+          <SignInMethodsCard activeProfile={activeProfile ?? null} profileKnown={profileKnown} onToast={onToast} />
         </div>
 
         <div className="md:col-span-2">
-          <ProfilesAndWatchlistsCard actingProfile={activeProfile ?? null} onToast={onToast} onProfilesChanged={onProfilesChanged} />
+          <ProfilesAndWatchlistsCard actingProfile={activeProfile ?? null} profileKnown={profileKnown} onToast={onToast} onProfilesChanged={onProfilesChanged} />
         </div>
 
         {/* Gamification: XP card + achievements grid. */}
@@ -976,11 +981,13 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
 // A restricted session cannot link or unlink sign-in methods (the server
 // refuses: a new link would let it sign in again without the password,
 // after its session ends), so it gets a note instead of the card.
-export function SignInMethodsCard({ activeProfile, onToast }: {
+export function SignInMethodsCard({ activeProfile, profileKnown, onToast }: {
   activeProfile: Profile | null
+  /** False while the session's profile is unknown: then it is treated as restricted. */
+  profileKnown: boolean
   onToast?: (message: string, type?: Toast['type']) => void
 }) {
-  return isRestrictedProfile(activeProfile)
+  return !profileKnown || isRestrictedProfile(activeProfile)
     ? <p className="glass-panel rounded-2xl p-6 text-white/55 text-sm">Sign-in methods can only be managed from a profile without a content limit.</p>
     : <ConnectedAccountsCard onToast={onToast} />
 }
@@ -1097,12 +1104,15 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
 // A session acting as a restricted profile (one with a content limit) gets no
 // management controls: the server refuses those writes from it anyway, and a
 // kid's session should not be shown a way to try.
-function ProfilesAndWatchlistsCard({ actingProfile, onToast, onProfilesChanged }: {
+function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast, onProfilesChanged }: {
   actingProfile: Profile | null
+  /** False while the session's profile is unknown: then it is treated as restricted. */
+  profileKnown: boolean
   onToast?: (message: string, type?: Toast['type']) => void
   onProfilesChanged?: () => void
 }) {
-  const restricted = isRestrictedProfile(actingProfile)
+  // An unknown profile (the startup list failed) could be a restricted one.
+  const restricted = !profileKnown || isRestrictedProfile(actingProfile)
   const [profiles, setProfiles] = useState<Profile[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
@@ -1193,7 +1203,9 @@ function ProfilesAndWatchlistsCard({ actingProfile, onToast, onProfilesChanged }
           </div>
           {restricted ? (
             <p className="text-white/50 text-xs mb-4">
-              {actingProfile?.name} has a content limit, so profiles and PINs can only be managed from a profile without one.
+              {actingProfile
+                ? `${actingProfile.name} has a content limit, so profiles and PINs can only be managed from a profile without one.`
+                : "This session's profile could not be confirmed, so profiles and PINs can only be managed after a reload."}
             </p>
           ) : (
             <ProfileLockPanel

@@ -6279,6 +6279,7 @@ export default function App() {
                 onLogout={handleLogout}
                 onToast={addToast}
                 activeProfile={profiles.find(p => p.id === activeProfileId) ?? null}
+                profileKnown={personalProfileReady}
                 onMaturityChange={(pref) => {
                   if (!activeProfileId) return
                   // Return the promise so SettingsView can roll back its optimistic

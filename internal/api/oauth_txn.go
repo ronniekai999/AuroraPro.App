@@ -298,6 +298,14 @@ func (h *OAuthHandler) consumeOAuthTxn(
 // against a 10-minute OAuth window, so an otherwise-valid link would otherwise
 // fail whenever the token aged out mid-round-trip.
 func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, linkUID int64) bool {
+	_, ok := h.linkSession(ctx, r, linkUID)
+	return ok
+}
+
+// linkSession is linkSessionMatches that also returns the session row it
+// matched (0 when the access token names none), for the identity insert to
+// recheck under the account lock.
+func (h *OAuthHandler) linkSession(ctx context.Context, r *http.Request, linkUID int64) (int64, bool) {
 	if c, err := r.Cookie(auth.AccessCookieName); err == nil && c.Value != "" {
 		if claims, verr := h.authSvc.ValidateAccessToken(c.Value); verr == nil {
 			// Belt-and-braces only: ValidateAccessToken already refuses a
@@ -306,15 +314,15 @@ func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, 
 			// the rule "a playback-scoped token cannot manage sign-in methods"
 			// is enforced locally too if that validator ever loosens.
 			if claims.Scope != "" {
-				return false
+				return 0, false
 			}
 			if claims.UserID != linkUID {
-				return false
+				return 0, false
 			}
 			// Honour a password change that landed mid-flow: the middleware
 			// checks token_version on every other authenticated route, and a
 			// link is not a weaker action than those.
-			return h.tokenVersionCurrent(ctx, linkUID, claims.TokenVersion) &&
+			return claims.RefreshTokenID, h.tokenVersionCurrent(ctx, linkUID, claims.TokenVersion) &&
 				h.linkSessionMayManage(ctx, linkUID, claims.RefreshTokenID)
 		}
 		// Present but unverifiable (expired or tampered) — fall through to the
@@ -327,13 +335,13 @@ func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, 
 		rt, rerr := h.queries.GetRefreshToken(ctx, c.Value)
 		if rerr != nil {
 			slog.Error("oauth link callback: refresh lookup", "user_id", linkUID, "error", rerr)
-			return false
+			return 0, false
 		}
 		if rt != nil && rt.UserID == linkUID {
-			return h.linkSessionMayManage(ctx, linkUID, rt.ID)
+			return rt.ID, h.linkSessionMayManage(ctx, linkUID, rt.ID)
 		}
 	}
-	return false
+	return 0, false
 }
 
 // linkSessionMayManage reports whether the session a link started from may

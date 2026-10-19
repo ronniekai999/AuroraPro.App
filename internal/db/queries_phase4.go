@@ -235,11 +235,25 @@ func (q *Queries) mostRestrictiveProfile(ctx context.Context, userID int64) (*mo
 // account with no password whose every profile is locked, preferring the
 // approver's own profile so the device crosses no other profile's PIN when it
 // need not; the hash goes with the grant, so a PIN changed before the device
-// collects it creates no session.
+// collects it creates no session. Only an account with no profile at all gets
+// the unrestricted stand-in (ID 0): one with profiles but no default (the TV
+// creates a first profile that is not the default, and a restore or
+// hand-written SQL can leave one) gets its first, so a caller reading ID 0 as
+// "no profile yet" cannot hand out the stand-in past every PIN.
 func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID, prefer int64) (*models.UserProfile, *string, error) {
 	p, err := q.mostRestrictiveProfile(ctx, userID)
-	if err != nil || p == nil || p.ID == 0 {
+	if err != nil || p == nil {
 		return p, nil, err
+	}
+	if p.ID == 0 {
+		profiles, err := q.GetProfilesByUser(ctx, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(profiles) == 0 {
+			return p, nil, nil
+		}
+		p = profiles[0]
 	}
 	if prefer != 0 && prefer != p.ID {
 		own, err := q.GetProfile(ctx, prefer)
@@ -674,8 +688,9 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 	if err != nil {
 		return err
 	}
-	// A profile deleted meanwhile (its delete waits on no lock this takes)
-	// would leave the account with no default: an unbound session would then
+	// A profile deleted before this transaction took the lock (the delete
+	// takes the same lock, so it ran wholly before) would leave the account
+	// with no default: an unbound session would then
 	// act as an unrestricted stand-in, and a PIN write end no unbound one.
 	if tag.RowsAffected() != 1 {
 		return ErrProfileGone
