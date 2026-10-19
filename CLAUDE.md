@@ -212,7 +212,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   no binding acts as the default, and `SetDefaultProfile` first binds the
   account's unbound sessions to the old default (revoked rows too: an access
   token resolves through its row after rotation), so re-defaulting moves no
-  other device onto a profile it did not act as. An account with no default
+  live session onto a profile it did not act as; an ended session's
+  still-valid access token, which on an account with no restricted profile
+  acts as the default, and a token naming no session do act as the new one,
+  for up to a token lifetime. An account with no default
   has none to bind them to: there, when the new default has a PIN, its other
   unbound sessions are signed out instead, keeping only the row the asking
   session's access token names (a token older than its session's latest
@@ -519,16 +522,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     are pinned only at the manager. The PIN state activation hands its bind is pinned at
     `checkUnlockHash` for every path (`TestTheUnlockReportsThePINStateItJudged`)
     and end to end only for a PIN removed and set again mid-activation; the
-    bind's recheck itself is pinned, and its lock mode with it: the race
-    tests hold the account lock as the PIN write does (`FOR NO KEY UPDATE`),
-    so weakening any management write's lock fails one, as weakening a bound
-    session insert's fails a revocation test
-    (`TestDeviceSessionIssuanceWaitsForRevocationUserLock`). Rotation's
-    user-row lock is pinned only as one that conflicts with `FOR NO KEY
-    UPDATE`, by a rotation racing a PIN write and a re-default
-    (`TestARotationInFlightCannotCarryABindingPastAWrite`): `FOR SHARE`
-    would pass. Unpinned besides: that the no-default re-default spares
-    bound sessions, and the edit handler's 404.
+    bind's recheck itself is pinned. Most tests that wait on the account
+    lock hold it `FOR NO KEY UPDATE`, so weakening any of its takers to `FOR
+    KEY SHARE` fails one (activation, a link, each management write, the
+    bound session insert, rotation; the last through
+    `TestARotationInFlightCannotCarryABindingPastAWrite`), but weakening one
+    to `FOR SHARE` fails a test only for the PIN write and
+    `keepAnUnrestrictedProfile` (deletes
+    and a ceiling added), whose tests hold `FOR SHARE`: a create, a
+    re-default, a ceiling edit's own lock, the bound session insert and
+    rotation would pass. Unpinned besides: that the no-default re-default
+    spares bound sessions, and the edit handler's 404.
     The onboarding age step's lock for a restricted profile (`ceilingLocked`)
     is tested at its patch helper only; the server refuses the change
     regardless.
