@@ -47,10 +47,9 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 	// on the admin exception for an admin account (internal/api
 	// refuseRestrictedAdmin): its restricted sessions would keep the admin
 	// powers.
-	if strings.TrimSpace(p.MaxAgeRating) != "" {
-		var has bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
-			WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, p.UserID).Scan(&has); err != nil {
+	if HasCeiling(p.MaxAgeRating) {
+		has, err := hasUnrestrictedProfile(ctx, tx, p.UserID)
+		if err != nil {
 			return err
 		}
 		if !has {
@@ -295,13 +294,36 @@ func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID, prefer 
 // session (internal/api refuseRestrictedAdmin), or it would have no way back
 // to them.
 func (q *Queries) HasUnrestrictedProfile(ctx context.Context, userID int64) (bool, error) {
-	var has bool
-	err := q.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
-		WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, userID).Scan(&has)
+	has, err := hasUnrestrictedProfile(ctx, q.pool, userID)
 	if err != nil {
 		return false, fmt.Errorf("check for an unrestricted profile: %w", err)
 	}
 	return has, nil
+}
+
+// hasUnrestrictedProfile reads each ceiling through HasCeiling, as the gates
+// enforce it, not in SQL: btrim strips spaces only, so a hand-written tab
+// read as a ceiling there, and a profile the gates leave unrestricted did not
+// count, granting the exception to an account that has one.
+func hasUnrestrictedProfile(ctx context.Context, querier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, userID int64) (bool, error) {
+	rows, err := querier.Query(ctx, `SELECT COALESCE(max_age_rating, '') FROM user_profiles WHERE user_id = $1`, userID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	has := false
+	for rows.Next() {
+		var rating string
+		if err := rows.Scan(&rating); err != nil {
+			return false, err
+		}
+		if !HasCeiling(rating) {
+			has = true
+		}
+	}
+	return has, rows.Err()
 }
 
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the

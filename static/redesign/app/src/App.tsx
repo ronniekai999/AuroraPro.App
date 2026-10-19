@@ -3050,8 +3050,9 @@ export default function App() {
     })
   }, [realtimeUserId])
   useRealtime({
-    // An admin's socket waits for the startup binding (catalogProfileSettled)
-    // and reopens when the profile or its admin powers change: the server
+    // An admin's socket waits until the startup profile load settles
+    // (catalogProfileSettled) and reopens when the profile or its admin
+    // powers change: the server
     // fixes the socket's role when it connects, and a new sign-in binds the
     // default before the startup re-selection moves it, so a socket opened
     // then gave a kid's session the admin-only events. A ceiling given to, or
@@ -6371,10 +6372,14 @@ export default function App() {
               />
             </ViewSuspense>
           )}
-          {/* Not before the startup binding is read: it fetches on mount,
-              and a fresh sign-in is bound to the default (an admin's powers)
-              until the startup re-selection moves it, so it showed other
-              members' private collections to the kid's tab. */}
+          {/* Not before the startup profile load settles
+              (catalogProfileSettled): it fetches on mount, and a fresh
+              sign-in is bound to the default (an admin's powers) until the
+              startup re-selection moves it, so it showed other members'
+              private collections to the kid's tab. The load settles too when
+              the binding cannot be read or the profile list fails, and the
+              view then mounts under whatever the server has bound, as the
+              catalog does. */}
           {view === 'collections' && !catalogProfileSettled && <ViewFallback />}
           {view === 'collections' && catalogProfileSettled && (
             <ViewSuspense fallback={<ViewFallback />}>

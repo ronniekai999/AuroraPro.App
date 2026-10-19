@@ -189,3 +189,20 @@ func TestCanonicalMaxRating(t *testing.T) {
 		}
 	}
 }
+
+// TestHasCeiling pins the admin checks' reading of a stored ceiling to the
+// ladder's: blank or any whitespace is none, and anything else is one, an
+// unknown value included (it restricts to the all-ages tier).
+func TestHasCeiling(t *testing.T) {
+	for in, want := range map[string]bool{
+		"": false, "  ": false, "\t": false, " \n\r\t ": false,
+		"PG": true, " pg ": true, "\tTV-14": true, "XYZ": true,
+	} {
+		if got := HasCeiling(in); got != want {
+			t.Errorf("HasCeiling(%q) = %v, want %v", in, got, want)
+		}
+		if got := AllowedRatingsForMax(in) != nil; got != want {
+			t.Errorf("AllowedRatingsForMax(%q) restricts = %v, but HasCeiling should agree with %v", in, got, want)
+		}
+	}
+}

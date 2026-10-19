@@ -415,9 +415,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (`showsAdminUI`); on `/admin` until then it says it is checking, or that it
   could not confirm the profile, and a switch to a restricted one leaves
   `/admin`. What it fetched with admin powers goes when they do: the
-  requests list is dropped and collections remount, both waiting for the
-  startup binding first, and the bug-report token's health is hidden and
-  fetched again.
+  requests list is dropped and collections remount, both waiting until the
+  startup profile load settles (`catalogProfileSettled`), as the catalog
+  does, and the bug-report token's health is hidden and fetched again.
   An admin's event socket opens only once the startup profile load settles
   (`catalogProfileSettled`) and reopens whenever the session's profile or
   that profile's admin powers change (`useRealtime`'s `connectionKey`): a
@@ -554,10 +554,27 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - In the exception's state, every restricted profile on the account keeps
     the admin powers, a child's included, not only the loosest; nothing
     reports such accounts, and leaving the state takes SQL or a restore
-    (the web app cannot lift a ceiling from a restricted session). A
-    hand-written tab for a ceiling is one to the server's admin checks and
-    none to the web app (which trims all whitespace), so the web app can
-    show admin UI the server refuses until boot rewrites the value.
+    (the web app cannot lift a ceiling from a restricted session).
+  - The admin checks read a ceiling as the ladder enforces it
+    (`db.HasCeiling`, which `HasUnrestrictedProfile` applies to each profile
+    in Go): blank or any whitespace is none, an unknown value is one. They
+    used to read it as SQL's `btrim` does, which strips spaces only, so a
+    parent stored with a hand-written tab counted as restricted and the
+    kid's session kept the admin powers. The profile-management checks still
+    read other whitespace as a ceiling (`denyRestrictedSession` any
+    non-empty value, the recheck and `keepAnUnrestrictedProfile` `btrim`),
+    which only refuses more: a session on such a value, which boot rewrites,
+    can use the admin pages but not manage profiles. The web app trims as
+    JavaScript does, which differs from Go on a few Unicode characters, so
+    for such a value it can show or hide admin UI the server refuses or
+    grants.
+  - When the startup binding cannot be read, or the profile list fails, the
+    startup load settles anyway (waiting would leave the app stuck), so
+    collections and the requests list mount, and an admin's socket opens,
+    under whatever the server has bound: after a fresh sign-in, the account
+    default, not the profile this browser last used. With the binding
+    unreadable they sit behind the profile picker, which covers the page but
+    does not make it inert.
   - A request already past the admin guard completes after a switch to a
     restricted profile (a backup or restore already running, say). `/ws`
     fixes its role when it connects, so a database error then leaves an
@@ -574,22 +591,22 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and scoped-token cases at the middleware, `adminPowers`' cases, the
     collections list and the socket's role through a request, the
     exception through the router and its predicate against the database
-    (`''` and spaces read as no ceiling and a tab as one, as Go's
-    `hasCeiling` and SQL's `btrim` both strip spaces only, a store that
-    cannot say grants
-    nothing, a ceilinged first profile refused), and the party QR code and
-    the feedback config at the handler (`admin_restricted_test.go`,
-    `party_qr_test.go`). The other `adminPowers`
-    sites are not, nor is an admin account with no profile through a real
-    database, nor the router's wiring of the QR and feedback handlers' store
-    (dropped, an unrestricted admin silently loses those two powers). In the
-    SPA, `showsAdminUI`, TopNav's use of its `adminUI` prop, the scan bar's
-    hiding and the socket's reconnect are tested; the App wiring (computing
-    `adminUI` and passing it to TopNav, the scan bar, the panels, collections
-    and the player; the admin view's mount and its notice, the redirect, the
-    detail page's admin actions, the socket's gate and key, dropping the
-    requests list, remounting collections, hiding the token's health) has no
-    App-level test. Settings still labels the account's role, admin included, in a
+    (`''`, spaces and a tab read as no ceiling and an unknown value as one,
+    as the ladder reads them, `TestHasCeiling`; a store that cannot say
+    grants nothing; a ceilinged first profile refused), and the party QR
+    code and the feedback config at the handler (`admin_restricted_test.go`,
+    `party_qr_test.go`). The other `adminPowers` sites are not, nor is an
+    admin account with no profile through a real database, nor the router's
+    wiring of the QR and feedback handlers' store (dropped, an unrestricted
+    admin silently loses those two powers). In the SPA, `showsAdminUI`,
+    TopNav's use of its `adminUI` prop, the scan bar's hiding and the
+    socket's reconnect are tested; the App wiring (computing `adminUI` and
+    passing it to TopNav, the scan bar, the panels, collections and the
+    player; the admin view's mount and its notice, the redirect, the detail
+    page's admin actions, the socket's gate and key, collections and the
+    requests list waiting for the startup load, dropping the requests list,
+    remounting collections, hiding the token's health) has no App-level
+    test. Settings still labels the account's role, admin included, in a
     restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.

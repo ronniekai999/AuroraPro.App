@@ -4,9 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/aurora-media/aurora/internal/auth"
+	"github.com/aurora-media/aurora/internal/db"
 )
 
 // The admin role belongs to the account, not to a profile, so a session
@@ -104,13 +104,11 @@ func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims
 	return err == nil && none
 }
 
-// hasCeiling reads a stored ceiling as the exception's query does (SQL
-// btrim, which strips spaces only), so the two cannot disagree about one
-// profile: a ceiling of spaces is none, and anything else, a tab included, is
-// one. (The ladder and the web app trim all whitespace, so a hand-written tab
-// is no ceiling to them; boot's canonicalization rewrites it.)
+// hasCeiling reads a stored ceiling as the gates enforce it and as the
+// exception's check reads each profile's (db.HasCeiling), so the two cannot
+// disagree about one profile: blank or all whitespace is none.
 func hasCeiling(maxAgeRating string) bool {
-	return strings.Trim(maxAgeRating, " ") != ""
+	return db.HasCeiling(maxAgeRating)
 }
 
 // unrestrictedProfiles is the store method behind the exception above.

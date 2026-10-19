@@ -55,12 +55,13 @@ func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
 	}{
 		{"an unrestricted admin", admin, fakeSessions{acting: free}, true},
 		{"a restricted admin", admin, fakeSessions{acting: kid}, false},
-		// A whitespace-only ceiling (hand-written; boot rewrites it) reads as
-		// none, as the ladder, HasUnrestrictedProfile and the web app read it.
+		// A whitespace-only ceiling (hand-written; boot rewrites it), a tab
+		// included, reads as none, as the ladder enforces it and
+		// HasUnrestrictedProfile reads it.
 		{"an admin on a whitespace-only ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "  "}}, true},
-		// A tab is not one of the spaces btrim strips, so the exception's
-		// query reads it as a ceiling; so must this.
-		{"an admin on a tab for a ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "\t"}}, false},
+		{"an admin on a tab for a ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "\t"}}, true},
+		// An unknown value restricts to the all-ages tier.
+		{"an admin on an unknown ceiling", admin, fakeSessions{acting: &models.UserProfile{ID: 3, MaxAgeRating: "XYZ"}}, false},
 		// With no unrestricted profile on the account, nothing else could use
 		// the admin powers, so a restricted session keeps them.
 		{"a restricted admin on an account with no unrestricted profile", admin, fakeSessions{acting: kid, noneUnrestricted: true}, true},
@@ -390,16 +391,27 @@ func TestTheAdminExceptionNeedsAnAccountWithNoUnrestrictedProfile(t *testing.T) 
 			t.Errorf("a stored ceiling of %q read as a ceiling", stored)
 		}
 	}
-	// btrim strips spaces only, as hasCeiling does: a tab is a ceiling to
-	// both, so they cannot disagree about one profile.
+	// A tab is no ceiling to the ladder, so a parent stored with one is
+	// unrestricted and the kid gets no exception. (SQL's btrim strips spaces
+	// only; read there, the tab was a ceiling and the kid kept the admin
+	// powers.) A concurrent boot canonicalization in another package rewrites
+	// it to NULL, which reads the same.
 	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = E'\t' WHERE id = $1`, f.parent.ID); err != nil {
 		t.Fatalf("store a tab: %v", err)
 	}
-	if has() {
-		t.Error("a stored ceiling of a tab read as none in SQL, though hasCeiling reads it as one")
+	if !has() {
+		t.Error("a stored ceiling of a tab read as a ceiling, though the ladder reads it as none")
 	}
-	if !hasCeiling("\t") {
-		t.Error("hasCeiling read a tab as no ceiling, though the exception's SQL reads it as one")
+	if hasCeiling("\t") {
+		t.Error("hasCeiling read a tab as a ceiling, though the ladder reads it as none")
+	}
+	// An unknown value restricts to the all-ages tier, so it is a ceiling;
+	// canonicalization rewrites it to that tier, which reads the same.
+	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'XYZ' WHERE id = $1`, f.parent.ID); err != nil {
+		t.Fatalf("store an unknown ceiling: %v", err)
+	}
+	if has() {
+		t.Error("a stored ceiling the ladder does not know read as none")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
 		t.Fatalf("restrict every profile: %v", err)
