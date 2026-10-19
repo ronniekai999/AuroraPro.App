@@ -1,0 +1,10 @@
+{
+  "sha": "4a940593055d7eea8830d0e8517ce1691cc8ad4b",
+  "verdict": "lows-only",
+  "summary": "Rebase of the reviewed 79c0f14 onto main after #535's squash merge (7d1773b): the tree is byte-identical to 79c0f14, whose review record was lows-only (full branch, then each fix and doc commit reviewed; the final doc pass found the last wording accurate).",
+  "reviewer": "fresh-agent-admin-r8-r12-docs",
+  "findings": "0",
+  "diff_digest": "40a62443eedafaf201a7f432285b0eec9b1f05d39e0f5a39597ea188ed92fe79",
+  "branch": "claude/gifted-hopper-rfs4s9-admin-restricted",
+  "recorded_at": "2026-10-19T11:39:19Z"
+}
