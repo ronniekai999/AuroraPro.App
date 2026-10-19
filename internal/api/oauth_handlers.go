@@ -531,7 +531,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Only the account password stands in for a PIN, so a linked identity's
 	// sign-in is bound to a profile it may act as without one.
-	signInProfile, err := oauthSignInProfile(r.Context(), h.queries, user.ID, user.PasswordHash != "")
+	signInProfile, signInPIN, err := oauthSignInProfile(r.Context(), h.queries, user.ID, user.PasswordHash != "")
 	if errors.Is(err, errEveryProfileLocked) {
 		h.renderError(w, "Every profile on this account has a PIN. Sign in with the account password instead.")
 		return
@@ -558,7 +558,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
 	}
 	if signInProfile == nil {
-		// Unbound, acting as the default: see oauthSignInProfile.
+		// Unbound: the account has no profile yet (oauthSignInProfile).
 		if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
 			slog.Error("oauth callback: refresh token persist", "error", err)
 			h.renderError(w, "Authentication succeeded but token issuance failed.")
@@ -568,6 +568,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		// Inserted under the account lock with the profile's PIN rechecked,
 		// so a PIN set since the choice above creates nothing.
 		newRT.ActiveProfileID = &signInProfile.ID
+		newRT.BoundPINHash = signInPIN
 		created, err := h.queries.CreateRefreshTokenAtVersion(r.Context(), newRT, user.TokenVersion)
 		if err != nil {
 			slog.Error("oauth callback: refresh token persist", "error", err)
@@ -1172,38 +1173,49 @@ var errEveryProfileLocked = errors.New("every profile on the account has a PIN")
 type oauthSignInProfiles interface {
 	GetDefaultProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
 	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
+	MostRestrictiveProfilePIN(ctx context.Context, userID, prefer int64) (*models.UserProfile, *string, error)
 }
 
 // oauthSignInProfile picks the profile a sign-in through a linked identity
-// binds its session to. The account password stands in for any PIN, by the
-// owner's choice, and a linked identity does not: on a family computer where
-// a parent stays signed in to the provider, it would otherwise be one click
-// past the default profile's lock. So the session gets the default when it
-// has no PIN, else the account's most restrictive unlocked profile, as device
-// pairing does; with every profile locked it is refused (errEveryProfileLocked)
-// and the password is the way in.
+// binds its session to, and the PIN state that choice was judged under (for
+// the session insert's recheck). The account password stands in for any PIN,
+// by the owner's choice, and a linked identity does not: on a family computer
+// where a parent stays signed in to the provider, it would otherwise be one
+// click past the default profile's lock, and anyone who linked their own
+// identity while on an unlocked profile would keep that way in after a PIN
+// was set. So the session gets the default when it has no PIN, else the
+// account's most restrictive unlocked profile, as device pairing does. With
+// every profile locked it is refused (errEveryProfileLocked) and the password
+// is the way in; an account with no password has no other way in, so it gets
+// the most restrictive profile without its PIN, as pairing does, which is
+// never looser than any other profile on it.
 //
-// Nil, nil leaves the session unbound, acting as the default: for an account
-// with no password, whose linked identity is its only credential and so
-// stands in for a PIN the way a password does (refusing it would lock the
-// owner out), and for an account with no profile yet.
-func oauthSignInProfile(ctx context.Context, q oauthSignInProfiles, userID int64, hasPassword bool) (*models.UserProfile, error) {
-	if !hasPassword {
-		return nil, nil
-	}
+// Nil leaves the session unbound, acting as the default, only for an account
+// with no profile yet.
+func oauthSignInProfile(ctx context.Context, q oauthSignInProfiles, userID int64, hasPassword bool) (*models.UserProfile, *string, error) {
 	def, err := q.GetDefaultProfile(ctx, userID)
-	if err != nil || def == nil {
-		return nil, err
+	if err != nil {
+		return nil, nil, err
 	}
-	if !def.HasPIN {
-		return def, nil
+	if def != nil && !def.HasPIN {
+		return def, nil, nil
 	}
 	unlocked, err := q.MostRestrictiveUnlockedProfile(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if unlocked == nil {
-		return nil, errEveryProfileLocked
+	if unlocked != nil {
+		return unlocked, nil, nil
 	}
-	return unlocked, nil
+	locked, hash, err := q.MostRestrictiveProfilePIN(ctx, userID, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	if locked == nil || locked.ID == 0 {
+		return nil, nil, nil // no profile yet
+	}
+	if hasPassword {
+		return nil, nil, errEveryProfileLocked
+	}
+	return locked, hash, nil
 }

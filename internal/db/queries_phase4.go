@@ -35,7 +35,7 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, p.UserID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, p.UserID); err != nil {
 		return err
 	}
 	if err := recheckManager(ctx, tx, 0, judged); err != nil {
@@ -285,7 +285,7 @@ var ErrProfilePINChanged = errors.New("the profile's PIN changed")
 // the profile's PIN is still the one the caller judged: wantHash nil checks
 // nothing, "" means the profile had no PIN, and anything else is the hash
 // the presented PIN matched. A mismatch is ErrProfilePINChanged. It takes
-// the user row FOR SHARE, so SetProfilePIN (FOR UPDATE) runs wholly before
+// the user row FOR SHARE, so SetProfilePIN (FOR NO KEY UPDATE) runs wholly before
 // or after it: a PIN set in between would otherwise revoke nothing (the
 // session was not yet bound to the profile) and the bind would then put it
 // on the newly locked profile.
@@ -386,6 +386,8 @@ type ManagerJudgement struct {
 }
 
 var (
+	// ErrProfileGone refuses a write whose profile was deleted meanwhile.
+	ErrProfileGone = errors.New("the profile was deleted meanwhile")
 	// ErrSessionEnded refuses a management write whose session's row went
 	// (a PIN write, a profile delete) after the handler judged it live.
 	ErrSessionEnded = errors.New("the session asking has ended")
@@ -525,7 +527,7 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
-		WHERE p.id = $1 FOR UPDATE OF u`, profileID); err != nil {
+		WHERE p.id = $1 FOR NO KEY UPDATE OF u`, profileID); err != nil {
 		return err
 	}
 	if judged != nil {
@@ -576,7 +578,7 @@ var ErrLastUnrestrictedProfile = errors.New("the account's last profile without 
 func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
-		WHERE p.id = $1 FOR UPDATE OF u`, profileID); err != nil {
+		WHERE p.id = $1 FOR NO KEY UPDATE OF u`, profileID); err != nil {
 		return err
 	}
 	var last bool
@@ -647,7 +649,7 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err = tx.Exec(ctx, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE", userID); err != nil {
+	if _, err = tx.Exec(ctx, "SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE", userID); err != nil {
 		return err
 	}
 	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
@@ -667,10 +669,16 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 		return err
 	}
 
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		"UPDATE user_profiles SET is_default = TRUE WHERE id = $1 AND user_id = $2", profileID, userID)
 	if err != nil {
 		return err
+	}
+	// A profile deleted meanwhile (its delete waits on no lock this takes)
+	// would leave the account with no default: an unbound session would then
+	// act as an unrestricted stand-in, and a PIN write end no unbound one.
+	if tag.RowsAffected() != 1 {
+		return ErrProfileGone
 	}
 
 	return tx.Commit(ctx)

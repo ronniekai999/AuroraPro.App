@@ -974,9 +974,8 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
 // callback redirect: shows a success toast and strips the param so a refresh
 // doesn't re-toast.
 // A restricted session cannot link or unlink sign-in methods (the server
-// refuses: a new link would let it sign in again without the password, and
-// on an account with no password land on the default without its PIN), so it
-// gets a note instead of the card.
+// refuses: a new link would let it sign in again without the password,
+// after its session ends), so it gets a note instead of the card.
 export function SignInMethodsCard({ activeProfile, onToast }: {
   activeProfile: Profile | null
   onToast?: (message: string, type?: Toast['type']) => void

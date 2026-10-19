@@ -1382,39 +1382,57 @@ func TestACeilingWriteRefusesALimitChangedMeanwhile(t *testing.T) {
 
 // TestAnOAuthSignInDoesNotStandInForAPIN: a sign-in through a linked identity
 // landed on the account default without its PIN; only the account password
-// stands in for one. It now gets the default only while that has no PIN.
+// stands in for one. It now gets the default only while that has no PIN, on
+// an account with a password or without one: on one without, anyone who had
+// linked their own identity kept a way past the PIN set after.
 func TestAnOAuthSignInDoesNotStandInForAPIN(t *testing.T) {
 	f := newLockFixture(t)
 	ctx := context.Background()
-	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); err != nil || p == nil || p.ID != f.parent.ID {
-		t.Fatalf("an unlocked default: %+v (err %v), want the default %d", p, err, f.parent.ID)
+	for _, hasPassword := range []bool{true, false} {
+		if p, h, err := oauthSignInProfile(ctx, f.q, f.userID, hasPassword); err != nil || p == nil || p.ID != f.parent.ID || h != nil {
+			t.Fatalf("an unlocked default (password %v): %+v, PIN %v (err %v), want the default %d", hasPassword, p, h, err, f.parent.ID)
+		}
 	}
 	f.setPIN(t, "4321")
-	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); err != nil || p == nil || p.ID != f.kid.ID {
-		t.Errorf("a locked default: %+v (err %v), want the most restrictive unlocked profile, the kid %d", p, err, f.kid.ID)
+	for _, hasPassword := range []bool{true, false} {
+		if p, h, err := oauthSignInProfile(ctx, f.q, f.userID, hasPassword); err != nil || p == nil || p.ID != f.kid.ID || h != nil {
+			t.Errorf("a locked default (password %v): %+v, PIN %v (err %v), want the most restrictive unlocked profile, the kid %d", hasPassword, p, h, err, f.kid.ID)
+		}
 	}
 	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
 		t.Fatalf("lock the kid: %d %s", code, body)
 	}
-	if p, err := oauthSignInProfile(ctx, f.q, f.userID, true); !errors.Is(err, errEveryProfileLocked) {
+	if p, _, err := oauthSignInProfile(ctx, f.q, f.userID, true); !errors.Is(err, errEveryProfileLocked) {
 		t.Errorf("every profile locked: %+v (err %v), want errEveryProfileLocked", p, err)
 	}
-	// An account with no password has only its linked identity, which then
-	// stands in for a PIN as a password does; refusing it would lock the
-	// owner out. Unbound, the session acts as the default.
-	if p, err := oauthSignInProfile(ctx, f.q, f.userID, false); err != nil || p != nil {
-		t.Errorf("no password, every profile locked: %+v (err %v), want unbound", p, err)
+	// An account with no password has no other way in, so with every profile
+	// locked it gets the most restrictive one without its PIN, as pairing
+	// does, and the session insert rechecks that PIN.
+	p, hash, err := oauthSignInProfile(ctx, f.q, f.userID, false)
+	if err != nil || p == nil || p.ID != f.kid.ID || hash == nil {
+		t.Fatalf("no password, every profile locked: %+v, PIN %v (err %v), want the kid %d with its PIN", p, hash, err, f.kid.ID)
 	}
-	// The session insert rechecks the chosen profile's PIN under the account
-	// lock, so a PIN set after the choice creates nothing.
-	rt := &models.RefreshToken{UserID: f.userID, Token: fmt.Sprintf("oauth-%d", time.Now().UnixNano()),
-		ExpiresAt: time.Now().Add(time.Hour), ActiveProfileID: &f.parent.ID}
 	u, err := f.q.GetUserByID(ctx, f.userID)
 	if err != nil {
 		t.Fatalf("read the user: %v", err)
 	}
-	if created, err := f.q.CreateRefreshTokenAtVersion(ctx, rt, u.TokenVersion); err != nil || created {
-		t.Errorf("a session bound to a profile locked since the choice: created %v (err %v), want none", created, err)
+	session := func(profileID int64, judged *string) bool {
+		t.Helper()
+		rt := &models.RefreshToken{UserID: f.userID, Token: fmt.Sprintf("oauth-%d", time.Now().UnixNano()),
+			ExpiresAt: time.Now().Add(time.Hour), ActiveProfileID: &profileID, BoundPINHash: judged}
+		created, err := f.q.CreateRefreshTokenAtVersion(ctx, rt, u.TokenVersion)
+		if err != nil {
+			t.Fatalf("create the session: %v", err)
+		}
+		return created
+	}
+	if !session(f.kid.ID, hash) {
+		t.Error("a session judged under the kid's PIN was not created")
+	}
+	// The session insert rechecks the chosen profile's PIN under the account
+	// lock, so a PIN set after the choice creates nothing.
+	if session(f.parent.ID, nil) {
+		t.Error("a session bound to a profile locked since the choice was created")
 	}
 }
 
@@ -1758,4 +1776,148 @@ func TestAManagementRequestInFlightRechecksItsSession(t *testing.T) {
 			t.Errorf("the parent after the race: %+v, %v; want it still the default", p, err)
 		}
 	})
+}
+
+// TestALinkFinishesOnlyForASessionThatMayStillManage: the link's start
+// refuses a restricted session, but its callback checked only the access
+// cookie's signature, user and version, so a session that a PIN write ended
+// (its token outlives the row) or that became restricted mid-link finished
+// the link anyway; on an account with no password that identity was a way in.
+func TestALinkFinishesOnlyForASessionThatMayStillManage(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	h := newTxnTestHandler(t, f.q)
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil || u == nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	withAccess := func(rt int64) *http.Request {
+		t.Helper()
+		tok, _, err := h.authSvc.GenerateAccessToken(f.userID, u.Username, "user", u.TokenVersion, rt)
+		if err != nil {
+			t.Fatalf("mint an access token: %v", err)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/callback", nil)
+		r.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok})
+		return r
+	}
+	if !h.linkSessionMatches(ctx, withAccess(f.parentRT), f.userID) {
+		t.Fatal("the parent's live, unrestricted session was refused")
+	}
+	if h.linkSessionMatches(ctx, withAccess(f.kidRT), f.userID) {
+		t.Error("a session acting as the restricted kid finished a link")
+	}
+	// Through the refresh cookie too.
+	raw := fmt.Sprintf("link-kid-%d", time.Now().UnixNano())
+	kidRow := &models.RefreshToken{UserID: f.userID, Token: raw, ExpiresAt: time.Now().Add(time.Hour), ActiveProfileID: &f.kid.ID}
+	if err := f.q.CreateRefreshToken(ctx, kidRow); err != nil {
+		t.Fatalf("seed a kid session: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/callback", nil)
+	r.AddCookie(&http.Cookie{Name: auth.RefreshCookieName, Value: raw})
+	if h.linkSessionMatches(ctx, r, f.userID) {
+		t.Error("a restricted session finished a link through its refresh cookie")
+	}
+	// A session a PIN write ended: its access token is still valid. With no
+	// profile left restricted, a token whose row is gone acts as the
+	// unrestricted default, so only the liveness check refuses it.
+	stray := seedRCRefreshToken(t, f.q, f.userID)
+	f.bind(t, stray, f.parent.ID)
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE user_profiles SET max_age_rating = NULL WHERE id = $1`, f.kid.ID); err != nil {
+		t.Fatalf("lift the kid's limit: %v", err)
+	}
+	f.setPIN(t, "4321")
+	if h.linkSessionMatches(ctx, withAccess(stray), f.userID) {
+		t.Error("a session the PIN write ended finished a link")
+	}
+}
+
+// TestRaceTheAccountLockCoversUnboundSessionsAndDeletes: an unbound session
+// acts as the default, so the recheck reads the default's ceiling; and a
+// re-default whose profile was deleted meanwhile left the account with no
+// default at all.
+func TestRaceTheAccountLockCoversUnboundSessionsAndDeletes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("an unbound session whose default gains a ceiling", func(t *testing.T) {
+		f := newLockFixture(t)
+		unbound := seedRCRefreshToken(t, f.q, f.userID)
+		code, reason := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE id = $1`, f.parent.ID)
+			return err
+		}, func() (int, string) {
+			c, r, _ := f.call(t, f.h.CreateProfile, http.MethodPost, unbound, 0, `{"name":"another"}`)
+			return c, r
+		})
+		if code != http.StatusForbidden || reason != "profile_restricted" {
+			t.Errorf("%d %q, want 403 profile_restricted", code, reason)
+		}
+	})
+	t.Run("re-defaulting a profile deleted meanwhile", func(t *testing.T) {
+		f := newLockFixture(t)
+		code, reason := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM user_profiles WHERE id = $1`, f.kid.ID)
+			return err
+		}, func() (int, string) {
+			c, r, _ := f.call(t, f.h.SetDefault, http.MethodPut, f.parentRT, f.kid.ID, "")
+			return c, r
+		})
+		if code != http.StatusNotFound {
+			t.Errorf("%d %q, want 404", code, reason)
+		}
+		if p, err := f.q.GetDefaultProfile(ctx, f.userID); err != nil || p == nil || p.ID != f.parent.ID {
+			t.Errorf("the default after the race: %+v, %v; want the parent still", p, err)
+		}
+	})
+}
+
+// TestDeletingAProfileDoesNotDeadlockWithAChildInsert: a delete held the
+// account lock FOR UPDATE, which blocks the foreign-key lock any insert of a
+// user's child takes, while waiting on the profile row a concurrent insert of
+// the profile's child had locked; a writer inserting a profile's child, then
+// a user's (a recap question does), deadlocked with it. The management writes
+// lock FOR NO KEY UPDATE, which still serializes them with each other, with
+// rotation and with activation, but not with foreign-key inserts.
+func TestDeletingAProfileDoesNotDeadlockWithAChildInsert(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	var holder int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the backend pid: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO watchlists (profile_id, name) VALUES ($1, 'deadlock probe')`, f.kid.ID); err != nil {
+		t.Fatalf("insert the profile's child: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.q.DeleteProfile(ctx, f.kid.ID, nil)
+		done <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`,
+			holder).Scan(&blocked); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if blocked {
+			break
+		}
+	}
+	insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := tx.Exec(insertCtx, `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + interval '1 hour')`,
+		f.userID, fmt.Sprintf("deadlock-probe-%d", time.Now().UnixNano())); err != nil {
+		t.Fatalf("insert the user's child while the delete waits: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("the delete: %v, want it to complete", err)
+	}
 }

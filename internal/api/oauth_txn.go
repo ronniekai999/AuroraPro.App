@@ -314,7 +314,8 @@ func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, 
 			// Honour a password change that landed mid-flow: the middleware
 			// checks token_version on every other authenticated route, and a
 			// link is not a weaker action than those.
-			return h.tokenVersionCurrent(ctx, linkUID, claims.TokenVersion)
+			return h.tokenVersionCurrent(ctx, linkUID, claims.TokenVersion) &&
+				h.linkSessionMayManage(ctx, linkUID, claims.RefreshTokenID)
 		}
 		// Present but unverifiable (expired or tampered) — fall through to the
 		// refresh cookie rather than rejecting outright.
@@ -329,10 +330,28 @@ func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, 
 			return false
 		}
 		if rt != nil && rt.UserID == linkUID {
-			return true
+			return h.linkSessionMayManage(ctx, linkUID, rt.ID)
 		}
 	}
 	return false
+}
+
+// linkSessionMayManage reports whether the session a link started from may
+// still manage sign-in methods: its row is live and its acting profile has no
+// ceiling, as the link's start required (denyRestrictedSession). A PIN write
+// ends a session by deleting its row, and its access token outlives that by
+// up to a token lifetime, longer than a link's state window; without this, a
+// session ended or restricted mid-link finished the link anyway, and on an
+// account with no password that identity was a way in. Fails closed.
+func (h *OAuthHandler) linkSessionMayManage(ctx context.Context, userID, refreshTokenID int64) bool {
+	if refreshTokenID != 0 {
+		live, err := h.queries.SessionLive(ctx, userID, refreshTokenID)
+		if err != nil || !live {
+			return false
+		}
+	}
+	acting, err := h.queries.ResolveActingProfile(ctx, userID, refreshTokenID)
+	return err == nil && acting != nil && acting.MaxAgeRating == ""
 }
 
 // tokenVersionCurrent compares a token's stamped version against the user's

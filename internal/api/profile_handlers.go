@@ -706,6 +706,10 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.queries.SetDefaultProfile(r.Context(), claims.UserID, profileID, managerJudgement(claims, targetPIN)); err != nil {
+		if errors.Is(err, db.ErrProfileGone) {
+			writeError(w, http.StatusNotFound, "profile not found")
+			return
+		}
 		if denyManagerRecheck(w, err) {
 			return
 		}

@@ -255,8 +255,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   or change a PIN, change any ceiling (re-sending its unchanged ceiling
   passes, and is not written), edit another profile's settings through the
   profile routes, or link or unlink a sign-in identity (a new link would let
-  it sign in again without the password, and on an account with no password
-  land on the default without its PIN). These checks fail closed when the acting
+  it sign in again without the password, after its session ends). These
+  checks fail closed when the acting
   profile cannot be resolved, and refuse a session whose row is gone (401
   `session_ended`, `requireLiveSession`): its still-valid access token acts as
   the most restrictive profile, which with no restricted profile left is the
@@ -276,7 +276,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 - An account keeps at least one profile without a ceiling: a ceiling on its
   last one, or that profile's delete, is a 409 `last_unrestricted_profile`
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
-  writes cannot each count the other's profile as the one left). Without it
+  writes cannot each count the other's profile as the one left). The
+  management writes lock the user row `FOR NO KEY UPDATE`: that conflicts
+  with itself, with activation's `FOR SHARE` and with the `FOR UPDATE` of
+  rotation and the session inserts, but not with the foreign-key lock an
+  insert of the account's children takes. `FOR UPDATE` deadlocked a profile
+  delete with a recap question, which inserts a child of the profile and
+  then one of the account. A re-default whose profile was deleted meanwhile
+  is refused (404) rather than leaving the account with no default, which
+  nothing reports or repairs. Without it
   nothing on the account could manage profiles again, and onboarding's age
   step reached that on a single-profile account in one move; that step now
   gives the account's only such profile the tone lean and no ceiling. A
@@ -405,11 +413,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     while that has no PIN, else the account's most restrictive unlocked
     profile, as pairing does, and with every profile locked it is refused;
     the session insert rechecks that profile's PIN under the account lock.
-    An account with no password is the exception: its linked identity is its
-    only credential, so it stands in for a PIN as the password does, and on
-    a family computer a parent left signed in to the provider is one click
-    past the default's lock. The callback's use of the helper has no
-    end-to-end test.
+    An account with no password has no other way in, so there, with every
+    profile locked, the sign-in gets the most restrictive profile without
+    its PIN, as pairing does. It used to land on the default without its PIN
+    whenever the account had no password, so anyone who had linked their own
+    identity while on an unlocked profile kept a way past a PIN set later; a
+    PIN write leaves linked identities in place, and they now land where any
+    linked sign-in does. A link's callback rechecks that the session it
+    started from is still live and unrestricted (`linkSessionMayManage`),
+    since its access token outlives a PIN write. The callback's use of the
+    helper has no end-to-end test.
   - An account with no password (OAuth-only) has no recovery for a forgotten
     PIN short of the database. Nor does a password account whose owner has
     forgotten the password while every profile is locked: there is no
@@ -489,7 +502,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A session a PIN write ended keeps its still-valid access token for up to
     one token lifetime, acting as the account's most restrictive profile, as
     a deleted profile's sessions do; it can read and write that profile's
-    data but cannot manage profiles or pair a device.
+    data, and other profiles' through the `?profile_id=` routes, but cannot
+    manage profiles, pair a device or finish a sign-in link.
   - A PIN write keeps only the session row its access token names, so a tab
     whose token predates its session's latest rotation ends its own session
     too; it signs in again.

@@ -30,6 +30,7 @@ type deviceTestStore struct {
 	// MostRestrictiveProfilePIN's answer.
 	mostRestrictive    *models.UserProfile
 	mostRestrictivePIN *string
+	preferred          int64 // the prefer MostRestrictiveProfilePIN was asked for
 }
 
 func (s *deviceTestStore) SessionLive(context.Context, int64, int64) (bool, error) {
@@ -417,12 +418,16 @@ func TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn(t *testing.T) {
 		if created[0].BoundPINHash == nil || *created[0].BoundPINHash != hash {
 			t.Errorf("the session was judged under PIN %v, want the profile's hash", created[0].BoundPINHash)
 		}
+		if store.preferred != 41 {
+			t.Errorf("asked for the most restrictive profile preferring %d, want the approver's own 41", store.preferred)
+		}
 	})
 }
 
-func (s *deviceTestStore) MostRestrictiveProfilePIN(context.Context, int64, int64) (*models.UserProfile, *string, error) {
+func (s *deviceTestStore) MostRestrictiveProfilePIN(_ context.Context, _ int64, prefer int64) (*models.UserProfile, *string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.preferred = prefer
 	if s.mostRestrictive == nil {
 		return nil, nil, errors.New("no profile")
 	}

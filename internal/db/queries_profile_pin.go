@@ -60,7 +60,7 @@ func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, ha
 		return 0, fmt.Errorf("set profile pin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
 		return 0, fmt.Errorf("set profile pin: %w", err)
 	}
 	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
