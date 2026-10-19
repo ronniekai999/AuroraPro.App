@@ -560,21 +560,26 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     in Go): blank or any whitespace is none, an unknown value is one. They
     used to read it as SQL's `btrim` does, which strips spaces only, so a
     parent stored with a hand-written tab counted as restricted and the
-    kid's session kept the admin powers. The profile-management checks still
-    read other whitespace as a ceiling (`denyRestrictedSession` any
-    non-empty value, the recheck and `keepAnUnrestrictedProfile` `btrim`),
-    which only refuses more: a session on such a value, which boot rewrites,
-    can use the admin pages but not manage profiles. The web app trims as
-    JavaScript does, which differs from Go on a few Unicode characters, so
-    for such a value it can show or hide admin UI the server refuses or
-    grants.
+    kid's session kept the admin powers. The profile-management checks read
+    a ceiling more strictly (the handlers' checks any non-empty value, the
+    SQL rechecks `btrim`), so a session on a whitespace value, which boot
+    rewrites, can use the admin pages but not manage profiles. The write
+    guards read the other profiles that strictly too, and
+    `keepAnUnrestrictedProfile` reads the profile written as the ladder
+    does, so such a value only refuses more there: limiting or deleting a
+    profile stored with one needs another profile free of a limit by every
+    reading, and a write cannot put the account in the exception's state.
+    The web app trims as JavaScript does, which differs from Go on a few
+    Unicode characters, so for such a value it can show or hide admin UI the
+    server refuses or grants.
   - When the startup binding cannot be read, or the profile list fails, the
     startup load settles anyway (waiting would leave the app stuck), so
     collections and the requests list mount, and an admin's socket opens,
     under whatever the server has bound: after a fresh sign-in, the account
     default, not the profile this browser last used. With the binding
     unreadable they sit behind the profile picker, which covers the page but
-    does not make it inert.
+    does not make it inert; a pick drops the requests list, remounts
+    collections and reopens an admin's socket.
   - A request already past the admin guard completes after a switch to a
     restricted profile (a backup or restore already running, say). `/ws`
     fixes its role when it connects, so a database error then leaves an
@@ -592,11 +597,15 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     collections list and the socket's role through a request, the
     exception through the router and its predicate against the database
     (`''`, spaces and a tab read as no ceiling and an unknown value as one,
-    as the ladder reads them, `TestHasCeiling`; a store that cannot say
-    grants nothing; a ceilinged first profile refused), and the party QR
-    code and the feedback config at the handler (`admin_restricted_test.go`,
-    `party_qr_test.go`). The other `adminPowers` sites are not, nor is an
-    admin account with no profile through a real database, nor the router's
+    as the ladder reads them, `TestHasCeiling`; a result cut off mid-read
+    and a store that cannot say grant nothing; a ceilinged first profile
+    refused; limiting or deleting a tab-stored profile beside only
+    restricted ones refused), and the party QR code and the feedback config
+    at the handler (`admin_restricted_test.go`, `party_qr_test.go`,
+    `queries_unrestricted_profile_test.go`). The other `adminPowers` sites
+    are not, nor are the write guards' strict reading of the other profiles
+    (read loosely, a guard refuses less), nor is an admin account with no
+    profile through a real database, nor the router's
     wiring of the QR and feedback handlers' store (dropped, an unrestricted
     admin silently loses those two powers). In the SPA, `showsAdminUI`,
     TopNav's use of its `adminUI` prop, the scan bar's hiding and the

@@ -5808,17 +5808,22 @@ export default function App() {
 
   // An admin's list holds every member's requests (with their usernames) and
   // a restricted session's only the account's own, so it is dropped when the
-  // session's admin powers change: a switch to the kid's profile kept the
-  // parent's list on screen. Dropped during the render that sees the change,
-  // not in an effect after it, so that render never commits the old list.
-  const [requestsAdminUI, setRequestsAdminUI] = useState(adminUI)
-  if (requestsAdminUI !== adminUI) {
-    setRequestsAdminUI(adminUI)
+  // session's profile or its admin powers change: a switch to the kid's
+  // profile kept the parent's list on screen, and so did a pick of the kid's
+  // when the startup binding could not be read (the app shows no admin UI
+  // then, but the list was fetched under whatever the server had bound).
+  // Dropped during the render that sees the change, not in an effect after
+  // it, so that render never commits the old list.
+  const requestsKey = `${activeProfileId}:${adminUI}`
+  const [requestsFor, setRequestsFor] = useState(requestsKey)
+  if (requestsFor !== requestsKey) {
+    setRequestsFor(requestsKey)
     setRequestsList(null)
   }
-  // Requests list — lazy-fetch on first visit to the tab, once the session's
-  // profile is known (catalogProfileSettled), so a list fetched for the
+  // Requests list — lazy-fetch on first visit to the tab, once the startup
+  // profile load settles (catalogProfileSettled), so a list fetched for the
   // default before the startup re-selection moves the session is not shown.
+  // A fetch in flight across a change of profile is dropped with it.
   useEffect(() => {
     if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled) return
     let cancelled = false
@@ -5831,7 +5836,7 @@ export default function App() {
         setRequestsList([])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, requestsList, catalogProfileSettled, adminUI])
+  }, [user, view, requestsList, catalogProfileSettled, requestsKey])
 
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {

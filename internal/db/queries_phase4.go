@@ -46,10 +46,13 @@ func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, j
 	// stand-in) would leave nothing on it able to manage profiles, and turn
 	// on the admin exception for an admin account (internal/api
 	// refuseRestrictedAdmin): its restricted sessions would keep the admin
-	// powers.
+	// powers. The existing profiles are read as the management rechecks read
+	// them (btrim, which strips spaces only), more strictly than the
+	// exception does, so a hand-written whitespace ceiling only refuses more.
 	if HasCeiling(p.MaxAgeRating) {
-		has, err := hasUnrestrictedProfile(ctx, tx, p.UserID)
-		if err != nil {
+		var has bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_profiles
+			WHERE user_id = $1 AND NULLIF(btrim(max_age_rating), '') IS NULL)`, p.UserID).Scan(&has); err != nil {
 			return err
 		}
 		if !has {
@@ -643,27 +646,34 @@ var ErrLastUnrestrictedProfile = errors.New("the account's last profile without 
 // account's user row first, so two such writes cannot each see the other's
 // profile as the one left free. A profile that already has a limit passes:
 // re-sending a limit is how a restricted session's own edits round-trip it.
+//
+// The profile written is read loosely, as the ladder does (HasCeiling), and
+// the others strictly, as the management rechecks do (btrim, which strips
+// spaces only), so a hand-written whitespace ceiling only refuses more: one
+// on the profile written counts as free, so limiting or deleting it cannot
+// leave the account in internal/api's admin exception, and one on another
+// profile counts as limited, since those rechecks refuse its sessions.
 func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id
 		WHERE p.id = $1 FOR NO KEY UPDATE OF u`, profileID); err != nil {
 		return err
 	}
-	var last bool
+	var rating string
+	var otherFree bool
 	err := tx.QueryRow(ctx, `
-		SELECT NULLIF(btrim(p.max_age_rating), '') IS NULL
-		       AND NOT EXISTS (
+		SELECT COALESCE(p.max_age_rating, ''), EXISTS (
 		         SELECT 1 FROM user_profiles o
 		         WHERE o.user_id = p.user_id AND o.id <> p.id
 		           AND NULLIF(btrim(o.max_age_rating), '') IS NULL)
-		FROM user_profiles p WHERE p.id = $1`, profileID).Scan(&last)
+		FROM user_profiles p WHERE p.id = $1`, profileID).Scan(&rating, &otherFree)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if last {
+	if !HasCeiling(rating) && !otherFree {
 		return ErrLastUnrestrictedProfile
 	}
 	return nil
