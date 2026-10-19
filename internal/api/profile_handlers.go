@@ -938,21 +938,27 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 // Watchlist Handlers
 // ============================================================
 
-// requireProfileOwnership resolves the {profileId} of a watchlist or My
-// Library route: one of the account's profiles, and for a session acting as a
-// restricted profile only that profile (resolveRequestProfile). Those lists
-// read titles back with no ceiling, so another profile's lists would show a
-// restricted session whatever that profile had saved.
-func (h *ProfileHandler) requireProfileOwnership(w http.ResponseWriter, r *http.Request) (int64, bool) {
+// requireOwnedProfile resolves the {profileId} of a watchlist or My Library
+// route: one of the account's profiles, and for a session acting as a
+// restricted profile only that profile (resolveRequestProfile). A list is
+// read back under its own profile's ceiling, so a restricted session naming an
+// unrestricted profile would see everything that profile had saved.
+func (h *ProfileHandler) requireOwnedProfile(w http.ResponseWriter, r *http.Request) (*models.UserProfile, bool) {
 	if _, ok := requireClaims(w, r); !ok {
-		return 0, false
+		return nil, false
 	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "profileId"), 10, 64)
 	if err != nil || profileID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
-		return 0, false
+		return nil, false
 	}
-	profile, ok := resolveRequestProfile(w, r, h.queries, profileID)
+	return resolveRequestProfile(w, r, h.queries, profileID)
+}
+
+// requireProfileOwnership is requireOwnedProfile for routes that need only
+// the id.
+func (h *ProfileHandler) requireProfileOwnership(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return 0, false
 	}
@@ -980,12 +986,14 @@ func (h *ProfileHandler) requireWatchlistOwnership(w http.ResponseWriter, r *htt
 
 // ListWatchlists returns all watchlists for a profile.
 func (h *ProfileHandler) ListWatchlists(w http.ResponseWriter, r *http.Request) {
-	profileID, ok := h.requireProfileOwnership(w, r)
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return
 	}
 
-	lists, err := h.queries.GetWatchlistsByProfile(r.Context(), profileID)
+	// Counts under the profile's ceiling, like the lists' items.
+	lists, err := h.queries.GetWatchlistsByProfile(r.Context(), profile.ID,
+		db.AllowedRatingsForMax(profile.MaxAgeRating))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list watchlists")
 		return
@@ -1062,20 +1070,22 @@ func (h *ProfileHandler) DeleteWatchlist(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "watchlist deleted"})
 }
 
-// GetWatchlistItems returns items in a watchlist.
+// GetWatchlistItems returns items in a watchlist, under the profile's
+// ceiling: a list can hold titles saved before the ceiling was set.
 func (h *ProfileHandler) GetWatchlistItems(w http.ResponseWriter, r *http.Request) {
-	profileID, ok := h.requireProfileOwnership(w, r)
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return
 	}
 
-	listID, ok := h.requireWatchlistOwnership(w, r, profileID)
+	listID, ok := h.requireWatchlistOwnership(w, r, profile.ID)
 	if !ok {
 		return
 	}
 
 	params := paginate(r)
-	items, total, err := h.queries.GetWatchlistItems(r.Context(), listID, params)
+	items, total, err := h.queries.GetWatchlistItems(r.Context(), listID, params,
+		db.AllowedRatingsForMax(profile.MaxAgeRating))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get watchlist items")
 		return
@@ -1087,14 +1097,15 @@ func (h *ProfileHandler) GetWatchlistItems(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, paginatedResponse(items, total, params))
 }
 
-// AddToWatchlist adds an item to a watchlist.
+// AddToWatchlist adds an item to a watchlist. The profile's ceiling must
+// allow the title, or the answer is the 404 a missing title gets.
 func (h *ProfileHandler) AddToWatchlist(w http.ResponseWriter, r *http.Request) {
-	profileID, ok := h.requireProfileOwnership(w, r)
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return
 	}
 
-	listID, ok := h.requireWatchlistOwnership(w, r, profileID)
+	listID, ok := h.requireWatchlistOwnership(w, r, profile.ID)
 	if !ok {
 		return
 	}
@@ -1107,6 +1118,10 @@ func (h *ProfileHandler) AddToWatchlist(w http.ResponseWriter, r *http.Request) 
 
 	if req.MediaItemID <= 0 {
 		writeError(w, http.StatusBadRequest, "media_item_id required")
+		return
+	}
+	if hidden, err := mediaHidden(r.Context(), h.queries, profile, req.MediaItemID); err != nil || hidden {
+		denyHiddenMedia(w, req.MediaItemID, err)
 		return
 	}
 
@@ -1129,18 +1144,20 @@ func (h *ProfileHandler) AddToWatchlist(w http.ResponseWriter, r *http.Request) 
 // GetLibrary returns the profile's "My Library" saved items — the set behind
 // the + save button. Backed by a reserved default watchlist so saves persist
 // server-side and sync across devices (previously they lived only in one
-// browser's localStorage).
+// browser's localStorage). Read under the profile's ceiling, like
+// GetWatchlistItems.
 func (h *ProfileHandler) GetLibrary(w http.ResponseWriter, r *http.Request) {
-	profileID, ok := h.requireProfileOwnership(w, r)
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return
 	}
-	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profileID)
+	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profile.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve library")
 		return
 	}
-	items, err := h.queries.GetAllWatchlistItems(r.Context(), wl.ID)
+	items, err := h.queries.GetAllWatchlistItems(r.Context(), wl.ID,
+		db.AllowedRatingsForMax(profile.MaxAgeRating))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get library items")
 		return
@@ -1149,9 +1166,10 @@ func (h *ProfileHandler) GetLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 // AddToLibrary saves a media item to the profile's library. Idempotent —
-// re-saving an already-saved item is a no-op, not an error.
+// re-saving an already-saved item is a no-op, not an error. Gated like
+// AddToWatchlist.
 func (h *ProfileHandler) AddToLibrary(w http.ResponseWriter, r *http.Request) {
-	profileID, ok := h.requireProfileOwnership(w, r)
+	profile, ok := h.requireOwnedProfile(w, r)
 	if !ok {
 		return
 	}
@@ -1164,7 +1182,11 @@ func (h *ProfileHandler) AddToLibrary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "media_item_id required")
 		return
 	}
-	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profileID)
+	if hidden, err := mediaHidden(r.Context(), h.queries, profile, req.MediaItemID); err != nil || hidden {
+		denyHiddenMedia(w, req.MediaItemID, err)
+		return
+	}
+	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profile.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve library")
 		return

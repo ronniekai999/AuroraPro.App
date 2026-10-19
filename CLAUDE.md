@@ -164,24 +164,51 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   `profile_restricted`). Fails closed on a resolve error. The account-wide
   history routes show a restricted session only its own rows, under its
   ceiling.
+- The gated by-id routes (`docs/parental-ceiling.md` lists them) go through
+  `internal/api/ceiling_gate.go`: lookups by id with the acting profile,
+  profile-keyed routes with the resolved profile (so a parent naming the kid
+  gets the kid's ceiling). The stream routes keep their own file check. Under a
+  ceiling a missing id gets the same 404 body as an over-ceiling one, so these
+  routes do not say which ids exist; for an unrestricted profile the gate
+  skips the title lookup. The gated writes (progress, mark watched, thumbs,
+  star ratings, watchlist and My Library adds) are gated because history,
+  anchor rails and the lists read the title back. Collections, party creation
+  and party media changes still take any id (see the gaps). Deleting and
+  clearing are not gated, so a profile can remove what it can no longer see,
+  where it can name it. A progress write's episode is judged on its own show,
+  not the id it is filed under.
 - Coverage is NOT complete. `docs/parental-ceiling.md` is the route-by-route
   map; change its row when you change a route's gate. Never infer coverage
   from a summary; check the handler.
 - Known gaps (examples, not exhaustive):
-  - Profile-keyed but with no ceiling on the data: recaps, progress reads and
-    writes, ratings and feedback, watchlist items and My Library. A restricted
-    session reaches only its own profile, but can write progress or a list
-    entry for any media id and read it back (a recap of an over-ceiling show,
-    for one).
+  - Data recorded before a ceiling: the recommender's anchors come from
+    history with no ceiling, so pre-ceiling progress can still name an
+    over-ceiling title in an anchor rail's "Because you watched", in the
+    `nearest_anchor` captions on `/api/me/recommendations`, and in the LLM
+    prompts behind the hero, discover and rail blurbs. Pre-ceiling 1-2 star
+    ratings of over-ceiling titles likewise reach the hero and discover
+    prompts (`LowRatedAnchors`). A watchlist's pre-ceiling entries (any list
+    but My Library) are hidden from its reads, which also hides the row ids
+    its item DELETE takes, so they go only with the whole list. `GET
+    /api/me/rating` returns the profile's own stars for any id (no title
+    data).
+  - Cross-library copies: the detail, files, episodes and next-episode
+    lookups add files of other items with the same TMDB id without checking
+    those items' ratings, so a restricted profile can be offered a version
+    (with its media id) whose stream then 404s.
+  - Party media changes answer "unknown media for this party" for a missing
+    id and "media exceeds this profile's content rating" for an over-ceiling
+    one, before the host check, so any participant can tell the two apart.
+  - The SPA's My Library snapshot is the profile's own (per account and
+    profile), but can hold titles saved before its ceiling was set or
+    lowered; they show until the server's filtered list arrives, or while
+    offline.
   - No ceiling on listings: every live and scheduled party server-wide
     (`/api/parties/active`, with title and poster), and `/api/calendar`
     (every show's upcoming episodes by date).
-  - No ceiling on lookups by id: `/api/media/{id}/files`, `/next-episode`,
-    episode files, artwork, cast, `/api/stream/info/{fileID}` (tracks and
-    external subtitle filenames), and a party's `highlight.mp4` (membership
-    only). Collections, watchlists and My Library accept any media id and read
-    items back unfiltered, so a restricted profile can enumerate the library
-    through them.
+  - No ceiling on a party's `highlight.mp4` (membership only). Collections
+    accept any media id and read items back unfiltered, so a restricted
+    profile can enumerate the library through them.
   - Transcode sessions rely on their creation-time check: the session cast
     token (`CreateCastToken`) and the session's playlists and segments check
     only account ownership, so a restricted session holding another profile's

@@ -20,18 +20,23 @@ Terms:
   must be the account's, and a restricted session may name only itself (403
   `profile_restricted`). An unrestricted session may name any of them, a
   PIN-locked one included: the lock guards switching, not the data.
+- **By-id gate**: `internal/api/ceiling_gate.go`. Checks a title or episode
+  id against a profile's ceiling and fails closed. Under a ceiling a missing
+  id gets the same 404 body as an over-ceiling one.
 
 ## Enforced from the acting profile
 
 | Routes | Gate |
 |---|---|
 | `GET /api/media`, `/api/media/recent`, `/api/media/search` | SQL before LIMIT; fails open to unrestricted on a resolve error (discovery) |
-| `GET /api/media/{id}`, `/seasons`, `/seasons/{n}/episodes` | Go `RatingAllowed`; fails closed |
+| `GET /api/media/{id}`, `/seasons`, `/seasons/{n}/episodes` | By-id gate. The detail also lists other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
+| `GET /api/media/{id}/files`, `/artwork`, `/cast`, `/next-episode`, `/api/media/episodes/{episodeId}/files` | By-id gate (an episode by its show's rating). Files, episodes and next episode also list other libraries' copies of the title (same TMDB id) without checking those copies' ratings; streaming one is still refused |
+| `GET /api/stream/info/{fileID}` | Go, the stream routes' file check; fails closed, same 404 as a missing file |
 | `GET/HEAD /api/stream/media/{fileID}`, `/episode/{fileID}`, `/{fileID}/direct`, `/direct/{fileID}` | Go; fails closed. A file-bound cast token relies on its mint-time check |
 | `POST /api/stream/{fileID}/cast-token`, `POST /api/stream/sessions` | Go at creation; fails closed |
 | `GET /api/stream/{fileID}/subtitles`, `GET/HEAD .../subtitles/{trackIdx}` | Go; fails closed |
 | `POST /api/collections` (AI seed only) | SQL plus Go re-check; no seed on a resolve error |
-| WS `/ws/party-room` `change-media` | Go; **fails open** when the media or profile lookup errors or finds nothing |
+| WS `/ws/party-room` `change-media` | Go, with the profile resolved when the socket connected; **fails open** when the media or profile lookup errors or finds nothing. A missing id and an over-ceiling one get different errors |
 | `GET /api/members/{username}` watch strip | SQL before the dedup and LIMIT. A restricted non-default session gets no strip on its own account's page (the strip is the default profile's history) |
 
 ## Someone else's ceiling
@@ -44,30 +49,32 @@ Terms:
 
 | Routes | Notes |
 |---|---|
-| `GET /api/me/hero`, `/recommendations`, `/discover`, `/engagement-rails` | Recommender SQL. A ceiling-lookup error builds nothing, and no cache stores the empty result |
+| `GET /api/me/hero`, `/recommendations`, `/discover`, `/engagement-rails` | Recommender SQL. A ceiling-lookup error builds nothing, and no cache stores the empty result. Anchors come from history with no ceiling: `/recommendations` captions name them, and the LLM blurb prompts include them |
 | `GET /api/me/anchor-rails` | Items gated; the anchor's own title comes from history and is not |
 | `GET /api/me/following/recent` | SQL |
-| `GET /api/onboarding/grid`, `/preview`, `POST /api/onboarding/seeds` | SQL; seeds validated against the ceiling |
+| `GET /api/onboarding/grid`, `/preview`, `POST /api/onboarding/seeds` | SQL; seeds validated against the ceiling, and a `selected` pick counts toward the grid's and preview's taste vector only when the ceiling allows it |
 | `GET /api/progress/continue` | SQL before the dedup and LIMIT |
+| `GET /api/media/{id}/recap`, `/recap/status`, `/recap/conversation`, `POST .../recap/conversation/turns` | By-id gate on the show. The two `DELETE` clears are ungated |
+| `GET/PUT /api/progress/{id}`, `POST /api/progress/{id}/watched` | By-id gate on the title, and on a named episode's own show. `DELETE` is ungated |
+| `POST /api/me/feedback` (up, down), `POST /api/me/rating` (1 to 5 stars) | By-id gate. Clearing either is ungated |
+| `POST /api/profiles/{profileId}/watchlists/{listId}/items`, `POST .../library` | By-id gate. Removing is ungated |
+| `GET /api/profiles/{profileId}/watchlists/{listId}/items`, `GET .../library` | SQL, before LIMIT and in the count |
+| `GET /api/profiles/{profileId}/watchlists` | Each list's `item_count` counts only titles under the ceiling |
+
+The ungated deletes and clears let a profile remove data recorded before its
+ceiling, which it can no longer see, where it can name it. A watchlist's item
+DELETE (any list but My Library) takes a row id that the filtered read no
+longer returns, so those entries go only with the whole list.
 
 ## Profile-keyed, no ceiling
 
-The profile is scoped, so a restricted session reaches only its own data, but
-that data is not filtered. A restricted session can write progress, a rating
-or a list entry for any media id, and then read it back here.
-
-- Recaps: `GET /api/media/{id}/recap`, `/recap/status`, `/recap/conversation`,
-  `POST .../recap/conversation/turns`.
-- Progress: `GET/PUT /api/progress/{id}`, `POST /api/progress/{id}/watched`.
-- `POST /api/me/feedback`, `GET/POST /api/me/rating`.
-- Watchlist items and My Library: `GET/POST
-  /api/profiles/{profileId}/watchlists/{listId}/items`, `GET/POST
-  /api/profiles/{profileId}/library`.
+- `GET /api/me/rating` returns the profile's own stars for any media id. It
+  carries no title data.
 
 These are profile-keyed too, with no title data to filter: `GET
 /api/onboarding/status`, `POST /api/onboarding/skip`, `DELETE
 /api/onboarding/seeds`, `POST /api/me/recommendation-exposure`, `DELETE
-/api/progress/{id}`, both recap `DELETE`s, `GET/POST
+/api/progress/{id}`, both recap `DELETE`s, `POST
 /api/profiles/{profileId}/watchlists` and `DELETE .../watchlists/{listId}`,
 the watchlist item and My Library `DELETE`s, and the playback telemetry
 beacons `POST /api/stream/qoe/start`, `/finish` and `/restamp`.
@@ -80,9 +87,6 @@ profile's rows, under its ceiling, in SQL before LIMIT and in the count.
 
 ## No ceiling
 
-- Lookups by id: `GET /api/media/{id}/files`, `/next-episode`,
-  `/api/media/episodes/{episodeId}/files`, `/artwork`, `/cast`,
-  `/api/stream/info/{fileID}` (tracks and external subtitle filenames).
 - Listings: `/api/media/genres` (aggregate), `/api/libraries` (names and
   paths), `/api/calendar`, `/api/collections` and `/api/collections/{id}`,
   `/api/me/notifications`, `/api/parties/active` (every live and scheduled

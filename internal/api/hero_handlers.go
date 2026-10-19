@@ -516,10 +516,11 @@ func (h *HeroHandler) Feedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profile, ok := resolveQueryProfile(w, r, h.queries)
 	if !ok {
 		return
 	}
+	profileID := profile.ID
 	var req struct {
 		MediaItemID int64  `json:"media_item_id"`
 		Direction   string `json:"direction"`
@@ -534,6 +535,9 @@ func (h *HeroHandler) Feedback(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Direction {
 	case "up", "down":
+		if !h.allowTitle(w, r, profile, req.MediaItemID) {
+			return
+		}
 		if err := h.queries.RecordItemFeedback(r.Context(), profileID, req.MediaItemID, req.Direction); err != nil {
 			// A positive-but-nonexistent id trips the media_items FK (23503):
 			// that's a client error, not a server fault — surface 404, not 500.
@@ -581,10 +585,11 @@ func (h *HeroHandler) SetRating(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	profile, ok := resolveQueryProfile(w, r, h.queries)
 	if !ok {
 		return
 	}
+	profileID := profile.ID
 	var req struct {
 		MediaItemID int64 `json:"media_item_id"`
 		Stars       int   `json:"stars"`
@@ -599,6 +604,9 @@ func (h *HeroHandler) SetRating(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case req.Stars >= 1 && req.Stars <= 5:
+		if !h.allowTitle(w, r, profile, req.MediaItemID) {
+			return
+		}
 		if err := h.queries.SetUserRating(r.Context(), profileID, req.MediaItemID, req.Stars); err != nil {
 			// A positive-but-nonexistent id trips the media_items FK (23503):
 			// that's a client error, not a server fault — surface 404, not 500.
@@ -662,6 +670,17 @@ func (h *HeroHandler) GetRating(w http.ResponseWriter, r *http.Request) {
 		"media_item_id": mediaItemID,
 		"stars":         stars,
 	})
+}
+
+// allowTitle gates a thumb or star rating: the profile's ceiling must allow
+// the title, or the answer is the 404 a missing title gets. Clearing either
+// stays ungated, so a profile can still remove what it can no longer see.
+func (h *HeroHandler) allowTitle(w http.ResponseWriter, r *http.Request, profile *models.UserProfile, mediaID int64) bool {
+	if hidden, err := mediaHidden(r.Context(), h.queries, profile, mediaID); err != nil || hidden {
+		denyHiddenMedia(w, mediaID, err)
+		return false
+	}
+	return true
 }
 
 // resolveProfileID returns the profile to personalize for and a bool

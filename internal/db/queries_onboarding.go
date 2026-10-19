@@ -122,7 +122,12 @@ func (q *Queries) CountEmbeddedItems(ctx context.Context, ids []int64) (int, err
 // preview" rail feeds this into NearestUnwatched. Mirrors BuildProfileVector's
 // threshold (minHistoryItems) and ErrInsufficientHistory contract so the rail
 // stays empty until the picks are meaningful.
-func (q *Queries) PartialTasteVector(ctx context.Context, mediaItemIDs []int64) (string, error) {
+//
+// allowedRatings is the profile's ceiling (AllowedRatingsForMax; nil means
+// none): only allowed titles count, so a restricted profile cannot steer the
+// grid or preview toward an over-ceiling title's neighbours by naming its id,
+// or learn from the answer whether that id exists.
+func (q *Queries) PartialTasteVector(ctx context.Context, mediaItemIDs []int64, allowedRatings []string) (string, error) {
 	if len(mediaItemIDs) == 0 {
 		return "", ErrInsufficientHistory
 	}
@@ -130,8 +135,9 @@ func (q *Queries) PartialTasteVector(ctx context.Context, mediaItemIDs []int64) 
 		SELECT COUNT(*),
 		       CASE WHEN COUNT(*) > 0 THEN AVG(embedding)::text ELSE NULL END
 		FROM media_items
-		WHERE id = ANY($1::bigint[]) AND embedding IS NOT NULL`,
-		mediaItemIDs)
+		WHERE id = ANY($1::bigint[]) AND embedding IS NOT NULL
+		  AND ($2::text[] IS NULL OR content_rating = ANY($2))`,
+		mediaItemIDs, allowedRatings)
 	var count int
 	var vec *string
 	if err := row.Scan(&count, &vec); err != nil {
@@ -276,20 +282,23 @@ func (q *Queries) OnboardingGridReactive(ctx context.Context, profileID int64, v
 	return items, rows.Err()
 }
 
-// CountSeedsOutsideRatings reports how many of the given ids have a content
-// rating that is unknown or NOT within the allowed set — used to reject
-// onboarding picks above a restricted profile's max_age_rating before they ever
-// reach taste_seeds (and thus the profile's taste vector). allowed comes from
-// allowedRatingsForMax; nil/empty means "unrestricted" → returns 0, no query.
+// CountSeedsOutsideRatings reports how many of the given (deduplicated) ids
+// are not a title within the allowed set: over it, unrated, or missing — used
+// to reject onboarding picks above a restricted profile's max_age_rating
+// before they ever reach taste_seeds (and thus the profile's taste vector). A
+// missing id counts, so it is refused exactly like an over-ceiling one and the
+// answer does not say which ids exist. allowed comes from allowedRatingsForMax;
+// nil/empty means "unrestricted" → returns 0, no query.
 func (q *Queries) CountSeedsOutsideRatings(ctx context.Context, ids []int64, allowed []string) (int, error) {
 	if len(ids) == 0 || len(allowed) == 0 {
 		return 0, nil
 	}
 	var n int
 	if err := q.pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM media_items
-		WHERE id = ANY($1::bigint[])
-		  AND (content_rating IS NULL OR content_rating = '' OR NOT (content_rating = ANY($2::text[])))`,
+		SELECT COUNT(*) FROM unnest($1::bigint[]) AS s(id)
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM media_items m
+		  WHERE m.id = s.id AND m.content_rating = ANY($2::text[]))`,
 		ids, allowed).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count seeds outside ratings: %w", err)
 	}

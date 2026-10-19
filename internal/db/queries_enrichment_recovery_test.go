@@ -422,10 +422,10 @@ func TestWatchlistItemsSurvivesNullYear(t *testing.T) {
 		t.Errorf("%s: the NULL-year row (media_item %d) is missing from %d results", name, itemID, len(items))
 	}
 
-	all, err := q.GetAllWatchlistItems(ctx, listID)
+	all, err := q.GetAllWatchlistItems(ctx, listID, nil)
 	check("GetAllWatchlistItems", all, err)
 
-	paged, _, err := q.GetWatchlistItems(ctx, listID, models.PaginationParams{Page: 1, PerPage: 50})
+	paged, _, err := q.GetWatchlistItems(ctx, listID, models.PaginationParams{Page: 1, PerPage: 50}, nil)
 	check("GetWatchlistItems", paged, err)
 }
 
