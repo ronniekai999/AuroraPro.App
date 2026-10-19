@@ -556,6 +556,10 @@ type Manager struct {
 	// on m.mu.
 	shareCacheInvalidator atomic.Pointer[func(code string)]
 
+	// onReelForTest, when set, sees the title each ending party's highlight
+	// reel is cut from. Tests only; set it before any party ends.
+	onReelForTest func(mediaItemID int64, mediaTitle string)
+
 	// M9/M1 — server-lifecycle context for parent-of background work
 	// (highlight-reel ffmpeg jobs, daily reaper). On SIGTERM this
 	// context cancels, in-flight goroutines unwind cleanly rather than
@@ -1848,14 +1852,15 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// effort: empty reactions → no reel (handled by generator).
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
-	mediaItemIDForReel := ps.MediaItemID
 	// Since host succession this is the FINAL host, not necessarily the
 	// creator — deliberate: the last steward gets the reel-ready bell. A
 	// creator who handed off can still fetch the reel (party membership,
 	// not hostship, gates access).
 	hostForReel := ps.HostUserID
-	mediaTitleForReel := ps.MediaTitle
-	episodeIDAtEnd, mediaPosterAtEnd := ps.EpisodeID, ps.MediaPoster
+	// The title the party ends on, for its row; the reel takes the title
+	// the row records.
+	mediaIDAtEnd, episodeIDAtEnd := ps.MediaItemID, ps.EpisodeID
+	mediaTitleAtEnd, mediaPosterAtEnd := ps.MediaTitle, ps.MediaPoster
 
 	slog.Info("watch party ending — diagnostic snapshot",
 		"code", code,
@@ -1928,6 +1933,17 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 		_ = c.Close()
 	}
 
+	// Mark inactive in DB, recording the final title when it still exists
+	// (see EndWatchPartyOn).
+	reelMediaID, reelTitle := int64(0), ""
+	if dbID > 0 {
+		var err error
+		reelMediaID, reelTitle, err = m.queries.EndWatchPartyOn(context.Background(), dbID, mediaIDAtEnd, episodeIDAtEnd, mediaTitleAtEnd, mediaPosterAtEnd)
+		if err != nil {
+			slog.Warn("failed to end party in DB", "error", err)
+		}
+	}
+
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
 	// minutes later (best-effort). Empty reactions → no reel, returns
@@ -1938,16 +1954,13 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// party codes REUSE codes across sessions, so a code-only file would
 	// let a later session's reel be served under an earlier session's
 	// notification (and vice versa for authorization).
-	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel, dbID)
-
-	// Mark inactive in DB, on the title the reel is cut from (its gate reads
-	// the row's), when that title and its episode still exist; the id is
-	// recorded even when its name or poster cannot be.
-	if dbID > 0 {
-		if err := m.queries.EndWatchPartyOn(context.Background(), dbID, mediaItemIDForReel, episodeIDAtEnd, mediaTitleForReel, mediaPosterAtEnd); err != nil {
-			slog.Warn("failed to end party in DB", "error", err)
-		}
+	// It is cut from the title the row ended on, not the one in memory:
+	// its gate reads the row, so the two must name the same title on every
+	// path, including the ones where the final title could not be recorded.
+	if m.onReelForTest != nil {
+		m.onReelForTest(reelMediaID, reelTitle)
 	}
+	m.generateHighlightReelAsync(code, reactionsForReel, reelMediaID, hostForReel, reelTitle, dbID)
 
 	// M3 room lifecycle: persistent rooms survive the session end (touch
 	// last_active_at so the "My Rooms" list orders correctly). Non-persistent

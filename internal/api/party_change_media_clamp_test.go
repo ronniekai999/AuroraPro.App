@@ -75,3 +75,20 @@ func TestPartyMediaTextCapFitsColumn(t *testing.T) {
 		t.Fatalf("cap %d exceeds VARCHAR(%d)", partyMediaTextMaxRunes, columnChars)
 	}
 }
+
+// PostgreSQL text refuses NUL, so one in a title failed every write of it,
+// the party's end included. It is removed before the clamp, so a full-length
+// title padded with NULs keeps all of its text. This pins the helper only:
+// change-media's call to it has no socket-level test.
+func TestPartyMediaTextDropsNULBeforeTheClamp(t *testing.T) {
+	if got := partyMediaText("Sever\x00ance\x00"); got != "Severance" {
+		t.Errorf("got %q, want the NULs removed", got)
+	}
+	full := strings.Repeat("a", partyMediaTextMaxRunes)
+	if got := partyMediaText("\x00\x00" + full); got != full {
+		t.Errorf("a full-length title behind two NULs came back as %d runes, want all %d", utf8.RuneCountInString(got), partyMediaTextMaxRunes)
+	}
+	if n := utf8.RuneCountInString(partyMediaText(full + "b")); n != partyMediaTextMaxRunes {
+		t.Errorf("an over-long title came back as %d runes, want %d", n, partyMediaTextMaxRunes)
+	}
+}
