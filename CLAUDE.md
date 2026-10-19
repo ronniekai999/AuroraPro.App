@@ -211,11 +211,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   profile the default (`SetDefault`) needs the same, since every session with
   no binding acts as the default, and `SetDefaultProfile` first binds the
   account's unbound sessions to the old default (revoked rows too: an access
-  token resolves through its row after rotation), so re-defaulting moves no
-  live session onto a profile it did not act as; an ended session's
-  still-valid access token, which on an account with no restricted profile
-  acts as the default, and a token naming no session do act as the new one,
-  for up to a token lifetime. An account with no default
+  token resolves through its row after rotation), so on an account with a
+  default, re-defaulting moves no other session whose row exists when it
+  runs. It can move what has no row
+  to bind: an ended session's still-valid access token acts as the account's
+  most restrictive profile, ties going to the default, and a token naming no
+  session acts as the default, so for up to a token lifetime a re-default
+  can change which profile either acts as, to the new default without its
+  PIN among others. An account with no default
   has none to bind them to: there, when the new default has a PIN, its other
   unbound sessions are signed out instead, keeping only the row the asking
   session's access token names (a token older than its session's latest
@@ -499,7 +502,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     gives the whole window, not the time left.
   - A deleted profile's devices keep their still-valid access tokens for up
     to one token lifetime, acting as the account's most restrictive remaining
-    profile, which is the default if that was the only restricted one; their
+    profile (ties go to the default, so it is the default when no remaining
+    profile is stricter); their
     progress and feedback writes land on that profile. A backup restore can
     leave tokens in the same state.
   - The web app has no screen for changing another profile's ceiling or the
@@ -528,8 +532,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     bound session insert, rotation; the last through
     `TestARotationInFlightCannotCarryABindingPastAWrite`), but weakening one
     to `FOR SHARE` fails a test only for the PIN write and
-    `keepAnUnrestrictedProfile` (deletes
-    and a ceiling added), whose tests hold `FOR SHARE`: a create, a
+    `keepAnUnrestrictedProfile` (through a delete; a ceiling edit already
+    holds its own lock), whose tests hold `FOR SHARE`: a create, a
     re-default, a ceiling edit's own lock, the bound session insert and
     rotation would pass. Unpinned besides: that the no-default re-default
     spares bound sessions, and the edit handler's 404.
