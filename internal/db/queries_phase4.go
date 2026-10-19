@@ -654,7 +654,9 @@ var ErrLastUnrestrictedProfile = errors.New("the account's last profile without 
 // limiting or deleting it cannot leave the account in internal/api's admin
 // exception, and a tab on another profile counts as limited. Spaces there
 // count as free, though the handlers' checks, which read any non-empty value
-// as a ceiling, refuse that profile's sessions until boot rewrites it.
+// as a ceiling, refuse that profile's sessions until boot rewrites it, so
+// limiting or deleting the last other free profile beside one leaves no
+// session able to manage profiles until then.
 func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) error {
 	if _, err := tx.Exec(ctx, `
 		SELECT 1 FROM users u JOIN user_profiles p ON p.user_id = u.id

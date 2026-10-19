@@ -570,13 +570,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     would refuse, and a write cannot put the account in the exception's
     state. A spaces-only value on another profile is free to the guards but
     a ceiling to the handlers, so the last other unrestricted profile can be
-    limited beside one, and then no session can manage profiles until boot.
-    The web app trims as JavaScript does, which differs from Go on a few
-    Unicode characters, so for such a value it can show or hide admin UI the
-    server refuses or grants. It also shows a session on a whitespace value
-    Settings' profile-management controls, which the handlers refuse (403),
-    and reads other profiles more loosely than the guards, so it can offer a
-    limit or delete they refuse (409).
+    limited or deleted beside one, and then no session can manage profiles
+    until boot. The web app trims as JavaScript does, which differs from Go
+    on a few Unicode characters, so for such a value it can show or hide
+    admin UI the server refuses or grants. For a session on a whitespace
+    value it also shows Settings' profile-management controls (creating a
+    profile, the PIN panel) and onboarding's age slider, which the handlers
+    refuse (403; the slider's PUT is refused whole, name and avatar
+    included). And it reads other profiles more loosely than the guards, so
+    beside a tab-stored one, onboarding's age slider can send a limit the
+    guard refuses (409).
   - When the startup binding cannot be read, or the profile list fails, the
     startup load settles anyway (waiting would leave the app stuck), so
     collections and the requests list mount, and an admin's socket opens,
@@ -608,8 +611,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     restricted ones refused), and the party QR code and the feedback config
     at the handler (`admin_restricted_test.go`, `party_qr_test.go`,
     `queries_unrestricted_profile_test.go`). The other `adminPowers` sites
-    are not, nor are the write guards' strict reading of the other profiles
-    (read loosely, a guard refuses less), nor is an admin account with no
+    are not, nor is the write guards' `btrim` reading of the other profiles
+    (read as the ladder does, a guard refuses less), nor are the admin
+    guard's readings of whitespace beyond spaces and a tab (a newline, say),
+    nor is an admin account with no
     profile through a real database, nor the router's
     wiring of the QR and feedback handlers' store (dropped, an unrestricted
     admin silently loses those two powers). In the SPA, `showsAdminUI`,
