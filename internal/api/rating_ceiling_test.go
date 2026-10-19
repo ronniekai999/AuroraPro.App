@@ -820,7 +820,7 @@ func TestAICollectionSeed_ServerDerivedCeiling(t *testing.T) {
 			if !sameRatings(fake.allowedRatings, tc.want) {
 				t.Errorf("AI collection seed passed allowedRatings %v, want %v", fake.allowedRatings, tc.want)
 			}
-			items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+			items, err := f.q.ListCollectionItems(context.Background(), c.ID, nil)
 			if err != nil {
 				t.Fatalf("list collection items: %v", err)
 			}
@@ -872,7 +872,7 @@ func TestAICollectionSeed_ResolveErrorSkipsSeed(t *testing.T) {
 	if fake.called {
 		t.Error("a failed profile lookup still ran the seed search")
 	}
-	items, err := f.q.ListCollectionItems(context.Background(), c.ID)
+	items, err := f.q.ListCollectionItems(context.Background(), c.ID, nil)
 	if err != nil {
 		t.Fatalf("list collection items: %v", err)
 	}

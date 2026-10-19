@@ -1939,9 +1939,10 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// notification (and vice versa for authorization).
 	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel, dbID)
 
-	// Mark inactive in DB
+	// Mark inactive in DB, on the title the reel is cut from (its gate reads
+	// the row's).
 	if dbID > 0 {
-		if err := m.queries.EndWatchParty(context.Background(), dbID); err != nil {
+		if err := m.queries.EndWatchPartyOn(context.Background(), dbID, mediaItemIDForReel); err != nil {
 			slog.Warn("failed to end party in DB", "error", err)
 		}
 	}
@@ -3367,6 +3368,7 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 			"code":               ps.Code,
 			"host_user_id":       ps.HostUserID,
 			"party_name":         ps.PartyName,
+			"media_item_id":      ps.MediaItemID,
 			"media_title":        ps.MediaTitle,
 			"media_poster":       ps.MediaPoster,
 			"participant_count":  len(ps.Participants),

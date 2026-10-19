@@ -173,10 +173,10 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   skips the title lookup. The detail route (`GET /api/media/{id}`) does its
   own check on the title it loads (`RatingAllowed`), with the same 404 body;
   it always looks the title up, and a lookup error there is a 500. The gated
-  writes (progress, mark watched, thumbs,
-  star ratings, watchlist and My Library adds) are gated because history,
-  anchor rails and the lists read the title back. Collections, party creation
-  and party media changes still take any id (see the gaps). Deleting and
+  writes (progress, mark watched, thumbs, star ratings, watchlist, My Library
+  and collection adds) are gated because history, anchor rails and the lists
+  read the title back. Party creation and party media changes still take any
+  id (see the gaps). Deleting and
   clearing are not gated, so a profile can remove what it can no longer see,
   where it can name it. A progress write's episode is judged on its own show,
   not the id it is filed under.
@@ -214,12 +214,15 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
     profile), but can hold titles saved before its ceiling was set or
     lowered; they show until the server's filtered list arrives, or while
     offline.
-  - No ceiling on listings: every live and scheduled party server-wide
-    (`/api/parties/active`, with title and poster), and `/api/calendar`
-    (every show's upcoming episodes by date).
-  - No ceiling on a party's `highlight.mp4` (membership only). Collections
-    accept any media id and read items back unfiltered, so a restricted
-    profile can enumerate the library through them.
+  - The calendar, live-party, invite and collection listings fail open on
+    a resolve error, like browse; a collection's name, description and AI
+    prompt are shown as written; and a party's title still reaches a
+    restricted session by code (`GET /api/parties/{code}`, and the public
+    `/api/code/{code}/info`) and in notification text written when the
+    invite, RSVP, reminder or reel was sent. The live-party and invite
+    listings judge the party's title id; the title text and poster they show
+    are the host's own for room starts and media changes, so a host can
+    label an allowed title with another's name.
   - Transcode sessions rely on their creation-time check: the session cast
     token (`CreateCastToken`) and the session's playlists and segments check
     only account ownership, so a restricted session holding another profile's

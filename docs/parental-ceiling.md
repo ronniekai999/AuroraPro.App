@@ -35,7 +35,13 @@ Terms:
 | `GET/HEAD /api/stream/media/{fileID}`, `/episode/{fileID}`, `/{fileID}/direct`, `/direct/{fileID}` | Go; fails closed. A file-bound cast token relies on its mint-time check |
 | `POST /api/stream/{fileID}/cast-token`, `POST /api/stream/sessions` | Go at creation; fails closed |
 | `GET /api/stream/{fileID}/subtitles`, `GET/HEAD .../subtitles/{trackIdx}` | Go; fails closed |
-| `POST /api/collections` (AI seed only) | SQL plus Go re-check; no seed on a resolve error |
+| `POST /api/collections` (AI seed) | SQL plus Go re-check; no seed on a resolve error |
+| `GET /api/collections`, `/api/collections/{id}` | SQL: items, counts, the poster mosaic and the cover leave out members over the ceiling (under a ceiling the cover is the first allowed member's poster); fails open on a resolve error (discovery). Names, descriptions and AI prompts are shown as written |
+| `POST /api/collections/{id}/items` | By-id gate. Removing is ungated |
+| `GET /api/calendar` | SQL before LIMIT; fails open on a resolve error (discovery) |
+| `GET /api/parties/active` | Go, on the id of each party's current title; fails open on a resolve error, and lists none when the ratings cannot be read. A party whose title cannot be found is left out. The title text and poster shown are the host's own for room starts and media changes |
+| `GET /api/me/party-invites` | SQL, on the id of the party's current title; fails open on a resolve error. Sending still checks only the invitee's default profile, and the invite's notification is not filtered |
+| `GET /api/parties/{code}/highlight.mp4` | By-id gate on the title the party ended on (recorded when it ends), for admins too, after the membership check (which admins skip) |
 | WS `/ws/party-room` `change-media` | Go, with the profile resolved when the socket connected; **fails open** when the media or profile lookup errors or finds nothing. A missing id and an over-ceiling one get different errors |
 | `GET /api/members/{username}` watch strip | SQL before the dedup and LIMIT. A restricted non-default session gets no strip on its own account's page (the strip is the default profile's history) |
 
@@ -43,7 +49,7 @@ Terms:
 
 | Routes | Gate |
 |---|---|
-| `POST /api/parties/{code}/invites` | The invitee's default profile, at send time only |
+| `POST /api/parties/{code}/invites` | The invitee's default profile, at send time only. Listing invites applies the reading session's own ceiling (above) |
 
 ## Profile-keyed, with that profile's ceiling
 
@@ -88,20 +94,18 @@ profile's rows, under its ceiling, in SQL before LIMIT and in the count.
 ## No ceiling
 
 - Listings: `/api/media/genres` (aggregate), `/api/libraries` (names and
-  paths), `/api/calendar`, `/api/collections` and `/api/collections/{id}`,
-  `/api/me/notifications`, `/api/parties/active` (every live and scheduled
-  party), `GET /api/parties/{code}`, `/api/me/party-invites` (send-time check
-  only), `/api/rooms`, and the account's media requests: `GET /api/requests`
-  and `GET /api/requests/search`, a TMDB-wide title search with posters and
+  paths), `/api/me/notifications` (party invites, RSVPs, reminders and reel
+  notices carry the title in their stored text), `GET /api/parties/{code}` (the
+  party's title and poster for anyone with the code), `/api/rooms`, and the
+  account's media requests: `GET /api/requests` and `GET
+  /api/requests/search`, a TMDB-wide title search with posters and
   overviews, for `POST /api/requests`.
-- Enumeration: `POST /api/collections/{id}/items` adds any media id, and the
-  collection reads it back.
 - Session playback by id: `POST /api/stream/sessions/{sessionID}/cast-token`
   and the session's HLS playlists and segments check account ownership only,
   so another profile's session id on the account plays.
 - Parties: `POST /api/parties`, `POST /api/rooms/{id}/parties`, a party's
-  `highlight.mp4`, `reactions`, `qr.png` and `card-links`, WS `join-party` on
-  both party sockets.
+  `reactions`, `qr.png` and `card-links`, WS `join-party` on both party
+  sockets.
 - Realtime: WS `/ws` sends `scan_progress`, with scanned file names, to every
   connected client, every profile's progress events (media ids and
   positions) to all of the account's devices, and, when the opt-in

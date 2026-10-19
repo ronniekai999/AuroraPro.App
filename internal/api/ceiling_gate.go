@@ -84,6 +84,19 @@ func actingEpisodeHidden(ctx context.Context, q *db.Queries, claims *auth.JWTCla
 	return episodeHidden(ctx, q, profile, episodeID)
 }
 
+// listingAllowedRatings is the acting profile's allowed ratings for a listing
+// (nil when unrestricted). Listings are discovery, not the boundary (the
+// by-id gates above are), so a resolve error lists unrestricted, as browse
+// and search do, and is logged.
+func listingAllowedRatings(ctx context.Context, q actingProfileResolver, claims *auth.JWTClaims, listing string) []string {
+	profile, err := q.ResolveActingProfile(ctx, claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		slog.Warn("resolve acting profile failed, listing unrestricted", "listing", listing, "user_id", claims.UserID, "error", err)
+		return nil
+	}
+	return db.AllowedRatingsForMax(profile.MaxAgeRating)
+}
+
 // denyHiddenMedia writes the gate's refusal, the 404 a missing title gets.
 func denyHiddenMedia(w http.ResponseWriter, id int64, err error) {
 	if err != nil {

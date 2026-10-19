@@ -113,17 +113,24 @@ func (q *Queries) SetInviteRSVP(ctx context.Context, inviteID, inviteeUserID int
 // drop out via is_active=false, so no time-window math is needed here.
 // Declined invites are included: the UI needs them to render "you declined"
 // instead of re-asking.
-func (q *Queries) ListUpcomingInvitesForUser(ctx context.Context, userID int64) ([]models.MyPartyInvite, error) {
+//
+// allowedRatings is the reading session's ceiling (db.AllowedRatingsForMax;
+// nil is unrestricted). The send-time check judged the invitee's default
+// profile, and the party's media can change after it, so an invite whose
+// party now shows a title over the reader's ceiling, or none, is left out.
+func (q *Queries) ListUpcomingInvitesForUser(ctx context.Context, userID int64, allowedRatings []string) ([]models.MyPartyInvite, error) {
 	rows, err := q.pool.Query(ctx,
 		`SELECT pi.id, wp.party_code, wp.party_name, wp.media_title, wp.media_poster,
 		        hu.username, pi.rsvp, pi.note, wp.scheduled_start_at, wp.started_at, pi.created_at
 		 FROM party_invites pi
 		 JOIN watch_parties wp ON wp.id = pi.party_id AND wp.is_active = TRUE
 		 JOIN users hu ON hu.id = wp.host_user_id
+		 LEFT JOIN media_items m ON m.id = wp.media_item_id
 		 WHERE pi.invitee_user_id = $1
+		   AND ($2::text[] IS NULL OR m.content_rating = ANY($2))
 		 ORDER BY COALESCE(wp.scheduled_start_at, wp.created_at) ASC, pi.id ASC
 		 LIMIT 100`,
-		userID,
+		userID, allowedRatings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list upcoming invites: %w", err)

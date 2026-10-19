@@ -2197,6 +2197,31 @@ func (q *Queries) GetContentRatingForEpisode(ctx context.Context, episodeID int6
 	return rating, nil
 }
 
+// GetContentRatings returns the content_rating of each of ids that exists
+// ("" for unrated). An id with no row is absent from the map; under a
+// ceiling, callers treat it as hidden.
+func (q *Queries) GetContentRatings(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, COALESCE(content_rating, '') FROM media_items WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("content ratings: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var rating string
+		if err := rows.Scan(&id, &rating); err != nil {
+			return nil, fmt.Errorf("scan content rating: %w", err)
+		}
+		out[id] = rating
+	}
+	return out, rows.Err()
+}
+
 // GetContentRatingForMediaFile is the movie-file counterpart of
 // GetContentRatingForEpisodeFile (issue #462).
 func (q *Queries) GetContentRatingForMediaFile(ctx context.Context, mediaFileID int64) (string, error) {

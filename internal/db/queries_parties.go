@@ -260,24 +260,25 @@ func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*mod
 // partyDBID, additionally requiring that row to carry code — so a URL can't
 // mix one session's code with another session's id. found=false when no such
 // (id, code) row exists. Single round trip on purpose: the highlight-reel
-// handler runs this per HTTP Range request during MP4 playback.
-func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, err error) {
+// handler runs this per HTTP Range request during MP4 playback. mediaItemID
+// is the party's last media (0 if none), which is what its reel shows.
+func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, mediaItemID int64, err error) {
 	err = q.pool.QueryRow(ctx, `
 		SELECT host_user_id = $3 OR EXISTS (
 			SELECT 1 FROM watch_party_participants
 			WHERE party_id = $1 AND user_id = $3
-		)
+		), COALESCE(media_item_id, 0)
 		FROM watch_parties
 		WHERE id = $1 AND party_code = $2`,
 		partyDBID, code, userID,
-	).Scan(&member)
+	).Scan(&member, &mediaItemID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return false, false, nil
+			return false, false, 0, nil
 		}
-		return false, false, fmt.Errorf("is party member: %w", err)
+		return false, false, 0, fmt.Errorf("is party member: %w", err)
 	}
-	return true, member, nil
+	return true, member, mediaItemID, nil
 }
 
 // EndWatchParty marks a watch party as inactive and records the end time.
@@ -285,6 +286,22 @@ func (q *Queries) EndWatchParty(ctx context.Context, id int64) error {
 	_, err := q.pool.Exec(ctx,
 		`UPDATE watch_parties SET is_active = false, ended_at = $1 WHERE id = $2`,
 		time.Now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("end watch party: %w", err)
+	}
+	return nil
+}
+
+// EndWatchPartyOn ends a party and records the title it ended on. A
+// change-media saves the new title in the background, and that save skips an
+// inactive row, so a change just before the end used to leave the row on the
+// earlier title; the highlight reel, cut from the final one, is gated on the
+// row's.
+func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE watch_parties SET is_active = false, ended_at = $1, media_item_id = $3 WHERE id = $2`,
+		time.Now(), id, mediaItemID,
 	)
 	if err != nil {
 		return fmt.Errorf("end watch party: %w", err)
