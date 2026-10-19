@@ -69,7 +69,8 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	// end starts a party on (media, ep, name), runs before (database work,
 	// outside the party's lock), moves its in-memory title as change does,
 	// with no save, ends it, and reads its row back. It fails the test unless
-	// the reel generator was handed the row's title id and name.
+	// the reel generator was handed the row's title id and name, or nothing
+	// when the row was left active.
 	end := func(t *testing.T, media int64, ep *int64, name string, before func(partyID int64), change func(ps *PartyState)) row {
 		t.Helper()
 		ps, err := m.CreateParty(ctx, hostID, "host", media, ep, "Movie Night", name, "", 8,
@@ -100,8 +101,13 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 			FROM watch_parties WHERE party_code = $1`, ps.Code).Scan(&r.media, &r.episode, &r.title, &r.poster, &r.active); err != nil {
 			t.Fatalf("read the party row: %v", err)
 		}
-		if reelMedia != r.media || reelTitle != r.title {
-			t.Errorf("reel cut from title %d %q; the row, which gates it, records %d %q", reelMedia, reelTitle, r.media, r.title)
+		wantMedia, wantTitle := r.media, r.title
+		if r.active {
+			// The end failed, and a failed end cuts no reel.
+			wantMedia, wantTitle = 0, ""
+		}
+		if reelMedia != wantMedia || reelTitle != wantTitle {
+			t.Errorf("reel handed title %d %q; want %d %q (row %+v, which gates it)", reelMedia, reelTitle, wantMedia, wantTitle, r)
 		}
 		return r
 	}
@@ -225,8 +231,8 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		}
 	})
 
-	// The retry is the same guarded write: a title gone by then still
-	// leaves the row on its own, in two updates, not three.
+	// The retry checks the title still exists: a title gone by then leaves
+	// the row on its own, in two updates, not three.
 	t.Run("a title deleted meanwhile, and the first write refused", func(t *testing.T) {
 		var updates func() int64
 		r := end(t, gMovie, nil, "endmedia g", func(partyID int64) {
@@ -245,6 +251,19 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		}
 	})
 
+	// When no write lands, not even the plain end, the row stays active and
+	// there is no reel: the title in memory is never the fallback.
+	t.Run("every write refused, the plain end too", func(t *testing.T) {
+		r := end(t, gMovie, nil, "endmedia g", func(partyID int64) {
+			refuse(t, partyID, 3)
+		}, func(ps *PartyState) {
+			ps.MediaItemID, ps.MediaTitle = rMovie, "endmedia r"
+		})
+		if !r.active || r.media != gMovie {
+			t.Errorf("row %+v; want left active on its own title %d", r, gMovie)
+		}
+	})
+
 	// An episode that is not the title's own would pair one show's id with
 	// another's episode, so the row takes the title alone, with no episode,
 	// name or poster from the same suspect change.
@@ -254,6 +273,22 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 		})
 		if r.active || r.media != showB || r.episode != nil || r.title != "" || r.poster != "" {
 			t.Errorf("row %+v; want ended on show %d alone", r, showB)
+		}
+	})
+	// The retry checks the episode too, after a failure that is not the
+	// text's.
+	t.Run("an episode of another show, and the first write refused", func(t *testing.T) {
+		var updates func() int64
+		r := end(t, showA, &episodeA, "endmedia show a", func(partyID int64) {
+			updates = refuse(t, partyID, 1)
+		}, func(ps *PartyState) {
+			ps.MediaItemID, ps.MediaTitle, ps.MediaPoster = showB, "endmedia show b", "/b.jpg"
+		})
+		if r.active || r.media != showB || r.episode != nil || r.title != "" || r.poster != "" {
+			t.Errorf("row %+v; want ended on show %d alone", r, showB)
+		}
+		if n := updates(); n != 2 {
+			t.Errorf("%d updates reached the row; want 2", n)
 		}
 	})
 
