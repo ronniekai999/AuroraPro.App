@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
@@ -298,16 +299,17 @@ func (q *Queries) EndWatchParty(ctx context.Context, id int64) error {
 // with another's name (issue #460). A change-media saves the new title in
 // the background, and that save skips an inactive row, so a change just
 // before the end used to leave the row on the earlier title; the highlight
-// reel, cut from the final one, is gated on the row's.
+// reel, cut from the final one, is gated on the row's media_item_id.
 //
-// The title is recorded only while it still exists, with its episode still
+// The title is recorded only while it still exists and its episode is still
 // its own: a merge deletes the duplicate a live party may still name, and
-// the foreign key would then fail the whole statement and leave the party
-// active for good, blocking its room. Ending matters more than the title, so
-// if the write still fails (the title deleted between the check and the
-// write) the party is ended on the row's own title.
+// the foreign key would then fail the statement. Ending the party matters
+// most, and the title's id next (the reel gate reads it), so a write that
+// still fails (bad text in the name or poster, or the title deleted between
+// the check and the write) is retried with the ids alone, the name and
+// poster blanked, and then as a plain end on the row's own title.
 func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64, episodeID *int64, mediaTitle, mediaPoster string) error {
-	_, err := q.pool.Exec(ctx, `
+	const end = `
 		UPDATE watch_parties p
 		   SET is_active     = false,
 		       ended_at      = $1,
@@ -321,16 +323,18 @@ func (q *Queries) EndWatchPartyOn(ctx context.Context, id, mediaItemID int64, ep
 		                   FROM tv_episodes e
 		                   JOIN tv_seasons  s ON s.id = e.season_id
 		                  WHERE e.id = $4 AND e.media_item_id = $3 AND s.media_item_id = $3)) AS ok) t
-		 WHERE p.id = $2`,
-		time.Now(), id, mediaItemID, episodeID, mediaTitle, mediaPoster,
-	)
+		 WHERE p.id = $2`
+	now := time.Now()
+	_, err := q.pool.Exec(ctx, end, now, id, mediaItemID, episodeID, mediaTitle, mediaPoster)
 	if err == nil {
 		return nil
 	}
-	if endErr := q.EndWatchParty(ctx, id); endErr != nil {
-		return fmt.Errorf("end watch party: %w (recording its title: %v)", endErr, err)
+	slog.Warn("end watch party: recording its title failed; retrying with the ids alone", "party_id", id, "error", err)
+	if _, err = q.pool.Exec(ctx, end, now, id, mediaItemID, episodeID, "", ""); err == nil {
+		return nil
 	}
-	return nil
+	slog.Warn("end watch party: recording its title's ids failed; ending it on its own title", "party_id", id, "error", err)
+	return q.EndWatchParty(ctx, id)
 }
 
 // ============================================================

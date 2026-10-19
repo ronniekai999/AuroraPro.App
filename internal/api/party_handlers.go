@@ -164,9 +164,10 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 	// Membership gate against the DB audit rows of THAT session (the party
 	// is long gone from the manager's memory by the time the reel exists).
 	// This runs per HTTP Range request during playback: one round trip for
-	// the membership and the party's title, the acting profile's ceiling
-	// check after it (another for a restricted profile), and the admin check
-	// only for a non-member. A session with admin powers skips the membership
+	// the membership and the party's title, then the acting profile's
+	// ceiling check (resolving the profile, usually two more, and the title's
+	// rating for a restricted one), and the admin check only for a
+	// non-member. A session with admin powers skips the membership
 	// check but not the rating ceiling: a reel is clips of the party's title,
 	// and the ceiling is the acting profile's, whatever the account's role.
 	found, member, mediaID, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)

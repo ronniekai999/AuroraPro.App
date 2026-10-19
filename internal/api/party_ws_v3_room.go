@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -320,8 +321,11 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// rather than let an oversized value silently fail the DB write
 			// and leave memory diverged from disk. Create derives the title
 			// server-side, so this is the only path that needs the guard.
-			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
-			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
+			// PostgreSQL text rejects NUL, so a NUL in either failed every
+			// write of the party's title, the end's included, leaving the row
+			// (which gates the highlight reel) on the previous title.
+			p.MediaTitle = truncateRunes(strings.ReplaceAll(p.MediaTitle, "\x00", ""), partyMediaTextMaxRunes)
+			p.MediaPoster = truncateRunes(strings.ReplaceAll(p.MediaPoster, "\x00", ""), partyMediaTextMaxRunes)
 			if caller == nil {
 				// The connect-time lookup failed; one failure must not
 				// turn the check off for the socket's life. Bounded like
