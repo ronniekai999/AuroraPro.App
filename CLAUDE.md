@@ -571,15 +571,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     state. A spaces-only value on another profile is free to the guards but
     a ceiling to the handlers, so the last other unrestricted profile can be
     limited or deleted beside one, and then no session can manage profiles
-    until boot. The web app trims as JavaScript does, which differs from Go
-    on a few Unicode characters, so for such a value it can show or hide
-    admin UI the server refuses or grants. For a session on a whitespace
-    value it also shows Settings' profile-management controls (creating a
-    profile, the PIN panel) and onboarding's age slider, which the handlers
-    refuse (403; the slider's PUT is refused whole, name and avatar
-    included). And it reads other profiles more loosely than the guards, so
-    beside a tab-stored one, onboarding's age slider can send a limit the
-    guard refuses (409).
+    until boot. The web app reads a ceiling as JavaScript's trim does, which
+    differs from Go's on a few Unicode characters and is looser than the
+    handlers' and the guards' readings, so for such a value it can show or
+    hide admin UI the server refuses or grants, and offer profile, sign-in
+    method or onboarding actions the server then refuses (403 or 409).
   - When the startup binding cannot be read, or the profile list fails, the
     startup load settles anyway (waiting would leave the app stuck), so
     collections and the requests list mount, and an admin's socket opens,
