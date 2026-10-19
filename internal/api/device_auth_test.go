@@ -420,7 +420,7 @@ func TestDevicePairing_ALockedApproverDoesNotPassItsProfileOn(t *testing.T) {
 	})
 }
 
-func (s *deviceTestStore) MostRestrictiveProfilePIN(context.Context, int64) (*models.UserProfile, *string, error) {
+func (s *deviceTestStore) MostRestrictiveProfilePIN(context.Context, int64, int64) (*models.UserProfile, *string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.mostRestrictive == nil {

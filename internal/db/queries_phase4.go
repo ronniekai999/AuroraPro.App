@@ -26,6 +26,33 @@ func (q *Queries) CreateProfile(ctx context.Context, p *models.UserProfile) erro
 	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 }
 
+// CreateProfileFor creates p for a session's request, under the account's
+// user-row lock, after rechecking what the handler judged about the session
+// (recheckManager). CreateProfile is the unchecked insert.
+func (q *Queries) CreateProfileFor(ctx context.Context, p *models.UserProfile, judged *ManagerJudgement) error {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, p.UserID); err != nil {
+		return err
+	}
+	if err := recheckManager(ctx, tx, 0, judged); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO user_profiles (user_id, name, avatar_url, is_default, max_age_rating, language, subtitle_lang, subtitle_mode)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, created_at, updated_at`,
+		p.UserID, p.Name, p.AvatarURL, p.IsDefault, nilIfEmpty(p.MaxAgeRating),
+		p.Language, nilIfEmpty(p.SubtitleLang), p.SubtitleMode,
+	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (q *Queries) GetProfilesByUser(ctx context.Context, userID int64) ([]*models.UserProfile, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, user_id, name, COALESCE(avatar_url, ''), is_default,
@@ -203,14 +230,28 @@ func (q *Queries) mostRestrictiveProfile(ctx context.Context, userID int64) (*mo
 }
 
 // MostRestrictiveProfilePIN returns the account's most restrictive profile
-// (mostRestrictiveProfile) and its PIN hash, nil when it has none. Pairing
-// uses it on an account with no password whose every profile is locked; the
-// hash goes with the grant, so a PIN changed before the device collects it
-// creates no session.
-func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID int64) (*models.UserProfile, *string, error) {
+// (mostRestrictiveProfile), or prefer when it is the account's and exactly as
+// restrictive, and its PIN hash, nil when it has none. Pairing uses it on an
+// account with no password whose every profile is locked, preferring the
+// approver's own profile so the device crosses no other profile's PIN when it
+// need not; the hash goes with the grant, so a PIN changed before the device
+// collects it creates no session.
+func (q *Queries) MostRestrictiveProfilePIN(ctx context.Context, userID, prefer int64) (*models.UserProfile, *string, error) {
 	p, err := q.mostRestrictiveProfile(ctx, userID)
 	if err != nil || p == nil || p.ID == 0 {
 		return p, nil, err
+	}
+	if prefer != 0 && prefer != p.ID {
+		own, err := q.GetProfile(ctx, prefer)
+		if err != nil {
+			return nil, nil, err
+		}
+		if own != nil && own.UserID == userID {
+			a, b := AllowedRatingsForMax(own.MaxAgeRating), AllowedRatingsForMax(p.MaxAgeRating)
+			if (a == nil && b == nil) || (a != nil && b != nil && len(a) == len(b)) {
+				p = own
+			}
+		}
 	}
 	var hash *string
 	if err := q.pool.QueryRow(ctx, `SELECT pin_hash FROM user_profiles WHERE id = $1 AND user_id = $2`, p.ID, userID).Scan(&hash); err != nil {
@@ -318,10 +359,95 @@ func (q *Queries) MostRestrictiveUnlockedProfile(ctx context.Context, userID int
 // CeilingJudgement is what a handler judged before writing a profile's
 // ceiling: the acting profile of the session asking, which must still have no
 // limit when the write lands, and the edited profile's ceiling as it read it
-// (raw, as GetProfile returns it).
+// (raw, as GetProfile returns it). The session itself is rechecked as every
+// management write rechecks it (ManagerJudgement).
 type CeilingJudgement struct {
+	ManagerJudgement
 	ActingProfileID int64
 	Was             string
+}
+
+// ManagerJudgement is what a profile-management handler judged about the
+// session asking: that its row (RefreshTokenID; 0 when its token names none)
+// was live and its acting profile had no ceiling, and, where the write
+// depends on it, the PIN state of the profile written. The handler judged
+// before any lock, so the write rechecks under the user-row lock it takes
+// (recheckManager). A PIN write ends the sessions acting as its profile by
+// deleting their rows; without the recheck, such a session's request already
+// in flight landed after it, replacing the PIN just set or lifting a kid's
+// ceiling.
+type ManagerJudgement struct {
+	UserID         int64
+	RefreshTokenID int64
+	// TargetPIN is the PIN state the handler judged the written profile
+	// under: nil when the write does not depend on it (a password stood in,
+	// or the write needs no PIN), else "" for none or the hash it had.
+	TargetPIN *string
+}
+
+var (
+	// ErrSessionEnded refuses a management write whose session's row went
+	// (a PIN write, a profile delete) after the handler judged it live.
+	ErrSessionEnded = errors.New("the session asking has ended")
+)
+
+// recheckManager rechecks judged under the user-row lock tx holds: the
+// session's row still exists, the profile it acts as (its binding, else the
+// account default) still has no ceiling, and targetProfileID's PIN state is
+// still the one judged (ErrProfilePINChanged, as for a bind). A nil
+// judgement checks nothing (internal callers).
+func recheckManager(ctx context.Context, tx pgx.Tx, targetProfileID int64, j *ManagerJudgement) error {
+	if j == nil {
+		return nil
+	}
+	var bound *int64
+	if j.RefreshTokenID != 0 {
+		err := tx.QueryRow(ctx, `SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2`,
+			j.RefreshTokenID, j.UserID).Scan(&bound)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrSessionEnded
+		}
+		if err != nil {
+			return err
+		}
+	}
+	var restricted bool
+	var err error
+	if bound != nil {
+		err = tx.QueryRow(ctx, `SELECT NULLIF(btrim(max_age_rating), '') IS NOT NULL FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			*bound, j.UserID).Scan(&restricted)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT NULLIF(btrim(max_age_rating), '') IS NOT NULL FROM user_profiles WHERE user_id = $1 AND is_default`,
+			j.UserID).Scan(&restricted)
+	}
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Bound to a profile that is not the account's: as unknowable as
+		// ResolveActingProfile's fallback, so refused. No default: no
+		// profile at all, so nothing to restrict it.
+		if bound != nil {
+			return ErrActingProfileRestricted
+		}
+	case err != nil:
+		return err
+	case restricted:
+		return ErrActingProfileRestricted
+	}
+	if j.TargetPIN != nil && targetProfileID != 0 {
+		var hash string
+		err := tx.QueryRow(ctx, `SELECT COALESCE(pin_hash, '') FROM user_profiles WHERE id = $1 AND user_id = $2`,
+			targetProfileID, j.UserID).Scan(&hash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // gone: the write finds nothing to change
+		}
+		if err != nil {
+			return err
+		}
+		if hash != *j.TargetPIN {
+			return ErrProfilePINChanged
+		}
+	}
+	return nil
 }
 
 var (
@@ -403,6 +529,9 @@ func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *model
 		return err
 	}
 	if judged != nil {
+		if err := recheckManager(ctx, tx, profileID, &judged.ManagerJudgement); err != nil {
+			return err
+		}
 		var actingFree bool
 		var was string
 		if err := tx.QueryRow(ctx, `
@@ -480,13 +609,17 @@ func keepAnUnrestrictedProfile(ctx context.Context, tx pgx.Tx, profileID int64) 
 //
 // It refuses (ErrLastUnrestrictedProfile) to delete the account's last profile
 // without a content rating limit.
-func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, error) {
+func (q *Queries) DeleteProfile(ctx context.Context, profileID int64, judged *ManagerJudgement) (bool, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
 	if err := keepAnUnrestrictedProfile(ctx, tx, profileID); err != nil {
+		return false, err
+	}
+	// keepAnUnrestrictedProfile took the user-row lock.
+	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
 		return false, err
 	}
 	tag, err := tx.Exec(ctx,
@@ -507,7 +640,7 @@ func (q *Queries) DeleteProfile(ctx context.Context, profileID int64) (bool, err
 // token outlives its row's rotation and resolves through it. The user row is
 // locked like RotateRefreshToken locks it, so a rotation cannot slip an
 // unbound row in between.
-func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64) error {
+func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64, judged *ManagerJudgement) error {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -515,6 +648,9 @@ func (q *Queries) SetDefaultProfile(ctx context.Context, userID, profileID int64
 	defer tx.Rollback(ctx)
 
 	if _, err = tx.Exec(ctx, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE", userID); err != nil {
+		return err
+	}
+	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `

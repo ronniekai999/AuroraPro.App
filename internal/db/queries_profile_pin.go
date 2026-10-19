@@ -54,7 +54,7 @@ func (q *Queries) GetProfilePINState(ctx context.Context, profileID int64) (*Pro
 // so a rotation cannot carry a binding past the deletion, and activation
 // takes it FOR SHARE. Clearing a PIN ends nothing. It returns how many
 // sessions it ended.
-func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, hash string, keepTokenID int64) (int64, error) {
+func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, hash string, keepTokenID int64, judged *ManagerJudgement) (int64, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("set profile pin: %w", err)
@@ -62,6 +62,9 @@ func (q *Queries) SetProfilePIN(ctx context.Context, userID, profileID int64, ha
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
 		return 0, fmt.Errorf("set profile pin: %w", err)
+	}
+	if err := recheckManager(ctx, tx, profileID, judged); err != nil {
+		return 0, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE user_profiles

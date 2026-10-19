@@ -208,6 +208,32 @@ func denyRestrictedSession(w http.ResponseWriter, r *http.Request, store session
 	return false
 }
 
+// managerJudgement is what a management handler judged about the session
+// asking, for the write to recheck under the account lock it takes: its
+// checks ran before any lock, so a PIN write ending the session, or a ceiling
+// landing on its profile, in between would otherwise let a request already in
+// flight land after it. targetPIN is the PIN state judged for the written
+// profile (nil when the write does not depend on it).
+func managerJudgement(claims *auth.JWTClaims, targetPIN *string) *db.ManagerJudgement {
+	return &db.ManagerJudgement{UserID: claims.UserID, RefreshTokenID: claims.RefreshTokenID, TargetPIN: targetPIN}
+}
+
+// denyManagerRecheck answers a management write its recheck refused, and
+// reports whether it did.
+func denyManagerRecheck(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, db.ErrSessionEnded):
+		writeErrorReason(w, http.StatusUnauthorized, "session_ended", "this session has ended; sign in again")
+	case errors.Is(err, db.ErrActingProfileRestricted):
+		writeErrorReason(w, http.StatusForbidden, "profile_restricted", "this profile now has a content rating limit")
+	case errors.Is(err, db.ErrProfilePINChanged):
+		writeErrorReason(w, http.StatusForbidden, "profile_pin_required", "this profile's PIN just changed; enter it")
+	default:
+		return false
+	}
+	return true
+}
+
 // unlockRequest carries what can unlock a PIN-protected profile: its PIN, or
 // the account password in its place.
 type unlockRequest struct {
@@ -424,7 +450,10 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		SubtitleMode: subMode,
 	}
 
-	if err := h.queries.CreateProfile(r.Context(), profile); err != nil {
+	if err := h.queries.CreateProfileFor(r.Context(), profile, managerJudgement(claims, nil)); err != nil {
+		if denyManagerRecheck(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create profile")
 		return
 	}
@@ -544,7 +573,7 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	// limit read above.
 	var judged *db.CeilingJudgement
 	if req.MaxAgeRating != nil {
-		judged = &db.CeilingJudgement{ActingProfileID: acting.ID, Was: profile.MaxAgeRating}
+		judged = &db.CeilingJudgement{ManagerJudgement: *managerJudgement(claims, nil), ActingProfileID: acting.ID, Was: profile.MaxAgeRating}
 	}
 
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req, judged); err != nil {
@@ -552,8 +581,7 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 			denyLastUnrestricted(w)
 			return
 		}
-		if errors.Is(err, db.ErrActingProfileRestricted) {
-			writeErrorReason(w, http.StatusForbidden, "profile_restricted", "this profile now has a content rating limit")
+		if denyManagerRecheck(w, err) {
 			return
 		}
 		if errors.Is(err, db.ErrProfileCeilingChanged) {
@@ -606,10 +634,13 @@ func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.queries.DeleteProfile(r.Context(), profileID)
+	deleted, err := h.queries.DeleteProfile(r.Context(), profileID, managerJudgement(claims, nil))
 	if err != nil {
 		if errors.Is(err, db.ErrLastUnrestrictedProfile) {
 			denyLastUnrestricted(w)
+			return
+		}
+		if denyManagerRecheck(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to delete profile")
@@ -657,11 +688,27 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if profile.HasPIN && acting.ID != profile.ID && !h.checkUnlock(w, r, acting, profile, unlock) {
-		return
+	// The PIN state judged goes with the write: a PIN set on the profile
+	// since the check would otherwise make it the default without it.
+	var targetPIN *string
+	switch {
+	case acting.ID == profile.ID:
+		// The session is on it already.
+	case profile.HasPIN:
+		ok, judgedPIN := h.checkUnlockHash(w, r, acting, profile, unlock)
+		if !ok {
+			return
+		}
+		targetPIN = judgedPIN
+	default:
+		none := ""
+		targetPIN = &none
 	}
 
-	if err := h.queries.SetDefaultProfile(r.Context(), claims.UserID, profileID); err != nil {
+	if err := h.queries.SetDefaultProfile(r.Context(), claims.UserID, profileID, managerJudgement(claims, targetPIN)); err != nil {
+		if denyManagerRecheck(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to set default profile")
 		return
 	}
@@ -830,8 +877,16 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 		writeErrorReason(w, http.StatusTooManyRequests, "rate_limited", "too many PIN changes; try again later")
 		return
 	}
-	if profile.HasPIN && !h.checkUnlock(w, r, acting, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password}) {
-		return
+	// The PIN state judged goes with the write: one set since this read would
+	// otherwise be replaced without the current PIN.
+	none := ""
+	targetPIN := &none
+	if profile.HasPIN {
+		ok, judgedPIN := h.checkUnlockHash(w, r, acting, profile, unlockRequest{PIN: req.CurrentPIN, Password: req.Password})
+		if !ok {
+			return
+		}
+		targetPIN = judgedPIN
 	}
 	if h.authSvc == nil {
 		writeError(w, http.StatusInternalServerError, "profile lock unavailable")
@@ -845,8 +900,11 @@ func (h *ProfileHandler) SetProfilePIN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	revoked, err := h.queries.SetProfilePIN(r.Context(), claims.UserID, profileID, hash, claims.RefreshTokenID)
+	revoked, err := h.queries.SetProfilePIN(r.Context(), claims.UserID, profileID, hash, claims.RefreshTokenID, managerJudgement(claims, targetPIN))
 	if err != nil {
+		if denyManagerRecheck(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to set the PIN")
 		return
 	}

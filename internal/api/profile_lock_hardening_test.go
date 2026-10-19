@@ -23,6 +23,7 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -623,6 +624,10 @@ func TestTheLastUnrestrictedCheckWaitsForTheAccountLock(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
+	var holder int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the backend pid: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, f.userID); err != nil {
 		t.Fatalf("lock the user row: %v", err)
 	}
@@ -632,7 +637,9 @@ func TestTheLastUnrestrictedCheckWaitsForTheAccountLock(t *testing.T) {
 
 	pg := "PG"
 	done := make(chan error, 1)
-	go func() { done <- f.q.UpdateProfile(ctx, f.parent.ID, &models.UpdateProfileRequest{MaxAgeRating: &pg}, nil) }()
+	go func() {
+		done <- f.q.UpdateProfile(ctx, f.parent.ID, &models.UpdateProfileRequest{MaxAgeRating: &pg}, nil)
+	}()
 	var result error
 	finished := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
@@ -646,7 +653,7 @@ func TestTheLastUnrestrictedCheckWaitsForTheAccountLock(t *testing.T) {
 		}
 		var waiting bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF u%')`).Scan(&waiting); err != nil {
+			WHERE $1 = ANY(pg_blocking_pids(pid)))`, holder).Scan(&waiting); err != nil {
 			t.Fatalf("read pg_stat_activity: %v", err)
 		}
 		if waiting {
@@ -796,7 +803,7 @@ func TestAPINWriteWaitsForTheAccountLock(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := f.q.SetProfilePIN(ctx, f.userID, f.kid.ID, "$argon2id$placeholder", f.parentRT)
+		_, err := f.q.SetProfilePIN(ctx, f.userID, f.kid.ID, "$argon2id$placeholder", f.parentRT, nil)
 		done <- err
 	}()
 	waitForALockWait(t, pool, done, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE%")
@@ -905,7 +912,7 @@ func TestAPINWriteClearsTheLockout(t *testing.T) {
 		`UPDATE user_profiles SET pin_failed_attempts = 3, pin_locked_until = NOW() + interval '1 hour' WHERE id = $1`, f.parent.ID); err != nil {
 		t.Fatalf("seed a lockout: %v", err)
 	}
-	if _, err := f.q.SetProfilePIN(context.Background(), f.userID, f.parent.ID, "another-hash", f.parentRT); err != nil {
+	if _, err := f.q.SetProfilePIN(context.Background(), f.userID, f.parent.ID, "another-hash", f.parentRT, nil); err != nil {
 		t.Fatalf("write the PIN: %v", err)
 	}
 	if err := pool.QueryRow(context.Background(),
@@ -1423,9 +1430,20 @@ func TestAPairingOnAnAccountWithNoPasswordGetsTheMostRestrictiveProfile(t *testi
 	if code, _, body := f.call(t, f.h.SetProfilePIN, http.MethodPut, f.parentRT, f.kid.ID, `{"pin":"2468"}`); code != http.StatusOK {
 		t.Fatalf("lock the kid: %d %s", code, body)
 	}
-	p, hash, err := f.q.MostRestrictiveProfilePIN(ctx, f.userID)
+	p, hash, err := f.q.MostRestrictiveProfilePIN(ctx, f.userID, f.parent.ID)
 	if err != nil || p == nil || p.ID != f.kid.ID || hash == nil {
 		t.Fatalf("most restrictive: %+v, PIN %v (err %v); want the kid %d with its PIN", p, hash, err, f.kid.ID)
+	}
+	// An approver on a profile exactly as restrictive keeps its own, rather
+	// than handing the device a sibling's.
+	sibling := &models.UserProfile{UserID: f.userID, Name: "sibling", MaxAgeRating: f.kid.MaxAgeRating, Language: "en", SubtitleMode: "off"}
+	if err := f.q.CreateProfile(ctx, sibling); err != nil {
+		t.Fatalf("seed a sibling: %v", err)
+	}
+	for _, prefer := range []int64{f.kid.ID, sibling.ID} {
+		if p, _, err := f.q.MostRestrictiveProfilePIN(ctx, f.userID, prefer); err != nil || p == nil || p.ID != prefer {
+			t.Errorf("preferring %d, as restrictive as the tightest: %+v (err %v); want it", prefer, p, err)
+		}
 	}
 	u, err := f.q.GetUserByID(ctx, f.userID)
 	if err != nil {
@@ -1487,6 +1505,10 @@ func TestDeletingAProfileWaitsForTheAccountLock(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
+	var holder int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the backend pid: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, f.userID); err != nil {
 		t.Fatalf("lock the user row: %v", err)
 	}
@@ -1495,7 +1517,7 @@ func TestDeletingAProfileWaitsForTheAccountLock(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := f.q.DeleteProfile(ctx, spare.ID)
+		_, err := f.q.DeleteProfile(ctx, spare.ID, nil)
 		done <- err
 	}()
 	var result error
@@ -1509,7 +1531,7 @@ func TestDeletingAProfileWaitsForTheAccountLock(t *testing.T) {
 		}
 		var waiting bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF u%')`).Scan(&waiting); err != nil {
+			WHERE $1 = ANY(pg_blocking_pids(pid)))`, holder).Scan(&waiting); err != nil {
 			t.Fatalf("read pg_stat_activity: %v", err)
 		}
 		if waiting {
@@ -1529,4 +1551,211 @@ func TestDeletingAProfileWaitsForTheAccountLock(t *testing.T) {
 	if p, err := f.q.GetProfile(ctx, spare.ID); err != nil || p == nil {
 		t.Errorf("the spare after the race: %+v, %v; want it kept", p, err)
 	}
+}
+
+// raceTheAccountLock runs call, a request from a session, while a transaction
+// holding the account's user-row lock applies change (as a PIN write does
+// when it ends sessions). The request's handler checks the state from before
+// change, then waits on the lock; once change commits, its write runs, and
+// must recheck what the handler judged.
+func (f *lockFixture) raceTheAccountLock(t *testing.T, change func(tx pgx.Tx) error, call func() (int, string)) (int, string) {
+	t.Helper()
+	ctx := context.Background()
+	pool := lockTestPool(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	var holder int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the backend pid: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, f.userID); err != nil {
+		t.Fatalf("lock the user row: %v", err)
+	}
+	if err := change(tx); err != nil {
+		t.Fatalf("apply the change: %v", err)
+	}
+	type result struct {
+		code   int
+		reason string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, reason := call()
+		done <- result{code, reason}
+	}()
+	var res result
+	finished := false
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !finished; {
+		select {
+		case res = <-done:
+			finished = true
+			continue
+		default:
+		}
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`,
+			holder).Scan(&blocked); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if finished {
+		t.Fatalf("the request finished (%d %q) before waiting on the account lock", res.code, res.reason)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	res = <-done
+	return res.code, res.reason
+}
+
+// TestAManagementRequestInFlightRechecksItsSession: a PIN write ends the
+// sessions acting as its profile, but a request from one of them already past
+// its handler's checks, waiting on the account lock, used to land after it:
+// replacing the PIN just set, lifting a kid's ceiling, or deleting, creating
+// or re-defaulting a profile. Each write now rechecks its session under the
+// lock.
+func TestAManagementRequestInFlightRechecksItsSession(t *testing.T) {
+	ctx := context.Background()
+	endTheSession := func(f *lockFixture, rt int64) func(tx pgx.Tx) error {
+		return func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE id = $1`, rt)
+			return err
+		}
+	}
+	setup := func(t *testing.T) (*lockFixture, int64) {
+		f := newLockFixture(t)
+		stray := seedRCRefreshToken(t, f.q, f.userID) // another device on the parent
+		f.bind(t, stray, f.parent.ID)
+		return f, stray
+	}
+	pinHash := func(t *testing.T, f *lockFixture, id int64) string {
+		t.Helper()
+		var h string
+		if err := lockTestPool(t).QueryRow(ctx, `SELECT COALESCE(pin_hash, '') FROM user_profiles WHERE id = $1`, id).Scan(&h); err != nil {
+			t.Fatalf("read the PIN: %v", err)
+		}
+		return h
+	}
+
+	t.Run("setting a PIN", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, endTheSession(f, stray), func() (int, string) {
+			c, r, _ := f.call(t, f.h.SetProfilePIN, http.MethodPut, stray, f.parent.ID, `{"pin":"0000"}`)
+			return c, r
+		})
+		if code != http.StatusUnauthorized || reason != "session_ended" {
+			t.Errorf("%d %q, want 401 session_ended", code, reason)
+		}
+		if got := pinHash(t, f, f.parent.ID); got != "set-meanwhile" {
+			t.Errorf("the parent's PIN is %q, want the one set meanwhile", got)
+		}
+	})
+	t.Run("setting a PIN over one set meanwhile, from a live session", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.parent.ID)
+			return err
+		}, func() (int, string) {
+			c, r, _ := f.call(t, f.h.SetProfilePIN, http.MethodPut, stray, f.parent.ID, `{"pin":"0000"}`)
+			return c, r
+		})
+		if code != http.StatusForbidden || reason != "profile_pin_required" {
+			t.Errorf("%d %q, want 403 profile_pin_required", code, reason)
+		}
+		if got := pinHash(t, f, f.parent.ID); got != "set-meanwhile" {
+			t.Errorf("the parent's PIN is %q, want the one set meanwhile", got)
+		}
+	})
+	t.Run("lifting a ceiling", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, endTheSession(f, stray), func() (int, string) {
+			c, r, _ := f.call(t, f.h.UpdateProfile, http.MethodPut, stray, f.kid.ID, `{"max_age_rating":""}`)
+			return c, r
+		})
+		if code != http.StatusUnauthorized || reason != "session_ended" {
+			t.Errorf("%d %q, want 401 session_ended", code, reason)
+		}
+		if p, err := f.q.GetProfile(ctx, f.kid.ID); err != nil || p == nil || p.MaxAgeRating == "" {
+			t.Errorf("the kid after the race: %+v, %v; want its limit kept", p, err)
+		}
+	})
+	t.Run("deleting a profile", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, endTheSession(f, stray), func() (int, string) {
+			c, r, _ := f.call(t, f.h.DeleteProfile, http.MethodDelete, stray, f.kid.ID, "")
+			return c, r
+		})
+		if code != http.StatusUnauthorized || reason != "session_ended" {
+			t.Errorf("%d %q, want 401 session_ended", code, reason)
+		}
+		if p, err := f.q.GetProfile(ctx, f.kid.ID); err != nil || p == nil {
+			t.Errorf("the kid after the race: %+v, %v; want it kept", p, err)
+		}
+	})
+	t.Run("creating a profile", func(t *testing.T) {
+		f, stray := setup(t)
+		before, _ := f.q.CountProfilesByUser(ctx, f.userID)
+		code, reason := f.raceTheAccountLock(t, endTheSession(f, stray), func() (int, string) {
+			c, r, _ := f.call(t, f.h.CreateProfile, http.MethodPost, stray, 0, `{"name":"another"}`)
+			return c, r
+		})
+		if code != http.StatusUnauthorized || reason != "session_ended" {
+			t.Errorf("%d %q, want 401 session_ended", code, reason)
+		}
+		if after, _ := f.q.CountProfilesByUser(ctx, f.userID); after != before {
+			t.Errorf("profiles after the race: %d, want %d", after, before)
+		}
+	})
+	t.Run("creating a profile once the session's own profile is restricted", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE id = $1`, f.parent.ID)
+			return err
+		}, func() (int, string) {
+			c, r, _ := f.call(t, f.h.CreateProfile, http.MethodPost, stray, 0, `{"name":"another"}`)
+			return c, r
+		})
+		if code != http.StatusForbidden || reason != "profile_restricted" {
+			t.Errorf("%d %q, want 403 profile_restricted", code, reason)
+		}
+	})
+	t.Run("re-defaulting a profile", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, endTheSession(f, stray), func() (int, string) {
+			c, r, _ := f.call(t, f.h.SetDefault, http.MethodPut, stray, f.kid.ID, "")
+			return c, r
+		})
+		if code != http.StatusUnauthorized || reason != "session_ended" {
+			t.Errorf("%d %q, want 401 session_ended", code, reason)
+		}
+		if p, err := f.q.GetProfile(ctx, f.parent.ID); err != nil || p == nil || !p.IsDefault {
+			t.Errorf("the parent after the race: %+v, %v; want it still the default", p, err)
+		}
+	})
+	t.Run("re-defaulting a profile locked meanwhile", func(t *testing.T) {
+		f, stray := setup(t)
+		code, reason := f.raceTheAccountLock(t, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE user_profiles SET pin_hash = 'set-meanwhile' WHERE id = $1`, f.kid.ID)
+			return err
+		}, func() (int, string) {
+			c, r, _ := f.call(t, f.h.SetDefault, http.MethodPut, stray, f.kid.ID, "")
+			return c, r
+		})
+		if code != http.StatusForbidden || reason != "profile_pin_required" {
+			t.Errorf("%d %q, want 403 profile_pin_required", code, reason)
+		}
+		if p, err := f.q.GetProfile(ctx, f.parent.ID); err != nil || p == nil || !p.IsDefault {
+			t.Errorf("the parent after the race: %+v, %v; want it still the default", p, err)
+		}
+	})
 }

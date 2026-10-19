@@ -180,7 +180,7 @@ type deviceSessionStore interface {
 	GetUserByID(context.Context, int64) (*models.User, error)
 	ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error)
 	MostRestrictiveUnlockedProfile(ctx context.Context, userID int64) (*models.UserProfile, error)
-	MostRestrictiveProfilePIN(ctx context.Context, userID int64) (*models.UserProfile, *string, error)
+	MostRestrictiveProfilePIN(ctx context.Context, userID, prefer int64) (*models.UserProfile, *string, error)
 	SessionLive(ctx context.Context, userID, refreshTokenID int64) (bool, error)
 	CreateRefreshTokenAtVersion(context.Context, *models.RefreshToken, int) (bool, error)
 	RevokeRefreshToken(context.Context, string) error
@@ -305,9 +305,10 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	// no password: then pairing is the device's only way in, and refusing it
 	// would lock the owner's devices out for good (no route can give an
 	// account a password). The device then gets the account's most
-	// restrictive profile, PIN and all, which is never looser than any other
-	// profile on it; as the linked sign-in does for such an account, the
-	// approver's own sign-in stands in for that one PIN. Fails closed.
+	// restrictive profile without its PIN (the approver's own when it ties),
+	// which is never looser than any other profile on it; as the linked
+	// sign-in does for such an account, the approver's own sign-in stands in
+	// for that one PIN. Fails closed.
 	acting, err := h.sessions.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID)
 	if err != nil || acting == nil {
 		writeError(w, http.StatusInternalServerError, "could not check the active profile")
@@ -328,7 +329,7 @@ func (h *DeviceAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 				"every profile on this account has a PIN; sign in on the device with the account password instead")
 			return
 		default:
-			locked, hash, lerr := h.sessions.MostRestrictiveProfilePIN(r.Context(), claims.UserID)
+			locked, hash, lerr := h.sessions.MostRestrictiveProfilePIN(r.Context(), claims.UserID, acting.ID)
 			if lerr != nil || locked == nil || locked.ID == 0 {
 				writeError(w, http.StatusInternalServerError, "could not check the active profile")
 				return

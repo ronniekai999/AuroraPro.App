@@ -260,12 +260,19 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   profile cannot be resolved, and refuse a session whose row is gone (401
   `session_ended`, `requireLiveSession`): its still-valid access token acts as
   the most restrictive profile, which with no restricted profile left is the
-  unrestricted default. The handler's checks run before any lock, so a ceiling
-  write rechecks under the account lock (`CeilingJudgement`) that the
-  session's own profile still has no limit (403 `profile_restricted`) and the
-  edited profile still has the limit the handler read (409 `profile_changed`);
-  otherwise a parent tightening a kid's limit could see a request judged a
-  moment earlier put it back or lift it.
+  unrestricted default. The handler's checks run before any lock, so every
+  management write (create, delete, re-default, a PIN, a ceiling) rechecks
+  under the account lock what its handler judged (`ManagerJudgement`,
+  `recheckManager`): the session's row still exists (401 `session_ended`),
+  the profile it acts as still has no limit (403 `profile_restricted`), and,
+  for a PIN write or a re-default, the profile's PIN is still the one judged
+  (403 `profile_pin_required`); a ceiling write also that the edited profile
+  still has the limit the handler read (409 `profile_changed`, under
+  `CeilingJudgement`). A PIN write ends the sessions acting as its profile,
+  and a request from one of them already past its checks used to land after
+  it, replacing the PIN just set or lifting a kid's limit; a parent
+  tightening a kid's limit could likewise see a request judged a moment
+  earlier put it back or lift it.
 - An account keeps at least one profile without a ceiling: a ceiling on its
   last one, or that profile's delete, is a 409 `last_unrestricted_profile`
   (`keepAnUnrestrictedProfile`, which locks the user row first, so two such
@@ -302,8 +309,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   `profile_locked`, since the account password can still sign the device in,
   except on an account with no password, where pairing is the device's only
   way in and no route can give the account a password: the device then gets
-  the account's most restrictive profile, PIN and all
-  (`MostRestrictiveProfilePIN`), never looser than any other profile on it.
+  the account's most restrictive profile without its PIN, the approver's own
+  when it ties (`MostRestrictiveProfilePIN`), never looser than any other
+  profile on it. It still crosses that one profile's PIN: a kid on a locked
+  profile can put a device on a sibling's that is more restrictive, or on
+  the default when no profile has a limit, and the device reaches that
+  profile's history and lists.
   The grant waits up to ten minutes for the device's poll, so the session
   insert rechecks under the user-row lock that the profile's PIN state is the
   one judged (`RefreshToken.BoundPINHash`: none, or the same hash): a grant
@@ -377,6 +388,17 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     switch to any unlocked profile, including one with a looser limit or
     none; Settings warns about the unlocked profiles whose limit differs
     (it has no rating ladder of its own, so it also lists stricter ones).
+  - A lock guards switching into a profile, not changing it: an unrestricted
+    session can rename, restrict or delete a locked profile without its PIN,
+    and a delete takes the profile's history with it.
+  - A pairing grant's session insert rechecks the bound profile's PIN state
+    only, not the ceilings: "most restrictive" is judged at approval, up to
+    ten minutes before the device collects the grant.
+  - Writes outside the management list (a rename or other cosmetic edit, a
+    pairing approval) do not recheck the session under the lock, so one
+    from a session a PIN write ends in between can still land; a pairing's
+    bound profile is still rechecked for its PIN when the device collects
+    the grant.
   - A password login binds the account default without its PIN: the
     password that signed in stands in for it. A sign-in through a linked
     identity does not (`oauthSignInProfile`): it binds the default only
@@ -454,7 +476,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     `share_watch_history` switch publishes the default profile's history),
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when
-    that profile has a PIN, to the most restrictive unlocked one), the
+    that profile has a PIN, to the most restrictive unlocked one, or, on an
+    account with no password whose every profile is locked, to the most
+    restrictive one without its PIN), the
     taste-onboarding routes (`/api/onboarding/skip`, `/seeds`, `DELETE
     /seeds`), which take any `?profile_id=` on the account, so a restricted
     session can mark another profile's onboarding done or change its seeds,
