@@ -392,15 +392,23 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
 - The admin role belongs to the account, but a session acting as a restricted
   profile has none of its powers. The admin routes refuse it with 403
   `profile_restricted` (`refuseRestrictedAdmin`, behind `auth.RequireAdmin`).
-  Outside them `adminPowers` decides, failing closed: reading other members'
-  private collections and editing or deleting theirs, making a collection
-  public, any party's reactions, info, highlight reel and QR code, other
-  accounts' transcode sessions, the admin view and quota of media requests,
-  and the event socket's admin-only now-playing feed (the role is fixed when
-  `/ws` connects). The web app shows its Admin tab, admin controls and server
-  panel only once the session is known to act as an unrestricted profile, or
-  the account has none (`showsAdminUI`), and leaves `/admin` on a switch to a
-  restricted one.
+  Outside them `adminPowers` decides, failing closed (a scoped token such as a
+  cast token, which copies its minter's role, has none): reading other
+  members' private collections and editing or deleting theirs, making a
+  collection public, any party's reactions, info, highlight reel and QR code,
+  other accounts' transcode sessions, every member's media requests (listing
+  them, deleting another's, skipping the request quota), the bug-report
+  token's health, and the event socket's admin-only now-playing feed (the
+  role is fixed when `/ws` connects). The web app shows its Admin tab, admin
+  controls and server panel only once the session is known to act as an
+  unrestricted profile, or the account has none (`showsAdminUI`); on `/admin`
+  until then it says it is checking, or that it could not confirm the
+  profile, and a switch to a restricted one leaves `/admin`.
+- This holds only while the session stays restricted. A switch to any
+  unlocked unrestricted profile restores every admin power, restore and role
+  changes included, so on an admin account each unrestricted profile's PIN
+  and the account password are the only barrier; the README still points
+  owners to a separate, non-admin account for children as the stronger setup.
 - Known gaps:
   - The lock is only as strong as the account password, which unlocks every
     profile and can be guessed through the sign-in and password-change
@@ -488,16 +496,23 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - With a provider's invite bypass on (`BypassInviteEnabled`), anyone with
     an account there, a child included, can sign up a separate account with
     no ceiling at all.
-  - An event socket keeps the role it connected with: a session that
-    switches to a restricted profile keeps receiving the now-playing feed
-    until it reconnects. The feedback config still reports the GitHub
-    token's health to a restricted admin session. Only the admin routes'
-    refusal, the collections list and the socket's role are pinned through
-    a request (`admin_restricted_test.go`), plus the party QR code at the
-    handler; the other `adminPowers` sites are not, and the SPA's App wiring
-    of `showsAdminUI` (the admin view's mount, its redirect, the detail
-    page's admin actions) has no App-level test, though TopNav's use of it
-    does.
+  - Admin alerts (`internal/notify`: a member's new media request, with its
+    title, and scan completions) go to the admin ACCOUNT, so a restricted
+    session on it sees them in the notification list, over `/ws` and by web
+    push; notifications have no profile, and push cannot be filtered by one.
+  - An event socket keeps the role it connected with, either way: a session
+    that switches to a restricted profile keeps receiving the now-playing
+    feed until it reconnects, and one that switches back stays a user until
+    then. No first-party client reads that feed (`useRealtime` ignores it),
+    but the browser still receives it.
+  - Pinned: the admin routes' refusal through the router and its fail-closed
+    cases at the middleware, `adminPowers`' cases, the collections list and
+    the socket's role through a request, and the party QR code and the
+    feedback config at the handler (`admin_restricted_test.go`,
+    `party_qr_test.go`). The other `adminPowers` sites are not. The SPA's
+    App wiring of `showsAdminUI` (the admin view's mount and its notice, the
+    redirect, the detail page's admin actions) has no App-level test, though
+    TopNav's use of it does.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

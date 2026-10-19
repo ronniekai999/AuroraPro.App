@@ -114,6 +114,8 @@ type FeedbackHandler struct {
 	// or revoked PAT surfaces immediately instead of only on the
 	// first user-attempted Submit.
 	tokenHealth atomic.Value // *patHealth
+	// sessions decides the admin role's reach (adminPowers); nil means none.
+	sessions sessionStore
 }
 
 // patHealth is the snapshot stored in FeedbackHandler.tokenHealth.
@@ -855,7 +857,7 @@ func (l *feedbackLimiter) runSweep(ctx context.Context) {
 // authed users. The frontend gates the launcher button on `enabled`.
 //
 // 2026-05-27 — TokenHealthy / TokenHealthReason are populated ONLY
-// when the requester is an admin (claims.Role == "admin"). Pointer
+// when the requester has the admin role's powers (adminPowers). Pointer
 // on TokenHealthy distinguishes "checked false" from "not yet
 // checked" (no value sent); regular users always see both fields
 // omitted via `omitempty` because admins shouldn't share PAT
@@ -886,7 +888,7 @@ func (h *FeedbackHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		Enabled: h.cfg.Enabled,
 	}
 	claims := auth.GetClaims(r.Context())
-	if claims != nil && claims.Role == "admin" {
+	if adminPowers(r.Context(), h.sessions, claims) {
 		if hp, ok := h.tokenHealth.Load().(*patHealth); ok && hp != nil {
 			healthy := hp.Healthy
 			resp.TokenHealthy = &healthy

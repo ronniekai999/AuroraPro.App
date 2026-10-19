@@ -503,6 +503,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// Phase 3 attachment-janitor goroutine exits cleanly on graceful
 	// shutdown.
 	feedbackH := NewFeedbackHandler(deps.RootCtx, deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir, deps.Version)
+	if deps.Queries != nil {
+		feedbackH.sessions = deps.Queries
+	}
 	partyH := NewPartyHandler(
 		deps.PartyManager,
 		deps.Queries,
@@ -561,7 +564,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// secureCookies threads through so the encoded URL's scheme is https
 	// behind a TLS-terminating proxy (same hint the auth cookies use).
 	partyQRH := NewPartyQRHandler(deps.PartyManager, cfg.Server.SecureCookies)
-	partyQRH.sessions = deps.Queries
+	if deps.Queries != nil { // a nil *db.Queries would be a non-nil sessionStore
+		partyQRH.sessions = deps.Queries
+	}
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.

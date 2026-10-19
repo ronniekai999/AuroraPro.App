@@ -244,7 +244,7 @@ function AvatarMenu({
         ref={triggerRef}
         type="button"
         onClick={() => setOpen(o => !o)}
-        title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
+        title={`Signed in as ${user.username}${showAdmin ? ' (admin)' : ''}`}
         // "true", not "menu" — see the note above `itemRefs`: this opens a
         // disclosure panel of links and buttons, not a menu widget.
         aria-haspopup="true"
@@ -287,7 +287,7 @@ function AvatarMenu({
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
             <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
-              {user.role === 'admin' ? (
+              {showAdmin ? (
                 <>
                   <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
                   Account

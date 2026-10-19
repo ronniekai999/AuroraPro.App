@@ -37,9 +37,11 @@ func refuseRestrictedAdmin(store sessionStore) func(http.Handler) http.Handler {
 // powers outside the admin routes (other members' private collections, any
 // watch party's roster and reel). A session acting as a restricted profile,
 // one whose session row is gone, or one whose profile cannot be resolved has
-// none: it fails closed.
+// none: it fails closed. So does a scoped token (a cast token copies its
+// minter's role but names no session, so it would resolve to the account
+// default), and a handler given no store.
 func adminPowers(ctx context.Context, store sessionStore, claims *auth.JWTClaims) bool {
-	if claims == nil || claims.Role != "admin" {
+	if claims == nil || claims.Role != "admin" || claims.Scope != "" || store == nil {
 		return false
 	}
 	if claims.RefreshTokenID != 0 {

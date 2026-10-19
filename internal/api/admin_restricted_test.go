@@ -19,9 +19,10 @@ import (
 
 // fakeSessions is a sessionStore answering with a fixed acting profile.
 type fakeSessions struct {
-	acting *models.UserProfile
-	err    error
-	gone   bool
+	acting  *models.UserProfile
+	err     error
+	gone    bool
+	liveErr error
 }
 
 func (f fakeSessions) ResolveActingProfile(context.Context, int64, int64) (*models.UserProfile, error) {
@@ -29,7 +30,7 @@ func (f fakeSessions) ResolveActingProfile(context.Context, int64, int64) (*mode
 }
 
 func (f fakeSessions) SessionLive(context.Context, int64, int64) (bool, error) {
-	return !f.gone, nil
+	return !f.gone, f.liveErr
 }
 
 func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
@@ -48,12 +49,56 @@ func TestAdminPowersNeedAnUnrestrictedSession(t *testing.T) {
 		{"a resolve error", admin, fakeSessions{err: errors.New("down")}, false},
 		{"no acting profile", admin, fakeSessions{}, false},
 		{"a session whose row is gone", admin, fakeSessions{acting: free, gone: true}, false},
+		{"a session check that fails", admin, fakeSessions{acting: free, liveErr: errors.New("down")}, false},
+		// A cast token copies its minter's role and names no session, so it
+		// would resolve to the account default.
+		{"a cast token", &auth.JWTClaims{UserID: 1, Role: "admin", Scope: auth.ScopeCast, SessionID: "s"}, fakeSessions{acting: free}, false},
 		{"a user", &auth.JWTClaims{UserID: 1, Role: "user", RefreshTokenID: 2}, fakeSessions{acting: free}, false},
 		{"no claims", nil, fakeSessions{acting: free}, false},
 	}
 	for _, c := range cases {
 		if got := adminPowers(ctx, c.store, c.claims); got != c.want {
 			t.Errorf("%s: adminPowers = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if adminPowers(ctx, nil, admin) {
+		t.Error("no store: adminPowers = true, want false")
+	}
+}
+
+// TestTheAdminRefusalFailsClosed: the admin routes' guard lets through only a
+// live session known to act as an unrestricted profile.
+func TestTheAdminRefusalFailsClosed(t *testing.T) {
+	admin := &auth.JWTClaims{UserID: 1, Role: "admin", RefreshTokenID: 2}
+	free := &models.UserProfile{ID: 1}
+	cases := []struct {
+		name       string
+		store      fakeSessions
+		wantCode   int
+		wantReason string
+	}{
+		{"an unrestricted session", fakeSessions{acting: free}, http.StatusOK, ""},
+		{"a restricted session", fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}, http.StatusForbidden, "profile_restricted"},
+		{"an ended session", fakeSessions{acting: free, gone: true}, http.StatusUnauthorized, "session_ended"},
+		{"a session check that fails", fakeSessions{acting: free, liveErr: errors.New("down")}, http.StatusInternalServerError, ""},
+		{"a resolve error", fakeSessions{err: errors.New("down")}, http.StatusInternalServerError, ""},
+		{"no acting profile", fakeSessions{}, http.StatusInternalServerError, ""},
+	}
+	for _, c := range cases {
+		reached := false
+		guard := refuseRestrictedAdmin(c.store)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+		req = req.WithContext(context.WithValue(req.Context(), auth.ClaimsContextKey, admin))
+		rr := httptest.NewRecorder()
+		guard.ServeHTTP(rr, req)
+		if rr.Code != c.wantCode || errorReasonOf(rr) != c.wantReason {
+			t.Errorf("%s: %d %q, want %d %q", c.name, rr.Code, errorReasonOf(rr), c.wantCode, c.wantReason)
+		}
+		if reached != (c.wantCode == http.StatusOK) {
+			t.Errorf("%s: the handler ran = %v", c.name, reached)
 		}
 	}
 }
@@ -87,14 +132,16 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 		router.ServeHTTP(rr, req)
 		return rr.Code, errorReasonOf(rr)
 	}
-	// One route per guard in the router.
+	// One route per guard in the router. The ids are ones no row has and the
+	// POSTs carry no body, so if a guard regresses the handler behind it finds
+	// nothing to change in the shared test database.
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/users"},
 		{http.MethodPost, "/api/users/invite"},
 		{http.MethodPost, "/api/libraries"},
-		{http.MethodPost, "/api/media/1/refresh-metadata"},
-		{http.MethodPost, "/api/media/1/match"},
-		{http.MethodDelete, "/api/media/1"},
+		{http.MethodPost, "/api/media/999999999999/refresh-metadata"},
+		{http.MethodPost, "/api/media/999999999999/match"},
+		{http.MethodDelete, "/api/media/999999999999"},
 		{http.MethodGet, "/api/tmdb/search?q=x"},
 		{http.MethodGet, "/api/stream/sessions"},
 		{http.MethodGet, "/api/admin/dashboard"},
@@ -126,7 +173,9 @@ func TestARestrictedAdminSeesOnlyItsOwnCollections(t *testing.T) {
 	if err := f.q.CreateCollection(ctx, private); err != nil {
 		t.Fatalf("seed a private collection: %v", err)
 	}
-	t.Cleanup(func() { _, _ = lockTestPool(t).Exec(context.Background(), `DELETE FROM collections WHERE id = $1`, private.ID) })
+	t.Cleanup(func() {
+		_, _ = lockTestPool(t).Exec(context.Background(), `DELETE FROM collections WHERE id = $1`, private.ID)
+	})
 	h := NewCollectionsHandler(f.q)
 	lists := func(rt int64) bool {
 		r := httptest.NewRequest(http.MethodGet, "/api/collections", nil)
@@ -210,5 +259,31 @@ func TestTheEventSocketGivesARestrictedSessionTheUsersEvents(t *testing.T) {
 	}
 	if got := first(kid); got != "marker" {
 		t.Errorf("the kid's socket read %q first, want the marker: it received the admin-only event", got)
+	}
+}
+
+// TestTheFeedbackTokenHealthIsForAdminPowersOnly: the bug-report config shows
+// admins the GitHub token's health; a restricted admin session is not one.
+func TestTheFeedbackTokenHealthIsForAdminPowersOnly(t *testing.T) {
+	h := &FeedbackHandler{cfg: config.BugReportConfig{Enabled: true}}
+	h.tokenHealth.Store(&patHealth{Healthy: false, Reason: "token expired", CheckedAt: time.Now()})
+	admin := &auth.JWTClaims{UserID: 1, Role: "admin", RefreshTokenID: 2}
+	shown := func(sessions sessionStore) bool {
+		h.sessions = sessions
+		req := httptest.NewRequest(http.MethodGet, "/api/feedback/config", nil)
+		req = req.WithContext(context.WithValue(req.Context(), auth.ClaimsContextKey, admin))
+		rr := httptest.NewRecorder()
+		h.GetConfig(rr, req)
+		var resp FeedbackConfigResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rr.Body)
+		}
+		return resp.TokenHealthy != nil || resp.TokenHealthReason != ""
+	}
+	if !shown(fakeSessions{acting: &models.UserProfile{ID: 1}}) {
+		t.Fatal("precondition: an unrestricted admin session should see the token's health")
+	}
+	if shown(fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}}) {
+		t.Error("a restricted admin session saw the token's health")
 	}
 }

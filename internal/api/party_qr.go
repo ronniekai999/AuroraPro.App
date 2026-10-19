@@ -89,7 +89,7 @@ func (h *PartyQRHandler) ServeQR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	if !h.manager.IsParticipantOrHost(code, claims.UserID) && (h.sessions == nil || !adminPowers(r.Context(), h.sessions, claims)) {
+	if !h.manager.IsParticipantOrHost(code, claims.UserID) && !adminPowers(r.Context(), h.sessions, claims) {
 		writeError(w, http.StatusNotFound, "party not found")
 		return
 	}

@@ -52,6 +52,7 @@ describe('TopNav admin controls', () => {
     // "admin" badge) or the nav icon, and the open account menu.
     expect(screen.getAllByRole('button', { name: /^Admin/ })).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: /^Server status$/i })).toHaveLength(2)
+    expect(screen.getByRole('button', { name: 'Account menu for owner' }).getAttribute('title')).toBe('Signed in as owner (admin)')
   })
 
   it('hides all of them from an admin account whose session acts as a restricted profile', () => {
@@ -60,5 +61,7 @@ describe('TopNav admin controls', () => {
     expect(screen.queryAllByRole('button', { name: /^Server status$/i })).toHaveLength(0)
     // The menu did open: its other rows are there.
     expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
+    // Nor does it call the session an admin.
+    expect(screen.getByRole('button', { name: 'Account menu for owner' }).getAttribute('title')).toBe('Signed in as owner')
   })
 })

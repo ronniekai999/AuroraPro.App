@@ -122,6 +122,25 @@ func TestPartyQR_AdminBypassesMembership(t *testing.T) {
 	}
 }
 
+// TestPartyQR_RestrictedAdminIsNotLetThrough — the bypass is the admin role's
+// power, which a session acting as a restricted profile does not have; nor
+// does an admin whose handler has no session store to ask.
+func TestPartyQR_RestrictedAdminIsNotLetThrough(t *testing.T) {
+	admin := &auth.JWTClaims{UserID: 1, Username: "admin", Role: "admin", RefreshTokenID: 7}
+	for name, sessions := range map[string]sessionStore{
+		"restricted": fakeSessions{acting: &models.UserProfile{ID: 2, MaxAgeRating: "PG"}},
+		"no store":   nil,
+	} {
+		h := NewPartyQRHandler(&fakeQRManager{member: false}, false)
+		h.sessions = sessions
+		rec := httptest.NewRecorder()
+		h.ServeQR(rec, qrRequest("ABCDEF", "host.local", admin))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: got status %d, want 404", name, rec.Code)
+		}
+	}
+}
+
 // TestPartyQR_Unauthenticated — no claims in context → 401.
 func TestPartyQR_Unauthenticated(t *testing.T) {
 	mgr := &fakeQRManager{member: true}

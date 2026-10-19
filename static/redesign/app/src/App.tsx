@@ -6450,6 +6450,16 @@ export default function App() {
               <AdminView currentAdminId={user.id} />
             </ViewSuspense>
           )}
+          {/* An admin whose session's profile is not known yet (startup), or
+              could not be read (the profile list failed): say so, rather than
+              a blank page. A known restricted profile is sent home instead. */}
+          {view === 'admin' && user.role === 'admin' && !adminUI && !actingRestricted && (
+            <p role="status" className="text-white/50 text-sm text-center py-16">
+              {profilesSettled
+                ? "Couldn't confirm which profile this session uses, so the admin pages are hidden. Reload to try again."
+                : 'Checking your profile…'}
+            </p>
+          )}
         </div>
       </main>
 

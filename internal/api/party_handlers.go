@@ -161,17 +161,16 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 	}
 	// Membership gate against the DB audit rows of THAT session (the party
 	// is long gone from the manager's memory by the time the reel exists).
-	// Single round trip — this runs per HTTP Range request during playback.
-	if !adminPowers(r.Context(), h.queries, claims) {
-		found, member, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to authorize")
-			return
-		}
-		if !found || !member {
-			writeError(w, http.StatusNotFound, "highlight reel not available")
-			return
-		}
+	// Single round trip for a member — this runs per HTTP Range request
+	// during playback. Only a non-member pays for the admin check.
+	found, member, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to authorize")
+		return
+	}
+	if (!found || !member) && !adminPowers(r.Context(), h.queries, claims) {
+		writeError(w, http.StatusNotFound, "highlight reel not available")
+		return
 	}
 	// File path is resolved on-disk; PartyHandler doesn't know the
 	// cache dir directly — the manager carries the cacheDir config.
