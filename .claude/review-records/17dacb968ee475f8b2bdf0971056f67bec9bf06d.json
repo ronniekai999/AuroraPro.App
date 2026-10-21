@@ -1,0 +1,10 @@
+{
+  "sha": "17dacb968ee475f8b2bdf0971056f67bec9bf06d",
+  "verdict": "lows-only",
+  "summary": "Independent fresh-context read-only review of 32c4577 (admin alerts hidden from sessions without adminPowers: SQL filter on list, count and both mark-reads; admin-role-only socket delivery; SPA feed re-read on profile change; docs), then of the review fixes aba1beb and the CLAUDE.md wording pass 17dacb9. First round: lows only (former admin's push badge, a mark-all-read before the startup profile load, four unpinned paths); fixed the mark-all-read guard and pinned single mark-read and the push test's badge, documented the rest. Mutations re-run by the reviewer: every server filter and both new pins caught; the App-level wiring (onReset drop, feed key, mark-all-read guard) is untested and documented as such. Final state lows-only: two open lows, both documented as known gaps (a former admin's badge counts hidden alerts; a bell opened during startup leaves rows that load while it is open unread).",
+  "reviewer": "claude-subagent-general-purpose-fresh-context",
+  "findings": "2",
+  "diff_digest": "b26a256290ce33dfe7b74bcf36503d68bf13ccc5fd897a46c2bb2340c824089c",
+  "branch": "claude/laughing-ritchie-e2xv7z",
+  "recorded_at": "2026-10-21T01:53:46Z"
+}
