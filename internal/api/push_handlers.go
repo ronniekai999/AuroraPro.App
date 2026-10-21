@@ -23,7 +23,7 @@ type pushStore interface {
 	DeletePushSubscriptionForUser(ctx context.Context, endpoint string, userID int64) error
 	ListPushSubscriptionsForUser(ctx context.Context, userID int64) ([]*models.PushSubscription, error)
 	PruneStalePushSubscriptions(ctx context.Context, cutoff time.Time) (int64, error)
-	CountUnreadNotifications(ctx context.Context, userID int64) (int, error)
+	CountUnreadNotifications(ctx context.Context, userID int64, adminAlerts bool) (int, error)
 }
 
 // pushService is the sender surface the handlers need. *push.Sender
@@ -214,7 +214,9 @@ func (h *PushHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unread, err := h.store.CountUnreadNotifications(r.Context(), claims.UserID)
+	// The test goes to every device on the account, so its badge counts every
+	// unread row, as the dispatcher's does (notify.Dispatcher.Notify).
+	unread, err := h.store.CountUnreadNotifications(r.Context(), claims.UserID, true)
 	if err != nil {
 		unread = 0
 	}

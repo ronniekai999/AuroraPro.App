@@ -25,7 +25,10 @@ func NewNotificationHandler(queries *db.Queries) *NotificationHandler {
 }
 
 // List returns the caller's most-recent notifications plus the current unread
-// count (for the bell badge), scoped to the authenticated user.
+// count (for the bell badge), scoped to the authenticated user. The admin-only
+// types (models.AdminNotificationTypes) go to the admin account, so a session
+// without adminPowers (acting as a restricted profile, say) is not shown them,
+// in the list or the count; adminPowers fails closed.
 // GET /api/me/notifications
 func (h *NotificationHandler) List(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
@@ -33,8 +36,9 @@ func (h *NotificationHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	adminAlerts := adminPowers(r.Context(), h.queries, claims)
 
-	items, err := h.queries.ListNotificationsForUser(r.Context(), claims.UserID, 50)
+	items, err := h.queries.ListNotificationsForUser(r.Context(), claims.UserID, 50, adminAlerts)
 	if err != nil {
 		slog.Error("failed to list notifications", "error", err, "user_id", claims.UserID)
 		writeError(w, http.StatusInternalServerError, "failed to load notifications")
@@ -44,7 +48,7 @@ func (h *NotificationHandler) List(w http.ResponseWriter, r *http.Request) {
 		items = []*models.Notification{}
 	}
 
-	unread, err := h.queries.CountUnreadNotifications(r.Context(), claims.UserID)
+	unread, err := h.queries.CountUnreadNotifications(r.Context(), claims.UserID, adminAlerts)
 	if err != nil {
 		slog.Error("failed to count unread notifications", "error", err, "user_id", claims.UserID)
 		writeError(w, http.StatusInternalServerError, "failed to load notifications")
@@ -59,7 +63,7 @@ func (h *NotificationHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // MarkRead marks a single notification read. Ownership-scoped: the query only
 // touches a row that belongs to the caller, so it cleanly no-ops for someone
-// else's id or an already-read row.
+// else's id, an already-read row, or a row List does not show the session.
 // POST /api/me/notifications/{id}/read
 func (h *NotificationHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
@@ -74,7 +78,7 @@ func (h *NotificationHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.queries.MarkNotificationRead(r.Context(), id, claims.UserID); err != nil {
+	if err := h.queries.MarkNotificationRead(r.Context(), id, claims.UserID, adminPowers(r.Context(), h.queries, claims)); err != nil {
 		slog.Error("failed to mark notification read", "error", err, "id", id, "user_id", claims.UserID)
 		writeError(w, http.StatusInternalServerError, "failed to mark read")
 		return
@@ -84,7 +88,9 @@ func (h *NotificationHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 }
 
 // MarkAllRead marks all of the caller's unread notifications read (panel "mark
-// all read" / clearing the badge).
+// all read" / clearing the badge): the ones List shows it, only. A restricted
+// session's mark-all-read leaves the admin alerts it is not shown unread, so
+// opening a kid's bell cannot clear a new request off the parent's.
 // POST /api/me/notifications/read-all
 func (h *NotificationHandler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
@@ -93,7 +99,7 @@ func (h *NotificationHandler) MarkAllRead(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.queries.MarkAllNotificationsRead(r.Context(), claims.UserID); err != nil {
+	if err := h.queries.MarkAllNotificationsRead(r.Context(), claims.UserID, adminPowers(r.Context(), h.queries, claims)); err != nil {
 		slog.Error("failed to mark all notifications read", "error", err, "user_id", claims.UserID)
 		writeError(w, http.StatusInternalServerError, "failed to mark all read")
 		return

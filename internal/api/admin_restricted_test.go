@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/aurora-media/aurora/internal/config"
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/gorilla/websocket"
 )
@@ -325,6 +327,162 @@ func TestTheEventSocketGivesARestrictedSessionTheUsersEvents(t *testing.T) {
 	}
 	if got := first(kid); got != "marker" {
 		t.Errorf("the kid's socket read %q first, want the marker: it received the admin-only event", got)
+	}
+}
+
+// TestARestrictedAdminSessionIsNotShownTheAdminAlerts: the admin alerts (a
+// member's new request, with its title, and scan results) go to the admin
+// account, so the notification list, its unread count and mark-read leave
+// them out for a session acting as a restricted profile. Driven through the
+// router.
+func TestARestrictedAdminSessionIsNotShownTheAdminAlerts(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1`, f.userID); err != nil {
+		t.Fatalf("make the user an admin: %v", err)
+	}
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	seed := func(typ string, rid *int64) int64 {
+		n := &models.Notification{UserID: f.userID, Type: typ, Title: typ, RequestID: rid}
+		if created, err := f.q.CreateNotification(ctx, n); err != nil || !created {
+			t.Fatalf("seed %s: created=%v err=%v", typ, created, err)
+		}
+		return n.ID
+	}
+	r1, r2 := int64(8101), int64(8102)
+	request := seed(models.NotificationAdminNewRequest, &r1)
+	seed(models.NotificationScanComplete, nil)
+	seed(models.NotificationRequestAvailable, &r2)
+
+	svc := healthTestService()
+	router := NewRouter(RouterDeps{Cfg: &config.Config{}, AuthSvc: svc, Queries: f.q, StartTime: time.Now()})
+	do := func(method, path string, rt int64) *httptest.ResponseRecorder {
+		tok, _, err := svc.GenerateAccessToken(f.userID, u.Username, "admin", u.TokenVersion, rt)
+		if err != nil {
+			t.Fatalf("mint a token: %v", err)
+		}
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, path, rr.Code, rr.Body)
+		}
+		return rr
+	}
+	list := func(rt int64) (types []string, unread int) {
+		var out struct {
+			Notifications []models.Notification `json:"notifications"`
+			Unread        int                   `json:"unread"`
+		}
+		rr := do(http.MethodGet, "/api/me/notifications", rt)
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rr.Body)
+		}
+		for _, n := range out.Notifications {
+			types = append(types, n.Type)
+		}
+		return types, out.Unread
+	}
+
+	if types, unread := list(f.parentRT); len(types) != 3 || unread != 3 {
+		t.Fatalf("the parent's session: %v, %d unread; want all 3, unread", types, unread)
+	}
+	if types, unread := list(f.kidRT); len(types) != 1 || types[0] != models.NotificationRequestAvailable || unread != 1 {
+		t.Errorf("the kid's session: %v, %d unread; want only the account's own notification, unread", types, unread)
+	}
+
+	// The kid's mark-read, by id or all, does not reach the alerts it is not
+	// shown: the parent still has them to read.
+	do(http.MethodPost, "/api/me/notifications/"+strconv.FormatInt(request, 10)+"/read", f.kidRT)
+	do(http.MethodPost, "/api/me/notifications/read-all", f.kidRT)
+	if _, unread := list(f.kidRT); unread != 0 {
+		t.Errorf("the kid's session after mark-all-read: %d unread, want 0", unread)
+	}
+	if _, unread := list(f.parentRT); unread != 2 {
+		t.Errorf("the parent's session after the kid's mark-all-read: %d unread, want the 2 admin alerts", unread)
+	}
+
+	// With no unrestricted profile on the account the restricted session
+	// keeps the admin powers (adminPowers' exception), and is shown them.
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE user_profiles SET max_age_rating = 'PG' WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatalf("restrict every profile: %v", err)
+	}
+	if types, _ := list(f.kidRT); len(types) != 3 {
+		t.Errorf("the kid's session with no unrestricted profile left: %v, want all 3", types)
+	}
+}
+
+// TestTheEventSocketSendsTheAdminAlertsOnlyToAdminRoleSockets: the
+// dispatcher's live leg sends an admin alert to the account's admin-role
+// sockets only, and `/ws` connects a restricted session as a user, so its
+// socket gets the account's other notifications but not the alert.
+func TestTheEventSocketSendsTheAdminAlertsOnlyToAdminRoleSockets(t *testing.T) {
+	f := newLockFixture(t)
+	ctx := context.Background()
+	if _, err := lockTestPool(t).Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1`, f.userID); err != nil {
+		t.Fatalf("make the user an admin: %v", err)
+	}
+	u, err := f.q.GetUserByID(ctx, f.userID)
+	if err != nil {
+		t.Fatalf("read the user: %v", err)
+	}
+	svc := healthTestService()
+	hub := ws.NewHub(nil)
+	server := httptest.NewServer(NewRouter(RouterDeps{Cfg: &config.Config{}, AuthSvc: svc, Queries: f.q, Hub: hub, StartTime: time.Now()}))
+	t.Cleanup(server.Close)
+	dial := func(rt int64) *websocket.Conn {
+		tok, _, err := svc.GenerateAccessToken(f.userID, u.Username, "admin", u.TokenVersion, rt)
+		if err != nil {
+			t.Fatalf("mint a token: %v", err)
+		}
+		conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws?token="+tok, nil)
+		if err != nil {
+			t.Fatalf("dial /ws: %v (%v)", err, resp)
+		}
+		t.Cleanup(func() { conn.Close() })
+		return conn
+	}
+	parent, kid := dial(f.parentRT), dial(f.kidRT)
+	for deadline := time.Now().Add(5 * time.Second); hub.ClientCount() < 2; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub registered %d of 2 sockets", hub.ClientCount())
+		}
+	}
+	// The real dispatcher persists each row (the fixture's user takes them
+	// with it) and broadcasts it. Each socket's queue is FIFO, so the first
+	// notification a socket reads says whether the alert reached it.
+	d := notify.NewDispatcher(f.q, hub, nil, nil)
+	rid := int64(8201)
+	d.Notify(ctx, &models.Notification{UserID: f.userID, Type: models.NotificationAdminNewRequest, Title: "a member's request", RequestID: &rid})
+	d.Notify(ctx, &models.Notification{UserID: f.userID, Type: models.NotificationScanComplete, Title: "Movies: 2 new items"})
+	d.Notify(ctx, &models.Notification{UserID: f.userID, Type: models.NotificationPartyInvite, Title: "a party"})
+	next := func(conn *websocket.Conn) string {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var ev struct {
+			Type string `json:"type"`
+			Data struct {
+				Type string `json:"type"`
+			} `json:"data"`
+		}
+		if err := conn.ReadJSON(&ev); err != nil {
+			t.Fatalf("read an event: %v", err)
+		}
+		if ev.Type != ws.EventNotification {
+			t.Fatalf("read a %q event, want a notification", ev.Type)
+		}
+		return ev.Data.Type
+	}
+	for _, want := range []string{models.NotificationAdminNewRequest, models.NotificationScanComplete, models.NotificationPartyInvite} {
+		if got := next(parent); got != want {
+			t.Errorf("the parent's socket read %q, want %q", got, want)
+		}
+	}
+	if got := next(kid); got != models.NotificationPartyInvite {
+		t.Errorf("the kid's socket read %q first, want the party invite: it received an admin alert", got)
 	}
 }
 

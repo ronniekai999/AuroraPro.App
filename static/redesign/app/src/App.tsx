@@ -115,6 +115,7 @@ import { TopNav } from '@/components/TopNav'
 import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
+import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
 // lazy view chunks (AdminView etc.) can import them without reaching
 // back into App. Icon is a pure SVG leaf; formatRequestDate is a pure
@@ -2760,8 +2761,8 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
   // Set the moment a mark-all-read is issued (panel open); reset at the top
-  // of the seed effect below on every realtimeUserId change (login, logout,
-  // session-expiry relogin). Guards the seed fetch against a race where its
+  // of the seed effect below on every seed (login, session-expiry relogin,
+  // an admin's profile or admin powers changing). Guards the seed fetch against a race where its
   // GET was already in flight when the user marked everything read: without
   // this, the GET's now-stale `unread` count lands afterward and Math.max
   // slams the badge back up even though the server (and local state) has
@@ -3041,6 +3042,19 @@ export default function App() {
   // App-wide realtime hub: live request-status patches + push notifications.
   // One socket for the whole session, enabled only while logged in.
   const realtimeUserId = user && typeof user === 'object' ? user.id : null
+  // The server shows a session the admin alerts (a member's new request, scan
+  // results) in the notification feed and sends it them, and the admin-only
+  // events, over the socket only while it has the admin powers, which a
+  // session acting as a restricted profile does not. So an admin's socket and
+  // feed wait until the startup profile load settles (catalogProfileSettled)
+  // and are reopened and re-read whenever the profile or its admin powers
+  // change: a new sign-in binds the default before the startup re-selection
+  // moves it, so a socket opened or a feed read then gave a kid's session the
+  // parent's. A ceiling given to, or lifted from, the session's own profile
+  // changes them too. Anyone else's cannot change, so neither waits nor
+  // reopens.
+  const realtimeReady = realtimeUserId != null && ((!!user && user.role !== 'admin') || catalogProfileSettled)
+  const realtimeKey = user && user.role === 'admin' ? `${activeProfileId}:${adminUI}` : 'user'
 
   // Boot-time push re-POST (see docs/push.md): once per
   // signed-in session, re-report this device's live subscription so
@@ -3055,16 +3069,9 @@ export default function App() {
     })
   }, [realtimeUserId])
   useRealtime({
-    // An admin's socket waits until the startup profile load settles
-    // (catalogProfileSettled) and reopens when the profile or its admin
-    // powers change: the server
-    // fixes the socket's role when it connects, and a new sign-in binds the
-    // default before the startup re-selection moves it, so a socket opened
-    // then gave a kid's session the admin-only events. A ceiling given to, or
-    // lifted from, the session's own profile changes the role too. Anyone
-    // else's role cannot change, so their socket neither waits nor reopens.
-    enabled: realtimeUserId != null && ((!!user && user.role !== 'admin') || catalogProfileSettled),
-    connectionKey: user && user.role === 'admin' ? `${activeProfileId}:${adminUI}` : 'user',
+    // The server fixes the socket's role when it connects (see realtimeKey).
+    enabled: realtimeReady,
+    connectionKey: realtimeKey,
     onRequestStatus: (ev) => {
       // Patch the matching row's status in place — NEVER insert. The create
       // flow already optimistically prepends the new row, and the failure
@@ -3102,7 +3109,10 @@ export default function App() {
     },
   })
 
-  // Seed the notification feed + unread badge on login (once per user id). The
+  // Seed the notification feed + unread badge on login, and for an admin again
+  // whenever the socket reopens for a new profile or admin powers
+  // (realtimeKey), dropping what was read for the previous one: the server
+  // leaves the admin alerts out for a session without the admin powers. The
   // WS keeps it live thereafter; resetUserState clears it on explicit logout.
   //
   // markedAllReadRef is reset HERE, not only in resetUserState, because
@@ -3112,46 +3122,44 @@ export default function App() {
   // a mark-all-read from the PRIOR session would permanently pin the badge
   // to its last value across that relogin, discarding every real unread
   // count the new session's seed fetch reports.
-  useEffect(() => {
-    if (realtimeUserId == null) return
-    markedAllReadRef.current = false
-    seedResolvedRef.current = false
-    let cancelled = false
-    const ac = new AbortController()
-    listNotifications(ac.signal)
-      .then(res => {
-        if (cancelled) return
-        seedResolvedRef.current = true
-        // Merge, don't overwrite. The WS opens on the same render, so a live
-        // 'notification' may have already been prepended by onNotification
-        // before this GET resolves. Union by id (newest-first) so that live
-        // arrival isn't clobbered, and never let the snapshot's unread count
-        // drop below what live events already bumped it to.
-        setNotifications(prev => {
-          if (prev.length === 0) return res.notifications
-          const seen = new Set<number>()
-          const merged: AppNotification[] = []
-          for (const n of [...prev, ...res.notifications]) {
-            if (seen.has(n.id)) continue
-            seen.add(n.id)
-            merged.push(n)
-          }
-          merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
-          return merged
-        })
-        // Once a mark-all-read has fired, this GET (issued before that POST
-        // landed) reflects a stale unread count — trust local state instead
-        // of resurrecting a badge the user already cleared.
-        setUnreadCount(prev => (markedAllReadRef.current ? prev : Math.max(res.unread, prev)))
+  useNotificationSeed({
+    enabled: realtimeReady,
+    sessionKey: `${realtimeUserId}:${realtimeKey}`,
+    load: listNotifications,
+    onReset: () => {
+      markedAllReadRef.current = false
+      seedResolvedRef.current = false
+      // When realtimeKey changed, the socket reopened in this same commit and
+      // has delivered nothing yet, so this drops only the previous profile's
+      // feed.
+      setNotifications([])
+      setUnreadCount(0)
+    },
+    onLoaded: res => {
+      seedResolvedRef.current = true
+      // Merge, don't overwrite. The WS opens on the same render, so a live
+      // 'notification' may have already been prepended by onNotification
+      // before this GET resolves. Union by id (newest-first) so that live
+      // arrival isn't clobbered, and never let the snapshot's unread count
+      // drop below what live events already bumped it to.
+      setNotifications(prev => {
+        if (prev.length === 0) return res.notifications
+        const seen = new Set<number>()
+        const merged: AppNotification[] = []
+        for (const n of [...prev, ...res.notifications]) {
+          if (seen.has(n.id)) continue
+          seen.add(n.id)
+          merged.push(n)
+        }
+        merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+        return merged
       })
-      .catch(() => {
-        /* non-fatal — the bell just stays empty */
-      })
-    return () => {
-      cancelled = true
-      ac.abort()
-    }
-  }, [realtimeUserId])
+      // Once a mark-all-read has fired, this GET (issued before that POST
+      // landed) reflects a stale unread count — trust local state instead
+      // of resurrecting a badge the user already cleared.
+      setUnreadCount(prev => (markedAllReadRef.current ? prev : Math.max(res.unread, prev)))
+    },
+  })
 
   // Mirror unreadCount onto the OS/PWA app icon badge (Dock, taskbar,
   // Android launcher) — see lib/pwa.ts:syncAppBadge for why this is

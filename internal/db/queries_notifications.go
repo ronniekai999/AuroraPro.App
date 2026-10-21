@@ -44,18 +44,28 @@ func (q *Queries) CreateNotification(ctx context.Context, n *models.Notification
 	return true, nil
 }
 
+// notificationShown is the predicate every read and read-marking query below
+// adds: with adminAlerts ($2) a session is shown all of the account's rows,
+// without it everything but models.AdminNotificationTypes ($3). It is in the
+// WHERE clause so LIMIT counts only rows shown, and the read-marking queries
+// use it too, so a session cannot change a row it is not shown: a kid's
+// mark-all-read leaves the admin's alerts unread. type is NOT NULL, so the
+// comparison is never NULL.
+const notificationShown = `($2::boolean OR type <> ALL($3::text[]))`
+
 // ListNotificationsForUser returns a user's most-recent notifications, newest
-// first, capped at limit (defaulted/clamped to 50).
-func (q *Queries) ListNotificationsForUser(ctx context.Context, userID int64, limit int) ([]*models.Notification, error) {
+// first, capped at limit (defaulted/clamped to 50). Without adminAlerts it
+// leaves out the admin-only types (see notificationShown).
+func (q *Queries) ListNotificationsForUser(ctx context.Context, userID int64, limit int, adminAlerts bool) ([]*models.Notification, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, user_id, type, title, COALESCE(media_type, ''), request_id, COALESCE(link, ''), read_at, created_at
 		FROM notifications
-		WHERE user_id = $1
+		WHERE user_id = $1 AND `+notificationShown+`
 		ORDER BY created_at DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $4`, userID, adminAlerts, models.AdminNotificationTypes(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -74,31 +84,35 @@ func (q *Queries) ListNotificationsForUser(ctx context.Context, userID int64, li
 
 // CountUnreadNotifications returns the number of unread notifications for a user
 // (backs the bell badge). Uses the partial idx_notifications_user_unread index.
-func (q *Queries) CountUnreadNotifications(ctx context.Context, userID int64) (int, error) {
+// Without adminAlerts it leaves out the admin-only types (see
+// notificationShown).
+func (q *Queries) CountUnreadNotifications(ctx context.Context, userID int64, adminAlerts bool) (int, error) {
 	var n int
 	err := q.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL`,
-		userID,
+		`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL AND `+notificationShown,
+		userID, adminAlerts, models.AdminNotificationTypes(),
 	).Scan(&n)
 	return n, err
 }
 
 // MarkNotificationRead marks a single notification read, scoped to its owner so a
 // user can't mark someone else's notification. No-ops cleanly if the id doesn't
-// belong to the user or is already read.
-func (q *Queries) MarkNotificationRead(ctx context.Context, id, userID int64) error {
+// belong to the user, is already read, or is not shown without adminAlerts.
+func (q *Queries) MarkNotificationRead(ctx context.Context, id, userID int64, adminAlerts bool) error {
 	_, err := q.pool.Exec(ctx,
-		`UPDATE notifications SET read_at = NOW() WHERE id = $1 AND user_id = $2 AND read_at IS NULL`,
-		id, userID,
+		`UPDATE notifications SET read_at = NOW()
+		 WHERE user_id = $1 AND `+notificationShown+` AND id = $4 AND read_at IS NULL`,
+		userID, adminAlerts, models.AdminNotificationTypes(), id,
 	)
 	return err
 }
 
-// MarkAllNotificationsRead marks all of a user's unread notifications read.
-func (q *Queries) MarkAllNotificationsRead(ctx context.Context, userID int64) error {
+// MarkAllNotificationsRead marks all of a user's unread notifications read,
+// those shown only: without adminAlerts the admin-only types stay unread.
+func (q *Queries) MarkAllNotificationsRead(ctx context.Context, userID int64, adminAlerts bool) error {
 	_, err := q.pool.Exec(ctx,
-		`UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL`,
-		userID,
+		`UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL AND `+notificationShown,
+		userID, adminAlerts, models.AdminNotificationTypes(),
 	)
 	return err
 }

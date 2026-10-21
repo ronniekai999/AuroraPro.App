@@ -18,6 +18,8 @@ type fakeStore struct {
 	admins    []int64
 	adminsErr error
 	nextID    int64
+	// badgeAdminAlerts records what each badge count asked for.
+	badgeAdminAlerts []bool
 }
 
 func (f *fakeStore) CreateNotification(_ context.Context, n *models.Notification) (bool, error) {
@@ -34,7 +36,10 @@ func (f *fakeStore) CreateNotification(_ context.Context, n *models.Notification
 	return f.createRet, nil
 }
 
-func (f *fakeStore) CountUnreadNotifications(_ context.Context, _ int64) (int, error) {
+func (f *fakeStore) CountUnreadNotifications(_ context.Context, _ int64, adminAlerts bool) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.badgeAdminAlerts = append(f.badgeAdminAlerts, adminAlerts)
 	return f.unread, nil
 }
 
@@ -42,19 +47,31 @@ func (f *fakeStore) GetAdminUserIDs(_ context.Context) ([]int64, error) {
 	return f.admins, f.adminsErr
 }
 
+// fakeHub records each broadcast; adminOnly says whether it went to the
+// user's admin-role sockets only.
 type fakeHub struct {
-	mu     sync.Mutex
-	events []map[string]interface{}
-	users  []int64
+	mu        sync.Mutex
+	events    []map[string]interface{}
+	users     []int64
+	adminOnly []bool
 }
 
-func (f *fakeHub) BroadcastToUser(userID int64, event string, payload interface{}) {
+func (f *fakeHub) record(userID int64, payload interface{}, adminOnly bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.users = append(f.users, userID)
+	f.adminOnly = append(f.adminOnly, adminOnly)
 	if m, ok := payload.(map[string]interface{}); ok {
 		f.events = append(f.events, m)
 	}
+}
+
+func (f *fakeHub) BroadcastToUser(userID int64, _ string, payload interface{}) {
+	f.record(userID, payload, false)
+}
+
+func (f *fakeHub) BroadcastToUserAdmins(userID int64, _ string, payload interface{}) {
+	f.record(userID, payload, true)
 }
 
 type fakePush struct {
@@ -182,5 +199,43 @@ func TestScanCompletedGatesOnNewFiles(t *testing.T) {
 	d.ScanCompleted(context.Background(), "Movies", 1)
 	if got := store.created[len(store.created)-1].Title; got != "Movies: 1 new item" {
 		t.Errorf("singular title = %q", got)
+	}
+}
+
+// TestAdminAlertsGoOnlyToAdminRoleSockets: the admin alerts go to the admin
+// account, and `/ws` connects a session acting as a restricted profile as a
+// user, so they are sent to the account's admin-role sockets only. Every other
+// type still reaches every socket of its user.
+func TestAdminAlertsGoOnlyToAdminRoleSockets(t *testing.T) {
+	store := &fakeStore{createRet: true, admins: []int64{1}, unread: 2}
+	hub := &fakeHub{}
+	push := &fakePush{}
+	d := NewDispatcher(store, hub, push, passthroughEnvelope)
+
+	d.AdminNewRequest(context.Background(), &models.Request{ID: 55, Title: "Dune", MediaType: "movie"}, 9)
+	d.ScanCompleted(context.Background(), "Movies", 2)
+	d.Notify(context.Background(), &models.Notification{UserID: 1, Type: models.NotificationRequestAvailable, Title: "Hook"})
+
+	want := []bool{true, true, false}
+	if len(hub.adminOnly) != len(want) {
+		t.Fatalf("broadcasts: %v, want %d", hub.adminOnly, len(want))
+	}
+	for i, typ := range []string{models.NotificationAdminNewRequest, models.NotificationScanComplete, models.NotificationRequestAvailable} {
+		if hub.events[i]["type"] != typ {
+			t.Fatalf("broadcast %d is %v, want %s", i, hub.events[i]["type"], typ)
+		}
+		if hub.adminOnly[i] != want[i] {
+			t.Errorf("%s went to admin-role sockets only = %v, want %v", typ, hub.adminOnly[i], want[i])
+		}
+	}
+	// Push subscriptions belong to the account, so push still delivers all
+	// three, and each badge counts every unread row.
+	if len(push.users) != 3 {
+		t.Errorf("push leg: %d sends, want 3", len(push.users))
+	}
+	for i, all := range store.badgeAdminAlerts {
+		if !all {
+			t.Errorf("badge %d left out the admin alerts; push reaches every device on the account", i)
+		}
 	}
 }

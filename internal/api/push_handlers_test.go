@@ -56,7 +56,7 @@ func (f *fakePushStore) PruneStalePushSubscriptions(_ context.Context, _ time.Ti
 	return 0, nil
 }
 
-func (f *fakePushStore) CountUnreadNotifications(_ context.Context, _ int64) (int, error) {
+func (f *fakePushStore) CountUnreadNotifications(_ context.Context, _ int64, _ bool) (int, error) {
 	return 2, nil
 }
 

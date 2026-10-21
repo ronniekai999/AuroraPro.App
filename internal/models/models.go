@@ -1147,6 +1147,26 @@ const (
 	NotificationPartyReminder = "party_reminder"
 )
 
+// AdminNotificationTypes are the types only the admin role receives (other
+// members' requests, scan results). They go to the admin ACCOUNT, so a session
+// acting as a restricted profile on it is not shown them: the notification
+// list leaves them out and the event socket sends them only to admin-role
+// connections. A new admin-only type must be added here. A fresh slice each
+// call, so no caller can change what another filters.
+func AdminNotificationTypes() []string {
+	return []string{NotificationAdminNewRequest, NotificationScanComplete}
+}
+
+// IsAdminNotification reports whether typ is one of AdminNotificationTypes.
+func IsAdminNotification(typ string) bool {
+	for _, t := range AdminNotificationTypes() {
+		if t == typ {
+			return true
+		}
+	}
+	return false
+}
+
 // Notification is a durable, per-user in-app notification backing the bell +
 // Notifications panel. Created by the request monitor on a status transition and
 // also pushed live over the 'notification' WebSocket event; the persisted row is
