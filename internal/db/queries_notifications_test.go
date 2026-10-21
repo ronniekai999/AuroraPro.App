@@ -232,9 +232,18 @@ func TestAdminAlertsAreShownOnlyWithAdminAlerts(t *testing.T) {
 	}
 
 	// Marking read without admin alerts leaves them unread: one by its id,
-	// then all.
+	// then all. A row it is shown, it marks read.
 	if err := q.MarkNotificationRead(ctx, alerts[0], userID, false); err != nil {
 		t.Fatalf("mark an admin alert read: %v", err)
+	}
+	if err := q.MarkNotificationRead(ctx, member[0], userID, false); err != nil {
+		t.Fatalf("mark a member row read: %v", err)
+	}
+	if got := unread(false); got != len(member)-1 {
+		t.Errorf("after marking one member row read without admin alerts: unread %d, want %d", got, len(member)-1)
+	}
+	if got := unread(true); got != len(member)-1+len(alerts) {
+		t.Errorf("after marking one admin alert and one member row read without admin alerts: %d unread in all, want %d", got, len(member)-1+len(alerts))
 	}
 	if err := q.MarkAllNotificationsRead(ctx, userID, false); err != nil {
 		t.Fatalf("mark all read: %v", err)

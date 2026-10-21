@@ -5904,6 +5904,12 @@ export default function App() {
         onRsvp={handleInviteRsvp}
         onJoinParty={code => void handleJoinInviteParty(code)}
         onMarkAllRead={() => {
+          // Before the feed may be read (an admin's waits for the startup
+          // profile load) nothing is shown to mark, and the POST would run as
+          // whatever profile the session is bound to before the startup
+          // re-selection moves it, clearing the parent's admin alerts; the
+          // feed read that follows would also reset markedAllReadRef under it.
+          if (!realtimeReady) return
           // Only skip once seedResolvedRef confirms unreadCount is trustworthy
           // — before that, 0 can mean "genuinely nothing unread" OR "the seed
           // fetch hasn't landed yet", and treating those the same previously

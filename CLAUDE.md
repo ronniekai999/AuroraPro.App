@@ -586,8 +586,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     admin-only types are a hand-kept list (`models.AdminNotificationTypes`);
     a new admin-only type left off it reaches a restricted session, and
     nothing checks. A former admin's old alerts are hidden from it too, since
-    a user has no admin powers. Scan progress (with the current file name)
-    and library updates go to every socket, whatever its role or profile.
+    a user has no admin powers, and its mark-reads leave them unread, so its
+    push badges keep counting them until SQL clears them; shown to it
+    instead, they would be shown to a restricted profile on that account.
+    A newly made admin's alerts stay hidden until its access token, which
+    carries the role, is refreshed. Scan progress (with the current file
+    name) and library updates go to every socket, whatever its role or
+    profile.
   - A restricted session on an admin account is held to the request quota,
     and the new-request alert skips its requester, so on a one-admin install
     a request it has held for approval alerts nobody.
@@ -693,16 +698,18 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     tested; the App wiring (computing `adminUI` and
     passing it to TopNav, the scan bar, the panels, collections and the
     player; the admin view's mount and its notice, the redirect, the detail
-    page's admin actions, the socket's and the feed's gate and key,
-    collections and the
-    requests list waiting for the startup load, dropping the requests list,
-    remounting collections, hiding the token's health) has no App-level
-    test. The admin alerts are pinned against the database (the list, the
-    count and both mark-reads, `queries_notifications_test.go`), through
-    the router for an unrestricted, a restricted and an exception session,
-    through a `/ws` dial with the real dispatcher (`admin_restricted_test.go`),
-    and at the dispatcher (`dispatcher_test.go`). Settings still labels the account's role, admin included, in a
-    restricted session.
+    page's admin actions, the socket's and the feed's gate and key, the
+    feed's drop of the previous profile's rows and the bell's mark-all-read
+    waiting for it, collections and the requests list waiting for the
+    startup load, dropping the requests list, remounting collections, hiding
+    the token's health) has no App-level test. The admin alerts are pinned
+    against the database (the list, the count and both mark-reads,
+    `queries_notifications_test.go`), through the router for an
+    unrestricted, a restricted and an exception session, through a `/ws`
+    dial with the real dispatcher (`admin_restricted_test.go`), and at the
+    dispatcher and the push test's badge (`dispatcher_test.go`,
+    `push_handlers_test.go`). Settings still labels the account's role,
+    admin included, in a restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

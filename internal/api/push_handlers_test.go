@@ -22,6 +22,8 @@ type fakePushStore struct {
 	}
 	subs   []*models.PushSubscription
 	pruned bool
+	// badgeAdminAlerts records what each badge count asked for.
+	badgeAdminAlerts []bool
 }
 
 func (f *fakePushStore) UpsertPushSubscription(_ context.Context, s *models.PushSubscription) error {
@@ -56,7 +58,10 @@ func (f *fakePushStore) PruneStalePushSubscriptions(_ context.Context, _ time.Ti
 	return 0, nil
 }
 
-func (f *fakePushStore) CountUnreadNotifications(_ context.Context, _ int64, _ bool) (int, error) {
+func (f *fakePushStore) CountUnreadNotifications(_ context.Context, _ int64, adminAlerts bool) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.badgeAdminAlerts = append(f.badgeAdminAlerts, adminAlerts)
 	return 2, nil
 }
 
@@ -159,6 +164,11 @@ func TestPushTestCooldownAndDeviceCount(t *testing.T) {
 	h.Test(rec, pushReq("POST", "", 7))
 	if rec.Code != 200 || len(svc.sent) != 1 {
 		t.Fatalf("first test: status %d sent %v", rec.Code, svc.sent)
+	}
+	// The test goes to every device on the account, so its badge counts the
+	// admin alerts too, as the dispatcher's does.
+	if len(store.badgeAdminAlerts) != 1 || !store.badgeAdminAlerts[0] {
+		t.Errorf("badge counts asked for admin alerts = %v, want [true]", store.badgeAdminAlerts)
 	}
 
 	// Immediately again → throttled, nothing sent.

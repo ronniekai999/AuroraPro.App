@@ -95,7 +95,9 @@ profile's rows, under its ceiling, in SQL before LIMIT and in the count.
 
 - Listings: `/api/media/genres` (aggregate), `/api/libraries` (names and
   paths), `/api/me/notifications` (party invites, RSVPs, reminders and reel
-  notices carry the title in their stored text), `GET /api/parties/{code}` (the
+  notices carry the title in their stored text; the admin alerts, other
+  members' requested titles among them, are left out for a session without
+  the admin powers), `GET /api/parties/{code}` (the
   party's title and poster for anyone with the code), `/api/rooms`, and the
   account's media requests: `GET /api/requests` and `GET
   /api/requests/search`, a TMDB-wide title search with posters and
