@@ -190,6 +190,20 @@ func (h *Hub) BroadcastToUser(userID int64, eventType string, data interface{}) 
 	})
 }
 
+// BroadcastToUserAdmins sends a JSON message to a specific user's admin-role
+// clients only. The admin role belongs to the account, but `/ws` connects a
+// session acting as a restricted profile as a user, so this is how an
+// admin-only event for one account skips that session's sockets.
+func (h *Hub) BroadcastToUserAdmins(userID int64, eventType string, data interface{}) {
+	payload := marshalEvent(eventType, data)
+	if payload == nil {
+		return
+	}
+	h.broadcastPayload(payload, func(c *client) bool {
+		return c.userID == userID && c.role == "admin"
+	})
+}
+
 // ClientCount returns the number of connected clients
 func (h *Hub) ClientCount() int {
 	h.mu.RLock()

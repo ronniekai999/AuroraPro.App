@@ -18,13 +18,16 @@ import (
 // Store is the query-layer slice the dispatcher needs. *db.Queries satisfies it.
 type Store interface {
 	CreateNotification(ctx context.Context, n *models.Notification) (bool, error)
-	CountUnreadNotifications(ctx context.Context, userID int64) (int, error)
+	CountUnreadNotifications(ctx context.Context, userID int64, adminAlerts bool) (int, error)
 	GetAdminUserIDs(ctx context.Context) ([]int64, error)
 }
 
 // Hub is the live-delivery leg. *websocket.Hub satisfies it.
 type Hub interface {
 	BroadcastToUser(userID int64, event string, payload interface{})
+	// BroadcastToUserAdmins reaches only the user's admin-role sockets: a
+	// session acting as a restricted profile connects as a user.
+	BroadcastToUserAdmins(userID int64, event string, payload interface{})
 }
 
 // PushSender is the closed-tab leg. *push.Sender satisfies it; nil disables
@@ -74,7 +77,7 @@ func (d *Dispatcher) Notify(ctx context.Context, n *models.Notification) {
 		// One payload shape for every producer. Requests historically omitted
 		// link and the reel omitted media_type/request_id; the frontend's
 		// AppNotification has every field optional, so unifying is additive.
-		d.hub.BroadcastToUser(n.UserID, ws.EventNotification, map[string]interface{}{
+		payload := map[string]interface{}{
 			"id":         n.ID,
 			"type":       n.Type,
 			"title":      n.Title,
@@ -82,15 +85,24 @@ func (d *Dispatcher) Notify(ctx context.Context, n *models.Notification) {
 			"request_id": n.RequestID,
 			"link":       n.Link,
 			"created_at": n.CreatedAt,
-		})
+		}
+		// An admin alert goes to the account's admin-role sockets only, as the
+		// notification list shows it only with the admin powers.
+		if models.IsAdminNotification(n.Type) {
+			d.hub.BroadcastToUserAdmins(n.UserID, ws.EventNotification, payload)
+		} else {
+			d.hub.BroadcastToUser(n.UserID, ws.EventNotification, payload)
+		}
 	}
 
 	if d.push == nil || d.envelope == nil {
 		return
 	}
 	// Badge = unread count AFTER the insert; a count error degrades to 0
-	// rather than losing the push.
-	unread, err := d.store.CountUnreadNotifications(writeCtx, n.UserID)
+	// rather than losing the push. Push subscriptions belong to the account,
+	// not a profile, so push reaches every device the account turned it on
+	// for, admin alerts included, and the badge counts every unread row too.
+	unread, err := d.store.CountUnreadNotifications(writeCtx, n.UserID, true)
 	if err != nil {
 		slog.Warn("notify: unread count for badge failed", "user_id", n.UserID, "error", err)
 		unread = 0

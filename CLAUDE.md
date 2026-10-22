@@ -447,8 +447,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   collection public, any party's reactions, info, highlight reel and QR code,
   other accounts' transcode sessions, every member's media requests (listing
   them, deleting another's, skipping the request quota), the bug-report
-  token's health, and the event socket's admin-only events (now playing,
-  transcode status, server health; the role is fixed when `/ws` connects).
+  token's health, the event socket's admin-only events (now playing,
+  transcode status, server health; the role is fixed when `/ws` connects),
+  and the admin alerts (`models.AdminNotificationTypes`: a member's new
+  request, with its title, and scan results) in the notification list, its
+  unread count and mark-read, and on the event socket, which sends them only
+  to admin-role sockets (`Hub.BroadcastToUserAdmins`).
   The admin routes' guard refuses a non-admin and a scoped token itself,
   though `auth.RequireAdmin` and `RequireAuth` ahead of it already do. The
   one exception is an admin account with no unrestricted profile at all
@@ -471,8 +475,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   (`catalogProfileSettled`) and reopens whenever the session's profile or
   that profile's admin powers change (`useRealtime`'s `connectionKey`): a
   new sign-in binds the default before the startup re-selection moves it,
-  so a socket opened then handed a kid's session the admin events. Anyone
-  else's socket opens at once and never reopens; its role cannot change.
+  so a socket opened then handed a kid's session the admin events. Its
+  notification feed is read at the same moments, dropping the previous
+  profile's (`useNotificationSeed`, keyed like the socket by `realtimeKey`),
+  since a feed read then showed the kid the parent's admin alerts. Anyone
+  else's socket and feed open at once and are never reopened; their role
+  cannot change.
 - This holds only while the session stays restricted. A switch to any
   unlocked unrestricted profile restores every admin power, restore and role
   changes included, so on an admin account each unrestricted profile's PIN
@@ -566,11 +574,29 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     an account there, a child included, can sign up a separate account with
     no ceiling at all.
   - Admin alerts (`internal/notify`: a member's new media request, with its
-    title, and scan completions) go to the admin ACCOUNT, so a restricted
-    session on it sees them in the notification list, over `/ws` and by web
-    push; notifications have no profile, and push cannot be filtered by one.
-    Scan progress (with the current file name) and library updates go to
-    every socket, whatever its role or profile.
+    title, and scan completions) go to the admin ACCOUNT; notifications have
+    no profile. A session without `adminPowers` is not shown them in the
+    list or its unread count (filtered in SQL before LIMIT,
+    `notificationShown`), and its mark-read, one or all, leaves them unread,
+    so a kid opening the bell cannot clear a new request off the parent's.
+    The socket sends them to admin-role sockets only. Web push still
+    delivers them to every device the account turned push on for, a kid's
+    included: subscriptions belong to the account, not a profile, so push
+    cannot be filtered by one, and every push badge counts them. The
+    admin-only types are a hand-kept list (`models.AdminNotificationTypes`);
+    a new admin-only type left off it reaches a restricted session, and
+    nothing checks. A former admin's old alerts are hidden from it too, since
+    a user has no admin powers, and its mark-reads leave them unread, so its
+    push badges keep counting them until SQL clears them or the account is
+    an admin again; shown to it instead, they would be shown to a
+    restricted profile on that account. A newly made admin's alerts stay
+    hidden until its access token, which carries the role, is refreshed,
+    and in the web app until the bell's next read or the socket's next
+    reconnect after that. A bell opened before an admin's startup profile
+    load settles marks nothing read, and the rows that load while it stays
+    open stay unread until it is opened again. Scan progress (with the
+    current file name) and library updates go to every socket, whatever its
+    role or profile.
   - A restricted session on an admin account is held to the request quota,
     and the new-request alert skips its requester, so on a one-admin install
     a request it has held for approval alerts nobody.
@@ -580,9 +606,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     elsewhere, a hand-opened one) keeps the admin events after a switch to a
     restricted profile until it reconnects. No first-party client reads
     those events (`useRealtime` ignores them), but the browser still
-    receives them. While an admin's web app socket is closed (until startup
-    settles, and for a moment at each reopen) a notification or request
-    status is missed live; the bell has it on the next load.
+    receives them. The admin alerts follow the same role, and the web app
+    does read those: a tab whose socket has not yet reopened after a switch
+    to a restricted profile (one made in another tab, until this tab's
+    `storage`-triggered re-read lands) shows a new one in the bell and as a
+    toast. While an admin's web app socket is closed (until startup
+    settles, and for a moment at each reopen) a request status is missed
+    live, and so is a notification created after that reopen's feed read
+    but before the socket connects; the bell has it on the next load.
   - An admin account with no profile that creates one in Settings keeps
     acting as the server's unrestricted stand-in (the new profile is not
     the default), but the web app then knows a profile and no binding, so
@@ -628,12 +659,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     method or onboarding actions the server then refuses (403 or 409).
   - When the startup binding cannot be read, or the profile list fails, the
     startup load settles anyway (waiting would leave the app stuck), so
-    collections and the requests list mount, and an admin's socket opens,
-    under whatever the server has bound: after a fresh sign-in, the account
-    default, not the profile this browser last used. With the binding
-    unreadable they sit behind the profile picker, which covers the page but
-    does not make it inert; a pick drops the requests list, remounts
-    collections and reopens an admin's socket.
+    collections and the requests list mount, and an admin's socket opens
+    and feed is read, under whatever the server has bound: after a fresh
+    sign-in, the account default, not the profile this browser last used.
+    With the binding unreadable they sit behind the profile picker, which
+    covers the page but does not make it inert; a pick drops the requests
+    list, remounts collections, and reopens an admin's socket and re-reads
+    its feed.
   - A request already past the admin guard completes after a switch to a
     restricted profile (a backup or restore already running, say). `/ws`
     fixes its role when it connects, so a database error then leaves an
@@ -665,15 +697,24 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     profile through a real database, nor the router's
     wiring of the QR and feedback handlers' store (dropped, an unrestricted
     admin silently loses those two powers). In the SPA, `showsAdminUI`,
-    TopNav's use of its `adminUI` prop, the scan bar's hiding and the
-    socket's reconnect are tested; the App wiring (computing `adminUI` and
+    TopNav's use of its `adminUI` prop, the scan bar's hiding, the
+    socket's reconnect and the feed's re-read (`useNotificationSeed`) are
+    tested; the App wiring (computing `adminUI` and
     passing it to TopNav, the scan bar, the panels, collections and the
     player; the admin view's mount and its notice, the redirect, the detail
-    page's admin actions, the socket's gate and key, collections and the
-    requests list waiting for the startup load, dropping the requests list,
-    remounting collections, hiding the token's health) has no App-level
-    test. Settings still labels the account's role, admin included, in a
-    restricted session.
+    page's admin actions, the socket's and the feed's gate and key, the
+    feed's drop of the previous profile's rows and the bell's mark-all-read
+    waiting for the feed's gate, collections and the requests list waiting
+    for the startup load, dropping the requests list, remounting
+    collections, hiding the token's health) has no App-level test. The
+    admin alerts are pinned against the database (the list, the count and
+    both mark-reads,
+    `queries_notifications_test.go`), through the router for an
+    unrestricted, a restricted and an exception session, through a `/ws`
+    dial with the real dispatcher (`admin_restricted_test.go`), and at the
+    dispatcher and the push test's badge (`dispatcher_test.go`,
+    `push_handlers_test.go`). Settings still labels the account's role,
+    admin included, in a restricted session.
   - Backups carry the argon2 PIN hashes; with 10,000 possible PINs, anyone
     holding a backup can recover them offline.
   - PINs are four digits. With the re-lock above, guessing averages about 50

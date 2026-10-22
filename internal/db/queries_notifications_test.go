@@ -13,6 +13,7 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 )
@@ -77,7 +78,7 @@ func TestListAndUnreadNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := q.ListNotificationsForUser(context.Background(), userID, 50)
+	items, err := q.ListNotificationsForUser(context.Background(), userID, 50, true)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestListAndUnreadNotifications(t *testing.T) {
 		t.Errorf("fresh notification should be unread (read_at nil)")
 	}
 
-	if unread, err := q.CountUnreadNotifications(context.Background(), userID); err != nil || unread != 2 {
+	if unread, err := q.CountUnreadNotifications(context.Background(), userID, true); err != nil || unread != 2 {
 		t.Errorf("unread=%d err=%v, want 2", unread, err)
 	}
 }
@@ -116,18 +117,18 @@ func TestMarkNotificationRead(t *testing.T) {
 	}
 
 	// A different user must not be able to mark this notification read.
-	if err := q.MarkNotificationRead(context.Background(), n.ID, other); err != nil {
+	if err := q.MarkNotificationRead(context.Background(), n.ID, other, true); err != nil {
 		t.Fatalf("cross-user mark errored: %v", err)
 	}
-	if u, _ := q.CountUnreadNotifications(context.Background(), userID); u != 1 {
+	if u, _ := q.CountUnreadNotifications(context.Background(), userID, true); u != 1 {
 		t.Errorf("cross-user mark must not affect owner's unread; got %d, want 1", u)
 	}
 
 	// The owner can.
-	if err := q.MarkNotificationRead(context.Background(), n.ID, userID); err != nil {
+	if err := q.MarkNotificationRead(context.Background(), n.ID, userID, true); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := q.CountUnreadNotifications(context.Background(), userID); u != 0 {
+	if u, _ := q.CountUnreadNotifications(context.Background(), userID, true); u != 0 {
 		t.Errorf("after owner read, unread=%d, want 0", u)
 	}
 }
@@ -146,13 +147,124 @@ func TestMarkAllNotificationsRead(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if u, _ := q.CountUnreadNotifications(context.Background(), userID); u != 3 {
+	if u, _ := q.CountUnreadNotifications(context.Background(), userID, true); u != 3 {
 		t.Fatalf("setup unread=%d, want 3", u)
 	}
-	if err := q.MarkAllNotificationsRead(context.Background(), userID); err != nil {
+	if err := q.MarkAllNotificationsRead(context.Background(), userID, true); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := q.CountUnreadNotifications(context.Background(), userID); u != 0 {
+	if u, _ := q.CountUnreadNotifications(context.Background(), userID, true); u != 0 {
 		t.Errorf("after mark-all, unread=%d, want 0", u)
+	}
+}
+
+// TestAdminAlertsAreShownOnlyWithAdminAlerts: without adminAlerts (a session
+// acting as a restricted profile on an admin account) the list, the unread
+// count and both read-marking queries leave out the admin-only types. The
+// filter is in SQL, so LIMIT counts only the rows shown: the member rows
+// here are OLDER than a full page of admin alerts, and a filter applied after
+// LIMIT would return none of them.
+func TestAdminAlertsAreShownOnlyWithAdminAlerts(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	userID := seedTestUser(t, q)
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM notifications WHERE user_id = $1`, userID)
+	})
+
+	seed := func(typ string, rid *int64, age time.Duration) int64 {
+		t.Helper()
+		n := &models.Notification{UserID: userID, Type: typ, Title: typ, RequestID: rid}
+		if created, err := q.CreateNotification(ctx, n); err != nil || !created {
+			t.Fatalf("seed %s: created=%v err=%v", typ, created, err)
+		}
+		// Pin the order: created_at is NOW() for every row of a fast test.
+		if _, err := q.pool.Exec(ctx, `UPDATE notifications SET created_at = NOW() - $2::interval WHERE id = $1`, n.ID, age.String()); err != nil {
+			t.Fatalf("age %s: %v", typ, err)
+		}
+		return n.ID
+	}
+	var member []int64
+	for i := int64(1); i <= 3; i++ {
+		rid := 9000 + i
+		member = append(member, seed(models.NotificationRequestAvailable, &rid, time.Duration(10+i)*time.Hour))
+	}
+	var alerts []int64
+	for i := int64(1); i <= 3; i++ {
+		rid := 9100 + i
+		alerts = append(alerts, seed(models.NotificationAdminNewRequest, &rid, time.Duration(i)*time.Hour))
+		alerts = append(alerts, seed(models.NotificationScanComplete, nil, time.Duration(i)*time.Hour+time.Minute))
+	}
+
+	ids := func(adminAlerts bool, limit int) []int64 {
+		t.Helper()
+		items, err := q.ListNotificationsForUser(ctx, userID, limit, adminAlerts)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		var out []int64
+		for _, n := range items {
+			out = append(out, n.ID)
+		}
+		return out
+	}
+	unread := func(adminAlerts bool) int {
+		t.Helper()
+		n, err := q.CountUnreadNotifications(ctx, userID, adminAlerts)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+
+	if got := ids(true, 50); len(got) != len(member)+len(alerts) {
+		t.Errorf("with admin alerts: %d rows, want %d", len(got), len(member)+len(alerts))
+	}
+	if got := unread(true); got != len(member)+len(alerts) {
+		t.Errorf("with admin alerts: unread %d, want %d", got, len(member)+len(alerts))
+	}
+	got := ids(false, 3)
+	if len(got) != 3 || got[0] != member[0] || got[1] != member[1] || got[2] != member[2] {
+		t.Errorf("without admin alerts, a page of 3: %v, want the member rows %v", got, member)
+	}
+	if got := unread(false); got != len(member) {
+		t.Errorf("without admin alerts: unread %d, want %d", got, len(member))
+	}
+
+	// Marking read without admin alerts leaves them unread: one by its id,
+	// then all. A row it is shown, it marks read.
+	if err := q.MarkNotificationRead(ctx, alerts[0], userID, false); err != nil {
+		t.Fatalf("mark an admin alert read: %v", err)
+	}
+	if err := q.MarkNotificationRead(ctx, member[0], userID, false); err != nil {
+		t.Fatalf("mark a member row read: %v", err)
+	}
+	if got := unread(false); got != len(member)-1 {
+		t.Errorf("after marking one member row read without admin alerts: unread %d, want %d", got, len(member)-1)
+	}
+	if got := unread(true); got != len(member)-1+len(alerts) {
+		t.Errorf("after marking one admin alert and one member row read without admin alerts: %d unread in all, want %d", got, len(member)-1+len(alerts))
+	}
+	if err := q.MarkAllNotificationsRead(ctx, userID, false); err != nil {
+		t.Fatalf("mark all read: %v", err)
+	}
+	if got := unread(false); got != 0 {
+		t.Errorf("after mark-all without admin alerts: unread %d of the rows shown, want 0", got)
+	}
+	if got := unread(true); got != len(alerts) {
+		t.Errorf("after mark-all without admin alerts: %d unread in all, want the %d admin alerts", got, len(alerts))
+	}
+	// With them, they can be marked read.
+	if err := q.MarkNotificationRead(ctx, alerts[0], userID, true); err != nil {
+		t.Fatalf("mark an admin alert read: %v", err)
+	}
+	if got := unread(true); got != len(alerts)-1 {
+		t.Errorf("after marking one admin alert read: %d unread, want %d", got, len(alerts)-1)
+	}
+	if err := q.MarkAllNotificationsRead(ctx, userID, true); err != nil {
+		t.Fatalf("mark all read: %v", err)
+	}
+	if got := unread(true); got != 0 {
+		t.Errorf("after mark-all with admin alerts: %d unread, want 0", got)
 	}
 }
