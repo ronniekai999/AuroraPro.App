@@ -1531,6 +1531,10 @@ type TranscodeManager struct {
 	// drainExtraViewers counts viewers that hold no transcode session
 	// (direct play). Guarded by tm.mu; invoked unlocked. See drainstate.go.
 	drainExtraViewers func() int
+	// mediaStartProbe replaces probeMediaStartSec in tests; nil in
+	// production. A field rather than a package variable so a swapped probe
+	// can only ever reach the manager a test built.
+	mediaStartProbe func(ctx context.Context, variantDir string, fmp4 bool) (float64, error)
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
 	// change state (created, stopped, expired). The callback receives an event
@@ -1656,6 +1660,11 @@ type TranscodeSession struct {
 	// populated on first subtitle segment request.
 	// Values: -1 = not probed, -2 = probe in progress, >= 0 = cached PTS.
 	initPTS90kHz int64
+	// mediaStart caches where a remux session's published media actually
+	// begins on the source clock (the key frame -noaccurate_seek landed on,
+	// before StartSec). Published in the variant playlist so the web player
+	// anchors its clock there instead of on StartSec; see media_start.go.
+	mediaStart mediaStartState
 	// castHeld marks a session fetched with a CAST-SCOPED token. Set by
 	// MarkCastHeld, which requireSessionAccess calls on the fetch itself,
 	// not at mint time (see the reasoning there: a mint whose response
@@ -4865,6 +4874,12 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		out = append(out, lines[0])
 		out = append(out, "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
 		out = append(out, lines[1:]...)
+		// A remux started mid-file begins at the key frame before StartSec,
+		// not at StartSec. Publish where it really begins, as a comment line
+		// every non-hls.js client ignores (media_start.go).
+		if sec, ok := tm.sessionMediaStart(s, v, firstMediaURI(lines)); ok {
+			out = insertBeforeFirstSegment(out, mediaStartLine(sec))
+		}
 	}
 
 	// For native HLS clients (Safari) and casters that pass auth via
