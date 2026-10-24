@@ -85,6 +85,24 @@ function host(overrides: Partial<PartySync> = {}): PartySync {
   }
 }
 
+it('rebinds controls when party callbacks change on the same media', async () => {
+  const previous = host()
+  const view = render(<VideoPlayer target={oldEpisode} party={previous} onClose={() => {}} />)
+  await bootHls()
+  vi.mocked(previous.requestPause).mockClear()
+
+  const current = {
+    ...previous, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn(),
+  }
+  view.rerender(<VideoPlayer target={oldEpisode} party={current} onClose={() => {}} />)
+  await settle()
+  video().currentTime = 41
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+  await settle()
+  expect(current.requestPause).toHaveBeenCalledExactlyOnceWith(41_000)
+  expect(previous.requestPause).not.toHaveBeenCalled()
+})
+
 it('Play for all waits for the new episode to boot and broadcasts exactly one Play', async () => {
   let party = host()
   const advance = vi.fn(async () => 'advanced' as const)
@@ -447,4 +465,27 @@ it.each([
     expect(party.requestPause).toHaveBeenCalledOnce()
     expect(party.requestSeek).not.toHaveBeenCalled()
   }
+})
+
+// A party switch can keep the same title and role. Only its bound request
+// callbacks change, so the video listeners must refresh without a target swap.
+it('rebinds local player requests when the party callbacks change on the same title', async () => {
+  const first = host()
+  const view = render(<VideoPlayer target={oldEpisode} party={first} onClose={() => {}} />)
+  await bootHls()
+  const second = { ...first, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+  view.rerender(<VideoPlayer target={oldEpisode} party={second} onClose={() => {}} />)
+  await settle()
+  vi.mocked(first.requestPlay).mockClear()
+  vi.mocked(first.requestPause).mockClear()
+  vi.mocked(first.requestSeek).mockClear()
+  video().currentTime = 25
+  act(() => { video().pause(); void video().play() })
+  fireEvent.seeked(video())
+  expect(second.requestPause).toHaveBeenCalledWith(25_000)
+  expect(second.requestPlay).toHaveBeenCalledOnce()
+  expect(second.requestSeek).toHaveBeenCalledWith(25_000)
+  expect(first.requestPause).not.toHaveBeenCalled()
+  expect(first.requestPlay).not.toHaveBeenCalled()
+  expect(first.requestSeek).not.toHaveBeenCalled()
 })

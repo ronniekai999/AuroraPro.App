@@ -94,6 +94,12 @@ jobs:
       - name: Test
         run: go test ./... -timeout 20m
 
+      # The party socket write-deadline fix is observable only under the race
+      # detector (internal/watchparty/safeconn_test.go), so this package also
+      # runs with -race. It takes seconds; the whole suite under -race does not.
+      - name: Race (watchparty)
+        run: go test -race -count=1 ./internal/watchparty/ -timeout 10m
+
   web:
     name: SPA build & test
     runs-on: ubuntu-latest

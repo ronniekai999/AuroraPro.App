@@ -1302,3 +1302,32 @@ describe('Fifth independent LOAD acknowledgement boundaries', () => {
     expectAbsoluteSeekActions(seek, [210])
   })
 })
+
+
+it('refreshes cast party requests when the party changes on the same title', async () => {
+  const first: PartySync = {
+    isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null,
+    isPlaying: true, rev: 1, hlsStartSec: 0,
+    tickRef: { current: { abs_ms: 100000, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() } },
+    seekRef: { current: null }, helloAbsMsRef: { current: 100000 },
+    requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn(),
+  }
+  const view = render(<VideoPlayer target={movie} profileId={7} party={first} onClose={() => {}} />)
+  await bootHls()
+  fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+  view.rerender(<VideoPlayer target={movie} profileId={7} party={first} onClose={() => {}} />)
+  await settle()
+  await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+  const second = { ...first, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
+  view.rerender(<VideoPlayer target={movie} profileId={7} party={second} onClose={() => {}} />)
+  await settle()
+  vi.mocked(first.requestPlay).mockClear()
+  vi.mocked(first.requestPause).mockClear()
+  vi.mocked(first.requestSeek).mockClear()
+  Object.assign(fake.cast.remote, { isPaused: true, currentTime: 5, updateSeq: fake.cast.remote.updateSeq + 1 })
+  await act(async () => { vi.advanceTimersByTime(1000) }); await settle()
+  expect(second.requestPause).toHaveBeenCalledWith(105000)
+  expect(first.requestPause).not.toHaveBeenCalled()
+  expect(first.requestPlay).not.toHaveBeenCalled()
+  expect(first.requestSeek).not.toHaveBeenCalled()
+})

@@ -1454,6 +1454,37 @@ func (q *Queries) GetAnyFilePath(ctx context.Context, mediaItemID int64) string 
 	return path
 }
 
+// ReelSourcePath returns the file a party's highlight reel is cut from, or ""
+// when there is none to cut from honestly.
+//
+// A reaction's position belongs to the timeline of what the party was
+// playing, so the reel must come from that exact file. For an episode that is
+// the episode's own file: a show's title id is the SERIES, and resolving it
+// with GetAnyFilePath picks the show's first episode (S01E01 for a party that
+// watched S03E05). Without an episode the title must be a movie; a show with
+// no recorded episode never said which episode its reactions belong to, so it
+// gets no reel rather than clips of an arbitrary one. The episode must belong
+// to the title, as the party row guarantees (EndWatchPartyOn).
+func (q *Queries) ReelSourcePath(ctx context.Context, mediaItemID int64, episodeID *int64) string {
+	var path string
+	err := q.pool.QueryRow(ctx,
+		`SELECT COALESCE(
+			CASE WHEN $2::bigint IS NULL THEN
+				(SELECT mf.path FROM media_files mf WHERE mf.media_item_id = $1 ORDER BY mf.id LIMIT 1)
+			ELSE
+				(SELECT ef.path FROM episode_files ef
+				 JOIN tv_episodes ep ON ep.id = ef.episode_id
+				 WHERE ef.episode_id = $2 AND ep.media_item_id = $1
+				 ORDER BY ef.id LIMIT 1)
+			END,
+			''
+		)`, mediaItemID, episodeID).Scan(&path)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
 // GetRecentMedia lists the newest titles, deduplicated across libraries.
 // allowedRatings is the acting profile's parental ceiling from
 // AllowedRatingsForMax: nil means unrestricted, and otherwise only titles

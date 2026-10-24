@@ -12,8 +12,8 @@ import (
 // reel was cut from the final title but gated on the row's, so a kid could be
 // served a reel of an R title the row said was G. Here the in-memory title
 // moves with no save at all, the worst case of that race. Every case also
-// checks that the reel generator is handed the title the row records, or
-// nothing when the end failed and the row was left active.
+// checks that the reel generator is handed the title and episode the row
+// records, or nothing when the end failed and the row was left active.
 func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	q, pool := requireRehydrateDB(t)
 	ctx := context.Background()
@@ -59,13 +59,21 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 	m := NewManager(q, nil)
 	t.Cleanup(m.Shutdown)
 	var reelMedia int64
+	var reelEpisode *int64
 	var reelTitle string
-	m.onReelForTest = func(media int64, name string) { reelMedia, reelTitle = media, name }
+	m.onReelForTest = func(media int64, ep *int64, name string) { reelMedia, reelEpisode, reelTitle = media, ep, name }
 	type row struct {
 		media         int64
 		episode       *int64
 		title, poster string
 		active        bool
+	}
+	same := func(a, b *int64) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
+	deref := func(p *int64) any {
+		if p == nil {
+			return nil
+		}
+		return *p
 	}
 	// end starts a party on (media, ep, name), runs before (database work,
 	// outside the party's lock), moves its in-memory title as change does,
@@ -93,7 +101,8 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 			defer ps.mu.Unlock()
 			change(ps)
 		}()
-		reelMedia, reelTitle = -1, "unset"
+		unset := int64(-1)
+		reelMedia, reelEpisode, reelTitle = -1, &unset, "unset"
 		if err := m.EndParty(ps.Code, hostID); err != nil {
 			t.Fatalf("end party: %v", err)
 		}
@@ -102,13 +111,16 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 			FROM watch_parties WHERE party_code = $1`, ps.Code).Scan(&r.media, &r.episode, &r.title, &r.poster, &r.active); err != nil {
 			t.Fatalf("read the party row: %v", err)
 		}
-		wantMedia, wantTitle := r.media, r.title
+		wantMedia, wantEpisode, wantTitle := r.media, r.episode, r.title
 		if r.active {
 			// The end failed, and a failed end cuts no reel.
-			wantMedia, wantTitle = 0, ""
+			wantMedia, wantEpisode, wantTitle = 0, nil, ""
 		}
-		if reelMedia != wantMedia || reelTitle != wantTitle {
-			t.Errorf("reel handed title %d %q; want %d %q (row %+v, which gates it)", reelMedia, reelTitle, wantMedia, wantTitle, r)
+		// The episode too: a show's reel is cut from the episode's file, so
+		// it has to be the episode the row records beside the title.
+		if reelMedia != wantMedia || !same(reelEpisode, wantEpisode) || reelTitle != wantTitle {
+			t.Errorf("reel handed title %d episode %v %q; want %d %v %q (row %+v, which gates it)",
+				reelMedia, deref(reelEpisode), reelTitle, wantMedia, deref(wantEpisode), wantTitle, r)
 		}
 		return r
 	}
@@ -153,8 +165,6 @@ func TestEndingAPartyRecordsTheTitleItEndedOn(t *testing.T) {
 			return n
 		}
 	}
-	same := func(a, b *int64) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
-
 	t.Run("the final title, with its name", func(t *testing.T) {
 		r := end(t, gMovie, nil, "endmedia g", nil, func(ps *PartyState) {
 			ps.MediaItemID, ps.MediaTitle = rMovie, "endmedia r"

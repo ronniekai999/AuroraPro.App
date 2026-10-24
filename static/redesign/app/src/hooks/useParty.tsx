@@ -215,6 +215,9 @@ export interface UseParty {
   requestPlay: () => void
   requestPause: (absMs: number) => void
   requestSeek: (absMs: number) => void
+  // Test seam (PARTY-9), not for app use: a copy of the sync intents
+  // buffered for the sync socket's next open.
+  __pendingSyncIntentsForTests: () => { seek?: OutboundSyncMessage; playPause?: OutboundSyncMessage }
   // Live sync values for the player effect. Refs avoid causing
   // re-renders on every tick (which fires at 1-2 Hz).
   tickRef: React.MutableRefObject<TickPayload | null>
@@ -713,6 +716,9 @@ export function useParty(currentUserId?: number): UseParty {
           seekRef.current = null
           latestAcceptedRevRef.current = 0
           helloAbsMsRef.current = 0
+          // PARTY-9 — an intent buffered for the party that just ended
+          // must not replay into the next party's sync socket.
+          pendingSyncIntentRef.current = {}
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -803,6 +809,8 @@ export function useParty(currentUserId?: number): UseParty {
           seekRef.current = null
           latestAcceptedRevRef.current = 0
           helloAbsMsRef.current = 0
+          // PARTY-9 — see the room socket's party-ended teardown.
+          pendingSyncIntentRef.current = {}
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -1185,6 +1193,9 @@ export function useParty(currentUserId?: number): UseParty {
     seekRef.current = null
     latestAcceptedRevRef.current = 0
     helloAbsMsRef.current = 0
+    // PARTY-9 — intents buffered for the party being left belong to it, not
+    // to the one being joined (leave() and end() already drop them).
+    pendingSyncIntentRef.current = {}
     // Preflight: distinguish a live party from a persistent-room
     // code. We don't deeply use the response yet (Phase 4.5 will
     // render an "offline room" panel) but we use the success/404 to
@@ -1298,6 +1309,9 @@ export function useParty(currentUserId?: number): UseParty {
   // buffered in its own slot so a later play/pause can't clobber it
   // (2026-06 review, bug 3); within each slot the newest intent wins.
   const sendOrBuffer = useCallback((msg: OutboundSyncMessage) => {
+    // Bind requests to the party rendered with the player. A queued event
+    // from its old binding must neither send nor buffer in a newer party.
+    if (!state.code || state.code !== activeCodeRef.current) return
     const ws = syncWsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify(msg)) } catch { /* defensive */ }
@@ -1308,7 +1322,7 @@ export function useParty(currentUserId?: number): UseParty {
     } else {
       pendingSyncIntentRef.current.playPause = msg
     }
-  }, [])
+  }, [state.code])
   const requestPlay = useCallback(() => {
     sendOrBuffer({ type: 'request-play' })
   }, [sendOrBuffer])
@@ -1318,6 +1332,15 @@ export function useParty(currentUserId?: number): UseParty {
   const requestSeek = useCallback((absMs: number) => {
     sendOrBuffer(partySeekRequest(absMs))
   }, [sendOrBuffer])
+  // Test seam (PARTY-9): a copy of the buffered sync intents. join() is
+  // the only way into a party and it clears the buffer first, so the
+  // party-ended teardowns' clears cannot be seen through the rest of this
+  // API; the regression tests read the buffer here to pin each one. Not
+  // for app use.
+  const pendingSyncIntentsForTests = useCallback(
+    () => ({ ...pendingSyncIntentRef.current }),
+    [],
+  )
 
   // Tear down on unmount — without this, navigating away from V2
   // (or refreshing) would orphan the sockets server-side until the
@@ -1403,6 +1426,7 @@ export function useParty(currentUserId?: number): UseParty {
     requestPlay,
     requestPause,
     requestSeek,
+    __pendingSyncIntentsForTests: pendingSyncIntentsForTests,
     tickRef,
     seekRef,
     helloAbsMsRef,
