@@ -1,12 +1,19 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from 'vitest'
 import {
   MEDIA_START_ALIGN_EDGE_SEC,
   MEDIA_START_MAX_LAG_SEC,
   MEDIA_START_MAX_LEAD_SEC,
   MEDIA_START_TAG,
+  RemuxClock,
+  fetchNativeMediaWindow,
+  firstVariantUri,
   mediaStartAlignmentSec,
+  observePlayback,
+  parseMediaPlaylistWindow,
   reportedMediaStartSec,
   sessionMediaOriginSec,
+  type MediaWindow,
 } from './mediaStart'
 
 // The shape hls.js 1.6 gives a playlist comment `#AURORA-MEDIA-START:<s>` in
@@ -96,5 +103,197 @@ describe('mediaStartAlignmentSec', () => {
     expect(mediaStartAlignmentSec(25, 24.99, 20, 10)).toBe(0)
     expect(mediaStartAlignmentSec(25, 19.9, 0, 0)).toBe(0)
     expect(mediaStartAlignmentSec(25, 26, 20, 10)).toBe(0)
+  })
+  it('keeps the edge margin on top of the runway (L3)', () => {
+    // into + runway exactly at the produced end used to pass with no margin.
+    expect(mediaStartAlignmentSec(25, 20, 15, 10)).toBe(0)
+    expect(mediaStartAlignmentSec(25, 20, 15 + MEDIA_START_ALIGN_EDGE_SEC, 10)).toBe(5)
+    expect(mediaStartAlignmentSec(25, 20, 15 + MEDIA_START_ALIGN_EDGE_SEC - 0.001, 10)).toBe(0)
+  })
+})
+
+describe('plausibility window (L5)', () => {
+  it('is [start_sec - 60, start_sec + 1], the same as the server', () => {
+    expect(MEDIA_START_MAX_LAG_SEC).toBe(60)
+    expect(sessionMediaOriginSec(3600, 3540, true)).toBe(3540)
+    expect(sessionMediaOriginSec(3600, 3539.999, true)).toBe(3600)
+    expect(sessionMediaOriginSec(3600, 3601, true)).toBe(3601)
+    expect(sessionMediaOriginSec(3600, 3601.001, true)).toBe(3600)
+  })
+})
+
+const NATIVE_FMP4 = [
+  '#EXTM3U', '#EXT-X-START:TIME-OFFSET=0,PRECISE=YES', '#EXT-X-VERSION:7', '#EXT-X-TARGETDURATION:10',
+  '#EXT-X-MEDIA-SEQUENCE:0', '#EXT-X-PLAYLIST-TYPE:EVENT', '#EXT-X-MAP:URI="init.mp4?token=t"',
+  '#AURORA-MEDIA-START:19.946009', '#EXTINF:10.000000,', 'seg_00000.m4s?token=t', '#EXTINF:9.5,', 'seg_00001.m4s?token=t', '',
+].join('\r\n')
+
+describe('parseMediaPlaylistWindow (native path)', () => {
+  it('reads the start, the produced end and the reload runway of a live playlist', () => {
+    expect(parseMediaPlaylistWindow(NATIVE_FMP4)).toEqual({ reportedSec: 19.946009, producedEndSec: 19.5, runwaySec: 9.5 })
+  })
+  it('needs no runway once the playlist is finished', () => {
+    expect(parseMediaPlaylistWindow(NATIVE_FMP4 + '#EXT-X-ENDLIST\n').runwaySec).toBe(0)
+  })
+  it('reports no start without the line, after the first segment, or when it is not seconds', () => {
+    expect(parseMediaPlaylistWindow(NATIVE_FMP4.replace('#AURORA-MEDIA-START:19.946009\r\n', '')).reportedSec).toBeNull()
+    const late = NATIVE_FMP4.replace('#AURORA-MEDIA-START:19.946009\r\n', '').replace('seg_00000.m4s?token=t', 'seg_00000.m4s?token=t\r\n#AURORA-MEDIA-START:19.9')
+    expect(parseMediaPlaylistWindow(late).reportedSec).toBeNull()
+    expect(parseMediaPlaylistWindow(NATIVE_FMP4.replace('19.946009', 'NaN')).reportedSec).toBeNull()
+  })
+  it('finds the first variant of a master playlist', () => {
+    expect(firstVariantUri('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\nsource/stream.m3u8\n')).toBe('source/stream.m3u8')
+    expect(firstVariantUri('#EXTM3U\n')).toBeNull()
+  })
+})
+
+describe('fetchNativeMediaWindow', () => {
+  const response = (body: string, ok = true) => ({ ok, text: async () => body }) as Response
+  it('reads the master, then its variant, relative to the master URL', async () => {
+    const fetchImpl = vi.fn(async (url: string, _init?: RequestInit) => url.endsWith('master.m3u8')
+      ? response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nsource/stream.m3u8\n')
+      : response(NATIVE_FMP4))
+    const w = await fetchNativeMediaWindow('/api/stream/hls/sess/master.m3u8', undefined, fetchImpl as unknown as typeof fetch)
+    expect(w?.reportedSec).toBe(19.946009)
+    expect(fetchImpl.mock.calls.map(c => new URL(c[0]).pathname)).toEqual(['/api/stream/hls/sess/master.m3u8', '/api/stream/hls/sess/source/stream.m3u8'])
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ credentials: 'include' })
+  })
+  it.each([
+    ['master refused', async () => response('', false)],
+    ['variant refused', async (url: string) => url.endsWith('master.m3u8') ? response('#EXTM3U\nsource/stream.m3u8\n') : response('', false)],
+    ['no variant listed', async () => response('#EXTM3U\n')],
+    ['network error', async () => { throw new TypeError('Failed to fetch') }],
+  ])('is null, never a throw, when the %s', async (_name, impl) => {
+    await expect(fetchNativeMediaWindow('/m/master.m3u8', undefined, vi.fn(impl) as unknown as typeof fetch)).resolves.toBeNull()
+  })
+})
+
+describe('RemuxClock', () => {
+  const S = 25
+  const O = 19.946009
+  const windowOf = (reportedSec: number | null, producedEndSec: number, runwaySec = 10): MediaWindow => ({ reportedSec, producedEndSec, runwaySec })
+  const owner = (currentTime = 0) => ({ currentTime, ownsPlayhead: true })
+
+  it('adopts a plausible start before playback and aligns when there is runway', () => {
+    const c = new RemuxClock(S, true)
+    expect(c.noteLevel(windowOf(O, 20), owner())).toEqual({ originChanged: true, alignTo: S - O })
+    expect(c.originSec).toBe(O)
+    expect(c.noteLevel(windowOf(O, 30), owner(1))).toEqual({ originChanged: false, alignTo: null })
+  })
+
+  it('refuses a start that arrives after playback began, keeping start_sec (M2)', () => {
+    const c = new RemuxClock(S, true)
+    c.noteLevel(windowOf(null, 10), owner())
+    c.notePlayed()
+    expect(c.noteLevel(windowOf(O, 20), owner(9.8))).toEqual({ originChanged: false, alignTo: null })
+    expect(c.originSec).toBe(S)
+    expect(c.refusedLateStart).toBe(true)
+    // and keeps refusing
+    expect(c.noteLevel(windowOf(O, 30), owner(12)).originChanged).toBe(false)
+  })
+
+  it('never moves a transcode or an unseeked session', () => {
+    expect(new RemuxClock(S, false).noteLevel(windowOf(O, 20), owner()).originChanged).toBe(false)
+    expect(new RemuxClock(0, true).noteLevel(windowOf(0.02, 20), owner()).originChanged).toBe(false)
+  })
+
+  it('retries the alignment on later loads while the playhead is short of start_sec (H1)', () => {
+    const c = new RemuxClock(S, true)
+    expect(c.noteLevel(windowOf(O, 10), owner()).alignTo).toBeNull() // only segment 0: no runway
+    c.notePlayed()
+    expect(c.noteLevel(windowOf(O, 20), owner(1.2)).alignTo).toBeCloseTo(S - O, 9)
+  })
+
+  it('stops retrying once playback reaches start_sec on its own', () => {
+    const c = new RemuxClock(S, true)
+    c.noteLevel(windowOf(O, 10), owner())
+    c.notePlayed()
+    expect(c.noteLevel(windowOf(O, 30), owner(5.2)).alignTo).toBeNull()
+    expect(c.noteLevel(windowOf(O, 40), owner(0.5)).alignTo).toBeNull()
+  })
+
+  it('never aligns a party guest, whose position the drift loop owns', () => {
+    const c = new RemuxClock(S, true)
+    expect(c.noteLevel(windowOf(O, 30), { currentTime: 0, ownsPlayhead: false }).alignTo).toBeNull()
+    expect(c.originSec).toBe(O)
+  })
+
+  it('never jumps a playhead a seek moved', () => {
+    const before = new RemuxClock(S, true)
+    expect(before.noteLevel(windowOf(O, 30), owner(3)).alignTo).toBeNull() // moved before playing
+    const scrubbed = new RemuxClock(S, true)
+    scrubbed.noteLevel(windowOf(O, 10), owner())
+    scrubbed.notePlayed(); scrubbed.noteUserSeek()
+    expect(scrubbed.noteLevel(windowOf(O, 30), owner(1)).alignTo).toBeNull()
+  })
+
+  it('consumes exactly one seeked, matched by position, for its alignment (L2)', () => {
+    const c = new RemuxClock(S, true)
+    const into = c.noteLevel(windowOf(O, 20), owner()).alignTo!
+    expect(c.consumeAlignmentSeeked(into + 3)).toBe(false)
+    expect(c.consumeAlignmentSeeked(into + 0.04)).toBe(true)
+    expect(c.consumeAlignmentSeeked(into)).toBe(false)
+    expect(new RemuxClock(S, true).consumeAlignmentSeeked(0)).toBe(false)
+  })
+
+  describe('hostReanchorSec', () => {
+    const unaligned = () => { const c = new RemuxClock(S, true); c.noteLevel(windowOf(O, 10), owner()); c.notePlayed(); return c }
+    it('returns the true position once for an unaligned host, then never, and ends retries', () => {
+      const c = unaligned()
+      expect(c.hostReanchorSec(0.5, S + 1.5)).toBeCloseTo(O + 0.5, 9)
+      expect(c.hostReanchorSec(0.75, S + 1.75)).toBeNull()
+      expect(c.noteLevel(windowOf(O, 30), owner(1)).alignTo).toBeNull()
+    })
+    it('falls back to the gap when the room position is unknown', () => {
+      expect(unaligned().hostReanchorSec(0.5, null)).toBeCloseTo(O + 0.5, 9)
+    })
+    it('sends nothing when the room already agrees, and decides once', () => {
+      const c = unaligned()
+      expect(c.hostReanchorSec(0.5, O + 0.6)).toBeNull()
+      expect(c.hostReanchorSec(0.6, S + 3)).toBeNull()
+    })
+    it('covers a host that reached start_sec by playing a gap late', () => {
+      const c = unaligned()
+      c.noteLevel(windowOf(O, 30), owner(6))
+      expect(c.hostReanchorSec(6, S + 6)).toBeCloseTo(O + 6, 9)
+    })
+    it('is never due for an aligned host, no gap, a scrub, or no measured start', () => {
+      const aligned = new RemuxClock(S, true); aligned.noteLevel(windowOf(O, 20), owner())
+      expect(aligned.hostReanchorSec(0.5, S + 5)).toBeNull()
+      const noGap = new RemuxClock(40, true); noGap.noteLevel(windowOf(39.98, 10), owner())
+      expect(noGap.hostReanchorSec(0.5, 45)).toBeNull()
+      const scrubbed = unaligned(); scrubbed.noteUserSeek()
+      expect(scrubbed.hostReanchorSec(0.5, S + 5)).toBeNull()
+      const provisional = new RemuxClock(S, true); provisional.notePlayed()
+      expect(provisional.hostReanchorSec(0.5, S + 5)).toBeNull()
+      // not decided yet: a later adoption could still need it
+      provisional.noteLevel(windowOf(O, 10), owner())
+      expect(provisional.refusedLateStart).toBe(true)
+    })
+  })
+})
+
+describe('observePlayback', () => {
+  it('marks the clock played on `playing`, or the clock advancing while playing; unbinds', () => {
+    const vid = document.createElement('video')
+    let paused = true
+    Object.defineProperty(vid, 'paused', { get: () => paused })
+    const playedOn = (setup: () => void) => {
+      const c = new RemuxClock(25, true)
+      const unbind = observePlayback(vid, c)
+      setup()
+      unbind()
+      // played <=> a late start is refused
+      c.noteLevel({ reportedSec: 19.9, producedEndSec: 20, runwaySec: 10 }, { currentTime: 0, ownsPlayhead: true })
+      return c.refusedLateStart
+    }
+    expect(playedOn(() => vid.dispatchEvent(new Event('playing')))).toBe(true)
+    expect(playedOn(() => { vid.currentTime = 3; paused = true; vid.dispatchEvent(new Event('timeupdate')) })).toBe(false)
+    expect(playedOn(() => { vid.currentTime = 3; paused = false; vid.dispatchEvent(new Event('timeupdate')) })).toBe(true)
+    const c = new RemuxClock(25, true)
+    observePlayback(vid, c)()
+    vid.dispatchEvent(new Event('playing'))
+    c.noteLevel({ reportedSec: 19.9, producedEndSec: 20, runwaySec: 10 }, { currentTime: 0, ownsPlayhead: true })
+    expect(c.refusedLateStart).toBe(false)
   })
 })

@@ -255,3 +255,226 @@ describe('remux clock: what must not move', () => {
     expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: Math.round((ORIGIN + 3) * 1000) }), expect.any(AbortSignal))
   })
 })
+
+// A later level load, as hls.js delivers a live playlist reload.
+async function levelUpdate(mediaStart: string | null, fragments: number) {
+  const details = levelDetails(mediaStart, fragments)
+  await act(async () => { fake.hls.at(-1)!.emit('LEVEL_UPDATED', { details, level: 0 }) }); await settle()
+}
+const playing = () => fireEvent(video(), new Event('playing'))
+const roomTick = (absMs: number) => ({ abs_ms: absMs, server_now_ms: Date.now(), running: true, receivedAtMs: Date.now() })
+
+describe('remux clock H1: an alignment that had no runway', () => {
+  it('is retried on a later playlist load while the playhead is short of start_sec', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls(ORIGIN.toFixed(6), 1)
+    expect(video().currentTime).toBe(0)
+    playing(); video().currentTime = 1.2
+    await levelUpdate(ORIGIN.toFixed(6), 2)
+    expect(video().currentTime).toBeCloseTo(ALIGNED, 6)
+  })
+
+  it('is not retried once playback has passed start_sec', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls(ORIGIN.toFixed(6), 1)
+    playing(); video().currentTime = 6
+    await levelUpdate(ORIGIN.toFixed(6), 3)
+    expect(video().currentTime).toBe(6)
+  })
+
+  it('never jumps away from a scrub', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls(ORIGIN.toFixed(6), 1)
+    playing(); video().currentTime = 2; fireEvent.timeUpdate(video())
+    fireEvent.click(screen.getByRole('button', { name: 'Skip Intro' })); await settle()
+    expect(video().currentTime).toBeCloseTo(24 - ORIGIN, 6)
+    await levelUpdate(ORIGIN.toFixed(6), 3)
+    expect(video().currentTime).toBeCloseTo(24 - ORIGIN, 6)
+  })
+
+  it('makes an unaligned party host re-anchor the room on its true position, once', async () => {
+    const host = party({ isHost: true, isPlaying: true, tickRef: { current: roomTick(START_SEC * 1000) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={host} />); await bootHls(ORIGIN.toFixed(6), 1)
+    playing(); video().currentTime = 0.5
+    host.tickRef.current = roomTick(START_SEC * 1000 + 500)
+    fireEvent.timeUpdate(video())
+    expect(host.requestSeek).toHaveBeenCalledTimes(1)
+    expect(host.requestSeek).toHaveBeenCalledWith(Math.round((ORIGIN + 0.5) * 1000))
+    // No loop: later ticks and the seek's own echo (which comes back over
+    // the sync socket; the host does not seek locally) send nothing more, and
+    // the host no longer jumps to start_sec when runway appears.
+    video().currentTime = 0.75; fireEvent.timeUpdate(video())
+    host.seekRef.current = { abs_ms: Math.round((ORIGIN + 0.5) * 1000), by: 1, sequence: 1, rev: 2, running: true, receivedAtMs: Date.now() }
+    await act(async () => { vi.advanceTimersByTime(250) }); await settle()
+    fireEvent.timeUpdate(video())
+    await levelUpdate(ORIGIN.toFixed(6), 3)
+    expect(video().currentTime).toBe(0.75)
+    expect(host.requestSeek).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits while a newer canonical Pause holds the room, and sends no play', async () => {
+    const paused = party({ isHost: true, isPlaying: false, tickRef: { current: { ...roomTick(START_SEC * 1000), running: false } } })
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} party={paused} />); await bootHls(ORIGIN.toFixed(6), 1)
+    const playsBefore = vi.mocked(paused.requestPlay).mock.calls.length
+    playing(); video().currentTime = 0.5; fireEvent.timeUpdate(video())
+    expect(paused.requestSeek).not.toHaveBeenCalled()
+    expect(vi.mocked(paused.requestPlay).mock.calls.length).toBe(playsBefore)
+    // The host plays the room again: now the room runs from its anchor, a gap
+    // ahead of the host's picture, and the re-anchor goes out.
+    const resumed = { ...paused, isPlaying: true, tickRef: { current: roomTick(START_SEC * 1000) } }
+    view.rerender(<VideoPlayer target={movie} onClose={() => {}} party={resumed} />); await settle()
+    video().currentTime = 0.6; fireEvent.timeUpdate(video())
+    expect(resumed.requestSeek).toHaveBeenCalledTimes(1)
+    expect(resumed.requestSeek).toHaveBeenCalledWith(Math.round((ORIGIN + 0.6) * 1000))
+  })
+
+  it('sends nothing when the room already agrees with the host', async () => {
+    const host = party({ isHost: true, isPlaying: true, tickRef: { current: roomTick(Math.round((ORIGIN + 0.5) * 1000)) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={host} />); await bootHls(ORIGIN.toFixed(6), 1)
+    playing(); video().currentTime = 0.5; fireEvent.timeUpdate(video())
+    expect(host.requestSeek).not.toHaveBeenCalled()
+  })
+
+  it('is never needed by an aligned host', async () => {
+    const host = party({ isHost: true, isPlaying: true, tickRef: { current: roomTick(START_SEC * 1000) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={host} />); await bootHls()
+    playing(); video().currentTime = ALIGNED + 0.3; fireEvent.timeUpdate(video())
+    expect(host.requestSeek).not.toHaveBeenCalled()
+  })
+
+  it('is never applied to a guest, whose drift loop owns the position', async () => {
+    const guest = party({ isHost: false, isPlaying: false })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} />); await bootHls()
+    expect(video().currentTime).toBe(0)
+    fireEvent.timeUpdate(video())
+    expect(guest.requestSeek).not.toHaveBeenCalled()
+  })
+})
+
+describe('remux clock L2: the alignment seek is not a scrub, however late it lands', () => {
+  it('consumes exactly the alignment seeked, by position, after any time window', async () => {
+    const host = party({ isHost: true, isPlaying: true })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={host} />); await bootHls()
+    // A first fragment slower than the old 10 s window.
+    await act(async () => { vi.advanceTimersByTime(15000) }); await settle()
+    fireEvent(video(), new Event('seeked'))
+    expect(host.requestSeek).not.toHaveBeenCalled()
+    // One-shot: a later seeked at the same spot is the host's again.
+    fireEvent(video(), new Event('seeked'))
+    expect(host.requestSeek).toHaveBeenCalledWith(START_SEC * 1000)
+  })
+})
+
+describe('remux clock M2: a start that appears late', () => {
+  it('is refused once the element has played: the clock stays on start_sec', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={7} />); await bootHls(null, 1)
+    playing(); video().currentTime = 9.8
+    await levelUpdate(ORIGIN.toFixed(6), 2)
+    expect(video().currentTime).toBe(9.8)
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: (START_SEC + 9.8) * 1000 }), expect.any(AbortSignal))
+  })
+
+  it('is adopted if it arrives before anything played', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={7} />); await bootHls(null, 1)
+    await levelUpdate(ORIGIN.toFixed(6), 2)
+    expect(video().currentTime).toBeCloseTo(ALIGNED, 6)
+    video().currentTime = 7
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: Math.round((ORIGIN + 7) * 1000) }), expect.any(AbortSignal))
+  })
+})
+
+describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', () => {
+  const MASTER = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\nsource/stream.m3u8\n'
+  const variant = (line: string | null) => [
+    '#EXTM3U', '#EXT-X-START:TIME-OFFSET=0,PRECISE=YES', '#EXT-X-TARGETDURATION:10', '#EXT-X-MAP:URI="init.mp4"',
+    ...(line === null ? [] : [line]), '#EXTINF:10.000000,', 'seg_00000.m4s', '#EXTINF:10.000000,', 'seg_00001.m4s', '',
+  ].join('\n')
+  let readyState = 4
+  const fetchMock = vi.fn()
+  function serve(variantBody: string | Promise<string> | Error) {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/master.m3u8')) return { ok: true, text: async () => MASTER }
+      if (variantBody instanceof Error) throw variantBody
+      return { ok: true, text: async () => await variantBody }
+    })
+  }
+  beforeEach(() => {
+    readyState = 4
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15')
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('maybe')
+    vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockImplementation(() => readyState)
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+  async function bootNative(profileId = 7) {
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={profileId} />)
+    await settle(); await settle()
+  }
+  async function progressAfter(sec: number) {
+    video().currentTime = sec
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    return vi.mocked(reportProgress).mock.calls.at(-1)?.[1].position_ms
+  }
+
+  it('fetches the variant once, beside the unchanged src load, and adopts and aligns at loadedmetadata', async () => {
+    readyState = 0
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    await bootNative()
+    // Safari still loads exactly what it loaded before: the AirPlay-capable
+    // cast-token master URL on src.
+    expect(video().src).toContain('/api/stream/hls/cast-clone/master.m3u8?token=cast')
+    expect(fetchMock.mock.calls.map(c => new URL(c[0]).pathname)).toEqual(['/api/stream/session/master.m3u8', '/api/stream/session/source/stream.m3u8'])
+    expect(video().currentTime).toBe(0)
+    readyState = 1
+    fireEvent(video(), new Event('loadedmetadata')); await settle()
+    expect(video().currentTime).toBeCloseTo(ALIGNED, 6)
+    expect(await progressAfter(7)).toBe(Math.round((ORIGIN + 7) * 1000))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['the fetch fails', () => serve(new TypeError('Failed to fetch'))],
+    ['the line is missing', () => serve(variant(null))],
+    ['the value is implausible', () => serve(variant('#AURORA-MEDIA-START:27'))],
+    ['the value is not seconds', () => serve(variant('#AURORA-MEDIA-START:soon'))],
+  ])('behaves exactly as before when %s', async (_name, setup) => {
+    setup()
+    await bootNative()
+    expect(video().currentTime).toBe(0)
+    expect(await progressAfter(7)).toBe((START_SEC + 7) * 1000)
+  })
+
+  it('retries the alignment from the element’s seekable window once it leaves runway', async () => {
+    const oneSegment = variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`).replace('#EXTINF:10.000000,\nseg_00001.m4s\n', '')
+    serve(oneSegment)
+    await bootNative()
+    expect(video().currentTime).toBe(0)
+    playing(); video().currentTime = 1
+    let seekableEnd = 10
+    vi.spyOn(HTMLMediaElement.prototype, 'seekable', 'get').mockImplementation(
+      () => ({ length: 1, start: () => 0, end: () => seekableEnd }) as unknown as TimeRanges)
+    fireEvent(video(), new Event('progress')); await settle()
+    expect(video().currentTime).toBe(1)
+    seekableEnd = 30
+    fireEvent(video(), new Event('progress')); await settle()
+    expect(video().currentTime).toBeCloseTo(ALIGNED, 6)
+  })
+
+  it('refuses a start that arrives after playback began', async () => {
+    let release!: (body: string) => void
+    serve(new Promise<string>(resolve => { release = resolve }))
+    await bootNative()
+    playing(); video().currentTime = 4
+    release(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`)); await settle(); await settle()
+    expect(video().currentTime).toBe(4)
+    expect(await progressAfter(4)).toBe((START_SEC + 4) * 1000)
+  })
+
+  it('never fetches for a transcode', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Awaited<ReturnType<typeof getStreamInfo>>)
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    await bootNative()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await progressAfter(7)).toBe((START_SEC + 7) * 1000)
+  })
+})
