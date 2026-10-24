@@ -1356,6 +1356,43 @@ html[data-glow="subtle"] .stage-topnav {
   border-color: transparent;
   box-shadow: none;
 }
+/* ── Search palette input (Stage refresh, D2) ──────────────────────────
+   The third container reset, after .stage-navsearch and .convo-search, and for
+   the same reason: the palette's query field is chromeless by design, but the
+   unlayered global `input:not([type="range"])` (0,1,1) beat every utility on it,
+   so the palette rendered the app-wide input box inside its own panel — a fill,
+   a 10px-radius border, 12px/16px padding and a 14.4px font where 22px display
+   type was intended — and on focus a lavender ring nested inside the panel.
+   (0,2,1) here outranks the global box; the size moves here from the call site
+   because the call site's `text-[22px]` lost too. */
+.stage-palette input:not([type="range"]) {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1.3;
+}
+/* (0,5,1) against the global focus rule's (0,4,1) — audit-focus-indicators
+   Check 4 compares the two, and Check 3 requires the :focus-within below. */
+.stage-palette input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
+.stage-palette input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
+  outline: none;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+/* The panel IS the field, so the panel carries the focus indicator: its border
+   brightens from purple/.2 to lavender/.7 (4.77:1 against the resting border,
+   6.00:1 against the scrim beyond it, computed as scripts/contrast.mjs does),
+   with a 1px lavender ring. Only `border-color` and
+   `box-shadow`, which the call site's utilities otherwise own at (0,1,0). The
+   query's caret is the second cue. */
+.stage-palette:focus-within {
+  border-color: rgba(216, 180, 254, 0.7);
+  box-shadow: 0 0 0 1px rgba(216, 180, 254, 0.25), 0 20px 80px -10px rgba(168, 85, 247, 0.45);
+}
+
 /* See the note at its call site in HeroSection. Starts at the hero's own opaque
    ink so there is no step at the boundary, and fades out over its own height so
    `.aurora-bg`'s radials arrive gradually.
