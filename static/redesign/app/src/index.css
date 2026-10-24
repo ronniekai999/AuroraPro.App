@@ -864,6 +864,25 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 2px;
   background: linear-gradient(90deg, var(--stage-purple), var(--stage-cyan));
   box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+  animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
+}
+/* The underline grows in from its centre when a tab becomes active (Stage
+   refresh, N1). It plays only when the pseudo-element starts to exist — i.e. on
+   activation — not on re-renders. The detail page's tab underline is a real
+   <span> (DetailTabs) and opts in with .stage-tabline. Ends at `transform: none`,
+   so nothing is held afterwards. */
+.stage-tabline {
+  animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
+}
+@keyframes stageTabLine {
+  from { transform: scaleX(0.25); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+/* Same selectors as the rules above, so specificity cannot let the grow win. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-tab[aria-current="page"]::after,
+  .stage-tab[aria-selected="true"]::after,
+  .stage-tabline { animation: none; }
 }
 /* Inset so the scrolling strip can't clip it — see .stage-tabstrip. */
 .stage-tab:focus-visible {
