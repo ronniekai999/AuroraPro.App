@@ -323,10 +323,14 @@ const ONB_INK = (() => {
 // 2.59:1 and 3.77:1 for as long as the palette existed and this script passed,
 // because this script measures ONLY the surfaces listed in SURFACES below and
 // the palette was never listed — the same structural blind spot this file's
-// header describes for the on-art audit and the vibe bar. Its backdrop is three
-// composites deep: the page (`.aurora-bg`, whose tints show through both
-// translucent layers above it), the full-viewport scrim, then the panel's own
-// fill. The scrim and panel are read from the component.
+// header describes for the on-art audit and the vibe bar. Modelled, bottom-up:
+// the page's `.aurora-bg` (its tints show through both translucent layers),
+// the full-viewport scrim, then the panel's own fill; the scrim and panel are
+// read from the component. NOT modelled: the two decorative blobs between the
+// scrim and the panel, and whatever view is on screen beneath the scrim (hero
+// art, a backdrop, video). The scrim and panel pass about 1.5% of what lies
+// under them, so at full strength those cost the palette's text a few
+// hundredths of a ratio point (6.45 → ~6.39 for the secondary text).
 const PAL = 'src/components/SearchPalette.tsx'
 const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
