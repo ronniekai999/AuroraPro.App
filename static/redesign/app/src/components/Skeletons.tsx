@@ -11,8 +11,12 @@
 //
 // Neutral tiles on purpose — NOT ui/skeleton.tsx (removed with the unused
 // shadcn set), whose `bg-accent` was the saturated brand purple.
-// `animate-pulse` is already nulled under prefers-reduced-motion by the
-// global block in index.css, so a reduced-motion user sees still tiles.
+// The tile and its motion are `.stage-skel` in index.css (Stage refresh, L1):
+// a slow lavender sheen instead of Tailwind's opacity pulse, the same sweep a
+// card shows while its poster is in flight, so loading reads as one thing.
+// Nulled under prefers-reduced-motion, so a reduced-motion user sees still tiles.
+// The radius stays a utility here (the primitive sets none, so call sites can
+// pass their own `rounded-*` and tailwind-merge resolves it).
 //
 // aria-hidden throughout: the surrounding view owns the accessible
 // loading announcement (PageHeader's role="status" line, HomeView's live
@@ -25,7 +29,7 @@ export function SkeletonBlock({ className }: { className?: string }) {
   return (
     <div
       aria-hidden="true"
-      className={cn('bg-white/[0.03] border border-white/[0.04] animate-pulse rounded-xl', className)}
+      className={cn('stage-skel rounded-xl', className)}
     />
   )
 }

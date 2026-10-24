@@ -3104,6 +3104,44 @@ html[data-glow="subtle"] .rail-container {
 html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
   content: none;
 }
+/* Skeleton tile (Stage refresh, L1) — SkeletonBlock's surface and motion. A
+   slow lavender sweep, the look of the poster sheen above, over the neutral 3%
+   fill the tiles always had, replacing Tailwind's animate-pulse opacity throb.
+   No radius and no display here (CASCADE HAZARD): call sites pass `rounded-*`
+   and size utilities.
+   The sweep is a `::before` moved by `transform`, so the compositor runs it with
+   no main-thread paint; the first cut animated `background-position`, which
+   repainted every tile every frame. It stays infinite because a skeleton only
+   exists while its data is loading — the settled no-pick hero, which used to be
+   one, is a static card again (HeroSection). Glow = Subtle drops it.
+   Its containing block and clip come from a ZERO-specificity rule, so a call
+   site's own `absolute` (the hero skeleton's ring disc) or `overflow-*`
+   utility still wins: a plain `.stage-skel { position: relative }`, unlayered
+   and after the utilities, would have pulled that disc into the flow. */
+:where(.stage-skel) {
+  position: relative;
+  overflow: hidden;
+}
+.stage-skel {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.stage-skel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.06) 50%, rgba(216, 180, 254, 0) 70%);
+  transform: translateX(-100%);
+  animation: skelSweep 1.6s var(--ease-standard) infinite;
+}
+@keyframes skelSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+html[data-glow="subtle"] .stage-skel::before {
+  content: none;
+}
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
    own 9px corners clipped against the wrap's edge. Phase 3 removed the
    image's radius entirely (the card is the sole clipping authority), so
@@ -4267,6 +4305,7 @@ textarea:focus-visible {
   .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin,
+  .stage-skel::before,
   /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
      translateY/translateX, i.e. real motion, and were missed by the sweep
      above. The gap is old; the blast radius is new, because the nav now
