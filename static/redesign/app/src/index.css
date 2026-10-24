@@ -1072,9 +1072,17 @@ html[data-glow="subtle"] .stage-topnav {
   color: rgba(255, 255, 255, 0.8);
   box-shadow: var(--glass-lip); /* G1; :focus-visible below swaps in its ring */
   cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard);
 }
 .stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+/* Press feedback (Stage refresh, N3): party, server, bell and the menu button
+   dip as they are pressed. Owned here, not as an `active:scale-*` utility, so
+   nothing at a call site can compete for `transform`. */
+.stage-iconbtn:active { transform: scale(0.94); }
+@media (prefers-reduced-motion: reduce) {
+  .stage-iconbtn { transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard); }
+  .stage-iconbtn:active { transform: none; }
+}
 .stage-iconbtn[aria-expanded="true"] {
   background: rgba(168, 85, 247, 0.16);
   border-color: rgba(168, 85, 247, 0.5);
