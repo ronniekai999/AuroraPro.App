@@ -4877,7 +4877,7 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		// A remux started mid-file begins at the key frame before StartSec,
 		// not at StartSec. Publish where it really begins, as a comment line
 		// every non-hls.js client ignores (media_start.go).
-		if sec, ok := tm.sessionMediaStart(s, v, firstMediaURI(lines)); ok {
+		if sec, ok := tm.sessionMediaStart(r.Context(), s, v, firstMediaURI(lines)); ok {
 			out = insertBeforeFirstSegment(out, mediaStartLine(sec))
 		}
 	}

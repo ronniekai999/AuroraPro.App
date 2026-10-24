@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -274,8 +276,8 @@ func TestSessionMediaStart_ProbesOnceAndBoundsWhatItPublishes(t *testing.T) {
 	}
 
 	t.Run("one probe per session, reused on every reload", func(t *testing.T) {
-		calls := 0
-		tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls++; return 19.946009, nil })
+		var calls atomic.Int32
+		tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls.Add(1); return 19.946009, nil })
 		s, v := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
 		for i := 0; i < 3; i++ {
 			body := servePlaylist(t, tm, s, v)
@@ -284,36 +286,179 @@ func TestSessionMediaStart_ProbesOnceAndBoundsWhatItPublishes(t *testing.T) {
 				t.Fatalf("load %d: media start not right before the first segment:\n%s", i, body)
 			}
 		}
-		if calls != 1 {
-			t.Errorf("probed %d times across 3 loads, want 1", calls)
+		if n := calls.Load(); n != 1 {
+			t.Errorf("probed %d times across 3 loads, want 1", n)
 		}
 	})
 
-	t.Run("transient failures retry a bounded number of times", func(t *testing.T) {
-		calls := 0
-		tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls++; return 0, errors.New("busy") })
+	// M2: a start that only appears on a later reload moves the clock under a
+	// viewer already watching. Every retry happens inside the FIRST request.
+	t.Run("transient failures are retried within the first request, never after it", func(t *testing.T) {
+		var calls atomic.Int32
+		tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls.Add(1); return 0, errors.New("busy") })
 		s, v := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
-		for i := 0; i < mediaStartMaxAttempts+3; i++ {
+		if _, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); ok {
+			t.Fatal("published a media start the probe never produced")
+		}
+		if n := calls.Load(); n != mediaStartMaxAttempts {
+			t.Fatalf("first request probed %d times, want all %d attempts inside it", n, mediaStartMaxAttempts)
+		}
+		for i := 0; i < 3; i++ {
 			if _, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); ok {
-				t.Fatal("published a media start the probe never produced")
+				t.Fatal("a later reload published a media start")
 			}
 		}
-		if calls != mediaStartMaxAttempts {
-			t.Errorf("probed %d times, want the cap of %d", calls, mediaStartMaxAttempts)
+		if n := calls.Load(); n != mediaStartMaxAttempts {
+			t.Errorf("later reloads probed again: %d probes in all", n)
 		}
 	})
 
-	t.Run("a start after the anchor is not one -noaccurate_seek produced", func(t *testing.T) {
-		calls := 0
-		tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls++; return 31, nil })
+	t.Run("a failure recovered within the first request is published by it", func(t *testing.T) {
+		var calls atomic.Int32
+		tm := newTM(t, func(context.Context, string, bool) (float64, error) {
+			if calls.Add(1) < mediaStartMaxAttempts {
+				return 0, errors.New("segment still flushing")
+			}
+			return 19.946009, nil
+		})
 		s, v := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
-		for i := 0; i < 2; i++ {
-			if sec, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); ok {
-				t.Fatalf("published %.3fs for start_sec=25", sec)
+		if sec, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); !ok || sec != 19.946009 {
+			t.Fatalf("first request published %v (ok=%v), want the retried measurement", sec, ok)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		startSec int
+		measured float64
+	}{
+		{"after the anchor: not one -noaccurate_seek produced", 25, 31},
+		{"more than a minute before the anchor", 3600, 3600 - mediaStartMaxLagSec - 1},
+		{"negative", 25, -0.5},
+	} {
+		t.Run("implausible start is final: "+tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			tm := newTM(t, func(context.Context, string, bool) (float64, error) { calls.Add(1); return tc.measured, nil })
+			s, v := fakeMediaStartSession(t, tm, tc.startSec, mediaStartPlaylist)
+			for i := 0; i < 2; i++ {
+				if sec, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); ok {
+					t.Fatalf("published %.3fs for start_sec=%d", sec, tc.startSec)
+				}
+			}
+			if n := calls.Load(); n != 1 {
+				t.Errorf("an implausible answer is final, probed %d times", n)
+			}
+		})
+	}
+	t.Run("the edges of the window are published", func(t *testing.T) {
+		for _, measured := range []float64{3600 - mediaStartMaxLagSec, 3600 + mediaStartMaxLeadSec} {
+			tm := newTM(t, func(context.Context, string, bool) (float64, error) { return measured, nil })
+			s, v := fakeMediaStartSession(t, tm, 3600, mediaStartPlaylist)
+			if sec, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); !ok || sec != measured {
+				t.Errorf("measured %.3f for start_sec=3600: published %v (ok=%v)", measured, sec, ok)
 			}
 		}
-		if calls != 1 {
-			t.Errorf("an implausible answer is final, probed %d times", calls)
+	})
+
+	// L1: no request holds a lock across the probe.
+	t.Run("concurrent fetches wait together, not in turn", func(t *testing.T) {
+		const probeTime = 600 * time.Millisecond
+		var calls atomic.Int32
+		tm := newTM(t, func(ctx context.Context, _ string, _ bool) (float64, error) {
+			calls.Add(1)
+			select {
+			case <-time.After(probeTime):
+				return 19.946009, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		})
+		s, _ := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
+		const fetches = 4
+		bodies := make(chan string, fetches)
+		began := time.Now()
+		var wg sync.WaitGroup
+		for i := 0; i < fetches; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rec := httptest.NewRecorder()
+				tm.ServeVariantPlaylist(rec, httptest.NewRequest("GET", "/x", nil), s.ID, "source", "")
+				bodies <- rec.Body.String()
+			}()
+		}
+		wg.Wait()
+		close(bodies)
+		if took := time.Since(began); took > probeTime+400*time.Millisecond {
+			t.Errorf("%d concurrent fetches took %v behind one %v probe: they queued", fetches, took, probeTime)
+		}
+		for body := range bodies {
+			if _, ok := publishedMediaStart(t, body); !ok {
+				t.Errorf("a concurrent fetch was served without the measurement:\n%s", body)
+			}
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("probed %d times for %d concurrent fetches, want 1", n, fetches)
+		}
+	})
+
+	t.Run("a hung probe costs each fetch the budget, not more", func(t *testing.T) {
+		tm := newTM(t, func(ctx context.Context, _ string, _ bool) (float64, error) {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		})
+		s, v := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
+		began := time.Now()
+		var wg sync.WaitGroup
+		for i := 0; i < 3; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); servePlaylist(t, tm, s, v) }()
+		}
+		wg.Wait()
+		if took := time.Since(began); took > mediaStartBudget+time.Second {
+			t.Errorf("3 fetches behind a hung probe took %v; the budget is %v", took, mediaStartBudget)
+		}
+		// The measurement itself gave up inside the budget: the next fetch
+		// finds it settled instead of paying the wait again.
+		next := time.Now()
+		if _, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); ok {
+			t.Fatal("published a measurement from a probe that never answered")
+		}
+		if took := time.Since(next); took > 200*time.Millisecond {
+			t.Errorf("a fetch after the budget waited %v: the hung probe was never bounded", took)
+		}
+	})
+
+	t.Run("a cancelled request does not cancel the measurement", func(t *testing.T) {
+		var calls atomic.Int32
+		release := make(chan struct{})
+		tm := newTM(t, func(ctx context.Context, _ string, _ bool) (float64, error) {
+			calls.Add(1)
+			select {
+			case <-release:
+				return 19.946009, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		})
+		s, v := fakeMediaStartSession(t, tm, 25, mediaStartPlaylist)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		// Straight at the wait: through ServeVariantPlaylist, its own select on
+		// Ready vs the cancelled context would pick either at random.
+		began := time.Now()
+		if _, ok := tm.sessionMediaStart(ctx, s, v, "seg_00000.ts"); ok {
+			t.Fatal("a cancelled request waited for and got the measurement")
+		}
+		if took := time.Since(began); took > 500*time.Millisecond {
+			t.Errorf("a cancelled request still waited %v for the probe", took)
+		}
+		close(release)
+		if sec, ok := publishedMediaStart(t, servePlaylist(t, tm, s, v)); !ok || sec != 19.946009 {
+			t.Fatalf("the next request got %v (ok=%v); the measurement died with the cancelled one", sec, ok)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("probed %d times, want 1", n)
 		}
 	})
 

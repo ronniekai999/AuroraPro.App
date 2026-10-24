@@ -56,25 +56,52 @@ const (
 	// before the anchor; the slack covers the first sample's B-frame/codec
 	// delay. Anything later did not come from this anchor.
 	mediaStartMaxLeadSec = 1.0
-	// mediaStartProbeTimeout bounds the one ffprobe a session pays. It reads
-	// headers and the first packets of a segment already on disk.
-	mediaStartProbeTimeout = 10 * time.Second
-	// mediaStartMaxAttempts caps retries after transient probe failures, so
-	// a segment ffprobe cannot read costs a few probes, not one per playlist
-	// reload for the life of the session.
+	// mediaStartMaxLagSec bounds how far BEFORE start_sec it may sit. A remux
+	// begins at the key frame before the anchor, or (the Matroska heuristic)
+	// the one before that; two GOPs past a minute is not a real stream. The
+	// SPA applies the same window (lib/mediaStart.ts MEDIA_START_MAX_LAG_SEC).
+	mediaStartMaxLagSec = 60.0
+	// mediaStartBudget bounds the whole measurement, retries included. The
+	// first variant playlist request waits for it (the only moment the web
+	// player can still adopt the result before showing a frame), so it is
+	// what a remux start pays at worst; a healthy probe takes tens of ms.
+	mediaStartBudget = 2500 * time.Millisecond
+	// mediaStartMaxAttempts caps probes per session. All of them run inside
+	// mediaStartBudget, i.e. within the first playlist request: a start that
+	// appeared on a LATER reload would move the web player's clock under a
+	// viewer already watching, which is worse than never publishing one.
 	mediaStartMaxAttempts = 3
+	// mediaStartProbeSize and mediaStartAnalyzeDuration keep each probe to the
+	// head of the segment: the start time comes from the first packets of
+	// each stream (fMP4: from the fragment's trun), and the default 5 MB/5 s
+	// would read most of a 4K remux segment for nothing. Measured: the same
+	// start time at 32 KB on every fixture; 1 MB leaves room for a key frame
+	// of a high-bitrate source ahead of the first audio packet.
+	mediaStartProbeSize       = "1000000"
+	mediaStartAnalyzeDuration = "1000000"
 )
 
-// mediaStartState caches a session's measured origin. The first segment is
-// immutable once the playlist lists it, so one successful measurement holds
-// for the session's life, including after crash/reap resumes, which append
-// to the same playlist rather than rewriting segment 0.
+// mediaStartRetryBackoff is the pause before each retry, inside the budget.
+var mediaStartRetryBackoff = []time.Duration{150 * time.Millisecond, 400 * time.Millisecond}
+
+// mediaStartState is a session's one measurement, run once in the
+// background and awaited by playlist requests.
+//
+// No request holds a lock across the probe: the first remux playlist request
+// starts it, and every request (that one included) waits on `done` for at
+// most the budget or until its own context ends. Concurrent fetches wait
+// together rather than in turn, and a hung ffprobe costs each of them the
+// budget, not a probe timeout per request ahead of it.
+//
+// The first segment is immutable once the playlist lists it, so the result
+// holds for the session's life, including after crash/reap resumes, which
+// append to the same playlist rather than rewriting segment 0.
 type mediaStartState struct {
-	mu       sync.Mutex
-	sec      float64
-	known    bool // sec holds a published measurement
-	settled  bool // no further probe will be attempted (known, or unusable)
-	attempts int
+	mu      sync.Mutex
+	started bool
+	done    chan struct{} // closed once sec/known are final
+	sec     float64
+	known   bool // sec is a plausible measurement to publish
 }
 
 // errNoMediaStart reports a segment that carries no usable start time.
@@ -91,6 +118,10 @@ var errNoMediaStart = errors.New("first segment has no start time")
 // zeroes on the first decode time of the track it syncs on; ffprobe reports
 // the earliest presentation time across streams): 6-18 ms on the Chromium
 // measurement, against errors of a whole GOP without it.
+//
+// It does not take the API's ffprobeGate (internal/api, which imports this
+// package): it runs at most mediaStartMaxAttempts times per remux session,
+// bounded by mediaStartBudget and the probe limits above, off every lock.
 func probeMediaStartSec(ctx context.Context, variantDir string, fmp4 bool) (float64, error) {
 	var input string
 	if fmp4 {
@@ -105,9 +136,9 @@ func probeMediaStartSec(ctx context.Context, variantDir string, fmp4 bool) (floa
 	} else {
 		input = filepath.Join(variantDir, "seg_00000.ts")
 	}
-	ctx, cancel := context.WithTimeout(ctx, mediaStartProbeTimeout)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error",
+		"-probesize", mediaStartProbeSize,
+		"-analyzeduration", mediaStartAnalyzeDuration,
 		"-show_entries", "format=start_time",
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		input)
@@ -126,6 +157,13 @@ func probeMediaStartSec(ctx context.Context, variantDir string, fmp4 bool) (floa
 	return sec, nil
 }
 
+// mediaStartPlausible is the window a measured start must fall in to be
+// published for this anchor: [start_sec - 60 s, start_sec + 1 s], never < 0.
+func mediaStartPlausible(sec float64, startSec int) bool {
+	anchor := float64(startSec)
+	return sec >= 0 && sec >= anchor-mediaStartMaxLagSec && sec <= anchor+mediaStartMaxLeadSec
+}
+
 // sessionMediaStart returns the measured origin to publish for this session,
 // or ok=false to publish nothing (the client then keeps start_sec, which is
 // exactly the pre-measurement behaviour).
@@ -135,52 +173,95 @@ func probeMediaStartSec(ctx context.Context, variantDir string, fmp4 bool) (floa
 // passes no -ss at all.
 //
 // firstSegment is the first media URI the playlist being served lists. The
-// measurement is taken only while that is segment 0: that is the segment
+// measurement starts only while that is segment 0: that is the segment
 // hls.js anchors the session's timeline on. (The unreadable-playlist resume
 // fallback rewrites the playlist from a later segment; a session that never
-// served segment 0 publishes nothing. A cached measurement keeps being
-// published, because the timeline it describes was fixed by the first load.)
-func (tm *TranscodeManager) sessionMediaStart(s *TranscodeSession, v *QualityVariant, firstSegment string) (float64, bool) {
+// served segment 0 publishes nothing. A measurement already taken keeps
+// being published, because the timeline it describes was fixed by the first
+// load — CLAUDE.md records that as a known gap.)
+//
+// ctx is the request's: it ends this request's wait, never the measurement,
+// whose result every later request of the session shares.
+func (tm *TranscodeManager) sessionMediaStart(ctx context.Context, s *TranscodeSession, v *QualityVariant, firstSegment string) (float64, bool) {
 	if s == nil || v == nil || !s.Remux || s.StartSec <= 0 {
 		return 0, false
 	}
 	st := &s.mediaStart
 	st.mu.Lock()
+	if !st.started {
+		if numStr, ok := segmentNumberPart(firstSegment); !ok || strings.TrimLeft(numStr, "0") != "" {
+			st.mu.Unlock()
+			return 0, false
+		}
+		st.started = true
+		st.done = make(chan struct{})
+		go tm.measureMediaStart(s, v.OutputDir)
+	}
+	done := st.done
+	st.mu.Unlock()
+
+	wait := time.NewTimer(mediaStartBudget + 250*time.Millisecond)
+	defer wait.Stop()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return 0, false
+	case <-wait.C:
+		return 0, false
+	}
+	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.settled {
-		return st.sec, st.known
-	}
-	if numStr, ok := segmentNumberPart(firstSegment); !ok || strings.TrimLeft(numStr, "0") != "" {
-		return 0, false
-	}
-	if st.attempts >= mediaStartMaxAttempts {
-		st.settled = true
-		return 0, false
-	}
-	st.attempts++
+	return st.sec, st.known
+}
+
+// measureMediaStart runs the session's probes, retrying transient failures
+// inside mediaStartBudget, and publishes the outcome by closing done.
+func (tm *TranscodeManager) measureMediaStart(s *TranscodeSession, variantDir string) {
+	st := &s.mediaStart
+	sec, known := 0.0, false
+	defer func() {
+		st.mu.Lock()
+		st.sec, st.known = sec, known
+		close(st.done)
+		st.mu.Unlock()
+	}()
 	probe := tm.mediaStartProbe
 	if probe == nil {
 		probe = probeMediaStartSec
 	}
-	// Deliberately not the request's context: an impatient client cancelling
-	// its playlist fetch must not spend one of the session's few attempts.
-	sec, err := probe(context.Background(), v.OutputDir, s.FMP4)
-	if err != nil {
-		slog.Warn("remux media start not measured; clients keep start_sec",
-			"session_id", s.ID, "start_sec", s.StartSec, "attempt", st.attempts, "error", err)
-		return 0, false
+	ctx, cancel := context.WithTimeout(context.Background(), mediaStartBudget)
+	defer cancel()
+	for attempt := 1; attempt <= mediaStartMaxAttempts; attempt++ {
+		measured, err := probe(ctx, variantDir, s.FMP4)
+		if err == nil {
+			if !mediaStartPlausible(measured, s.StartSec) {
+				slog.Warn("remux media start implausible for its anchor; not publishing it",
+					"session_id", s.ID, "start_sec", s.StartSec, "measured_sec", measured)
+				return
+			}
+			sec, known = measured, true
+			slog.Info("remux media start measured",
+				"session_id", s.ID, "start_sec", s.StartSec, "media_start_sec", fmt.Sprintf("%.3f", sec),
+				"keyframe_gap_sec", fmt.Sprintf("%.3f", float64(s.StartSec)-sec), "attempt", attempt)
+			return
+		}
+		slog.Warn("remux media start probe failed",
+			"session_id", s.ID, "start_sec", s.StartSec, "attempt", attempt, "error", err)
+		if attempt > len(mediaStartRetryBackoff) {
+			break
+		}
+		retry := time.NewTimer(mediaStartRetryBackoff[attempt-1])
+		select {
+		case <-ctx.Done():
+		case <-retry.C:
+		}
+		retry.Stop()
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	st.settled = true
-	if sec < 0 || sec > float64(s.StartSec)+mediaStartMaxLeadSec {
-		slog.Warn("remux media start implausible for its anchor; not publishing it",
-			"session_id", s.ID, "start_sec", s.StartSec, "measured_sec", sec)
-		return 0, false
-	}
-	st.sec, st.known = sec, true
-	slog.Info("remux media start measured",
-		"session_id", s.ID, "start_sec", s.StartSec, "media_start_sec", fmt.Sprintf("%.3f", sec),
-		"keyframe_gap_sec", fmt.Sprintf("%.3f", float64(s.StartSec)-sec))
-	return sec, true
+	slog.Warn("remux media start not measured; clients keep start_sec",
+		"session_id", s.ID, "start_sec", s.StartSec)
 }
 
 // mediaStartLine renders the playlist comment for a measured origin.
