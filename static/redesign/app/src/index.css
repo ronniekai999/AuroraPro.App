@@ -113,14 +113,20 @@
        .glass-panel, .glass-card, and .media-card. Default is
        "Aurora" (white border, purple-tinted halo). Users override
        via Settings → Appearance → Glow Style, which writes
-       data-glow="subtle" | "heavy" on <html>. */
+       data-glow="subtle" | "heavy" on <html>.
+       Every halo, in all three styles, leads with --glass-lip (Stage refresh,
+       G1): the 1px top highlight that makes a dark panel read as lit glass. It
+       is an inset shadow, so it paints under a card's poster and only shows on
+       surfaces whose own fill is visible at the top edge. */
     --glow-border: rgba(220, 200, 255, 0.22);
     --glow-border-strong: rgba(220, 200, 255, 0.45);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.14),
       0 0 28px rgba(168, 85, 247, 0.12),
       0 0 56px rgba(255, 255, 255, 0.05);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.25),
       0 0 34px rgba(168, 85, 247, 0.20),
       0 0 72px rgba(255, 255, 255, 0.08);
@@ -215,7 +221,7 @@
     --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
     --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
-    --fs-rail: 1.3125rem;     /* rail titles, 21px */
+    --fs-rail: 1.25rem;       /* rail titles, 20px (Stage refresh, R1) */
 
     /* Leading is PER TYPEFACE, not per size. Overrides live with the
        html[data-font] blocks below; this is the "one list to re-check when a
@@ -302,14 +308,44 @@
     --dur-slow: 350ms;
     --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
     --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+    /* Entrances (Stage refresh, T1). Things ARRIVING — a view, a menu, a
+       toast, a dialog card — use the emphasized curve: most of the distance
+       is covered early and the last few pixels settle, which reads as quicker
+       than --ease-standard at the same duration. Hover/press feedback stays
+       on --ease-standard. Exits keep --ease-exit at --dur-fast so
+       useExitTransition's 150ms unmount still lands as the animation ends. */
+    --dur-enter: 280ms;
+    --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+    /* A 1px top highlight that makes a dark glass surface read as lit from
+       above. Folded into the --glow-halo tokens (G1) and used directly on the
+       ghost button family; an inset shadow paints under content, so on a
+       poster card it sits beneath the art and changes nothing. */
+    --glass-lip: inset 0 1px 0 rgba(255, 255, 255, 0.06);
     --r-sm: 8px;
     --r-md: 12px;
     --r-lg: 14px;
     --r-xl: 18px;
+    /* The largest step (Stage refresh, G2): the PIN and Previously dialogs,
+       which had 24px and 28px literals. index.css snapped its off-scale radii
+       (9, 11, 13, 15, 16px) to the nearest step in the same pass, and wrote
+       the on-scale ones as tokens. Left as literals on purpose: 10px (the
+       small-control step the tabs, small buttons and fields share), the
+       sub-8px chip and track radii, the player's, and .density-toggle's 11px,
+       which is its 8px buttons plus its 3px padding so the corners nest. */
+    --r-2xl: 24px;
     --r-pill: 999px;
+    /* Elevation (G2). Popovers (the avatar menu, the phone menu sheet, the
+       server and notification panels) and modal cards were Tailwind's
+       shadow-2xl — black at 0.25, close to invisible on #050505 — or a
+       one-off literal. Both carry the glass lip (G1). Used through
+       `shadow-[shadow:var(--shadow-pop)]`: the `shadow:` hint is required,
+       because Tailwind 3 compiles a bare `shadow-[var(--x)]` as a shadow
+       COLOUR (measured), which silently draws nothing. */
+    --shadow-pop: var(--glass-lip), 0 18px 48px -12px rgba(0, 0, 0, 0.7);
+    --shadow-modal: var(--glass-lip), 0 28px 90px rgba(0, 0, 0, 0.65);
     --surface-1: #0a0a0f;
     --surface-2: #14121e;
-    /* Small-end type. The display scale above stops at --fs-rail (21px);
+    /* Small-end type. The display scale above stops at --fs-rail (20px);
        everything smaller was 217 arbitrary `text-[Npx]` utilities across
        ten values including half-pixels. These four name the clusters
        (labels 10, captions 11, meta 12.5, small body 13.5). Adopted where
@@ -325,9 +361,11 @@
     --glow-border: rgba(255, 255, 255, 0.10);
     --glow-border-strong: rgba(255, 255, 255, 0.18);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(255, 255, 255, 0.06),
       0 0 14px rgba(255, 255, 255, 0.04);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(255, 255, 255, 0.12),
       0 0 18px rgba(255, 255, 255, 0.08);
   }
@@ -336,10 +374,12 @@
     --glow-border: rgba(220, 200, 255, 0.40);
     --glow-border-strong: rgba(220, 200, 255, 0.65);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.28),
       0 0 32px rgba(168, 85, 247, 0.30),
       0 0 64px rgba(255, 255, 255, 0.12);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.50),
       0 0 48px rgba(168, 85, 247, 0.40),
       0 0 96px rgba(255, 255, 255, 0.18);
@@ -776,6 +816,23 @@
   backdrop-filter: blur(12px);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
+/* Aurora hairline (Stage refresh, N4). Once content scrolls under the bar its
+   bottom edge picks up a faint purple-to-cyan line, fading in over the grey
+   border — the same pair the active-tab underline uses. Opacity only, so there
+   is no motion to still. Absolute against the bar's own `position: relative`. */
+.stage-topnav::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.5) 26%, rgba(34, 211, 238, 0.4) 74%, transparent);
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease-standard);
+}
+.stage-topnav[data-scrolled]::after { opacity: 1; }
 @media (min-width: 768px) {
   /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
      and the first version of the phase missed it: at a flat 30px the logo and nav
@@ -841,6 +898,25 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 2px;
   background: linear-gradient(90deg, var(--stage-purple), var(--stage-cyan));
   box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+  animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
+}
+/* The underline grows in from its centre when a tab becomes active (Stage
+   refresh, N1). It plays only when the pseudo-element starts to exist — i.e. on
+   activation — not on re-renders. The detail page's tab underline is a real
+   <span> (DetailTabs) and opts in with .stage-tabline. Ends at `transform: none`,
+   so nothing is held afterwards. */
+.stage-tabline {
+  animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
+}
+@keyframes stageTabLine {
+  from { transform: scaleX(0.25); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+/* Same selectors as the rules above, so specificity cannot let the grow win. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-tab[aria-current="page"]::after,
+  .stage-tab[aria-selected="true"]::after,
+  .stage-tabline { animation: none; }
 }
 /* Inset so the scrolling strip can't clip it — see .stage-tabstrip. */
 .stage-tab:focus-visible {
@@ -1028,10 +1104,19 @@ html[data-glow="subtle"] .stage-topnav {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.09);
   color: rgba(255, 255, 255, 0.8);
+  box-shadow: var(--glass-lip); /* G1; :focus-visible below swaps in its ring */
   cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard);
 }
 .stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+/* Press feedback (Stage refresh, N3): party, server, bell and the menu button
+   dip as they are pressed. Owned here, not as an `active:scale-*` utility, so
+   nothing at a call site can compete for `transform`. */
+.stage-iconbtn:active { transform: scale(0.94); }
+@media (prefers-reduced-motion: reduce) {
+  .stage-iconbtn { transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard); }
+  .stage-iconbtn:active { transform: none; }
+}
 .stage-iconbtn[aria-expanded="true"] {
   background: rgba(168, 85, 247, 0.16);
   border-color: rgba(168, 85, 247, 0.5);
@@ -1158,6 +1243,55 @@ html[data-glow="subtle"] .stage-topnav {
   background:
     linear-gradient(90deg, rgba(5, 5, 5, 0.95) 0%, rgba(5, 5, 5, 0.72) 40%, rgba(5, 5, 5, 0.15) 72%, rgba(5, 5, 5, 0.35) 100%),
     linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
+}
+/* The words change with the art (Stage refresh, H2). HeroSection keys the
+   reason, genre line, title, description and the compact "Featured" line on
+   the pick's id, so a rotation remounts them and they fade up with the
+   backdrop's dissolve instead of snapping. `backwards`, not `both`: the
+   delay needs the from-state, but a held `to { transform: none }` computes
+   to an identity matrix, not `none` (measured), and would leave each line a
+   stacking context it never was. The first mount plays it too, under the
+   page's own .animate-fade-in. */
+.stage-hero-swap {
+  animation: heroTextIn 460ms var(--ease-emphasized) backwards;
+}
+.stage-hero-swap-d1 { animation-delay: 50ms; }
+.stage-hero-swap-d2 { animation-delay: 100ms; }
+@keyframes heroTextIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* The match ring eases to the next pick's score. */
+.stage-hero-ring-arc {
+  transition: stroke-dasharray 700ms var(--ease-emphasized);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-hero-swap,
+  .stage-hero-swap-d1,
+  .stage-hero-swap-d2 {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .stage-hero-ring-arc {
+    transition: none;
+  }
+}
+
+/* Top feather (Stage refresh, H1). The backdrop used to start on a hard line
+   right under the greeting; this lets the art rise out of the page instead,
+   the same #050505 the bottom fade lands on. A fixed 72px, not a percentage,
+   so the full hero (480-680px) and the 250px browse band lose the same strip
+   of artwork. It is a child of the scrim, so it paints over both layers above
+   and under the corner vignette. It only darkens, so it can only raise the
+   white text's contrast — audit-onart-contrast models it anyway, because that
+   audit's claim is that it composites EVERY layer. */
+.stage-hero-scrim::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 72px;
+  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0.55) 45%, transparent 100%);
 }
 
 /* Transient-overlay menu items get a ring on plain :focus, not only on
@@ -1288,6 +1422,43 @@ html[data-glow="subtle"] .stage-topnav {
   border-color: transparent;
   box-shadow: none;
 }
+/* ── Search palette input (Stage refresh, D2) ──────────────────────────
+   The third container reset, after .stage-navsearch and .convo-search, and for
+   the same reason: the palette's query field is chromeless by design, but the
+   unlayered global `input:not([type="range"])` (0,1,1) beat every utility on it,
+   so the palette rendered the app-wide input box inside its own panel — a fill,
+   a 10px-radius border, 12px/16px padding and a 14.4px font where 22px display
+   type was intended — and on focus a lavender ring nested inside the panel.
+   (0,2,1) here outranks the global box; the size moves here from the call site
+   because the call site's `text-[22px]` lost too. */
+.stage-palette input:not([type="range"]) {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1.3;
+}
+/* (0,5,1) against the global focus rule's (0,4,1) — audit-focus-indicators
+   Check 4 compares the two, and Check 3 requires the :focus-within below. */
+.stage-palette input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
+.stage-palette input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
+  outline: none;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+/* The panel IS the field, so the panel carries the focus indicator: its border
+   brightens from purple/.2 to lavender/.7 (4.77:1 against the resting border,
+   6.00:1 against the scrim beyond it, computed as scripts/contrast.mjs does),
+   with a 1px lavender ring. Only `border-color` and
+   `box-shadow`, which the call site's utilities otherwise own at (0,1,0). The
+   query's caret is the second cue. */
+.stage-palette:focus-within {
+  border-color: rgba(216, 180, 254, 0.7);
+  box-shadow: 0 0 0 1px rgba(216, 180, 254, 0.25), 0 20px 80px -10px rgba(168, 85, 247, 0.45);
+}
+
 /* See the note at its call site in HeroSection. Starts at the hero's own opaque
    ink so there is no step at the boundary, and fades out over its own height so
    `.aurora-bg`'s radials arrive gradually.
@@ -1510,7 +1681,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* ── Request rows ─────────────────────────────────────────────────────
    The mockup's .req: a 70×105 poster beside a stacked info column. */
 .stage-req {
-  border-radius: 16px;
+  border-radius: var(--r-lg);
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.07);
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
@@ -1520,7 +1691,7 @@ html[data-glow="subtle"] .stage-toolbar {
   position: relative;
   width: 70px;
   height: 105px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #12101c;
@@ -1585,7 +1756,7 @@ html[data-glow="subtle"] .stage-toolbar {
 .stage-colcard {
   position: relative;
   height: 118px;
-  border-radius: 15px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   border: 1px solid rgba(220, 200, 255, 0.16);
   background: #0b0b12;
@@ -1660,7 +1831,7 @@ html[data-glow="subtle"] .stage-toolbar {
   justify-content: center;
   gap: 8px;
   height: 44px;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   border: 1px dashed rgba(168, 85, 247, 0.45);
   background: rgba(168, 85, 247, 0.06);
   color: var(--stage-purple-lt);
@@ -1679,7 +1850,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* ── Segmented control (List ⇄ Month) ─────────────────────────────────
    No `display` here — the call site sets `inline-flex`. */
 .stage-seg {
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
@@ -1734,7 +1905,7 @@ html[data-glow="subtle"] .stage-toolbar {
   align-items: center;
   gap: 11px;
   padding: 8px 11px;
-  border-radius: 11px;
+  border-radius: var(--r-md);
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
@@ -1769,7 +1940,7 @@ html[data-glow="subtle"] .stage-toolbar {
 .stage-calcell {
   position: relative;
   min-height: 108px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.05);
   padding: 6px 7px;
@@ -1875,7 +2046,7 @@ html[data-glow="subtle"] .stage-toolbar {
    role="radio", so the visual and the announced state cannot disagree. */
 .stage-opt {
   padding: 13px 14px;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.09);
   cursor: pointer;
@@ -1955,6 +2126,8 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(3, 3, 5, 0.72);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+  /* Fades in under the opening theater (Stage refresh, P2). */
+  animation: veilIn 260ms var(--ease-standard) backwards;
 }
 html[data-glow="subtle"] .stage-dim-veil {
   backdrop-filter: none;
@@ -2001,6 +2174,33 @@ html[data-glow="subtle"] .stage-dim-veil {
   border: 1px solid rgba(220, 200, 255, 0.2);
   box-shadow: var(--glow-halo-strong), 0 40px 100px rgba(0, 0, 0, 0.8);
   background: #000;
+  /* The theater opens (Stage refresh, P2): a 340ms rise from .985 instead of
+     appearing in one frame; the veil behind it fades in (veilIn). TRANSFORM
+     ONLY: VideoPlayer swaps this class out in fullscreen and back in on
+     leaving it, so the entrance replays on every fullscreen exit, and the
+     first cut also faded the box from opacity 0 — the picture blanked for
+     ~340ms each time. A replayed rise of 8px just reads as the box settling
+     back into place. `backwards`, never `both` or `forwards`: a held `to`
+     transform computes to an identity matrix, which would make this box the
+     containing block for any `position: fixed` descendant for as long as the
+     player is open. Nothing inside it is fixed today (measured; the party
+     overlays mount in App, outside the player) — the fill keeps it that way
+     after the 340ms. */
+  animation: theaterIn 340ms var(--ease-emphasized) backwards;
+}
+@keyframes theaterIn {
+  from { transform: translateY(8px) scale(0.985); }
+  to { transform: none; }
+}
+@keyframes veilIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-theater,
+  .stage-dim-veil {
+    animation: none;
+  }
 }
 /* Full-bleed below lg. 90px of inset per side leaves 195px of picture on a
    375px screen — the theater framing is a desktop affordance, and on a phone
@@ -2105,7 +2305,14 @@ html[data-player-surface="theater"] .stage-party-reactions {
   height: 5px;
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.36);
+  /* Thickens 5 → 7px under the pointer or keyboard focus (Stage refresh, P1),
+     inside the 14px hit row, so nothing around it moves. The fills and the knob
+     position against the track and follow it; no alpha changes, so the contrast
+     figures below still hold. */
+  transition: height 160ms var(--ease-standard);
 }
+.stage-scrub:hover .stage-scrub-track,
+.stage-scrub:focus-visible .stage-scrub-track { height: 7px; }
 /* Track 0.36 and buffered 0.75, against the mockup's 0.18/0.30.
 
    The earlier justification for 0.28/0.45 measured a single sample point over a
@@ -2184,13 +2391,27 @@ html[data-player-surface="theater"] .stage-party-reactions {
    sat outside every prefers-reduced-motion block in the file. */
 .stage-orb {
   transition: transform 140ms ease;
+  /* "Who's watching?" profiles fade up in turn (Stage refresh, PG1), 60ms
+     apart. `backwards` so nothing is held after the entrance: a held `to`
+     transform would outrank the hover/focus lift below for good, since an
+     animation beats every normal declaration. */
+  animation: orbIn 380ms var(--ease-emphasized) backwards;
+}
+.stage-orb:nth-child(2) { animation-delay: 60ms; }
+.stage-orb:nth-child(3) { animation-delay: 120ms; }
+.stage-orb:nth-child(4) { animation-delay: 180ms; }
+.stage-orb:nth-child(5) { animation-delay: 240ms; }
+.stage-orb:nth-child(n + 6) { animation-delay: 300ms; }
+@keyframes orbIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  to { opacity: 1; transform: none; }
 }
 .stage-orb:hover,
 .stage-orb:focus-visible {
   transform: scale(1.04);
 }
 @media (prefers-reduced-motion: reduce) {
-  .stage-orb { transition: none; }
+  .stage-orb { transition: none; animation: none; }
   .stage-orb:hover,
   .stage-orb:focus-visible { transform: none; }
 }
@@ -2222,9 +2443,13 @@ html[data-player-surface="theater"] .stage-party-reactions {
   color: #fff;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  box-shadow: var(--glass-lip); /* P1 */
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
 }
 .stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
+/* Press feedback (P1). Owned here rather than as a call-site utility so
+   nothing in PlayerControls has to change. */
+.stage-tr-btn:not(:disabled):active { transform: scale(0.94); transition-duration: 80ms; }
 .stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 /* The primary play/pause: white on dark, the one control that should be
    findable without looking. */
@@ -2238,6 +2463,31 @@ html[data-player-surface="theater"] .stage-party-reactions {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 .stage-tr-btn-primary:hover { background: #f1f1f1; }
+/* A soft purple ring around the white play button under the pointer (P1).
+   box-shadow, so it stacks with the global :focus-visible outline instead of
+   replacing it. */
+.stage-tr-btn-primary:not(:disabled):hover { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(168, 85, 247, 0.32); }
+
+/* The control band glides as it hides and returns (P1). PlayerControls' root
+   carries `data-player-chrome` and flips `aria-hidden` with its own opacity
+   fade (a call-site utility on the ROOT, untouched here); this moves only the
+   inner band, which has no transition or transform utilities of its own. CSS
+   hooks only — PlayerControls.tsx is not edited. The transform exists only while
+   hidden (and inert), so a visible band holds no transform. */
+[data-player-chrome] > .stage-controls-scrim {
+  transition: transform var(--dur-enter) var(--ease-emphasized);
+}
+[data-player-chrome][aria-hidden="true"] > .stage-controls-scrim {
+  transform: translateY(12px);
+  transition-duration: 300ms;
+  transition-timing-function: var(--ease-exit);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-scrub-track,
+  [data-player-chrome] > .stage-controls-scrim { transition: none; }
+  [data-player-chrome][aria-hidden="true"] > .stage-controls-scrim,
+  .stage-tr-btn:not(:disabled):active { transform: none; }
+}
 /* The "10" on the skip buttons. */
 /* The "10" subscript inside the skip-back/skip-forward glyphs. It is the ONLY
    thing distinguishing a 10-second skip from any other interval, so it has to
@@ -2415,13 +2665,13 @@ html[data-glow="subtle"] .stage-upnext {
   gap: 9px;
   height: 46px;
   padding: 0 24px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
   font-weight: 600;
   font-size: 14.5px;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
 }
 /* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
    scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
@@ -2443,7 +2693,9 @@ html[data-glow="subtle"] .stage-upnext {
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
 /* Press feedback. Buttons had hover and focus states and nothing for the
    click itself; a 2% settle is the smallest tactile cue that reads. */
-.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.98); }
+/* .97 over 90ms (Stage refresh, T1): the press lands fast and is felt; the
+   release eases back on the base transition above. */
+.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.97); transition-duration: 90ms; }
 .stage-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
@@ -2453,11 +2705,21 @@ html[data-glow="subtle"] .stage-upnext {
   color: #fff;
   box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
 }
+/* The glow brightens under the pointer (T1). `:not(:focus-visible)` because
+   this is (0,4,0) and would otherwise REPLACE the focus ring that
+   .stage-btn:focus-visible draws with box-shadow at (0,2,0) whenever a focused
+   button is also hovered. */
+.stage-btn-primary:not(:disabled):not(:focus-visible):hover {
+  box-shadow: 0 10px 34px rgba(168, 85, 247, 0.6), inset 0 0 0 1px rgba(216, 180, 254, 0.5);
+}
 .stage-btn-ghost {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
   border-color: rgba(255, 255, 255, 0.14);
   backdrop-filter: blur(8px);
+  /* G1. .stage-btn:focus-visible (0,2,0) replaces this with its ring while
+     focused, which is the intent: the ring is the indicator. */
+  box-shadow: var(--glass-lip);
 }
 .stage-btn-quiet {
   background: transparent;
@@ -2537,13 +2799,20 @@ html[data-glow="subtle"] .badge-glass {
    Dropping the blur is the whole of the blur budget's ask; the fills are
    already opaque enough to stand without it. */
 
-@keyframes slideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+/* Toast entrance (Stage refresh, D3): rises 14px into the place it rests,
+   instead of travelling the whole width of the screen in from the right. */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to { opacity: 1; transform: none; }
 }
 
+/* 6px, not 10px (Stage refresh, T1): on the emphasized curve the shorter rise
+   reads as arrival rather than travel. The END state is deliberately unchanged —
+   `translateY(0)` held by `forwards` is what keeps every .animate-fade-in root a
+   stacking context, and several notes in this file and in App.tsx reason from
+   that (see .convo-search::before). Do not "tidy" it to `transform: none`. */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -2559,7 +2828,8 @@ html[data-glow="subtle"] .badge-glass {
    and the chromaticShift / float / pulse-glow / shimmer keyframes, plus
    .holo-text, .media-card (the pre-cinema card), .card-actions, .action-btn,
    .status-dot, .text-gradient and .glow-text. None had a consumer in the
-   SPA. slideIn stays: .toast uses it. */
+   SPA. (slideIn stayed for .toast until the Stage refresh replaced it with
+   toastIn.) */
 
 /* 2026-05-26 — fill-mode: forwards. Without it, animation-fill-mode
    defaults to "none" and the element snaps BACK to its un-animated state
@@ -2575,12 +2845,12 @@ html[data-glow="subtle"] .badge-glass {
    `transform: translateY(0)` also outranked the hero's inline parallax
    transform, which is why the hero no longer uses this class. */
 .animate-fade-in {
-  animation: fadeIn 0.4s ease-out forwards;
+  animation: fadeIn var(--dur-enter) var(--ease-emphasized) forwards;
 }
 
 /* Exit animations (UI polish pass). Surfaces that enter with
    .animate-fade-in get `.is-closing` from useExitTransition for the last
-   --dur-fast before they unmount; the toast, which enters with slideIn,
+   --dur-fast before they unmount; the toast, which enters with toastIn,
    gets `.is-leaving`. Both are declared AFTER the enter rules so the exit
    wins the `animation` shorthand at equal specificity, and both animate to
    opacity 0 with `forwards` so the surface cannot flash back to full
@@ -2591,16 +2861,82 @@ html[data-glow="subtle"] .badge-glass {
   from { opacity: 1; }
   to { opacity: 0; }
 }
-@keyframes slideOut {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(100%); opacity: 0; }
+/* Leaves by drifting 18px right as it fades (D3) — a nod to the corner it came
+   from, without the full-width slide. --dur-base matches Toast.tsx's 220ms
+   removal timer. */
+@keyframes toastOut {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateX(18px); }
 }
 .animate-fade-in.is-closing {
   animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
   pointer-events: none;
 }
 .toast.is-leaving {
-  animation: slideOut var(--dur-base) var(--ease-exit) forwards;
+  animation: toastOut var(--dur-base) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
+/* The backdrop fades; the dialog rises (Stage refresh, D1). Modal wrappers
+   used to carry .animate-fade-in, so the whole overlay — scrim included —
+   slid up 6px with the card. Now the wrapper only fades (.stage-scrim-in)
+   and the card rises 12px from .965 (.stage-dialog-in) on the emphasized
+   curve. The scrim holds opacity 1 with `forwards` exactly as fadeIn did, so
+   an inline opacity on a wrapper is overridden no more and no less than
+   before. Every wrapper is a fixed, z-indexed inset-0 box, so dropping
+   fadeIn's held translateY(0) changes neither its stacking context nor the
+   containing block of anything fixed inside it. The card's keyframes are
+   transform-only (the wrapper's fade carries its opacity) and fill
+   `backwards`, NOT `both`: a held `to { transform: none }` computes to an
+   identity matrix, not `none` (measured), so `both` would leave every card a
+   stacking context and a containing block for fixed descendants for good.
+   `backwards` lets the card fall back to its own style once the rise ends.
+   The scrim's exit reuses fadeOut over --dur-fast. */
+@keyframes scrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dialogIn {
+  from { transform: translateY(12px) scale(0.965); }
+  to { transform: none; }
+}
+.stage-scrim-in {
+  animation: scrimIn var(--dur-enter) var(--ease-standard) forwards;
+}
+.stage-scrim-in.is-closing {
+  animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+.stage-dialog-in {
+  animation: dialogIn var(--dur-enter) var(--ease-emphasized) backwards;
+}
+
+/* Menus open from the button that owns them (Stage refresh, N2): the avatar
+   menu, the phone menu sheet and the server / notification panels scale up
+   from their trigger's corner instead of rising from below it. The primitive
+   sets NO transform-origin — each call site names its own with an origin-*
+   utility, because the right corner differs per surface (and per breakpoint
+   for the panels), and a primitive that set it would beat those utilities
+   (unlayered rules after @tailwind utilities, see CASCADE HAZARD).
+   `both`, deliberately: a held `to { transform: none }` computes to an
+   identity matrix, not `none` (measured), so like .animate-fade-in's held
+   translateY(0) it keeps each surface a stacking context and the containing
+   block for anything fixed inside it — exactly what these four were before.
+   The exit runs for --dur-fast, the length useExitTransition waits before it
+   unmounts. */
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes popOut {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(-2px) scale(0.98); }
+}
+.animate-pop-in {
+  animation: popIn var(--dur-enter) var(--ease-emphasized) both;
+}
+.animate-pop-in.is-closing {
+  animation: popOut var(--dur-fast) var(--ease-exit) forwards;
   pointer-events: none;
 }
 
@@ -2692,10 +3028,11 @@ html[data-glow="subtle"] .badge-glass {
                               card (renders an <img>, optional progress,
                               optional reason caption) so the rest of
                               the home-rail flow doesn't change.
-   .rail-container         — glassy frame wrapping a whole rail (title +
-                              cards), with a decorative header row that
-                              uses horizontal divider lines on either
-                              side of the rail's title.
+   .rail-container         — wraps a whole rail (title + cards). No frame
+                              since the Stage refresh (RS): the rail sits
+                              on the page, with a decorative header row
+                              whose divider line runs from the title to
+                              See All.
    ==================================================================== */
 
 /* .media-card (the pre-cinema card: ::before scrim, -8px lift, 1.08 image
@@ -2729,6 +3066,12 @@ html[data-glow="subtle"] .badge-glass {
 /* Rail scroll container */
 .rail-scroll {
   display: flex;
+  /* Out by its own 4px inline padding (Stage refresh, RS), so the first card's
+     edge lands on the page gutter with the rail title and the hero text above
+     it, while the padding still holds the focus ring the scroll box would
+     otherwise clip. The shelf used to absorb the 4px offset in its own
+     padding; on the page it read as a stagger. */
+  margin-inline: -4px;
   /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
   gap: 18px;
   overflow-x: auto;
@@ -2812,39 +3155,60 @@ html[data-glow="subtle"] .badge-glass {
   flex-shrink: 0;
 }
 
+/* Edge fades (Stage refresh, R2). With the shelf gone a rail's clipped edge
+   was a hard cut through a card on the page; now the side with more cards
+   behind it fades, and only that side — MediaRail mirrors its paddle state
+   onto the wrap as data-can-left / data-can-right, so the first card at rest
+   is never faded and a rail that fits has no mask at all.
+   22px: the 18px card gap plus the scroll box's 4px padding, i.e. the strip
+   past a card that ends flush with the gap. The first cut faded 40px, which
+   at 1440px reached 18px into the sixth card, fully visible and fully
+   clickable. No width fits every viewport (where the overflow card starts
+   depends on the width): measured, this one overlaps no fully visible card
+   at 1280, 1440 or 1920, and at any width it can reach at most 22px into one.
+   The mask is on the scroll box, so it stays put while the cards scroll under
+   it; the paddles are the wrap's other children and are never masked. It is
+   dropped while a card inside has keyboard focus, so the focus ring on a card
+   at the edge is never faded out: that rule comes second and ties on
+   specificity ((0,3,0) each), so source order is what keeps it winning.
+   The whole thing sits in @supports selector(:has(*)): the drop needs :has(),
+   and a browser without it would keep the fade over a focused edge card's
+   ring. Without :has() a rail gets no fade at all, the hard cut it had. */
+@supports selector(:has(*)) {
+  .rail-scroll-wrap[data-can-left] .rail-scroll { --rail-fade-l: 22px; }
+  .rail-scroll-wrap[data-can-right] .rail-scroll { --rail-fade-r: 22px; }
+  .rail-scroll-wrap:is([data-can-left], [data-can-right]) .rail-scroll {
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 var(--rail-fade-l, 0px), #000 calc(100% - var(--rail-fade-r, 0px)), transparent 100%);
+    mask-image: linear-gradient(90deg, transparent 0, #000 var(--rail-fade-l, 0px), #000 calc(100% - var(--rail-fade-r, 0px)), transparent 100%);
+  }
+  .rail-scroll-wrap .rail-scroll:has(:focus-visible) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
+
 /* ====================================================================
    .rail-container — wraps a whole home rail (header + cards).
-   Glassy bg + outer halo so the rail reads as a contained shelf rather
-   than free-floating cards on the page background. Padding leaves room
-   for the cards' own hover lift without clipping. The decorative
-   horizontal divider lines on either side of the rail title are pure
-   ::before / ::after on .rail-header — no extra DOM nodes needed.
+   No shelf (Stage refresh, RS). It used to be a glass frame — fill,
+   glow border, halo, 14px backdrop blur, 18-22px padding — around every
+   rail, so Home was a stack of 5-10 boxes, each full-width and ~400px
+   tall, and the heaviest blur on the page (Glow = Subtle had to flatten
+   it). The cards already carry their own halo; the rails now sit on the
+   page, aligned to the same gutter as the hero, and the spacing between
+   them does the grouping. Nothing to override under Glow = Subtle, so
+   that rule went with it. audit-glass-contrast measures the rail header
+   on the page background (.aurora-bg) instead of on the shelf.
    ==================================================================== */
 .rail-container {
-  background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
-  border: 1px solid var(--glow-border);
-  border-radius: var(--r-xl);
-  box-shadow: var(--glow-halo);
-  padding: 18px 20px 22px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  margin-bottom: 28px;
-}
-/* The one large blurred surface that multiplies — 5–10 of these on Home,
-   each full-width and ~400px tall — and it had no Glow = Subtle override,
-   so the lever the Settings page offers weak GPUs skipped the heaviest
-   layer. Separate rule on purpose: audit-glass-contrast parses the base
-   `.rail-container` background above and must keep finding it. */
-html[data-glow="subtle"] .rail-container {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: rgba(12, 10, 18, 0.96);
+  /* 40px, up from 28 (Stage refresh, R1): with no shelf edge to separate
+     them, the space between rails is what groups each title with its row. */
+  margin-bottom: 40px;
 }
 .rail-header {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 /* 2026-05-27 — Per-rail icon chip with tint variants. The base rule
    handles ONLY layout (size, shape, alignment); each [data-tint=...]
@@ -2856,7 +3220,7 @@ html[data-glow="subtle"] .rail-container {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2894,9 +3258,19 @@ html[data-glow="subtle"] .rail-container {
   border-color: rgba(99, 102, 241, 0.4);
   color: #a5b4fc;
 }
+/* The display face at --fs-rail (Stage refresh, R1). Rail titles were body
+   Inter at 16.8px/600 while --fs-rail (21px) sat unused, so the one heading
+   that repeats down the whole of Home was the least designed type on it.
+   20px, the size the refresh was drawn at, one step under the old 21px token
+   that nothing consumed. Titles wrap (see below), and verify-mobile-layout
+   renders a long one at phone widths in each of the four typefaces, failing
+   on any overrun. */
 .rail-header .rail-title {
-  font-size: 1.05rem;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: var(--fs-rail);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
   color: rgba(255, 255, 255, 0.95);
   /* Wraps rather than `nowrap`. With nowrap a title wider than its column
      (phones, long "Because you watched …" / LLM rail names) overflowed the
@@ -2914,11 +3288,14 @@ html[data-glow="subtle"] .rail-container {
   height: 1px;
   background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%);
 }
+/* See All takes the secondary-text token, not white at 0.4 (Stage refresh,
+   RS): that was about 3.7:1 and never measured, because nothing audited the
+   shelf it sat on. audit-glass-contrast now measures it on the page. */
 .rail-header .rail-see-all {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-secondary);
   font-size: 0.8rem;
   transition: color 0.2s;
   flex-shrink: 0;
@@ -2944,9 +3321,11 @@ html[data-glow="subtle"] .rail-container {
   background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
   border: 1px solid var(--glow-border);
   box-shadow: var(--glow-halo);
-  transition: transform var(--dur-slow) var(--ease-standard),
-              box-shadow var(--dur-slow) var(--ease-standard),
-              border-color var(--dur-slow) var(--ease-standard);
+  /* Lift on the entrance curve (Stage refresh, C1): 280ms emphasized instead of
+     350ms standard, so the card answers the pointer at once and settles. */
+  transition: transform var(--dur-enter) var(--ease-emphasized),
+              box-shadow var(--dur-enter) var(--ease-emphasized),
+              border-color var(--dur-base) var(--ease-standard);
   cursor: pointer;
 }
 /* The glow strengthens on any :hover (a stuck glow on touch is harmless);
@@ -2958,8 +3337,27 @@ html[data-glow="subtle"] .rail-container {
 }
 @media (hover: hover) and (pointer: fine) {
   .media-card-cinema:hover {
-    transform: translateY(-6px);
+    transform: translateY(-4px);
   }
+  /* Press settle. Hover-capable pointers only: on touch, :active fires at the
+     start of a swipe across the rail, so every card under the thumb would
+     shrink while the user scrolls. `:not(:has(button:active))` keeps the card
+     still while the lib badge, AI gem or Resume pill inside it is pressed —
+     those are their own controls. Without :has() support the rule is dropped
+     and the card simply has no press state. */
+  .media-card-cinema:active:not(:has(button:active)) {
+    transform: translateY(-2px) scale(0.985);
+    transition-duration: 110ms;
+  }
+}
+/* Keyboard parity (C1). A focused card used to get only the outline floor while
+   a hovered one lifted and lit up; now both read the same. The global
+   :focus-visible outline is deliberately left in place on top of this. Not
+   behind the hover query: keyboard focus is not a pointer state. */
+.media-card-cinema:focus-visible {
+  border-color: var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong);
+  transform: translateY(-4px);
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -2998,8 +3396,10 @@ html[data-glow="subtle"] .rail-container {
   width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  /* No radius — the card clips. See the .poster-wrap note above. */
-  transition: transform 0.5s var(--ease-standard), opacity var(--dur-base) var(--ease-standard);
+  /* No radius — the card clips. See the .poster-wrap note above.
+     Emphasized timings (Stage refresh, C2): the decode fade and the 1.04 → 1
+     settle below arrive together, then the slower transform finishes the move. */
+  transition: transform 0.7s var(--ease-emphasized), opacity 420ms var(--ease-emphasized);
 }
 /* Fade-in on decode: invisible until the <img> sets data-loaded (see
    MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
@@ -3009,6 +3409,119 @@ html[data-glow="subtle"] .rail-container {
    does not apply; the reduced-motion block still stills it. */
 .media-card-cinema img.poster-img:not([data-loaded]) {
   opacity: 0;
+  /* Starts a touch large and settles as it fades in (C2). (0,3,1), so it also
+     outranks the (0,3,0) hover scale while the art is still in flight. A cache
+     hit is marked loaded by the ref callback before first paint, so it never
+     plays this. */
+  transform: scale(1.04);
+}
+/* Loading sheen (C2). The decode fade used to start from the card's flat fill,
+   so a slow poster read as an empty box. While the <img> is pending its wrap
+   carries a slow lavender sweep, and the art fades in over it. `:has()` keys it
+   to the image's own state, so the posterless placeholder (a <div>, never
+   pending) and a loaded card have none. Without :has() support the rule is
+   dropped and the old fade remains.
+
+   COST, measured after a review. The first cut animated the wrap's
+   `background-position`, which repaints on the main thread every frame, and ran
+   it `infinite`: a lazy poster in an off-screen rail position is never
+   requested, so it never loads, so its sheen never stopped — 16-51 of them on an
+   idle Home, ~350ms of main-thread time every 3s. Now:
+     - the band is a `::before` moved by `transform`, which the compositor
+       animates without main-thread paints;
+     - it sweeps 3 times (~5s) and then rests off the left edge, invisible. CSS
+       cannot tell an off-screen or never-requested image from a slow one, so
+       the bound is what stops the off-screen ones; a poster still pending after
+       that shows the card's flat fill, as before C2;
+     - Glow = Subtle (html[data-glow="subtle"], the weak-GPU setting) drops it.
+   `::before`, not `::after`: positioned and first in tree order, it paints over
+   the pending (transparent) <img> but under the card's badges and text. The
+   wrap is already `position: relative`; the card's `overflow: hidden` clips the
+   band while it waits off the edge. */
+.media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.07) 50%, rgba(216, 180, 254, 0) 70%);
+  transform: translateX(-100%);
+  animation: posterSweep 1.6s var(--ease-standard) 3;
+}
+@keyframes posterSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
+  content: none;
+}
+/* Detail tabs move instead of jumping (Stage refresh, DT3). DetailView keys
+   the tab panel's content on the active tab, so a switch fades it up 6px.
+   `backwards`, not `both` or `forwards`: a held `to { transform: none }`
+   computes to an identity matrix, which would leave the panel a stacking
+   context and a containing block for anything fixed inside it. */
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.stage-panel-in {
+  animation: panelIn var(--dur-enter) var(--ease-emphasized) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-panel-in { animation: none; }
+}
+
+/* Detail art fades in on decode (Stage refresh, DT1): the 58vh DetailHero
+   backdrop and the DetailRail poster used to pop in over their fill whenever
+   the download finished. Same contract as the card posters above — `img.`
+   so nothing that never fires onLoad can match, opacity only (DetailHero's
+   scale-105 utility keeps the transform), a transition rather than an
+   animation, stilled under reduced motion. */
+img.stage-img-fade {
+  transition: opacity 420ms var(--ease-emphasized);
+}
+img.stage-img-fade:not([data-loaded]) {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  img.stage-img-fade { transition: none; }
+}
+/* Skeleton tile (Stage refresh, L1) — SkeletonBlock's surface and motion. A
+   slow lavender sweep, the look of the poster sheen above, over the neutral 3%
+   fill the tiles always had, replacing Tailwind's animate-pulse opacity throb.
+   No radius and no display here (CASCADE HAZARD): call sites pass `rounded-*`
+   and size utilities.
+   The sweep is a `::before` moved by `transform`, so the compositor runs it with
+   no main-thread paint; the first cut animated `background-position`, which
+   repainted every tile every frame. It stays infinite because a skeleton only
+   exists while its data is loading — the settled no-pick hero, which used to be
+   one, is a static card again (HeroSection). Glow = Subtle drops it.
+   Its containing block and clip come from a ZERO-specificity rule, so a call
+   site's own `absolute` (the hero skeleton's ring disc) or `overflow-*`
+   utility still wins: a plain `.stage-skel { position: relative }`, unlayered
+   and after the utilities, would have pulled that disc into the flow. */
+:where(.stage-skel) {
+  position: relative;
+  overflow: hidden;
+}
+.stage-skel {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.stage-skel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.06) 50%, rgba(216, 180, 254, 0) 70%);
+  transform: translateX(-100%);
+  animation: skelSweep 1.6s var(--ease-standard) infinite;
+}
+@keyframes skelSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+html[data-glow="subtle"] .stage-skel::before {
+  content: none;
 }
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
    own 9px corners clipped against the wrap's edge. Phase 3 removed the
@@ -3029,9 +3542,9 @@ html[data-glow="subtle"] .rail-container {
    /hover/resize frame. Profiling showed observable FPS drops on weak
    integrated graphics. The badge is 30px on top of a poster — the
    "frosted glass" effect was invisible at that size. A flat dark fill
-   (rgba 0.7) reads identically while costing nothing to render. The
-   rail-container's outer blur is preserved since it's once per rail
-   (5-10 layers total). */
+   (rgba 0.7) reads identically while costing nothing to render. (The
+   rail-container's own blur, once per rail, went with the shelf in the
+   Stage refresh.) */
 .media-card-cinema .lib-badge {
   position: absolute;
   top: 14px;
@@ -3097,7 +3610,7 @@ html[data-glow="subtle"] .rail-container {
   width: 30px;
   height: 30px;
   padding: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3195,9 +3708,21 @@ html[data-glow="subtle"] .rail-container {
      did not cover. Later in the file than the hover rules at equal
      specificity, so these win. */
   .media-card-cinema { transition: none; }
-  .media-card-cinema:hover { transform: none; }
-  .media-card-cinema:hover .poster-img { transform: none; }
+  .media-card-cinema:hover,
+  .media-card-cinema:focus-visible { transform: none; }
+  /* Its own rule: a browser without :has() drops a whole selector list that
+     contains one, which took the hover and focus nulls above down with it. */
+  .media-card-cinema:active:not(:has(button:active)) { transform: none; }
+  .media-card-cinema:hover .poster-img,
+  .media-card-cinema img.poster-img:not([data-loaded]) { transform: none; }
   .media-card-cinema .poster-img { transition: none; }
+  /* The loading sheen stops, resting off the edge; the pending wrap is just
+     the card's own fill. The SAME selector as the rule it nulls, not a shorter
+     `.poster-wrap` one: the `:has(…)` argument makes that rule (0,4,2), so a
+     shorter null here would lose and the sheen would keep running.
+     audit-reduced-motion matches class names, not specificity, and reported the
+     shorter form as covered. */
+  .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before { animation: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
   .media-card-cinema .reason-scrim { transform: none; transition: opacity var(--dur-base) var(--ease-standard); }
@@ -3706,21 +4231,29 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.02);
 }
 
-/* Toast */
+/* Toast (Stage refresh, D3). Aurora's glass instead of a neutral #111 card:
+   the card gradient, the glow border, the glass lip, and a soft glow tinted by
+   the toast's type (Toast.tsx stamps data-type). The message is white/80 on a
+   near-opaque dark fill, so the text contrast does not depend on what is behind. */
 .toast {
-  background: rgba(17, 17, 17, 0.95);
+  background: linear-gradient(180deg, rgba(28, 25, 42, 0.94), rgba(14, 12, 22, 0.96));
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 14px 20px;
-  border-radius: var(--r-md);
+  border: 1px solid var(--glow-border);
+  padding: 12px 14px 12px 12px;
+  border-radius: var(--r-lg);
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow:
+    var(--glass-lip),
+    0 18px 44px -12px rgba(0, 0, 0, 0.75),
+    0 0 30px -10px var(--toast-glow, rgba(168, 85, 247, 0.45));
   /* forwards: holds the "to" frame so a re-render can never snap the toast
-     back to its off-screen "from" (the same defence .animate-fade-in has). */
-  animation: slideIn 0.3s ease forwards;
+     back to its "from" (the same defence .animate-fade-in has). */
+  animation: toastIn 320ms var(--ease-emphasized) forwards;
 }
+.toast[data-type="success"] { --toast-glow: rgba(16, 185, 129, 0.4); }
+.toast[data-type="error"] { --toast-glow: rgba(239, 68, 68, 0.4); }
 
 /* ====================================================================
    LIBRARY HYBRID REDESIGN (2026-05-31) — Movies / TV Shows browse page.
@@ -3869,7 +4402,7 @@ textarea:focus-visible {
   justify-content: center;
   width: 34px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   color: rgba(255, 255, 255, 0.55);
   transition: color 0.15s, background 0.15s;
   cursor: pointer;
@@ -3889,7 +4422,7 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.015);
 }
@@ -4003,7 +4536,7 @@ textarea:focus-visible {
 .media-list-row .mlr-add {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4161,13 +4694,14 @@ textarea:focus-visible {
   .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin,
-  /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
+  .stage-skel::before,
+  /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn (now toastIn) include a
      translateY/translateX, i.e. real motion, and were missed by the sweep
      above. The gap is old; the blast radius is new, because the nav now
      applies .animate-fade-in to the avatar dropdown and the mobile menu
      sheet — the primary navigation of every phone session.
 
-     `.toast` is slideIn's only remaining owner (the unused
+     `.toast` is toastIn's only owner (slideIn's, before the Stage refresh; the unused
      .animate-slide-in utility was removed with the dead CSS), and the
      audit's coverage check had been satisfied by that utility's entry, not
      by the toast — so the toast slid under reduced motion. Nulled here.
@@ -4179,11 +4713,34 @@ textarea:focus-visible {
   .toast {
     animation: none !important;
   }
+  /* Watch-party reactions (Stage refresh, A1). ReactionOverlay sets each
+     emoji's 320px rise-and-scale as an INLINE style animation, which only an
+     !important rule can override — and none did, so reactions floated across
+     the picture for reduced-motion users too. Stilled, the emoji simply
+     appears above the controls and is removed on ReactionOverlay's own timer.
+     audit-reduced-motion Check 3 verifies this rule exists (INLINE_COVERED). */
+  .stage-party-reactions > div {
+    animation: none !important;
+  }
   /* Exits, too — the hook unmounts immediately under reduced motion, so
      these never run there; nulled for the audit's coverage check and for
      any caller that adds the class by hand. */
   .animate-fade-in.is-closing,
   .toast.is-leaving {
+    animation: none !important;
+  }
+  /* N2's menus: they appear in place, and (the hook unmounting at once under
+     reduced motion) never run the exit. Neither rule sets a base opacity 0,
+     so stilled they are simply visible. */
+  .animate-pop-in,
+  .animate-pop-in.is-closing {
+    animation: none !important;
+  }
+  /* D1's dialogs: the scrim and card appear in place. Neither sets a base
+     opacity 0 or transform, so stilled they rest at their author style. */
+  .stage-scrim-in,
+  .stage-scrim-in.is-closing,
+  .stage-dialog-in {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than

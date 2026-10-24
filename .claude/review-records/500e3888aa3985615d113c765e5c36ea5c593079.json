@@ -1,0 +1,10 @@
+{
+  "sha": "500e3888aa3985615d113c765e5c36ea5c593079",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only review (2 rounds) of origin/main...500e388, the 30-commit visual refresh. Round 1: fix-first on 2 mediums (endless no-pick hero shimmer; infinite main-thread poster sheens) and 5 lows (theater blank on fullscreen exit, ambiguous phone icons, shrunken ring text, :has() voiding reduced-motion nulls, edge fade over a visible card). Round 2: all fixed and measured (idle main-thread cost back to main's), audits verified stricter by mutation, no behaviour change, constrained player/party files untouched. Remaining: 2 nits (Check 4 misses split-rule/var infinite; veil fades in on fullscreen exit).",
+  "reviewer": "independent-review-agent",
+  "findings": "0",
+  "diff_digest": "785a7ae41bb9a208eb16aa0931cf405945e2781884517e07597055f4918b1e6a",
+  "branch": "claude/sweet-brown-36veir",
+  "recorded_at": "2026-10-24T08:24:22Z"
+}

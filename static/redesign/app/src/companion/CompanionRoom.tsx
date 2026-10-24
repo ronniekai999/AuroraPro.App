@@ -335,7 +335,7 @@ function MicButton({
       title={!inVoice ? 'Tap to join voice (starts muted)' : liveMic ? 'Live — tap to mute' : 'Muted — tap to talk'}
     >
       {liveMic && !reduced && (
-        <span className="pointer-events-none absolute -inset-[5px] rounded-[18px] border-[1.5px] border-emerald-400/50 [animation:companion-mic-ring_1.6s_ease-out_infinite]" />
+        <span className="pointer-events-none absolute -inset-[5px] rounded-[18px] border-[1.5px] border-emerald-400/50 motion-safe:[animation:companion-mic-ring_1.6s_ease-out_infinite]" />
       )}
       {busy ? (
         <svg viewBox="0 0 24 24" fill="none" className={`h-5 w-5 ${reduced ? '' : 'animate-spin'}`} aria-hidden="true">

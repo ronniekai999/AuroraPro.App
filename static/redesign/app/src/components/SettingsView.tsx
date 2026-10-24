@@ -380,7 +380,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                         Promise.resolve(onAvatarChange(nebulaValue(n.id))).catch(() => setLocalAvatar(prev))
                       }}
                       className={`relative aspect-square rounded-full transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
-                        sel ? 'scale-110 ring-2 ring-white/50' : 'hover:scale-105'
+                        sel ? 'motion-safe:scale-110 ring-2 ring-white/50' : 'motion-safe:hover:scale-105'
                       }`}
                     >
                       <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />

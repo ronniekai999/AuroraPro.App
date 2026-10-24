@@ -1003,7 +1003,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       //
       // data-screenshot-exclude carries the html-to-image opt-out
       // (`filter` predicate matches launcher + modal + toasts).
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-fade-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 stage-scrim-in"
       style={
         recording
           ? { visibility: 'hidden' }
@@ -1033,7 +1033,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         // Submit button below the fold unreachable. max-h + overflow-y-auto
         // makes the modal scroll; overscroll-contain stops the chain at its
         // scroll boundaries; overflow-x-hidden preserves the rounded corners.
-        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl"
+        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-[shadow:var(--shadow-modal)] stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         // Holistic deep-debug M2 — drop aria-modal during recording

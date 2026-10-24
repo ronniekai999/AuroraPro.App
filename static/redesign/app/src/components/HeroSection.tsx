@@ -5,6 +5,7 @@
 // — only HeroSection uses it.
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
+import { HeroSkeleton } from '@/components/Skeletons'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
 import { backdropSrcSet, recordRecommendationExposure, type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
@@ -31,7 +32,7 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2', slateToken, slatePosition = 0, profileId }: {
+export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2', slateToken, slatePosition = 0, profileId }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -88,6 +89,12 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   onNextPick?: () => void
   // Pause auto-rotation while user hovers.
   onPauseChange?: (paused: boolean) => void
+  /** Only meaningful while `hero` is absent: true while the caller still
+   *  expects a pick (Stage refresh, L2), which draws the hero-shaped
+   *  skeleton. False — the default — is the settled no-pick state (an empty
+   *  library, a ceiling no title passes, a failed fetch), which gets the
+   *  static card: a skeleton there would shimmer for the life of the page. */
+  loading?: boolean
   // Personalization status — drives the cold-start hint that replaces
   // the empty reason line when we're below the watch-history threshold.
   // null = unknown / not yet loaded.
@@ -229,27 +236,51 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       // height from the inset-card era; once `home` went full-bleed those
       // rounded corners landed on the viewport edges on every cold load,
       // and the frame then SNAPPED when the real hero arrived.
-      <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
-        compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
-      }`}>
-        <div className="text-center px-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
-            <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
-              <defs>
-                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#A855F7" />
-                  <stop offset="0.5" stopColor="#7C3AED" />
-                  <stop offset="1" stopColor="#22D3EE" />
-                </linearGradient>
-              </defs>
-              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
-              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-            </svg>
+      // Stage refresh (L2) — while a pick is still on its way (`loading`),
+      // its content too: a hero-shaped skeleton instead of a centred mark, so
+      // the pick fills in rather than replaces. The heading stays for
+      // assistive tech (sr-only; the bars stand in for it on screen).
+      // This branch is ALSO the permanent no-pick state (an empty library, a
+      // ceiling no title passes, a failed fetch), and there the skeleton's
+      // sweep would run for the life of the page — a review measured ~16x the
+      // idle main-thread time. So `loading` false keeps the static card it
+      // always was, heading visible. Both raise the caption from white/40
+      // (3.6:1) to the secondary-text token.
+      loading ? (
+        <HeroSkeleton
+          compact={compact}
+          aside={(
+            <div className="flex-none">
+              <h2 className="sr-only">Welcome to Aurora</h2>
+              <p className="inline-flex items-center gap-2 text-[color:var(--text-secondary)] text-xs">
+                <Icon name="sparkle" size={13} className="text-purple-300" /> Loading your featured content…
+              </p>
+            </div>
+          )}
+        />
+      ) : (
+        <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
+          compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
+        }`}>
+          <div className="text-center px-8">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
+              <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
+                <defs>
+                  <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stopColor="#A855F7" />
+                    <stop offset="0.5" stopColor="#7C3AED" />
+                    <stop offset="1" stopColor="#22D3EE" />
+                  </linearGradient>
+                </defs>
+                <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
+                <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
+              </svg>
+            </div>
+            <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
+            <p className="text-[color:var(--text-secondary)] text-sm mt-2">Loading your featured content…</p>
           </div>
-          <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
-          <p className="text-white/40 text-sm mt-2">Loading your featured content…</p>
-        </div>
-      </section>
+        </section>
+      )
     )
   }
   const hero = heroProp
@@ -425,6 +456,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         // the hero width and stay exact below the cap. Above it the ring moves
         // INWARD, where the scrim's horizontal ramp is stronger — so the audit's
         // figure becomes conservative there rather than wrong.
+        // Phone (Stage refresh, H3): at full size the 84px ring took a quarter
+        // of a phone's width beside the title. Only the RING shrinks, to 76px
+        // (the box and the SVG below; the viewBox scales the arc): the smallest
+        // whose track still clears a 20px "100%" in all four typefaces (Sora's
+        // is 57px wide; the track's inside is 60px). The first cut
+        // scaled this whole wrapper by .75, which took the MATCH caption to an
+        // effective 7.5px and the numeral to 15px; both keep their size here,
+        // so the numeral is the 20px the on-art audit credits.
         className="absolute top-6 right-[var(--page-pad-x)] md:top-11 md:right-[calc(var(--page-pad-x)+4px)] z-20 flex flex-col items-center gap-1.5"
         role="img"
         aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
@@ -443,8 +482,8 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             1.8:1 on a dark frame. The eyebrow now carries `relative` for the
             same reason the ring wrapper does. */}
         <div className="stage-hero-match-veil" aria-hidden="true" />
-        <div className="relative w-[84px] h-[84px]">
-          <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
+        <div className="relative w-[84px] h-[84px] max-sm:w-[76px] max-sm:h-[76px]">
+          <svg className="w-[84px] h-[84px] max-sm:w-[76px] max-sm:h-[76px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
             <defs>
               <linearGradient id="heroMatchGradient" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0" stopColor="#a855f7" />
@@ -471,7 +510,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             <circle
               cx="42" cy="42" r="36" fill="none" stroke="url(#heroMatchGradient)"
               strokeWidth="6" strokeLinecap="round"
-              strokeDasharray={`${(matchScore / 100) * matchCircumference} ${matchCircumference}`}
+              // A style, not the attribute, so .stage-hero-ring-arc can ease
+              // the arc to the next pick's score (Stage refresh, H2).
+              className="stage-hero-ring-arc"
+              style={{ strokeDasharray: `${(matchScore / 100) * matchCircumference} ${matchCircumference}` }}
             />
           </svg>
           <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white [text-shadow:0_1px_4px_rgba(0,0,0,0.55)]" aria-hidden="true">
@@ -537,8 +579,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               PAGE's metadata ("Movies … Drama • 2016"). The compact band
               names the featured title on its own line below instead, and
               dropping this reclaims 33px of a 250px frame. */}
+          {/* flex-wrap (H3): on a phone the genre/year line drops under the
+              pill instead of squeezing it into three lines. */}
           {!compact && (
-          <div className="flex items-center gap-3 mb-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-3">
             {/* 2026-06-05 (Home redesign B) — when a personalization
                 reason exists, lead with an "✨ Aurora picked this for
                 you" pill (replaces the plain "Recommended" copy). No
@@ -548,7 +592,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               // Phase 4 — the mockup's provenance pill, not the generic
               // glass badge: this is the one element that says the pick
               // came from the recommender, so it gets its own treatment.
-              <span className="stage-pick-pill inline-flex">
+              <span className="stage-pick-pill inline-flex whitespace-nowrap">
                 <Icon name="sparkle" size={13} /> Aurora picked this for you
               </span>
             ) : isCatalogFallback ? (
@@ -560,7 +604,16 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 <Icon name="star" size={12} /> Featured
               </span>
             )}
-            <span className="text-white/60 text-sm">
+            {/* Keyed on the title (Stage refresh, H2) so each text line below
+                remounts with its .stage-hero-swap entrance when the pick
+                rotates, instead of snapping while the art dissolves. Text
+                only: the buttons are never keyed, so focus and the CTA
+                handlers are untouched. Each line's key carries its own
+                prefix: the reason, title, "Featured" and description lines
+                are SIBLINGS, and a bare `hero.id` on all of them is a
+                duplicate key, which React answers by leaving stale copies
+                in the DOM — the title rendered three times over. */}
+            <span key={`genre-${hero.id}`} className="stage-hero-swap text-white/60 text-sm">
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
           </div>
@@ -571,7 +624,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p className="text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow">{reason}</p>
+            <p key={`reason-${hero.id}`} className="stage-hero-swap text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow max-sm:line-clamp-2">{reason}</p>
           ) : personalization?.coldStart ? (
             <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
@@ -587,6 +640,8 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             const Heading = titleAs
             return (
               <Heading
+                // The page name in compact never changes; the title does.
+                key={compact ? 'page-title' : `title-${hero.id}`}
                 // line-clamp is load-bearing at this size, not tidiness.
                 // .type-hero is 84px at line-height .94 ≈ 79px per line, and
                 // this column is bottom-anchored inside the root's
@@ -607,7 +662,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                     // home hero held 48px from 640px to 1023px while the browse
                     // band went to 52px at 768px, so the browse page's title
                     // was BIGGER than the hero's on every tablet-width screen.
-                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
+                    : 'stage-hero-swap stage-hero-swap-d1 text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
                 }
               >
                 {compact ? (pageTitle ?? hero.title) : hero.title}
@@ -623,21 +678,28 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               clips the eyebrow off the top (the column is bottom-anchored
               inside overflow-hidden). */}
           {compact && (
-            <p className="text-white/70 text-sm mb-2.5 line-clamp-1">
+            <p key={`featured-${hero.id}`} className="stage-hero-swap text-white/70 text-sm mb-2.5 line-clamp-1">
               <span className="text-white/50">Featured: </span>
               <span className="text-white font-semibold">{hero.title}</span>
               {countLabel ? <span className="text-white/50"> — {countLabel}</span> : null}
             </p>
           )}
           {!compact && hero.description && (
-            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
+            <p key={`desc-${hero.id}`} className="stage-hero-swap stage-hero-swap-d2 text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
           )}
           {/* This row DOES keep `flex-wrap`, and unlike the row above it cannot
               misfire at tablet widths: it lives inside the `max-w-2xl` column, and
               three pills at `px-6 py-3` plus two 12px gaps need ~430px, so it only
               wraps once the column itself is under ~430px — which happens on phones
               and nowhere else. */}
-          <div className="flex flex-wrap items-center gap-3">
+          {/* Phone (H3): one row — the primary CTA stretches (max-sm:flex-1) and
+              My List / More Info go icon-only (their labels max-sm:sr-only; each
+              button's aria-label already names it), instead of three stacked
+              pills taking a third of the hero. The 8px gap is what keeps Play and
+              two 46px squares on one line in a 320px viewport's 222px column:
+              flex-wrap breaks on Play's max-content width, and at 12px gaps the
+              row measured 226px in three of the four typefaces. */}
+          <div className="flex flex-wrap items-center gap-3 max-sm:gap-2">
             {/* 2026-05-27 — Resume-aware primary CTA. When the hero
                 has a CW match, click resumes at the saved position via
                 resume.onPlay (which threads through to App's
@@ -684,7 +746,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // needs the extra bottom padding and overflow clip that the
                 // family's fixed height would collide with. Purple, not
                 // indigo — it is the same primary action as Play.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple"
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 motion-safe:hover:scale-105 glow-purple max-sm:flex-1 max-sm:justify-center max-sm:px-4"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >
@@ -713,7 +775,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 aria-label={`Play ${hero.title}`}
                 // The shared button family (index.css .stage-btn): one
                 // primary look across hero, detail rail and Load More.
-                className={`stage-btn stage-btn-pill stage-btn-primary${compact ? ' stage-btn-sm' : ''}`}
+                className={`stage-btn stage-btn-pill stage-btn-primary max-sm:flex-1${compact ? ' stage-btn-sm' : ''}`}
               >
                 <Icon name="play" size={compact ? 15 : 18} /> Play
               </button>
@@ -729,18 +791,18 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                   onClick={() => onToggleLib(hero)}
                   aria-label={inLib ? `Remove ${hero.title} from My List` : `Add ${hero.title} to My List`}
                   title={inLib ? 'In My List — click to remove' : 'Add to My List'}
-                  className={`stage-btn stage-btn-pill stage-btn-ghost${inLib ? ' is-on' : ''}${compact ? ' stage-btn-sm' : ''}`}
+                  className={`stage-btn stage-btn-pill stage-btn-ghost${inLib ? ' is-on' : ''}${compact ? ' stage-btn-sm max-sm:w-9' : ' max-sm:w-[46px]'} max-sm:px-0`}
                 >
-                  <Icon name={inLib ? 'check' : 'plus'} size={18} /> {inLib ? 'In My List' : 'My List'}
+                  <Icon name={inLib ? 'check' : 'plus'} size={18} /> <span className="max-sm:sr-only">{inLib ? 'In My List' : 'My List'}</span>
                 </button>
               )
             })()}
             <button
               onClick={() => onInfo(hero)}
               aria-label={`More info about ${hero.title}`}
-              className={`stage-btn stage-btn-pill stage-btn-ghost${compact ? ' stage-btn-sm' : ''}`}
+              className={`stage-btn stage-btn-pill stage-btn-ghost${compact ? ' stage-btn-sm max-sm:w-9' : ' max-sm:w-[46px]'} max-sm:px-0`}
             >
-              <Icon name="info" size={compact ? 15 : 18} /> More Info
+              <Icon name="info" size={compact ? 15 : 18} /> <span className="max-sm:sr-only">More Info</span>
             </button>
           </div>
         </div>
@@ -767,9 +829,20 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             // would make a deliberately quiet tertiary control the loudest thing
             // in the hero's bottom-right. Recorded so the next audit doesn't
             // "fix" it.
-            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/75 hover:text-white text-sm transition-colors whitespace-nowrap"
+            // Below sm it is icon-only (Stage refresh, H3; the label goes
+            // sr-only, and aria-label and title still name it), so it is a 46px
+            // square in the CTA row's line. There its glyph, at the same white/75
+            // as the label, is what identifies it, not the border — and it is
+            // skip-forward, not the refresh arrow it shows beside its label:
+            // the greeting's "Refresh picks" is also icon-only on a phone, and
+            // two bare refresh arrows on one screen, with no hover to tell them
+            // apart on touch, said the same thing about different actions.
+            // shrink-0: without its label its min-content is one 15px glyph,
+            // and the column beside it (min-w-0, max-content basis) squeezed
+            // it to a sliver. With the label it never shrank below the text.
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/75 hover:text-white text-sm transition-colors whitespace-nowrap shrink-0 max-sm:h-[46px] max-sm:w-[46px] max-sm:justify-center max-sm:p-0"
           >
-            Not tonight <Icon name="refresh" size={15} />
+            <span className="max-sm:sr-only">Not tonight</span> <Icon name="refresh" size={15} className="max-sm:hidden" /><Icon name="skipForward" size={15} className="sm:hidden" />
           </button>
         )}
       </div>

@@ -57,11 +57,11 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-fade-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 stage-scrim-in"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[520px] bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden"
+        className="w-full max-w-[520px] bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-[shadow:var(--shadow-modal)] overflow-hidden stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

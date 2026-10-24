@@ -11,13 +11,18 @@
 //
 // Neutral tiles on purpose — NOT ui/skeleton.tsx (removed with the unused
 // shadcn set), whose `bg-accent` was the saturated brand purple.
-// `animate-pulse` is already nulled under prefers-reduced-motion by the
-// global block in index.css, so a reduced-motion user sees still tiles.
+// The tile and its motion are `.stage-skel` in index.css (Stage refresh, L1):
+// a slow lavender sheen instead of Tailwind's opacity pulse, the same sweep a
+// card shows while its poster is in flight, so loading reads as one thing.
+// Nulled under prefers-reduced-motion, so a reduced-motion user sees still tiles.
+// The radius stays a utility here (the primitive sets none, so call sites can
+// pass their own `rounded-*` and tailwind-merge resolves it).
 //
 // aria-hidden throughout: the surrounding view owns the accessible
 // loading announcement (PageHeader's role="status" line, HomeView's live
 // region), and a grid of decorative rectangles has nothing to add to it.
 
+import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
 /** One neutral pulsing block. Callers set the size and radius. */
@@ -25,7 +30,7 @@ export function SkeletonBlock({ className }: { className?: string }) {
   return (
     <div
       aria-hidden="true"
-      className={cn('bg-white/[0.03] border border-white/[0.04] animate-pulse rounded-xl', className)}
+      className={cn('stage-skel rounded-xl', className)}
     />
   )
 }
@@ -46,10 +51,72 @@ export function GridSkeleton({ count = 12, className }: { count?: number; classN
   )
 }
 
-/** A home rail's shape: the glass shelf (.rail-container), a header line
- *  where the icon + title sit, and a row of card-sized tiles at the rail's
- *  real card widths (206px poster / 336px landscape) and 18px gap. The row
- *  is clipped rather than scrolled — nothing to scroll to. */
+/** The hero's shape (Stage refresh, L2): the real hero's frame — its height
+ *  utilities, full bleed, the same gradient floor the placeholder had — with
+ *  its content bottom-anchored at the page gutter over the real footer's
+ *  `pb-9`, and (full size only) the match ring's disc top-right at the ring's
+ *  own insets. So the pick arriving fills the shapes in instead of replacing
+ *  a centred mark.
+ *
+ *  `title` replaces the title bars with real text (the browse pages know
+ *  theirs before the list arrives) and `aside` takes the slot "Not tonight"
+ *  will occupy. Both are the CALLER's: HeroSection renders this for every
+ *  missing pick, which is also the permanent state of an empty library or a
+ *  failed hero fetch, so what the frame says is not this component's to
+ *  decide. The footer uses its own class string, not the real hero's:
+ *  verify-page-alignment needs that one unique in HeroSection.tsx. */
+export function HeroSkeleton({ compact = false, title, aside }: { compact?: boolean; title?: ReactNode; aside?: ReactNode }) {
+  return (
+    <section className={cn(
+      'relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]',
+      compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]',
+    )}>
+      {!compact && (
+        <SkeletonBlock className="absolute top-6 right-[var(--page-pad-x)] md:top-11 md:right-[calc(var(--page-pad-x)+4px)] h-[84px] w-[84px] rounded-full" />
+      )}
+      <div className="stage-gutter absolute inset-x-0 bottom-0 z-20 flex flex-col gap-4 pb-9 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0 flex-1 max-w-2xl">
+          {compact ? (
+            <>
+              <SkeletonBlock className="h-3.5 w-24 rounded-md mb-3" />
+              {title ?? <SkeletonBlock className="h-10 w-[min(320px,70%)] rounded-lg mb-2.5" />}
+              <SkeletonBlock className="h-4 w-[min(300px,80%)] rounded-md mb-4" />
+              <div className="flex flex-wrap gap-3">
+                <SkeletonBlock className="h-11 w-[104px] rounded-full" />
+                <SkeletonBlock className="h-11 w-[124px] rounded-full" />
+              </div>
+            </>
+          ) : (
+            <>
+              <SkeletonBlock className="h-7 w-[min(214px,60%)] rounded-full mb-3" />
+              <SkeletonBlock className="h-4 w-[min(470px,85%)] rounded-md mb-3" />
+              {title ?? (
+                <div className="space-y-2.5 mb-4">
+                  <SkeletonBlock className="h-11 md:h-16 w-[min(560px,92%)] rounded-xl" />
+                  <SkeletonBlock className="h-11 md:h-16 w-[min(380px,64%)] rounded-xl" />
+                </div>
+              )}
+              <SkeletonBlock className="h-4 w-[min(520px,88%)] rounded-md mb-5" />
+              <div className="flex flex-wrap gap-3">
+                <SkeletonBlock className="h-12 w-[118px] rounded-full" />
+                <SkeletonBlock className="h-12 w-[132px] rounded-full" />
+                <SkeletonBlock className="h-12 w-[150px] rounded-full" />
+              </div>
+            </>
+          )}
+        </div>
+        {aside}
+      </div>
+    </section>
+  )
+}
+
+/** A home rail's shape: the rail's wrapper (.rail-container, which has no
+ *  shelf since the Stage refresh), a header line where the icon + title sit,
+ *  and a row of card-sized tiles at the rail's real card widths (206px poster
+ *  / 336px landscape) and 18px gap. The row mirrors .rail-scroll's 4px inline
+ *  padding and the -4px margin that puts its first card on the gutter. It is
+ *  clipped rather than scrolled — nothing to scroll to. */
 export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poster' | 'landscape'; count?: number }) {
   const tile = aspect === 'landscape' ? 'w-[336px] aspect-video' : 'w-[206px] aspect-[2/3]'
   return (
@@ -58,7 +125,7 @@ export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poste
         <SkeletonBlock className="h-7 w-7 rounded-lg" />
         <SkeletonBlock className="h-5 w-44 rounded-md" />
       </div>
-      <div className="flex gap-[18px] overflow-hidden px-1 py-2">
+      <div className="flex gap-[18px] overflow-hidden -mx-1 px-1 py-2">
         {Array.from({ length: count }).map((_, i) => (
           <SkeletonBlock key={i} className={cn('shrink-0 rounded-[var(--r-lg)]', tile)} />
         ))}

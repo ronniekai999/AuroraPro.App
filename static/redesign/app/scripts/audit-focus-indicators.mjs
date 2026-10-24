@@ -202,6 +202,25 @@ if (dormant) {
 console.log(`  (${checked} suppression site(s) examined)`)
 if (!problems) console.log('  no unguarded suppressions.')
 
+/** Containers whose descendant rule resets the global input :focus treatment.
+ *
+ *  Matches the WHOLE `:not()` chain before `:focus`. This used to be
+ *  `input:not\(\[type="range"\]\):focus` — i.e. `:focus` directly after the
+ *  range exclusion — which stopped matching every real resetter the day the
+ *  global rule gained its checkbox/radio exclusions and the resets were widened
+ *  to match it (`…:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus`).
+ *  From then on Check 3 printed "no containers reset the global treatment —
+ *  nothing to check" while Check 4, three lines further down the same output,
+ *  listed two of them: the check existed, ran, and verified nothing. Deleting
+ *  `.convo-search:focus-within` — the vibe bar's only focus indicator — left
+ *  the gate green. Same family as Check 4's own selector scan below, so the two
+ *  checks can no longer disagree about which containers exist. */
+function resettersIn(text) {
+  return [...new Set(
+    [...text.matchAll(/^\s*(\.[\w-]+) input:not\(\[type="range"\]\)(?::not\([^)]*\))*:focus(?=[,\s{])/gm)].map(x => x[1])
+  )]
+}
+
 console.log('\n## Check 2 — the global input :focus treatment still clears 3:1')
 const css = fs.readFileSync(CSS, 'utf8')
 // Located by its select/textarea branches rather than by the full selector text.
@@ -240,12 +259,10 @@ if (!m) {
     // Containers that RESET this treatment take on the duty themselves. Check 2's
     // premise used to be "this is the ONLY indicator for every text field", which
     // is false wherever a `.x input:...:focus` descendant rule nulls it — those
-    // are (0,3,1) and win. List them so the claim stays honest.
-    const resetters = [...new Set(
-      [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
-    )]
+    // are (0,5,1) and win. List them so the claim stays honest.
+    const resetters = resettersIn(css)
     if (resetters.length) {
-      console.log(`  note: ${resetters.length} container(s) reset this treatment at (0,3,1) and`)
+      console.log(`  note: ${resetters.length} container(s) reset this treatment (see Check 4) and`)
       console.log(`        must supply their own indicator — ${resetters.join(', ')}`)
       console.log('        (checked below)')
     }
@@ -267,9 +284,7 @@ if (!m) {
 // enforce it reads, to anyone skimming the output, as evidence the duty is met.
 console.log('\n## Check 3 — every container that resets it supplies its own indicator')
 {
-  const resetters = [...new Set(
-    [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
-  )]
+  const resetters = resettersIn(css)
   if (!resetters.length) {
     console.log('  no containers reset the global treatment — nothing to check.')
   }

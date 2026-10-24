@@ -89,7 +89,7 @@ export function ProfilePinDialog({
         // Above ProfilesGate (z-85): picking a locked profile there opens this
         // over the gate, and the gate stays up until the unlock succeeds.
         overlayClassName="z-[90] bg-black/80 backdrop-blur-md"
-        className="z-[91] w-[calc(100%-2rem)] max-w-[380px] rounded-[24px] border border-purple-400/25 bg-[#15131f] p-6 text-white shadow-[0_28px_90px_rgba(0,0,0,0.65)]"
+        className="z-[91] w-[calc(100%-2rem)] max-w-[380px] rounded-[var(--r-2xl)] border border-purple-400/25 bg-[#15131f] p-6 text-white shadow-[shadow:var(--shadow-modal)]"
       >
         <form
           className="flex flex-col items-center text-center"

@@ -182,7 +182,7 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
             onFocus={() => setHovered(n)}
             onBlur={() => setHovered(0)}
             className={cn(
-              'p-1.5 rounded-lg transition-ui hover:scale-110',
+              'p-1.5 rounded-lg transition-ui motion-safe:hover:scale-110',
               n <= shown ? 'text-yellow-400' : 'text-white/25 hover:text-white/50',
             )}
           >
@@ -273,13 +273,16 @@ export function DetailRail({
           key={poster}
           src={poster}
           alt={title}
-          className="w-full aspect-[2/3] object-cover"
+          // stage-img-fade (DT1) — see DetailHero.
+          className="stage-img-fade w-full aspect-[2/3] object-cover"
           // lazy: below lg the box is display:none, and a lazy image that never
           // lays out is never fetched — without it every phone detail view
           // downloaded a w500 poster it could not show. From lg up the poster
           // sits in the first viewport, so lazy loading starts it at once.
           loading="lazy"
           decoding="async"
+          ref={(el) => { if (el && el.complete && el.naturalWidth > 0) el.setAttribute('data-loaded', '') }}
+          onLoad={(e) => e.currentTarget.setAttribute('data-loaded', '')}
           onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
         />
         {hasProgress && (

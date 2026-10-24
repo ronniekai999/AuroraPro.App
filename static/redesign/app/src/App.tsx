@@ -133,7 +133,7 @@ import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefre
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
-import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
+import { DetailSkeleton, GridSkeleton, HeroSkeleton, RailSkeleton, SkeletonBlock } from '@/components/Skeletons'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -554,7 +554,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
+            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 motion-safe:hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed motion-safe:disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
             {submitting ? (
               <>
@@ -714,7 +714,7 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
         if (disabled) e.preventDefault()
         else rememberDevicePairing(window.location.pathname, window.location.search)
       }}
-      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
+      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 motion-safe:hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >
       {config.icon}
       {label}
@@ -795,6 +795,11 @@ interface HomeViewProps {
   // Cold-start hint info — passed through from the /api/me/hero response.
   // null = unknown (initial load); set when the response lands.
   heroPersonalization?: HeroPersonalization | null
+  // True while Home still expects a pick (Stage refresh, L2): the core
+  // rails, whose arrival sets the catalog fallback when the pool has none,
+  // have not landed and have not failed. Draws the hero skeleton; false with
+  // no hero is the settled no-pick state, drawn static.
+  heroLoading?: boolean
   // My Library + button on cards. Set of saved IDs for fast O(1) lookup
   // per render; callback toggles membership when the user clicks +.
   libraryIds?: Set<number>
@@ -855,7 +860,7 @@ interface HomeViewProps {
   onRefreshRecs?: () => void
   recsRefreshing?: boolean
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -943,10 +948,13 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               disabled={recsRefreshing}
               title="Refresh picks — rebuild your AI-curated Discover rails"
               aria-label="Refresh picks — rebuild your AI-curated Discover rails"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              // Icon-only below sm (Stage refresh, H3): the label goes
+              // sr-only and the aria-label/title still name it; the spinning
+              // glyph still shows a refresh in flight.
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
-              {recsRefreshing ? 'Refreshing…' : 'Refresh picks'}
+              <span className="max-sm:sr-only">{recsRefreshing ? 'Refreshing…' : 'Refresh picks'}</span>
             </button>
           )}
           {onSurprise && (
@@ -954,15 +962,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
-              <Icon name="sparkle" size={15} /> Surprise me
+              <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>
           )}
         </div>
       </div>
       <HeroSection
         hero={hero}
+        loading={heroLoading}
         onPlay={onPlay}
         onInfo={onSelect}
         reason={heroReason}
@@ -1144,6 +1153,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           which had the bar OVERLAPPING the placeholder — and the placeholder's
           content is centred, so there is nothing at its bottom edge to crowd — but
           the formula above is not unconditional and was written as if it were.
+          (Stage refresh, L2: while a pick is still loading that branch is a
+          hero-shaped skeleton whose footer carries the same `pb-9`, so the
+          formula holds there too — 44px above its caption and button bars. The
+          settled no-pick state is still the centred card described above.)
 
           The px figures are also rem-derived: `pb-9`, `mt-2` and `mb-8` are all
           rem, `--page-gutter` is a px literal. At a 24px root the gap is 66 and the
@@ -1162,6 +1175,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           is 44px above against 51px below (the rail panel's 1px border plus its 18px
           padding-top), which reverses the claim. This same comment scolds an earlier
           draft for exactly that substitution twelve lines up, and then made it.
+          (Stage refresh, RS: the rail panel is gone — no border, no padding — so
+          the first rail's header now sits at that 32px box edge itself: 44px above
+          against 32px below, content to content, and the plain phrasing holds. The
+          two paragraphs around this one describe the shelf as it was.)
 
           The defensible version is nearest VISIBLE boundary, and it needs the
           hero's bottom edge to be invisible — see the next paragraph, where it is
@@ -1725,7 +1742,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1885,7 +1902,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -2030,18 +2047,32 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 // Quiet placeholder while a browse list is in flight.
 function BrowseLoadingState({ title }: { title: string }) {
   return (
-    // stage-gutter: movies/shows are in FULL_BLEED_VIEWS, so this no longer
-    // inherits .stage-page's padding. It renders on every sort and genre
-    // change (the parent resets the list to null), so without the gutter the
-    // skeleton flashed edge-to-edge and then snapped in by 48px.
-    <div className="animate-fade-in stage-gutter pt-8">
-      <div className="mb-8">
-        {/* PageHeader's title scale, so Movies / TV Shows agree with My
-            Library, Search and Requests instead of a one-off text-4xl. */}
-        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
-        <p className="text-white/60 text-sm mt-2" role="status">Loading your library…</p>
+    // Stage refresh (L2) — the browse page's own layout rather than a page
+    // header: the compact hero band with the real <h1> in it (the compact
+    // hero's title classes, the page name being known before the list), a
+    // toolbar row at .stage-toolbar's 14px padding, then the grid at the
+    // gutter. With a backdrop-bearing title, which is the usual case,
+    // BrowseView lands on exactly this frame.
+    // The gutter on every row: movies/shows are in FULL_BLEED_VIEWS, so this
+    // does not inherit .stage-page's padding. It renders on every sort and
+    // genre change (the parent resets the list to null), so without the
+    // gutter the skeleton flashed edge-to-edge and then snapped in by 48px.
+    <div className="animate-fade-in relative">
+      <HeroSkeleton
+        compact
+        title={<h1 className="text-white font-extrabold font-display mb-1.5 text-3xl md:type-browse line-clamp-1">{title}</h1>}
+        aside={<p className="flex-none text-[color:var(--text-secondary)] text-xs" role="status">Loading your library…</p>}
+      />
+      <div className="stage-gutter mb-6 flex items-center gap-3 py-3.5 border-b border-white/[0.05]" aria-hidden="true">
+        <SkeletonBlock className="h-9 w-16 rounded-full" />
+        <SkeletonBlock className="h-9 w-20 rounded-full" />
+        <SkeletonBlock className="h-9 w-24 rounded-full max-sm:hidden" />
+        <SkeletonBlock className="h-9 w-20 rounded-full max-md:hidden" />
+        <SkeletonBlock className="ml-auto h-9 w-36 rounded-xl" />
       </div>
-      <GridSkeleton />
+      <div className="stage-gutter">
+        <GridSkeleton />
+      </div>
     </div>
   )
 }
@@ -6073,6 +6104,9 @@ export default function App() {
               onSelect={handleSelect}
               onPlay={handlePlay}
               hero={homeHero ?? undefined}
+              // The core rails set the catalog-fallback hero when they land,
+              // so until they land (or fail) a pick is still on its way.
+              heroLoading={homeRails === undefined && !homeError}
               // Memoized above (homeRailsProp) — Continue Watching prepended
               // and deduped, conversational results pinned first.
               rails={homeRailsProp}
@@ -6815,8 +6849,8 @@ export default function App() {
       )}
 
       {addToListMedia && activeProfileId && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAddToListMedia(null)}>
-          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
+          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
             {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}

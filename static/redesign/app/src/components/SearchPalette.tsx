@@ -215,7 +215,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   return (
     <div
-      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 stage-scrim-in${exit.closing ? ' is-closing' : ''}`}
       onClick={(e) => {
         // Click outside the panel closes. The backdrop below is a
         // covering child, so target !== currentTarget for backdrop
@@ -242,7 +242,10 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         // title, a meta line and a ⏎ hint; at 672 the meta line was the first
         // thing to truncate on ordinary titles.
         ref={panelRef}
-        className="relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden"
+        // `stage-palette`: index.css resets the global input treatment inside
+        // this panel and draws the focus indicator on the panel itself — see
+        // the note on the input below.
+        className="stage-palette relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden stage-dialog-in"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
@@ -332,7 +335,16 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             // off the panel's right edge, because an <input>'s default
             // min-width is `auto`, so it will not contract below its size
             // attribute's intrinsic width.
-            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/60 focus:ring-0"
+            //
+            // The box itself — no fill, no border, no padding, and the 22px size —
+            // lives on `.stage-palette input` in index.css (Stage refresh, D2). The
+            // `bg-transparent border-0 text-[22px] focus:ring-0` that used to be
+            // here never applied: they are (0,1,0) and the unlayered global
+            // `input:not([type="range"])` is (0,1,1), so the palette drew the
+            // app-wide input box INSIDE itself, with a lavender focus ring, at
+            // 14.4px. Same defect .convo-search and .stage-navsearch already fix
+            // with a container reset; this is the third.
+            className="flex-1 min-w-0 outline-none text-white font-display font-semibold tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/60"
             spellCheck={false}
             autoComplete="off"
           />
@@ -345,7 +357,9 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               Smart
             </span>
           )}
-          <kbd className="text-[10px] uppercase tracking-wider text-white/40 border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
+          {/* text-[color:var(--text-secondary)] (6.45:1 on this panel), not white/40 (3.77:1). Same for
+              every secondary line below; see audit-glass-contrast. */}
+          <kbd className="text-[10px] uppercase tracking-wider text-[color:var(--text-secondary)] border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
         </div>
 
         {/* Results */}
@@ -385,20 +399,27 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           ref={listRef}
           className="max-h-[55vh] overflow-y-auto"
         >
+          {/* Empty and no-result states (Stage refresh, E1): an icon tile and a
+              display-face lead line over the same words, so they read as a
+              designed state rather than two lines of grey. Presentational only —
+              nothing here is interactive, and the copy is unchanged. */}
           {!query.trim() && (
             <div className="px-5 py-10 text-center">
-              <p className="text-white/50 text-sm">Start typing to search your library.</p>
-              <p className="text-white/30 text-xs mt-2">
+              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-purple-400/20 bg-purple-500/10 text-purple-300" aria-hidden="true">
+                <Icon name="search" size={20} />
+              </span>
+              <p className="font-display text-white/90 text-base font-semibold tracking-tight">Start typing to search your library.</p>
+              <p className="text-[color:var(--text-secondary)] text-xs mt-2">
                 Try <span className="text-purple-300">a title</span>, <span className="text-purple-300">an actor</span>, or <span className="text-purple-300">a vibe</span> like "rainy night noir".
               </p>
-              <div className="mt-6 flex items-center justify-center gap-2 text-white/30 text-[11px]">
+              <div className="mt-6 flex items-center justify-center gap-2 text-[color:var(--text-secondary)] text-[11px]">
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">↑</kbd>
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">↓</kbd>
                 <span>navigate</span>
-                <span className="text-white/20 mx-1">·</span>
+                <span className="text-white/20 mx-1" aria-hidden="true">·</span>
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
                 <span>select</span>
-                <span className="text-white/20 mx-1">·</span>
+                <span className="text-white/20 mx-1" aria-hidden="true">·</span>
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
                 <span>close</span>
               </div>
@@ -413,9 +434,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           )}
 
           {query.trim() && !loading && results.length === 0 && (
-            <div className="px-5 py-8 text-center">
-              <p className="text-white/50 text-sm">No matches for "{query}"</p>
-              <p className="text-white/30 text-xs mt-1">Check spelling or try a broader phrase.</p>
+            <div className="px-5 py-10 text-center">
+              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-white/10 bg-white/[0.04] text-[color:var(--text-secondary)]" aria-hidden="true">
+                <Icon name="compass" size={20} />
+              </span>
+              <p className="font-display text-white/90 text-base font-semibold tracking-tight break-words">No matches for "{query}"</p>
+              <p className="text-[color:var(--text-secondary)] text-xs mt-1.5">Check spelling or try a broader phrase.</p>
             </div>
           )}
 
@@ -496,10 +520,10 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               )}
               <div className="flex-1 min-w-0">
                 <div className="text-white text-sm font-medium truncate">{m.title}</div>
-                <div className="text-white/40 text-xs flex items-center gap-2">
+                <div className="text-[color:var(--text-secondary)] text-xs flex items-center gap-2">
                   {m.year > 0 && <span>{m.year}</span>}
                   {m.genre && <span>· {m.genre}</span>}
-                  <span className="text-white/30 uppercase">· {m.type === 'show' ? 'Series' : 'Movie'}</span>
+                  <span className="uppercase">· {m.type === 'show' ? 'Series' : 'Movie'}</span>
                 </div>
               </div>
               {i === highlighted && (

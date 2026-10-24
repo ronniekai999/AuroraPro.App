@@ -307,5 +307,224 @@ for (const hit of negZJsx) {
   }
 }
 
+console.log('\n## Check 3 — motion utilities in TSX have a reduced-motion path')
+// Checks 1-2 read index.css. Motion written as Tailwind utilities in the markup —
+// `hover:scale-105`, `data-[state=open]:animate-in` — never passes through this
+// file's @media blocks, so it was invisible here: a review of the Stage refresh
+// found nine call sites that scaled or lifted on hover with no reduced-motion
+// path, and the Radix dialogs' zoom-and-fade ran for everyone.
+//
+// The rule, per class token in src/**/*.{ts,tsx} (tests excluded, comments
+// blanked):
+//   - A TRANSFORM utility (scale-, translate-, rotate-, skew-) behind a STATE
+//     variant (hover:, focus:, active:, group-hover:, data-[…]:, aria-…:, …)
+//     must also carry `motion-safe:` (or be a `motion-reduce:` override). A
+//     state-driven transform is motion whenever a transition is on the element,
+//     and when one is not it is still a jump the user did not ask for.
+//   - An ANIMATION utility (`animate-*`, other than animate-none) must carry
+//     `motion-safe:`/`motion-reduce:`, or — only when it has NO variant, so its
+//     class name is literally `.animate-x` — be nulled by an
+//     `animation: none` rule for `.animate-x` inside a reduced-motion block in
+//     index.css (that is how .animate-fade-in, .animate-pulse and .animate-spin
+//     are handled). A variant-prefixed one cannot be reached by such a rule: the
+//     element's class is `data-[state=open]:animate-in`, not `animate-in`.
+//   - An arbitrary-property animation class (`[animation:…]`) is an animation
+//     utility like any other and needs `motion-safe:`.
+//   - CSS injected through a component's own `<style>{`…`}</style>` may declare
+//     `animation:` only inside a `prefers-reduced-motion: no-preference` block.
+//   - An inline `animation:` in a style object beats every non-!important rule,
+//     so it must be listed in INLINE_COVERED below with the index.css selector
+//     that nulls it, and this check verifies that selector really sets
+//     `animation: none !important` inside a reduced-motion block.
+//
+//   - A bare transform utility that shares a string literal with a bare
+//     transition covering transform (`transition`, `transition-all`,
+//     `transition-transform`, `transition-ui`) is a component-toggled transform
+//     that animates: `isExpanded ? 'rotate-180 transition-transform' : …`. The
+//     transition needs `motion-safe:` (or a `motion-reduce:transition-none`
+//     beside it); the transform itself may stay, since it is the state.
+//
+// KNOWN LIMITS, stated rather than implied: a toggled bare transform whose
+// transition sits in a DIFFERENT literal (`sel ? 'scale-110' : ''` beside a
+// static `transition-ui`) is motion too, and this cannot see it — the token
+// alone does not say whether it is toggled. Class names assembled from
+// fragments at runtime are invisible. Neither is a reason to skip what IS
+// decidable.
+// Style-object animations and the index.css rule that nulls each — a claim this
+// check verifies, not an exemption it takes on trust.
+const INLINE_COVERED = new Map([
+  ['src/components/ReactionOverlay.tsx',
+    '.stage-party-reactions > div'],
+])
+{
+  // `data-[side=…]`, `data-[align=…]` and `data-[orientation=…]` are PLACEMENT
+  // facts Radix sets once per open (which side a popover opened on), not states
+  // that toggle under the pointer, so a translate behind them is an offset, not
+  // motion. Every other data-/aria- variant counts as state.
+  const PLACEMENT = /^data-\[(side|align|orientation)\b/
+  const STATE = /^(hover|focus|focus-visible|focus-within|active|visited|checked|disabled|enabled|open|target|group-[\w-]+|peer-[\w-]+|data-\[.*\]|aria-[\w-]+|aria-\[.*\]|group-data-\[.*\]|group-aria-[\w-]+)$/
+  const TRANSFORM = /^-?(scale|translate|rotate|skew)(-[xy])?-/
+  // Classes an index.css reduced-motion rule sets `animation: none` on.
+  const nulled = new Set()
+  for (const body of rmBodies) {
+    for (const m of body.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/animation:\s*none/.test(m[2])) continue
+      for (const c of m[1].matchAll(/\.([\w-]+)/g)) nulled.add(c[1])
+    }
+  }
+  /** Split a class token on its top-level ':' — not the ones inside `[…]`. */
+  const segments = tok => {
+    const out = []; let depth = 0, cur = ''
+    for (const ch of tok) {
+      if (ch === '[') depth++
+      else if (ch === ']') depth--
+      if (ch === ':' && depth === 0) { out.push(cur); cur = '' } else cur += ch
+    }
+    out.push(cur)
+    return out
+  }
+  const walk = (dir, out = []) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) walk(full, out)
+      else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) out.push(full)
+    }
+    return out
+  }
+  let checked = 0, bad = 0
+  for (const file of walk('src')) {
+    const raw = fs.readFileSync(file, 'utf8')
+    const text = raw
+      .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:\\])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length))
+    const lineOf = i => text.slice(0, i).split('\n').length
+    for (const m of text.matchAll(/[^\s"'`{}(),;<>]+/g)) {
+      const tok = m[0]
+      const seg = segments(tok)
+      const util = seg[seg.length - 1]
+      const variants = seg.slice(0, -1)
+      const isTransform = TRANSFORM.test(util) && variants.length > 0
+      const isAnim = (/^animate-[\w[\]-]+$/.test(util) && util !== 'animate-none') || /^\[animation:/.test(util)
+      if (!isTransform && !isAnim) continue
+      // Only class-like tokens: a bare word in prose (`scale-` in an identifier)
+      // has no variant and is not an animate- utility, so it never gets here.
+      checked++
+      const guarded = variants.includes('motion-safe') || variants.includes('motion-reduce')
+      let why = null
+      if (isTransform && !guarded && variants.some(v => STATE.test(v) && !PLACEMENT.test(v))) {
+        why = 'state-driven transform without motion-safe:'
+      } else if (isAnim && !guarded) {
+        if (variants.length || util.startsWith('[')) why = 'variant-prefixed or arbitrary animation without motion-safe: (an index.css rule cannot reach it)'
+        else if (!nulled.has(util)) why = `.${util} is not nulled by an animation: none rule in a reduced-motion block`
+      }
+      if (why) {
+        bad++
+        console.log(`  ***     ${file}:${lineOf(m.index)} ${tok}`)
+        console.log(`          ${why}`)
+      }
+    }
+    // A toggled bare transform and its transition in one literal (see the rule
+    // list above). Missed by the first version of this check, which only read
+    // variant-prefixed transforms: the request rows' chevron kept rotating for
+    // reduced-motion users after the commit that said everything was guarded.
+    for (const lit of text.matchAll(/(['"`])((?:(?!\1)[^\\\n])*)\1/g)) {
+      const toks = lit[2].split(/\s+/)
+      if (!toks.some(t => TRANSFORM.test(t))) continue
+      const trans = toks.filter(t => /^(transition|transition-all|transition-transform|transition-ui)$/.test(t))
+      if (!trans.length || toks.includes('motion-reduce:transition-none')) continue
+      checked++
+      bad++
+      console.log(`  ***     ${file}:${lineOf(lit.index)} ${toks.filter(t => TRANSFORM.test(t)).join(' ')} … ${trans.join(' ')}`)
+      console.log('          a toggled transform animates through an unguarded transition: use motion-safe:' + trans[0])
+    }
+    // CSS a component injects itself: every `animation:` must sit inside a
+    // no-preference block of that same stylesheet.
+    for (const sm of text.matchAll(/<style>\{`([\s\S]*?)`\}<\/style>/g)) {
+      const sheet = sm[1]
+      const safe = []
+      for (const q of sheet.matchAll(/@media[^{]*prefers-reduced-motion:\s*no-preference[^{]*\{/g)) {
+        let depth = 1, i = q.index + q[0].length
+        for (; i < sheet.length && depth > 0; i++) { if (sheet[i] === '{') depth++; else if (sheet[i] === '}') depth-- }
+        safe.push([q.index, i])
+      }
+      for (const a of sheet.matchAll(/(?<![\w-])animation\s*:\s*(?!none)/g)) {
+        if (safe.some(([lo, hi]) => a.index > lo && a.index < hi)) continue
+        bad++
+        console.log(`  ***     ${file}:${lineOf(sm.index + 9 + a.index)} injected <style> declares an animation outside a prefers-reduced-motion: no-preference block`)
+      }
+    }
+    // Style objects: `animation: '…'` / `animation: \`…\`` (a quoted value — CSS
+    // text and arbitrary classes have none).
+    for (const m of text.matchAll(/(?<![\w[-])animation(Name)?\s*:\s*[`'"]/g)) {
+      const cover = INLINE_COVERED.get(file)
+      const esc = cover && cover.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      if (cover && new RegExp(String.raw`${esc}\s*(,[^{]*)?\{[^}]*animation:\s*none\s*!important`).test(rmText)) {
+        console.log(`  ok      ${file}:${lineOf(m.index)} inline animation — nulled by ${cover} { animation: none !important }`)
+        continue
+      }
+      bad++
+      console.log(`  ***     ${file}:${lineOf(m.index)} inline animation in a style object with no verified reduced-motion null${cover ? ` (${cover} was named, but no reduced-motion block sets animation: none !important on it)` : ''}`)
+    }
+  }
+  console.log(`  (${checked} motion utilit${checked === 1 ? 'y' : 'ies'} examined)`)
+  if (!bad) console.log('  every one has a reduced-motion path.')
+  problems += bad
+}
+
+// ── Check 4 — an animation that never ends is compositor-only ─────────────
+// Not a reduced-motion rule, but a motion one this file is placed to see. The
+// Stage refresh's first loading sheen animated `background-position` with
+// `infinite`; a lazy poster that is never requested never loads, so on an idle
+// Home 16-51 of them repainted on the main thread every frame (~350ms per 3s,
+// measured). A keyframe set that runs forever may move only `transform` and
+// `opacity`, which the compositor animates without main-thread paints. A
+// bounded one (a count, not `infinite`) is not held to this. Scope: index.css.
+{
+  console.log('\n## Check 4 — infinite animations animate only transform and opacity')
+  // Pre-existing, from before the rule; listed by name so anything NEW fails,
+  // and checked for staleness so the list cannot outlive its reason.
+  const KNOWN = new Map([
+    ['onbShimmer', "the onboarding headline's background-clip:text gradient (#482); a fill that IS the text cannot move by transform. Reported for follow-up."],
+  ])
+  const COMPOSITOR = new Set(['transform', 'opacity'])
+  const keyframeProps = new Map()
+  for (const m of css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
+    let depth = 1, i = m.index + m[0].length
+    for (; i < css.length && depth > 0; i++) { if (css[i] === '{') depth++; else if (css[i] === '}') depth-- }
+    const body = css.slice(m.index + m[0].length, i - 1)
+    const props = new Set([...body.matchAll(/(?:^|[{;\s])([a-z-]+)\s*:/g)].map(x => x[1]))
+    keyframeProps.set(m[1], new Set([...(keyframeProps.get(m[1]) ?? []), ...props]))
+  }
+  const forever = new Map() // keyframe name → first line that runs it forever
+  for (const m of css.matchAll(/\{([^{}]*)\}/g)) {
+    const body = m[1]
+    const line = css.slice(0, m.index).split('\n').length
+    for (const d of body.matchAll(/(?:^|;)\s*animation\s*:\s*([^;]*)/g)) {
+      for (const layer of d[1].split(/,(?![^(]*\))/)) {
+        if (!/\binfinite\b/.test(layer)) continue
+        for (const tok of layer.trim().split(/\s+/)) if (keyframeProps.has(tok) && !forever.has(tok)) forever.set(tok, line)
+      }
+    }
+    if (/animation-iteration-count\s*:\s*infinite/.test(body)) {
+      const n = body.match(/animation-name\s*:\s*([\w-]+)/)
+      if (n && keyframeProps.has(n[1]) && !forever.has(n[1])) forever.set(n[1], line)
+    }
+  }
+  let bad = 0
+  for (const [name, line] of forever) {
+    const off = [...keyframeProps.get(name)].filter(p => !COMPOSITOR.has(p))
+    if (!off.length) { console.log(`  ok      ${name} (index.css:${line})`); continue }
+    if (KNOWN.has(name)) { console.log(`  known   ${name} animates ${off.join(', ')} forever — ${KNOWN.get(name)}`); continue }
+    bad++
+    console.log(`  ***     ${name} (index.css:${line}) runs forever and animates ${off.join(', ')}: main-thread paint every frame. Animate transform/opacity, or bound the count.`)
+  }
+  for (const name of KNOWN.keys()) {
+    const off = forever.has(name) && [...(keyframeProps.get(name) ?? [])].some(p => !COMPOSITOR.has(p))
+    if (!off) { bad++; console.log(`  ***     ${name} is listed as a known exception but no longer is one; remove it from KNOWN`) }
+  }
+  if (!bad) console.log('  every infinite animation is compositor-only (or a listed pre-existing exception).')
+  problems += bad
+}
+
 console.log(`\n${problems} reduced-motion problem(s).`)
 process.exit(problems ? 1 : 0)
