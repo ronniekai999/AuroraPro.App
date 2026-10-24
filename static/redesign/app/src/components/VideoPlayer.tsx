@@ -61,6 +61,7 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
+import { mediaStartAlignmentSec, reportedMediaStartSec, sessionMediaOriginSec, MEDIA_START_ALIGN_MIN_SEC } from '@/lib/mediaStart'
 import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
 // Delivery/viewing identity rules are also exercised by the mounted-player
 // regressions, alongside their unit coverage in playbackQoESession.
@@ -604,7 +605,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // when this target booted. Null whenever the current target is not
   // direct-play, which is what makes it safe to consult unconditionally.
   const directCastRef = useRef<DirectCastTarget | null>(null)
+  // The source second at media time 0 — what every media-clock ↔ absolute
+  // conversion adds or subtracts. It boots as the session's start_sec, and a
+  // remux refines it to where its media really begins (the key frame before
+  // start_sec) once the variant playlist reports that; see lib/mediaStart.ts.
+  // Fractional after that refinement, so nothing that needs the server's
+  // whole-second anchor may read it: those read sessionStartSecRef.
   const startSecRef = useRef<number>(0)
+  // The session's start_sec exactly as the server returned it (0 for direct
+  // play): the `-ss` anchor the subtitle cue shift is requested against and the
+  // legacy receiver-conversion fallback. Never the media clock.
+  const sessionStartSecRef = useRef<number>(0)
   // Per-play listener cleanup for <video> event handlers registered by ANY
   // delivery path — direct play's error/resume/subtitle listeners AND the
   // native-HLS diagnostics set (renamed from mediaCleanupRef,
@@ -646,7 +657,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // keyframe BEFORE startSec; transcode accurate-seeks so t=0 ≈
   // startSec. The server needs to know which to align cues correctly.
   // Stays false for direct-play (startSecRef is 0 there, so no shift
-  // is requested at all).
+  // is requested at all). Also the gate on refining startSecRef from the
+  // playlist's measured media start: a transcode's clock never moves.
   const sessionRemuxRef = useRef<boolean>(false)
   const [status, setStatus] = useState<string>('Loading…')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -1368,7 +1380,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const castStartSec = typeof resp.start_sec === 'number' && Number.isFinite(resp.start_sec) && resp.start_sec >= 0
       ? resp.start_sec : null
     castPendingStartSecRef.current = castStartSec
-    const loadStartSec = castStartSec ?? Math.max(0, startSecRef.current ?? 0)
+    // The legacy fallback assumes the receiver shares the local session's
+    // `-ss` anchor, so it takes that anchor as the server stated it, not the
+    // local media clock's refined origin (a remux is always cloned anyway).
+    const loadStartSec = castStartSec ?? Math.max(0, sessionStartSecRef.current ?? 0)
     // Media identity still authorizes explicit FINISHED with unknown clock.
     if (progressLoad) {
       progressLoad.context = {
@@ -2644,7 +2659,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     console.info('[Aurora.sub] applySubtitle called', {
       requestedIndex: index,
       target: { fileId: target.fileId, fileType: target.fileType },
-      startSec: startSecRef.current,
+      startSec: sessionStartSecRef.current,
+      mediaOriginSec: startSecRef.current,
       currentTime: vid.currentTime,
       vidDuration: vid.duration,
       existingTextTracks: vid.textTracks.length,
@@ -2685,7 +2701,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // HLS-relative (0 = resume point), so every cue fires `startSec`
     // seconds late — or never, when past EOF. The server endpoint
     // ignores start=0, so this is safe to always send.
-    const startSec = startSecRef.current
+    // The session's whole-second anchor, never the refined media origin: the
+    // endpoint parses an integer and derives the remux shift itself.
+    const startSec = sessionStartSecRef.current
     // Issue #141 — tell the server whether this session is REMUXING.
     // It picks the cue-shift offset accordingly: keyframe-≤-startSec
     // for remux (input seek can't land mid-GOP), raw startSec for
@@ -3074,6 +3092,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     directCastRef.current = null
     deliveryModeRef.current = 'resolving'
     startSecRef.current = 0
+    sessionStartSecRef.current = 0
     // Suppress host party-broadcasts until this session has (re)booted —
     // see playerReadyRef. Set true right before each vid.play() below.
     playerReadyRef.current = false
@@ -3475,7 +3494,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // rather than the browser guessing at values it cannot see.
         try { qoeRef.current?.noteSession(session.session_id) } catch { /* best-effort */ }
         deliveryModeRef.current = 'hls'
-        startSecRef.current = session.start_sec ?? 0
+        sessionStartSecRef.current = session.start_sec ?? 0
+        // Provisional for a remux until its playlist reports the measured
+        // media start (adoptMediaStart below); final for everything else.
+        startSecRef.current = sessionStartSecRef.current
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
         // already folds in forceTranscode). The subtitle endpoint uses
         // this to pick the cue-shift offset: keyframe for remux, raw
@@ -3818,6 +3840,44 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           producedEdgeSecRef.current = last.start + last.duration + (startSecRef.current ?? 0)
           return producedEdgeSecRef.current
         }
+        // Remux clock (lib/mediaStart.ts): media time 0 of a remux is the key
+        // frame before start_sec, and the playlist says which second that is.
+        // Adopt it as the clock origin before anything converts this load's
+        // positions — both level listeners call this first, and the first
+        // level load precedes any buffered media, so no frame is ever shown
+        // on the provisional origin. Then, once, start the element at
+        // start_sec itself (the position this session was asked for) when the
+        // produced window leaves runway for it, so the host's picture and the
+        // room's clock agree; see mediaStartAlignmentSec. A playhead that
+        // already moved (a party seek
+        // applied during boot) is left where it is: its clock is now true and
+        // the drift loop owns any correction.
+        let mediaStartAligned = false
+        const adoptMediaStart = (details?: { live?: boolean; fragments?: Array<{ start: number; duration: number; tagList?: string[][]; initSegment?: { tagList?: string[][] } | null }> }) => {
+          if (cancelled) return
+          const origin = sessionMediaOriginSec(
+            sessionStartSecRef.current, reportedMediaStartSec(details?.fragments), sessionRemuxRef.current)
+          if (origin === startSecRef.current) return
+          startSecRef.current = origin
+          if (!mediaStartAligned && vid.currentTime < MEDIA_START_ALIGN_MIN_SEC) {
+            mediaStartAligned = true
+            const frags = details?.fragments ?? []
+            const last = frags[frags.length - 1]
+            // A live playlist's next segment arrives with hls.js's next reload,
+            // about one segment duration away: that is the runway it needs.
+            const into = mediaStartAlignmentSec(sessionStartSecRef.current, origin,
+              last ? last.start + last.duration : 0, details?.live && last ? last.duration : 0)
+            if (into > 0) {
+              // Not a scrub: its DOM `seeked` must not reach the room as one.
+              locallyBroadcastSeekUntilRef.current = Math.max(locallyBroadcastSeekUntilRef.current, Date.now() + 10_000)
+              try { vid.currentTime = into } catch { /* defensive */ }
+            }
+          }
+          if (playerReadyRef.current) {
+            logicalAbsoluteSecRef.current = Math.max(0, vid.currentTime + origin)
+            setCurrentSec(logicalAbsoluteSecRef.current)
+          }
+        }
         // Up-switch stall containment — the rule and the hls.js behaviour it
         // answers are documented on levelLagsPlayhead. hls.js 1.6's
         // stream controller does not wait quietly for a lagging rung: its
@@ -3853,8 +3913,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           setStatus('Rendition fell behind — restarting from here…')
           seekToRealSecRef.current(playheadAbs, { forceRebuild: true })
         }
-        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => { noteProducedEdge(data.details) })
+        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => { adoptMediaStart(data.details); noteProducedEdge(data.details) })
         hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => {
+          adoptMediaStart(data.details)
           const edgeAbs = noteProducedEdge(data.details)
           // hls.js emits LEVEL_UPDATED inside its own onLevelLoaded BEFORE
           // synchronizeToLiveEdge, so this listener — and only this one —
