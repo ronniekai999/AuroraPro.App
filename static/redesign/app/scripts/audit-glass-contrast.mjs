@@ -328,9 +328,9 @@ const ONB_INK = (() => {
 // the full-viewport scrim, then the panel's own fill; the scrim and panel are
 // read from the component. NOT modelled: the two decorative blobs between the
 // scrim and the panel, and whatever view is on screen beneath the scrim (hero
-// art, a backdrop, video). The scrim and panel pass about 1.5% of what lies
-// under them, so at full strength those cost the palette's text a few
-// hundredths of a ratio point (6.45 → ~6.39 for the secondary text).
+// art, a backdrop, video). The panel passes about 10% of the blobs, and the
+// scrim and panel together about 1.5% of the view beneath; at full strength
+// that costs the near-threshold text about 0.06 (6.45 → ~6.39).
 const PAL = 'src/components/SearchPalette.tsx'
 const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
