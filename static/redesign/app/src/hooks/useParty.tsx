@@ -713,6 +713,9 @@ export function useParty(currentUserId?: number): UseParty {
           seekRef.current = null
           latestAcceptedRevRef.current = 0
           helloAbsMsRef.current = 0
+          // PARTY-9 — an intent buffered for the party that just ended
+          // must not replay into the next party's sync socket.
+          pendingSyncIntentRef.current = {}
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -803,6 +806,8 @@ export function useParty(currentUserId?: number): UseParty {
           seekRef.current = null
           latestAcceptedRevRef.current = 0
           helloAbsMsRef.current = 0
+          // PARTY-9 — see the room socket's party-ended teardown.
+          pendingSyncIntentRef.current = {}
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -1185,6 +1190,9 @@ export function useParty(currentUserId?: number): UseParty {
     seekRef.current = null
     latestAcceptedRevRef.current = 0
     helloAbsMsRef.current = 0
+    // PARTY-9 — intents buffered for the party being left belong to it, not
+    // to the one being joined (leave() and end() already drop them).
+    pendingSyncIntentRef.current = {}
     // Preflight: distinguish a live party from a persistent-room
     // code. We don't deeply use the response yet (Phase 4.5 will
     // render an "offline room" panel) but we use the success/404 to
@@ -1303,6 +1311,10 @@ export function useParty(currentUserId?: number): UseParty {
       try { ws.send(JSON.stringify(msg)) } catch { /* defensive */ }
       return
     }
+    // PARTY-9 — with no party being joined or in, there is no party for
+    // the intent to belong to, and buffering it would hand it to whichever
+    // party is joined next.
+    if (!activeCodeRef.current) return
     if (msg.type === 'request-seek') {
       pendingSyncIntentRef.current.seek = msg
     } else {
