@@ -2971,9 +2971,11 @@ html[data-glow="subtle"] .rail-container {
   background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
   border: 1px solid var(--glow-border);
   box-shadow: var(--glow-halo);
-  transition: transform var(--dur-slow) var(--ease-standard),
-              box-shadow var(--dur-slow) var(--ease-standard),
-              border-color var(--dur-slow) var(--ease-standard);
+  /* Lift on the entrance curve (Stage refresh, C1): 280ms emphasized instead of
+     350ms standard, so the card answers the pointer at once and settles. */
+  transition: transform var(--dur-enter) var(--ease-emphasized),
+              box-shadow var(--dur-enter) var(--ease-emphasized),
+              border-color var(--dur-base) var(--ease-standard);
   cursor: pointer;
 }
 /* The glow strengthens on any :hover (a stuck glow on touch is harmless);
@@ -2985,8 +2987,27 @@ html[data-glow="subtle"] .rail-container {
 }
 @media (hover: hover) and (pointer: fine) {
   .media-card-cinema:hover {
-    transform: translateY(-6px);
+    transform: translateY(-4px);
   }
+  /* Press settle. Hover-capable pointers only: on touch, :active fires at the
+     start of a swipe across the rail, so every card under the thumb would
+     shrink while the user scrolls. `:not(:has(button:active))` keeps the card
+     still while the lib badge, AI gem or Resume pill inside it is pressed —
+     those are their own controls. Without :has() support the rule is dropped
+     and the card simply has no press state. */
+  .media-card-cinema:active:not(:has(button:active)) {
+    transform: translateY(-2px) scale(0.985);
+    transition-duration: 110ms;
+  }
+}
+/* Keyboard parity (C1). A focused card used to get only the outline floor while
+   a hovered one lifted and lit up; now both read the same. The global
+   :focus-visible outline is deliberately left in place on top of this. Not
+   behind the hover query: keyboard focus is not a pointer state. */
+.media-card-cinema:focus-visible {
+  border-color: var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong);
+  transform: translateY(-4px);
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -3222,7 +3243,11 @@ html[data-glow="subtle"] .rail-container {
      did not cover. Later in the file than the hover rules at equal
      specificity, so these win. */
   .media-card-cinema { transition: none; }
-  .media-card-cinema:hover { transform: none; }
+  .media-card-cinema:hover,
+  .media-card-cinema:focus-visible { transform: none; }
+  /* Its own rule: a browser without :has() drops a whole selector list that
+     contains one, which took the hover and focus nulls above down with it. */
+  .media-card-cinema:active:not(:has(button:active)) { transform: none; }
   .media-card-cinema:hover .poster-img { transform: none; }
   .media-card-cinema .poster-img { transition: none; }
   .media-card-cinema .ai-gem { transition: none; }
