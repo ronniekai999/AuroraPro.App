@@ -919,15 +919,33 @@ capability declarations.
 - Forward seeks rebuild only beyond the produced edge supplied by hls.js.
 - `effectiveDefaultIndex` is the single model of the track a player starts.
 - A remux's media time 0 is the key frame before `start_sec`
-  (`-noaccurate_seek`; on Matroska with B-frames a whole GOP earlier when the
-  target sits within 130 ms after a key frame). The variant playlist carries the
-  measured start as the comment `#AURORA-MEDIA-START:<sec>` right before the
-  first `#EXTINF` (`media_start.go`; never in the header, where hls.js files it
-  on the fMP4 init segment). The SPA's `startSecRef` is that media-clock origin;
-  `sessionStartSecRef` keeps the whole-second `start_sec` for the subtitle
-  `start=` (an `Atoi`) and the receiver fallback. Boot starts at `start_sec`
-  only when the playlist leaves a reload of runway. Transcodes, native HLS and
-  the Android TV client still anchor on `start_sec`.
+  (`-noaccurate_seek`; for demuxers without `AVFMT_SEEK_TO_PTS` — Matroska,
+  MPEG-TS, AVI — with B-frames, a whole GOP earlier when the target sits within
+  130 ms after a key frame). The variant playlist carries the measured start as
+  the comment `#AURORA-MEDIA-START:<sec>` right before the first `#EXTINF`
+  (`media_start.go`; never in the header, where hls.js files it on the fMP4
+  init segment). It is measured once per session in the background, retried
+  only inside the first playlist request (2.5 s budget, no lock held across
+  ffprobe), and published only within `[start_sec - 60, start_sec + 1]`.
+- The SPA's `startSecRef` is that media-clock origin, owned by the session's
+  `RemuxClock` (`lib/mediaStart.ts`); `sessionStartSecRef` keeps the
+  whole-second `start_sec` for the subtitle `start=` (an `Atoi`) and the
+  receiver fallback. The clock adopts a start only before the element has
+  played (a later one is refused, keeping `start_sec`); aligns to `start_sec`
+  only with a reload of runway, retried on later loads while the playhead is
+  short of it, never for a party guest or after a scrub; consumes the
+  alignment's own `seeked` by position; and makes an unaligned party host send
+  one seek with its true position once playback runs with the room running.
+  Native HLS fetches the variant playlist once and applies it at
+  `loadedmetadata`, failing safe to `start_sec`. Transcodes and the Android TV
+  client still anchor on `start_sec`.
+- Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone;
+  the remux subtitle cue shift still uses `ProbeSeekKeyframe`
+  (`phase2_handlers.go` `ServeSubtitle`), a GOP off on the Matroska key-frame
+  case; after the unreadable-playlist resume fallback the cached start
+  describes segment 0 of a playlist that no longer lists it; a measurement
+  that lands after the first request's budget reaches only players that have
+  not started.
 - Known gap: an HLS quality up-switch can still stall because new rungs start at
   the current absolute source position and no cross-rendition produced-edge
   contract exists.
