@@ -323,13 +323,14 @@ const ONB_INK = (() => {
 // 2.59:1 and 3.77:1 for as long as the palette existed and this script passed,
 // because this script measures ONLY the surfaces listed in SURFACES below and
 // the palette was never listed — the same structural blind spot this file's
-// header describes for the on-art audit and the vibe bar. Its backdrop is two
-// composites deep, both read from the component: the full-viewport scrim over
-// the page ink, then the panel's own fill.
+// header describes for the on-art audit and the vibe bar. Its backdrop is three
+// composites deep: the page (`.aurora-bg`, whose tints show through both
+// translucent layers above it), the full-viewport scrim, then the panel's own
+// fill. The scrim and panel are read from the component.
 const PAL = 'src/components/SearchPalette.tsx'
 const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
-const onPalette = () => stack(PAL_PANEL, PAL_SCRIM)
+const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 
 const SURFACES = [
   // ── The referral step. A one-shot question with a Skip, so every control
