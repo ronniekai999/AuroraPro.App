@@ -221,7 +221,7 @@
     --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
     --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
-    --fs-rail: 1.3125rem;     /* rail titles, 21px */
+    --fs-rail: 1.25rem;       /* rail titles, 20px (Stage refresh, R1) */
 
     /* Leading is PER TYPEFACE, not per size. Overrides live with the
        html[data-font] blocks below; this is the "one list to re-check when a
@@ -328,7 +328,7 @@
     --r-pill: 999px;
     --surface-1: #0a0a0f;
     --surface-2: #14121e;
-    /* Small-end type. The display scale above stops at --fs-rail (21px);
+    /* Small-end type. The display scale above stops at --fs-rail (20px);
        everything smaller was 217 arbitrary `text-[Npx]` utilities across
        ten values including half-pixels. These four name the clusters
        (labels 10, captions 11, meta 12.5, small body 13.5). Adopted where
@@ -3108,13 +3108,15 @@ html[data-glow="subtle"] .badge-glass {
    on the page background (.aurora-bg) instead of on the shelf.
    ==================================================================== */
 .rail-container {
-  margin-bottom: 28px;
+  /* 40px, up from 28 (Stage refresh, R1): with no shelf edge to separate
+     them, the space between rails is what groups each title with its row. */
+  margin-bottom: 40px;
 }
 .rail-header {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 /* 2026-05-27 — Per-rail icon chip with tint variants. The base rule
    handles ONLY layout (size, shape, alignment); each [data-tint=...]
@@ -3164,9 +3166,19 @@ html[data-glow="subtle"] .badge-glass {
   border-color: rgba(99, 102, 241, 0.4);
   color: #a5b4fc;
 }
+/* The display face at --fs-rail (Stage refresh, R1). Rail titles were body
+   Inter at 16.8px/600 while --fs-rail (21px) sat unused, so the one heading
+   that repeats down the whole of Home was the least designed type on it.
+   20px, the size the refresh was drawn at, one step under the old 21px token
+   that nothing consumed. Titles wrap (see below), and verify-mobile-layout
+   renders a long one at phone widths in each of the four typefaces, failing
+   on any overrun. */
 .rail-header .rail-title {
-  font-size: 1.05rem;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: var(--fs-rail);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
   color: rgba(255, 255, 255, 0.95);
   /* Wraps rather than `nowrap`. With nowrap a title wider than its column
      (phones, long "Because you watched …" / LLM rail names) overflowed the

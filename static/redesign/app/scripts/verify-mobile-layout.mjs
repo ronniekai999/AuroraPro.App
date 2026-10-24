@@ -190,9 +190,13 @@ for (const font of FONTS) {
     await page.goto(`${ORIGIN}/`)
     const r = await page.evaluate(async () => {
       await document.fonts.ready
-      // The family body text resolves to under this typeface — the one the rail
-      // title and card meta are set in. It must be among the faces that loaded.
+      // The family body text resolves to under this typeface — the one the card
+      // meta and rail subtitle are set in. It must be among the faces that loaded.
       const bodyFamily = getComputedStyle(document.body).fontFamily.split(',')[0].trim().replace(/['"]/g, '')
+      // The rail title is set in the DISPLAY face since the Stage refresh (R1),
+      // so the body face loading no longer proves the title was measured in its
+      // own font. Checked separately, against the same loaded list.
+      const titleFamily = getComputedStyle(document.querySelector('.rail-title')).fontFamily.split(',')[0].trim().replace(/['"]/g, '')
       // Faces the page actually requested; `unloaded` ones are declared but unused.
       const faces = [...document.fonts].filter(f => f.status !== 'unloaded')
       const fontErrors = faces.filter(f => f.status === 'error').map(f => f.family)
@@ -254,12 +258,13 @@ for (const font of FONTS) {
                  spill: +spill.toFixed(1), gap: +(title.top - badges.bottom).toFixed(1),
                  pillGap: +(title.top - resume.bottom).toFixed(1) }
       })
-      return { rails, cards, fontErrors, fontsLoaded, bodyFamily, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
+      return { rails, cards, fontErrors, fontsLoaded, bodyFamily, titleFamily, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
     })
 
     const before = problems
     if (r.fontErrors.length) fail(`web fonts failed to load: ${[...new Set(r.fontErrors)].join(', ')} — measurements would use a fallback font`)
     if (!r.fontsLoaded.includes(r.bodyFamily)) fail(`body font "${r.bodyFamily}" did not load (loaded: ${[...new Set(r.fontsLoaded)].join(', ') || 'none'}) — measurements would use a fallback font`)
+    if (!r.fontsLoaded.includes(r.titleFamily)) fail(`rail title font "${r.titleFamily}" did not load (loaded: ${[...new Set(r.fontsLoaded)].join(', ') || 'none'}) — the title would be measured in a fallback font`)
     if (r.iw !== width || r.sw > width) fail(`the page is wider than the device: ${r.sw}px on a ${width}px viewport`)
     for (const rail of r.rails) {
       if (rail.worst > rail.contentRight + 0.5) fail(`rail ${rail.i}: header reaches ${rail.worst}, past the rail's content edge ${rail.contentRight}`)
@@ -276,7 +281,7 @@ for (const font of FONTS) {
       if (c.truncated && c.shown > 1) fail(`${at}: TOKENS SHRUNK INSTEAD OF DROPPED — ${c.truncated} of ${c.shown} truncated`)
     }
     const shown = r.cards.filter(c => !c.w.includes('lone')).map(c => `${c.w}:${c.shown}/${c.of}`).join(' ')
-    console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} · page ${r.sw}px · ${r.rails.length} rail headers · meta tokens shown ${shown}`)
+    console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} / ${r.titleFamily} · page ${r.sw}px · ${r.rails.length} rail headers · meta tokens shown ${shown}`)
     await ctx.close()
   }
 }
