@@ -1,0 +1,10 @@
+{
+  "sha": "273beadbdb66b76acfc779dd7d30ae3b70bfdc11",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only review of origin/main...273bead. Covers the 500e388 refresh (lows-only after two rounds) plus 327bdd1, which adds the .aurora-bg page layer under the search palette's scrim in audit-glass-contrast (stricter, every palette row still passes at 6.45:1) and two comment-only commits stating what the model leaves out (blobs ~10%, underlying view ~1.5%). Remaining nits: Check 4 misses infinite set in a separate rule or a custom property, onbShimmer exception is name-keyed, theater veil fades in ~260ms on fullscreen exit.",
+  "reviewer": "independent-review-agent",
+  "findings": "0",
+  "diff_digest": "667b2438a29db15cf7a98066ed1a4109e5513ef0f2a984aa6f3622a23dd4699e",
+  "branch": "claude/sweet-brown-36veir",
+  "recorded_at": "2026-10-24T08:35:44Z"
+}
