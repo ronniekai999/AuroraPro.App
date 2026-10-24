@@ -56,6 +56,11 @@ function parseLinearStops(value, which) {
   const stops = []
   for (const m of chosen.matchAll(/(rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|transparent)\s*([\d.]+)%/g)) {
     const col = m[1]
+    // heroBackdrop composites #050505 at each stop's alpha and never reads the
+    // stop's colour, so a layer that changed hue would be measured as ink.
+    // Refuse it instead of reporting a figure for a colour that is not there.
+    if (col !== 'transparent' && !/^(#050505|rgba\(\s*5\s*,\s*5\s*,\s*5\s*,[^)]*\))$/i.test(col))
+      throw new Error(`audit: a hero scrim stop is ${col}; this audit composites #050505 only — model the new colour, do not pass`)
     let a
     if (col === 'transparent') a = 0
     else if (col.startsWith('rgba')) a = Number(col.match(/[\d.]+/g)[3] ?? 1)
@@ -125,6 +130,27 @@ const CORNER = {
   a0: Number(cornerDecl[3].split(',')[3]),
   end: Number(cornerDecl[4]) / 100,
 }
+// The fourth layer: .stage-hero-scrim::before, the top feather (Stage refresh
+// H1). A fixed-px band, so its alpha at a fractional y depends on the hero's
+// real height — read from the hero's own height utilities at the 1440x900 frame
+// the coordinates below were taken at, not assumed.
+const VIEWPORT_H = 900
+const FEATHER = (() => {
+  const bg = cssValue('.stage-hero-scrim::before', 'background')
+  if (!/linear-gradient\(180deg/.test(bg)) throw new Error('audit: the hero top feather is no longer a top-down (180deg) linear-gradient')
+  const h = cssValue('.stage-hero-scrim::before', 'height').match(/^([\d.]+)px$/)
+  if (!h) throw new Error('audit: the hero top feather height is no longer a px length')
+  const sizes = hero.match(/'relative w-full h-\[(\d+)vh\] min-h-\[(\d+)px\] max-h-\[(\d+)px\]/)
+  if (!sizes) throw new Error(`audit: the full hero's h-[Nvh] min-h-[px] max-h-[px] sizing is no longer in ${SRC_HERO}`)
+  const heroPx = Math.min(Number(sizes[3]), Math.max(Number(sizes[2]), (Number(sizes[1]) / 100) * VIEWPORT_H))
+  // `transparent 100%` has no rgba, so the last stop is parsed as alpha 0.
+  return { stops: parseLinearStops(bg, 0), px: Number(h[1]), heroPx }
+})()
+function featherAlpha(yFromBottom) {
+  const fromTop = (1 - yFromBottom) * FEATHER.heroPx
+  return fromTop >= FEATHER.px ? 0 : rampA(FEATHER.stops, fromTop / FEATHER.px)
+}
+
 function cornerAlpha(x, yFromBottom) {
   const dx = (1 - x) / CORNER.rx
   const dy = (1 - yFromBottom) / CORNER.ry
@@ -133,11 +159,13 @@ function cornerAlpha(x, yFromBottom) {
   return CORNER.a0 * (1 - d / CORNER.end)
 }
 
-/** Composite all three scrim layers at (x from left, y from bottom) over `frame`,
- *  in paint order: artwork, vertical ramp, horizontal ramp, corner vignette. */
+/** Composite all four scrim layers at (x from left, y from bottom) over `frame`,
+ *  in paint order: artwork, vertical ramp, horizontal ramp, top feather (the
+ *  scrim's own ::before, so above both of its layers), corner vignette. */
 function heroBackdrop(x, yFromBottom, frame) {
   let bg = over(INK, rampA(HERO.vert, yFromBottom), frame)
   bg = over(INK, rampA(HERO.horiz, x), bg)
+  bg = over(INK, featherAlpha(yFromBottom), bg)
   return over(INK, cornerAlpha(x, yFromBottom), bg)
 }
 

@@ -1227,6 +1227,21 @@ html[data-glow="subtle"] .stage-topnav {
     linear-gradient(90deg, rgba(5, 5, 5, 0.95) 0%, rgba(5, 5, 5, 0.72) 40%, rgba(5, 5, 5, 0.15) 72%, rgba(5, 5, 5, 0.35) 100%),
     linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
 }
+/* Top feather (Stage refresh, H1). The backdrop used to start on a hard line
+   right under the greeting; this lets the art rise out of the page instead,
+   the same #050505 the bottom fade lands on. A fixed 72px, not a percentage,
+   so the full hero (480-680px) and the 250px browse band lose the same strip
+   of artwork. It is a child of the scrim, so it paints over both layers above
+   and under the corner vignette. It only darkens, so it can only raise the
+   white text's contrast — audit-onart-contrast models it anyway, because that
+   audit's claim is that it composites EVERY layer. */
+.stage-hero-scrim::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 72px;
+  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0.55) 45%, transparent 100%);
+}
 
 /* Transient-overlay menu items get a ring on plain :focus, not only on
    :focus-visible.
