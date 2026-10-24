@@ -918,6 +918,16 @@ capability declarations.
 - Tonemapping scales before the zscale/Hable chain.
 - Forward seeks rebuild only beyond the produced edge supplied by hls.js.
 - `effectiveDefaultIndex` is the single model of the track a player starts.
+- A remux's media time 0 is the key frame before `start_sec`
+  (`-noaccurate_seek`; on Matroska with B-frames a whole GOP earlier when the
+  target sits within 130 ms after a key frame). The variant playlist carries the
+  measured start as the comment `#AURORA-MEDIA-START:<sec>` right before the
+  first `#EXTINF` (`media_start.go`; never in the header, where hls.js files it
+  on the fMP4 init segment). The SPA's `startSecRef` is that media-clock origin;
+  `sessionStartSecRef` keeps the whole-second `start_sec` for the subtitle
+  `start=` (an `Atoi`) and the receiver fallback. Boot starts at `start_sec`
+  only when the playlist leaves a reload of runway. Transcodes, native HLS and
+  the Android TV client still anchor on `start_sec`.
 - Known gap: an HLS quality up-switch can still stall because new rungs start at
   the current absolute source position and no cross-rendition produced-edge
   contract exists.
