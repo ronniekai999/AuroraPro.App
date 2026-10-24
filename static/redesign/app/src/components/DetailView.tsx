@@ -632,6 +632,12 @@ export default function DetailView({
                 bought nothing and forced the tabs to either dangle their
                 `aria-controls` or drop it. See the note in DetailTabs. */}
             <div role="tabpanel" id="detail-panel" aria-labelledby={`detail-tab-${activeTab}`}>
+              {/* Keyed on the tab (Stage refresh, DT3) so a switch replays
+                  .stage-panel-in instead of swapping the panel in one frame.
+                  Every tab already renders a different component type at this
+                  position, so each switch remounted its content before the key
+                  existed; the key adds the entrance, not a remount. */}
+              <div key={activeTab} className="stage-panel-in">
               {activeTab === 'overview' ? (
                 <div className="space-y-10">
                   {storylineNode}
@@ -646,6 +652,7 @@ export default function DetailView({
               ) : activeTab === 'media' ? (
                 mediaNode
               ) : null}
+              </div>
             </div>
           </div>
         </div>

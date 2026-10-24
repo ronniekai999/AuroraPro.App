@@ -3353,6 +3353,22 @@ html[data-glow="subtle"] .rail-container {
 html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
   content: none;
 }
+/* Detail tabs move instead of jumping (Stage refresh, DT3). DetailView keys
+   the tab panel's content on the active tab, so a switch fades it up 6px.
+   `backwards`, not `both` or `forwards`: a held `to { transform: none }`
+   computes to an identity matrix, which would leave the panel a stacking
+   context and a containing block for anything fixed inside it. */
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.stage-panel-in {
+  animation: panelIn var(--dur-enter) var(--ease-emphasized) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-panel-in { animation: none; }
+}
+
 /* Detail art fades in on decode (Stage refresh, DT1): the 58vh DetailHero
    backdrop and the DetailRail poster used to pop in over their fill whenever
    the download finished. Same contract as the card posters above — `img.`
