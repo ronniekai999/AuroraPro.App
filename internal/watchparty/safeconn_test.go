@@ -18,8 +18,17 @@ import (
 // deadline in a plain field that WriteMessage reads, so the deadline must be
 // set under the same mutex as the writes or the two goroutines race on it.
 // A running party exercises this constantly: ticks every 250ms against the
-// time-sync burst on every sync connect and a probe every 30s. Run with
-// -race; without the lock this reports a data race in gorilla's
+// time-sync burst on every sync connect and a probe every 30s.
+//
+// This test guards the fix ONLY under the race detector. Without -race it
+// passes whether or not SetWriteDeadline takes the lock, because the race
+// corrupts no observable result. CI's `go test ./...` step
+// (.github/workflows/ci.yml) runs without -race, so CI does not pin this
+// fix. Run it as:
+//
+//	go test -race -count=1 -run TestSafeConn_DeadlineDoesNotRaceConcurrentWrites ./internal/watchparty/
+//
+// With the lock removed, that reports a data race in gorilla's
 // SetWriteDeadline against a concurrent WriteMessage.
 func TestSafeConn_DeadlineDoesNotRaceConcurrentWrites(t *testing.T) {
 	upgrader := websocket.Upgrader{}
