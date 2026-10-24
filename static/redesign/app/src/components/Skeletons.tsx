@@ -50,10 +50,12 @@ export function GridSkeleton({ count = 12, className }: { count?: number; classN
   )
 }
 
-/** A home rail's shape: the glass shelf (.rail-container), a header line
- *  where the icon + title sit, and a row of card-sized tiles at the rail's
- *  real card widths (206px poster / 336px landscape) and 18px gap. The row
- *  is clipped rather than scrolled — nothing to scroll to. */
+/** A home rail's shape: the rail's wrapper (.rail-container, which has no
+ *  shelf since the Stage refresh), a header line where the icon + title sit,
+ *  and a row of card-sized tiles at the rail's real card widths (206px poster
+ *  / 336px landscape) and 18px gap. The row mirrors .rail-scroll's 4px inline
+ *  padding and the -4px margin that puts its first card on the gutter. It is
+ *  clipped rather than scrolled — nothing to scroll to. */
 export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poster' | 'landscape'; count?: number }) {
   const tile = aspect === 'landscape' ? 'w-[336px] aspect-video' : 'w-[206px] aspect-[2/3]'
   return (
@@ -62,7 +64,7 @@ export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poste
         <SkeletonBlock className="h-7 w-7 rounded-lg" />
         <SkeletonBlock className="h-5 w-44 rounded-md" />
       </div>
-      <div className="flex gap-[18px] overflow-hidden px-1 py-2">
+      <div className="flex gap-[18px] overflow-hidden -mx-1 px-1 py-2">
         {Array.from({ length: count }).map((_, i) => (
           <SkeletonBlock key={i} className={cn('shrink-0 rounded-[var(--r-lg)]', tile)} />
         ))}

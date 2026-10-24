@@ -1162,6 +1162,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           is 44px above against 51px below (the rail panel's 1px border plus its 18px
           padding-top), which reverses the claim. This same comment scolds an earlier
           draft for exactly that substitution twelve lines up, and then made it.
+          (Stage refresh, RS: the rail panel is gone — no border, no padding — so
+          the first rail's header now sits at that 32px box edge itself: 44px above
+          against 32px below, content to content, and the plain phrasing holds. The
+          two paragraphs around this one describe the shelf as it was.)
 
           The defensible version is nearest VISIBLE boundary, and it needs the
           hero's bottom edge to be invisible — see the next paragraph, where it is

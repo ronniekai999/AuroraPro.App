@@ -2968,10 +2968,11 @@ html[data-glow="subtle"] .badge-glass {
                               card (renders an <img>, optional progress,
                               optional reason caption) so the rest of
                               the home-rail flow doesn't change.
-   .rail-container         — glassy frame wrapping a whole rail (title +
-                              cards), with a decorative header row that
-                              uses horizontal divider lines on either
-                              side of the rail's title.
+   .rail-container         — wraps a whole rail (title + cards). No frame
+                              since the Stage refresh (RS): the rail sits
+                              on the page, with a decorative header row
+                              whose divider line runs from the title to
+                              See All.
    ==================================================================== */
 
 /* .media-card (the pre-cinema card: ::before scrim, -8px lift, 1.08 image
@@ -3005,6 +3006,12 @@ html[data-glow="subtle"] .badge-glass {
 /* Rail scroll container */
 .rail-scroll {
   display: flex;
+  /* Out by its own 4px inline padding (Stage refresh, RS), so the first card's
+     edge lands on the page gutter with the rail title and the hero text above
+     it, while the padding still holds the focus ring the scroll box would
+     otherwise clip. The shelf used to absorb the 4px offset in its own
+     padding; on the page it read as a stagger. */
+  margin-inline: -4px;
   /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
   gap: 18px;
   overflow-x: auto;
@@ -3090,31 +3097,18 @@ html[data-glow="subtle"] .badge-glass {
 
 /* ====================================================================
    .rail-container — wraps a whole home rail (header + cards).
-   Glassy bg + outer halo so the rail reads as a contained shelf rather
-   than free-floating cards on the page background. Padding leaves room
-   for the cards' own hover lift without clipping. The decorative
-   horizontal divider lines on either side of the rail title are pure
-   ::before / ::after on .rail-header — no extra DOM nodes needed.
+   No shelf (Stage refresh, RS). It used to be a glass frame — fill,
+   glow border, halo, 14px backdrop blur, 18-22px padding — around every
+   rail, so Home was a stack of 5-10 boxes, each full-width and ~400px
+   tall, and the heaviest blur on the page (Glow = Subtle had to flatten
+   it). The cards already carry their own halo; the rails now sit on the
+   page, aligned to the same gutter as the hero, and the spacing between
+   them does the grouping. Nothing to override under Glow = Subtle, so
+   that rule went with it. audit-glass-contrast measures the rail header
+   on the page background (.aurora-bg) instead of on the shelf.
    ==================================================================== */
 .rail-container {
-  background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
-  border: 1px solid var(--glow-border);
-  border-radius: var(--r-xl);
-  box-shadow: var(--glow-halo);
-  padding: 18px 20px 22px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   margin-bottom: 28px;
-}
-/* The one large blurred surface that multiplies — 5–10 of these on Home,
-   each full-width and ~400px tall — and it had no Glow = Subtle override,
-   so the lever the Settings page offers weak GPUs skipped the heaviest
-   layer. Separate rule on purpose: audit-glass-contrast parses the base
-   `.rail-container` background above and must keep finding it. */
-html[data-glow="subtle"] .rail-container {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: rgba(12, 10, 18, 0.96);
 }
 .rail-header {
   display: flex;
@@ -3190,11 +3184,14 @@ html[data-glow="subtle"] .rail-container {
   height: 1px;
   background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%);
 }
+/* See All takes the secondary-text token, not white at 0.4 (Stage refresh,
+   RS): that was about 3.7:1 and never measured, because nothing audited the
+   shelf it sat on. audit-glass-contrast now measures it on the page. */
 .rail-header .rail-see-all {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-secondary);
   font-size: 0.8rem;
   transition: color 0.2s;
   flex-shrink: 0;
@@ -3441,9 +3438,9 @@ html[data-glow="subtle"] .stage-skel::before {
    /hover/resize frame. Profiling showed observable FPS drops on weak
    integrated graphics. The badge is 30px on top of a poster — the
    "frosted glass" effect was invisible at that size. A flat dark fill
-   (rgba 0.7) reads identically while costing nothing to render. The
-   rail-container's outer blur is preserved since it's once per rail
-   (5-10 layers total). */
+   (rgba 0.7) reads identically while costing nothing to render. (The
+   rail-container's own blur, once per rail, went with the shelf in the
+   Stage refresh.) */
 .media-card-cinema .lib-badge {
   position: absolute;
   top: 14px;

@@ -212,6 +212,29 @@ function tagOf(file, anchor) {
   return src.slice(start, end + 1)
 }
 
+/** A CSS colour value that may be a `var(--token)` — resolved through :root —
+ *  or a literal. The rail's See All moved to the secondary-text token. */
+function cssColor(selector, prop) {
+  const v = cssValue(selector, prop)
+  const tok = v.match(/^var\((--[\w-]+)\)$/)
+  return tok ? rootToken(tok[1]) : parseColor(v)
+}
+
+/** A rule's font-size in px: `Nrem`, `Npx`, or a `var(--token)` holding one.
+ *  Dies on anything else rather than guessing the threshold. */
+function cssPx(selector) {
+  let v = cssValue(selector, 'font-size')
+  const tok = v.match(/^var\((--[\w-]+)\)$/)
+  if (tok) {
+    const m = css.match(new RegExp(String.raw`\n\s*${tok[1].replace(/[-]/g, '\\-')}\s*:\s*([^;]+);`))
+    if (!m) throw new Error(`audit: ${tok[1]} is not defined in ${CSS}`)
+    v = m[1].trim()
+  }
+  const n = v.match(/^([\d.]+)(rem|px)$/)
+  if (!n) throw new Error(`audit: ${selector} font-size ${v} is not a rem/px length this audit can judge`)
+  return Number(n[1]) * (n[2] === 'rem' ? 16 : 1)
+}
+
 /** A `:root` custom property from index.css, as a colour. The text-secondary
  *  token is what the AA fixes in this codebase reach for, so a surface styled
  *  with `text-[color:var(--x)]` has to be measurable without restating the value. */
@@ -254,7 +277,13 @@ const INK = (() => {
 // Panel fills, each named by the rule that owns it.
 const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
-const RAIL = backgroundLayers(cssValue('.rail-container', 'background'))
+// The page itself (Stage refresh, RS). The home rails used to sit on a glass
+// shelf (`.rail-container`'s fill, read here as RAIL and measured by nothing);
+// the shelf is gone, so their header text sits on `.aurora-bg` — three radial
+// tints over its own #050505 base. backgroundLayers keeps every tint at its
+// full stop, i.e. the lightest point of each, which is the worst case for
+// light text.
+const PAGE = backgroundLayers(cssValue('.aurora-bg', 'background'))
 
 /** Composite layered fills onto the ink and return EVERY backdrop the element can
  *  present, so the caller can judge the worst one.
@@ -278,6 +307,7 @@ function stack(...elements) {
 
 const APP = 'src/App.tsx'
 const ONB = 'src/components/OnboardingFlow.tsx'
+const RAIL_TSX = 'src/components/MediaRail.tsx'
 
 // The onboarding overlay is `fixed inset-0` with its OWN opaque base, so its
 // text does not sit on the app ink at all. Derived from the overlay's utility
@@ -398,13 +428,26 @@ const SURFACES = [
     color: () => twText(PAL, '{m.year > 0 &&').rgb, alpha: () => twText(PAL, '{m.year > 0 &&').a,
     px: 12, on: onPalette,
   },
+  // ── The home rail header, on the page now that the shelf is gone (RS). ──
+  {
+    what: 'rail title', where: `${CSS} (.rail-header .rail-title)`,
+    color: () => cssColor('.rail-header .rail-title', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-title', 'color').a,
+    px: cssPx('.rail-header .rail-title'), on: () => stack(PAGE),
+  },
+  {
+    what: 'rail subtitle', where: `${RAIL_TSX} (rail header)`,
+    color: () => twText(RAIL_TSX, 'break-words">{subtitle}').rgb,
+    alpha: () => twText(RAIL_TSX, 'break-words">{subtitle}').a,
+    px: 12, on: () => stack(PAGE),
+  },
+  {
+    what: 'rail "See All"', where: `${CSS} (.rail-header .rail-see-all)`,
+    color: () => cssColor('.rail-header .rail-see-all', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-see-all', 'color').a,
+    px: cssPx('.rail-header .rail-see-all'), on: () => stack(PAGE),
+  },
 ]
-
-// `.rail-container` is read so the fill is validated even though no surface below
-// currently sits on it — the rule existing is part of this model's premise, and a
-// silent `undefined` here would make any future rail surface measure against the
-// bare ink. Referenced explicitly so linters do not strip it.
-void RAIL
 
 const need = s => (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5
 const resolve = v => (typeof v === 'function' ? v() : v)
