@@ -2173,7 +2173,14 @@ html[data-player-surface="theater"] .stage-party-reactions {
   height: 5px;
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.36);
+  /* Thickens 5 → 7px under the pointer or keyboard focus (Stage refresh, P1),
+     inside the 14px hit row, so nothing around it moves. The fills and the knob
+     position against the track and follow it; no alpha changes, so the contrast
+     figures below still hold. */
+  transition: height 160ms var(--ease-standard);
 }
+.stage-scrub:hover .stage-scrub-track,
+.stage-scrub:focus-visible .stage-scrub-track { height: 7px; }
 /* Track 0.36 and buffered 0.75, against the mockup's 0.18/0.30.
 
    The earlier justification for 0.28/0.45 measured a single sample point over a
@@ -2290,9 +2297,13 @@ html[data-player-surface="theater"] .stage-party-reactions {
   color: #fff;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  box-shadow: var(--glass-lip); /* P1 */
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
 }
 .stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
+/* Press feedback (P1). Owned here rather than as a call-site utility so
+   nothing in PlayerControls has to change. */
+.stage-tr-btn:not(:disabled):active { transform: scale(0.94); transition-duration: 80ms; }
 .stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 /* The primary play/pause: white on dark, the one control that should be
    findable without looking. */
@@ -2306,6 +2317,31 @@ html[data-player-surface="theater"] .stage-party-reactions {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 .stage-tr-btn-primary:hover { background: #f1f1f1; }
+/* A soft purple ring around the white play button under the pointer (P1).
+   box-shadow, so it stacks with the global :focus-visible outline instead of
+   replacing it. */
+.stage-tr-btn-primary:not(:disabled):hover { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(168, 85, 247, 0.32); }
+
+/* The control band glides as it hides and returns (P1). PlayerControls' root
+   carries `data-player-chrome` and flips `aria-hidden` with its own opacity
+   fade (a call-site utility on the ROOT, untouched here); this moves only the
+   inner band, which has no transition or transform utilities of its own. CSS
+   hooks only — PlayerControls.tsx is not edited. The transform exists only while
+   hidden (and inert), so a visible band holds no transform. */
+[data-player-chrome] > .stage-controls-scrim {
+  transition: transform var(--dur-enter) var(--ease-emphasized);
+}
+[data-player-chrome][aria-hidden="true"] > .stage-controls-scrim {
+  transform: translateY(12px);
+  transition-duration: 300ms;
+  transition-timing-function: var(--ease-exit);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-scrub-track,
+  [data-player-chrome] > .stage-controls-scrim { transition: none; }
+  [data-player-chrome][aria-hidden="true"] > .stage-controls-scrim,
+  .stage-tr-btn:not(:disabled):active { transform: none; }
+}
 /* The "10" on the skip buttons. */
 /* The "10" subscript inside the skip-back/skip-forward glyphs. It is the ONLY
    thing distinguishing a 10-second skip from any other interval, so it has to
