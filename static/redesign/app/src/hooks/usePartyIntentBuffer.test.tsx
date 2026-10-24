@@ -67,16 +67,22 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// Join `code`, deliver its room snapshot (which opens the sync socket), and
-// return the still-CONNECTING sync socket so intents buffer against it.
-async function joinWithClosedSync(result: { current: ReturnType<typeof useParty> }, code: string) {
-  await act(async () => { await result.current.join(code, { skipPreflight: true }) })
+// Open the latest room socket and deliver `code`'s snapshot, which opens the
+// sync socket; return both, the sync socket still CONNECTING.
+function deliverSnapshot(code: string) {
   const room = roomSockets().at(-1)!
   act(() => {
     room.open()
     room.receive('party-state', snapshot(code))
   })
   return { room, sync: syncSockets().at(-1)! }
+}
+
+// Join `code`, deliver its room snapshot (which opens the sync socket), and
+// return the still-CONNECTING sync socket so intents buffer against it.
+async function joinWithClosedSync(result: { current: ReturnType<typeof useParty> }, code: string) {
+  await act(async () => { await result.current.join(code, { skipPreflight: true }) })
+  return deliverSnapshot(code)
 }
 
 // Pins the room socket's party-ended teardown clear.
@@ -274,5 +280,68 @@ it('drops requests retained from a render with no active party', async () => {
   expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
   act(() => { only.sync.open() })
   expect(intents(only.sync)).toEqual([])
+  unmount()
+})
+
+// The window CodeRabbit reported on #541, exactly: join() with skipPreflight
+// makes the new code active before React renders anything, and the old
+// party's player listeners can fire at once. The tests above fire them only
+// after the join has rendered and the new room has sent its snapshot.
+it("drops an old binding's requests made as a skipPreflight join starts, before it renders", async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  const first = await joinWithClosedSync(result, 'AAAAAA')
+  act(() => { first.sync.open() })
+  const oldPlayer = result.current
+
+  await act(async () => {
+    const joining = result.current.join('BBBBBB', { skipPreflight: true })
+    oldPlayer.requestPause(1_234_000)
+    oldPlayer.requestSeek(1_200_000)
+    expect(await joining).toEqual({ ok: true })
+  })
+
+  const second = deliverSnapshot('BBBBBB')
+  act(() => { second.sync.open() })
+  expect(second.sync.sent.map(m => m.type)).toContain('join-party')
+  expect(intents(second.sync)).toEqual([])
+  expect(intents(first.sync)).toEqual([])
+  unmount()
+})
+
+// The joined party's own callbacks buffer from the moment the join renders,
+// before its room snapshot arrives (the tests above buffer only after it),
+// and flush when its sync socket opens.
+it("still buffers a request made through the joined party's own callbacks before its snapshot", async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  await joinWithClosedSync(result, 'AAAAAA')
+  await act(async () => { await result.current.join('BBBBBB', { skipPreflight: true }) })
+  act(() => { result.current.requestSeek(42_000) })
+  const second = deliverSnapshot('BBBBBB')
+  act(() => { second.sync.open() })
+  expect(intents(second.sync)).toEqual([{ type: 'request-seek', payload: { to_ms: 42_000 } }])
+  unmount()
+})
+
+// Binding requests to their party must not drop ones from callbacks held
+// across a sync-socket reconnect inside that same party.
+it('keeps delivering requests from callbacks held across a sync reconnect in the same party', async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  const only = await joinWithClosedSync(result, 'AAAAAA')
+  act(() => { only.sync.open() })
+  const held = result.current
+  act(() => { held.requestPause(10_000) })
+  expect(intents(only.sync)).toEqual([{ type: 'request-pause', payload: { at_ms: 10_000 } }])
+
+  // The sync socket drops; a request made meanwhile is buffered and flushed
+  // when the room's next snapshot reopens it.
+  act(() => { only.sync.close(); only.sync.onclose?.() })
+  act(() => { held.requestSeek(20_000) })
+  act(() => { only.room.receive('party-state', snapshot('AAAAAA', 2)) })
+  const reopened = syncSockets().at(-1)!
+  expect(reopened).not.toBe(only.sync)
+  act(() => { reopened.open() })
+  expect(intents(reopened)).toEqual([{ type: 'request-seek', payload: { to_ms: 20_000 } }])
+  act(() => { held.requestPlay() })
+  expect(intents(reopened).map(m => m.type)).toEqual(['request-seek', 'request-play'])
   unmount()
 })
