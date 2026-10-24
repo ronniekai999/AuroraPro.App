@@ -2817,6 +2817,35 @@ html[data-glow="subtle"] .badge-glass {
   pointer-events: none;
 }
 
+/* Menus open from the button that owns them (Stage refresh, N2): the avatar
+   menu, the phone menu sheet and the server / notification panels scale up
+   from their trigger's corner instead of rising from below it. The primitive
+   sets NO transform-origin — each call site names its own with an origin-*
+   utility, because the right corner differs per surface (and per breakpoint
+   for the panels), and a primitive that set it would beat those utilities
+   (unlayered rules after @tailwind utilities, see CASCADE HAZARD).
+   `both`, deliberately: a held `to { transform: none }` computes to an
+   identity matrix, not `none` (measured), so like .animate-fade-in's held
+   translateY(0) it keeps each surface a stacking context and the containing
+   block for anything fixed inside it — exactly what these four were before.
+   The exit runs for --dur-fast, the length useExitTransition waits before it
+   unmounts. */
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes popOut {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(-2px) scale(0.98); }
+}
+.animate-pop-in {
+  animation: popIn var(--dur-enter) var(--ease-emphasized) both;
+}
+.animate-pop-in.is-closing {
+  animation: popOut var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
 /* Hero backdrop layers (HeroSection). The transform reads the parallax
    custom properties the section writes from a rAF (--hero-px/--hero-py,
    each in [-1, 1] → ±1% drift inside the 5% overscan), and the fade is
@@ -4532,6 +4561,13 @@ textarea:focus-visible {
      any caller that adds the class by hand. */
   .animate-fade-in.is-closing,
   .toast.is-leaving {
+    animation: none !important;
+  }
+  /* N2's menus: they appear in place, and (the hook unmounting at once under
+     reduced motion) never run the exit. Neither rule sets a base opacity 0,
+     so stilled they are simply visible. */
+  .animate-pop-in,
+  .animate-pop-in.is-closing {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than
