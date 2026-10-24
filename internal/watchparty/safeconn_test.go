@@ -21,10 +21,10 @@ import (
 // time-sync burst on every sync connect and a probe every 30s.
 //
 // This test guards the fix ONLY under the race detector. Without -race it
-// passes whether or not SetWriteDeadline takes the lock, because the race
-// corrupts no observable result. CI's `go test ./...` step
-// (.github/workflows/ci.yml) runs without -race, so CI does not pin this
-// fix. Run it as:
+// passes whether or not SetWriteDeadline takes the lock: a torn deadline read
+// is possible but nothing here can observe it. CI pins the fix through its
+// "Race (watchparty)" step (.github/workflows/ci.yml), not the plain
+// `go test ./...` step. Run it locally as:
 //
 //	go test -race -count=1 -run TestSafeConn_DeadlineDoesNotRaceConcurrentWrites ./internal/watchparty/
 //
