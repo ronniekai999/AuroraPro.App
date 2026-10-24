@@ -623,7 +623,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             type="button"
             onClick={next}
             disabled={!canAdvance()}
-            className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-7 py-3 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.45)] transition-ui hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.65)] disabled:pointer-events-none disabled:opacity-40 disabled:shadow-none"
+            className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-7 py-3 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.45)] transition-ui motion-safe:hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.65)] disabled:pointer-events-none disabled:opacity-40 disabled:shadow-none"
           >
             {step === 'titles' ? 'Build my Aurora →' : 'Continue →'}
           </button>
@@ -663,7 +663,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   aria-label={n.name}
                   className={
                     'relative block aspect-square w-full rounded-full p-0 transition-transform duration-300 ' +
-                    (sel ? 'scale-110' : 'hover:-translate-y-0.5 hover:scale-[1.04]')
+                    (sel ? 'motion-safe:scale-110' : 'motion-safe:hover:-translate-y-0.5 motion-safe:hover:scale-[1.04]')
                   }
                   style={
                     sel
@@ -1083,7 +1083,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             // skip — wait for the answer to land before the page goes away.
             void settleReferral().then(onDone)
           }}
-          className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-ui hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
+          className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-ui motion-safe:hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
         >
           Take me in →
         </button>
@@ -1197,7 +1197,7 @@ function PosterTile({
         'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-ui ' +
         (selected
           ? 'border-transparent outline outline-2 outline-[#a981ff] shadow-[0_0_0_1px_#a981ff,0_14px_38px_-12px_rgba(169,129,255,0.55)]'
-          : 'border-white/[0.08] hover:-translate-y-1 hover:shadow-2xl')
+          : 'border-white/[0.08] motion-safe:hover:-translate-y-1 hover:shadow-2xl')
       }
     >
       {m.poster ? (

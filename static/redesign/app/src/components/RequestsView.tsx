@@ -506,7 +506,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                         <Icon
                           name="chevronDown"
                           size={12}
-                          className={isExpanded ? 'rotate-180 transition-transform' : 'transition-transform'}
+                          className={isExpanded ? 'rotate-180 motion-safe:transition-transform' : 'motion-safe:transition-transform'}
                         />
                         {isExpanded ? 'Hide overview' : 'Show overview'}
                       </button>

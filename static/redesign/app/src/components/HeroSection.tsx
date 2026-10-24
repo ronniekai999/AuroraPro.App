@@ -684,7 +684,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 // needs the extra bottom padding and overflow clip that the
                 // family's fixed height would collide with. Purple, not
                 // indigo — it is the same primary action as Play.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 hover:scale-105 glow-purple"
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 motion-safe:hover:scale-105 glow-purple"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >

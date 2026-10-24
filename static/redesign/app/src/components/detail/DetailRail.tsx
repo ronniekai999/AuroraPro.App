@@ -182,7 +182,7 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
             onFocus={() => setHovered(n)}
             onBlur={() => setHovered(0)}
             className={cn(
-              'p-1.5 rounded-lg transition-ui hover:scale-110',
+              'p-1.5 rounded-lg transition-ui motion-safe:hover:scale-110',
               n <= shown ? 'text-yellow-400' : 'text-white/25 hover:text-white/50',
             )}
           >

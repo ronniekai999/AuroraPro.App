@@ -4469,6 +4469,15 @@ textarea:focus-visible {
   .toast {
     animation: none !important;
   }
+  /* Watch-party reactions (Stage refresh, A1). ReactionOverlay sets each
+     emoji's 320px rise-and-scale as an INLINE style animation, which only an
+     !important rule can override — and none did, so reactions floated across
+     the picture for reduced-motion users too. Stilled, the emoji simply
+     appears above the controls and is removed on ReactionOverlay's own timer.
+     audit-reduced-motion Check 3 verifies this rule exists (INLINE_COVERED). */
+  .stage-party-reactions > div {
+    animation: none !important;
+  }
   /* Exits, too — the hook unmounts immediately under reduced motion, so
      these never run there; nulled for the audit's coverage check and for
      any caller that adds the class by hand. */

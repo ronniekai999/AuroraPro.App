@@ -246,9 +246,9 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
             onClick={attempt}
             className={[
               'w-full rounded-2xl py-3.5 font-semibold text-white transition-ui',
-              AURORA_REDUCED_MOTION ? '' : 'hover:scale-[1.01]',
+              AURORA_REDUCED_MOTION ? '' : 'motion-safe:hover:scale-[1.01]',
               'bg-gradient-to-br from-purple-500 to-purple-800 shadow-[0_8px_26px_rgba(168,85,247,0.4)]',
-              'disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed',
+              'disabled:opacity-40 motion-safe:disabled:hover:scale-100 disabled:cursor-not-allowed',
             ].join(' ')}
           >
             Join the party
