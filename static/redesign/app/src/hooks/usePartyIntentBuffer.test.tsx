@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { apiFetch } from '@/lib/api'
 import { useParty } from './useParty'
 
 vi.mock('@/lib/api', () => ({
@@ -19,6 +20,11 @@ vi.mock('@/lib/voice', () => ({
 // not, so the intent was replayed into the next party joined: a guest's
 // buffered pause (AllowPause is on by default) paused the new room at a
 // position from a different title.
+//
+// Each clear is pinned on its own. join() is the only way into a party and it
+// clears the buffer first, so a later join cannot show whether a party-ended
+// teardown cleared it; those two tests read the buffer through the hook's
+// test seam right after the teardown, before any join.
 
 class Socket {
   static OPEN = 1
@@ -54,6 +60,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   Socket.all = []
   vi.stubGlobal('WebSocket', Socket)
+  vi.mocked(apiFetch).mockReset()
 })
 afterEach(() => {
   vi.useRealTimers()
@@ -72,7 +79,8 @@ async function joinWithClosedSync(result: { current: ReturnType<typeof useParty>
   return { room, sync: syncSockets().at(-1)! }
 }
 
-it('does not replay an intent buffered in a party that ended into the next one', async () => {
+// Pins the room socket's party-ended teardown clear.
+it('drops an intent buffered in a party that ended on the room socket', async () => {
   const { result, unmount } = renderHook(() => useParty(1))
   const first = await joinWithClosedSync(result, 'AAAAAA')
   act(() => {
@@ -80,9 +88,11 @@ it('does not replay an intent buffered in a party that ended into the next one',
     result.current.requestSeek(1_200_000)
   })
   expect(intents(first.sync)).toHaveLength(0) // buffered: the sync socket never opened
+  expect(Object.keys(result.current.__pendingSyncIntentsForTests()).sort()).toEqual(['playPause', 'seek'])
 
   act(() => { first.room.receive('party-ended') })
   await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
 
   const second = await joinWithClosedSync(result, 'BBBBBB')
   act(() => { second.sync.open() })
@@ -91,18 +101,26 @@ it('does not replay an intent buffered in a party that ended into the next one',
   unmount()
 })
 
-it('does not replay an intent buffered before ending on the sync socket either', async () => {
+// Pins the sync socket's party-ended teardown clear.
+it('drops an intent buffered in a party that ended on the sync socket', async () => {
   const { result, unmount } = renderHook(() => useParty(1))
   const first = await joinWithClosedSync(result, 'AAAAAA')
-  act(() => { result.current.requestPlay() })
-  // The sync socket opens just to deliver the end: its flush happens first,
-  // so re-buffer afterwards the way a drop and reconnect would.
   act(() => { first.sync.open() })
-  expect(intents(first.sync).map(m => m.type)).toEqual(['request-play'])
+  expect(first.sync.sent.map(m => m.type)).toContain('join-party')
+
+  // The end arrives on the live sync socket, and the server then closes it.
+  // The teardown waits 50 ms, and the player is still mounted meanwhile: an
+  // intent it issues now finds no open sync socket and is buffered for the
+  // party that just ended.
+  act(() => { first.sync.receive('party-ended') })
   act(() => { first.sync.close(); first.sync.onclose?.() })
   act(() => { result.current.requestPause(5_000) })
-  act(() => { first.room.receive('party-ended') })
+  expect(intents(first.sync)).toEqual([])
+  expect(Object.keys(result.current.__pendingSyncIntentsForTests())).toEqual(['playPause'])
+
   await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+  expect(result.current.state.code).toBeNull() // the sync socket's teardown ran
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
 
   const second = await joinWithClosedSync(result, 'BBBBBB')
   act(() => { second.sync.open() })
@@ -110,6 +128,7 @@ it('does not replay an intent buffered before ending on the sync socket either',
   unmount()
 })
 
+// Pins join()'s clear.
 it('does not carry a buffered intent across a join straight into another party', async () => {
   const { result, unmount } = renderHook(() => useParty(1))
   await joinWithClosedSync(result, 'AAAAAA')
@@ -118,6 +137,39 @@ it('does not carry a buffered intent across a join straight into another party',
   const second = await joinWithClosedSync(result, 'BBBBBB')
   act(() => { second.sync.open() })
   expect(intents(second.sync)).toEqual([])
+  unmount()
+})
+
+// Pins sendOrBuffer's no-active-party guard. join() clears the buffer and
+// then awaits the code lookup with no party active; the previous party's
+// player can still issue an intent in that window, and without the guard it
+// was buffered after the clear and flushed into the party being joined.
+it('never sends an intent issued while no party is active', async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  await joinWithClosedSync(result, 'AAAAAA')
+
+  let answerLookup!: (info: unknown) => void
+  vi.mocked(apiFetch).mockImplementationOnce(() => new Promise(resolve => { answerLookup = resolve }))
+  let joined!: Promise<{ ok: boolean; error?: string }>
+  act(() => { joined = result.current.join('BBBBBB') })
+  expect(apiFetch).toHaveBeenCalledWith('/api/code/BBBBBB/info')
+
+  act(() => { result.current.requestPause(7_000) })
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
+
+  await act(async () => {
+    answerLookup({ type: 'active' })
+    expect(await joined).toEqual({ ok: true })
+  })
+  const room = roomSockets().at(-1)!
+  act(() => {
+    room.open()
+    room.receive('party-state', snapshot('BBBBBB'))
+  })
+  const sync = syncSockets().at(-1)!
+  act(() => { sync.open() })
+  expect(sync.sent.map(m => m.type)).toContain('join-party')
+  expect(intents(sync)).toEqual([])
   unmount()
 })
 

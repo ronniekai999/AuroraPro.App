@@ -215,6 +215,9 @@ export interface UseParty {
   requestPlay: () => void
   requestPause: (absMs: number) => void
   requestSeek: (absMs: number) => void
+  // Test seam (PARTY-9), not for app use: a copy of the sync intents
+  // buffered for the sync socket's next open.
+  __pendingSyncIntentsForTests: () => { seek?: OutboundSyncMessage; playPause?: OutboundSyncMessage }
   // Live sync values for the player effect. Refs avoid causing
   // re-renders on every tick (which fires at 1-2 Hz).
   tickRef: React.MutableRefObject<TickPayload | null>
@@ -1330,6 +1333,15 @@ export function useParty(currentUserId?: number): UseParty {
   const requestSeek = useCallback((absMs: number) => {
     sendOrBuffer(partySeekRequest(absMs))
   }, [sendOrBuffer])
+  // Test seam (PARTY-9): a copy of the buffered sync intents. join() is
+  // the only way into a party and it clears the buffer first, so the
+  // party-ended teardowns' clears cannot be seen through the rest of this
+  // API; the regression tests read the buffer here to pin each one. Not
+  // for app use.
+  const pendingSyncIntentsForTests = useCallback(
+    () => ({ ...pendingSyncIntentRef.current }),
+    [],
+  )
 
   // Tear down on unmount — without this, navigating away from V2
   // (or refreshing) would orphan the sockets server-side until the
@@ -1415,6 +1427,7 @@ export function useParty(currentUserId?: number): UseParty {
     requestPlay,
     requestPause,
     requestSeek,
+    __pendingSyncIntentsForTests: pendingSyncIntentsForTests,
     tickRef,
     seekRef,
     helloAbsMsRef,
