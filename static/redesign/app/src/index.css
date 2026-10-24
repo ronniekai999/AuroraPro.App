@@ -325,7 +325,24 @@
     --r-md: 12px;
     --r-lg: 14px;
     --r-xl: 18px;
+    /* The largest step (Stage refresh, G2): the PIN and Previously dialogs,
+       which had 24px and 28px literals. index.css snapped its off-scale radii
+       (9, 11, 13, 15, 16px) to the nearest step in the same pass, and wrote
+       the on-scale ones as tokens. Left as literals on purpose: 10px (the
+       small-control step the tabs, small buttons and fields share), the
+       sub-8px chip and track radii, the player's, and .density-toggle's 11px,
+       which is its 8px buttons plus its 3px padding so the corners nest. */
+    --r-2xl: 24px;
     --r-pill: 999px;
+    /* Elevation (G2). Popovers (the avatar menu, the phone menu sheet, the
+       server and notification panels) and modal cards were Tailwind's
+       shadow-2xl — black at 0.25, close to invisible on #050505 — or a
+       one-off literal. Both carry the glass lip (G1). Used through
+       `shadow-[shadow:var(--shadow-pop)]`: the `shadow:` hint is required,
+       because Tailwind 3 compiles a bare `shadow-[var(--x)]` as a shadow
+       COLOUR (measured), which silently draws nothing. */
+    --shadow-pop: var(--glass-lip), 0 18px 48px -12px rgba(0, 0, 0, 0.7);
+    --shadow-modal: var(--glass-lip), 0 28px 90px rgba(0, 0, 0, 0.65);
     --surface-1: #0a0a0f;
     --surface-2: #14121e;
     /* Small-end type. The display scale above stops at --fs-rail (20px);
@@ -1664,7 +1681,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* ── Request rows ─────────────────────────────────────────────────────
    The mockup's .req: a 70×105 poster beside a stacked info column. */
 .stage-req {
-  border-radius: 16px;
+  border-radius: var(--r-lg);
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.07);
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
@@ -1674,7 +1691,7 @@ html[data-glow="subtle"] .stage-toolbar {
   position: relative;
   width: 70px;
   height: 105px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #12101c;
@@ -1739,7 +1756,7 @@ html[data-glow="subtle"] .stage-toolbar {
 .stage-colcard {
   position: relative;
   height: 118px;
-  border-radius: 15px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   border: 1px solid rgba(220, 200, 255, 0.16);
   background: #0b0b12;
@@ -1814,7 +1831,7 @@ html[data-glow="subtle"] .stage-toolbar {
   justify-content: center;
   gap: 8px;
   height: 44px;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   border: 1px dashed rgba(168, 85, 247, 0.45);
   background: rgba(168, 85, 247, 0.06);
   color: var(--stage-purple-lt);
@@ -1833,7 +1850,7 @@ html[data-glow="subtle"] .stage-toolbar {
 /* ── Segmented control (List ⇄ Month) ─────────────────────────────────
    No `display` here — the call site sets `inline-flex`. */
 .stage-seg {
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
@@ -1888,7 +1905,7 @@ html[data-glow="subtle"] .stage-toolbar {
   align-items: center;
   gap: 11px;
   padding: 8px 11px;
-  border-radius: 11px;
+  border-radius: var(--r-md);
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
@@ -1923,7 +1940,7 @@ html[data-glow="subtle"] .stage-toolbar {
 .stage-calcell {
   position: relative;
   min-height: 108px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.05);
   padding: 6px 7px;
@@ -2029,7 +2046,7 @@ html[data-glow="subtle"] .stage-toolbar {
    role="radio", so the visual and the announced state cannot disagree. */
 .stage-opt {
   padding: 13px 14px;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.09);
   cursor: pointer;
@@ -2648,7 +2665,7 @@ html[data-glow="subtle"] .stage-upnext {
   gap: 9px;
   height: 46px;
   padding: 0 24px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
   font-weight: 600;
   font-size: 14.5px;
@@ -3203,7 +3220,7 @@ html[data-glow="subtle"] .badge-glass {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3593,7 +3610,7 @@ html[data-glow="subtle"] .stage-skel::before {
   width: 30px;
   height: 30px;
   padding: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4385,7 +4402,7 @@ textarea:focus-visible {
   justify-content: center;
   width: 34px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   color: rgba(255, 255, 255, 0.55);
   transition: color 0.15s, background 0.15s;
   cursor: pointer;
@@ -4405,7 +4422,7 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.015);
 }
@@ -4519,7 +4536,7 @@ textarea:focus-visible {
 .media-list-row .mlr-add {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;

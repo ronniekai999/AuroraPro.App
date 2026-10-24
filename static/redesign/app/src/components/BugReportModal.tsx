@@ -1033,7 +1033,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         // Submit button below the fold unreachable. max-h + overflow-y-auto
         // makes the modal scroll; overscroll-contain stops the chain at its
         // scroll boundaries; overflow-x-hidden preserves the rounded corners.
-        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl stage-dialog-in"
+        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-[shadow:var(--shadow-modal)] stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         // Holistic deep-debug M2 — drop aria-modal during recording

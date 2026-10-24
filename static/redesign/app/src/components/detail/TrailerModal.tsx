@@ -41,7 +41,7 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
       aria-label={title ? `${title} — Trailer` : 'Trailer'}
     >
       <div
-        className="relative w-full max-w-[min(92vw,1100px)] aspect-video rounded-2xl overflow-hidden bg-black shadow-2xl ring-1 ring-white/10 stage-dialog-in"
+        className="relative w-full max-w-[min(92vw,1100px)] aspect-video rounded-2xl overflow-hidden bg-black shadow-[shadow:var(--shadow-modal)] ring-1 ring-white/10 stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* referrerPolicy overrides the SPA's `Referrer-Policy: no-referrer`

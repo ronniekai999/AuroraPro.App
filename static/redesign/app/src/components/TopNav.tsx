@@ -282,7 +282,7 @@ function AvatarMenu({
           // Tab, and a focus landing on a node 150ms from unmount would
           // drop to <body>.
           inert={exit.closing || undefined}
-          className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-pop-in origin-top-right${exit.closing ? ' is-closing' : ''}`}
+          className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-[shadow:var(--shadow-pop)] z-[55] overflow-hidden animate-pop-in origin-top-right${exit.closing ? ' is-closing' : ''}`}
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
@@ -498,7 +498,7 @@ function MobileSheet({
         aria-label="Menu"
         // inert during the exit fade — see AvatarMenu.
         inert={closing || undefined}
-        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-2xl p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
+        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
         style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >
         {/* Real search field, not a shortcut to the palette. The palette

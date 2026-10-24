@@ -61,7 +61,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[520px] bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden stage-dialog-in"
+        className="w-full max-w-[520px] bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-[shadow:var(--shadow-modal)] overflow-hidden stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

@@ -1739,7 +1739,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1899,7 +1899,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">

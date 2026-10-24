@@ -171,7 +171,7 @@ function RecapModalSession({
         <DialogContent
           showCloseButton={false}
           overlayClassName="z-[80] bg-black/85 backdrop-blur-md"
-          className="z-[81] !flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[760px] flex-col gap-0 overflow-hidden rounded-[28px] border border-purple-400/30 bg-[#15131f] p-0 text-white shadow-[0_28px_90px_rgba(0,0,0,0.65)]"
+          className="z-[81] !flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[760px] flex-col gap-0 overflow-hidden rounded-[var(--r-2xl)] border border-purple-400/30 bg-[#15131f] p-0 text-white shadow-[shadow:var(--shadow-modal)]"
           aria-label={view === 'ask' ? `Ask Previously about ${title}` : `Previously, on ${title}`}
         >
           {view === 'recap' ? (
@@ -276,7 +276,7 @@ function RecapModalSession({
       <AlertDialog open={!!ask.confirmAction} onOpenChange={open => { if (!open && !ask.actionBusy) ask.setConfirmAction(undefined) }}>
         <AlertDialogContent
           overlayClassName="z-[90] bg-black/70 backdrop-blur-sm"
-          className="z-[91] border-white/10 bg-[#17141f] text-white shadow-2xl"
+          className="z-[91] border-white/10 bg-[#17141f] text-white shadow-[shadow:var(--shadow-modal)]"
           onCloseAutoFocus={event => {
             event.preventDefault()
             confirmReturnFocusRef.current?.focus()
