@@ -85,6 +85,24 @@ function host(overrides: Partial<PartySync> = {}): PartySync {
   }
 }
 
+it('rebinds controls when party callbacks change on the same media', async () => {
+  const previous = host()
+  const view = render(<VideoPlayer target={oldEpisode} party={previous} onClose={() => {}} />)
+  await bootHls()
+  vi.mocked(previous.requestPause).mockClear()
+
+  const current = {
+    ...previous, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn(),
+  }
+  view.rerender(<VideoPlayer target={oldEpisode} party={current} onClose={() => {}} />)
+  await settle()
+  video().currentTime = 41
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+  await settle()
+  expect(current.requestPause).toHaveBeenCalledExactlyOnceWith(41_000)
+  expect(previous.requestPause).not.toHaveBeenCalled()
+})
+
 it('Play for all waits for the new episode to boot and broadcasts exactly one Play', async () => {
   let party = host()
   const advance = vi.fn(async () => 'advanced' as const)

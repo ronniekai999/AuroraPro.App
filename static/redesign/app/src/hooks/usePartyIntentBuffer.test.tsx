@@ -229,3 +229,50 @@ it('still flushes an intent buffered for the party it belongs to', async () => {
   expect(intents(only.sync)).toEqual([{ type: 'request-seek', payload: { to_ms: 42_000 } }])
   unmount()
 })
+
+it.each([false, true])('drops requests from the previous party when the new sync socket is open: %s', async (open) => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  await joinWithClosedSync(result, 'AAAAAA')
+  // Player listeners and delayed work may retain these callbacks after a join.
+  const previous = result.current
+
+  const second = await joinWithClosedSync(result, 'BBBBBB')
+  if (open) act(() => { second.sync.open() })
+  act(() => {
+    result.current.requestSeek(42_000)
+    result.current.requestPause(43_000)
+  })
+  const sentBefore = [...intents(second.sync)]
+  const pendingBefore = result.current.__pendingSyncIntentsForTests()
+  act(() => {
+    previous.requestPlay()
+    previous.requestPause(900_000)
+    previous.requestSeek(950_000)
+  })
+  expect(intents(second.sync)).toEqual(sentBefore)
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual(pendingBefore)
+
+  if (!open) act(() => { second.sync.open() })
+  expect(intents(second.sync)).toEqual([
+    { type: 'request-seek', payload: { to_ms: 42_000 } },
+    { type: 'request-pause', payload: { at_ms: open ? 43_000 : -1 } },
+  ])
+  act(() => { result.current.requestPlay() })
+  expect(intents(second.sync).at(-1)).toEqual({ type: 'request-play' })
+  unmount()
+})
+
+it('drops requests retained from a render with no active party', async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  const inactive = result.current
+  const only = await joinWithClosedSync(result, 'AAAAAA')
+  act(() => {
+    inactive.requestPlay()
+    inactive.requestPause(5_000)
+    inactive.requestSeek(10_000)
+  })
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
+  act(() => { only.sync.open() })
+  expect(intents(only.sync)).toEqual([])
+  unmount()
+})
