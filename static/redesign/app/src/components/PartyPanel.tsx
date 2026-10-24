@@ -483,7 +483,10 @@ export function PartyPanel({
         if (!me) return null
         const isReady = !!me.ready
         const hostUid = state.hostUserId
-        const guests = state.participants.filter(p => p.user_id !== hostUid)
+        // The people the server's spoiler-free gate waits for
+        // (spoilerGateBlockersLocked): phone companions have no player
+        // and no Ready control, so they are never counted.
+        const guests = state.participants.filter(p => p.user_id !== hostUid && !p.companion)
         const notReadyGuests = guests.filter(g => !g.ready)
         const iAmHost = currentUserId === hostUid
         return (
