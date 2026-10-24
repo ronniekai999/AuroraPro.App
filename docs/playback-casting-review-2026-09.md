@@ -556,7 +556,7 @@ Where two reviewers found the same defect, the row gives both IDs.
 | PARTY-6 | M | When pause is allowed (`AllowPause`, on by default for parties the SPA creates), any guest can move the room with `request-pause`'s `at_ms`. Seek is host-only, but the pause position isn't clamped. | `internal/watchparty/sync_v3.go:931-946` | Ignore or clamp `at_ms` (S) · WP6 |
 | PARTY-7 | L | A stale seek or `hello` is replayed as a rebuild when a guest's player binds. | `VideoPlayer.tsx:3937-3962` | S · WP6 |
 | PARTY-8 | L | Holding an arrow key as host floods `request-seek` and exhausts the shared 120/min budget, including time-sync probes. | `VideoPlayer.tsx:5517-5539` | Debounce; separate bucket (S) · WP6 |
-| PARTY-9 | L | A sync intent buffered in one party is replayed into the next party joined. | `hooks/useParty.tsx:1159-1215` | S · WP6 |
+| PARTY-9 | L | A sync intent buffered in one party is replayed into the next party joined. | `hooks/useParty.tsx:1159-1215` | S · WP6 · fixed on branch `claude/sweet-brown-36veir-playback` (`4f1064e`, tests `ab8dd15`); not yet merged |
 | PARTY-10 | L | `initial_position_ms` is unbounded (the room path accepts negatives); `{"to_ms":null}` decodes to 0; host-close goroutines sleep 90 s and can't be interrupted. | `party_handlers.go:273-276`; `room_handlers.go:227-229`; `party_ws_v3_sync.go:224-229` | S · WP6 |
 
 ### Browser player
@@ -836,7 +836,7 @@ Phase assignments are implementation order, not closure evidence.
 | PARTY-6 | C — allowed guest pause accepts a bounded but arbitrary position; canonical position required for non-hosts. | 2C |
 | PARTY-7 | C — a newly bound guest consumes retained explicit-seek state without an age check. | 4D |
 | PARTY-8 | C — arrow repeats send seeks and share the sync-intent/time-probe rate budget. | 4D |
-| PARTY-9 | C — join/teardown clear clock refs without clearing the buffered sync intent. | 4D |
+| PARTY-9 | C — join/teardown clear clock refs without clearing the buffered sync intent. Fixed on branch `claude/sweet-brown-36veir-playback` (`4f1064e`): `join()` and both `party-ended` teardowns clear the buffer, and nothing is buffered while no party is active; `usePartyIntentBuffer.test.tsx` pins each clear and the guard (`ab8dd15`). Open on `main` until that branch merges. | 4D |
 | PARTY-10 | C — creation paths accept unbounded positions, numeric null seek becomes 0, and host-close work lacks cancellation. | 4D |
 | WEB-6 | C — create request is abortable while server session creation is detached from that cancellation. | 2A |
 | WEB-7 | C — solo advance lacks the outgoing episode's explicit completion write present in party advance. | 2B |
