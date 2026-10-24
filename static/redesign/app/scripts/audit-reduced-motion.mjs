@@ -471,5 +471,60 @@ const INLINE_COVERED = new Map([
   problems += bad
 }
 
+// ── Check 4 — an animation that never ends is compositor-only ─────────────
+// Not a reduced-motion rule, but a motion one this file is placed to see. The
+// Stage refresh's first loading sheen animated `background-position` with
+// `infinite`; a lazy poster that is never requested never loads, so on an idle
+// Home 16-51 of them repainted on the main thread every frame (~350ms per 3s,
+// measured). A keyframe set that runs forever may move only `transform` and
+// `opacity`, which the compositor animates without main-thread paints. A
+// bounded one (a count, not `infinite`) is not held to this. Scope: index.css.
+{
+  console.log('\n## Check 4 — infinite animations animate only transform and opacity')
+  // Pre-existing, from before the rule; listed by name so anything NEW fails,
+  // and checked for staleness so the list cannot outlive its reason.
+  const KNOWN = new Map([
+    ['onbShimmer', "the onboarding headline's background-clip:text gradient (#482); a fill that IS the text cannot move by transform. Reported for follow-up."],
+  ])
+  const COMPOSITOR = new Set(['transform', 'opacity'])
+  const keyframeProps = new Map()
+  for (const m of css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
+    let depth = 1, i = m.index + m[0].length
+    for (; i < css.length && depth > 0; i++) { if (css[i] === '{') depth++; else if (css[i] === '}') depth-- }
+    const body = css.slice(m.index + m[0].length, i - 1)
+    const props = new Set([...body.matchAll(/(?:^|[{;\s])([a-z-]+)\s*:/g)].map(x => x[1]))
+    keyframeProps.set(m[1], new Set([...(keyframeProps.get(m[1]) ?? []), ...props]))
+  }
+  const forever = new Map() // keyframe name → first line that runs it forever
+  for (const m of css.matchAll(/\{([^{}]*)\}/g)) {
+    const body = m[1]
+    const line = css.slice(0, m.index).split('\n').length
+    for (const d of body.matchAll(/(?:^|;)\s*animation\s*:\s*([^;]*)/g)) {
+      for (const layer of d[1].split(/,(?![^(]*\))/)) {
+        if (!/\binfinite\b/.test(layer)) continue
+        for (const tok of layer.trim().split(/\s+/)) if (keyframeProps.has(tok) && !forever.has(tok)) forever.set(tok, line)
+      }
+    }
+    if (/animation-iteration-count\s*:\s*infinite/.test(body)) {
+      const n = body.match(/animation-name\s*:\s*([\w-]+)/)
+      if (n && keyframeProps.has(n[1]) && !forever.has(n[1])) forever.set(n[1], line)
+    }
+  }
+  let bad = 0
+  for (const [name, line] of forever) {
+    const off = [...keyframeProps.get(name)].filter(p => !COMPOSITOR.has(p))
+    if (!off.length) { console.log(`  ok      ${name} (index.css:${line})`); continue }
+    if (KNOWN.has(name)) { console.log(`  known   ${name} animates ${off.join(', ')} forever — ${KNOWN.get(name)}`); continue }
+    bad++
+    console.log(`  ***     ${name} (index.css:${line}) runs forever and animates ${off.join(', ')}: main-thread paint every frame. Animate transform/opacity, or bound the count.`)
+  }
+  for (const name of KNOWN.keys()) {
+    const off = forever.has(name) && [...(keyframeProps.get(name) ?? [])].some(p => !COMPOSITOR.has(p))
+    if (!off) { bad++; console.log(`  ***     ${name} is listed as a known exception but no longer is one; remove it from KNOWN`) }
+  }
+  if (!bad) console.log('  every infinite animation is compositor-only (or a listed pre-existing exception).')
+  problems += bad
+}
+
 console.log(`\n${problems} reduced-motion problem(s).`)
 process.exit(problems ? 1 : 0)
