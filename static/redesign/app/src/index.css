@@ -3138,6 +3138,38 @@ html[data-glow="subtle"] .badge-glass {
   flex-shrink: 0;
 }
 
+/* Edge fades (Stage refresh, R2). With the shelf gone a rail's clipped edge
+   was a hard cut through a card on the page; now the side with more cards
+   behind it fades, and only that side — MediaRail mirrors its paddle state
+   onto the wrap as data-can-left / data-can-right, so the first card at rest
+   is never faded and a rail that fits has no mask at all.
+   22px: the 18px card gap plus the scroll box's 4px padding, i.e. the strip
+   past a card that ends flush with the gap. The first cut faded 40px, which
+   at 1440px reached 18px into the sixth card, fully visible and fully
+   clickable. No width fits every viewport (where the overflow card starts
+   depends on the width): measured, this one overlaps no fully visible card
+   at 1280, 1440 or 1920, and at any width it can reach at most 22px into one.
+   The mask is on the scroll box, so it stays put while the cards scroll under
+   it; the paddles are the wrap's other children and are never masked. It is
+   dropped while a card inside has keyboard focus, so the focus ring on a card
+   at the edge is never faded out: that rule comes second and ties on
+   specificity ((0,3,0) each), so source order is what keeps it winning.
+   The whole thing sits in @supports selector(:has(*)): the drop needs :has(),
+   and a browser without it would keep the fade over a focused edge card's
+   ring. Without :has() a rail gets no fade at all, the hard cut it had. */
+@supports selector(:has(*)) {
+  .rail-scroll-wrap[data-can-left] .rail-scroll { --rail-fade-l: 22px; }
+  .rail-scroll-wrap[data-can-right] .rail-scroll { --rail-fade-r: 22px; }
+  .rail-scroll-wrap:is([data-can-left], [data-can-right]) .rail-scroll {
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 var(--rail-fade-l, 0px), #000 calc(100% - var(--rail-fade-r, 0px)), transparent 100%);
+    mask-image: linear-gradient(90deg, transparent 0, #000 var(--rail-fade-l, 0px), #000 calc(100% - var(--rail-fade-r, 0px)), transparent 100%);
+  }
+  .rail-scroll-wrap .rail-scroll:has(:focus-visible) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
+
 /* ====================================================================
    .rail-container — wraps a whole home rail (header + cards).
    No shelf (Stage refresh, RS). It used to be a glass frame — fill,

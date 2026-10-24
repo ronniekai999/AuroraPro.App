@@ -164,7 +164,9 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           </button>
         )}
       </div>
-      <div className="rail-scroll-wrap">
+      {/* data-can-left/right (Stage refresh, R2) expose the paddle state the
+          rail already tracks, so CSS can fade the edge where more cards wait. */}
+      <div className="rail-scroll-wrap" data-can-left={canLeft || undefined} data-can-right={canRight || undefined}>
         {canLeft && (
           <button
             type="button"
