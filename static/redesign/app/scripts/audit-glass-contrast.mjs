@@ -405,7 +405,7 @@ const SURFACES = [
     what: 'palette empty-state line', where: `${PAL} (empty query)`,
     color: () => twText(PAL, 'Start typing to search').rgb,
     alpha: () => twText(PAL, 'Start typing to search').a,
-    px: 14, on: onPalette,
+    px: 16, on: onPalette,
   },
   {
     what: 'palette "Try a title…" hint', where: `${PAL} (empty query)`,
@@ -417,6 +417,11 @@ const SURFACES = [
     color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
     alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
     px: 11, on: onPalette,
+  },
+  {
+    what: 'palette no-match line', where: `${PAL} (no results)`,
+    color: () => twText(PAL, 'No matches for "{query}"').rgb, alpha: () => twText(PAL, 'No matches for "{query}"').a,
+    px: 16, on: onPalette,
   },
   {
     what: 'palette no-match hint', where: `${PAL} (no results)`,

@@ -399,9 +399,16 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           ref={listRef}
           className="max-h-[55vh] overflow-y-auto"
         >
+          {/* Empty and no-result states (Stage refresh, E1): an icon tile and a
+              display-face lead line over the same words, so they read as a
+              designed state rather than two lines of grey. Presentational only —
+              nothing here is interactive, and the copy is unchanged. */}
           {!query.trim() && (
             <div className="px-5 py-10 text-center">
-              <p className="text-white/50 text-sm">Start typing to search your library.</p>
+              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-purple-400/20 bg-purple-500/10 text-purple-300" aria-hidden="true">
+                <Icon name="search" size={20} />
+              </span>
+              <p className="font-display text-white/90 text-base font-semibold tracking-tight">Start typing to search your library.</p>
               <p className="text-[color:var(--text-secondary)] text-xs mt-2">
                 Try <span className="text-purple-300">a title</span>, <span className="text-purple-300">an actor</span>, or <span className="text-purple-300">a vibe</span> like "rainy night noir".
               </p>
@@ -427,9 +434,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           )}
 
           {query.trim() && !loading && results.length === 0 && (
-            <div className="px-5 py-8 text-center">
-              <p className="text-white/50 text-sm">No matches for "{query}"</p>
-              <p className="text-[color:var(--text-secondary)] text-xs mt-1">Check spelling or try a broader phrase.</p>
+            <div className="px-5 py-10 text-center">
+              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-white/10 bg-white/[0.04] text-[color:var(--text-secondary)]" aria-hidden="true">
+                <Icon name="compass" size={20} />
+              </span>
+              <p className="font-display text-white/90 text-base font-semibold tracking-tight break-words">No matches for "{query}"</p>
+              <p className="text-[color:var(--text-secondary)] text-xs mt-1.5">Check spelling or try a broader phrase.</p>
             </div>
           )}
 
