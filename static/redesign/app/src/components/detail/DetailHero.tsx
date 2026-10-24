@@ -93,11 +93,18 @@ export function DetailHero({
           // (~2000x3000) at high priority on every 2x/3x screen.
           srcSet={src === backdrop ? backdropSrcSet(src) : undefined}
           alt=""
-          className="w-full h-full object-cover scale-105"
+          // stage-img-fade (Stage refresh, DT1): invisible until decoded, then
+          // a 420ms opacity fade instead of popping in over the gradient.
+          // data-loaded is a DOM attribute, not state — the MediaCardCinema
+          // pattern: the ref callback catches a cache hit that completed
+          // before onLoad was attached; naturalWidth guards a 404.
+          className="stage-img-fade w-full h-full object-cover scale-105"
           style={{ objectPosition }}
           loading="eager"
           fetchPriority="high"
           decoding="async"
+          ref={(el) => { if (el && el.complete && el.naturalWidth > 0) el.setAttribute('data-loaded', '') }}
+          onLoad={(e) => e.currentTarget.setAttribute('data-loaded', '')}
           onError={() => setFailed(f => (f.includes(src) ? f : [...f, src]))}
         />
       )}

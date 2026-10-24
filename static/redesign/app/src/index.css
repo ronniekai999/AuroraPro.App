@@ -3353,6 +3353,21 @@ html[data-glow="subtle"] .rail-container {
 html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
   content: none;
 }
+/* Detail art fades in on decode (Stage refresh, DT1): the 58vh DetailHero
+   backdrop and the DetailRail poster used to pop in over their fill whenever
+   the download finished. Same contract as the card posters above — `img.`
+   so nothing that never fires onLoad can match, opacity only (DetailHero's
+   scale-105 utility keeps the transform), a transition rather than an
+   animation, stilled under reduced motion. */
+img.stage-img-fade {
+  transition: opacity 420ms var(--ease-emphasized);
+}
+img.stage-img-fade:not([data-loaded]) {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  img.stage-img-fade { transition: none; }
+}
 /* Skeleton tile (Stage refresh, L1) — SkeletonBlock's surface and motion. A
    slow lavender sweep, the look of the poster sheen above, over the neutral 3%
    fill the tiles always had, replacing Tailwind's animate-pulse opacity throb.
