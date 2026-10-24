@@ -302,6 +302,19 @@
     --dur-slow: 350ms;
     --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
     --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+    /* Entrances (Stage refresh, T1). Things ARRIVING — a view, a menu, a
+       toast, a dialog card — use the emphasized curve: most of the distance
+       is covered early and the last few pixels settle, which reads as quicker
+       than --ease-standard at the same duration. Hover/press feedback stays
+       on --ease-standard. Exits keep --ease-exit at --dur-fast so
+       useExitTransition's 150ms unmount still lands as the animation ends. */
+    --dur-enter: 280ms;
+    --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+    /* A 1px top highlight that makes a dark glass surface read as lit from
+       above. Folded into the --glow-halo tokens (G1) and used directly on the
+       ghost button family; an inset shadow paints under content, so on a
+       poster card it sits beneath the art and changes nothing. */
+    --glass-lip: inset 0 1px 0 rgba(255, 255, 255, 0.06);
     --r-sm: 8px;
     --r-md: 12px;
     --r-lg: 14px;
@@ -2421,7 +2434,7 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 14.5px;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
 }
 /* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
    scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
@@ -2443,7 +2456,9 @@ html[data-glow="subtle"] .stage-upnext {
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
 /* Press feedback. Buttons had hover and focus states and nothing for the
    click itself; a 2% settle is the smallest tactile cue that reads. */
-.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.98); }
+/* .97 over 90ms (Stage refresh, T1): the press lands fast and is felt; the
+   release eases back on the base transition above. */
+.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.97); transition-duration: 90ms; }
 .stage-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
@@ -2452,6 +2467,13 @@ html[data-glow="subtle"] .stage-upnext {
   background: linear-gradient(135deg, var(--stage-purple), var(--stage-purple-2));
   color: #fff;
   box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
+}
+/* The glow brightens under the pointer (T1). `:not(:focus-visible)` because
+   this is (0,4,0) and would otherwise REPLACE the focus ring that
+   .stage-btn:focus-visible draws with box-shadow at (0,2,0) whenever a focused
+   button is also hovered. */
+.stage-btn-primary:not(:disabled):not(:focus-visible):hover {
+  box-shadow: 0 10px 34px rgba(168, 85, 247, 0.6), inset 0 0 0 1px rgba(216, 180, 254, 0.5);
 }
 .stage-btn-ghost {
   background: rgba(255, 255, 255, 0.08);
@@ -2542,8 +2564,13 @@ html[data-glow="subtle"] .badge-glass {
   to { transform: translateX(0); opacity: 1; }
 }
 
+/* 6px, not 10px (Stage refresh, T1): on the emphasized curve the shorter rise
+   reads as arrival rather than travel. The END state is deliberately unchanged —
+   `translateY(0)` held by `forwards` is what keeps every .animate-fade-in root a
+   stacking context, and several notes in this file and in App.tsx reason from
+   that (see .convo-search::before). Do not "tidy" it to `transform: none`. */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -2575,7 +2602,7 @@ html[data-glow="subtle"] .badge-glass {
    `transform: translateY(0)` also outranked the hero's inline parallax
    transform, which is why the hero no longer uses this class. */
 .animate-fade-in {
-  animation: fadeIn 0.4s ease-out forwards;
+  animation: fadeIn var(--dur-enter) var(--ease-emphasized) forwards;
 }
 
 /* Exit animations (UI polish pass). Surfaces that enter with
