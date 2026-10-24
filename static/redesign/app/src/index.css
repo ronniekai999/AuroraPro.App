@@ -1227,6 +1227,40 @@ html[data-glow="subtle"] .stage-topnav {
     linear-gradient(90deg, rgba(5, 5, 5, 0.95) 0%, rgba(5, 5, 5, 0.72) 40%, rgba(5, 5, 5, 0.15) 72%, rgba(5, 5, 5, 0.35) 100%),
     linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
 }
+/* The words change with the art (Stage refresh, H2). HeroSection keys the
+   reason, genre line, title, description and the compact "Featured" line on
+   the pick's id, so a rotation remounts them and they fade up with the
+   backdrop's dissolve instead of snapping. `backwards`, not `both`: the
+   delay needs the from-state, but a held `to { transform: none }` computes
+   to an identity matrix, not `none` (measured), and would leave each line a
+   stacking context it never was. The first mount plays it too, under the
+   page's own .animate-fade-in. */
+.stage-hero-swap {
+  animation: heroTextIn 460ms var(--ease-emphasized) backwards;
+}
+.stage-hero-swap-d1 { animation-delay: 50ms; }
+.stage-hero-swap-d2 { animation-delay: 100ms; }
+@keyframes heroTextIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* The match ring eases to the next pick's score. */
+.stage-hero-ring-arc {
+  transition: stroke-dasharray 700ms var(--ease-emphasized);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-hero-swap,
+  .stage-hero-swap-d1,
+  .stage-hero-swap-d2 {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .stage-hero-ring-arc {
+    transition: none;
+  }
+}
+
 /* Top feather (Stage refresh, H1). The backdrop used to start on a hard line
    right under the greeting; this lets the art rise out of the page instead,
    the same #050505 the bottom fade lands on. A fixed 72px, not a percentage,

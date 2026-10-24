@@ -471,7 +471,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             <circle
               cx="42" cy="42" r="36" fill="none" stroke="url(#heroMatchGradient)"
               strokeWidth="6" strokeLinecap="round"
-              strokeDasharray={`${(matchScore / 100) * matchCircumference} ${matchCircumference}`}
+              // A style, not the attribute, so .stage-hero-ring-arc can ease
+              // the arc to the next pick's score (Stage refresh, H2).
+              className="stage-hero-ring-arc"
+              style={{ strokeDasharray: `${(matchScore / 100) * matchCircumference} ${matchCircumference}` }}
             />
           </svg>
           <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white [text-shadow:0_1px_4px_rgba(0,0,0,0.55)]" aria-hidden="true">
@@ -560,7 +563,16 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 <Icon name="star" size={12} /> Featured
               </span>
             )}
-            <span className="text-white/60 text-sm">
+            {/* Keyed on the title (Stage refresh, H2) so each text line below
+                remounts with its .stage-hero-swap entrance when the pick
+                rotates, instead of snapping while the art dissolves. Text
+                only: the buttons are never keyed, so focus and the CTA
+                handlers are untouched. Each line's key carries its own
+                prefix: the reason, title, "Featured" and description lines
+                are SIBLINGS, and a bare `hero.id` on all of them is a
+                duplicate key, which React answers by leaving stale copies
+                in the DOM — the title rendered three times over. */}
+            <span key={`genre-${hero.id}`} className="stage-hero-swap text-white/60 text-sm">
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
           </div>
@@ -571,7 +583,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p className="text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow">{reason}</p>
+            <p key={`reason-${hero.id}`} className="stage-hero-swap text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow">{reason}</p>
           ) : personalization?.coldStart ? (
             <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
@@ -587,6 +599,8 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             const Heading = titleAs
             return (
               <Heading
+                // The page name in compact never changes; the title does.
+                key={compact ? 'page-title' : `title-${hero.id}`}
                 // line-clamp is load-bearing at this size, not tidiness.
                 // .type-hero is 84px at line-height .94 ≈ 79px per line, and
                 // this column is bottom-anchored inside the root's
@@ -607,7 +621,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                     // home hero held 48px from 640px to 1023px while the browse
                     // band went to 52px at 768px, so the browse page's title
                     // was BIGGER than the hero's on every tablet-width screen.
-                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
+                    : 'stage-hero-swap stage-hero-swap-d1 text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
                 }
               >
                 {compact ? (pageTitle ?? hero.title) : hero.title}
@@ -623,14 +637,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               clips the eyebrow off the top (the column is bottom-anchored
               inside overflow-hidden). */}
           {compact && (
-            <p className="text-white/70 text-sm mb-2.5 line-clamp-1">
+            <p key={`featured-${hero.id}`} className="stage-hero-swap text-white/70 text-sm mb-2.5 line-clamp-1">
               <span className="text-white/50">Featured: </span>
               <span className="text-white font-semibold">{hero.title}</span>
               {countLabel ? <span className="text-white/50"> — {countLabel}</span> : null}
             </p>
           )}
           {!compact && hero.description && (
-            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
+            <p key={`desc-${hero.id}`} className="stage-hero-swap stage-hero-swap-d2 text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
           )}
           {/* This row DOES keep `flex-wrap`, and unlike the row above it cannot
               misfire at tablet widths: it lives inside the `max-w-2xl` column, and
