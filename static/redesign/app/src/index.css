@@ -3046,8 +3046,10 @@ html[data-glow="subtle"] .rail-container {
   width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  /* No radius — the card clips. See the .poster-wrap note above. */
-  transition: transform 0.5s var(--ease-standard), opacity var(--dur-base) var(--ease-standard);
+  /* No radius — the card clips. See the .poster-wrap note above.
+     Emphasized timings (Stage refresh, C2): the decode fade and the 1.04 → 1
+     settle below arrive together, then the slower transform finishes the move. */
+  transition: transform 0.7s var(--ease-emphasized), opacity 420ms var(--ease-emphasized);
 }
 /* Fade-in on decode: invisible until the <img> sets data-loaded (see
    MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
@@ -3057,6 +3059,50 @@ html[data-glow="subtle"] .rail-container {
    does not apply; the reduced-motion block still stills it. */
 .media-card-cinema img.poster-img:not([data-loaded]) {
   opacity: 0;
+  /* Starts a touch large and settles as it fades in (C2). (0,3,1), so it also
+     outranks the (0,3,0) hover scale while the art is still in flight. A cache
+     hit is marked loaded by the ref callback before first paint, so it never
+     plays this. */
+  transform: scale(1.04);
+}
+/* Loading sheen (C2). The decode fade used to start from the card's flat fill,
+   so a slow poster read as an empty box. While the <img> is pending its wrap
+   carries a slow lavender sweep, and the art fades in over it. `:has()` keys it
+   to the image's own state, so the posterless placeholder (a <div>, never
+   pending) and a loaded card have none. Without :has() support the rule is
+   dropped and the old fade remains.
+
+   COST, measured after a review. The first cut animated the wrap's
+   `background-position`, which repaints on the main thread every frame, and ran
+   it `infinite`: a lazy poster in an off-screen rail position is never
+   requested, so it never loads, so its sheen never stopped — 16-51 of them on an
+   idle Home, ~350ms of main-thread time every 3s. Now:
+     - the band is a `::before` moved by `transform`, which the compositor
+       animates without main-thread paints;
+     - it sweeps 3 times (~5s) and then rests off the left edge, invisible. CSS
+       cannot tell an off-screen or never-requested image from a slow one, so
+       the bound is what stops the off-screen ones; a poster still pending after
+       that shows the card's flat fill, as before C2;
+     - Glow = Subtle (html[data-glow="subtle"], the weak-GPU setting) drops it.
+   `::before`, not `::after`: positioned and first in tree order, it paints over
+   the pending (transparent) <img> but under the card's badges and text. The
+   wrap is already `position: relative`; the card's `overflow: hidden` clips the
+   band while it waits off the edge. */
+.media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.07) 50%, rgba(216, 180, 254, 0) 70%);
+  transform: translateX(-100%);
+  animation: posterSweep 1.6s var(--ease-standard) 3;
+}
+@keyframes posterSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
+  content: none;
 }
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
    own 9px corners clipped against the wrap's edge. Phase 3 removed the
@@ -3248,8 +3294,16 @@ html[data-glow="subtle"] .rail-container {
   /* Its own rule: a browser without :has() drops a whole selector list that
      contains one, which took the hover and focus nulls above down with it. */
   .media-card-cinema:active:not(:has(button:active)) { transform: none; }
-  .media-card-cinema:hover .poster-img { transform: none; }
+  .media-card-cinema:hover .poster-img,
+  .media-card-cinema img.poster-img:not([data-loaded]) { transform: none; }
   .media-card-cinema .poster-img { transition: none; }
+  /* The loading sheen stops, resting off the edge; the pending wrap is just
+     the card's own fill. The SAME selector as the rule it nulls, not a shorter
+     `.poster-wrap` one: the `:has(…)` argument makes that rule (0,4,2), so a
+     shorter null here would lose and the sheen would keep running.
+     audit-reduced-motion matches class names, not specificity, and reported the
+     shorter form as covered. */
+  .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before { animation: none; }
   .media-card-cinema .ai-gem { transition: none; }
   .media-card-cinema .ai-gem:hover { transform: none; }
   .media-card-cinema .reason-scrim { transform: none; transition: opacity var(--dur-base) var(--ease-standard); }
