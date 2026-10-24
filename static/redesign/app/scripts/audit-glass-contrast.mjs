@@ -187,6 +187,59 @@ function twAlpha(file, anchor, cls) {
   return Number(m[1]) / 100
 }
 
+/** The JSX opening tag holding `anchor` in `file` — the same scoping twAlpha
+ *  uses (walk back to this element's `<`, forward to its closing `>`, skipping
+ *  quotes and braces), factored out for the two lookups below. */
+function tagOf(file, anchor) {
+  const src = read(file)
+  const i = src.indexOf(anchor)
+  if (i < 0) throw new Error(`audit: anchor not found in ${file}: ${anchor}`)
+  if (src.indexOf(anchor, i + 1) >= 0) {
+    throw new Error(`audit: anchor "${anchor}" is not unique in ${file} — it cannot identify one element`)
+  }
+  const start = src.lastIndexOf('<', i)
+  if (start < 0) throw new Error(`audit: anchor "${anchor}" is not inside a JSX tag in ${file}`)
+  let end = -1, depth = 0, quote = null
+  for (let k = start; k < src.length; k++) {
+    const c = src[k]
+    if (quote) { if (c === '\\') { k++; continue } if (c === quote) quote = null; continue }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue }
+    if (c === '{') depth++
+    else if (c === '}') depth--
+    else if (c === '>' && depth === 0) { end = k; break }
+  }
+  if (end < 0) throw new Error(`audit: could not find the end of the tag holding "${anchor}" in ${file}`)
+  return src.slice(start, end + 1)
+}
+
+/** A `:root` custom property from index.css, as a colour. The text-secondary
+ *  token is what the AA fixes in this codebase reach for, so a surface styled
+ *  with `text-[color:var(--x)]` has to be measurable without restating the value. */
+function rootToken(name) {
+  const m = css.match(new RegExp(String.raw`\n\s*${name.replace(/[-]/g, '\\-')}\s*:\s*([^;]+);`))
+  if (!m) throw new Error(`audit: ${name} is not defined in ${CSS} — the audit is out of date, not passing`)
+  return parseColor(m[1])
+}
+
+/** The text colour an element's OWN tag sets: `text-white/NN`, or a token via
+ *  `text-[color:var(--x)]`. Returns { rgb, a }. Dies when the tag sets neither,
+ *  rather than guessing an inherited colour. */
+function twText(file, anchor) {
+  const tag = tagOf(file, anchor)
+  const tok = tag.match(/(?:^|[\s"'`{])text-\[color:var\((--[\w-]+)\)\]/)
+  if (tok) return rootToken(tok[1])
+  const w = tag.match(/(?:^|[\s"'`{])text-white\/(\d+)/)
+  if (w) return { rgb: W, a: Number(w[1]) / 100 }
+  throw new Error(`audit: no text-white/N or text-[color:var(--…)] on the element anchored by "${anchor}" in ${file}`)
+}
+
+/** An arbitrary-colour fill on an element's own tag: `bg-[#rrggbb]/NN`. */
+function twFill(file, anchor) {
+  const m = tagOf(file, anchor).match(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)/)
+  if (!m) throw new Error(`audit: no bg-[#…]/N on the element anchored by "${anchor}" in ${file}`)
+  return { rgb: hex(m[1]), a: Number(m[2]) / 100 }
+}
+
 // The page ink, derived from the app root's own utility rather than from CSS:
 // `.aurora-bg` sets only the radial tint layers, and the opaque base is
 // `bg-[#050505]` on the root element in App.tsx. Reading the wrong one is how a
@@ -235,6 +288,18 @@ const ONB_INK = (() => {
   if (!m) throw new Error('audit: onboarding overlay no longer carries its own bg-[#…] base — the audit is out of date, not passing')
   return hex(m[1])
 })()
+
+// The search palette (Stage refresh audit-gap fix). Its secondary text sat at
+// 2.59:1 and 3.77:1 for as long as the palette existed and this script passed,
+// because this script measures ONLY the surfaces listed in SURFACES below and
+// the palette was never listed — the same structural blind spot this file's
+// header describes for the on-art audit and the vibe bar. Its backdrop is two
+// composites deep, both read from the component: the full-viewport scrim over
+// the page ink, then the panel's own fill.
+const PAL = 'src/components/SearchPalette.tsx'
+const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
+const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
+const onPalette = () => stack(PAL_PANEL, PAL_SCRIM)
 
 const SURFACES = [
   // ── The referral step. A one-shot question with a Skip, so every control
@@ -293,6 +358,45 @@ const SURFACES = [
     alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-purple-100'),
     px: 11,
     on: () => stack(CONVO).map(bg => over(hex('#a855f7'), twAlpha(APP, 'aria-label="Search"', 'bg-purple-500'), bg)),
+  },
+  // ── The search palette. ──
+  {
+    what: 'palette query placeholder', where: `${PAL} (combobox)`,
+    color: W, alpha: () => twAlpha(PAL, 'placeholder="Search Aurora', 'placeholder-white'),
+    px: 16, on: onPalette,
+  },
+  {
+    what: 'palette "Esc" hint', where: `${PAL} (header kbd)`,
+    color: () => twText(PAL, 'uppercase tracking-wider text-[color:').rgb,
+    alpha: () => twText(PAL, 'uppercase tracking-wider text-[color:').a,
+    px: 10, on: onPalette,
+  },
+  {
+    what: 'palette empty-state line', where: `${PAL} (empty query)`,
+    color: () => twText(PAL, 'Start typing to search').rgb,
+    alpha: () => twText(PAL, 'Start typing to search').a,
+    px: 14, on: onPalette,
+  },
+  {
+    what: 'palette "Try a title…" hint', where: `${PAL} (empty query)`,
+    color: () => twText(PAL, 'Try <span').rgb, alpha: () => twText(PAL, 'Try <span').a,
+    px: 12, on: onPalette,
+  },
+  {
+    what: 'palette key legend', where: `${PAL} (empty query)`,
+    color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
+    alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
+    px: 11, on: onPalette,
+  },
+  {
+    what: 'palette no-match hint', where: `${PAL} (no results)`,
+    color: () => twText(PAL, 'Check spelling or try').rgb, alpha: () => twText(PAL, 'Check spelling or try').a,
+    px: 12, on: onPalette,
+  },
+  {
+    what: 'palette result meta', where: `${PAL} (result row)`,
+    color: () => twText(PAL, '{m.year > 0 &&').rgb, alpha: () => twText(PAL, '{m.year > 0 &&').a,
+    px: 12, on: onPalette,
   },
 ]
 
