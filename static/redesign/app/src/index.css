@@ -2617,9 +2617,11 @@ html[data-glow="subtle"] .badge-glass {
    Dropping the blur is the whole of the blur budget's ask; the fills are
    already opaque enough to stand without it. */
 
-@keyframes slideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+/* Toast entrance (Stage refresh, D3): rises 14px into the place it rests,
+   instead of travelling the whole width of the screen in from the right. */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to { opacity: 1; transform: none; }
 }
 
 /* 6px, not 10px (Stage refresh, T1): on the emphasized curve the shorter rise
@@ -2644,7 +2646,8 @@ html[data-glow="subtle"] .badge-glass {
    and the chromaticShift / float / pulse-glow / shimmer keyframes, plus
    .holo-text, .media-card (the pre-cinema card), .card-actions, .action-btn,
    .status-dot, .text-gradient and .glow-text. None had a consumer in the
-   SPA. slideIn stays: .toast uses it. */
+   SPA. (slideIn stayed for .toast until the Stage refresh replaced it with
+   toastIn.) */
 
 /* 2026-05-26 — fill-mode: forwards. Without it, animation-fill-mode
    defaults to "none" and the element snaps BACK to its un-animated state
@@ -2665,7 +2668,7 @@ html[data-glow="subtle"] .badge-glass {
 
 /* Exit animations (UI polish pass). Surfaces that enter with
    .animate-fade-in get `.is-closing` from useExitTransition for the last
-   --dur-fast before they unmount; the toast, which enters with slideIn,
+   --dur-fast before they unmount; the toast, which enters with toastIn,
    gets `.is-leaving`. Both are declared AFTER the enter rules so the exit
    wins the `animation` shorthand at equal specificity, and both animate to
    opacity 0 with `forwards` so the surface cannot flash back to full
@@ -2676,16 +2679,19 @@ html[data-glow="subtle"] .badge-glass {
   from { opacity: 1; }
   to { opacity: 0; }
 }
-@keyframes slideOut {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(100%); opacity: 0; }
+/* Leaves by drifting 18px right as it fades (D3) — a nod to the corner it came
+   from, without the full-width slide. --dur-base matches Toast.tsx's 220ms
+   removal timer. */
+@keyframes toastOut {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateX(18px); }
 }
 .animate-fade-in.is-closing {
   animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
   pointer-events: none;
 }
 .toast.is-leaving {
-  animation: slideOut var(--dur-base) var(--ease-exit) forwards;
+  animation: toastOut var(--dur-base) var(--ease-exit) forwards;
   pointer-events: none;
 }
 
@@ -3908,21 +3914,29 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.02);
 }
 
-/* Toast */
+/* Toast (Stage refresh, D3). Aurora's glass instead of a neutral #111 card:
+   the card gradient, the glow border, the glass lip, and a soft glow tinted by
+   the toast's type (Toast.tsx stamps data-type). The message is white/80 on a
+   near-opaque dark fill, so the text contrast does not depend on what is behind. */
 .toast {
-  background: rgba(17, 17, 17, 0.95);
+  background: linear-gradient(180deg, rgba(28, 25, 42, 0.94), rgba(14, 12, 22, 0.96));
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 14px 20px;
-  border-radius: var(--r-md);
+  border: 1px solid var(--glow-border);
+  padding: 12px 14px 12px 12px;
+  border-radius: var(--r-lg);
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow:
+    var(--glass-lip),
+    0 18px 44px -12px rgba(0, 0, 0, 0.75),
+    0 0 30px -10px var(--toast-glow, rgba(168, 85, 247, 0.45));
   /* forwards: holds the "to" frame so a re-render can never snap the toast
-     back to its off-screen "from" (the same defence .animate-fade-in has). */
-  animation: slideIn 0.3s ease forwards;
+     back to its "from" (the same defence .animate-fade-in has). */
+  animation: toastIn 320ms var(--ease-emphasized) forwards;
 }
+.toast[data-type="success"] { --toast-glow: rgba(16, 185, 129, 0.4); }
+.toast[data-type="error"] { --toast-glow: rgba(239, 68, 68, 0.4); }
 
 /* ====================================================================
    LIBRARY HYBRID REDESIGN (2026-05-31) — Movies / TV Shows browse page.
@@ -4364,13 +4378,13 @@ textarea:focus-visible {
   .animate-pulse,
   .animate-spin,
   .stage-skel::before,
-  /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
+  /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn (now toastIn) include a
      translateY/translateX, i.e. real motion, and were missed by the sweep
      above. The gap is old; the blast radius is new, because the nav now
      applies .animate-fade-in to the avatar dropdown and the mobile menu
      sheet — the primary navigation of every phone session.
 
-     `.toast` is slideIn's only remaining owner (the unused
+     `.toast` is toastIn's only owner (slideIn's, before the Stage refresh; the unused
      .animate-slide-in utility was removed with the dead CSS), and the
      audit's coverage check had been satisfied by that utility's entry, not
      by the toast — so the toast slid under reduced motion. Nulled here.

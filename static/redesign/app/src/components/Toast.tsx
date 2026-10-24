@@ -49,7 +49,7 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
   const [paused, setPaused] = useState(false)
   // Exit: the toast used to vanish in one frame when its timer fired or the
   // × was clicked (App's removeToast filters it out of the array). It now
-  // plays .toast.is-leaving (slideOut, --dur-base) and asks to be removed
+  // plays .toast.is-leaving (toastOut, --dur-base) and asks to be removed
   // when that has run. App still owns removal; this only delays the ask.
   // Under prefers-reduced-motion the exit is nulled in CSS and skipped here.
   const [leaving, setLeaving] = useState(false)
@@ -70,6 +70,8 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
   return (
     <div
       className={`toast${leaving ? ' is-leaving' : ''}`}
+      // Styling hook only: index.css tints the toast's glow by type.
+      data-type={t.type}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
