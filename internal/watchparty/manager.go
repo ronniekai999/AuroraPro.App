@@ -556,10 +556,13 @@ type Manager struct {
 	// on m.mu.
 	shareCacheInvalidator atomic.Pointer[func(code string)]
 
-	// onReelForTest, when set, sees the title id and name each ending
-	// party's highlight reel is handed, before anything can skip the reel.
-	// Tests only; set it before any party ends.
-	onReelForTest func(mediaItemID int64, mediaTitle string)
+	// onReelForTest, when set, sees the title id, episode and name each
+	// ending party's highlight reel is handed, before anything can skip the
+	// reel. onReelSourceForTest sees the source file the reel resolved for
+	// them ("" when there is none), before the file is opened. Tests only;
+	// set them before any party ends.
+	onReelForTest       func(mediaItemID int64, episodeID *int64, mediaTitle string)
+	onReelSourceForTest func(srcPath string)
 
 	// M9/M1 — server-lifecycle context for parent-of background work
 	// (highlight-reel ffmpeg jobs, daily reaper). On SIGTERM this
@@ -1937,9 +1940,10 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// Mark inactive in DB, recording the final title when it still exists
 	// (see EndWatchPartyOn).
 	reelMediaID, reelTitle := int64(0), ""
+	var reelEpisodeID *int64
 	if dbID > 0 {
 		var err error
-		reelMediaID, reelTitle, err = m.queries.EndWatchPartyOn(context.Background(), dbID, mediaIDAtEnd, episodeIDAtEnd, mediaTitleAtEnd, mediaPosterAtEnd)
+		reelMediaID, reelEpisodeID, reelTitle, err = m.queries.EndWatchPartyOn(context.Background(), dbID, mediaIDAtEnd, episodeIDAtEnd, mediaTitleAtEnd, mediaPosterAtEnd)
 		if err != nil {
 			slog.Warn("failed to end party in DB", "error", err)
 		}
@@ -1958,7 +1962,7 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	// It is cut from the title the row ended on, not the one in memory:
 	// its gate reads the row, so the two must name the same title on every
 	// path, including the ones where the final title could not be recorded.
-	m.generateHighlightReelAsync(code, reactionsForReel, reelMediaID, hostForReel, reelTitle, dbID)
+	m.generateHighlightReelAsync(code, reactionsForReel, reelMediaID, reelEpisodeID, hostForReel, reelTitle, dbID)
 
 	// M3 room lifecycle: persistent rooms survive the session end (touch
 	// last_active_at so the "My Rooms" list orders correctly). Non-persistent
@@ -2263,9 +2267,9 @@ type highlightMoment struct {
 //
 // Called from endPartyInternal AFTER the ps.mu lock is released so the
 // long-running ffmpeg job doesn't block other parties.
-func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID, hostUserID int64, mediaTitle string, partyDBID int64) {
+func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID int64, episodeID *int64, hostUserID int64, mediaTitle string, partyDBID int64) {
 	if m.onReelForTest != nil {
-		m.onReelForTest(mediaItemID, mediaTitle)
+		m.onReelForTest(mediaItemID, episodeID, mediaTitle)
 	}
 	m.mu.RLock()
 	dir := m.highlightCacheDir
@@ -2305,9 +2309,14 @@ func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRe
 		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 		defer cancel()
 
-		srcPath := queries.GetAnyFilePath(ctx, mediaItemID)
+		// The file the reactions were made on: a show's own episode, never
+		// the series' first one (see ReelSourcePath).
+		srcPath := queries.ReelSourcePath(ctx, mediaItemID, episodeID)
+		if m.onReelSourceForTest != nil {
+			m.onReelSourceForTest(srcPath)
+		}
 		if srcPath == "" {
-			slog.Warn("highlight reel: no source file for media", "code", code, "media_id", mediaItemID)
+			slog.Warn("highlight reel: no source file for media", "code", code, "media_id", mediaItemID, "episode_id", episodeID)
 			return
 		}
 		if _, err := os.Stat(srcPath); err != nil {
@@ -2921,6 +2930,15 @@ func (m *Manager) ChangeMedia(code string, callerUserID int64, callerProfile *mo
 		return errUser("only the host can change media")
 	}
 
+	// Reactions are positions on the timeline of the title they were sent
+	// on. A different title (or episode: a show's id is the series, so the
+	// episode is what changes on an advance) starts a new timeline, and
+	// carrying the old one's reactions over would cut the reel from the new
+	// file at moments that belong to the old one, and paint them on its
+	// seekbar. A re-sent change to the same title keeps them.
+	if ps.MediaItemID != newMediaItemID || !sameEpisode(ps.EpisodeID, newEpisodeID) {
+		ps.Reactions = nil
+	}
 	// Reset playback to a fresh-party state. V3 model: Paused at anchor=0,
 	// tick loop stopped. Host's next request-play kicks off the new media.
 	ps.MediaItemID = newMediaItemID
@@ -2966,6 +2984,15 @@ func (m *Manager) ChangeMedia(code string, callerUserID int64, callerProfile *mo
 	})
 
 	return nil
+}
+
+// sameEpisode reports whether two optional episode ids name the same episode
+// (both absent counts as the same).
+func sameEpisode(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // ============================================================
