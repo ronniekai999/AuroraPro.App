@@ -948,10 +948,13 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               disabled={recsRefreshing}
               title="Refresh picks — rebuild your AI-curated Discover rails"
               aria-label="Refresh picks — rebuild your AI-curated Discover rails"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              // Icon-only below sm (Stage refresh, H3): the label goes
+              // sr-only and the aria-label/title still name it; the spinning
+              // glyph still shows a refresh in flight.
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
-              {recsRefreshing ? 'Refreshing…' : 'Refresh picks'}
+              <span className="max-sm:sr-only">{recsRefreshing ? 'Refreshing…' : 'Refresh picks'}</span>
             </button>
           )}
           {onSurprise && (
@@ -959,9 +962,9 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
-              <Icon name="sparkle" size={15} /> Surprise me
+              <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>
           )}
         </div>
