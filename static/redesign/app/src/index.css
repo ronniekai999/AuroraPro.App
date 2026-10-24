@@ -799,6 +799,23 @@
   backdrop-filter: blur(12px);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
+/* Aurora hairline (Stage refresh, N4). Once content scrolls under the bar its
+   bottom edge picks up a faint purple-to-cyan line, fading in over the grey
+   border — the same pair the active-tab underline uses. Opacity only, so there
+   is no motion to still. Absolute against the bar's own `position: relative`. */
+.stage-topnav::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.5) 26%, rgba(34, 211, 238, 0.4) 74%, transparent);
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease-standard);
+}
+.stage-topnav[data-scrolled]::after { opacity: 1; }
 @media (min-width: 768px) {
   /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
      and the first version of the phase missed it: at a flat 30px the logo and nav
