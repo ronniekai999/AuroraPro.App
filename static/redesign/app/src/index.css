@@ -2109,6 +2109,8 @@ html[data-glow="subtle"] .stage-toolbar {
   background: rgba(3, 3, 5, 0.72);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+  /* Fades in under the opening theater (Stage refresh, P2). */
+  animation: veilIn 260ms var(--ease-standard) backwards;
 }
 html[data-glow="subtle"] .stage-dim-veil {
   backdrop-filter: none;
@@ -2155,6 +2157,33 @@ html[data-glow="subtle"] .stage-dim-veil {
   border: 1px solid rgba(220, 200, 255, 0.2);
   box-shadow: var(--glow-halo-strong), 0 40px 100px rgba(0, 0, 0, 0.8);
   background: #000;
+  /* The theater opens (Stage refresh, P2): a 340ms rise from .985 instead of
+     appearing in one frame; the veil behind it fades in (veilIn). TRANSFORM
+     ONLY: VideoPlayer swaps this class out in fullscreen and back in on
+     leaving it, so the entrance replays on every fullscreen exit, and the
+     first cut also faded the box from opacity 0 — the picture blanked for
+     ~340ms each time. A replayed rise of 8px just reads as the box settling
+     back into place. `backwards`, never `both` or `forwards`: a held `to`
+     transform computes to an identity matrix, which would make this box the
+     containing block for any `position: fixed` descendant for as long as the
+     player is open. Nothing inside it is fixed today (measured; the party
+     overlays mount in App, outside the player) — the fill keeps it that way
+     after the 340ms. */
+  animation: theaterIn 340ms var(--ease-emphasized) backwards;
+}
+@keyframes theaterIn {
+  from { transform: translateY(8px) scale(0.985); }
+  to { transform: none; }
+}
+@keyframes veilIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-theater,
+  .stage-dim-veil {
+    animation: none;
+  }
 }
 /* Full-bleed below lg. 90px of inset per side leaves 195px of picture on a
    375px screen — the theater framing is a desktop affordance, and on a phone
