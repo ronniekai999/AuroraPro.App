@@ -4890,16 +4890,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // the stable primitive fields the effect's body actually reads at
   // bind time, plus `Boolean(party)` so the effect still re-runs when
   // the party transitions null↔active. Everything the bound event
-  // handlers reference at event time — requestPlay/requestPause/
-  // requestSeek (stable useCallbacks over a no-dep sendOrBuffer in
-  // useParty) and tickRef/clockOffsetRef (stable useRefs) — keeps
-  // working across renders without a rebind. cast.status.connected is added
+  // handlers reference at event time — tickRef/clockOffsetRef (stable
+  // useRefs) — keeps working across renders without a rebind. The request*
+  // callbacks are bound to a party code, so refresh the listeners when those
+  // change even if the new party has the same title and role.
+  // cast.status.connected is added
   // so the local↔receiver handoff above (bail while cast owns sync) rebinds
   // this effect at exactly the moment a cast session starts or ends —
   // otherwise the bail check would only be re-evaluated on the next
   // unrelated re-bind, briefly running both sync effects at once.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, videoElement, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, party?.partyEpisodeId, cast.status.connected])
+  }, [target, videoElement, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, party?.partyEpisodeId, party?.requestPlay, party?.requestPause, party?.requestSeek, cast.status.connected])
 
   // M10 Phase 4 (receiver extension, issue #461 follow-up) — party sync
   // while a Chromecast receiver is the active playback surface. Mutually
@@ -5493,12 +5494,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return () => window.clearInterval(id)
   // Same coarse-dependency reasoning as the local-video sync effect above:
   // party/cast internals are read live through castRef/party's own stable
-  // refs+callbacks, so the effect only needs to rebind on the handful of
+  // refs, while party-bound request callbacks must refresh on a party switch.
+  // The effect also needs to rebind on the handful of
   // primitive signals that change its BEHAVIOR (host/guest role, party
   // transitioning null↔active, the party's media changing, target
   // identity, and the local↔receiver handoff itself).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
+  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, party?.requestPlay, party?.requestPause, party?.requestSeek, cast.status.connected])
 
   // Host cast→local handoff (2026-08 review fix, issue #461 follow-up).
   //

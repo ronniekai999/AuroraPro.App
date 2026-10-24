@@ -173,6 +173,54 @@ it('never sends an intent issued while no party is active', async () => {
   unmount()
 })
 
+// Retained callbacks model player events queued before its old binding is
+// cleaned up. They must carry the originating party even after join completes.
+it.each(['connecting', 'open'])('drops old player requests when the new party sync socket is %s', async status => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  await joinWithClosedSync(result, 'AAAAAA')
+  const oldPlayer = result.current
+  const second = await joinWithClosedSync(result, 'BBBBBB')
+  if (status === 'open') act(() => { second.sync.open() })
+
+  act(() => {
+    result.current.requestSeek(42_000)
+    result.current.requestPause(42_000)
+  })
+  const pending = result.current.__pendingSyncIntentsForTests()
+  const sent = [...intents(second.sync)]
+  act(() => {
+    oldPlayer.requestPlay()
+    oldPlayer.requestPause(7_000)
+    oldPlayer.requestSeek(9_000)
+  })
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual(pending)
+  expect(intents(second.sync)).toEqual(sent)
+
+  if (status === 'connecting') act(() => { second.sync.open() })
+  expect(intents(second.sync)).toEqual([
+    { type: 'request-seek', payload: { to_ms: 42_000 } },
+    { type: 'request-pause', payload: { at_ms: status === 'connecting' ? -1 : 42_000 } },
+  ])
+  act(() => { result.current.requestPlay() })
+  expect(intents(second.sync).at(-1)).toEqual({ type: 'request-play' })
+  unmount()
+})
+
+it('drops a callback created without a party after a party becomes active', async () => {
+  const { result, unmount } = renderHook(() => useParty(1))
+  const unboundPlayer = result.current
+  const only = await joinWithClosedSync(result, 'AAAAAA')
+  act(() => { only.sync.open() })
+  act(() => {
+    unboundPlayer.requestPlay()
+    unboundPlayer.requestPause(7_000)
+    unboundPlayer.requestSeek(9_000)
+  })
+  expect(result.current.__pendingSyncIntentsForTests()).toEqual({})
+  expect(intents(only.sync)).toEqual([])
+  unmount()
+})
+
 it('still flushes an intent buffered for the party it belongs to', async () => {
   const { result, unmount } = renderHook(() => useParty(1))
   const only = await joinWithClosedSync(result, 'AAAAAA')

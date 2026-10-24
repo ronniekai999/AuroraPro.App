@@ -1309,21 +1309,20 @@ export function useParty(currentUserId?: number): UseParty {
   // buffered in its own slot so a later play/pause can't clobber it
   // (2026-06 review, bug 3); within each slot the newest intent wins.
   const sendOrBuffer = useCallback((msg: OutboundSyncMessage) => {
+    // Bind requests to the party rendered with the player. A queued event
+    // from its old binding must neither send nor buffer in a newer party.
+    if (!state.code || state.code !== activeCodeRef.current) return
     const ws = syncWsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify(msg)) } catch { /* defensive */ }
       return
     }
-    // PARTY-9 — with no party being joined or in, there is no party for
-    // the intent to belong to, and buffering it would hand it to whichever
-    // party is joined next.
-    if (!activeCodeRef.current) return
     if (msg.type === 'request-seek') {
       pendingSyncIntentRef.current.seek = msg
     } else {
       pendingSyncIntentRef.current.playPause = msg
     }
-  }, [])
+  }, [state.code])
   const requestPlay = useCallback(() => {
     sendOrBuffer({ type: 'request-play' })
   }, [sendOrBuffer])
