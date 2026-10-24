@@ -215,7 +215,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   return (
     <div
-      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 stage-scrim-in${exit.closing ? ' is-closing' : ''}`}
       onClick={(e) => {
         // Click outside the panel closes. The backdrop below is a
         // covering child, so target !== currentTarget for backdrop
@@ -245,7 +245,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         // `stage-palette`: index.css resets the global input treatment inside
         // this panel and draws the focus indicator on the panel itself — see
         // the note on the input below.
-        className="stage-palette relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden"
+        className="stage-palette relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden stage-dialog-in"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"

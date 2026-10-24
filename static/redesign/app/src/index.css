@@ -2817,6 +2817,40 @@ html[data-glow="subtle"] .badge-glass {
   pointer-events: none;
 }
 
+/* The backdrop fades; the dialog rises (Stage refresh, D1). Modal wrappers
+   used to carry .animate-fade-in, so the whole overlay — scrim included —
+   slid up 6px with the card. Now the wrapper only fades (.stage-scrim-in)
+   and the card rises 12px from .965 (.stage-dialog-in) on the emphasized
+   curve. The scrim holds opacity 1 with `forwards` exactly as fadeIn did, so
+   an inline opacity on a wrapper is overridden no more and no less than
+   before. Every wrapper is a fixed, z-indexed inset-0 box, so dropping
+   fadeIn's held translateY(0) changes neither its stacking context nor the
+   containing block of anything fixed inside it. The card's keyframes are
+   transform-only (the wrapper's fade carries its opacity) and fill
+   `backwards`, NOT `both`: a held `to { transform: none }` computes to an
+   identity matrix, not `none` (measured), so `both` would leave every card a
+   stacking context and a containing block for fixed descendants for good.
+   `backwards` lets the card fall back to its own style once the rise ends.
+   The scrim's exit reuses fadeOut over --dur-fast. */
+@keyframes scrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dialogIn {
+  from { transform: translateY(12px) scale(0.965); }
+  to { transform: none; }
+}
+.stage-scrim-in {
+  animation: scrimIn var(--dur-enter) var(--ease-standard) forwards;
+}
+.stage-scrim-in.is-closing {
+  animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+.stage-dialog-in {
+  animation: dialogIn var(--dur-enter) var(--ease-emphasized) backwards;
+}
+
 /* Menus open from the button that owns them (Stage refresh, N2): the avatar
    menu, the phone menu sheet and the server / notification panels scale up
    from their trigger's corner instead of rising from below it. The primitive
@@ -4568,6 +4602,13 @@ textarea:focus-visible {
      so stilled they are simply visible. */
   .animate-pop-in,
   .animate-pop-in.is-closing {
+    animation: none !important;
+  }
+  /* D1's dialogs: the scrim and card appear in place. Neither sets a base
+     opacity 0 or transform, so stilled they rest at their author style. */
+  .stage-scrim-in,
+  .stage-scrim-in.is-closing,
+  .stage-dialog-in {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than

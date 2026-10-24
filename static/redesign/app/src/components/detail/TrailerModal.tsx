@@ -34,14 +34,14 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-fade-in"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 stage-scrim-in"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-label={title ? `${title} — Trailer` : 'Trailer'}
     >
       <div
-        className="relative w-full max-w-[min(92vw,1100px)] aspect-video rounded-2xl overflow-hidden bg-black shadow-2xl ring-1 ring-white/10"
+        className="relative w-full max-w-[min(92vw,1100px)] aspect-video rounded-2xl overflow-hidden bg-black shadow-2xl ring-1 ring-white/10 stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* referrerPolicy overrides the SPA's `Referrer-Policy: no-referrer`

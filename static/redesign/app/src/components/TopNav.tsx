@@ -485,7 +485,7 @@ function MobileSheet({
           menu button that closes this, the avatar, search — stay lit and
           tappable, the way the old drawer kept its hamburger reachable. */}
       <div
-        className={`fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden animate-fade-in${closing ? ' is-closing' : ''}`}
+        className={`fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden stage-scrim-in${closing ? ' is-closing' : ''}`}
         style={{ top: 'var(--chrome-h, var(--topnav-h))' }}
         onClick={onClose}
         aria-hidden="true"

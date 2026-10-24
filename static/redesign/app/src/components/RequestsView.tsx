@@ -213,8 +213,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       {/* Phase 4.6 — TMDB search + create dialog. Small modal so
           users don't lose scroll position in the requests list. */}
       {createExit.mounted && (
-        <div className={`fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 pt-20 animate-fade-in${createExit.closing ? ' is-closing' : ''}`} onClick={() => setCreateOpen(false)}>
-          <div className="w-full max-w-xl bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[80vh] flex flex-col overscroll-contain" onClick={e => e.stopPropagation()}>
+        <div className={`fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 pt-20 stage-scrim-in${createExit.closing ? ' is-closing' : ''}`} onClick={() => setCreateOpen(false)}>
+          <div className="w-full max-w-xl bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[80vh] flex flex-col overscroll-contain stage-dialog-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-white text-lg font-semibold">Request a Movie or TV Show</h2>
               <button onClick={() => setCreateOpen(false)} className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center">×</button>
