@@ -133,7 +133,7 @@ import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefre
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
-import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
+import { DetailSkeleton, GridSkeleton, HeroSkeleton, RailSkeleton, SkeletonBlock } from '@/components/Skeletons'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -795,6 +795,11 @@ interface HomeViewProps {
   // Cold-start hint info — passed through from the /api/me/hero response.
   // null = unknown (initial load); set when the response lands.
   heroPersonalization?: HeroPersonalization | null
+  // True while Home still expects a pick (Stage refresh, L2): the core
+  // rails, whose arrival sets the catalog fallback when the pool has none,
+  // have not landed and have not failed. Draws the hero skeleton; false with
+  // no hero is the settled no-pick state, drawn static.
+  heroLoading?: boolean
   // My Library + button on cards. Set of saved IDs for fast O(1) lookup
   // per render; callback toggles membership when the user clicks +.
   libraryIds?: Set<number>
@@ -855,7 +860,7 @@ interface HomeViewProps {
   onRefreshRecs?: () => void
   recsRefreshing?: boolean
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -963,6 +968,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
       </div>
       <HeroSection
         hero={hero}
+        loading={heroLoading}
         onPlay={onPlay}
         onInfo={onSelect}
         reason={heroReason}
@@ -1144,6 +1150,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           which had the bar OVERLAPPING the placeholder — and the placeholder's
           content is centred, so there is nothing at its bottom edge to crowd — but
           the formula above is not unconditional and was written as if it were.
+          (Stage refresh, L2: while a pick is still loading that branch is a
+          hero-shaped skeleton whose footer carries the same `pb-9`, so the
+          formula holds there too — 44px above its caption and button bars. The
+          settled no-pick state is still the centred card described above.)
 
           The px figures are also rem-derived: `pb-9`, `mt-2` and `mb-8` are all
           rem, `--page-gutter` is a px literal. At a 24px root the gap is 66 and the
@@ -2034,18 +2044,32 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 // Quiet placeholder while a browse list is in flight.
 function BrowseLoadingState({ title }: { title: string }) {
   return (
-    // stage-gutter: movies/shows are in FULL_BLEED_VIEWS, so this no longer
-    // inherits .stage-page's padding. It renders on every sort and genre
-    // change (the parent resets the list to null), so without the gutter the
-    // skeleton flashed edge-to-edge and then snapped in by 48px.
-    <div className="animate-fade-in stage-gutter pt-8">
-      <div className="mb-8">
-        {/* PageHeader's title scale, so Movies / TV Shows agree with My
-            Library, Search and Requests instead of a one-off text-4xl. */}
-        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
-        <p className="text-white/60 text-sm mt-2" role="status">Loading your library…</p>
+    // Stage refresh (L2) — the browse page's own layout rather than a page
+    // header: the compact hero band with the real <h1> in it (the compact
+    // hero's title classes, the page name being known before the list), a
+    // toolbar row at .stage-toolbar's 14px padding, then the grid at the
+    // gutter. With a backdrop-bearing title, which is the usual case,
+    // BrowseView lands on exactly this frame.
+    // The gutter on every row: movies/shows are in FULL_BLEED_VIEWS, so this
+    // does not inherit .stage-page's padding. It renders on every sort and
+    // genre change (the parent resets the list to null), so without the
+    // gutter the skeleton flashed edge-to-edge and then snapped in by 48px.
+    <div className="animate-fade-in relative">
+      <HeroSkeleton
+        compact
+        title={<h1 className="text-white font-extrabold font-display mb-1.5 text-3xl md:type-browse line-clamp-1">{title}</h1>}
+        aside={<p className="flex-none text-[color:var(--text-secondary)] text-xs" role="status">Loading your library…</p>}
+      />
+      <div className="stage-gutter mb-6 flex items-center gap-3 py-3.5 border-b border-white/[0.05]" aria-hidden="true">
+        <SkeletonBlock className="h-9 w-16 rounded-full" />
+        <SkeletonBlock className="h-9 w-20 rounded-full" />
+        <SkeletonBlock className="h-9 w-24 rounded-full max-sm:hidden" />
+        <SkeletonBlock className="h-9 w-20 rounded-full max-md:hidden" />
+        <SkeletonBlock className="ml-auto h-9 w-36 rounded-xl" />
       </div>
-      <GridSkeleton />
+      <div className="stage-gutter">
+        <GridSkeleton />
+      </div>
     </div>
   )
 }
@@ -6077,6 +6101,9 @@ export default function App() {
               onSelect={handleSelect}
               onPlay={handlePlay}
               hero={homeHero ?? undefined}
+              // The core rails set the catalog-fallback hero when they land,
+              // so until they land (or fail) a pick is still on its way.
+              heroLoading={homeRails === undefined && !homeError}
               // Memoized above (homeRailsProp) — Continue Watching prepended
               // and deduped, conversational results pinned first.
               rails={homeRailsProp}

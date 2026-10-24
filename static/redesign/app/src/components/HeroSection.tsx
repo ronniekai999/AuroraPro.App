@@ -5,6 +5,7 @@
 // — only HeroSection uses it.
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
+import { HeroSkeleton } from '@/components/Skeletons'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
 import { backdropSrcSet, recordRecommendationExposure, type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
@@ -31,7 +32,7 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2', slateToken, slatePosition = 0, profileId }: {
+export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2', slateToken, slatePosition = 0, profileId }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -88,6 +89,12 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   onNextPick?: () => void
   // Pause auto-rotation while user hovers.
   onPauseChange?: (paused: boolean) => void
+  /** Only meaningful while `hero` is absent: true while the caller still
+   *  expects a pick (Stage refresh, L2), which draws the hero-shaped
+   *  skeleton. False — the default — is the settled no-pick state (an empty
+   *  library, a ceiling no title passes, a failed fetch), which gets the
+   *  static card: a skeleton there would shimmer for the life of the page. */
+  loading?: boolean
   // Personalization status — drives the cold-start hint that replaces
   // the empty reason line when we're below the watch-history threshold.
   // null = unknown / not yet loaded.
@@ -229,27 +236,51 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       // height from the inset-card era; once `home` went full-bleed those
       // rounded corners landed on the viewport edges on every cold load,
       // and the frame then SNAPPED when the real hero arrived.
-      <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
-        compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
-      }`}>
-        <div className="text-center px-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
-            <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
-              <defs>
-                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#A855F7" />
-                  <stop offset="0.5" stopColor="#7C3AED" />
-                  <stop offset="1" stopColor="#22D3EE" />
-                </linearGradient>
-              </defs>
-              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
-              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-            </svg>
+      // Stage refresh (L2) — while a pick is still on its way (`loading`),
+      // its content too: a hero-shaped skeleton instead of a centred mark, so
+      // the pick fills in rather than replaces. The heading stays for
+      // assistive tech (sr-only; the bars stand in for it on screen).
+      // This branch is ALSO the permanent no-pick state (an empty library, a
+      // ceiling no title passes, a failed fetch), and there the skeleton's
+      // sweep would run for the life of the page — a review measured ~16x the
+      // idle main-thread time. So `loading` false keeps the static card it
+      // always was, heading visible. Both raise the caption from white/40
+      // (3.6:1) to the secondary-text token.
+      loading ? (
+        <HeroSkeleton
+          compact={compact}
+          aside={(
+            <div className="flex-none">
+              <h2 className="sr-only">Welcome to Aurora</h2>
+              <p className="inline-flex items-center gap-2 text-[color:var(--text-secondary)] text-xs">
+                <Icon name="sparkle" size={13} className="text-purple-300" /> Loading your featured content…
+              </p>
+            </div>
+          )}
+        />
+      ) : (
+        <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
+          compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
+        }`}>
+          <div className="text-center px-8">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
+              <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
+                <defs>
+                  <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stopColor="#A855F7" />
+                    <stop offset="0.5" stopColor="#7C3AED" />
+                    <stop offset="1" stopColor="#22D3EE" />
+                  </linearGradient>
+                </defs>
+                <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
+                <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
+              </svg>
+            </div>
+            <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
+            <p className="text-[color:var(--text-secondary)] text-sm mt-2">Loading your featured content…</p>
           </div>
-          <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
-          <p className="text-white/40 text-sm mt-2">Loading your featured content…</p>
-        </div>
-      </section>
+        </section>
+      )
     )
   }
   const hero = heroProp
