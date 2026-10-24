@@ -112,8 +112,7 @@ func (sc *SafeConn) writePump() {
 		case data := <-sc.outbox:
 			// Fresh deadline per write — see broadcastWriteTimeout for
 			// the stale-deadline production bug this prevents.
-			_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
-			if err := sc.WriteMessage(websocket.TextMessage, data); err != nil {
+			if err := sc.writeTextBy(data, time.Now().Add(broadcastWriteTimeout)); err != nil {
 				_ = sc.Close()
 				return
 			}
@@ -133,8 +132,7 @@ func (sc *SafeConn) Send(data []byte) error {
 		if sc.conn == nil {
 			return nil
 		}
-		_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
-		return sc.WriteMessage(websocket.TextMessage, data)
+		return sc.writeTextBy(data, time.Now().Add(broadcastWriteTimeout))
 	}
 	select {
 	case <-sc.done:
@@ -172,8 +170,25 @@ func (sc *SafeConn) WriteControl(messageType int, data []byte, deadline time.Tim
 }
 
 // SetWriteDeadline sets the write deadline on the underlying connection.
+//
+// Under writeMu like the writes: gorilla keeps the deadline in a plain field
+// that every write reads, and this conn has two writers (the pump, and the
+// handler's read loop answering time-sync probes and errors directly), so an
+// unlocked set raced the other goroutine's write.
 func (sc *SafeConn) SetWriteDeadline(t time.Time) error {
+	sc.writeMu.Lock()
+	defer sc.writeMu.Unlock()
 	return sc.conn.SetWriteDeadline(t)
+}
+
+// writeTextBy writes one text message with the given deadline, both under a
+// single writeMu hold, so the write cannot pick up another writer's deadline
+// in between.
+func (sc *SafeConn) writeTextBy(data []byte, deadline time.Time) error {
+	sc.writeMu.Lock()
+	defer sc.writeMu.Unlock()
+	_ = sc.conn.SetWriteDeadline(deadline)
+	return sc.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // Close stops the write pump and closes the underlying connection.
