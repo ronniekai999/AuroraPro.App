@@ -2374,13 +2374,27 @@ html[data-player-surface="theater"] .stage-party-reactions {
    sat outside every prefers-reduced-motion block in the file. */
 .stage-orb {
   transition: transform 140ms ease;
+  /* "Who's watching?" profiles fade up in turn (Stage refresh, PG1), 60ms
+     apart. `backwards` so nothing is held after the entrance: a held `to`
+     transform would outrank the hover/focus lift below for good, since an
+     animation beats every normal declaration. */
+  animation: orbIn 380ms var(--ease-emphasized) backwards;
+}
+.stage-orb:nth-child(2) { animation-delay: 60ms; }
+.stage-orb:nth-child(3) { animation-delay: 120ms; }
+.stage-orb:nth-child(4) { animation-delay: 180ms; }
+.stage-orb:nth-child(5) { animation-delay: 240ms; }
+.stage-orb:nth-child(n + 6) { animation-delay: 300ms; }
+@keyframes orbIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  to { opacity: 1; transform: none; }
 }
 .stage-orb:hover,
 .stage-orb:focus-visible {
   transform: scale(1.04);
 }
 @media (prefers-reduced-motion: reduce) {
-  .stage-orb { transition: none; }
+  .stage-orb { transition: none; animation: none; }
   .stage-orb:hover,
   .stage-orb:focus-visible { transform: none; }
 }
