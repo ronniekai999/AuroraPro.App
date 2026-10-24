@@ -113,14 +113,20 @@
        .glass-panel, .glass-card, and .media-card. Default is
        "Aurora" (white border, purple-tinted halo). Users override
        via Settings → Appearance → Glow Style, which writes
-       data-glow="subtle" | "heavy" on <html>. */
+       data-glow="subtle" | "heavy" on <html>.
+       Every halo, in all three styles, leads with --glass-lip (Stage refresh,
+       G1): the 1px top highlight that makes a dark panel read as lit glass. It
+       is an inset shadow, so it paints under a card's poster and only shows on
+       surfaces whose own fill is visible at the top edge. */
     --glow-border: rgba(220, 200, 255, 0.22);
     --glow-border-strong: rgba(220, 200, 255, 0.45);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.14),
       0 0 28px rgba(168, 85, 247, 0.12),
       0 0 56px rgba(255, 255, 255, 0.05);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.25),
       0 0 34px rgba(168, 85, 247, 0.20),
       0 0 72px rgba(255, 255, 255, 0.08);
@@ -338,9 +344,11 @@
     --glow-border: rgba(255, 255, 255, 0.10);
     --glow-border-strong: rgba(255, 255, 255, 0.18);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(255, 255, 255, 0.06),
       0 0 14px rgba(255, 255, 255, 0.04);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(255, 255, 255, 0.12),
       0 0 18px rgba(255, 255, 255, 0.08);
   }
@@ -349,10 +357,12 @@
     --glow-border: rgba(220, 200, 255, 0.40);
     --glow-border-strong: rgba(220, 200, 255, 0.65);
     --glow-halo:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.28),
       0 0 32px rgba(168, 85, 247, 0.30),
       0 0 64px rgba(255, 255, 255, 0.12);
     --glow-halo-strong:
+      var(--glass-lip),
       0 0 0 1px rgba(220, 200, 255, 0.50),
       0 0 48px rgba(168, 85, 247, 0.40),
       0 0 96px rgba(255, 255, 255, 0.18);
@@ -1041,6 +1051,7 @@ html[data-glow="subtle"] .stage-topnav {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.09);
   color: rgba(255, 255, 255, 0.8);
+  box-shadow: var(--glass-lip); /* G1; :focus-visible below swaps in its ring */
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
@@ -2480,6 +2491,9 @@ html[data-glow="subtle"] .stage-upnext {
   color: #fff;
   border-color: rgba(255, 255, 255, 0.14);
   backdrop-filter: blur(8px);
+  /* G1. .stage-btn:focus-visible (0,2,0) replaces this with its ring while
+     focused, which is the intent: the ring is the indicator. */
+  box-shadow: var(--glass-lip);
 }
 .stage-btn-quiet {
   background: transparent;
