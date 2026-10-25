@@ -33,10 +33,13 @@ flowchart TD
    would have caught the bug.
 4. **Build & test gate** — `go build ./...` and `go test ./...` must be green.
    For frontend work also run `npm run audit` in `static/redesign/app/`: it builds,
-   then runs six checks (focus indicators, on-art contrast, on-glass contrast,
-   reduced motion, breakpoints, cascade) and a browser-driven page-alignment check.
+   then runs `npm run audit:checks` — six static checks (focus indicators, on-art
+   contrast, on-glass contrast, reduced motion, breakpoints, cascade) and three
+   browser-driven ones (page alignment, mobile layout, PWA). CI's SPA job runs
+   the same `audit:checks` after its own build, so a new check belongs in
+   `audit:checks`, not appended to `audit`.
 
-   **That last one needs Chromium, and `npm ci` does not install it** — modern
+   **The browser checks need Chromium, and `npm ci` does not install it** — modern
    Playwright has no postinstall step. On a fresh machine, once:
 
    ```bash
