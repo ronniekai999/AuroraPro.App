@@ -1,0 +1,10 @@
+{
+  "sha": "20b00dbec45d237e63b208ef7cb389e71588ef31",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only review (4 rounds) of origin/main...20b00db, the #543 follow-ups. Round 1 fix-first: picking a profile from the forced picker after an unreadable binding still painted the previous profile's titles under the new name (M1), plus 5 lows. Rounds 2-4: M1 fixed and verified frame by frame in the built app (0 bad frames on every route vs 2-125 on main); dead Tailwind opacity modifiers now compile and are audited via Tailwind's own extractor; faint informational white text raised to AA and audited in TSX and CSS with anchored exemptions; profile-switch resets pinned by an App-level test (except next-page and Shows-total resets, stated in CLAUDE.md); icon-only buttons audited for accessible names. Remaining nits: aria-label={undefined} counts as a name; library-count note says once per sign-in though it reruns on user-object changes.",
+  "reviewer": "independent-review-agent",
+  "findings": "0",
+  "diff_digest": "675d264ebbdb2b0efe0e6ef15518574ebab74a891a7736c00b450f6bb346b170",
+  "branch": "claude/sweet-brown-36veir",
+  "recorded_at": "2026-10-25T06:27:17Z"
+}
