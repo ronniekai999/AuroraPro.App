@@ -50,8 +50,8 @@ flowchart TD
    ```
 
    On Debian or Ubuntu without the browser's system libraries, add
-   `--with-deps` (it runs apt-get, through sudo unless you are root), as CI
-   does. Without a browser the gate fails at the first browser check (page
+   `--with-deps` (it runs apt-get as root: directly, through sudo, or through
+   su when sudo is missing), as CI does. Without a browser the gate fails at the first browser check (page
    alignment), with Playwright's own message suggesting `npx playwright
    install`; the `chromium` form above is enough. `CHROMIUM_PATH` set to an
    existing binary uses that one; an empty value, or a path that does not

@@ -143,11 +143,10 @@ jobs:
 
       # `npm run audit` minus its build, which ran above: the gate CLAUDE.md
       # requires for frontend changes, which until now ran only when someone ran
-      # it locally. Each check exits non-zero on any problem it asserts (what
-      # only prints: the on-art advisory row, the focus audit's skip of the
-      # vendored ui/ primitives, and the cascade resolver's per-case report,
-      # whose @layer and specificity self-tests do fail), and the chain stops
-      # at the first, so any one fails the job. A new check belongs in
+      # it locally. Each check exits non-zero on any problem it asserts;
+      # allowlisted known exceptions and informational reports print without
+      # failing, so a green log can still name them. The chain stops at the
+      # first failing check, so any one fails the job. A new check belongs in
       # `audit:checks`: appended to `audit` instead, it would run locally and
       # never here.
       - name: Audit
