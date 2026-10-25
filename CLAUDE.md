@@ -981,19 +981,26 @@ capability declarations.
   transcode shifts by `start_sec`; a remux by `media_start=`, the measured
   start the web player sends beside `start=<start_sec>&remux=1`
   (`subtitleCueShiftQuery`), taken only as a plain decimal inside the
-  publication window (`ParseClientMediaStart`); otherwise by the
+  publication window and used at 10 ms (`ParseClientMediaStart`; each
+  distinct shift is a cached VTT, never evicted); otherwise by the
   `ProbeSeekKeyframe` prediction, as before. The player sends the measured
   start whether its clock adopted or refused it (`measuredStartSec`: cues are
-  timed on the element), and holds a pick (the rebuild restore included)
-  while the clock awaits its first level load (natively, its fetch), creating
-  the `<track>` once that settles, so the track is requested once.
+  timed on the element). Until a boot knows its delivery (stream info, the
+  session create) a pick is only recorded; the boot's restore reads the
+  latest pick when the delivery can take it, so one made during the boot,
+  Off included, wins over the pick the boot began with. A remux pick (the
+  restore included) is then held while the clock awaits its first level load
+  (natively, until the fetched result is applied at `loadedmetadata` or the
+  fetch fails), and its `<track>` created once that settles, so the track is
+  requested once.
 - Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
   and it assumes Safari's media time 0 is the first segment's start, as
   hls.js's is (unverified); older clients and a remux whose playlist reported
   no start still get the `ProbeSeekKeyframe` subtitle shift, a GOP off on the
   Matroska key-frame case, and so does a track created before a start that
   arrives late; a held pick waits for local loading, which a boot while
-  casting does not start; after the unreadable-playlist resume fallback the
+  casting does not start and a cast that connects during the hold stops
+  (`stopLoad`); after the unreadable-playlist resume fallback the
   cached start describes segment 0 of a playlist that no longer lists it; a
   measurement that lands after the first request's budget reaches only
   players that have not started.
