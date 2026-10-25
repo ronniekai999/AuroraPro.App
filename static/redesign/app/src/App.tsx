@@ -5704,11 +5704,12 @@ export default function App() {
   // signal) without the session changing. Only the latest request lands, and
   // an answer is shown only for the user and profile it was asked for, so
   // the commit that switches profile shows no count rather than the previous
-  // profile's. The stored answer is dropped whenever the user, the profile or
-  // the startup settle changes, so it is only ever the current request's: a
-  // key alone came back after a sign-out and sign-in in the same tab (the
-  // same user with no profile known yet), and after a switch away and back
-  // before the other profile's count landed, showing an answer from before.
+  // profile's. The stored answer is dropped whenever the user's id, the
+  // profile or the startup settle changes, so it is only ever the current
+  // request's: a key alone came back after a sign-out and sign-in in the same
+  // tab (the same user and, once the startup load settles, the same
+  // profile), and after a switch away and back before the other profile's
+  // count landed, showing an answer from before.
   const homeLibraryUserId = user ? user.id : null
   const homeLibraryKey = `${homeLibraryUserId}:${activeProfileId}`
   useEffect(() => {

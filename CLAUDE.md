@@ -440,15 +440,18 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   that /me and other tabs' auth signals replace. Only the latest request
   lands, and an answer shows only while the app acts as the user and
   profile it was asked for, so a switch's commit shows no count; the
-  stored answer is dropped whenever the user, the profile or the startup
-  settle changes, so a return to a profile, or the same user signing in
-  again in the tab, waits for a new answer. It was fetched once per
-  sign-in, before the binding was read, so a fresh sign-in that bound the
-  default and then re-selected the profile this browser last showed
-  counted the default's catalog, and a switch kept the previous profile's
-  count. While it is in flight, and when it fails, the greeting falls back
-  to the grid totals, which a switch resets (so a switch can briefly show
-  the new profile's grid total first). A failed activation (a switch, a PIN unlock, the startup
+  stored answer is dropped whenever the user's id, the profile or the
+  startup settle changes, so a return to a profile, or the same user
+  signing in again in the tab, waits for a new answer. It is keyed on the
+  profile, not its ceiling: a ceiling changed elsewhere keeps the old
+  count until the next switch, sign-in or reload, as the rails and grids
+  keep their titles. It was fetched once per sign-in, before the binding
+  was read, so a fresh sign-in that bound the default and then
+  re-selected the profile this browser last showed counted the default's
+  catalog, and a switch kept the previous profile's count. While it is in
+  flight, and when it fails, the greeting falls back to the grid totals,
+  which a switch resets (so a switch can briefly show the new profile's
+  grid total first). A failed activation (a switch, a PIN unlock, the startup
   re-selection) re-reads the binding, because a lost answer can follow a bind
   that happened. The tab-visibility re-read starts once the startup load
   settles, also runs when another window of the browser records a switch (the
@@ -799,8 +802,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     drop of a stored answer when its inputs change, and its latest-request
     guard (the abort or the cancelled flag: the stub honours abort, so
     either alone passes). The tests sign in one user, so the key's user
-    half and a new request for a new user id are unpinned (lint's
-    exhaustive-deps catches a dropped id dependency).
+    half and a new request for a new user id are unpinned (a dropped id
+    dependency is only an exhaustive-deps warning, which fails no gate).
     Not the grids' next-page resets,
     which the next first page replaces before a Load More can run, nor the
     startup exemption, the hero's latest-request guard or the remounting
