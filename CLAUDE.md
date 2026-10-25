@@ -444,9 +444,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   startup settle changes, so a return to a profile, or the same user
   signing in again in the tab, waits for a new answer. It is keyed on the
   profile, not its ceiling: a ceiling changed elsewhere keeps the old
-  count until the next switch, sign-in or reload, as the rails and grids
-  keep their titles. It was fetched once per sign-in, before the binding
-  was read, so a fresh sign-in that bound the default and then
+  count until the next switch, sign-in or reload, even after Home's rails
+  have refreshed under the new one. It was fetched once per sign-in,
+  before the binding was read, so a fresh sign-in that bound the default and then
   re-selected the profile this browser last showed counted the default's
   catalog, and a switch kept the previous profile's count. While it is in
   flight, and when it fails, the greeting falls back to the grid totals,

@@ -5688,7 +5688,7 @@ export default function App() {
   // greeting's "picked from X titles" clause. One count-only call
   // (per_page=1, no type filter → movies+shows counted together) using the
   // server's total_items. Non-blocking, abortable, and non-fatal: on error
-  // we leave homeLibraryTotal null and the greeting simply omits the clause
+  // we leave homeLibraryCount null and the greeting simply omits the clause
   // (it already gates on a non-null total). The browse-tab counts remain a
   // fallback. Gated on the user's id so we don't fire pre-auth.
   //
