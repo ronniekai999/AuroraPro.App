@@ -3531,15 +3531,34 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Remux clock (lib/mediaStart.ts): media time 0 of a remux is the key
         // frame before start_sec, and the variant playlist says which second
         // that is. Both delivery paths below feed this session's clock; this
-        // applies what it decides. A party guest's position belongs to the
-        // drift loop, so the clock never aligns one.
+        // applies what it decides. A party guest is aligned only before it
+        // plays, and to the room's position; after that its position belongs
+        // to the drift loop.
         const clock = new RemuxClock(sessionStartSecRef.current, sessionRemuxRef.current)
         remuxClockRef.current = clock
         remuxClockUnbindRef.current = observePlayback(vid, clock)
         const ownsPlayhead = () => !(partyControlsMediaRef.current && partySyncRef.current && !partySyncRef.current.isHost)
+        // A guest's room position for the alignment: null when the party is
+        // on another episode, its clock is unknown or stale, or an explicit
+        // seek is still waiting to be applied (the seek decides where the
+        // guest goes; the alignment must not race it).
+        const guestRoomAbsSec = (): number | null => {
+          const live = partySyncRef.current
+          if (!live || live.isHost || !partyControlsMediaRef.current ||
+              isPartyEpisodeMismatch(live.partyEpisodeId, target.episodeId)) return null
+          const seek = live.seekRef.current
+          if (seek && seek.sequence !== lastAppliedPartySeekSequenceRef.current &&
+              shouldApplyExplicitPartySeek(seek.by, live.currentUserId)) return null
+          return partyTargetAbsSec(live.tickRef.current, live.isPlaying, live.clockOffsetRef?.current ?? 0, Date.now())
+        }
         const noteMediaWindow = (w: MediaWindow) => {
           if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
-          const update: ClockUpdate = clock.noteLevel(w, { currentTime: vid.currentTime, ownsPlayhead: ownsPlayhead() })
+          const owns = ownsPlayhead()
+          const update: ClockUpdate = clock.noteLevel(w, {
+            currentTime: vid.currentTime,
+            ownsPlayhead: owns,
+            roomAbsSec: owns ? null : guestRoomAbsSec(),
+          })
           if (update.originChanged) startSecRef.current = clock.originSec
           if (update.alignTo !== null) {
             try { vid.currentTime = update.alignTo } catch { /* defensive */ }
@@ -3738,7 +3757,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // Safari or iPhone: nothing here can run WebKit.
           if (clock.wantsMeasuredOrigin) {
             void fetchNativeMediaWindow(masterUrl, ac.signal).then(fetched => {
-              if (!fetched || cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
+              if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
+              // No window is coming: a party guest stops holding its room
+              // positions for one (RemuxClock.holdsPartyPosition).
+              if (!fetched) { clock.noteNoMeasurement(); return }
               const seekableEnd = () => {
                 try {
                   const s = vid.seekable
@@ -3762,7 +3784,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 vid.removeEventListener('progress', retryFromElement)
                 vid.removeEventListener('durationchange', retryFromElement)
               }
-            }).catch(() => { /* fail-safe: stay on start_sec */ })
+            }).catch(() => { clock.noteNoMeasurement() /* fail-safe: stay on start_sec */ })
           }
 
           await completeTargetPlaybackBoot(vid)
@@ -4661,7 +4683,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // serve the new absolute position rebuilds at that anchor. The server
       // seek frame supplies a client-local sequence, making this exactly-once
       // even though the ref persists through the target change/reboot.
-      if (explicitSeek &&
+      //
+      // A remux session's window is not known until its first level load
+      // says where media time 0 is: before it, a host's re-anchor (a key
+      // frame plus a little, just before start_sec) reads as "before this
+      // session" and would rebuild a guest that is about to be able to serve
+      // it. Leave such a seek pending (RemuxClock.holdsPartyPosition, bounded)
+      // and skip this tick's drift correction; the play/pause mirror still
+      // runs. The first tick after the load serves or rebuilds it as usual.
+      const remuxClock = remuxClockRef.current
+      const holdSeekForMediaStart = Boolean(explicitSeek &&
+        explicitSeek.sequence !== lastAppliedPartySeekSequenceRef.current &&
+        remuxClock?.holdsPartyPosition(Math.max(0, explicitSeek.abs_ms / 1000), Date.now()))
+      if (explicitSeek && !holdSeekForMediaStart &&
           explicitSeek.sequence !== lastAppliedPartySeekSequenceRef.current) {
         const targetAbsSec = Math.max(0, explicitSeek.abs_ms / 1000)
         const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
@@ -4719,6 +4753,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Apply it locally; the normal play/pause mirror below preserves the
         // server's running state on the same interval turn.
         extendSuppression(300)
+        remuxClock?.noteUserSeek()
         try { vid.currentTime = absMsToHlsSec(explicitSeek.abs_ms) } catch { /* defensive */ }
       }
       const t = party.tickRef.current
@@ -4834,6 +4869,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // backward case, and for the known gaps left open (the mirror-image
       // forward case, and the Chromecast guest path).
       const targetAbsSec = projectedAbsMs / 1000
+      // The explicit seek's hold, for the drift loop: until a remux's first
+      // level load, the provisional start_sec would misjudge the room (a
+      // backward rebuild for a position in the key-frame gap, a snap the gap
+      // early otherwise), and that load aligns a guest that has not played to
+      // the room anyway. Bounded like the seek's.
+      if (holdSeekForMediaStart || remuxClock?.holdsPartyPosition(targetAbsSec, Date.now())) {
+        if (vid.playbackRate !== 1.0) vid.playbackRate = 1.0
+        return
+      }
       // partyEpisodeId isn't in this effect's dep array — target and
       // Boolean(party) are (so a content/party-presence change does rebind),
       // but of party's OWN fields only isHost/isPlaying/partyMediaItemId/

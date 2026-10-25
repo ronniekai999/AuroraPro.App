@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createCastToken, createSession, getStreamInfo, keepalive } from '@/lib/streaming'
 import { reportProgress } from '@/lib/api'
+import { getSyncSamples } from '@/lib/syncDebug'
 
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -348,6 +349,184 @@ describe('remux clock H1: an alignment that had no runway', () => {
   })
 })
 
+// MANIFEST_PARSED completes the boot; the first level load is separate.
+async function manifestOnly() {
+  await settle()
+  await act(async () => { fake.hls.at(-1)!.emit('MANIFEST_PARSED') }); await settle()
+}
+async function firstLevel(mediaStart: string | null, fragments = 2) {
+  const details = levelDetails(mediaStart, fragments)
+  await act(async () => {
+    fake.hls.at(-1)!.emit('LEVEL_UPDATED', { details, level: 0 })
+    fake.hls.at(-1)!.emit('LEVEL_LOADED', { details, level: 0 })
+  }); await settle()
+}
+const partyTick = async (ms = 250) => { await act(async () => { vi.advanceTimersByTime(ms) }); await settle() }
+// A host's explicit seek as useParty stores it (the host is user 2).
+const hostSeek = (absMs: number, sequence = 1) => ({ abs_ms: absMs, by: 2, sequence, rev: 2, running: true, receivedAtMs: Date.now() })
+// A host's re-anchor: its key frame plus 0.35 s, just before start_sec.
+const REANCHOR_MS = Math.round((ORIGIN + 0.35) * 1000)
+
+describe("remux clock: a guest's room positions wait for its first level load", () => {
+  it("holds a host's re-anchor until the first level load, then serves it in the window", async () => {
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />); await manifestOnly()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await partyTick()
+    // On start_sec alone the target reads as before this session.
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(video().currentTime).toBe(0)
+    await firstLevel(ORIGIN.toFixed(6))
+    // The pending seek, not the boot alignment, decides where the guest goes.
+    expect(video().currentTime).toBe(0)
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
+    expect(guest.requestSeek).not.toHaveBeenCalled()
+  })
+
+  it('leaves a guest that applied a party seek nothing to re-anchor if it becomes host', async () => {
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await manifestOnly()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await firstLevel(ORIGIN.toFixed(6))
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await partyTick()
+    expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
+    playing()
+    // Promoted with a room clock 2 s off its picture (mid rate-adjust, or a
+    // stale tick): the room already follows the seek this player applied.
+    const promoted = { ...guest, isHost: true, tickRef: { current: roomTick(REANCHOR_MS + 2000) } }
+    view.rerender(<VideoPlayer target={movie} onClose={() => {}} party={promoted} onSeekRebuild={vi.fn()} />); await settle()
+    // Past the applied seek's echo suppression, so a send would go out.
+    await partyTick(400)
+    promoted.tickRef.current = roomTick(REANCHOR_MS + 2000)
+    video().currentTime = REANCHOR_MS / 1000 - ORIGIN + 0.25; fireEvent.timeUpdate(video())
+    expect(promoted.requestSeek).not.toHaveBeenCalled()
+  })
+
+  it('rebuilds as before when the first level load reports no start', async () => {
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />); await manifestOnly()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    await firstLevel(null)
+    await partyTick()
+    expect(rebuild).toHaveBeenCalledWith(REANCHOR_MS / 1000)
+  })
+
+  it('holds for a bounded time only', async () => {
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />); await manifestOnly()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    await partyTick(3500)
+    expect(rebuild).not.toHaveBeenCalled()
+    await partyTick(500)
+    expect(rebuild).toHaveBeenCalledWith(REANCHOR_MS / 1000)
+  })
+
+  it('holds the drift loop too: no backward rebuild for a room inside the gap', async () => {
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />); await manifestOnly()
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await firstLevel(ORIGIN.toFixed(6))
+    // The first level load starts the guest at the room instead.
+    expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
+    guest.tickRef.current = roomTick(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+  })
+
+  it('never holds a transcode guest', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Awaited<ReturnType<typeof getStreamInfo>>)
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />); await manifestOnly()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).toHaveBeenCalledWith(REANCHOR_MS / 1000)
+  })
+})
+
+describe('remux clock: a guest starts at the room, not at the key frame', () => {
+  // An aligned host: the room runs from start_sec. Every guest on the same
+  // start_sec used to begin at the key frame, as its host did, and agree only
+  // because both clocks read high by the same gap.
+  const ROOM_MS = START_SEC * 1000 + 300
+  const decisionsSince = (before: number) => getSyncSamples().slice(before).map(s => s.decision)
+  beforeEach(() => { window.__auroraSyncDebug = true })
+  afterEach(() => { window.__auroraSyncDebug = false })
+
+  it('aligns a same-start guest to the room before it plays: no snap, nothing sent', async () => {
+    const guest = party({ isHost: false, tickRef: { current: roomTick(ROOM_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await bootHls()
+    expect(video().currentTime).toBeCloseTo(ROOM_MS / 1000 - ORIGIN, 6)
+    fireEvent(video(), new Event('seeked'))
+    // It plays on from there, and the room moves with it.
+    playing(); video().currentTime = ROOM_MS / 1000 - ORIGIN + 0.25
+    guest.tickRef.current = roomTick(ROOM_MS)
+    const before = getSyncSamples().length
+    await partyTick()
+    expect(decisionsSince(before)).toEqual(['ignore'])
+    expect(video().currentTime).toBeCloseTo(ROOM_MS / 1000 - ORIGIN + 0.25, 6)
+    expect(guest.requestSeek).not.toHaveBeenCalled()
+    expect(guest.requestPause).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the drift loop without runway, as before', async () => {
+    const guest = party({ isHost: false, tickRef: { current: roomTick(ROOM_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await bootHls(ORIGIN.toFixed(6), 1)
+    expect(video().currentTime).toBe(0)
+    playing(); video().currentTime = 0.25
+    guest.tickRef.current = roomTick(ROOM_MS)
+    const before = getSyncSamples().length
+    await partyTick()
+    expect(decisionsSince(before)).toEqual(['hard-seek'])
+    expect(video().currentTime).toBeCloseTo((ROOM_MS + 250) / 1000 - ORIGIN, 6)
+  })
+
+  it('leaves a guest that has played to the drift loop', async () => {
+    const guest = party({ isHost: false, tickRef: { current: roomTick(ROOM_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await bootHls(ORIGIN.toFixed(6), 1)
+    playing(); video().currentTime = 1
+    guest.tickRef.current = roomTick(ROOM_MS)
+    await levelUpdate(ORIGIN.toFixed(6), 3)
+    expect(video().currentTime).toBe(1)
+  })
+
+  it('aligns to a paused room without playing it', async () => {
+    const guest = party({ isHost: false, isPlaying: false, tickRef: { current: { ...roomTick(ROOM_MS), running: false } } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await manifestOnly()
+    const plays = play.mock.calls.length
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(video().currentTime).toBeCloseTo(ROOM_MS / 1000 - ORIGIN, 6)
+    expect(play.mock.calls.length).toBe(plays)
+    await partyTick()
+    expect(video().paused).toBe(true)
+    expect(video().currentTime).toBeCloseTo(ROOM_MS / 1000 - ORIGIN, 6)
+    expect(guest.requestSeek).not.toHaveBeenCalled()
+    expect(guest.requestPlay).not.toHaveBeenCalled()
+  })
+
+  it('does not align a guest whose party is on another episode', async () => {
+    const episode: PlayTarget = { ...movie, episodeId: 5 }
+    const guest = party({ isHost: false, partyEpisodeId: 6, tickRef: { current: roomTick(ROOM_MS) } })
+    render(<VideoPlayer target={episode} onClose={() => {}} party={guest} onSeekRebuild={vi.fn()} />); await bootHls()
+    expect(video().currentTime).toBe(0)
+  })
+})
+
 describe('remux clock L2: the alignment seek is not a scrub, however late it lands', () => {
   it('consumes exactly the alignment seeked, by position, after any time window', async () => {
     const host = party({ isHost: true, isPlaying: true })
@@ -468,6 +647,34 @@ describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', (
     release(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`)); await settle(); await settle()
     expect(video().currentTime).toBe(4)
     expect(await progressAfter(4)).toBe((START_SEC + 4) * 1000)
+  })
+
+  it("holds a guest's party seek until the fetched start is applied", async () => {
+    readyState = 0
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />)
+    await settle(); await settle()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    readyState = 1
+    fireEvent(video(), new Event('loadedmetadata')); await settle()
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
+  })
+
+  it('stops holding a guest once its fetch has failed', async () => {
+    serve(new TypeError('Failed to fetch'))
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />)
+    await settle(); await settle()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).toHaveBeenCalledWith(REANCHOR_MS / 1000)
   })
 
   it('never fetches for a transcode', async () => {

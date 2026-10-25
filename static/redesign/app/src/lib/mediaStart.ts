@@ -60,6 +60,15 @@ export const MEDIA_START_REANCHOR_TOLERANCE_SEC = 0.5
 /** How close a `seeked` must land to the alignment target to be its echo. */
 export const MEDIA_START_ECHO_TOLERANCE_SEC = 0.5
 
+/**
+ * How long a party guest leaves room positions unjudged while its clock waits
+ * for the first level load (RemuxClock.holdsPartyPosition). The server answers
+ * a remux's first variant request within about 2.75 s (media_start.go's
+ * budget plus its wait slack); past this the guest judges the room against
+ * start_sec, as it did before the hold existed.
+ */
+export const MEDIA_START_PARTY_HOLD_MS = 4000
+
 type TagList = ReadonlyArray<ReadonlyArray<string>>
 type TaggedFragment = { tagList?: TagList; initSegment?: { tagList?: TagList } | null }
 
@@ -146,11 +155,20 @@ export function mediaStartAlignmentSec(
   producedMediaEndSec: number,
   runwaySec: number,
 ): number {
-  const into = sessionStartSec - originSec
-  if (!(into > MEDIA_START_ALIGN_MIN_SEC)) return 0
+  return alignmentWithRunwaySec(sessionStartSec - originSec, producedMediaEndSec, runwaySec)
+}
+
+/**
+ * The runway rule on its own: `intoSec` (media seconds) if it is worth a seek
+ * and fits, with the reload runway and the edge margin, inside what the level
+ * playlist has published; else 0. A party guest aligns to the room's position
+ * under the same rule (RemuxClock).
+ */
+export function alignmentWithRunwaySec(intoSec: number, producedMediaEndSec: number, runwaySec: number): number {
+  if (!(intoSec > MEDIA_START_ALIGN_MIN_SEC)) return 0
   const runway = Number.isFinite(runwaySec) && runwaySec >= 0 ? runwaySec : Infinity
-  if (!(into + runway + MEDIA_START_ALIGN_EDGE_SEC <= producedMediaEndSec)) return 0
-  return into
+  if (!(intoSec + runway + MEDIA_START_ALIGN_EDGE_SEC <= producedMediaEndSec)) return 0
+  return intoSec
 }
 
 /** What one playlist load says about the session's media window. */
@@ -277,8 +295,14 @@ type Alignment =
  *   provisional start_sec is kept instead — the behaviour before this existed.
  * - Alignment is retried on every later playlist load while the playhead is
  *   still short of start_sec and the produced window now leaves runway: a
- *   forward jump of at most the gap. Not for a party guest, whose position the
- *   drift loop owns, and never after a user seek.
+ *   forward jump of at most the gap. Never after a user seek.
+ * - A party guest is aligned instead to the room's projected position, and
+ *   only before it plays (guestAlignmentTarget); after that, or without the
+ *   runway, its position is the drift loop's, as before.
+ * - Until the first level load says where media time 0 is, a party guest
+ *   leaves room positions unjudged (holdsPartyPosition), for a bounded time:
+ *   judged against the provisional start_sec, a position inside the key-frame
+ *   gap reads as "before this session" and rebuilds it.
  * - A party host that has started playing without aligning sends ONE seek with
  *   its true position (hostReanchorSec), so the room follows its picture.
  */
@@ -289,6 +313,8 @@ export class RemuxClock {
   private adopted = false
   private refused = false
   private played = false
+  private levelSeen = false
+  private holdSinceMs: number | null = null
   private alignment: Alignment = 'pending'
   private pendingEchoSec: number | null = null
   private reanchorDone = false
@@ -307,18 +333,56 @@ export class RemuxClock {
   get refusedLateStart(): boolean { return this.refused }
   /** Whether a remux session could have a measured start at all. */
   get wantsMeasuredOrigin(): boolean { return this.remux && this.sessionStartSec > 0 }
+  /**
+   * The session could report a measured start and nothing has said yet
+   * whether it does: no level load (hls.js), or the native path's one fetch
+   * neither applied nor failed.
+   */
+  get awaitingMeasuredStart(): boolean { return this.wantsMeasuredOrigin && !this.levelSeen }
 
   /** The element has played media (a `playing` event, or the clock advancing). */
   notePlayed(): void { this.played = true }
 
-  /** A user (or the player on the user's behalf) moved the playhead. */
+  /** The native path's fetch failed: no level load is coming. */
+  noteNoMeasurement(): void { this.levelSeen = true }
+
+  /**
+   * A seek the clock did not make moved the playhead: a user's, or a party
+   * seek applied to a guest.
+   */
   noteUserSeek(): void {
     if (this.alignment === 'pending' || this.alignment === 'passed') this.alignment = 'abandoned'
     this.pendingEchoSec = null
   }
 
-  /** A playlist load arrived. `ownsPlayhead` is false for a party guest. */
-  noteLevel(w: MediaWindow, el: { currentTime: number; ownsPlayhead: boolean }): ClockUpdate {
+  /**
+   * For a party guest (L1): leave this room position (an explicit seek's
+   * target, or the drift loop's projected one) unjudged for now. True while
+   * the clock awaits its first level load and the position is one a plausible
+   * start could still serve, at or after start_sec - MAX_LAG; for at most
+   * MEDIA_START_PARTY_HOLD_MS from the first hold. Judged against the
+   * provisional start_sec instead, a host's re-anchor (a key frame plus a
+   * little, so just BEFORE start_sec) reads as "before this session" and
+   * rebuilds a guest whose first level load would have put it in the window,
+   * and a position after start_sec lands the gap early. A position before
+   * start_sec - MAX_LAG precedes any start the clock would accept, so it is
+   * never held: it rebuilds at once, as before.
+   */
+  holdsPartyPosition(targetAbsSec: number, nowMs: number): boolean {
+    if (!this.awaitingMeasuredStart || !Number.isFinite(targetAbsSec) || !Number.isFinite(nowMs)) return false
+    if (targetAbsSec < this.sessionStartSec - MEDIA_START_MAX_LAG_SEC) return false
+    if (this.holdSinceMs === null) this.holdSinceMs = nowMs
+    return nowMs - this.holdSinceMs < MEDIA_START_PARTY_HOLD_MS
+  }
+
+  /**
+   * A playlist load arrived. `ownsPlayhead` is false for a party guest;
+   * `roomAbsSec` is then the room's projected position, or null when it is
+   * unknown, stale, or an explicit seek still waiting to be applied owns where
+   * the guest goes.
+   */
+  noteLevel(w: MediaWindow, el: { currentTime: number; ownsPlayhead: boolean; roomAbsSec?: number | null }): ClockUpdate {
+    this.levelSeen = true
     let originChanged = false
     if (!this.adopted && !this.refused) {
       const start = plausibleMediaStartSec(this.sessionStartSec, w.reportedSec, this.remux)
@@ -336,15 +400,37 @@ export class RemuxClock {
     return { originChanged, alignTo: this.alignmentTarget(w, el) }
   }
 
-  private alignmentTarget(w: MediaWindow, el: { currentTime: number; ownsPlayhead: boolean }): number | null {
+  private alignmentTarget(
+    w: MediaWindow,
+    el: { currentTime: number; ownsPlayhead: boolean; roomAbsSec?: number | null },
+  ): number | null {
     if (this.alignment !== 'pending' || this.reanchorDone) return null
     const into = this.sessionStartSec - this.origin
     if (!(into > MEDIA_START_ALIGN_MIN_SEC)) { this.alignment = 'unneeded'; return null }
     // Nothing but a seek moves an element that has not played.
     if (!this.played && el.currentTime > MEDIA_START_ALIGN_MIN_SEC) { this.alignment = 'abandoned'; return null }
+    if (!el.ownsPlayhead) return this.guestAlignmentTarget(w, el.roomAbsSec ?? null)
     if (el.currentTime >= into - MEDIA_START_ALIGN_MIN_SEC) { this.alignment = 'passed'; return null }
-    if (!el.ownsPlayhead) return null
-    const target = mediaStartAlignmentSec(this.sessionStartSec, this.origin, w.producedEndSec, w.runwaySec)
+    return this.aligned(mediaStartAlignmentSec(this.sessionStartSec, this.origin, w.producedEndSec, w.runwaySec))
+  }
+
+  /**
+   * A party guest (L2), before it plays: the room's projected position in
+   * media seconds, under the same runway rule, or null. A guest used to start
+   * at the key frame and agree with its host only because both clocks read
+   * high by the same gap; with true clocks a guest of an aligned host would
+   * start that gap behind the room and catch up through the drift loop — a
+   * hard snap after its first frames, or up to half a minute at 5% speed.
+   * Before playback a seek is invisible. Once the element has played, or
+   * without the runway, the drift loop owns the position, as before, so the
+   * two never both move it; the guest sends nothing either way.
+   */
+  private guestAlignmentTarget(w: MediaWindow, roomAbsSec: number | null): number | null {
+    if (this.played || roomAbsSec === null || !Number.isFinite(roomAbsSec)) return null
+    return this.aligned(alignmentWithRunwaySec(roomAbsSec - this.origin, w.producedEndSec, w.runwaySec))
+  }
+
+  private aligned(target: number): number | null {
     if (!(target > 0)) return null
     this.alignment = 'aligned'
     this.pendingEchoSec = target

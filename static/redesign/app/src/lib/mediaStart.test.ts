@@ -4,8 +4,10 @@ import {
   MEDIA_START_ALIGN_EDGE_SEC,
   MEDIA_START_MAX_LAG_SEC,
   MEDIA_START_MAX_LEAD_SEC,
+  MEDIA_START_PARTY_HOLD_MS,
   MEDIA_START_TAG,
   RemuxClock,
+  alignmentWithRunwaySec,
   fetchNativeMediaWindow,
   firstVariantUri,
   mediaStartAlignmentSec,
@@ -110,6 +112,12 @@ describe('mediaStartAlignmentSec', () => {
     expect(mediaStartAlignmentSec(25, 20, 15 + MEDIA_START_ALIGN_EDGE_SEC, 10)).toBe(5)
     expect(mediaStartAlignmentSec(25, 20, 15 + MEDIA_START_ALIGN_EDGE_SEC - 0.001, 10)).toBe(0)
   })
+  it('is the runway rule applied to start_sec - origin', () => {
+    expect(alignmentWithRunwaySec(5, 15 + MEDIA_START_ALIGN_EDGE_SEC, 10)).toBe(5)
+    expect(alignmentWithRunwaySec(5, 15 + MEDIA_START_ALIGN_EDGE_SEC - 0.001, 10)).toBe(0)
+    expect(alignmentWithRunwaySec(0.04, 100, 0)).toBe(0)
+    expect(alignmentWithRunwaySec(-1, 100, 0)).toBe(0)
+  })
 })
 
 describe('plausibility window (L5)', () => {
@@ -212,10 +220,102 @@ describe('RemuxClock', () => {
     expect(c.noteLevel(windowOf(O, 40), owner(0.5)).alignTo).toBeNull()
   })
 
-  it('never aligns a party guest, whose position the drift loop owns', () => {
+  it('never aligns a party guest without a room position: the drift loop owns it', () => {
     const c = new RemuxClock(S, true)
     expect(c.noteLevel(windowOf(O, 30), { currentTime: 0, ownsPlayhead: false }).alignTo).toBeNull()
     expect(c.originSec).toBe(O)
+    const unknown = new RemuxClock(S, true)
+    expect(unknown.noteLevel(windowOf(O, 30), { currentTime: 0, ownsPlayhead: false, roomAbsSec: null }).alignTo).toBeNull()
+  })
+
+  describe('a party guest before it plays (L2)', () => {
+    const guest = (roomAbsSec: number | null, currentTime = 0) => ({ currentTime, ownsPlayhead: false, roomAbsSec })
+
+    it("aligns to the room's projected position, not to start_sec", () => {
+      // An aligned host's room, 0.3 s on: the guest starts there, not at the
+      // key frame the gap behind it, and not at start_sec 0.3 s behind it.
+      const c = new RemuxClock(S, true)
+      expect(c.noteLevel(windowOf(O, 20), guest(S + 0.3)).alignTo).toBeCloseTo(S + 0.3 - O, 9)
+      // A host that re-anchored into the gap: the guest follows it there.
+      const reanchored = new RemuxClock(S, true)
+      expect(reanchored.noteLevel(windowOf(O, 20), guest(O + 0.35)).alignTo).toBeCloseTo(0.35, 9)
+      // The echo of that seek is consumed like a host's alignment.
+      expect(reanchored.consumeAlignmentSeeked(0.36)).toBe(true)
+    })
+
+    it('keeps the runway rule, and retries on later loads only until it plays', () => {
+      const c = new RemuxClock(S, true)
+      // 5.35 s into a single published 10 s segment would stall at its end.
+      expect(c.noteLevel(windowOf(O, 10), guest(S + 0.3)).alignTo).toBeNull()
+      expect(c.noteLevel(windowOf(O, 20), guest(S + 0.6)).alignTo).toBeCloseTo(S + 0.6 - O, 9)
+      const played = new RemuxClock(S, true)
+      played.noteLevel(windowOf(O, 10), guest(S + 0.3))
+      played.notePlayed()
+      expect(played.noteLevel(windowOf(O, 30), guest(S + 2, 1)).alignTo).toBeNull()
+    })
+
+    it('leaves a guest with no gap, no measured start, or a moved playhead alone', () => {
+      expect(new RemuxClock(40, true).noteLevel(windowOf(39.98, 30), guest(41)).alignTo).toBeNull()
+      expect(new RemuxClock(S, true).noteLevel(windowOf(null, 30), guest(S + 1)).alignTo).toBeNull()
+      expect(new RemuxClock(S, false).noteLevel(windowOf(O, 30), guest(S + 1)).alignTo).toBeNull()
+      expect(new RemuxClock(S, true).noteLevel(windowOf(O, 30), guest(S + 1, 2)).alignTo).toBeNull()
+      // A room at or before the origin is the rebuild path's, not a seek's.
+      expect(new RemuxClock(S, true).noteLevel(windowOf(O, 30), guest(O - 3)).alignTo).toBeNull()
+      expect(new RemuxClock(S, true).noteLevel(windowOf(O, 30), guest(Number.NaN)).alignTo).toBeNull()
+    })
+
+    it('is done once a party seek was applied to it', () => {
+      const c = new RemuxClock(S, true)
+      c.noteLevel(windowOf(O, 10), guest(null))
+      c.noteUserSeek()
+      expect(c.noteLevel(windowOf(O, 30), guest(S + 1)).alignTo).toBeNull()
+    })
+  })
+
+  describe('holdsPartyPosition (L1)', () => {
+    const NOW = 1_000_000
+    const guest0 = () => ({ currentTime: 0, ownsPlayhead: false, roomAbsSec: null })
+
+    it('holds a position a plausible start could serve until the first level load', () => {
+      const c = new RemuxClock(S, true)
+      expect(c.awaitingMeasuredStart).toBe(true)
+      // A host's re-anchor into the gap, start_sec itself, and past it.
+      expect(c.holdsPartyPosition(O + 0.35, NOW)).toBe(true)
+      expect(c.holdsPartyPosition(S, NOW)).toBe(true)
+      expect(c.holdsPartyPosition(S + 30, NOW)).toBe(true)
+      c.noteLevel(windowOf(O, 20), guest0())
+      expect(c.awaitingMeasuredStart).toBe(false)
+      expect(c.holdsPartyPosition(O + 0.35, NOW)).toBe(false)
+    })
+
+    it('stops holding when the load reports nothing, or the native fetch failed', () => {
+      const none = new RemuxClock(S, true)
+      none.noteLevel(windowOf(null, 20), guest0())
+      expect(none.holdsPartyPosition(O + 0.35, NOW)).toBe(false)
+      const failed = new RemuxClock(S, true)
+      failed.noteNoMeasurement()
+      expect(failed.holdsPartyPosition(O + 0.35, NOW)).toBe(false)
+    })
+
+    it('never holds before any start the clock would accept', () => {
+      const c = new RemuxClock(100, true)
+      expect(c.holdsPartyPosition(100 - MEDIA_START_MAX_LAG_SEC, NOW)).toBe(true)
+      expect(c.holdsPartyPosition(100 - MEDIA_START_MAX_LAG_SEC - 0.001, NOW)).toBe(false)
+      expect(c.holdsPartyPosition(Number.NaN, NOW)).toBe(false)
+    })
+
+    it('is bounded from the first hold', () => {
+      const c = new RemuxClock(S, true)
+      expect(c.holdsPartyPosition(O + 0.35, NOW)).toBe(true)
+      expect(c.holdsPartyPosition(O + 0.35, NOW + MEDIA_START_PARTY_HOLD_MS - 1)).toBe(true)
+      expect(c.holdsPartyPosition(O + 0.35, NOW + MEDIA_START_PARTY_HOLD_MS)).toBe(false)
+      expect(c.holdsPartyPosition(S, NOW + MEDIA_START_PARTY_HOLD_MS + 250)).toBe(false)
+    })
+
+    it('never holds for a transcode or an unseeked session', () => {
+      expect(new RemuxClock(S, false).holdsPartyPosition(O + 0.35, NOW)).toBe(false)
+      expect(new RemuxClock(0, true).holdsPartyPosition(0.2, NOW)).toBe(false)
+    })
   })
 
   it('never jumps a playhead a seek moved', () => {
