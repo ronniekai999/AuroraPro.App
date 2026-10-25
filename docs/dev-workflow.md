@@ -37,7 +37,9 @@ flowchart TD
    contrast, on-glass contrast, reduced motion, breakpoints, cascade) and three
    browser-driven ones (page alignment, mobile layout, PWA). CI's SPA job runs
    the same `audit:checks` after its own build, so a new check belongs in
-   `audit:checks`, not appended to `audit`.
+   `audit:checks`, not appended to `audit`. Run on its own, `audit:checks` tests
+   whatever build is in `static/v2`, which after a branch switch is stale: use
+   `npm run audit` unless you have just built.
 
    **The browser checks need Chromium, and `npm ci` does not install it** — modern
    Playwright has no postinstall step. On a fresh machine, once:
@@ -46,9 +48,10 @@ flowchart TD
    cd static/redesign/app && npx playwright install chromium
    ```
 
-   Without it the gate fails at the final step with Playwright's own message
-   telling you to run exactly that. Set `CHROMIUM_PATH` to override the binary
-   before review. Loop back on failure.
+   Without it the gate fails at the first browser check (page alignment), with
+   Playwright's own message suggesting `npx playwright install`; the `chromium`
+   form above is enough. Set `CHROMIUM_PATH` to override the binary before
+   review. Loop back on failure.
 5. **Independent deep-debug agent review** — dispatch a separate, fresh-context
    agent to adversarially review *the complete current diff*. The implementing
    agent's self-review does not satisfy this gate. The reviewer is read-only and
