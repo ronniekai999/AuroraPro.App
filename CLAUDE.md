@@ -977,11 +977,23 @@ capability declarations.
   rebuilding a still-booting guest. Native HLS fetches the variant playlist
   once and applies it at `loadedmetadata`, failing safe to `start_sec`.
   Transcodes and the Android TV client still anchor on `start_sec`.
+- Sidecar subtitle cue shift (`ServeSubtitle`, `subtitleCueShift`): a
+  transcode shifts by `start_sec`; a remux by `media_start=`, the measured
+  start the web player sends beside `start=<start_sec>&remux=1`
+  (`subtitleCueShiftQuery`), taken only as a plain decimal inside the
+  publication window (`ParseClientMediaStart`); otherwise by the
+  `ProbeSeekKeyframe` prediction, as before. The player sends the measured
+  start whether its clock adopted or refused it (`measuredStartSec`: cues are
+  timed on the element), and holds a pick (the rebuild restore included)
+  while the clock awaits its first level load (natively, its fetch), creating
+  the `<track>` once that settles, so the track is requested once.
 - Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
   and it assumes Safari's media time 0 is the first segment's start, as
-  hls.js's is (unverified); the remux subtitle cue shift still uses
-  `ProbeSeekKeyframe` (`phase2_handlers.go` `ServeSubtitle`), a GOP off on the
-  Matroska key-frame case; after the unreadable-playlist resume fallback the
+  hls.js's is (unverified); older clients and a remux whose playlist reported
+  no start still get the `ProbeSeekKeyframe` subtitle shift, a GOP off on the
+  Matroska key-frame case, and so does a track created before a start that
+  arrives late; a held pick waits for local loading, which a boot while
+  casting does not start; after the unreadable-playlist resume fallback the
   cached start describes segment 0 of a playlist that no longer lists it; a
   measurement that lands after the first request's budget reaches only
   players that have not started.
