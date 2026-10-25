@@ -2,8 +2,9 @@
 // The remux playback clock through the real VideoPlayer (lib/mediaStart.ts):
 // a remux's media time 0 is the key frame BEFORE start_sec, and the variant
 // playlist reports where that is. Every consumer of the media clock must use
-// the reported origin; the whole-second start_sec keeps the subtitle shift and
-// the receiver fallback. Mocks only delivery, telemetry and CAF.
+// the reported origin; the whole-second start_sec keeps the receiver fallback
+// and the subtitle request's `start=`, beside which the measured start rides
+// as `media_start=`. Mocks only delivery, telemetry and CAF.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
@@ -208,7 +209,7 @@ describe('remux clock: media time 0 is the measured key frame, not start_sec', (
     // The endpoint Atoi()s `start`, so it stays start_sec; the measured start
     // rides beside it and replaces the server's key-frame prediction.
     expect(trackQuery(document.querySelector('track')!.getAttribute('src')))
-      .toBe(`?type=media&start=${START_SEC}&remux=1&media_start=${ORIGIN.toFixed(6)}`)
+      .toBe(`?type=media&start=${START_SEC}&remux=1&media_start=19.95`)
   })
 
   it('broadcasts a host pause on the true clock, and not the boot alignment as a seek', async () => {
@@ -580,8 +581,13 @@ async function pickSubtitle(name: RegExp | string = /English subs/) {
   fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
   fireEvent.click(screen.getByRole('button', { name })); await settle()
 }
+// The stream info of a title the browser plays directly.
+function directPlayInfo() {
+  const remux = info('direct_stream')
+  return { ...remux, stream: { ...remux.stream, decision: 'direct_play', remux: false } } as unknown as Awaited<ReturnType<typeof getStreamInfo>>
+}
 const REMUX_QUERY = `?type=media&start=${START_SEC}&remux=1`
-const MEASURED_QUERY = `${REMUX_QUERY}&media_start=${ORIGIN.toFixed(6)}`
+const MEASURED_QUERY = `${REMUX_QUERY}&media_start=19.95`
 
 // The sidecar subtitle cue shift. The server used to predict the key frame a
 // remux began on (ProbeSeekKeyframe), which on Matroska with B-frames and a
@@ -610,7 +616,7 @@ describe('remux clock: subtitle cues are shifted to the measured start', () => {
     expect(document.querySelector('track')).toBeNull()
     expect(tracks()).toHaveLength(1)
     await firstLevel('30.000000')
-    expect(tracks().slice(1).map(trackQuery)).toEqual(['?type=media&start=40&remux=1&media_start=30.000000'])
+    expect(tracks().slice(1).map(trackQuery)).toEqual(['?type=media&start=40&remux=1&media_start=30.00'])
   })
 
   it('keeps the server prediction when the playlist reports no start (older server)', async () => {
@@ -653,7 +659,7 @@ describe('remux clock: subtitle cues are shifted to the measured start', () => {
   })
 
   it('sends no shift at all for direct play, and never waits', async () => {
-    vi.mocked(getStreamInfo).mockResolvedValue({ ...info('direct_stream'), stream: { ...info('direct_stream').stream, decision: 'direct_play', remux: false } } as unknown as Awaited<ReturnType<typeof getStreamInfo>>)
+    vi.mocked(getStreamInfo).mockResolvedValue(directPlayInfo())
     const tracks = watchTracks()
     render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
     expect(createSession).not.toHaveBeenCalled()
@@ -670,6 +676,107 @@ describe('remux clock: subtitle cues are shifted to the measured start', () => {
     await firstLevel(ORIGIN.toFixed(6))
     await pickSubtitle()
     expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`, `?type=media&start=${START_SEC}`])
+  })
+})
+
+// Before the delivery is known (stream info, then the session create) the
+// boot has reset start_sec and the clock: a <track> built then carried no
+// shift at all (cues a whole start_sec late), and the boot's restore then
+// replayed the pick it captured when it began, dropping or overriding a newer
+// one.
+describe('remux clock: a subtitle pick made while the boot resolves', () => {
+  function gate<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(r => { resolve = r })
+    return { promise, resolve }
+  }
+  type Session = Awaited<ReturnType<typeof createSession>>
+  type Info = Awaited<ReturnType<typeof getStreamInfo>>
+  const session = (startSec: number) => ({ session_id: `held-${startSec}`, master_playlist: '/api/stream/session/master.m3u8', start_sec: startSec }) as Session
+
+  it('during the session create, is requested once, against the measured start', async () => {
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    expect(fake.hls).toHaveLength(0)
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { created.resolve(session(START_SEC)) }); await manifestOnly()
+    expect(tracks()).toEqual([])
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+    expect(document.querySelectorAll('track')).toHaveLength(1)
+  })
+
+  it('during the session create of a transcode, is requested once with start_sec', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Info)
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { created.resolve(session(START_SEC)) }); await manifestOnly()
+    expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`])
+  })
+
+  it("during a rebuild's stream info, survives the boot and uses the new session's start", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    const infoGate = gate<Info>()
+    vi.mocked(getStreamInfo).mockImplementationOnce(() => infoGate.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />); await settle()
+    // The picker still lists the title's tracks while its stream info loads.
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { infoGate.resolve(info('direct_stream') as Info) }); await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks().map(trackQuery)).toEqual(['?type=media&start=40&remux=1&media_start=30.00'])
+  })
+
+  it("Off during a rebuild's session create wins over the pick the boot began with", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    await pickSubtitle()
+    expect(tracks()).toHaveLength(1)
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />)
+    await settle(); await settle()
+    await pickSubtitle('Off')
+    await act(async () => { created.resolve(session(40)) }); await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks()).toHaveLength(1)
+    expect(document.querySelector('track')).toBeNull()
+  })
+
+  it('is dropped by a title without that track, so a later title with it does not restore it', async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    expect(tracks()).toHaveLength(1)
+    vi.mocked(getStreamInfo).mockResolvedValueOnce({ ...info('direct_stream'), subtitles: [] } as unknown as Info)
+    view.rerender(<VideoPlayer target={{ ...movie, mediaItemId: 2, fileId: 11, title: 'No subs' }} onClose={() => {}} />); await bootHls()
+    view.rerender(<VideoPlayer target={{ ...movie, mediaItemId: 3, fileId: 12, title: 'Subs again' }} onClose={() => {}} />); await bootHls()
+    expect(tracks()).toHaveLength(1)
+    expect(document.querySelector('track')).toBeNull()
+  })
+
+  it('during the stream info of a direct-play title, is created at canplay with no shift', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(directPlayInfo())
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    const infoGate = gate<Info>()
+    vi.mocked(getStreamInfo).mockImplementationOnce(() => infoGate.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} />); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { infoGate.resolve(directPlayInfo()) }); await settle(); await settle()
+    expect(tracks()).toEqual([])
+    fireEvent(video(), new Event('canplay')); await settle()
+    expect(tracks().map(trackQuery)).toEqual(['?type=media'])
+    expect(document.querySelectorAll('track')).toHaveLength(1)
   })
 })
 
@@ -841,6 +948,22 @@ describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', (
     await pickSubtitle()
     expect(tracks()).toEqual([])
     release(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`)); await settle(); await settle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+  })
+
+  it('restores a pick made during the session create at canplay, against the fetched start', async () => {
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    let created!: (s: Awaited<ReturnType<typeof createSession>>) => void
+    vi.mocked(createSession).mockImplementationOnce(() => new Promise(r => { created = r }))
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={7} />); await settle(); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => {
+      created({ session_id: 'native-held', master_playlist: '/api/stream/session/master.m3u8', start_sec: START_SEC } as Awaited<ReturnType<typeof createSession>>)
+    }); await settle(); await settle()
+    expect(tracks()).toEqual([])
+    fireEvent(video(), new Event('canplay')); await settle()
     expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
   })
 
