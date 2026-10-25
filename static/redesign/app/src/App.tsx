@@ -5690,7 +5690,7 @@ export default function App() {
   // server's total_items. Non-blocking, abortable, and non-fatal: on error
   // we leave homeLibraryTotal null and the greeting simply omits the clause
   // (it already gates on a non-null total). The browse-tab counts remain a
-  // fallback. Gated on `user` so we don't fire pre-auth.
+  // fallback. Gated on the user's id so we don't fire pre-auth.
   //
   // The server counts the catalog the session's profile may see, so this
   // waits for the startup binding like the catalog does
@@ -5704,10 +5704,15 @@ export default function App() {
   // signal) without the session changing. Only the latest request lands, and
   // an answer is shown only for the user and profile it was asked for, so
   // the commit that switches profile shows no count rather than the previous
-  // profile's.
+  // profile's. The stored answer is dropped whenever the user, the profile or
+  // the startup settle changes, so it is only ever the current request's: a
+  // key alone came back after a sign-out and sign-in in the same tab (the
+  // same user with no profile known yet), and after a switch away and back
+  // before the other profile's count landed, showing an answer from before.
   const homeLibraryUserId = user ? user.id : null
   const homeLibraryKey = `${homeLibraryUserId}:${activeProfileId}`
   useEffect(() => {
+    setHomeLibraryCount(null)
     if (homeLibraryUserId === null || !catalogProfileSettled) return
     const key = `${homeLibraryUserId}:${activeProfileId}`
     const ac = new AbortController()

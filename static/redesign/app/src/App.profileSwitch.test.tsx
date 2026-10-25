@@ -312,11 +312,12 @@ describe('a profile switch never commits the new name over the previous profileâ
 
   // Home's greeting counts the library from its own fetch, or, when that
   // failed, from the browse grids' totals, which are the Parent's until the
-  // switch clears them.
-  it("does not count the Parent's library in Home's greeting", async () => {
+  // switch clears them. One grid each, so the greeting's total is that grid's.
+  it.each([['Movies', '/movies'], ['Shows', '/shows']])(
+    "does not count the Parent's library in Home's greeting from the %s total", async (_grid, path) => {
     vi.unstubAllGlobals()
     server = stubServer({ homeCountFails: true })
-    const commits = renderApp('/movies')
+    const commits = renderApp(path)
     await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
     fireEvent.click([...document.querySelectorAll('button.stage-tab')].find(b => b.textContent === 'Home')!)
     // Not vacuous: the fallback did put the Parent's total in the greeting.
@@ -325,7 +326,7 @@ describe('a profile switch never commits the new name over the previous profileâ
     await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
     expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
     expect(kidOverParent(commits)).toBe(0)
-  })
+    })
 
   it('clears a conversational search', async () => {
     const commits = renderApp('/')
@@ -450,5 +451,28 @@ describe('Homeâ€™s library count is the acting profileâ€™s', () => {
     await new Promise(done => setTimeout(done, 100))
     expect(document.body.textContent).toMatch(total(2))
     expect(commits.filter(c => c.parentTotal)).toEqual([])
+  })
+
+  // Back on the Parent before the Kid's count landed, the greeting waits for
+  // the Parent's new answer rather than showing the one from before the
+  // switch: kept, the same user and profile coming back (a sign-out and
+  // sign-in in this tab, say) would show an answer from another session.
+  it('asks again after a switch away and back, showing no earlier answer', async () => {
+    const commits = renderApp('/')
+    await greetingCounts(37)
+    server.hold('count-2')
+    switchToKid()
+    await waitFor(() => expect(server.counts).toEqual([1, 2]), { timeout: 5000 })
+    const release = server.hold('count-1')
+    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Parent/ }))
+    await waitFor(() => expect(server.counts).toEqual([1, 2, 1]), { timeout: 5000 })
+    const since = commits.length
+    expect(commits[since - 1].label).toBe('Parent')
+    await new Promise(done => setTimeout(done, 100))
+    expect(commits.slice(since).filter(c => c.parentTotal)).toEqual([])
+    expect(document.body.textContent).not.toMatch(total(37))
+    release()
+    await greetingCounts(37)
   })
 })
