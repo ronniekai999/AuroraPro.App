@@ -103,6 +103,12 @@ func ProbeSubtitles(ctx context.Context, filePath string) ([]models.SubtitleTrac
 // ~1-2s) in the SAFE direction (cues slightly late, not early). Most
 // remux-tier content is closed-GOP/all-IDR so this rarely bites; the
 // error is still smaller than the pre-#141 full-GOP error.
+//
+// Known limitation (demuxers without AVFMT_SEEK_TO_PTS: Matroska, MPEG-TS,
+// AVI): with B-frames FFmpeg seeks 130 ms before the target, so a target ON
+// a key frame lands on the previous one and this is a whole GOP late (cues a
+// GOP early). It is a prediction; the subtitle endpoint uses it only when
+// the client sends no measured start (media_start=, media_start.go).
 func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) float64 {
 	if target <= 0 {
 		return target
@@ -604,7 +610,9 @@ func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
 // -copyts/-start_at_zero make THAT keyframe the HLS t=0. Shifting by
 // the raw startSec (which can be up to one GOP after the keyframe)
 // placed every cue ~2-3s too early — "subtitles ahead of audio".
-// Callers must pass ProbeSeekKeyframe(startSec), not startSec.
+// Callers pass where the player's media time 0 is in the file, not the
+// requested startSec: for a remux, the measured start when the client sent
+// one, else ProbeSeekKeyframe(startSec) (internal/api subtitleCueShift).
 func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, error) {
 	if offsetSec <= 0 {
 		return vttPath, nil
