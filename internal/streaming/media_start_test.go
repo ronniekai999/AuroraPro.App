@@ -492,6 +492,50 @@ func TestSessionMediaStart_ProbesOnceAndBoundsWhatItPublishes(t *testing.T) {
 	})
 }
 
+// The probe's limits are what keep it cheap on a 40 Mbps segment (1 MB and
+// 1 s returned the same start as no limits at all, in review). Nothing else
+// fails without them, so pin the exact command line a stand-in ffprobe sees.
+func TestProbeMediaStartSec_PassesItsProbeLimits(t *testing.T) {
+	bin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "args")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AURORA_FAKE_FFPROBE_ARGS\"\necho 19.946000\n"
+	if err := os.WriteFile(filepath.Join(bin, "ffprobe"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write ffprobe stub: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AURORA_FAKE_FFPROBE_ARGS", argsFile)
+
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		fmp4  bool
+		input string
+	}{
+		{false, filepath.Join(dir, "seg_00000.ts")},
+		{true, "concat:" + filepath.Join(dir, "init.mp4") + "|" + filepath.Join(dir, "seg_00000.m4s")},
+	} {
+		sec, err := probeMediaStartSec(context.Background(), dir, tc.fmp4)
+		if err != nil || sec != 19.946 {
+			t.Fatalf("fmp4=%v: probe = %v, %v; want 19.946", tc.fmp4, sec, err)
+		}
+		raw, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatalf("fmp4=%v: the stand-in ffprobe did not run: %v", tc.fmp4, err)
+		}
+		got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+		want := []string{
+			"-v", "error",
+			"-probesize", "1000000",
+			"-analyzeduration", "1000000",
+			"-show_entries", "format=start_time",
+			"-of", "default=noprint_wrappers=1:nokey=1",
+			tc.input,
+		}
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("fmp4=%v: ffprobe argv\n got %q\nwant %q", tc.fmp4, got, want)
+		}
+	}
+}
+
 func TestProbeMediaStartSec_RefusesAConcatSeparatorInThePath(t *testing.T) {
 	if _, err := probeMediaStartSec(context.Background(), "/tmp/a|b", true); err == nil {
 		t.Fatal("a '|' in an fMP4 segment path must not reach the concat protocol")
