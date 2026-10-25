@@ -447,9 +447,10 @@ none of them modelled here:
   `walkFailed` and prunes nothing — the check refuses to answer rather than
   guess, which is right, and still an exit you cannot clear except by fixing
   the path. That holds with GNU coreutils and with uutils (the default on
-  Ubuntu 26.04) alike; only the reason it prints differs. **A non-directory partway down a root** gives exit 2 only when it
-  is not executable; an executable regular file mid-path is reported as
-  "does not exist" instead, which is the correct *answer* (the scan's
+  Ubuntu 26.04) alike; only the reason it prints differs. **A non-directory
+  partway down a root** gives exit 2 only when it is not executable; an
+  executable regular file mid-path is reported as "does not exist" instead,
+  which is the correct *answer* (the scan's
   `EvalSymlinks` fails with ENOTDIR, so it skips the prune) under a wrong
   explanation.
 

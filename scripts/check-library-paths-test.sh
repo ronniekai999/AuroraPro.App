@@ -937,17 +937,44 @@ CR_FAKEBIN=""
 # The second case is the same loss through realpath -m's answer: GNU hands a
 # loop back as itself, so a loop named "f<newline>" came back as an absent
 # "f". uutils fails on that loop instead, which the status check catches, so
-# that case pins the capture only on a GNU runner.
-if ln -s "$CR/blocked/inner" "$CR/hop"$'\n' 2>/dev/null \
-   && ln -s "$CR/hop"$'\n' "$CR/nl-target" \
-   && ln -s "$CR/f"$'\n' "$CR/f"$'\n' \
-   && ln -s "$CR/f"$'\n' "$CR/to-nl-loop" \
-   && ln -s "$CR/to-nl-loop" "$CR/via-nl-loop"; then
-    cr_is "$CR/nl-target"   blocked  "a symlink target ending in a newline is not shortened into an absent name" "contains a newline"
-    cr_is "$CR/via-nl-loop" blocked  "…nor is a realpath -m answer ending in one"
-else
+# the second case asserts the newline guard's own message only where
+# realpath -m does NOT fail on a loop (GNU). Without that guard the recursion
+# still blocks — the readlink guard meets the same name one level down — so
+# only the message tells the two apart.
+#
+# NLFS: does this filesystem take a newline in a name at all? Refusal is the
+# one reason to skip, as in cases 19 and 44. Any OTHER setup failure is a
+# `bad`: an `ln` that failed part way used to drop both cases with an "ok".
+NLFS=0
+{ : > "$TMP/nl-probe"$'\n'; } 2>/dev/null && [ -e "$TMP/nl-probe"$'\n' ] && NLFS=1
+if [ "$NLFS" -eq 0 ]; then
     ok "newline-terminated symlink targets: SKIPPED (filesystem refused a newline in a name)"
+elif ! { ln -s "$CR/blocked/inner" "$CR/hop"$'\n' \
+         && ln -s "$CR/hop"$'\n' "$CR/nl-target" \
+         && ln -s "$CR/f"$'\n' "$CR/f"$'\n' \
+         && ln -s "$CR/f"$'\n' "$CR/to-nl-loop" \
+         && ln -s "$CR/to-nl-loop" "$CR/via-nl-loop"; }; then
+    bad "newline-terminated symlink targets: could not build the fixture — both cases would go unrun"
+else
+    cr_is "$CR/nl-target"   blocked  "a symlink target ending in a newline is not shortened into an absent name" "contains a newline"
+    if realpath -m -- "$CR/loopa" >/dev/null 2>&1; then
+        nlwhy="resolves through a name containing a newline"   # GNU
+    else
+        nlwhy="could not be resolved"                          # uutils
+    fi
+    cr_is "$CR/via-nl-loop" blocked  "…nor is a realpath -m answer ending in one" "$nlwhy"
 fi
+# ── 33d. A readlink that exits 0 and prints nothing ───────────────
+# Linux cannot create a symlink with an empty target, so only a quietly
+# broken readlink reaches the empty-target arm. Unguarded, the empty target
+# is "relative", is joined to the link's directory, and that directory comes
+# back `resolved`. Faked, as realpath is in 33b.
+mkdir -p "$TMP/fakerl-silent"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/fakerl-silent/readlink"
+chmod a+rx "$TMP/fakerl-silent" "$TMP/fakerl-silent/readlink"
+CR_FAKEBIN="$TMP/fakerl-silent"
+cr_is "$CR/dangling"        blocked  "a readlink that exits 0 and prints nothing is not followed" "empty or contains a newline"
+CR_FAKEBIN=""
 # Search permission, not read, is what makes an absence conclusive. 0711 is the
 # ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
 # absent root under a home directory into an exit 2 nobody could clear.
@@ -1318,7 +1345,14 @@ R="$TMP/wcempty"; mkdir -p "$R"
 : > "$R/A.mkv"
 echo "$R" > "$FIX/roots"
 printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+# The stub READS its input before exiting. wc sits at the end of
+# `printf | wc -l`, and a stub that exits without reading races the printf:
+# when it wins, printf takes SIGPIPE, pipefail turns that into the STATUS
+# guard ("wc failed"), and this case — which asserts the VALUE guard — fails
+# with the right exit code and the wrong message. Seen once in about thirty
+# runs, under eight suites in parallel. Draining stdin removes the race.
 guard_case '#!/bin/sh
+cat > /dev/null
 exit 0' \
   "is not a number" "a wc that exits 0 and prints nothing → exit 2" wc
 
