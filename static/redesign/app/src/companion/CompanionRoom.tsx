@@ -130,7 +130,7 @@ export function CompanionRoom({
             {state.partyName || state.mediaTitle || 'Watch Party'}
           </p>
           {state.code && (
-            <p className="font-display text-[11px] tracking-[0.08em] text-white/40">
+            <p className="font-display text-[11px] tracking-[0.08em] text-white/50">
               CODE · {state.code}
             </p>
           )}
@@ -197,7 +197,7 @@ export function CompanionRoom({
         data-screenshot-exclude="true"
       >
         {state.chat.length === 0 && (
-          <p className="py-6 text-center text-xs text-white/30">
+          <p className="py-6 text-center text-xs text-white/50">
             Say hi 👋 — messages you send appear here and on everyone's screen.
           </p>
         )}
@@ -263,7 +263,7 @@ export function CompanionRoom({
           maxLength={1000}
           enterKeyHint="send"
           aria-label="Message the party"
-          className="min-w-0 flex-1 rounded-xl border border-[rgba(220,200,255,0.10)] bg-white/[0.05] px-3.5 py-2.5 text-sm text-white placeholder:text-white/40 focus:border-purple-500/40 focus:outline-none"
+          className="min-w-0 flex-1 rounded-xl border border-[rgba(220,200,255,0.10)] bg-white/[0.05] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
         />
         {draft.trim() ? (
           <button
@@ -388,7 +388,7 @@ function MemberChip({ participant, isSelf, speaking }: {
 function ChatBubble({ msg, mine }: { msg: ChatMessageEvent; mine: boolean }) {
   return (
     <div className={`flex max-w-[82%] flex-col ${mine ? 'self-end items-end' : 'items-start'}`}>
-      <span className={`mb-0.5 text-[10px] ${mine ? 'text-[color:var(--stage-purple-lt)]' : 'text-white/45'}`}>
+      <span className={`mb-0.5 text-[10px] ${mine ? 'text-[color:var(--stage-purple-lt)]' : 'text-white/50'}`}>
         {mine ? 'You' : msg.username}
       </span>
       <div

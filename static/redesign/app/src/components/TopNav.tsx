@@ -286,7 +286,7 @@ function AvatarMenu({
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
-            <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
+            <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5">
               {showAdmin ? (
                 <>
                   <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>

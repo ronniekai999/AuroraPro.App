@@ -1140,7 +1140,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               is visible in the public GitHub issue. */}
           <div>
             <label htmlFor="bug-name" className="block text-white/80 text-sm font-medium mb-1">
-              Your name <span className="text-white/40">(optional, visible in the GitHub issue)</span>
+              Your name <span className="text-white/50">(optional, visible in the GitHub issue)</span>
             </label>
             <input
               id="bug-name"
@@ -1150,7 +1150,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               maxLength={MAX_NAME_LEN}
               disabled={submitting || capturing || recording}
               placeholder="So we can credit you in the issue thread"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
+              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
             />
           </div>
 
@@ -1169,9 +1169,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               required
               disabled={submitting || capturing || recording}
               placeholder="e.g. Continue Watching card jumps to wrong episode"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
+              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
             />
-            <p className="text-white/30 text-[10px] mt-1 tabular-nums">
+            <p className="text-white/50 text-[10px] mt-1 tabular-nums">
               {title.length} / {MAX_TITLE_LEN}
             </p>
           </div>
@@ -1190,9 +1190,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               disabled={submitting || capturing || recording}
               rows={6}
               placeholder="What did you expect to happen? What actually happened? Steps to reproduce?"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50 resize-y min-h-[120px]"
+              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50 resize-y min-h-[120px]"
             />
-            <p className="text-white/30 text-[10px] mt-1 tabular-nums">
+            <p className="text-white/50 text-[10px] mt-1 tabular-nums">
               {description.length} / {MAX_DESC_LEN}
             </p>
           </div>
@@ -1204,7 +1204,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 clicking the label focuses the actual visible control
                 instead of an invisible element. */}
             <label htmlFor="bug-attachment-trigger" className="block text-white/80 text-sm font-medium mb-1">
-              Screenshot or recording <span className="text-white/40">(optional, max 25 MB)</span>
+              Screenshot or recording <span className="text-white/50">(optional, max 25 MB)</span>
             </label>
             {/* 2026-05-27 polish — three matching outlined buttons in a
                 consistent row. Native file <input> is hidden behind a
@@ -1288,7 +1288,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   </svg>
                 )}
                 {capturing ? 'Capturing…' : 'Capture this page'}
-                {!capturing && <span className="text-white/40 font-normal">· PNG</span>}
+                {!capturing && <span className="text-white/50 font-normal">· PNG</span>}
               </button>
               {/* Phase 3 — Record screen. Stop button shown while
                   recording with a live countdown; auto-stops at 30s.
@@ -1316,11 +1316,11 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                     <circle cx="12" cy="12" r="3" fill="currentColor" />
                   </svg>
                   Record screen
-                  <span className="text-white/40 font-normal">· WebM 30s</span>
+                  <span className="text-white/50 font-normal">· WebM 30s</span>
                 </button>
               )}
             </div>
-            <p className="text-white/30 text-[10px] mt-1">
+            <p className="text-white/50 text-[10px] mt-1">
               Use Capture for a screenshot or Record screen for up to 30 seconds of video — the form will hide briefly for capture.
             </p>
             {/* Phase 2 (deep-debug #4) — PRE-capture PII notice. Shown
@@ -1359,7 +1359,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 ) : null}
                 <div className="flex-1 min-w-0">
                   <p className="text-white/70 text-xs truncate">{attachment.name}</p>
-                  <p className="text-white/40 text-[10px]">
+                  <p className="text-white/50 text-[10px]">
                     {(attachment.size / 1024 / 1024).toFixed(2)} MB
                   </p>
                 </div>

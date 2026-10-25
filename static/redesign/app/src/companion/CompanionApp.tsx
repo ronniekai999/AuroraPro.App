@@ -187,7 +187,7 @@ function BootSplash() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4">
       <CompanionBrand size="lg" />
-      <p className="text-sm text-white/40">Loading…</p>
+      <p className="text-sm text-white/50">Loading…</p>
     </div>
   )
 }
@@ -287,7 +287,7 @@ function SignInSlot({
             autoComplete="username"
             aria-label="Username"
             disabled={submitting}
-            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/40 focus:border-purple-500/40 focus:outline-none"
+            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
           />
           <input
             type="password"
@@ -298,7 +298,7 @@ function SignInSlot({
             autoComplete="current-password"
             aria-label="Password"
             disabled={submitting}
-            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/40 focus:border-purple-500/40 focus:outline-none"
+            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
           />
           <button
             type="button"
@@ -313,7 +313,7 @@ function SignInSlot({
 
       {error && <p className="text-center text-sm text-red-300">{error}</p>}
 
-      <p className="px-2 pt-1 text-center text-[11px] leading-snug text-white/35">
+      <p className="px-2 pt-1 text-center text-[11px] leading-snug text-white/50">
         An Aurora account is required to join. No account? One tap with any provider above creates one.
       </p>
     </div>

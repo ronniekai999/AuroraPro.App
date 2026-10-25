@@ -119,7 +119,7 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
 
       {/* ── OTP 6-box code entry ───────────────────────────────────── */}
       <div className="mt-7">
-        <p className="text-center text-[11px] uppercase tracking-[0.14em] text-white/40 mb-3">
+        <p className="text-center text-[11px] uppercase tracking-[0.14em] text-white/50 mb-3">
           Enter the 6-character code
         </p>
         {/* The visible boxes are a presentation of the code; the real
@@ -214,7 +214,7 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
           <div className="glass-panel flex items-center gap-3 rounded-2xl p-3">
             <CompanionPoster poster={preview.mediaPoster} className="h-[68px] w-[46px] rounded-lg" />
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[11px] text-white/45">
+              <p className="truncate text-[11px] text-white/50">
                 {preview.partyName ? `${preview.partyName} · now playing` : 'Now playing'}
               </p>
               <p className="truncate text-sm font-semibold text-white">
@@ -255,7 +255,7 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
           </button>
         ) : (
           <div>
-            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wider text-white/30">
+            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wider text-white/50">
               <span className="h-px flex-1 bg-[var(--glow-border)]" />
               sign in to join
               <span className="h-px flex-1 bg-[var(--glow-border)]" />

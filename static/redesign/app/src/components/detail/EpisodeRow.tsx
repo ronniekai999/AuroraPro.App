@@ -135,14 +135,14 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
           )}
         </div>
         {ep.overview && (
-          <p className={cn('text-[12.5px] leading-snug line-clamp-2', inProgress ? 'text-white/55' : 'text-white/45')}>
+          <p className={cn('text-[12.5px] leading-snug line-clamp-2', inProgress ? 'text-white/60' : 'text-white/50')}>
             {ep.overview}
           </p>
         )}
         <div
           className={cn(
             'text-[11.5px] mt-1.5 font-medium',
-            inProgress ? 'text-purple-300' : 'text-white/45',
+            inProgress ? 'text-purple-300' : 'text-white/50',
           )}
         >
           {ep.leftLabel ?? ep.watchedLabel ?? ep.plainLabel}
@@ -157,7 +157,7 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
         accent matching the movie "Play in" chooser. */}
     {hasVersions && (
       <div className="flex items-center gap-2 flex-wrap px-[0.7rem] pb-[0.7rem] -mt-0.5">
-        <span className="text-white/40 text-[10px] uppercase tracking-wider mr-0.5">Play in</span>
+        <span className="text-white/50 text-[10px] uppercase tracking-wider mr-0.5">Play in</span>
         {ep.versions!.map((v) => (
           <button
             key={v.fileId}

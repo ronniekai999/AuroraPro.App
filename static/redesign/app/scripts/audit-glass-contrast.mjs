@@ -26,8 +26,11 @@
 //
 // STATIC CHECKS RUN FIRST, over every source file rather than a list, because they
 // protect the premise the measured surfaces below rest on: that a `cls/NN` in the
-// JSX is the colour the browser paints.
+// JSX is the colour the browser paints, and that the surfaces listed are not the
+// only ones that matter.
 //   0. Opacity modifiers that compile to nothing (`deadModifiers`).
+//   1. Faint white text below a floor computed from the app's surfaces
+//      (`faintText`), with an explicit, self-expiring exemption list.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -516,6 +519,332 @@ const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
 const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 
+// ── 1. Faint white text, everywhere, against a computed floor ────────────────
+//
+// The surfaces below are measured one by one, and only those. Everything else
+// was measured by nothing: about 330 uses of text-white/20 to /45 across 44
+// files, and white at 45% is under 4.5:1 even on pure black. So every
+// `text-white/N` (and `placeholder-white/N`) in the UI sources is held to a
+// FLOOR: the smallest step on the opacity scale that clears the threshold on
+// every surface faint text sits on, computed from those surfaces' own CSS. It
+// is a floor, not a measurement: a use above it can still fail on a lighter
+// fill than these, which is what the measured surfaces are for.
+//
+// Normal text needs 4.5:1. Large text (24px, or 18.66px bold, read from the
+// same tag's classes; an inherited size reads as normal) and an icon that
+// carries meaning (WCAG 1.4.11) need 3:1. A use below its floor fails unless it
+// is EXEMPT below, by kind:
+//   decorative   separators and ornaments that say nothing (no floor)
+//   placeholder  a placeholder repeating the field's visible label (no floor)
+//   disabled     shown only while the control is disabled (no floor); a
+//                `disabled:` variant is exempt without an entry
+//   non-text     an icon that carries meaning (held to the 3:1 floor)
+//   large        large text whose size the tag does not show (3:1 floor)
+//   deferred     left for later, each named here like any other exemption
+// Each entry's anchor is source text that includes the class itself and must
+// occur exactly `count` times (1 by default). An entry whose anchor no longer
+// covers a use below the floor fails as unneeded, so raising a class to the
+// floor means deleting its entry, and an exemption cannot outlive its reason.
+//
+// Classes are found the way the build finds them (Tailwind's extractor, see
+// `classesIn`), and `color:` declarations in index.css are held to the same
+// floor: the global placeholder colour styled every input without a
+// placeholder class, and nothing measured it.
+//
+// NOT COVERED: other faint colours (text-gray-*, tinted alphas such as
+// text-purple-200/40); alpha stacked by a parent's opacity-*; class names
+// built at runtime; fills lighter than the floor surfaces (/50 holds 4.5:1 up
+// to about white/0.10); and translucent overlays over video. The party rail
+// (rgba(12,10,20,0.4)) and the mini dock (rgba(8,6,14,0.5)) sit on the
+// picture: over a white frame, /50 text measures 1.7 and 2.1:1, and even
+// full white only 2.7 and 3.8:1. /50 needs fills of about 0.85 and 0.83
+// there, near the opaque 0.92 the Subtle glow setting already uses, which is
+// a design decision rather than a contrast fix.
+
+const FLOOR_SURFACES = {
+  'page ink #050505': [INK],
+  '.aurora-bg (page tints)': stack(PAGE),
+  '.glass-panel on the page': stack(backgroundLayers(cssValue('.glass-panel', 'background')), PAGE),
+  '.glass-card on the page': stack(backgroundLayers(cssValue('.glass-card', 'background')), PAGE),
+  '.glass-card:hover on the page': stack(backgroundLayers(cssValue('.glass-card:hover', 'background')), PAGE),
+  'panel ink --surface-1': [rootToken('--surface-1').rgb],
+  'raised panel --surface-2': [rootToken('--surface-2').rgb],
+}
+const THEME = require('tailwindcss/resolveConfig')(twConfig).theme
+const OPACITY_STEPS = Object.keys(THEME.opacity).map(Number).sort((a, b) => a - b)
+/** The smallest step on the scale that clears `need` on every floor surface. */
+function floorFor(need) {
+  const step = OPACITY_STEPS.find(s => Object.values(FLOOR_SURFACES).flat()
+    .every(bg => ratio(over(W, s / 100, bg), bg) >= need))
+  if (step === undefined) throw new Error(`audit: no opacity step clears ${need}:1 on every floor surface`)
+  return step
+}
+const FLOOR = { normal: floorFor(4.5), large: floorFor(3.0) }
+
+// Font sizes in px, from the resolved theme, for the large-text test.
+const FONT_PX = Object.fromEntries(Object.entries(THEME.fontSize)
+  .map(([k, v]) => [k, parseFloat(Array.isArray(v) ? v[0] : v) * (String(Array.isArray(v) ? v[0] : v).endsWith('rem') ? 16 : 1)]))
+
+const EXEMPT = [
+  // ── App.tsx ──
+  { file: 'src/App.tsx', anchor: 'absolute top-3 right-3 text-white/40 hover:text-white transition-colors"', kind: 'non-text',
+    why: 'the server panel\'s icon-only close button; its X is the control' },
+  { file: 'src/App.tsx', anchor: '<button onClick={onClose} className="text-white/40 hover:text-white transition-colors">', kind: 'non-text',
+    why: 'the notification panel\'s icon-only close button' },
+  { file: 'src/App.tsx', anchor: "stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40'", kind: 'non-text',
+    why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
+  { file: 'src/App.tsx', anchor: 'text-white/35 text-[10px]">ⓘ</span>', kind: 'non-text',
+    why: 'the glyph that marks a stat tile as having a hover hint' },
+  // ── companion, browse ──
+  { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
+    why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
+  { file: 'src/components/BrowseView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
+    why: 'the bullet between the page subtitle and its count' },
+  { file: 'src/components/CalendarView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
+    why: 'the bullet between the page subtitle and its count' },
+  { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
+    why: 'the attachment\'s icon-only "×" remove button' },
+  { file: 'src/components/MediaCardCinema.tsx', anchor: 'aria-hidden="true" className="text-white/20">', kind: 'decorative',
+    why: 'the film glyph a card shows where its poster is missing; the title is on the card' },
+  { file: 'src/components/MembersView.tsx', anchor: '<Icon name="users" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
+    why: 'the illustration above the members list\'s error message' },
+  { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
+    why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
+  // ── party ──
+  { file: 'src/components/PartyInvite.tsx', anchor: 'rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white"', kind: 'non-text',
+    why: 'the invite\'s icon-only close button' },
+  { file: 'src/components/PartyPanel.tsx', anchor: "className={speaking ? 'text-emerald-300' : 'text-white/40'}>", kind: 'non-text',
+    why: 'the microphone that marks a participant on voice, at rest (it turns green while they speak)' },
+  { file: 'src/components/PartyShareCardModal.tsx', anchor: 'className="text-white/40 hover:text-white/80 text-sm transition-colors"', kind: 'non-text',
+    why: 'the share card\'s icon-only "✕" close button' },
+  { file: 'src/components/ProfileSwitcher.tsx', anchor: 'strokeWidth="2.5" className="text-white/40" aria-hidden="true">', kind: 'non-text',
+    why: 'the chevron that shows the profile button opens a menu' },
+  // ── requests, search, top bar ──
+  { file: 'src/components/RequestsView.tsx', anchor: "r.media_type === 'tv' ? 'tv' : 'film'} size={20} className=\"text-white/25\" />", kind: 'decorative',
+    why: 'the glyph a search result shows where its poster is missing; the title and "TV"/"Movie" are beside it' },
+  { file: 'src/components/RequestsView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={22} className=\"text-white/25\" />", kind: 'decorative',
+    why: 'the same glyph on a request row without a poster' },
+  { file: 'src/components/RequestsView.tsx', anchor: '<Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
+    why: 'the illustration above the empty requests list\'s message' },
+  { file: 'src/components/RequestsView.tsx', anchor: '{req.username && <span className="text-white/25">·</span>}', kind: 'decorative',
+    why: 'the dot between a request\'s requester and its date' },
+  { file: 'src/components/RequestsView.tsx', anchor: 'className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04]', kind: 'non-text',
+    why: 'a request\'s icon-only delete button' },
+  { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
+    why: 'the dots between the key legend\'s entries' },
+  { file: 'src/components/SearchView.tsx', anchor: '<Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
+    why: 'the illustration above "No results found"' },
+  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={16} className="text-white/35 flex-none" />', kind: 'non-text',
+    why: 'the magnifier that marks the phone sheet\'s field as search' },
+  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={15} className="text-white/35 flex-none" />', kind: 'non-text',
+    why: 'the magnifier that marks the top bar\'s field as search' },
+  // ── member pages, voice, the match tool ──
+  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="user" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
+    why: 'the illustration above a member page\'s error message' },
+  { file: 'src/components/UserProfileView.tsx', anchor: '<span className="text-white/20">&middot;</span>', kind: 'decorative',
+    why: 'the dot between the follower and following counts' },
+  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="globe" size={12} className="text-white/40" />', kind: 'decorative',
+    why: 'the globe on a social link chip, which names the network in text' },
+  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="eye" size={14} className="text-white/25" />', kind: 'decorative',
+    why: 'the eye before the hidden-history message, which says it in words' },
+  { file: 'src/components/VoicePill.tsx', anchor: 'text-white/45 hover:text-red-300 hover:bg-red-500/15 transition-colors"', kind: 'non-text',
+    why: 'the voice pill\'s icon-only leave button' },
+  { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
+    why: 'the glyph a match candidate shows where its poster is missing' },
+  // ── detail ──
+  { file: 'src/components/detail/DetailHero.tsx', anchor: '{i > 0 && <span className="text-white/45" aria-hidden="true">·</span>}', kind: 'decorative',
+    why: 'the dots between the hero\'s metadata items' },
+  { file: 'src/components/detail/DetailRail.tsx', anchor: "n <= shown ? 'text-yellow-400' : 'text-white/35 hover:text-white/50',", kind: 'non-text',
+    why: 'an unfilled rating star; each star is a "rate N stars" button (raised from /25, about 2:1)' },
+  // ── admin ──
+  { file: 'src/components/admin/AdminView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={16} className=\"text-white/25\" />", kind: 'decorative',
+    why: 'the glyph a held request shows where its poster is missing' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: '{isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}', kind: 'decorative',
+    why: 'the tree corner on a cast receiver\'s row; an sr-only line says what the row is' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="text-white/40 hover:text-white" aria-label="Close">', kind: 'non-text',
+    why: 'the session diagnostic\'s icon-only close button' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: "${hostedChat ? 'text-white/30' : 'text-white/70'}", kind: 'disabled',
+    why: 'the Structured outputs label while its checkbox is disabled (hosted providers always use it)' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/[0.06] disabled:opacity-50', kind: 'non-text',
+    why: 'a user row\'s icon-only actions button' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: "color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',", kind: 'non-text',
+    why: 'the Skip Analysis tile\'s state icon with nothing analysed yet; the figures beside it are the text' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: '{hint && <span className="text-white/35">ⓘ</span>}', kind: 'non-text',
+    why: 'the glyph that marks a dashboard tile as having a hover hint' },
+  { file: 'src/components/admin/AdminView.tsx', anchor: 'mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span>', kind: 'non-text',
+    why: 'the same glyph on the Memory figure' },
+  // ── index.css ──
+  { file: 'src/index.css', anchor: '.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }', kind: 'non-text',
+    why: 'the dots between a card\'s meta items, set at 0.45 for 3:1 over the scrim on a bright poster (see the rule)' },
+  // ── deferred: the player, which a separate change was working in ──
+  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs">{a.codec}', kind: 'deferred',
+    why: 'an audio track\'s codec and channels in the track menu' },
+  { file: 'src/components/VideoPlayer.tsx', anchor: '{!loaded && <p className="text-white/40 text-sm">Loading…</p>}', kind: 'deferred',
+    why: 'the skip-marker editor\'s loading line' },
+  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs font-mono">', kind: 'deferred',
+    why: 'a skip marker\'s current value in the editor' },
+  { file: 'src/components/VideoPlayer.tsx', anchor: '<p className="text-white/30 text-[11px] mt-2 leading-snug">', kind: 'deferred',
+    why: 'the skip-marker editor\'s hint' },
+]
+
+const EXEMPT_KINDS = { decorative: null, placeholder: null, disabled: null, deferred: null, 'non-text': 'large', large: 'large' }
+const DISABLED_VARIANT = /(?:^|:)(?:group-|peer-|aria-)?disabled(?:\/[\w-]+)?:$/
+// A whole faint-white class: variants (`hover:`, `md:`, `[&>svg]:`, a named
+// group `group-hover/row:`, the child variant `*:`), then the utility and its
+// alpha, bare (/40) or arbitrary (/[0.4], /[.4], /[40%]).
+const FAINT = /^((?:(?:\*|[\w-]*(?:\[[^\]]*\])?[\w-]*(?:\/[\w-]+)?):)*)!?(text|placeholder)-white\/(\d+|\[(?:\d*\.?\d+%?)\])$/
+const alphaOf = raw => raw.startsWith('[')
+  ? (raw.endsWith('%]') ? parseFloat(raw.slice(1)) : Math.round(parseFloat(raw.slice(1)) * 100))
+  : Number(raw)
+
+/** The JSX opening tag around offset `i` in `src`, or else the string literal
+ *  holding it: where the classes that size the text live. */
+function classContext(src, i) {
+  const lt = src.lastIndexOf('<', i)
+  if (lt >= 0 && /[A-Za-z]/.test(src[lt + 1] ?? '')) {
+    let depth = 0, quote = null
+    for (let k = lt; k < src.length; k++) {
+      const c = src[k]
+      if (quote) { if (c === '\\') { k++; continue } if (c === quote) quote = null; continue }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue }
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      else if (c === '>' && depth === 0) { if (k > i) return src.slice(lt, k + 1); break }
+    }
+  }
+  const lineStart = src.lastIndexOf('\n', i) + 1
+  const lineEnd = src.indexOf('\n', i)
+  return src.slice(lineStart, lineEnd < 0 ? undefined : lineEnd)
+}
+
+/** Large text per WCAG, from the size and weight classes in `ctx`. The size is
+ *  the smallest at any breakpoint (a `max-sm:text-sm` makes it small on phones);
+ *  the weight counts only unprefixed. */
+function isLarge(ctx) {
+  let px = null
+  for (const m of ctx.matchAll(/(?<![\w-])text-(xs|sm|base|lg|[2-9]?xl)(?![\w-])/g)) px = Math.min(px ?? Infinity, FONT_PX[m[1]])
+  for (const m of ctx.matchAll(/(?<![\w-])text-\[([\d.]+)(px|rem)\]/g)) px = Math.min(px ?? Infinity, Number(m[1]) * (m[2] === 'rem' ? 16 : 1))
+  const bold = /(?<![\w:-])font-(bold|extrabold|black)(?![\w-])/.test(ctx)
+  return px !== null && (px >= 24 || (px >= 18.66 && bold))
+}
+
+/** Every faint-white class in `src`, as a use. */
+function faintUsesIn(f, src) {
+  const uses = []
+  for (const { token, index } of classesIn(src, t => FAINT.test(t))) {
+    const [, variants, utility, raw] = token.match(FAINT)
+    const kind = DISABLED_VARIANT.test(variants) ? 'disabled-variant'
+      : (utility === 'placeholder' || /(?:^|:)placeholder:$/.test(variants)) ? 'placeholder' : 'text'
+    const large = kind === 'text' && isLarge(classContext(src, index))
+    uses.push({ f, i: index, end: index + token.length, line: lineAt(src, index), cls: token, alpha: alphaOf(raw), kind, large })
+  }
+  return uses
+}
+
+/** White's alpha in a CSS colour, 0-100, or null when it is not white. Reads
+ *  rgb()/rgba() with commas or spaces and a `,` or `/` alpha, hsl()/hsla() at
+ *  100% lightness, and #fffA / #ffffffAA. */
+function whiteAlpha(value) {
+  const v = value.toLowerCase()
+  const alpha = (n, pct) => (n === undefined ? 100 : Math.round(pct ? parseFloat(n) : parseFloat(n) * 100))
+  let m
+  if ((m = v.match(/#fff([0-9a-f])(?![0-9a-f])/))) return Math.round(parseInt(m[1] + m[1], 16) / 2.55)
+  if ((m = v.match(/#ffffff([0-9a-f]{2})(?![0-9a-f])/))) return Math.round(parseInt(m[1], 16) / 2.55)
+  const W255 = String.raw`(?:255(?:\.0*)?|100%)`
+  if ((m = v.match(new RegExp(String.raw`rgba?\(\s*${W255}\s*[,\s]\s*${W255}\s*[,\s]\s*${W255}\s*(?:[,/]\s*([\d.]+)(%?))?\s*\)`)))) return alpha(m[1], m[2])
+  if ((m = v.match(/hsla?\(\s*[\d.]+(?:deg)?\s*[,\s]\s*[\d.]+%\s*[,\s]\s*100%\s*(?:[,/]\s*([\d.]+)(%?))?\s*\)/))) return alpha(m[1], m[2])
+  return null
+}
+
+/** White `color:` declarations in `text` (index.css), as uses. A use's span
+ *  runs from its rule's selector to the declaration, so an exemption anchors on
+ *  the rule as written. Sizes are not read: CSS text is judged as normal text. */
+function faintCssUses(text = css, file = CSS) {
+  const uses = []
+  postcss.parse(text).walkDecls(/^(?:color|-webkit-text-fill-color)$/, d => {
+    const alpha = whiteAlpha(d.value)
+    if (alpha === null || d.parent.type !== 'rule') return
+    const i = d.parent.source.start.offset
+    uses.push({
+      f: file, i, end: d.source.end.offset + 1, line: d.source.start.line, cls: `${d.parent.selector} { ${d.prop}: ${d.value} }`,
+      alpha, kind: /::?placeholder/.test(d.parent.selector) ? 'placeholder' : 'text', large: false,
+    })
+  })
+  return uses
+}
+
+// The shapes a regex scan missed, each a use below the floor that must be found.
+const FAINT_PROBE = {
+  text: '<i className="[&>svg]:text-white/38" /> `text-white/40${on ? " ring-2" : ""}` <b className="text-white/[38%]" />' +
+    ' <s className="group-hover/row:text-white/30 *:text-white/25" />',
+  want: ['[&>svg]:text-white/38', 'text-white/40', 'text-white/[38%]', 'group-hover/row:text-white/30', '*:text-white/25'],
+}
+// Each white the CSS scan must read, with its alpha; the last is not white.
+const CSS_PROBE = {
+  text: '.a { color: rgb(255 255 255 / 40%) } .b { color: hsla(0, 0%, 100%, .4) } .c { color: #fff6 }' +
+    ' .d { color: rgba(255, 255, 255, 0.45) } .e { color: #ffffff66 } .f { color: hsl(0 0% 100% / 0.3) } .g { color: #fffa0a }',
+  want: [40, 40, 40, 45, 40, 30],
+}
+
+function faintText() {
+  const problems = []
+  const probe = faintUsesIn('probe', FAINT_PROBE.text).filter(u => u.alpha < FLOOR.normal).map(u => u.cls)
+  if (probe.join(' ') !== FAINT_PROBE.want.join(' ')) {
+    problems.push(`known-answer probe: expected [${FAINT_PROBE.want.join(' ')}] below the floor, found [${probe.join(' ')}]`)
+  }
+  const cssProbe = faintCssUses(CSS_PROBE.text, 'probe.css').map(u => u.alpha)
+  if (cssProbe.join(' ') !== CSS_PROBE.want.join(' ')) {
+    problems.push(`CSS known-answer probe: expected alphas [${CSS_PROBE.want.join(' ')}], read [${cssProbe.join(' ')}]`)
+  }
+  const uses = [...uiSources().flatMap(f => faintUsesIn(f, code(f))), ...faintCssUses()]
+  const below = uses.filter(u => u.kind !== 'disabled-variant' && u.alpha < (u.large ? FLOOR.large : FLOOR.normal))
+
+  // Exemptions: each anchor must still sit over a use below its floor.
+  const covered = new Map()
+  for (const e of EXEMPT) {
+    if (!(e.kind in EXEMPT_KINDS)) { problems.push(`exemption ${e.file} "${e.anchor}": unknown kind "${e.kind}"`); continue }
+    if (!e.why) { problems.push(`exemption ${e.file} "${e.anchor}": no reason given`); continue }
+    const src = code(e.file)
+    const spans = []
+    for (let k = src.indexOf(e.anchor); k >= 0; k = src.indexOf(e.anchor, k + 1)) spans.push([k, k + e.anchor.length])
+    if (spans.length !== (e.count ?? 1)) {
+      problems.push(`exemption ${e.file} "${e.anchor}": anchor occurs ${spans.length}x, expected ${e.count ?? 1}` +
+        (spans.length ? ' — out of date' : ' — if its class was raised to the floor, delete the entry; otherwise update the anchor'))
+      continue
+    }
+    for (const [a, b] of spans) {
+      const hit = below.filter(u => u.f === e.file && u.i >= a && u.end <= b)
+      if (!hit.length) { problems.push(`exemption ${e.file}:${lineAt(src, a)} "${e.anchor}": covers no use below the floor — delete it`); continue }
+      for (const u of hit) {
+        covered.set(u, e)
+        const floor = EXEMPT_KINDS[e.kind] && FLOOR[EXEMPT_KINDS[e.kind]]
+        if (floor && u.alpha < floor) problems.push(`${u.f}:${u.line}  ${u.cls}  — exempt as ${e.kind}, but under its ${floor}% floor (3:1)`)
+      }
+    }
+  }
+  for (const u of below.filter(u => !covered.has(u))) {
+    problems.push(`${u.f}:${u.line}  ${u.cls}  — below the ${u.large ? FLOOR.large : FLOOR.normal}% floor${u.large ? ' (large text)' : ''}: raise it, or exempt it with a reason`)
+  }
+  return { uses, below, covered, problems }
+}
+
+{
+  console.log('## 1. Faint white text against the computed floor')
+  for (const [name, bgs] of Object.entries(FLOOR_SURFACES)) {
+    const min = need => OPACITY_STEPS.find(s => bgs.every(bg => ratio(over(W, s / 100, bg), bg) >= need))
+    console.log(`  ${name.padEnd(32)} 4.5:1 from /${min(4.5)}   3:1 from /${min(3)}`)
+  }
+  console.log(`  floor: /${FLOOR.normal} for normal text, /${FLOOR.large} for large text and meaningful icons`)
+  const r = faintText()
+  for (const p of r.problems) console.log(`  *** ${p}`)
+  const kinds = {}
+  for (const e of r.covered.values()) kinds[e.kind] = (kinds[e.kind] ?? 0) + 1
+  console.log(`  ${r.uses.length} faint-white uses (classes, and white colors in ${CSS}); ${r.below.length} below the floor: ` +
+    `${Object.entries(kinds).map(([k, n]) => `${n} ${k === 'deferred' ? 'deferred' : `exempt as ${k}`}`).join(', ') || 'none exempt'}; ` +
+    `${r.uses.filter(u => u.kind === 'disabled-variant').length} \`disabled:\` variant(s) not judged.\n`)
+  staticFails += r.problems.length
+}
+
 const SURFACES = [
   // ── The referral step. A one-shot question with a Skip, so every control
   //    here has to be readable the FIRST time or the answer is noise. ──
@@ -674,5 +1003,5 @@ for (const s of SURFACES) {
 }
 console.log('-'.repeat(72))
 console.log(`${fails} glass surface(s) below threshold.`)
-if (staticFails) console.log(`${staticFails} static check failure(s) above (dead modifiers).`)
+if (staticFails) console.log(`${staticFails} static check failure(s) above (dead modifiers, faint text).`)
 process.exit(fails || staticFails ? 1 : 0)

@@ -87,7 +87,7 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
         <p className="text-white font-bold text-3xl tabular-nums" aria-live="off">
           {overdue ? 'Starting…' : countdownLabel(msLeft)}
         </p>
-        <p className="text-white/45 text-xs mt-1">
+        <p className="text-white/50 text-xs mt-1">
           {overdue
             ? 'The server is starting the party.'
             : `Starts itself — ${formatPartyTime(scheduledStartAt, new Date(nowMs))}`}
@@ -100,7 +100,7 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
         <div className="mt-3 space-y-1.5">
           {([['Going', groups.going, 'text-emerald-300'],
              ['Maybe', groups.maybe, 'text-amber-300'],
-             ['No reply yet', groups.pending, 'text-white/40']] as const).map(([label, names, cls]) =>
+             ['No reply yet', groups.pending, 'text-white/50']] as const).map(([label, names, cls]) =>
             names.length > 0 && (
               <p key={label} className="text-xs leading-relaxed">
                 <span className={`font-semibold ${cls}`}>{label} ({names.length})</span>
@@ -139,7 +139,7 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
           </button>
         </div>
       ) : (
-        <p className="mt-3 text-white/40 text-[11px] leading-relaxed">
+        <p className="mt-3 text-white/50 text-[11px] leading-relaxed">
           Hang out in chat — playback starts for everyone at once.
         </p>
       )}

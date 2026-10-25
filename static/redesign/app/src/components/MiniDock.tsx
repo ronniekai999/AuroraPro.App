@@ -44,6 +44,8 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
   const micActionable = showMic && !!voice?.enabled
 
   return (
+    // The 0.5 fill sits on the video, so faint text here fails AA over a
+    // bright frame: see NOT COVERED in scripts/audit-glass-contrast.mjs.
     <div
       className="aurora-glass-overlay fixed left-1/2 -translate-x-1/2 bottom-4 z-[67]
                  inline-flex items-center gap-2 pl-2.5 pr-2.5 py-1.5 rounded-full
@@ -71,7 +73,7 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
         maxLength={500}
         aria-label="Send a quick chat message"
         className="w-44 sm:w-56 bg-transparent px-2 py-1 text-sm text-white
-                   placeholder:text-white/40 focus:outline-none border-0"
+                   placeholder:text-white/50 focus:outline-none border-0"
       />
 
       {/* Send — appears only when there's text, keeping the resting

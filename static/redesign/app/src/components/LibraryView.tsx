@@ -104,12 +104,12 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
         <div className="text-center py-16">
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
           <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
-          <p className="text-white/40 text-sm max-w-md mx-auto">
+          <p className="text-white/50 text-sm max-w-md mx-auto">
             Use the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left of any title to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>
         </div>
       ) : filteredLibrary.length === 0 ? (
-        <p className="text-white/40 text-sm">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
+        <p className="text-white/50 text-sm">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
       ) : (
         // 2028-05-28 — Saved library grid converted to <MediaCardCinema/>
         // so My Library matches the home rails. The library is a closed
@@ -139,7 +139,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
                 secondary head sits on the same display scale as every other
                 section head in the app instead of one arbitrary step below. */}
             <h2 className="text-white font-display font-bold type-section">Continue Watching</h2>
-            <span className="text-white/45 text-sm">({continueItems.length})</span>
+            <span className="text-white/50 text-sm">({continueItems.length})</span>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
             {continueItems.map(c => {

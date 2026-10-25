@@ -183,7 +183,7 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
             onBlur={() => setHovered(0)}
             className={cn(
               'p-1.5 rounded-lg transition-ui motion-safe:hover:scale-110',
-              n <= shown ? 'text-yellow-400' : 'text-white/25 hover:text-white/50',
+              n <= shown ? 'text-yellow-400' : 'text-white/35 hover:text-white/50',
             )}
           >
             <StarIcon size={22} />
@@ -191,7 +191,7 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
         ))}
       </div>
       {/* Fixed-height caption slot so the card doesn't jump between states. */}
-      <div className="h-4 mt-1 text-center text-[12px] text-white/45" aria-live="polite">
+      <div className="h-4 mt-1 text-center text-[12px] text-white/50" aria-live="polite">
         {shown > 0 ? RATING_LABELS[shown] : 'Tap a star — Aurora learns from it'}
       </div>
     </div>
@@ -375,7 +375,7 @@ export function DetailRail({
       {/* My Rating star card — personal 1-5★ verdict, feeds the recommender */}
       {onRate && (
         <div className="glass-card rounded-2xl px-4 pt-3.5 pb-2.5">
-          <div className="text-[11px] uppercase tracking-[.18em] text-white/40 mb-1.5 font-semibold">My Rating</div>
+          <div className="text-[11px] uppercase tracking-[.18em] text-white/50 mb-1.5 font-semibold">My Rating</div>
           <StarRatingRow rating={userRating ?? 0} onRate={onRate} />
         </div>
       )}
@@ -383,13 +383,13 @@ export function DetailRail({
       {/* Details credits card */}
       {detailRows.length > 0 && (
         <div className="glass-card rounded-2xl p-5">
-          <div className="text-[11px] uppercase tracking-[.18em] text-white/40 mb-2 font-semibold">Details</div>
+          <div className="text-[11px] uppercase tracking-[.18em] text-white/50 mb-2 font-semibold">Details</div>
           {detailRows.map((r, i) => (
             <div
               key={i}
               className="flex justify-between gap-4 py-[0.62rem] border-b border-white/[0.05] last:border-0 text-[13.5px]"
             >
-              <span className="text-white/45 flex-shrink-0">{r.label}</span>
+              <span className="text-white/50 flex-shrink-0">{r.label}</span>
               <span className="text-white/90 text-right font-medium">{r.value}</span>
             </div>
           ))}

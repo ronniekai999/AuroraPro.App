@@ -39,7 +39,7 @@ export function MediaInfoPanel({ audio, subtitles, subtitleFormat, className }: 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {audio.length > 0 && (
           <div className="glass-card rounded-2xl p-5">
-            <div className="text-[11px] uppercase tracking-[.16em] text-white/40 mb-3 font-semibold">
+            <div className="text-[11px] uppercase tracking-[.16em] text-white/50 mb-3 font-semibold">
               Audio Tracks
             </div>
             {audio.map((a, i) => (
@@ -50,7 +50,7 @@ export function MediaInfoPanel({ audio, subtitles, subtitleFormat, className }: 
                 <div className="flex items-center gap-2.5 min-w-0">
                   <LangChip>{a.language}</LangChip>
                   <span className="text-[14px] text-white/85 font-medium">{a.codec}</span>
-                  {a.detail && <span className="text-[13px] text-white/45 truncate">{a.detail}</span>}
+                  {a.detail && <span className="text-[13px] text-white/50 truncate">{a.detail}</span>}
                 </div>
                 {a.isDefault && (
                   <span className="text-[10px] px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded font-semibold flex-shrink-0 ml-2">
@@ -64,10 +64,10 @@ export function MediaInfoPanel({ audio, subtitles, subtitleFormat, className }: 
         {subtitles.length > 0 && (
           <div className="glass-card rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
-              <div className="text-[11px] uppercase tracking-[.16em] text-white/40 font-semibold">
+              <div className="text-[11px] uppercase tracking-[.16em] text-white/50 font-semibold">
                 Subtitles · {subtitles.length}
               </div>
-              {subtitleFormat && <span className="text-[11px] text-white/45">{subtitleFormat}</span>}
+              {subtitleFormat && <span className="text-[11px] text-white/50">{subtitleFormat}</span>}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {subtitles.map((s, i) => (

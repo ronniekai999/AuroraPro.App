@@ -361,7 +361,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="space-y-3">
               <div>
                 <p className="text-white/80 text-sm font-medium">Nebula for {activeProfile.name}</p>
-                <p className="text-white/40 text-xs">Your animated signature — shows in the profile switcher and account menu.</p>
+                <p className="text-white/50 text-xs">Your animated signature — shows in the profile switcher and account menu.</p>
               </div>
               <div role="radiogroup" aria-label="Avatar" className="grid grid-cols-5 gap-3 sm:grid-cols-10">
                 {NEBULAS.map(n => {
@@ -406,7 +406,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="space-y-3">
               <div>
                 <p className="text-white/80 text-sm font-medium">Recommendation lean for {activeProfile.name}</p>
-                <p className="text-white/40 text-xs">Nudges what surfaces first toward a maturity tier — it doesn't hide anything (that's the age limit). Applies on your next Home visit.</p>
+                <p className="text-white/50 text-xs">Nudges what surfaces first toward a maturity tier — it doesn't hide anything (that's the age limit). Applies on your next Home visit.</p>
               </div>
               <div
                 role="radiogroup"
@@ -585,7 +585,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Audio Language</p>
-                <p className="text-white/40 text-xs">Preferred audio track</p>
+                <p className="text-white/50 text-xs">Preferred audio track</p>
               </div>
               <Select value={settings.audioLang} onValueChange={(value) => setSettings(p => ({ ...p, audioLang: value }))}>
                 <SelectTrigger size="sm" className="text-sm">
@@ -602,7 +602,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Subtitle Language</p>
-                <p className="text-white/40 text-xs">Preferred subtitle track</p>
+                <p className="text-white/50 text-xs">Preferred subtitle track</p>
               </div>
               <Select
                 value={settings.subtitleLang === '' ? 'none' : settings.subtitleLang}
@@ -635,7 +635,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Preferred resolution</p>
-                <p className="text-white/40 text-xs">When a title has multiple files, pick this resolution if available.</p>
+                <p className="text-white/50 text-xs">When a title has multiple files, pick this resolution if available.</p>
               </div>
               <select
                 aria-label="Preferred resolution"
@@ -658,7 +658,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Streaming bitrate limit</p>
-                <p className="text-white/40 text-xs">Set this on a slow connection. Files above the limit are transcoded down instead of buffering.</p>
+                <p className="text-white/50 text-xs">Set this on a slow connection. Files above the limit are transcoded down instead of buffering.</p>
               </div>
               <select
                 aria-label="Streaming bitrate limit"
@@ -684,7 +684,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Preferred audio language</p>
-                <p className="text-white/40 text-xs">Picks this language's track by default when the file has one. The in-player track menu still overrides it.</p>
+                <p className="text-white/50 text-xs">Picks this language's track by default when the file has one. The in-player track menu still overrides it.</p>
               </div>
               <select
                 aria-label="Preferred audio language"
@@ -718,7 +718,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 <div className="flex items-center justify-between py-2">
                   <div>
                     <p className="text-white/80 text-sm font-medium">Signed in</p>
-                    <p className="text-white/40 text-xs">{settingsUser.username} &middot; {settingsUser.role}</p>
+                    <p className="text-white/50 text-xs">{settingsUser.username} &middot; {settingsUser.role}</p>
                   </div>
                 </div>
               )}
@@ -726,7 +726,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 <div className="flex items-center justify-between py-2">
                   <div>
                     <p className="text-red-400 text-sm font-medium">Sign Out</p>
-                    <p className="text-white/40 text-xs">End your session on this device</p>
+                    <p className="text-white/50 text-xs">End your session on this device</p>
                   </div>
                   <button
                     onClick={onLogout}
@@ -874,7 +874,7 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
     }
   }
 
-  const inputCls = 'w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder:text-white/25'
+  const inputCls = 'w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder:text-white/50'
 
   return (
     <div className="glass-panel rounded-2xl p-6">
@@ -893,12 +893,12 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
           </button>
         )}
       </div>
-      <p className="text-white/40 text-xs mb-5">
+      <p className="text-white/50 text-xs mb-5">
         {loaded ? <>What other members see at /user/{loaded.username}.</> : 'What other members see on your profile page.'}
       </p>
 
       {err && <p className="text-red-300/85 text-sm">{err}</p>}
-      {!err && !loaded && <p className="text-white/40 text-sm">Loading…</p>}
+      {!err && !loaded && <p className="text-white/50 text-sm">Loading…</p>}
       {!err && loaded && (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-2 gap-4">
@@ -942,7 +942,7 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-white/80 text-sm font-medium">Share watch history</p>
-              <p className="text-white/40 text-xs">Show your recently watched titles on your profile — applies immediately. Off by default; only your default profile's completed titles are ever shown.</p>
+              <p className="text-white/50 text-xs">Show your recently watched titles on your profile — applies immediately. Off by default; only your default profile's completed titles are ever shown.</p>
             </div>
             <button
               type="button"
@@ -1066,18 +1066,18 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
         <Icon name="key" size={18} className="text-purple-400" />
         Connected Accounts
       </h2>
-      <p className="text-white/40 text-xs mb-4">
+      <p className="text-white/50 text-xs mb-4">
         Link OAuth providers to sign in to Aurora without a password.
       </p>
       {err && <p className="text-red-300 text-sm mb-3">{err}</p>}
-      {links === null && !err && <p className="text-white/40 text-sm">Loading…</p>}
+      {links === null && !err && <p className="text-white/50 text-sm">Loading…</p>}
       {links && (
         <div className="space-y-2">
           {links.linked.map(l => (
             <div key={l.provider} className="flex items-center justify-between py-2 border-b border-white/[0.03] last:border-0">
               <div>
                 <p className="text-white/80 text-sm font-medium">{oauthProviderLabel(l.provider)}</p>
-                <p className="text-white/40 text-xs">
+                <p className="text-white/50 text-xs">
                   Connected {new Date(l.linkedAt).toLocaleDateString()}
                 </p>
               </div>
@@ -1095,7 +1095,7 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
             <div key={p} className="flex items-center justify-between py-2 border-b border-white/[0.03] last:border-0">
               <div>
                 <p className="text-white/80 text-sm font-medium">{oauthProviderLabel(p)}</p>
-                <p className="text-white/40 text-xs">Not connected</p>
+                <p className="text-white/50 text-xs">Not connected</p>
               </div>
               <button
                 onClick={() => void handleConnect(p)}
@@ -1107,7 +1107,7 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
             </div>
           ))}
           {links.linked.length === 0 && links.available.length === 0 && (
-            <p className="text-white/40 text-sm">No OAuth providers are enabled on this server.</p>
+            <p className="text-white/50 text-sm">No OAuth providers are enabled on this server.</p>
           )}
         </div>
       )}
@@ -1200,7 +1200,7 @@ export function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast
         Profiles &amp; Watchlists
       </h2>
       {err && <p className="text-red-300 text-sm mb-3">{err}</p>}
-      {profiles === null && <p className="text-white/40 text-sm">Loading…</p>}
+      {profiles === null && <p className="text-white/50 text-sm">Loading…</p>}
       {profiles && (
         <>
           <div className="flex items-center gap-2 flex-wrap mb-4">
@@ -1272,8 +1272,8 @@ export function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast
                   >+</button>
                 </div>
               </div>
-              {listsLoading && <p className="text-white/40 text-xs">Loading…</p>}
-              {!listsLoading && lists.length === 0 && <p className="text-white/40 text-xs">No watchlists yet.</p>}
+              {listsLoading && <p className="text-white/50 text-xs">Loading…</p>}
+              {!listsLoading && lists.length === 0 && <p className="text-white/50 text-xs">No watchlists yet.</p>}
               {lists.map(l => (
                 <div key={l.id} className="flex items-center justify-between py-1.5 border-b border-white/[0.03] last:border-0">
                   <span className="text-white/80 text-sm">{l.name}</span>
@@ -1287,11 +1287,11 @@ export function ProfilesAndWatchlistsCard({ actingProfile, profileKnown, onToast
       {/* Metadata attribution — TMDB's API terms require this notice
           wherever their data is used; TheTVDB asks for a linkback. */}
       <div className="mt-8 pt-4 border-t border-white/[0.06] space-y-1">
-        <p className="text-white/40 text-xs">
+        <p className="text-white/50 text-xs">
           This product uses the TMDB API but is not endorsed or certified by{' '}
           <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer" className="text-white/60 hover:text-white/90 underline">TMDB</a>.
         </p>
-        <p className="text-white/40 text-xs">
+        <p className="text-white/50 text-xs">
           TV metadata provided by{' '}
           <a href="https://thetvdb.com" target="_blank" rel="noreferrer" className="text-white/60 hover:text-white/90 underline">TheTVDB</a>.
         </p>
@@ -1469,7 +1469,7 @@ function PushControls({ onToast }: { onToast?: (message: string, type?: Toast['t
   }
 
   if (state === 'loading') {
-    return <p className="text-white/40 text-xs py-2">Checking push support…</p>
+    return <p className="text-white/50 text-xs py-2">Checking push support…</p>
   }
 
   const explain: Partial<Record<typeof state, string>> = {

@@ -571,7 +571,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         </div>
         <div className="ml-auto flex items-center gap-4">
           {inputIndex >= 0 && (
-            <span className="hidden text-xs tracking-wide text-white/40 sm:inline">
+            <span className="hidden text-xs tracking-wide text-white/50 sm:inline">
               Step {inputIndex + 1} of {machine.inputs.length}
             </span>
           )}
@@ -579,7 +579,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             <button
               type="button"
               onClick={() => void skip()}
-              className="text-xs font-semibold text-white/45 transition-colors hover:text-white/80"
+              className="text-xs font-semibold text-white/50 transition-colors hover:text-white/80"
             >
               Skip for now
             </button>
@@ -618,7 +618,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           >
             ← Back
           </button>
-          <span className="hidden text-xs text-white/30 sm:inline">{navHint()}</span>
+          <span className="hidden text-xs text-white/50 sm:inline">{navHint()}</span>
           <button
             type="button"
             onClick={next}
@@ -681,7 +681,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                 <div
                   className={
                     'mt-2 text-[0.72rem] tracking-wide transition-colors ' +
-                    (sel ? 'text-white' : 'text-white/40')
+                    (sel ? 'text-white' : 'text-white/50')
                   }
                 >
                   {n.name}
@@ -713,7 +713,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           }}
           maxLength={24}
           placeholder="Type your name"
-          className="font-display mt-8 w-full border-b-2 border-white/[0.14] bg-transparent pb-3 text-center text-[clamp(2rem,6vw,3rem)] font-bold text-white outline-none transition-colors placeholder:text-white/15 focus:border-[#a855f7]"
+          className="font-display mt-8 w-full border-b-2 border-white/[0.14] bg-transparent pb-3 text-center text-[clamp(2rem,6vw,3rem)] font-bold text-white outline-none transition-colors placeholder:text-white/35 focus:border-[#a855f7]"
         />
         <div className="mt-6 min-h-[1.4em] text-[1.05rem] text-white/60">
           {name.trim() ? (
@@ -776,7 +776,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           className="onb-range mt-8 w-full"
           style={{ '--p': `${pct}%` } as CSSProperties}
         />
-        <div className="mt-3 flex justify-between text-[0.7rem] text-white/35">
+        <div className="mt-3 flex justify-between text-[0.7rem] text-white/50">
           <span>4</span>
           <span>18</span>
           <span>40</span>
@@ -823,7 +823,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                 <div className="text-[1.3rem] font-bold text-white" style={{ fontFamily: f.font }}>
                   Aurora Pro
                 </div>
-                <div className="mt-0.5 text-[0.72rem] text-white/45">{f.label} · {f.desc}</div>
+                <div className="mt-0.5 text-[0.72rem] text-white/50">{f.label} · {f.desc}</div>
                 <div className="mt-2 text-[0.8rem] text-white/60" style={{ fontFamily: f.font }}>
                   The quick stream brings stories to life.
                 </div>
@@ -862,7 +862,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   }}
                 />
                 <div className="text-[0.88rem] font-semibold text-white">{g.label}</div>
-                <div className="mt-0.5 text-[0.66rem] text-white/45">{g.desc}</div>
+                <div className="mt-0.5 text-[0.66rem] text-white/50">{g.desc}</div>
               </button>
             )
           })}
@@ -1027,7 +1027,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   htmlFor="referral-detail"
                   className="block text-[0.8rem] font-medium text-white/75"
                 >
-                  Where, specifically? <span className="text-white/45">(optional)</span>
+                  Where, specifically? <span className="text-white/50">(optional)</span>
                 </label>
                 <input
                   id="referral-detail"

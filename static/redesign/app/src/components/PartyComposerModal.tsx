@@ -305,7 +305,7 @@ export function PartyComposerModal({
         </p>
 
         {/* ─── When ──────────────────────────────────────────────── */}
-        <p className="text-white/40 text-[10px] uppercase tracking-wider mb-2">When</p>
+        <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">When</p>
         <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
           {(['now', 'schedule'] as const).map(m => (
             <button
@@ -325,7 +325,7 @@ export function PartyComposerModal({
         </div>
 
         {mode === 'now' ? (
-          <p className="text-white/40 text-xs mt-2.5 leading-relaxed">
+          <p className="text-white/50 text-xs mt-2.5 leading-relaxed">
             The party starts as soon as you hit the button. Anyone you invite
             gets a notification with a one-tap join.
           </p>
@@ -369,7 +369,7 @@ export function PartyComposerModal({
                 className="mt-2.5 w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white text-sm focus:bg-white/[0.06] focus:outline-none [color-scheme:dark]"
               />
             )}
-            <p className="text-white/35 text-[11px] mt-2 leading-relaxed">
+            <p className="text-white/50 text-[11px] mt-2 leading-relaxed">
               {effectiveIso && !scheduleInPast
                 ? `Everyone's invited now, reminded 10 minutes before showtime, and the party starts itself — ${formatPartyTime(effectiveIso, new Date())}.`
                 : 'Times are in your timezone. Invites go out immediately; the party starts itself at showtime.'}
@@ -382,9 +382,9 @@ export function PartyComposerModal({
 
         {/* ─── Who ───────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-5 mb-2">
-          <p className="text-white/40 text-[10px] uppercase tracking-wider">
+          <p className="text-white/50 text-[10px] uppercase tracking-wider">
             Who
-            <span className="ml-2 normal-case tracking-normal text-white/30">optional — you can share the code later too</span>
+            <span className="ml-2 normal-case tracking-normal text-white/50">optional — you can share the code later too</span>
           </p>
           {selected.size > 0 && (
             <span className="text-purple-300 text-xs font-medium">{selected.size} invited</span>
@@ -436,7 +436,7 @@ export function PartyComposerModal({
           placeholder={`Type a name — ${MIN_MEMBER_QUERY_CHARS} letters minimum`}
           aria-label="Search members by name"
           autoComplete="off"
-          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/30 focus:bg-white/[0.06] focus:outline-none"
+          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none"
         />
 
         {/* Results. Nothing is listed until the query is long enough, so the
@@ -459,19 +459,19 @@ export function PartyComposerModal({
           // at least 3 letters" — advice that is actively wrong for the
           // short-name members the threshold rule exists to keep reachable,
           // since their whole name IS the query.
-          <p className="text-white/40 text-xs mt-2">Loading members…</p>
+          <p className="text-white/50 text-xs mt-2">Loading members…</p>
         ) : rosterEmpty ? (
-          <p className="text-white/40 text-xs mt-2">Nobody else here yet.</p>
+          <p className="text-white/50 text-xs mt-2">Nobody else here yet.</p>
         ) : matches.length === 0 ? (
           searching
             ? (
-              <p className="text-white/40 text-xs mt-2">
+              <p className="text-white/50 text-xs mt-2">
                 No members match “{search.trim()}”.
                 {rosterTruncated && ' Only the first ' + members!.length + ' members were loaded, so someone further down the list may be missing — you can still invite them with the party code.'}
               </p>
             )
             : (
-              <p className="text-white/35 text-[11px] mt-2">
+              <p className="text-white/50 text-[11px] mt-2">
                 Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
               </p>
             )
@@ -491,7 +491,7 @@ export function PartyComposerModal({
                     <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={32} />
                     <span className="min-w-0 flex-1">
                       <span className="block text-white/90 text-sm truncate">{shownName}</span>
-                      <span className="block text-white/40 text-[11px] truncate">
+                      <span className="block text-white/50 text-[11px] truncate">
                         @{m.username}{m.is_following ? ' · you follow them' : ''}
                       </span>
                     </span>
@@ -519,7 +519,7 @@ export function PartyComposerModal({
             — and the announcement below would otherwise state the rendered
             count as if it were the match count. */}
         {hiddenMatches > 0 && (
-          <p className="text-white/35 text-[11px] mt-1.5">
+          <p className="text-white/50 text-[11px] mt-1.5">
             Showing {matches.length} of {totalMatches}
             {/* "Keep typing" is only true above the threshold. Below it,
                 matches are whole-name equality, so another character can
@@ -566,8 +566,8 @@ export function PartyComposerModal({
         <p className="sr-only" role="status" aria-live="polite" aria-label="Guest list updates">{pickAnnouncement}</p>
 
         {/* ─── Note ──────────────────────────────────────────────── */}
-        <p className="text-white/40 text-[10px] uppercase tracking-wider mt-4 mb-2">
-          Note <span className="normal-case tracking-normal text-white/30">optional</span>
+        <p className="text-white/50 text-[10px] uppercase tracking-wider mt-4 mb-2">
+          Note <span className="normal-case tracking-normal text-white/50">optional</span>
         </p>
         <input
           type="text"
@@ -576,7 +576,7 @@ export function PartyComposerModal({
           onChange={e => setNote(e.target.value)}
           placeholder="Costumes optional. Popcorn mandatory. 🍿"
           aria-label="Invite note"
-          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/30 focus:bg-white/[0.06] focus:outline-none"
+          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none"
         />
 
         {error && <p className="text-red-400 text-sm mt-3">{error}</p>}

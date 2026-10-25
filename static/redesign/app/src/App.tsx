@@ -577,7 +577,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             <>
               <div className="flex items-center gap-3 my-6">
                 <div className="flex-1 h-px bg-white/[0.06]" />
-                <span className="text-white/30 text-xs uppercase tracking-wider">or</span>
+                <span className="text-white/50 text-xs uppercase tracking-wider">or</span>
                 <div className="flex-1 h-px bg-white/[0.06]" />
               </div>
               {/* 2-up tile grid, from a list rather than five near-identical
@@ -1484,7 +1484,7 @@ function YourWeekBand() {
           <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
             <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
           </span>
-          <span className="text-[11px] text-white/40 mt-1">
+          <span className="text-[11px] text-white/50 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
           </span>
         </div>
@@ -1762,8 +1762,8 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
         <Icon name="x" size={16} />
       </button>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pr-6">
-        {!isAdmin && <p className="text-white/40 text-sm col-span-full">Server status is admin-only.</p>}
-        {isAdmin && !stats && <p className="text-white/40 text-sm col-span-full">Loading stats…</p>}
+        {!isAdmin && <p className="text-white/50 text-sm col-span-full">Server status is admin-only.</p>}
+        {isAdmin && !stats && <p className="text-white/50 text-sm col-span-full">Loading stats…</p>}
         {tiles.map(stat => (
           <div
             key={stat.label}
@@ -1781,7 +1781,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
               <div className="min-w-0">
                 <p className="text-white/50 text-xs flex items-center gap-1">
                   {stat.label}
-                  {stat.hint && <span className="text-white/30 text-[10px]">ⓘ</span>}
+                  {stat.hint && <span className="text-white/35 text-[10px]">ⓘ</span>}
                 </p>
                 <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
@@ -1920,8 +1920,8 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       <div>
         {notifications.length === 0 && (
           <div className="p-8 text-center">
-            <p className="text-white/40 text-sm">No notifications yet</p>
-            <p className="text-white/30 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
+            <p className="text-white/60 text-sm">No notifications yet</p>
+            <p className="text-white/50 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
           </div>
         )}
         {notifications.map(n => {
@@ -1965,7 +1965,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                 {invite && (
                   <>
                     {(invite.scheduled_start_at || invite.note) && (
-                      <p className="text-white/45 text-xs mt-1 truncate">
+                      <p className="text-white/50 text-xs mt-1 truncate">
                         {invite.scheduled_start_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : ''}
                         {invite.scheduled_start_at && invite.note ? ' · ' : ''}
                         {invite.note ? `“${invite.note}”` : ''}
@@ -2004,7 +2004,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   </>
                 )}
                 {inviteGone && (
-                  <p className="text-white/35 text-xs mt-1">This party has ended.</p>
+                  <p className="text-white/50 text-xs mt-1">This party has ended.</p>
                 )}
                 {isPartyType && n.type !== 'party_invite' && partyCode && (
                   <button
@@ -2015,7 +2015,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                     Join
                   </button>
                 )}
-                <p className="text-white/30 text-xs mt-1">
+                <p className="text-white/50 text-xs mt-1">
                   {fmtRel(n.created_at)}
                   {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
                 </p>
@@ -2028,13 +2028,13 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
         {isAdmin && (
           <>
             <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
-              <h4 className="text-white/40 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
+              <h4 className="text-white/50 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
             </div>
             {loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-white/40 text-sm">Loading…</p>
+              <p className="px-4 pb-4 text-white/50 text-sm">Loading…</p>
             )}
             {!loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-white/40 text-sm">No recent activity.</p>
+              <p className="px-4 pb-4 text-white/50 text-sm">No recent activity.</p>
             )}
             {entries.map(e => (
               <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
@@ -5919,7 +5919,7 @@ export default function App() {
     // who are already authenticated. Sub-100ms in the typical case.
     return (
       <div className="min-h-screen flex items-center justify-center aurora-bg">
-        <div className="text-white/40 text-sm">Loading Aurora…</div>
+        <div className="text-white/50 text-sm">Loading Aurora…</div>
       </div>
     )
   }
@@ -6872,8 +6872,8 @@ export default function App() {
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
-            <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
-            {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}
+            <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
+            {addToListLists === null && <p className="text-white/50 text-sm">Loading…</p>}
             {addToListLists && addToListLists.length === 0 && (
               <div className="text-white/50 text-sm mb-3">
                 No watchlists yet. Create one in Settings → Profiles &amp; Watchlists first.

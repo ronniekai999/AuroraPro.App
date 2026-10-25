@@ -157,7 +157,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
           {/* The link hint only makes sense for a 404 — under a 500 it
               would blame the URL for a server problem. */}
           {error.toLowerCase().includes('not found') && (
-            <p className="text-white/40 text-xs mt-1">Check the link — profiles live at /user/&lt;username&gt;.</p>
+            <p className="text-white/50 text-xs mt-1">Check the link — profiles live at /user/&lt;username&gt;.</p>
           )}
         </div>
       </div>
@@ -166,7 +166,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
   if (!resp) {
     return (
       <div className="animate-fade-in">
-        <p className="text-white/40 text-sm py-16 text-center">Loading profile…</p>
+        <p className="text-white/50 text-sm py-16 text-center">Loading profile…</p>
       </div>
     )
   }
@@ -211,7 +211,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
                 </button>
               )}
             </div>
-            <p className="text-white/40 text-sm mt-0.5">
+            <p className="text-white/50 text-sm mt-0.5">
               @{profile.username} &middot; Member since {Number.isNaN(memberYear) ? '—' : memberYear}
             </p>
             <div className="flex items-center gap-3 mt-2 text-sm">
@@ -258,7 +258,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
                     {n.label}
                     {/* Facebook handles run to 60 chars — cap the chip so
                         one long handle can't overflow a phone viewport. */}
-                    <span className="text-white/35 inline-block max-w-[18ch] truncate">@{handle}</span>
+                    <span className="text-white/50 inline-block max-w-[18ch] truncate">@{handle}</span>
                   </a>
                 ))}
               </div>
@@ -271,10 +271,10 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
             <p className="text-white/50 text-xs uppercase tracking-wide font-semibold mb-3">
               {expanded === 'followers' ? 'Followers' : 'Following'}
             </p>
-            {connections === null && <p className="text-white/40 text-sm">Loading…</p>}
+            {connections === null && <p className="text-white/50 text-sm">Loading…</p>}
             {connections !== null && connections.length === 0 && (
               // A failed fetch must not masquerade as an empty list.
-              <p className="text-white/40 text-sm">
+              <p className="text-white/50 text-sm">
                 {connError
                   ? 'Couldn’t load this list — try again.'
                   : expanded === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
@@ -292,7 +292,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
                     <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} size={32} />
                     <span className="min-w-0">
                       <span className="block text-white/85 text-sm truncate">{m.display_name || m.username}</span>
-                      <span className="block text-white/35 text-xs truncate">@{m.username}</span>
+                      <span className="block text-white/50 text-xs truncate">@{m.username}</span>
                     </span>
                   </button>
                 ))}
@@ -318,14 +318,14 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
               cardSubtitleFor={m => watchedAt[m.id]}
             />
           ) : (
-            <p className="text-white/40 text-sm">
+            <p className="text-white/50 text-sm">
               {isMe
                 ? 'Nothing finished yet — titles show up here once you finish them. In-progress watches stay in Continue Watching.'
                 : 'No finished titles yet.'}
             </p>
           )
         ) : (
-          <p className="text-white/40 text-sm flex items-center gap-2">
+          <p className="text-white/50 text-sm flex items-center gap-2">
             <Icon name="eye" size={14} className="text-white/25" />
             {isMe
               // The server hides the strip from a profile with a content

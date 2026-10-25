@@ -134,7 +134,7 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
             onClick={() => { setFocused(i); onChange(t.id) }}
             className={cn(
               'relative py-2.5 text-[0.95rem] font-semibold transition-colors',
-              on ? 'text-white' : 'text-white/45 hover:text-white/80',
+              on ? 'text-white' : 'text-white/50 hover:text-white/80',
             )}
           >
             {t.label}

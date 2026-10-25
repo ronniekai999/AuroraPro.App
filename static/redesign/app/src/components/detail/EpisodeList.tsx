@@ -81,11 +81,11 @@ export function EpisodeList({
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
         <h3 className="text-lg font-semibold font-display">
           {selectedSeason ? `Season ${selectedSeason}` : 'Episodes'}
-          <span className="text-white/40 text-sm font-normal ml-2">· {count}</span>
+          <span className="text-white/50 text-sm font-normal ml-2">· {count}</span>
         </h3>
         {showPicker && (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-white/45 text-xs uppercase tracking-wider mr-1">Season</span>
+            <span className="text-white/50 text-xs uppercase tracking-wider mr-1">Season</span>
             {seasons!.map((s) => {
               const on = selectedSeason === s.season_number
               return (
@@ -120,7 +120,7 @@ export function EpisodeList({
       ) : loading ? (
         <EpisodeRowsSkeleton />
       ) : (
-        <p className="text-white/40 text-sm">{emptyText ?? 'No episodes available yet.'}</p>
+        <p className="text-white/50 text-sm">{emptyText ?? 'No episodes available yet.'}</p>
       )}
     </section>
   )

@@ -46,7 +46,7 @@ function CastMemberRow({ member }: { member: CastVM }) {
       )}
       <div className="min-w-0">
         <div className="text-[14px] font-semibold truncate">{member.name}</div>
-        {member.character && <div className="text-[12px] text-white/45 truncate">{member.character}</div>}
+        {member.character && <div className="text-[12px] text-white/50 truncate">{member.character}</div>}
       </div>
     </div>
   )
@@ -62,7 +62,7 @@ export function CastGrid({ cast, totalCount, onViewAll, className }: CastGridPro
           <button
             type="button"
             onClick={onViewAll}
-            className="text-sm text-white/45 hover:text-white/80 transition-colors"
+            className="text-sm text-white/50 hover:text-white/80 transition-colors"
           >
             View all {totalCount} →
           </button>

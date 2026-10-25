@@ -68,7 +68,7 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
           <h2 className="text-white text-lg font-semibold">Match "{target.title}"</h2>
           <button onClick={onClose} className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center">×</button>
         </div>
-        <p className="text-white/40 text-xs mb-3 truncate">{target.file_path}</p>
+        <p className="text-white/50 text-xs mb-3 truncate">{target.file_path}</p>
 
         <input
           type="text"
@@ -80,8 +80,8 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
         />
 
         <div className="flex-1 overflow-y-auto space-y-2 mb-3">
-          {searching && <p className="text-white/40 text-sm">Searching…</p>}
-          {!searching && q.trim() && results.length === 0 && <p className="text-white/40 text-sm">No candidates.</p>}
+          {searching && <p className="text-white/50 text-sm">Searching…</p>}
+          {!searching && q.trim() && results.length === 0 && <p className="text-white/50 text-sm">No candidates.</p>}
           {results.map(r => (
             <div key={`${r.source}-${r.id}`} className="flex items-center gap-3 p-2 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04]">
               <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
@@ -113,8 +113,8 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white/90 text-sm font-medium truncate">{r.title}{r.year ? ` (${r.year})` : ''}</p>
-                <p className="text-white/40 text-[10px] uppercase">{r.source} · id {r.id}</p>
-                {r.overview && <p className="text-white/40 text-xs line-clamp-2 mt-1">{r.overview}</p>}
+                <p className="text-white/50 text-[10px] uppercase">{r.source} · id {r.id}</p>
+                {r.overview && <p className="text-white/50 text-xs line-clamp-2 mt-1">{r.overview}</p>}
               </div>
               <button
                 disabled={submitting}
@@ -129,7 +129,7 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
 
         {/* Direct-ID path — when the user has a TMDB/TVDB ID in hand. */}
         <div className="border-t border-white/[0.06] pt-3">
-          <p className="text-white/40 text-xs mb-2">Or match by ID directly:</p>
+          <p className="text-white/50 text-xs mb-2">Or match by ID directly:</p>
           <div className="flex gap-2">
             <select value={directIdSource} onChange={e => setDirectIdSource(e.target.value as 'tmdb' | 'tvdb')} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
               <option value="tmdb">TMDB</option>

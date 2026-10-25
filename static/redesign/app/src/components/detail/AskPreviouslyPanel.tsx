@@ -85,7 +85,7 @@ export function AskPreviouslyPanel({
             </DialogDescription>
           </div>
           {(turns.length > 0 || (conversation?.hidden_turn_count || 0) > 0) && (
-            <button type="button" disabled={pending || conversationLoading || actionBusy} onClick={event => onConfirm('clear-history', event.currentTarget)} className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 disabled:cursor-not-allowed disabled:opacity-40">
+            <button type="button" disabled={pending || conversationLoading || actionBusy} onClick={event => onConfirm('clear-history', event.currentTarget)} className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 disabled:cursor-not-allowed disabled:opacity-40">
               <Trash2 aria-hidden="true" size={13} /> Clear history
             </button>
           )}
@@ -237,7 +237,7 @@ export function AskPreviouslyPanel({
               disabled={pending || conversationLoading || actionBusy}
               aria-label="Ask about what you’ve watched"
               placeholder="Ask about what you’ve watched…"
-              className="max-h-28 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-[15px] text-white outline-none placeholder:text-white/35 disabled:opacity-50"
+              className="max-h-28 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-[15px] text-white outline-none placeholder:text-white/50 disabled:opacity-50"
             />
             <button type="button" onClick={() => void onSubmit(composer)} disabled={pending || conversationLoading || actionBusy || !composer.trim()} aria-label="Send question" className="flex size-[52px] shrink-0 items-center justify-center rounded-full bg-purple-600 text-white shadow-[0_0_18px_rgba(168,85,247,0.42)] transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/25 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-200">
               {pending ? <LoaderCircle aria-hidden="true" className="animate-spin" size={18} /> : <Send aria-hidden="true" size={18} />}
