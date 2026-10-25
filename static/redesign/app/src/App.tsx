@@ -109,6 +109,7 @@ import { ProfilePinDialog } from '@/components/ProfilePinDialog'
 import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, showsAdminUI, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
+import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -726,6 +727,11 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
 // the .stage-page gutter, padding their inner sections with .stage-gutter.
 // Anything not listed here gets the standard page pad from App's wrapper.
 const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
+
+// What My Library is passed during a profile switch's first render
+// (profileSwitchPending), module-level so it is the same array every time.
+const NO_MEDIA: Media[] = []
+const NO_CONTINUE: ContinueWatchingItem[] = []
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
@@ -2355,6 +2361,11 @@ export default function App() {
   // When the profile list fails, or the binding is unreadable and the picker
   // is up, it loads anyway, as it did before.
   const catalogProfileSettled = activeProfileId !== null || profilesSettled
+  // The render that switches profile, until its resets have run: everything
+  // App kept for the previous profile is still in state, and the top bar
+  // already names the new one. Home, the grids, My Library and an open title
+  // render their cold state meanwhile (see lib/useProfileSwitchPending).
+  const profileSwitchPending = useProfileSwitchPending(activeProfileId, profilesSettled)
   // The admin pages and controls. The server refuses the admin role's powers
   // to a session acting as a restricted profile, so a kid's session on an
   // admin account sees none of them; they wait for the binding like
@@ -5534,12 +5545,15 @@ export default function App() {
   // A switch clears the previous profile's hero: an empty or failed pool for
   // the new profile leaves homeHero as it is, which kept the old profile's
   // pick on screen. The home-rails effect then puts the catalog fallback up
-  // until the new pool lands.
+  // until the new pool lands. The startup binding arriving is not a switch;
+  // a pick from the picker opened for an unreadable binding is (from null,
+  // after the startup load settled), and the hero on screen then is the
+  // catalog fallback fetched under the binding the server does have.
   const heroProfileRef = useRef<number | null>(null)
   useEffect(() => {
     const prev = heroProfileRef.current
     heroProfileRef.current = activeProfileId
-    if (prev === null || prev === activeProfileId) return
+    if (prev === activeProfileId || (prev === null && !profilesSettledBeforeRef.current)) return
     heroLoadRef.current++
     heroPoolRef.current = []
     setHeroPool([])
@@ -6103,14 +6117,19 @@ export default function App() {
             <HomeView
               onSelect={handleSelect}
               onPlay={handlePlay}
-              hero={homeHero ?? undefined}
+              // During a switch's first render (profileSwitchPending) Home
+              // gets what its cold load shows, a loading hero and rail
+              // skeletons: the hero, rails, Continue Watching and
+              // conversational results in state are the previous profile's
+              // until that render's effects clear them.
+              hero={profileSwitchPending ? undefined : homeHero ?? undefined}
               // The core rails set the catalog-fallback hero when they land,
               // so until they land (or fail) a pick is still on its way.
-              heroLoading={homeRails === undefined && !homeError}
+              heroLoading={profileSwitchPending || (homeRails === undefined && !homeError)}
               // Memoized above (homeRailsProp) — Continue Watching prepended
               // and deduped, conversational results pinned first.
-              rails={homeRailsProp}
-              loading={homeLoading}
+              rails={profileSwitchPending ? undefined : homeRailsProp}
+              loading={profileSwitchPending || homeLoading}
               convoLoading={convoLoading}
               error={homeError}
               onRetry={requestHomeReload}
@@ -6138,17 +6157,18 @@ export default function App() {
               user={typeof user === 'object' ? user : undefined}
               // Real count of the AI-curated set (hero picks + AI rails,
               // deduped) — varies, vs the old fixed ~5 hero-pool size.
-              pickCount={aiCuratedCount}
+              pickCount={profileSwitchPending ? 0 : aiCuratedCount}
               // Real library total. Prefer the count-only mount fetch
               // (homeLibraryTotal — movies+shows in one call); fall back to
               // the browse-tab counts (moviesTotal / showsTotal, populated
               // lazily when the user visits those tabs). Pass null when none
               // has loaded so HomeView OMITS the "picked from X titles"
-              // clause rather than fabricate it.
+              // clause rather than fabricate it. The browse-tab counts are
+              // the previous profile's until a switch's reset clears them.
               libraryTotal={
                 homeLibraryTotal != null
                   ? homeLibraryTotal
-                  : moviesTotal == null && showsTotal == null
+                  : profileSwitchPending || (moviesTotal == null && showsTotal == null)
                     ? null
                     : (moviesTotal ?? 0) + (showsTotal ?? 0)
               }
@@ -6212,7 +6232,7 @@ export default function App() {
               flashing the prototype's mock library to the user. */}
           {view === 'movies' && (
             <ViewSuspense fallback={<BrowseLoadingState title="Movies" />}>
-              {moviesList === null
+              {moviesList === null || profileSwitchPending
                 ? <BrowseLoadingState title="Movies" />
                 : <BrowseView
                     items={moviesList}
@@ -6240,7 +6260,7 @@ export default function App() {
           )}
           {view === 'shows' && (
             <ViewSuspense fallback={<BrowseLoadingState title="TV Shows" />}>
-              {showsList === null
+              {showsList === null || profileSwitchPending
                 ? <BrowseLoadingState title="TV Shows" />
                 : <BrowseView
                     items={showsList}
@@ -6269,9 +6289,9 @@ export default function App() {
           {view === 'library' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
-                library={library}
-                loading={!libraryLoaded}
-                continueItems={continueItems}
+                library={profileSwitchPending ? NO_MEDIA : library}
+                loading={profileSwitchPending || !libraryLoaded}
+                continueItems={profileSwitchPending ? NO_CONTINUE : continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
                 // 2026-05-27 — Continue Watching one-click resume on
@@ -6283,8 +6303,8 @@ export default function App() {
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
               page (or worse, a flash of the home view). */}
-          {view === 'detail' && !selectedMedia && <DetailSkeleton />}
-          {view === 'detail' && selectedMedia && (
+          {view === 'detail' && (!selectedMedia || profileSwitchPending) && <DetailSkeleton />}
+          {view === 'detail' && selectedMedia && !profileSwitchPending && (
             <ViewSuspense fallback={<DetailSkeleton />}>
               <DetailView
                 // Reset internal state (active tab, cast-expand) per title so
