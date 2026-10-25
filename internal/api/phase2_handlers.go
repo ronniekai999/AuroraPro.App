@@ -2594,8 +2594,8 @@ const (
 //     at a key frame before startSec. Since #431 its re-encoded audio starts
 //     there too, and hls.js anchors media time 0 on the earliest sample. A
 //     client that read the session's measured start (#AURORA-MEDIA-START,
-//     media_start.go) sends it as media_start=, and that is the shift: it is
-//     where this session's first segment really begins.
+//     media_start.go) sends it as media_start=, and that is the shift, to the
+//     nearest 10 ms: it is where this session's first segment really begins.
 //   - A remux without a usable media_start= (an older client, or a session
 //     whose measurement failed) keeps the prediction: ProbeSeekKeyframe, the
 //     largest key frame <= startSec, under the ffprobe gate (audit MED), or
@@ -2605,7 +2605,8 @@ const (
 //     within 130 ms after a key frame (CLAUDE.md, the remux clock).
 //
 // media_start= is trusted only within the window the playlist publishes it
-// under for startSec (streaming.ParseClientMediaStart); it can only move the
+// under for startSec, and used at 10 ms so it cannot mint a cached VTT per
+// millisecond (streaming.ParseClientMediaStart); it can only move the
 // requester's own cues.
 func subtitleCueShift(ctx context.Context, filePath string, startSec int, isRemux bool, rawMediaStart string) (float64, string) {
 	if startSec <= 0 {
@@ -2618,8 +2619,9 @@ func subtitleCueShift(ctx context.Context, filePath string, startSec int, isRemu
 		return sec, subtitleShiftMeasured
 	}
 	if rawMediaStart != "" {
+		// Client text: bounded before it reaches the log.
 		slog.Warn("subtitle media_start unusable for this start; predicting the key frame",
-			"start_sec", startSec, "media_start", rawMediaStart)
+			"start_sec", startSec, "media_start", truncateRunes(rawMediaStart, 32), "media_start_bytes", len(rawMediaStart))
 	}
 	shift := float64(startSec)
 	if release, err := acquireFFprobeSlot(ctx); err == nil {

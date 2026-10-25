@@ -546,9 +546,20 @@ func TestParseClientMediaStart(t *testing.T) {
 		want     float64
 		ok       bool
 	}{
-		{"19.946009", 25, 19.946009, true},
+		// Used at 10 ms (each distinct shift is a cached VTT per track): to the
+		// nearest hundredth, whatever precision arrives.
+		{"19.946009", 25, 19.95, true},
+		{"19.944", 25, 19.94, true},
+		{"19.95", 25, 19.95, true},
+		{"19.9549", 25, 19.95, true},
+		{"19.9451", 25, 19.95, true},
 		{mediaStartLine(9.960000)[len(mediaStartTagPrefix):], 20, 9.96, true}, // exactly what the playlist carries
 		{"20", 20, 20, true},
+		// The window judges the value sent; rounding then lands on its edge at
+		// most, never past it.
+		{"3540.004", 3600, 3540, true},
+		{"3600.999", 3600, 3601, true},
+		{"3539.996", 3600, 0, false},
 		{"0", 5, 0, true}, // a copy from the very first key frame
 		{"0.000000", 5, 0, true},
 		// The window's edges are in, one microsecond past each is out.

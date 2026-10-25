@@ -21,6 +21,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,11 +228,13 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		}
 	}
 	mediaStartParam := strconv.FormatFloat(published, 'f', 6, 64)
+	// The measured start as the server uses it: to the nearest 10 ms.
+	measured := math.Round(published*100) / 100
 
 	t.Run("a remux with the measured start shifts by it", func(t *testing.T) {
 		shift, basis := subtitleCueShift(ctx, src, startSec, true, mediaStartParam)
-		if basis != subtitleShiftMeasured || shift != published {
-			t.Fatalf("shift = %.6f (%s), want the measured %.6f", shift, basis, published)
+		if basis != subtitleShiftMeasured || shift != measured {
+			t.Fatalf("shift = %.6f (%s), want the measured %.6f to 10 ms (%.2f)", shift, basis, published, measured)
 		}
 		t.Logf("measured: shift %.3fs, cue error %+.3fs", shift, cueError(shift))
 		assertOnPicture(t, shift)
@@ -250,8 +253,17 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		at := firstCueStartSec(t, string(body))
-		if d := at - (shiftCueSourceSec - published); d > 0.002 || d < -0.002 {
-			t.Errorf("cue at %.3fs of media time, want %.3fs", at, shiftCueSourceSec-published)
+		if d := at - (shiftCueSourceSec - measured); d > 0.002 || d < -0.002 {
+			t.Errorf("cue at %.3fs of media time, want %.3fs", at, shiftCueSourceSec-measured)
+		}
+	})
+
+	t.Run("media_start is used at 10 ms", func(t *testing.T) {
+		for _, near := range []float64{measured - 0.004, measured + 0.0049, measured} {
+			param := strconv.FormatFloat(near, 'f', 6, 64)
+			if shift, basis := subtitleCueShift(ctx, src, startSec, true, param); basis != subtitleShiftMeasured || shift != measured {
+				t.Errorf("media_start=%s: shift = %.6f (%s), want %.2f", param, shift, basis, measured)
+			}
 		}
 	})
 
@@ -332,7 +344,16 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		if err := q.UpsertMediaFile(ctx, file); err != nil {
 			t.Fatalf("seed movie file: %v", err)
 		}
-		h := NewStreamHandler(q, nil, nil, t.TempDir(), nil, nil, nil)
+		subCache := t.TempDir()
+		h := NewStreamHandler(q, nil, nil, subCache, nil, nil, nil)
+		shiftedFiles := func(t *testing.T) []string {
+			t.Helper()
+			found, err := filepath.Glob(filepath.Join(subCache, "*_shift*ms_*.vtt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return found
+		}
 
 		cueAt := func(t *testing.T, query string) float64 {
 			t.Helper()
@@ -353,8 +374,15 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		}
 		start := "&start=" + strconv.Itoa(startSec)
 
-		// The web player's request for this session: on the picture.
-		expectCue(t, start+"&remux=1&media_start="+mediaStartParam, published)
+		// The web player's request for this session: on the picture, at 10 ms.
+		expectCue(t, start+"&remux=1&media_start="+mediaStartParam, measured)
+		// Values inside the same 10 ms share the one cached file.
+		for _, near := range []float64{measured - 0.004, measured + 0.0049, measured} {
+			expectCue(t, start+"&remux=1&media_start="+strconv.FormatFloat(near, 'f', 6, 64), measured)
+		}
+		if files := shiftedFiles(t); len(files) != 1 {
+			t.Errorf("4 media_start values inside one 10 ms step left %d shifted VTTs, want 1: %v", len(files), files)
+		}
 		// An older client: the prediction, exactly as before.
 		expectCue(t, start+"&remux=1", predicted)
 		expectCue(t, start+"&remux=1&media_start=NaN", predicted)
@@ -364,4 +392,25 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		// No start (direct play): unshifted.
 		expectCue(t, "", 0)
 	})
+}
+
+// An unusable media_start= is client text, and the prediction's warning logs
+// it: bounded, whatever the client sent. (No media needed: the prediction on a
+// missing file falls back to start_sec.)
+func TestSubtitleCueShift_BoundsTheLoggedMediaStart(t *testing.T) {
+	sent := strings.Repeat("9", 40) + strings.Repeat("x", 4096)
+	var shift float64
+	var basis string
+	out := captureLogs(t, func() {
+		shift, basis = subtitleCueShift(context.Background(), filepath.Join(t.TempDir(), "missing.mkv"), 20, true, sent)
+	})
+	if basis != subtitleShiftPredicted || shift != 20 {
+		t.Fatalf("shift = %.3f (%s), want the fallback prediction 20", shift, basis)
+	}
+	if !strings.Contains(out, "media_start="+strings.Repeat("9", 32)+" ") || strings.Contains(out, strings.Repeat("9", 33)) || strings.Contains(out, "9x") {
+		t.Errorf("the warning did not log the first 32 characters only:\n%s", out)
+	}
+	if !strings.Contains(out, "media_start_bytes=4136") {
+		t.Errorf("the warning did not log the length sent:\n%s", out)
+	}
 }
