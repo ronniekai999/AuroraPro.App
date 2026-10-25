@@ -981,18 +981,22 @@ capability declarations.
   transcode shifts by `start_sec`; a remux by `media_start=`, the measured
   start the web player sends beside `start=<start_sec>&remux=1`
   (`subtitleCueShiftQuery`), taken only as a plain decimal inside the
-  publication window and used at 10 ms (`ParseClientMediaStart`; each
-  distinct shift is a cached VTT, never evicted); otherwise by the
-  `ProbeSeekKeyframe` prediction, as before. The player sends the measured
-  start whether its clock adopted or refused it (`measuredStartSec`: cues are
-  timed on the element). Until a boot knows its delivery (stream info, the
-  session create) a pick is only recorded; the boot's restore reads the
-  latest pick when the delivery can take it, so one made during the boot,
+  publication window (`ParseClientMediaStart`); otherwise by the
+  `ProbeSeekKeyframe` prediction, as before. A `media_start=` shift is the
+  client's choice, so it is built in memory per request and never written to
+  the subtitle cache (`ShiftedVTT`, `ServeShiftedSubtitle`, with the file
+  path's headers); the server-derived shifts keep one cached file per (track,
+  offset), and the extracted track is cached either way. The player sends the
+  measured start whether its clock adopted or refused it (`measuredStartSec`:
+  cues are timed on the element). Until a boot knows its delivery (stream
+  info, the session create) a pick is only recorded; the boot's restore reads
+  the latest pick when the delivery can take it, so one made during the boot,
   Off included, wins over the pick the boot began with. A remux pick (the
   restore included) is then held while the clock awaits its first level load
   (natively, until the fetched result is applied at `loadedmetadata` or the
-  fetch fails), and its `<track>` created once that settles, so the track is
-  requested once.
+  fetch fails), and its `<track>` created once that settles. A restore keeps
+  a `<track>` the boot already built, turning it back on after the restore's
+  own disable, so each pick is requested once per boot.
 - Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
   and it assumes Safari's media time 0 is the first segment's start, as
   hls.js's is (unverified); older clients and a remux whose playlist reported
