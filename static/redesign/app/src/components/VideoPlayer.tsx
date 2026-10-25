@@ -61,7 +61,7 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
-import { RemuxClock, fetchNativeMediaWindow, levelMediaWindow, observePlayback, type ClockUpdate, type MediaWindow } from '@/lib/mediaStart'
+import { RemuxClock, fetchNativeMediaWindow, levelMediaWindow, observePlayback, subtitleCueShiftQuery, type ClockUpdate, type MediaWindow } from '@/lib/mediaStart'
 import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
 // Delivery/viewing identity rules are also exercised by the mounted-player
 // regressions, alongside their unit coverage in playbackQoESession.
@@ -613,8 +613,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // whole-second anchor may read it: those read sessionStartSecRef.
   const startSecRef = useRef<number>(0)
   // The session's start_sec exactly as the server returned it (0 for direct
-  // play): the `-ss` anchor the subtitle cue shift is requested against and the
-  // legacy receiver-conversion fallback. Never the media clock.
+  // play): the subtitle request's whole-second `start=` (beside the measured
+  // `media_start=`, subtitleCueShiftQuery) and the legacy receiver-conversion
+  // fallback. Never the media clock.
   const sessionStartSecRef = useRef<number>(0)
   // The current HLS session's RemuxClock (lib/mediaStart.ts), which owns
   // startSecRef's refinement, the boot/retry alignment, the alignment's
@@ -896,6 +897,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
   const activeTrackRef = useRef<HTMLTrackElement | null>(null)
+  // A subtitle pick made while this session's RemuxClock still awaits its
+  // measured start (no level load yet): its <track> is created once the clock
+  // knows, so the cue shift is requested once, against the measured start.
+  // Only that clock's session applies it (applyDeferredSubtitle).
+  // applySubtitleRef is the latest applySubtitle for the play effect to call.
+  const pendingSubtitleRef = useRef<{ clock: RemuxClock; index: number } | null>(null)
+  const applySubtitleRef = useRef<(index: number) => void>(() => {})
   // Phase 5 — guard so the transcode fallback fires at most once per
   // target. Without this, a chronically broken codec would loop
   // (fallback to transcode → also fails → fallback again).
@@ -2649,6 +2657,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!vid) return
     // Mirror to ref so hls.js event listeners see the latest pick.
     currentSubIndexRef.current = index
+    // A new pick, or subtitles off, replaces one still waiting for the clock.
+    pendingSubtitleRef.current = null
     // Issue #135 — diagnostic logging. The console.warn calls are
     // intentional and load-bearing: the bug reporter's diagnostic
     // buffer captures `warn` entries, and <track> requests bypass
@@ -2708,17 +2718,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // HLS-relative (0 = resume point), so every cue fires `startSec`
     // seconds late — or never, when past EOF. The server endpoint
     // ignores start=0, so this is safe to always send.
-    // The session's whole-second anchor, never the refined media origin: the
-    // endpoint parses an integer and derives the remux shift itself.
-    const startSec = sessionStartSecRef.current
-    // Issue #141 — tell the server whether this session is REMUXING.
-    // It picks the cue-shift offset accordingly: keyframe-≤-startSec
-    // for remux (input seek can't land mid-GOP), raw startSec for
-    // transcode (accurate seek lands exactly on startSec). Only
-    // meaningful when startSec>0; direct-play keeps startSec=0 and
-    // sends neither param (cues already match native currentTime).
+    // Issue #141 — tell the server whether this session is REMUXING, and
+    // for a remux where its media really begins (subtitleCueShiftQuery):
+    // `start=` stays the whole-second start_sec, `media_start=` is the
+    // measured start. Direct play sends neither (cues already match).
+    //
+    // A remux whose clock has not yet heard from its first level load (the
+    // restore at MANIFEST_PARSED, or a pick that early) waits for it, so the
+    // track is requested once, against the measured start, rather than
+    // against the server's key-frame prediction (a GOP early on Matroska
+    // with B-frames) and again after. The play effect creates it then.
+    const clock = remuxClockRef.current
+    if (clock?.awaitingMeasuredStart) {
+      pendingSubtitleRef.current = { clock, index }
+      console.info('[Aurora.sub] <track> deferred until the remux reports its media start', { trackIndex: index })
+      return
+    }
     const trackURL = `/api/stream/${target.fileId}/subtitles/${index}?type=${target.fileType}` +
-      (startSec > 0 ? `&start=${startSec}${sessionRemuxRef.current ? '&remux=1' : ''}` : '')
+      subtitleCueShiftQuery(sessionStartSecRef.current, sessionRemuxRef.current, clock?.measuredStartSec ?? null)
     const track = document.createElement('track')
     track.kind = 'subtitles'
     track.src = withToken(trackURL)
@@ -2914,6 +2931,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     promote()
   }, [target, availableSubs])
+  useEffect(() => { applySubtitleRef.current = applySubtitle }, [applySubtitle])
 
   // The QoE row is closed HERE, not in closeAndCleanup and not on unmount.
   //
@@ -3551,6 +3569,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               shouldApplyExplicitPartySeek(seek.by, live.currentUserId)) return null
           return partyTargetAbsSec(live.tickRef.current, live.isPlaying, live.clockOffsetRef?.current ?? 0, Date.now())
         }
+        // The subtitle pick applySubtitle held until this clock knew its
+        // measured start (or that none is coming), applied now. A pick held
+        // by an earlier session's clock is not this session's to apply.
+        const applyDeferredSubtitle = () => {
+          const pending = pendingSubtitleRef.current
+          if (cancelled || !pending || pending.clock !== clock) return
+          pendingSubtitleRef.current = null
+          applySubtitleRef.current(pending.index)
+        }
         const noteMediaWindow = (w: MediaWindow) => {
           if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
           const owns = ownsPlayhead()
@@ -3567,6 +3594,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             logicalAbsoluteSecRef.current = Math.max(0, vid.currentTime + clock.originSec)
             setCurrentSec(logicalAbsoluteSecRef.current)
           }
+          applyDeferredSubtitle()
         }
 
         // Prefer native HLS when the browser supports it natively (Safari on
@@ -3760,7 +3788,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
               // No window is coming: a party guest stops holding its room
               // positions for one (RemuxClock.holdsPartyPosition).
-              if (!fetched) { clock.noteNoMeasurement(); return }
+              if (!fetched) { clock.noteNoMeasurement(); applyDeferredSubtitle(); return }
               const seekableEnd = () => {
                 try {
                   const s = vid.seekable
@@ -3792,7 +3820,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 vid.removeEventListener('progress', retryFromElement)
                 vid.removeEventListener('durationchange', retryFromElement)
               }
-            }).catch(() => { clock.noteNoMeasurement() /* fail-safe: stay on start_sec */ })
+            }).catch(() => { clock.noteNoMeasurement(); applyDeferredSubtitle() /* fail-safe: stay on start_sec */ })
           }
 
           await completeTargetPlaybackBoot(vid)

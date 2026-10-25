@@ -18,8 +18,10 @@
 // servers, a failed measurement) the player keeps start_sec, as before.
 //
 // start_sec itself is unchanged and still owns what it always did: the
-// whole-second `-ss` anchor the session was asked for, the subtitle cue-shift
-// request and the cast receiver conversion.
+// whole-second `-ss` anchor the session was asked for (the subtitle request's
+// `start=`) and the cast receiver conversion. The subtitle request adds the
+// measured start as `media_start=` (subtitleCueShiftQuery), so its cues are
+// shifted to where the media really begins, not to the server's prediction.
 
 /** hls.js's name for the comment line; media_start.go writes the same one. */
 export const MEDIA_START_TAG = 'AURORA-MEDIA-START'
@@ -126,6 +128,31 @@ export function plausibleMediaStartSec(sessionStartSec: number, reportedSec: num
 export function sessionMediaOriginSec(sessionStartSec: number, reportedSec: number | null, remux: boolean): number {
   const start = Number.isFinite(sessionStartSec) && sessionStartSec > 0 ? sessionStartSec : 0
   return plausibleMediaStartSec(sessionStartSec, reportedSec, remux) ?? start
+}
+
+/**
+ * The cue-shift part of a sidecar subtitle URL (`/api/stream/{id}/subtitles/
+ * {idx}`): what tells the server where this session's media time 0 is in the
+ * file, so it can shift every cue there.
+ *
+ * - No start (direct play, a session from 0): nothing; cues already match.
+ * - A transcode: `start=<start_sec>`. An accurate seek begins there.
+ * - A remux: `start=<start_sec>&remux=1`, which makes the server PREDICT the
+ *   key frame FFmpeg began on (ProbeSeekKeyframe), plus, once the session's
+ *   playlist has reported where it really began, `media_start=<seconds>`,
+ *   which the server uses instead. The prediction is a whole GOP late (cues a
+ *   GOP early) where `-noaccurate_seek` lands one key frame earlier still:
+ *   Matroska, MPEG-TS and AVI with B-frames, a start on a key frame.
+ *
+ * `start=` stays the whole-second start_sec (the server parses an integer), so
+ * an older server ignores `media_start=` and predicts, as before.
+ * `measuredStartSec` is RemuxClock.measuredStartSec.
+ */
+export function subtitleCueShiftQuery(sessionStartSec: number, remux: boolean, measuredStartSec: number | null): string {
+  if (!(sessionStartSec > 0)) return ''
+  if (!remux) return `&start=${sessionStartSec}`
+  const measured = plausibleMediaStartSec(sessionStartSec, measuredStartSec, true)
+  return `&start=${sessionStartSec}&remux=1` + (measured === null ? '' : `&media_start=${measured.toFixed(6)}`)
 }
 
 /**
@@ -310,6 +337,7 @@ export class RemuxClock {
   readonly sessionStartSec: number
   readonly remux: boolean
   private origin: number
+  private measured: number | null = null
   private adopted = false
   private refused = false
   private played = false
@@ -331,6 +359,14 @@ export class RemuxClock {
   get hasMeasuredOrigin(): boolean { return this.adopted }
   /** A measured start arrived after playback began and was refused. */
   get refusedLateStart(): boolean { return this.refused }
+  /**
+   * Where the session's media really begins, in source seconds, once a load
+   * has reported a plausible start, ADOPTED OR REFUSED; else null. The
+   * subtitle cue shift wants it either way: a refusal keeps the clock's
+   * conversions on start_sec so nothing moves under the viewer, but the
+   * element's media time 0 is still this, and cues are timed on the element.
+   */
+  get measuredStartSec(): number | null { return this.measured }
   /** Whether a remux session could have a measured start at all. */
   get wantsMeasuredOrigin(): boolean { return this.remux && this.sessionStartSec > 0 }
   /**
@@ -387,6 +423,7 @@ export class RemuxClock {
     if (!this.adopted && !this.refused) {
       const start = plausibleMediaStartSec(this.sessionStartSec, w.reportedSec, this.remux)
       if (start !== null) {
+        this.measured = start
         if (this.played) {
           this.refused = true
         } else {
