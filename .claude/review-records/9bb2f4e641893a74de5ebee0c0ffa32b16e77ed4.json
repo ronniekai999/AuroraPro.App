@@ -1,0 +1,10 @@
+{
+  "sha": "9bb2f4e641893a74de5ebee0c0ffa32b16e77ed4",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only review (4 rounds) of origin/main...9bb2f4e, the remux clock anchor fix. Round 1 fix-first: H1 (unaligned host sat a GOP behind guests), M1 (Safari native path never adopted), M2 (late probe moved the clock mid-play), 5 lows. Owner chose retry-then-re-anchor for H1 and an untested-but-fail-safe Safari fix for M1. Rounds 2-4: all fixed and verified (H1 and M2 reproduced in headless Chromium with real hls.js and the real ServeVariantPlaylist; guest seek hold and pre-play room alignment revert-checked; native-path hold release fixed). Remaining: 1 low (probe-limit test swaps PATH via t.Setenv); documented gaps: Safari/iOS unverified on device, no real two-browser party run, mixed old/new bundles during rollout.",
+  "reviewer": "independent-review-agent",
+  "findings": "1",
+  "diff_digest": "d60308402791ddce5e6067f9fb6953d3f6c9cd12a4354f1e3b004dc6a32ffa71",
+  "branch": "claude/sweet-brown-36veir-remux-clock",
+  "recorded_at": "2026-10-25T02:59:09Z"
+}
