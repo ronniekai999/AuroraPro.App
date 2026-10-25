@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -520,6 +522,23 @@ func parseVTTTimestamp(ts string) float64 {
 	return float64(hh*3600+mm*60+ss) + float64(fff)/1000.0
 }
 
+// parseCueTimestamp is parseVTTTimestamp for a timestamp vttCueLineRE has
+// already captured, so exactly `(?:\d{1,3}:)?\d{1,2}:\d{2}\.\d{3}`: the same
+// value, without running a second regex for each side of every cue.
+func parseCueTimestamp(ts string) float64 {
+	clock, frac, _ := strings.Cut(ts, ".")
+	first, rest, _ := strings.Cut(clock, ":")
+	hh, mm, ss := "", first, rest
+	if m, s, three := strings.Cut(rest, ":"); three {
+		hh, mm, ss = first, m, s
+	}
+	h, _ := strconv.Atoi(hh)
+	m, _ := strconv.Atoi(mm)
+	s, _ := strconv.Atoi(ss)
+	f, _ := strconv.Atoi(frac)
+	return float64(h*3600+m*60+s) + float64(f)/1000.0
+}
+
 // formatVTTTimestamp renders seconds (float) as a VTT timestamp.
 // Always emits HH:MM:SS.fff for consistency.
 func formatVTTTimestamp(sec float64) string {
@@ -654,6 +673,12 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 		return outPath, nil
 	}
 
+	// Read before creating the output, so a failed read leaves no file.
+	text, err := readVTTSource(src, srcInfo)
+	if err != nil {
+		return "", err
+	}
+
 	dst, err := os.Create(outPath)
 	if err != nil {
 		return "", fmt.Errorf("create shifted vtt: %w", err)
@@ -663,19 +688,55 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	bw := bufio.NewWriter(dst)
 	defer bw.Flush()
 
-	if err := writeShiftedVTT(src, offsetSec, bw); err != nil {
-		os.Remove(outPath)
-		return "", err
-	}
+	writeShiftedVTT(text, offsetSec, bw)
 	return outPath, nil
 }
 
+// MaxInMemoryShiftSourceBytes caps the source VTT a client-chosen shift is
+// built from in memory. The rewrite allocates about 4x the source (the read,
+// its string, the output, ~3x of it live at once) and takes ~25 ms of CPU per
+// MB: measured on an 8 MB source, 36 MB and 190 ms (it was 121 MB and 390 ms
+// before the rewrite stopped holding every line). That is paid per request,
+// not once per (track, offset) as on the cached path; a revalidation pays
+// nothing (ServeShiftedSubtitle). Full-length tracks are typically well
+// under 1 MB. Above the cap the subtitle endpoint ignores media_start= and
+// uses its prediction through the cache, as before this existed
+// (InMemoryShiftSource).
+const MaxInMemoryShiftSourceBytes = 8 << 20
+
+// ErrShiftSourceTooLarge is InMemoryShiftSource's answer for a source above
+// MaxInMemoryShiftSourceBytes.
+var ErrShiftSourceTooLarge = errors.New("subtitle source too large to shift in memory")
+
+// inMemoryShiftSlots bounds concurrent in-memory rewrites, so a burst of
+// requests cannot hold more than a few rewrites' memory at once (four at the
+// cap: about 100 MB live, with the rewrites' CPU on at most four cores). A
+// request
+// waits for a slot (until its own context ends) rather than falling back: the
+// fallback, the key-frame prediction, is a GOP wrong on exactly the sources
+// media_start= exists for, and costs an ffprobe plus a cached file per offset.
+// A var so tests can occupy its slots.
+var inMemoryShiftSlots = make(chan struct{}, 4)
+
+// InMemoryShiftSource is the check before ServeShiftedSubtitle: vttPath's
+// FileInfo, ErrShiftSourceTooLarge above MaxInMemoryShiftSourceBytes, or the
+// stat error. Nothing is read.
+func InMemoryShiftSource(vttPath string) (os.FileInfo, error) {
+	info, err := os.Stat(vttPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat vtt source: %w", err)
+	}
+	if info.Size() > MaxInMemoryShiftSourceBytes {
+		return nil, ErrShiftSourceTooLarge
+	}
+	return info, nil
+}
+
 // ShiftedVTT is ShiftVTTCues built in memory and never cached: vttPath's cues
-// shifted by -offsetSec, and the source's FileInfo for the response's
-// validators (ServeShiftedSubtitle). For an offset the CLIENT chose (the
-// subtitle endpoint's media_start=), where a file per distinct value would let
-// any client fill the cache; rewriting timestamps is cheap text work, and the
-// expensive half, extracting the track, stays cached per track.
+// shifted by -offsetSec, and the source's FileInfo. For an offset the CLIENT
+// chose (the subtitle endpoint's media_start=), where a file per distinct
+// value would let any client fill the cache; the expensive half, extracting
+// the track, stays cached per track.
 func ShiftedVTT(vttPath string, offsetSec float64) ([]byte, os.FileInfo, error) {
 	src, err := os.Open(vttPath)
 	if err != nil {
@@ -686,39 +747,113 @@ func ShiftedVTT(vttPath string, offsetSec float64) ([]byte, os.FileInfo, error) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat vtt source: %w", err)
 	}
-	var out bytes.Buffer
-	if err := writeShiftedVTT(src, offsetSec, &out); err != nil {
+	text, err := readVTTSource(src, srcInfo)
+	if err != nil {
 		return nil, nil, err
 	}
+	var out bytes.Buffer
+	// The output is about the input's size (timestamps keep their width;
+	// dropped cues only shrink it): one allocation instead of the doublings.
+	out.Grow(len(text) + len(text)/32 + 64)
+	writeShiftedVTT(text, offsetSec, &out)
 	return out.Bytes(), srcInfo, nil
 }
 
-// ServeShiftedSubtitle serves a ShiftedVTT body with what ServeSubtitle sends
-// for a file: the same Content-Type and Cache-Control, an ETag (over the
-// source's name, size and mtime plus the shift, so a different shift is a
-// different entity), Last-Modified from the source, and http.ServeContent's
-// conditional and range handling, as http.ServeFile gives the file path.
-func ServeShiftedSubtitle(w http.ResponseWriter, r *http.Request, vttPath string, offsetSec float64, body []byte, srcInfo os.FileInfo) {
-	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "private, no-cache")
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|shift%dms",
-		filepath.Base(vttPath), srcInfo.Size(), srcInfo.ModTime().UnixNano(), int64(offsetSec*1000+0.5))))
-	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%x", sum[:8])))
-	http.ServeContent(w, r, filepath.Base(vttPath), srcInfo.ModTime(), bytes.NewReader(body))
+// shiftedSubtitleETag names one shift of one source version: the source's
+// full path, size and mtime, and the exact shift.
+func shiftedSubtitleETag(vttPath string, srcInfo os.FileInfo, offsetSec float64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|%s",
+		vttPath, srcInfo.Size(), srcInfo.ModTime().UnixNano(), strconv.FormatFloat(offsetSec, 'g', -1, 64))))
+	return fmt.Sprintf("%q", fmt.Sprintf("%x", sum[:8]))
 }
 
-// writeShiftedVTT is ShiftVTTCues' rewrite: src's cues shifted by -offsetSec
+// ServeShiftedSubtitle serves vttPath's cues shifted by -offsetSec, built in
+// memory (ShiftedVTT), with what ServeSubtitle sends for a file: the same
+// Content-Type and Cache-Control, an ETag (shiftedSubtitleETag), Last-Modified
+// from the source, and http.ServeContent's conditional and range handling, as
+// http.ServeFile gives the file path. srcInfo is InMemoryShiftSource's.
+//
+// The body is built only once the request needs it: ServeContent answers a
+// matching If-None-Match or If-Modified-Since with 304 before it touches the
+// content, so a revalidation rewrites nothing. The rewrite then waits for one
+// of inMemoryShiftSlots; a context that ends first, or a failed rewrite, is a
+// 500 (nothing has been written by then).
+func ServeShiftedSubtitle(w http.ResponseWriter, r *http.Request, vttPath string, offsetSec float64, srcInfo os.FileInfo) {
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", shiftedSubtitleETag(vttPath, srcInfo, offsetSec))
+	http.ServeContent(w, r, filepath.Base(vttPath), srcInfo.ModTime(),
+		&lazyShiftedVTT{ctx: r.Context(), path: vttPath, offsetSec: offsetSec})
+}
+
+// lazyShiftedVTT is ServeShiftedSubtitle's body: the shift, built on the first
+// Read or Seek, inside an inMemoryShiftSlots slot.
+type lazyShiftedVTT struct {
+	ctx       context.Context
+	path      string
+	offsetSec float64
+	body      *bytes.Reader
+	err       error
+}
+
+func (l *lazyShiftedVTT) load() error {
+	if l.body != nil || l.err != nil {
+		return l.err
+	}
+	select {
+	case inMemoryShiftSlots <- struct{}{}:
+	case <-l.ctx.Done():
+		l.err = l.ctx.Err()
+		return l.err
+	}
+	body, _, err := ShiftedVTT(l.path, l.offsetSec)
+	<-inMemoryShiftSlots
+	if err != nil {
+		l.err = err
+		slog.Warn("in-memory subtitle shift failed", "vtt", l.path, "shift_offset", l.offsetSec, "error", err)
+		return err
+	}
+	l.body = bytes.NewReader(body)
+	return nil
+}
+
+func (l *lazyShiftedVTT) Read(p []byte) (int, error) {
+	if err := l.load(); err != nil {
+		return 0, err
+	}
+	return l.body.Read(p)
+}
+
+func (l *lazyShiftedVTT) Seek(offset int64, whence int) (int64, error) {
+	if err := l.load(); err != nil {
+		return 0, err
+	}
+	return l.body.Seek(offset, whence)
+}
+
+// readVTTSource reads an open subtitle file whole, in one allocation sized
+// from its FileInfo.
+func readVTTSource(f *os.File, info os.FileInfo) (string, error) {
+	var buf bytes.Buffer
+	buf.Grow(int(info.Size()) + bytes.MinRead)
+	if _, err := buf.ReadFrom(f); err != nil {
+		return "", fmt.Errorf("read vtt: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// writeShiftedVTT is ShiftVTTCues' rewrite: text's cues shifted by -offsetSec
 // onto bw, blocks preserved, cues wholly before zero dropped and ones
 // straddling it clamped.
-func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error {
-	scanner := bufio.NewScanner(src)
-	// Bump the scanner buffer for long cue lines. Default 64K is fine
-	// for normal subs but some ASS-converted VTTs have multi-line
-	// settings strings.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	// Read the whole VTT into memory and process in BLOCK mode. Block
-	// mode is necessary because:
+//
+// Lines split as bufio.ScanLines splits them (on \n, one trailing \r
+// dropped), and each block is processed as soon as the blank line ending it
+// is read, from a scratch slice reused for the next: nothing holds the whole
+// file's lines. (Main read every line into a slice, then the blocks into
+// another, and capped a line at 1 MB; output is byte-identical for every
+// input it accepted, subtitles_shift_oracle_test.go.)
+func writeShiftedVTT(text string, offsetSec float64, bw io.StringWriter) {
+	// Process in BLOCK mode. Block mode is necessary because:
 	//   - STYLE / NOTE / REGION blocks can span many lines and must be
 	//     preserved verbatim (any content inside may be CSS-like and
 	//     may even contain text that *looks* like a timing line).
@@ -733,52 +868,32 @@ func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error
 	//   - starts with "REGION" → REGION block (verbatim)
 	//   - contains "-->" on first or second line → cue block
 	//   - anything else → unknown, pass through verbatim
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read vtt: %w", err)
-	}
-
 	startOffset := offsetSec
 
-	// emitBlock writes a slice of lines + a trailing blank-line
-	// separator (the block boundary). Empty blocks are skipped.
+	// emitLines writes lines, each newline-terminated (two writes, not a
+	// concatenation: no string per line). emitBlock adds the trailing
+	// blank-line separator (the block boundary); empty blocks are skipped.
+	emitLines := func(block []string) {
+		for _, l := range block {
+			bw.WriteString(l)
+			bw.WriteString("\n")
+		}
+	}
 	emitBlock := func(block []string) {
 		if len(block) == 0 {
 			return
 		}
-		for _, l := range block {
-			bw.WriteString(l + "\n")
-		}
+		emitLines(block)
 		bw.WriteString("\n")
 	}
 
-	// Group input into blocks (slices of lines) separated by blank
-	// lines. Multiple consecutive blanks collapse into one separator.
-	var blocks [][]string
-	var cur []string
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			if len(cur) > 0 {
-				blocks = append(blocks, cur)
-				cur = nil
-			}
-			continue
-		}
-		cur = append(cur, l)
-	}
-	if len(cur) > 0 {
-		blocks = append(blocks, cur)
-	}
-
-	// Process each block.
-	for bi, block := range blocks {
+	// processBlock handles one block (a run of non-blank lines); bi is its
+	// position, 0 for the WEBVTT header. It keeps nothing of block.
+	processBlock := func(bi int, block []string) {
 		// The first block is the WEBVTT header. Emit verbatim.
 		if bi == 0 {
 			emitBlock(block)
-			continue
+			return
 		}
 		first := strings.TrimSpace(block[0])
 		// STYLE / NOTE / REGION blocks: verbatim passthrough.
@@ -786,7 +901,7 @@ func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error
 			first == "NOTE" || strings.HasPrefix(first, "NOTE ") ||
 			first == "REGION" || strings.HasPrefix(first, "REGION ") {
 			emitBlock(block)
-			continue
+			return
 		}
 		// Identify the timing line: first line in the block that
 		// matches vttCueLineRE. If line 0 is the timing line, there's
@@ -795,6 +910,11 @@ func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error
 		timingIdx := -1
 		var timingMatch []string
 		for li, l := range block {
+			// The regex needs "-->": a line without it (a cue id, text)
+			// cannot match, so it is not run on one.
+			if !strings.Contains(l, "-->") {
+				continue
+			}
 			if m := vttCueLineRE.FindStringSubmatch(l); m != nil {
 				timingIdx = li
 				timingMatch = m
@@ -805,21 +925,21 @@ func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error
 			// Not a recognizable cue block — pass through verbatim
 			// (defensive against unusual VTT extensions).
 			emitBlock(block)
-			continue
+			return
 		}
-		startT := parseVTTTimestamp(timingMatch[1])
-		endT := parseVTTTimestamp(timingMatch[2])
+		startT := parseCueTimestamp(timingMatch[1])
+		endT := parseCueTimestamp(timingMatch[2])
 		if startT < 0 || endT < 0 {
 			// Timing parse failed — pass through verbatim.
 			emitBlock(block)
-			continue
+			return
 		}
 		shiftedStart := startT - startOffset
 		shiftedEnd := endT - startOffset
 		if shiftedEnd <= 0 {
 			// Entire cue is in the past — drop the whole block (id +
 			// timing + text).
-			continue
+			return
 		}
 		if shiftedStart < 0 {
 			shiftedStart = 0
@@ -833,20 +953,45 @@ func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error
 		if settings != "" && !strings.HasPrefix(settings, " ") && !strings.HasPrefix(settings, "\t") {
 			settings = " " + settings
 		}
-		newTiming := fmt.Sprintf("%s --> %s%s",
-			formatVTTTimestamp(shiftedStart),
-			formatVTTTimestamp(shiftedEnd),
-			settings,
-		)
-		// Rebuild the block: cue-id lines (if any) + new timing +
-		// rest of the cue text body.
-		rebuilt := make([]string, 0, len(block))
-		rebuilt = append(rebuilt, block[:timingIdx]...)
-		rebuilt = append(rebuilt, newTiming)
-		rebuilt = append(rebuilt, block[timingIdx+1:]...)
-		emitBlock(rebuilt)
+		// Rebuild the block in place: cue-id lines (if any), the new
+		// timing line, the rest of the cue text body, the separator.
+		emitLines(block[:timingIdx])
+		bw.WriteString(formatVTTTimestamp(shiftedStart))
+		bw.WriteString(" --> ")
+		bw.WriteString(formatVTTTimestamp(shiftedEnd))
+		bw.WriteString(settings)
+		bw.WriteString("\n")
+		emitBlock(block[timingIdx+1:])
+		if timingIdx+1 == len(block) {
+			bw.WriteString("\n")
+		}
 	}
-	return nil
+
+	// Blocks are separated by blank lines; consecutive blanks collapse into
+	// one separator.
+	var block []string
+	blocks := 0
+	for rest := text; rest != ""; {
+		line := rest
+		if i := strings.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = ""
+		}
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			if len(block) > 0 {
+				processBlock(blocks, block)
+				blocks++
+				block = block[:0]
+			}
+			continue
+		}
+		block = append(block, line)
+	}
+	if len(block) > 0 {
+		processBlock(blocks, block)
+	}
 }
 
 // ConvertSRTtoVTT converts an external .srt file to .vtt format.

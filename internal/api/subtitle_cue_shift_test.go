@@ -343,10 +343,10 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 			return found
 		}
 
-		get := func(t *testing.T, query string, header http.Header) *httptest.ResponseRecorder {
+		getTrack := func(t *testing.T, track, query string, header http.Header) *httptest.ResponseRecorder {
 			t.Helper()
-			r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles/1000?type=media"+query,
-				map[string]string{"fileID": i64(file.ID), "trackIdx": "1000"})
+			r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles/"+track+"?type=media"+query,
+				map[string]string{"fileID": i64(file.ID), "trackIdx": track})
 			for k, v := range header {
 				r.Header[k] = v
 			}
@@ -354,9 +354,13 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 			h.ServeSubtitle(rr, rcClaimsCtx(r, userID, refreshID))
 			return rr
 		}
-		expectCue := func(t *testing.T, query string, shift float64) *httptest.ResponseRecorder {
+		get := func(t *testing.T, query string, header http.Header) *httptest.ResponseRecorder {
 			t.Helper()
-			rr := get(t, query, nil)
+			return getTrack(t, "1000", query, header)
+		}
+		expectTrackCue := func(t *testing.T, track, query string, shift float64) *httptest.ResponseRecorder {
+			t.Helper()
+			rr := getTrack(t, track, query, nil)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("%s: HTTP %d: %s", query, rr.Code, rr.Body.String())
 			}
@@ -364,6 +368,10 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 				t.Errorf("%s: cue at %.3fs of media time, want %.3fs (a shift of %.3fs)", query, at, shiftCueSourceSec-shift, shift)
 			}
 			return rr
+		}
+		expectCue := func(t *testing.T, query string, shift float64) *httptest.ResponseRecorder {
+			t.Helper()
+			return expectTrackCue(t, "1000", query, shift)
 		}
 		start := "&start=" + strconv.Itoa(startSec)
 
@@ -422,6 +430,34 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		}
 		// No start (direct play): unshifted.
 		expectCue(t, "", 0)
+
+		// A source above the in-memory cap: media_start= is set aside for the
+		// prediction, through the cache, as before it existed; said once.
+		// (A .vtt sidecar is served as is, so its size is the source's.)
+		var big strings.Builder
+		big.WriteString("WEBVTT\n\nNOTE padding past the in-memory cap\n")
+		for big.Len() <= streaming.MaxInMemoryShiftSourceBytes {
+			big.WriteString(strings.Repeat("padding ", 12) + "\n")
+		}
+		big.WriteString("\n00:00:25.000 --> 00:00:27.000\nTwenty-five\n")
+		if err := os.WriteFile(strings.TrimSuffix(src, filepath.Ext(src))+".zzz.vtt", []byte(big.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before := len(shiftedFiles(t))
+		logs := captureLogs(t, func() {
+			for i := 0; i < 2; i++ {
+				expectTrackCue(t, "1001", start+"&remux=1&media_start="+mediaStartParam, predicted)
+			}
+		})
+		if n := strings.Count(logs, "too large to shift in memory"); n != 1 {
+			t.Errorf("the cap's fallback was logged %d times over two requests, want once:\n%s", n, logs)
+		}
+		if !strings.Contains(logs, "level=INFO msg=\"subtitle too large") {
+			t.Errorf("the cap's fallback is not an Info line:\n%s", logs)
+		}
+		if got := len(shiftedFiles(t)); got != before+1 {
+			t.Errorf("the capped track's prediction left %d new cached files, want its one", got-before)
+		}
 	})
 }
 

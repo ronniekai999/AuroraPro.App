@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -2388,12 +2389,17 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 //     > 0, every cue timestamp is shifted back by where the player's media
 //     time 0 sits in the file (subtitleCueShift), so cues match the HLS
 //     time domain. Without this, cues fire `start` seconds late or never
-//     (when past EOF). The shifted VTT is cached separately from the raw
-//     extracted VTT, keyed by (VTT path, shift).
+//     (when past EOF). A shift the server derived (start_sec, the key-frame
+//     prediction) is cached separately from the raw extracted VTT, keyed by
+//     (VTT path, shift).
 //   - remux=1 — the session copies video (Issue #141); see subtitleCueShift.
 //   - media_start=<sec> — with remux=1, the measured start the session's
 //     variant playlist reported (#AURORA-MEDIA-START, media_start.go). It
-//     replaces the server's key-frame prediction. Older clients omit it.
+//     replaces the server's key-frame prediction. Older clients omit it. Its
+//     shift is the client's choice, so it is built in memory per request and
+//     never cached (streaming.ServeShiftedSubtitle; a revalidation builds
+//     nothing), for sources up to streaming.MaxInMemoryShiftSourceBytes;
+//     above that the prediction is used, through the cache.
 func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -2464,7 +2470,6 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		shiftErr := error(nil)
 		shiftOffset, shiftBasis := 0.0, subtitleShiftNone
 		inMemory := false // a client-chosen shift, built per request
-		var shiftedBody []byte
 		var srcInfo os.FileInfo
 		if startSec > 0 {
 			shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, rawMediaStart)
@@ -2473,10 +2478,23 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 				// media_start= is the client's to choose, so its shift is
 				// never written to the cache: a file per distinct value would
 				// let any client fill the disk. The extracted track it is
-				// built from is cached as before.
-				shiftedBody, srcInfo, err = streaming.ShiftedVTT(vttPath, shiftOffset)
-				inMemory = err == nil
-			} else {
+				// built from is cached as before. Only the stat happens here;
+				// the rewrite waits for the response to need it.
+				srcInfo, err = streaming.InMemoryShiftSource(vttPath)
+				if errors.Is(err, streaming.ErrShiftSourceTooLarge) {
+					// Too big to rebuild per request: the prediction, through
+					// the cache, as before media_start= existed.
+					if _, seen := inMemoryShiftCapLogged.LoadOrStore(vttPath, true); !seen {
+						slog.Info("subtitle too large to shift in memory; using the key-frame prediction for media_start",
+							"vtt", vttPath, "max_bytes", streaming.MaxInMemoryShiftSourceBytes)
+					}
+					shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, "")
+					err = nil
+				} else {
+					inMemory = err == nil
+				}
+			}
+			if !inMemory && err == nil {
 				// Offsets the server derived (start_sec, the key-frame
 				// prediction): one cached file per (track, offset), as before.
 				var shifted string
@@ -2490,11 +2508,11 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 					"error", err, "vtt", vttPath, "start_sec", startSec, "shift_offset", shiftOffset)
 			}
 		}
-		byteSize := int64(len(shiftedBody))
-		if !inMemory {
-			if info, statErr := os.Stat(served); statErr == nil {
-				byteSize = info.Size()
-			}
+		var byteSize int64 // the source's size for an in-memory shift
+		if inMemory {
+			byteSize = srcInfo.Size()
+		} else if info, statErr := os.Stat(served); statErr == nil {
+			byteSize = info.Size()
 		}
 		slog.Info("subtitle served",
 			"file_id", fileID,
@@ -2511,7 +2529,7 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 			"vtt_bytes", byteSize,
 		)
 		if inMemory {
-			streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset, shiftedBody, srcInfo)
+			streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset, srcInfo)
 			return
 		}
 		streaming.ServeSubtitle(w, r, served)
@@ -2598,6 +2616,11 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 
 	serve(vttPath)
 }
+
+// inMemoryShiftCapLogged holds the source VTTs ServeSubtitle has already said
+// are too large to shift in memory, so the fallback is logged once per track
+// (per process), not on every request.
+var inMemoryShiftCapLogged sync.Map
 
 // What a subtitle cue shift rests on, for ServeSubtitle's log line.
 const (
