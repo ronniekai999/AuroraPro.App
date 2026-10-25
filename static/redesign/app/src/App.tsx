@@ -1913,7 +1913,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">Notifications</h3>
-        <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
+        <button onClick={onClose} className="text-white/40 hover:text-white transition-colors" aria-label="Close notifications">
           <Icon name="x" size={16} />
         </button>
       </div>

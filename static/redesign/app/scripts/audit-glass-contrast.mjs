@@ -589,7 +589,7 @@ const EXEMPT = [
   // ── App.tsx ──
   { file: 'src/App.tsx', anchor: 'absolute top-3 right-3 text-white/40 hover:text-white transition-colors"', kind: 'non-text',
     why: 'the server panel\'s icon-only close button; its X is the control' },
-  { file: 'src/App.tsx', anchor: '<button onClick={onClose} className="text-white/40 hover:text-white transition-colors">', kind: 'non-text',
+  { file: 'src/App.tsx', anchor: 'className="text-white/40 hover:text-white transition-colors" aria-label="Close notifications">', kind: 'non-text',
     why: 'the notification panel\'s icon-only close button' },
   { file: 'src/App.tsx', anchor: "stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40'", kind: 'non-text',
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
