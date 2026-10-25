@@ -2,10 +2,12 @@ package streaming
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -611,8 +613,10 @@ func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
 // the raw startSec (which can be up to one GOP after the keyframe)
 // placed every cue ~2-3s too early — "subtitles ahead of audio".
 // Callers pass where the player's media time 0 is in the file, not the
-// requested startSec: for a remux, the measured start when the client sent
-// one, else ProbeSeekKeyframe(startSec) (internal/api subtitleCueShift).
+// requested startSec (internal/api subtitleCueShift). Only offsets the server
+// derived come here (start_sec, ProbeSeekKeyframe(startSec)): each distinct
+// one is a file in cacheDir, so an offset a client chose (the measured start
+// it sends back) goes through ShiftedVTT instead, which writes nothing.
 func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, error) {
 	if offsetSec <= 0 {
 		return vttPath, nil
@@ -659,6 +663,54 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	bw := bufio.NewWriter(dst)
 	defer bw.Flush()
 
+	if err := writeShiftedVTT(src, offsetSec, bw); err != nil {
+		os.Remove(outPath)
+		return "", err
+	}
+	return outPath, nil
+}
+
+// ShiftedVTT is ShiftVTTCues built in memory and never cached: vttPath's cues
+// shifted by -offsetSec, and the source's FileInfo for the response's
+// validators (ServeShiftedSubtitle). For an offset the CLIENT chose (the
+// subtitle endpoint's media_start=), where a file per distinct value would let
+// any client fill the cache; rewriting timestamps is cheap text work, and the
+// expensive half, extracting the track, stays cached per track.
+func ShiftedVTT(vttPath string, offsetSec float64) ([]byte, os.FileInfo, error) {
+	src, err := os.Open(vttPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open vtt source: %w", err)
+	}
+	defer src.Close()
+	srcInfo, err := src.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat vtt source: %w", err)
+	}
+	var out bytes.Buffer
+	if err := writeShiftedVTT(src, offsetSec, &out); err != nil {
+		return nil, nil, err
+	}
+	return out.Bytes(), srcInfo, nil
+}
+
+// ServeShiftedSubtitle serves a ShiftedVTT body with what ServeSubtitle sends
+// for a file: the same Content-Type and Cache-Control, an ETag (over the
+// source's name, size and mtime plus the shift, so a different shift is a
+// different entity), Last-Modified from the source, and http.ServeContent's
+// conditional and range handling, as http.ServeFile gives the file path.
+func ServeShiftedSubtitle(w http.ResponseWriter, r *http.Request, vttPath string, offsetSec float64, body []byte, srcInfo os.FileInfo) {
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|shift%dms",
+		filepath.Base(vttPath), srcInfo.Size(), srcInfo.ModTime().UnixNano(), int64(offsetSec*1000+0.5))))
+	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%x", sum[:8])))
+	http.ServeContent(w, r, filepath.Base(vttPath), srcInfo.ModTime(), bytes.NewReader(body))
+}
+
+// writeShiftedVTT is ShiftVTTCues' rewrite: src's cues shifted by -offsetSec
+// onto bw, blocks preserved, cues wholly before zero dropped and ones
+// straddling it clamped.
+func writeShiftedVTT(src io.Reader, offsetSec float64, bw io.StringWriter) error {
 	scanner := bufio.NewScanner(src)
 	// Bump the scanner buffer for long cue lines. Default 64K is fine
 	// for normal subs but some ASS-converted VTTs have multi-line
@@ -686,8 +738,7 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		os.Remove(outPath)
-		return "", fmt.Errorf("read vtt: %w", err)
+		return fmt.Errorf("read vtt: %w", err)
 	}
 
 	startOffset := offsetSec
@@ -795,7 +846,7 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 		rebuilt = append(rebuilt, block[timingIdx+1:]...)
 		emitBlock(rebuilt)
 	}
-	return outPath, nil
+	return nil
 }
 
 // ConvertSRTtoVTT converts an external .srt file to .vtt format.

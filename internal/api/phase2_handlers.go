@@ -2463,20 +2463,38 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		served := vttPath
 		shiftErr := error(nil)
 		shiftOffset, shiftBasis := 0.0, subtitleShiftNone
+		inMemory := false // a client-chosen shift, built per request
+		var shiftedBody []byte
+		var srcInfo os.FileInfo
 		if startSec > 0 {
 			shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, rawMediaStart)
-			shifted, err := streaming.ShiftVTTCues(vttPath, shiftOffset, h.subCache)
-			if err == nil {
-				served = shifted
+			var err error
+			if shiftBasis == subtitleShiftMeasured {
+				// media_start= is the client's to choose, so its shift is
+				// never written to the cache: a file per distinct value would
+				// let any client fill the disk. The extracted track it is
+				// built from is cached as before.
+				shiftedBody, srcInfo, err = streaming.ShiftedVTT(vttPath, shiftOffset)
+				inMemory = err == nil
 			} else {
+				// Offsets the server derived (start_sec, the key-frame
+				// prediction): one cached file per (track, offset), as before.
+				var shifted string
+				if shifted, err = streaming.ShiftVTTCues(vttPath, shiftOffset, h.subCache); err == nil {
+					served = shifted
+				}
+			}
+			if err != nil {
 				shiftErr = err
 				slog.Warn("subtitle cue-shift failed; serving unshifted",
 					"error", err, "vtt", vttPath, "start_sec", startSec, "shift_offset", shiftOffset)
 			}
 		}
-		var byteSize int64
-		if info, statErr := os.Stat(served); statErr == nil {
-			byteSize = info.Size()
+		byteSize := int64(len(shiftedBody))
+		if !inMemory {
+			if info, statErr := os.Stat(served); statErr == nil {
+				byteSize = info.Size()
+			}
 		}
 		slog.Info("subtitle served",
 			"file_id", fileID,
@@ -2488,9 +2506,14 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 			"shift_basis", shiftBasis,
 			"keyframe_gap", float64(startSec)-shiftOffset,
 			"shifted", startSec > 0 && shiftErr == nil,
+			"in_memory", inMemory,
 			"vtt_path", served,
 			"vtt_bytes", byteSize,
 		)
+		if inMemory {
+			streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset, shiftedBody, srcInfo)
+			return
+		}
 		streaming.ServeSubtitle(w, r, served)
 	}
 
@@ -2594,8 +2617,8 @@ const (
 //     at a key frame before startSec. Since #431 its re-encoded audio starts
 //     there too, and hls.js anchors media time 0 on the earliest sample. A
 //     client that read the session's measured start (#AURORA-MEDIA-START,
-//     media_start.go) sends it as media_start=, and that is the shift, to the
-//     nearest 10 ms: it is where this session's first segment really begins.
+//     media_start.go) sends it as media_start=, and that is the shift: it is
+//     where this session's first segment really begins.
 //   - A remux without a usable media_start= (an older client, or a session
 //     whose measurement failed) keeps the prediction: ProbeSeekKeyframe, the
 //     largest key frame <= startSec, under the ffprobe gate (audit MED), or
@@ -2605,9 +2628,10 @@ const (
 //     within 130 ms after a key frame (CLAUDE.md, the remux clock).
 //
 // media_start= is trusted only within the window the playlist publishes it
-// under for startSec, and used at 10 ms so it cannot mint a cached VTT per
-// millisecond (streaming.ParseClientMediaStart); it can only move the
-// requester's own cues.
+// under for startSec (streaming.ParseClientMediaStart); it can only move the
+// requester's own cues. Being the client's choice, the shift it yields is
+// built per request and never cached (ServeSubtitle, streaming.ShiftedVTT);
+// the other bases are the server's own and keep the per-offset disk cache.
 func subtitleCueShift(ctx context.Context, filePath string, startSec int, isRemux bool, rawMediaStart string) (float64, string) {
 	if startSec <= 0 {
 		return 0, subtitleShiftNone

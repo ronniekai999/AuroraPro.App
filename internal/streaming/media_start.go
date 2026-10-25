@@ -165,25 +165,15 @@ func mediaStartPlausible(sec float64, startSec int) bool {
 	return sec >= 0 && sec >= anchor-mediaStartMaxLagSec && sec <= anchor+mediaStartMaxLeadSec
 }
 
-// clientMediaStartStepsPerSec sets the resolution a client-sent media start
-// is used at: 10 ms. Each distinct shift is its own cached VTT per track
-// (ShiftVTTCues keys on the millisecond, and the cache is never evicted), so
-// a free value would let the 61 s window alone mint 61,000 files per track
-// and start_sec; at 10 ms it is 6,100, and an honest client sends the same
-// value for a session every time. 10 ms is well inside a frame and inside
-// the measurement's own spread (the AAC packet can lead the key frame by
-// ~40 ms). The SPA rounds to the same step (subtitleCueShiftQuery).
-const clientMediaStartStepsPerSec = 100
-
 // ParseClientMediaStart reads a media start a client sends back: the value of
 // this session's #AURORA-MEDIA-START line, which the subtitle endpoint takes
 // as media_start= so the cue shift lands where the remux really began rather
 // than where ProbeSeekKeyframe predicts it did. Accepted only as a plain
 // decimal number of seconds (what the line carries and the web player sends:
 // no sign, exponent, NaN or Inf) inside the window the line is published
-// under for this start_sec, and returned rounded to 10 ms
-// (clientMediaStartStepsPerSec); anything else is ok=false, and the caller
-// keeps its prediction.
+// under for this start_sec; anything else is ok=false, and the caller keeps
+// its prediction. The value is the client's choice, so the endpoint shifts by
+// it in memory and caches nothing (ShiftedVTT).
 func ParseClientMediaStart(raw string, startSec int) (float64, bool) {
 	if !isDecimalSeconds(raw) {
 		return 0, false
@@ -194,8 +184,7 @@ func ParseClientMediaStart(raw string, startSec int) (float64, bool) {
 	if err != nil || !mediaStartPlausible(sec, startSec) {
 		return 0, false
 	}
-	// The window's edges are whole seconds, so the rounded value stays in it.
-	return math.Round(sec*clientMediaStartStepsPerSec) / clientMediaStartStepsPerSec, true
+	return sec, true
 }
 
 // isDecimalSeconds reports whether s is digits with an optional fractional

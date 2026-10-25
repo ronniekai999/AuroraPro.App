@@ -21,7 +21,6 @@ package api
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -228,42 +227,31 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		}
 	}
 	mediaStartParam := strconv.FormatFloat(published, 'f', 6, 64)
-	// The measured start as the server uses it: to the nearest 10 ms.
-	measured := math.Round(published*100) / 100
 
 	t.Run("a remux with the measured start shifts by it", func(t *testing.T) {
 		shift, basis := subtitleCueShift(ctx, src, startSec, true, mediaStartParam)
-		if basis != subtitleShiftMeasured || shift != measured {
-			t.Fatalf("shift = %.6f (%s), want the measured %.6f to 10 ms (%.2f)", shift, basis, published, measured)
+		if basis != subtitleShiftMeasured || shift != published {
+			t.Fatalf("shift = %.6f (%s), want the measured %.6f", shift, basis, published)
 		}
 		t.Logf("measured: shift %.3fs, cue error %+.3fs", shift, cueError(shift))
 		assertOnPicture(t, shift)
 
-		// And the shifted VTT puts the cue there.
+		// And the in-memory shift ServeSubtitle serves it with puts the cue
+		// there, writing nothing.
 		vtt := filepath.Join(t.TempDir(), "cue.vtt")
 		if err := os.WriteFile(vtt, []byte("WEBVTT\n\n00:00:25.000 --> 00:00:27.000\nTwenty-five\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, err := streaming.ShiftVTTCues(vtt, shift, t.TempDir())
+		body, _, err := streaming.ShiftedVTT(vtt, shift)
 		if err != nil {
 			t.Fatalf("shift VTT: %v", err)
 		}
-		body, err := os.ReadFile(out)
-		if err != nil {
-			t.Fatal(err)
-		}
 		at := firstCueStartSec(t, string(body))
-		if d := at - (shiftCueSourceSec - measured); d > 0.002 || d < -0.002 {
-			t.Errorf("cue at %.3fs of media time, want %.3fs", at, shiftCueSourceSec-measured)
+		if d := at - (shiftCueSourceSec - published); d > 0.002 || d < -0.002 {
+			t.Errorf("cue at %.3fs of media time, want %.3fs", at, shiftCueSourceSec-published)
 		}
-	})
-
-	t.Run("media_start is used at 10 ms", func(t *testing.T) {
-		for _, near := range []float64{measured - 0.004, measured + 0.0049, measured} {
-			param := strconv.FormatFloat(near, 'f', 6, 64)
-			if shift, basis := subtitleCueShift(ctx, src, startSec, true, param); basis != subtitleShiftMeasured || shift != measured {
-				t.Errorf("media_start=%s: shift = %.6f (%s), want %.2f", param, shift, basis, measured)
-			}
+		if left, _ := os.ReadDir(filepath.Dir(vtt)); len(left) != 1 {
+			t.Errorf("the in-memory shift wrote files beside its source: %v", left)
 		}
 	})
 
@@ -355,40 +343,83 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 			return found
 		}
 
-		cueAt := func(t *testing.T, query string) float64 {
+		get := func(t *testing.T, query string, header http.Header) *httptest.ResponseRecorder {
 			t.Helper()
 			r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles/1000?type=media"+query,
 				map[string]string{"fileID": i64(file.ID), "trackIdx": "1000"})
+			for k, v := range header {
+				r.Header[k] = v
+			}
 			rr := httptest.NewRecorder()
 			h.ServeSubtitle(rr, rcClaimsCtx(r, userID, refreshID))
+			return rr
+		}
+		expectCue := func(t *testing.T, query string, shift float64) *httptest.ResponseRecorder {
+			t.Helper()
+			rr := get(t, query, nil)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("%s: HTTP %d: %s", query, rr.Code, rr.Body.String())
 			}
-			return firstCueStartSec(t, rr.Body.String())
-		}
-		expectCue := func(t *testing.T, query string, shift float64) {
-			t.Helper()
-			if at := cueAt(t, query); at-(shiftCueSourceSec-shift) > 0.002 || at-(shiftCueSourceSec-shift) < -0.002 {
+			if at := firstCueStartSec(t, rr.Body.String()); at-(shiftCueSourceSec-shift) > 0.002 || at-(shiftCueSourceSec-shift) < -0.002 {
 				t.Errorf("%s: cue at %.3fs of media time, want %.3fs (a shift of %.3fs)", query, at, shiftCueSourceSec-shift, shift)
 			}
+			return rr
 		}
 		start := "&start=" + strconv.Itoa(startSec)
 
-		// The web player's request for this session: on the picture, at 10 ms.
-		expectCue(t, start+"&remux=1&media_start="+mediaStartParam, measured)
-		// Values inside the same 10 ms share the one cached file.
-		for _, near := range []float64{measured - 0.004, measured + 0.0049, measured} {
-			expectCue(t, start+"&remux=1&media_start="+strconv.FormatFloat(near, 'f', 6, 64), measured)
+		// The web player's request for this session: on the picture. A
+		// client-chosen shift is built per request: distinct values (each
+		// one exact) leave no shifted file in the cache.
+		measuredResp := expectCue(t, start+"&remux=1&media_start="+mediaStartParam, published)
+		for _, other := range []float64{published - 0.004, published + 0.0049, published - 7.25, 0.5} {
+			expectCue(t, start+"&remux=1&media_start="+strconv.FormatFloat(other, 'f', 6, 64), other)
 		}
-		if files := shiftedFiles(t); len(files) != 1 {
-			t.Errorf("4 media_start values inside one 10 ms step left %d shifted VTTs, want 1: %v", len(files), files)
+		if files := shiftedFiles(t); len(files) != 0 {
+			t.Errorf("five media_start values left %d shifted VTTs in the cache, want none: %v", len(files), files)
 		}
-		// An older client: the prediction, exactly as before.
-		expectCue(t, start+"&remux=1", predicted)
+
+		// Served as the file path serves a cached shift: the same headers,
+		// validators from the source, and a conditional request answered 304.
+		// An older client: the prediction, cached exactly as before.
+		predictedResp := expectCue(t, start+"&remux=1", predicted)
 		expectCue(t, start+"&remux=1&media_start=NaN", predicted)
+		for _, name := range []string{"Content-Type", "Cache-Control", "Accept-Ranges"} {
+			if got, want := measuredResp.Header().Get(name), predictedResp.Header().Get(name); got != want || want == "" {
+				t.Errorf("%s: in-memory %q, cached file %q", name, got, want)
+			}
+		}
+		for _, name := range []string{"ETag", "Last-Modified", "Content-Length"} {
+			if measuredResp.Header().Get(name) == "" || predictedResp.Header().Get(name) == "" {
+				t.Errorf("%s: in-memory %q, cached file %q; both must send it", name, measuredResp.Header().Get(name), predictedResp.Header().Get(name))
+			}
+		}
+		if got := measuredResp.Header().Get("Content-Length"); got != strconv.Itoa(measuredResp.Body.Len()) {
+			t.Errorf("in-memory Content-Length %s for a %d-byte body", got, measuredResp.Body.Len())
+		}
+		if a, b := measuredResp.Header().Get("ETag"), get(t, start+"&remux=1&media_start=0.500000", nil).Header().Get("ETag"); a == b {
+			t.Errorf("two different shifts share the ETag %s", a)
+		}
+		if again := get(t, start+"&remux=1&media_start="+mediaStartParam, http.Header{"If-None-Match": {measuredResp.Header().Get("ETag")}}); again.Code != http.StatusNotModified {
+			t.Errorf("a conditional request for the same in-memory shift: HTTP %d, want 304", again.Code)
+		}
 		// A transcode: start_sec, with or without a stray media_start.
 		expectCue(t, start, startSec)
 		expectCue(t, start+"&media_start="+mediaStartParam, startSec)
+		// The server-derived shifts (the prediction and start_sec) are the
+		// only ones cached: a file per distinct offset, as before.
+		wantFiles := map[string]bool{}
+		for _, offset := range []float64{predicted, startSec} {
+			wantFiles[fmt.Sprintf("_shift%dms_", int64(offset*1000+0.5))] = true
+		}
+		files := shiftedFiles(t)
+		if len(files) != len(wantFiles) {
+			t.Errorf("the cache holds %v, want one file per server-derived offset %v", files, wantFiles)
+		}
+		for _, f := range files {
+			if name := filepath.Base(f); !wantFiles[name[strings.Index(name, "_shift"):strings.Index(name, "ms_")+3]] {
+				t.Errorf("unexpected shifted file %s", name)
+			}
+		}
 		// No start (direct play): unshifted.
 		expectCue(t, "", 0)
 	})
