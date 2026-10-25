@@ -2724,8 +2724,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // `start=` stays the whole-second start_sec, `media_start=` is the
     // measured start. Direct play sends neither (cues already match).
     //
-    // Until this boot knows its delivery (stream info, the session create)
-    // there is nothing to shift against: start_sec and the clock are reset
+    // Until this boot knows its delivery (stream info, the session create,
+    // and for direct play on WebKit the AirPlay token mint) there is
+    // nothing to shift against: start_sec and the clock are reset
     // and unknown. The pick is only recorded (the state and ref above); the
     // boot's restore reads the latest one once the delivery can take it.
     if (deliveryModeRef.current === 'resolving') {
@@ -2771,6 +2772,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // errors silently by default; without this handler a 4xx
     // response from the server produces no UI feedback at all.
     track.addEventListener('error', () => {
+      // Only the active track speaks for the pick. A track a later pick, Off
+      // or a boot has already removed (its fetch aborted, or failing late)
+      // must not roll back the pick that replaced it: the boot's restore
+      // reads the pick when it runs, so that rollback cancelled it, and a
+      // later pick's track would play under an "Off" picker.
+      if (activeTrackRef.current !== track) {
+        console.info('[Aurora.sub] <track> error from a track no longer active; ignored', { trackIndex: index, url: trackURL })
+        return
+      }
       const msg = `Couldn't load "${trackLabel}" subtitle track`
       console.warn('[Aurora.sub] <track> error event fired', {
         trackIndex: index,
@@ -2787,7 +2797,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       try {
         if (track.parentNode) track.parentNode.removeChild(track)
       } catch { /* defensive */ }
-      if (activeTrackRef.current === track) activeTrackRef.current = null
+      activeTrackRef.current = null
     })
     // Issue #135 — log when the <track>'s underlying TextTrack
     // populates. This tells us if the VTT was fetched + parsed
@@ -3260,8 +3270,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Always clear the local <track> first; the new session's <video>
         // may have re-created its TextTracks list. The pick itself stays
         // (currentSubIndexRef) and is read when the restore runs, so one
-        // made while this boot resolves — during stream info or the session
-        // create, which applySubtitle only records — wins over the pick in
+        // made while this boot resolves — during stream info, the session
+        // create or the AirPlay token mint, which applySubtitle only records
+        // — wins over the pick in
         // force when the boot began, Off included. Dropped here only when
         // the new content has no such track.
         if (activeTrackRef.current) {

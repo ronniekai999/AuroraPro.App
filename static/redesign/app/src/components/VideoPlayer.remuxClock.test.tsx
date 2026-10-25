@@ -866,6 +866,63 @@ describe('remux clock: the restore keeps a track the boot already built', () => 
   })
 })
 
+// A <track> fires `error` when its fetch fails, including one a boot or a
+// later pick has already removed (an aborted or late-failing fetch of an
+// uncached embedded track). Only the active track may roll the pick back.
+describe('remux clock: an error from a track no longer active', () => {
+  // Every <track> the player creates, in order.
+  function watchTrackElements() {
+    const spy = vi.spyOn(document, 'createElement')
+    return () => spy.mock.results.map(r => r.value as unknown).filter((el): el is HTMLTrackElement => el instanceof HTMLTrackElement)
+  }
+  const englishSelected = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+    const selected = screen.getByRole('button', { name: /English subs/ }).className.includes('text-purple-300')
+    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+    return selected
+  }
+
+  it('does not cancel the restore of a rebuild that removed it', async () => {
+    const tracks = watchTrackElements()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    await pickSubtitle()
+    const [removed] = tracks()
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />)
+    await settle(); await settle()
+    expect(removed.isConnected).toBe(false)
+    fireEvent(removed, new Event('error')); await settle()
+    await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks().slice(1).map(el => trackQuery(el.getAttribute('src')))).toEqual(['?type=media&start=40&remux=1&media_start=30.000000'])
+    expect(screen.queryByText(/Couldn't load/)).toBeNull()
+    expect(englishSelected()).toBe(true)
+  })
+
+  it('does not turn the picker Off under the track that replaced it', async () => {
+    const tracks = watchTrackElements()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    await pickSubtitle('Off')
+    await pickSubtitle()
+    const [first, second] = tracks()
+    fireEvent(first, new Event('error')); await settle()
+    expect(second.isConnected).toBe(true)
+    expect(screen.queryByText(/Couldn't load/)).toBeNull()
+    expect(englishSelected()).toBe(true)
+  })
+
+  it('still rolls back, and says so, when the active track fails', async () => {
+    const tracks = watchTrackElements()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    const [active] = tracks()
+    fireEvent(active, new Event('error')); await settle()
+    expect(active.isConnected).toBe(false)
+    expect(screen.getByText(/Couldn't load "English subs" subtitle track/)).toBeDefined()
+    expect(englishSelected()).toBe(false)
+  })
+})
+
 describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', () => {
   const MASTER = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\nsource/stream.m3u8\n'
   const variant = (line: string | null) => [
