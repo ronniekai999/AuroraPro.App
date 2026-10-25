@@ -1495,6 +1495,87 @@ for rpbin in "" "$TMP/fakerp-eloop"; do
     esac
 done
 
+# ── 48. A link's resolved target, compared byte for byte ──────────
+# The scanner's escape test is strings.HasPrefix on the EXACT resolved path.
+# `t="$(realpath -e …)"` stripped trailing newlines, so a link to a FILE named
+# "<root><newline>" — beside the root, not under it — resolved to exactly the
+# root and passed the containment test: "all 2 recorded file(s) will be
+# found", exit 0, while the scanner logs "symlink escapes library root" and
+# prunes the row. The same on GNU and uutils.
+if [ "$NLFS" -eq 0 ]; then
+    ok "a target named <root><newline>: SKIPPED (filesystem refused a newline in a name)"
+else
+    fixture nlescape
+    R="$TMP/nlescape/media"; mkdir -p "$R"
+    : > "$R/real.mkv"
+    if { : > "$R"$'\n'; } 2>/dev/null && ln -s "$R"$'\n' "$R/x.mkv"; then
+        echo "$R" > "$FIX/roots"
+        printf '%s\n%s\n' "$R/real.mkv" "$R/x.mkv" > "$FIX/recorded"
+        run
+        expect_rc 1 "a link to a file named <root><newline> is an escape, not the root → exit 1"
+        expect_out "$R/x.mkv" "…and its row is the one named"
+    else
+        bad "a target named <root><newline>: could not build the fixture — the case would go unrun"
+    fi
+fi
+
+# ── 49. realpath -e past a regular file: one answer on either build ─
+# A link to `a.mkv/.` is where GNU and uutils realpath -e part: GNU fails with
+# ENOTDIR, uutils resolves it to a.mkv. So one tree gave exit 1 on GNU and
+# exit 0 on uutils. Not a false all-clear — the scanner's EvalSymlinks fails
+# with ENOTDIR, which it counts as unreadable and SHIELDS — but an answer that
+# depended on the coreutils build; and with nothing else under the root the
+# roles flipped: uutils discovered the link and over-reported, GNU found
+# nothing and was right. Both call sites now ask the kernel (`[ -e ]`) first.
+# Every shape runs under the installed realpath and under a fake that
+# resolves it as uutils does, so a GNU runner pins the uutils side too. The
+# third shape is the root's own call site: a root linked to `file.mkv/.`
+# used to stop with a different reason on each build.
+mkdir -p "$TMP/fakerp-enotdir"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -L "$3" ] && { t="$(readlink -- "$3")"; case "$t" in */.) exec "%s" -e -- "${t%%/.}" ;; esac; }\nexec "%s" "$@"\n' \
+    "$REALRP" "$REALRP" > "$TMP/fakerp-enotdir/realpath"
+chmod a+rx "$TMP/fakerp-enotdir" "$TMP/fakerp-enotdir/realpath"
+fixture enotdir
+E="$TMP/enotdir"
+R="$E/media"; mkdir -p "$R"; : > "$R/a.mkv"
+ln -s "$R/a.mkv/." "$R/link.mkv"
+Z="$E/zero"; mkdir -p "$Z/data"; : > "$Z/data/a.bin"
+ln -s "$Z/data/a.bin/." "$Z/link.mkv"
+: > "$E/file.mkv"; ln -s "$E/file.mkv/." "$E/rootlink"
+for rpbin in "" "$TMP/fakerp-enotdir"; do
+    what="the installed realpath"; [ -n "$rpbin" ] && what="a realpath -e that resolves it, as uutils does"
+    echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/a.mkv" "$R/link.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 1 "a link to a.mkv/. is not discovered, under $what → exit 1"
+    expect_out "$R/link.mkv" "…and its row is the one named ($what)"
+    echo "$Z" > "$FIX/roots"; printf '%s\n%s\n' "$Z/link.mkv" "$Z/other.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 0 "…and alone under its root, nothing is discovered, under $what → exit 0"
+    expect_out "no media found" "…through the zero-discovered branch ($what)"
+    echo "$E/rootlink" > "$FIX/roots"; printf '%s\n' "$E/rootlink/x.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 2 "a root linked to file.mkv/., under $what → exit 2"
+    expect_out "resolves component by component but not as a whole" "…for the same reason on either build ($what)"
+done
+
+# ── 50. A realpath -e that answers nothing for the root ───────────
+# The escape test is `"$t/" in "$rr"/*`. With rr empty that is "/"*, which
+# every target passes, so a link escaping the root read as found: exit 0.
+# Only a quietly broken realpath -e produces it, hence the fake: it answers
+# nothing, status 0, for a directory (the root) and passes the rest through.
+mkdir -p "$TMP/fakerp-emptyroot"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -d "$3" ] && exit 0\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-emptyroot/realpath"
+chmod a+rx "$TMP/fakerp-emptyroot" "$TMP/fakerp-emptyroot/realpath"
+fixture emptyrr
+R="$TMP/emptyrr"; mkdir -p "$R"; : > "$R/A.mkv"
+: > "$TMP/emptyrr-outside.mkv"; ln -s "$TMP/emptyrr-outside.mkv" "$R/E.mkv"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/A.mkv" "$R/E.mkv" > "$FIX/recorded"
+run
+expect_rc 1 "control: a link escaping the root is not discovered → exit 1"
+OUT="$(PATH="$TMP/fakerp-emptyroot:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+expect_rc 2 "a realpath -e that answers nothing for the root → exit 2, not every link 'inside'"
+expect_out "gave no usable answer" "…through the root-answer check"
+
 echo
 echo "passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ]

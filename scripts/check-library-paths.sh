@@ -120,11 +120,24 @@ die()  {
 # GNU coreutils OR uutils. Ubuntu 26.04's default `coreutils` package is
 # uutils (find, grep and sed stay GNU there), and every coreutils
 # invocation in this file was measured against GNU 9.4 and uutils 0.8.0
-# and 0.10.0, as root and unprivileged, on the awkward inputs (loops,
-# unreadable and non-directory components, newlines, invalid UTF-8,
-# byte-distinct lookalikes). One form differs: `realpath -m` on a symlink
-# loop, which uutils refuses — see classify_root. Re-measure before
-# relying on a new flag of any of these.
+# and 0.10.0, as root and unprivileged: the line tools on awkward input
+# (newlines, invalid UTF-8, byte-distinct lookalikes), and the path tools
+# over every pairing of a file, directory, missing name, dangling link,
+# loop, link into an unreadable directory, or link to a file or directory
+# with the suffixes `/`, `/.`, `/..`, `//`, `/./`, `/x`, `/./x`, `/../x`,
+# written directly or reached through a link's target. Two forms differ,
+# and nothing else did:
+#   - `realpath -m` through a symlink loop: uutils fails (ELOOP), GNU
+#     carries on lexically. classify_root checks its status, so both
+#     builds report the loop as blocked.
+#   - `realpath -e` on a path that goes on past a regular file with only
+#     `.`, `..` or empty components (`a.mkv/.`, `a.mkv/..`; also `a.mkv/`
+#     and `a.mkv//` when they come from a link's target): GNU fails
+#     (ENOTDIR), uutils resolves it. Both call sites ask the kernel
+#     (`[ -e ]`) first, which fails there, so both builds take GNU's path.
+# The first version of this note named only the first; the second was
+# found by review, with a hand-picked list of shapes that missed it.
+# Re-measure before relying on a new flag of any of these.
 for tool in realpath psql comm sort find grep sed wc readlink mktemp tr; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
@@ -261,8 +274,8 @@ classify_root() {
                 # 2, but only because the caller's `realpath -e` — "should be
                 # unreachable" — failed on the loop too, and it gave the wrong
                 # reason; the test suite's case 47.) Measured against GNU 9.4
-                # and uutils 0.8.0 and 0.10.0 over the states this function
-                # sees, loops are the only place the two disagree.
+                # and uutils 0.8.0 and 0.10.0, loops are the only place the
+                # two disagree on `-m` (see the note above the tool list).
                 # So its status decides, and a failure is `blocked`: a target
                 # this cannot resolve is unknown, and unknown is never absent.
                 # The empty-or-relative case is the absolute-path check at the
@@ -540,13 +553,46 @@ while IFS= read -r LIB; do
         $r (could not be classified: $verdict)"
                 continue ;;
         esac
-        if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
-            # classify_root said resolved, so this should be unreachable. If it
-            # ever fires, the two disagree and we do not know which is right.
+        # The kernel first, then realpath -e, and the answer captured exactly.
+        #
+        # This was commented "should be unreachable", and is not: a root that
+        # is a link to `file.mkv/.` reaches it, because classify_root follows
+        # a dangling link's target through realpath -m, which drops a `/.` or
+        # `/..` after a regular file lexically and so answers `resolved`
+        # where the kernel says ENOTDIR. (The scan's EvalSymlinks fails the
+        # same way, which skips the library's prune, so the exit 2 below
+        # over-reports.) realpath -e is where GNU coreutils and uutils part on
+        # exactly that shape — GNU fails with ENOTDIR, uutils resolves it —
+        # so `[ -e ]` asks the kernel before either is consulted, and both
+        # stop here with the same reason.
+        #
+        # Exact because the escape test below compares bytes, as the
+        # scanner's HasPrefix does, and `$(...)` would strip a trailing
+        # newline from the resolved root. That half is an EQUIVALENT MUTANT,
+        # recorded rather than chased: the resolved root ends in a newline
+        # only when the root's last component is a link (the stored name
+        # cannot hold one — n_badroot), and neither `find` nor the scanner's
+        # WalkDir descends into a root that is a link, so nothing but the
+        # root entry itself is ever tested against it. It is exact for
+        # consistency with $t.
+        #
+        # Absolute because an empty answer — a realpath that exits 0 and
+        # prints nothing — makes the escape test `"$t/" in "/"*`, which every
+        # target passes: each escaping symlink would read as found.
+        if ! [ -e "$rc" ] || ! rr="$(realpath -e -- "$rc" 2>/dev/null && printf x)"; then
+            # classify_root said resolved and this disagrees; we do not know
+            # which is right, so this cannot answer.
             rootopaque="$rootopaque
         $r (resolves component by component but not as a whole)"
             continue
         fi
+        rr="${rr%x}"; rr="${rr%$'\n'}"
+        case "$rr" in
+            /*) ;;
+            *)  rootopaque="$rootopaque
+        $r (realpath -e gave no usable answer for it)"
+                continue ;;
+        esac
         if [ ! -d "$rc" ]; then
             # A root that resolves to something other than a directory. WalkDir
             # visits it as a single entry, so if it happens to carry a video
@@ -598,16 +644,41 @@ while IFS= read -r LIB; do
             if [ -L "$f" ]; then
                 # The scanner's symlink-escape guard, on ITS roots: resolve the
                 # link and require the result at or under the RESOLVED root.
-                t="$(realpath -e -- "$f" 2>/dev/null)" || continue
+                #
+                # The kernel first. A link whose target continues past a
+                # regular file — `a.mkv/.`, `a.mkv/..`, `a.mkv/`, written in
+                # the link or reached through one — is where GNU and uutils
+                # realpath -e part: GNU fails with ENOTDIR, uutils resolves it
+                # anyway. The kernel's stat fails, as the scanner's
+                # EvalSymlinks does, so with `[ -e ]` first both builds skip
+                # it, which is what GNU did. The scanner SHIELDS such a row
+                # (an error other than not-exist marks it unreadable) rather
+                # than pruning it, so skipping it here over-reports: the safe
+                # side, and the same answer on either build. Measured over
+                # every shape tried, `[ -e ]` and GNU's realpath -e agree on a
+                # symlink except one: a chain of more than 40 links, which the
+                # kernel refuses and EvalSymlinks follows (to 255) — skipped
+                # here too, another over-report.
+                [ -e "$f" ] || continue
+                # Captured exactly. `$(...)` strips trailing newlines, and a
+                # link to a file named "<root><newline>" BESIDE the root then
+                # resolved to exactly the root and passed the test below,
+                # while the scanner's HasPrefix compares the real bytes,
+                # calls it an escape and prunes the row: "all recorded files
+                # will be found", exit 0. Reproduced. Only realpath's own
+                # trailing newline is removed.
+                t="$(realpath -e -- "$f" 2>/dev/null && printf x)" || continue
+                t="${t%x}"; t="${t%$'\n'}"
                 case "$t/" in "$rr"/*) ;; *) [ "$t" = "$rr" ] || continue ;; esac
             fi
             # `|| exit 9`, not a status check after the loop. A while loop's
-            # exit status is whatever its LAST body command returned, and three
+            # exit status is whatever its LAST body command returned, and four
             # paths in this body end in `continue`, which returns 0 — so a run
             # where every write failed but the final entry was a dangling
-            # symlink (or a newline name, or an escaping symlink) reported
-            # ${fs[1]} = 0, left the disk list empty, and answered "no media
-            # found, so the scan will prune nothing". A dangling symlink under
+            # symlink (or a newline name, or one realpath could not resolve,
+            # or an escaping symlink) reported ${fs[1]} = 0, left the disk
+            # list empty, and answered "no media found, so the scan will
+            # prune nothing". A dangling symlink under
             # a library root is the most ordinary artefact of the half-finished
             # move this script exists for, so the ordering was not exotic.
             # Failing HERE removes the ordering from the question entirely.

@@ -1031,11 +1031,15 @@ operator runbook must keep saying so.
   those rows explicitly. Quietly failing tools need status checks, contradiction
   checks, or known-answer probes, as appropriate.
 - Answers must not depend on GNU coreutils versus uutils (Ubuntu 26.04's
-  default `coreutils`). The one measured difference is `realpath -m` on a
-  symlink loop, which uutils fails; `classify_root` reads a failed resolution
-  or a non-absolute path as blocked, and the suite pins that with fake
-  `realpath`s. `find` emits in the filesystem's readdir order (tmpfs: newest
-  first), so a fixture that needs an order must assert it.
+  default `coreutils`). Two forms were measured to differ. `realpath -m`
+  through a symlink loop fails under uutils; `classify_root` reads a failed
+  resolution or a non-absolute path as blocked. `realpath -e` past a regular
+  file (`a.mkv/.`, `a.mkv/..`, or `a.mkv/` from a link's target) fails under
+  GNU with ENOTDIR and resolves under uutils; both of its call sites test
+  `[ -e ]` first, so both builds take GNU's path. The suite pins each with
+  fakes on `PATH`. `find` emits in the filesystem's readdir order (tmpfs
+  listed newest first on Linux 6.18), so a fixture that needs an order must
+  assert it.
 - The script intentionally over-reports unreadable subtrees, does not model the
   empty-item sweep, and does not reproduce every `walkFailed` condition.
 - `scripts/check-library-paths-test.sh` drops privileges for permission cases;
