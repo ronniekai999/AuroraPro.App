@@ -946,6 +946,57 @@ capability declarations.
 - Tonemapping scales before the zscale/Hable chain.
 - Forward seeks rebuild only beyond the produced edge supplied by hls.js.
 - `effectiveDefaultIndex` is the single model of the track a player starts.
+- A remux's media time 0 is the key frame before `start_sec`
+  (`-noaccurate_seek`; for demuxers without `AVFMT_SEEK_TO_PTS` — Matroska,
+  MPEG-TS, AVI — with B-frames, a whole GOP earlier when the target sits within
+  130 ms after a key frame). The variant playlist carries the measured start as
+  the comment `#AURORA-MEDIA-START:<sec>` right before the first `#EXTINF`
+  (`media_start.go`; never in the header, where hls.js files it on the fMP4
+  init segment). It is measured once per session in the background, retried
+  only inside the first playlist request (2.5 s budget, no lock held across
+  ffprobe), and published only within `[start_sec - 60, start_sec + 1]`.
+- The SPA's `startSecRef` is that media-clock origin, owned by the session's
+  `RemuxClock` (`lib/mediaStart.ts`); `sessionStartSecRef` keeps the
+  whole-second `start_sec` for the subtitle `start=` (an `Atoi`) and the
+  receiver fallback. The clock adopts a start only before the element has
+  played (a later one is refused, keeping `start_sec`); aligns to `start_sec`
+  only with a reload of runway, retried on later loads while the playhead is
+  short of it, never after a scrub; consumes the alignment's own `seeked` by
+  position; and makes an unaligned party host send one seek with its true
+  position once playback runs with the room running. A party guest is aligned
+  instead to the room's projected position, under the same runway rule and
+  only before it plays; once it has played, without runway, or while an
+  explicit seek is pending, the drift loop and the seek handling own its
+  position, and it sends nothing. Until a remux's first level load (natively,
+  until its one fetch has been applied at `loadedmetadata` or has failed; the
+  element's `progress`/`durationchange` retries attach only after it is
+  applied, since any window reaching the clock ends the hold), a guest leaves
+  explicit seeks and drift corrections unjudged when the room position is at
+  or after `start_sec - 60` (`holdsPartyPosition`, at most 4 s), so a host's
+  re-anchor into the key-frame gap is served in the window instead of
+  rebuilding a still-booting guest. Native HLS fetches the variant playlist
+  once and applies it at `loadedmetadata`, failing safe to `start_sec`.
+  Transcodes and the Android TV client still anchor on `start_sec`.
+- Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
+  and it assumes Safari's media time 0 is the first segment's start, as
+  hls.js's is (unverified); the remux subtitle cue shift still uses
+  `ProbeSeekKeyframe` (`phase2_handlers.go` `ServeSubtitle`), a GOP off on the
+  Matroska key-frame case; after the unreadable-playlist resume fallback the
+  cached start describes segment 0 of a playlist that no longer lists it; a
+  measurement that lands after the first request's budget reaches only
+  players that have not started.
+- Known party gaps: a host whose own measurement failed (no line in its first
+  playlist, or a start refused as late) never adopts the measured start, so
+  `hostReanchorSec` returns null and the room keeps the original key-frame
+  offset whenever its guests did measure. On a host transfer, a new host
+  whose clock measured a start but that, as a guest, neither aligned nor
+  applied a party seek can send one stray re-anchor to its own position when
+  it is mid rate-adjust (more than 0.5 s off) or its tick is stale. The
+  guest's hold delays a seek that needs a rebuild anyway by up to its first
+  level load (4 s at most). The pre-play alignment uses the room's position
+  at the level load; boot latency after it is the drift loop's, as before. A
+  party mixing old and new SPA bundles disagrees by the gap until everyone
+  reloads: an old bundle still reads media time 0 as `start_sec`.
 - Known gap: an HLS quality up-switch can still stall because new rungs start at
   the current absolute source position and no cross-rendition produced-edge
   contract exists.
