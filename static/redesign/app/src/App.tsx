@@ -962,7 +962,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/[0.12] hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>

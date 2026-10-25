@@ -103,7 +103,7 @@ function Tile({
       className={cn(
         TILE,
         active
-          ? 'bg-purple-500/12 border-purple-400/30 text-purple-200'
+          ? 'bg-purple-500/[0.12] border-purple-400/30 text-purple-200'
           : 'bg-white/[0.04] border-white/[0.07] text-white/80 hover:bg-white/[0.09] hover:text-white',
         disabled && 'opacity-40 cursor-not-allowed hover:bg-white/[0.04]',
       )}

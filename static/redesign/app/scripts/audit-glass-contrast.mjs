@@ -23,8 +23,21 @@
 // mutation that proved it changed the CSS while the script kept reporting the old
 // value. So each surface names a CSS selector + property and a JSX anchor, and the
 // run DIES if either has moved rather than passing on a stale number.
+//
+// STATIC CHECKS RUN FIRST, over every source file rather than a list, because they
+// protect the premise the measured surfaces below rest on: that a `cls/NN` in the
+// JSX is the colour the browser paints.
+//   0. Opacity modifiers that compile to nothing (`deadModifiers`).
 
 import fs from 'node:fs'
+import path from 'node:path'
+import { createRequire } from 'node:module'
+import postcss from 'postcss'
+import selparser from 'postcss-selector-parser'
+
+const require = createRequire(import.meta.url)
+const tailwind = require('tailwindcss')
+const loadConfig = require('tailwindcss/loadConfig')
 
 const CSS = 'src/index.css'
 const css = fs.readFileSync(CSS, 'utf8')
@@ -81,6 +94,173 @@ const hexAlpha = h => {
   return s.length === 8 ? parseInt(s.slice(6, 8), 16) / 255 : 1
 }
 const W = [1, 1, 1]
+
+// ── Source scanning, shared by the static checks ─────────────────────────────
+
+const APP_DIR = path.resolve(import.meta.dirname, '..')
+
+/** The files Tailwind scans for classes (tailwind.config.js `content`: index.html
+ *  and src/**), minus tests and their setup, which render nothing. Paths are
+ *  relative to the app directory, as every other path in this script is. */
+function uiSources() {
+  const out = ['index.html']
+  const walk = dir => {
+    for (const e of fs.readdirSync(path.join(APP_DIR, dir), { withFileTypes: true })) {
+      const p = path.posix.join(dir, e.name)
+      if (e.isDirectory()) { if (p !== 'src/test') walk(p) }
+      else if (/\.[jt]sx?$/.test(e.name) && !/\.test\.[jt]sx?$/.test(e.name)) out.push(p)
+    }
+  }
+  walk('src')
+  return out.sort()
+}
+
+/** `raw` with comments blanked, offsets and line breaks preserved.
+ *
+ *  Not `read()`: that one opens a `//` comment anywhere, so it blanks the rest of
+ *  any line holding `https://`, and a line like SettingsView's TVDB credit (a
+ *  URL, then the className) would hide its classes from a scan. Here a comment
+ *  opens only where code can open one: at a line start or after whitespace, `{`,
+ *  `(`, `;` or `,`. That also keeps `accept="image/*"` from opening a block
+ *  comment. Quotes are not tracked, for the reason `read()` gives (JSX prose is
+ *  full of apostrophes). */
+function codeOnly(raw) {
+  const out = raw.split('')
+  const opener = k => k === 0 || /[\s{(;,]/.test(raw[k - 1])
+  let i = 0, line = false, block = false
+  while (i < raw.length) {
+    if (line) { if (raw[i] === '\n') line = false; else out[i] = ' '; i++; continue }
+    if (block) {
+      if (raw[i] === '*' && raw[i + 1] === '/') { out[i] = out[i + 1] = ' '; block = false; i += 2; continue }
+      if (raw[i] !== '\n') out[i] = ' '
+      i++; continue
+    }
+    if (raw[i] === '/' && raw[i + 1] === '/' && opener(i)) { out[i] = out[i + 1] = ' '; line = true; i += 2; continue }
+    if (raw[i] === '/' && raw[i + 1] === '*' && opener(i)) { out[i] = out[i + 1] = ' '; block = true; i += 2; continue }
+    i++
+  }
+  return out.join('')
+}
+const codeCache = new Map()
+const code = f => {
+  if (!codeCache.has(f)) codeCache.set(f, codeOnly(fs.readFileSync(path.join(APP_DIR, f), 'utf8')))
+  return codeCache.get(f)
+}
+const lineAt = (src, i) => src.slice(0, i).split('\n').length
+
+// ── 0. Opacity modifiers that compile to nothing ─────────────────────────────
+//
+// The phone menu sheet (TopNav) had no fill of its own: `bg-[#0a0a0f]/97`. Tailwind
+// 3 resolves a bare `/N` against the theme's opacity scale (0-100 in steps of 5;
+// tailwind.config.js does not extend it), and a value off that scale is not an
+// error. It just emits no rule. Ten such classes shipped, four of them text
+// alphas that `twAlpha` below would have read as real: it parses `/(\d+)` and
+// cannot know the class is dead.
+//
+// The oracle is Tailwind itself, run with the project's own config, so this does
+// not restate the scale and follows the config if it is ever extended. A token
+// `X/N` is dead when `X` alone emits a rule and `X/N` does not. That needs no list
+// of colour utilities, ignores paths, dates and prose (their `X` compiles to
+// nothing either), and also catches the same silent failure in a fraction
+// (`w-1/7`) or a line-height (`text-sm/13`). The `opacity-N` family is checked
+// the same way, with `opacity-0` as the sibling that must compile. Comments are
+// skipped: a class in a comment styles nothing.
+
+const twConfig = loadConfig(path.join(APP_DIR, 'tailwind.config.js'))
+
+/** The subset of `candidates` that Tailwind, under this project's config, emits a
+ *  rule for. One compile for the whole set. */
+async function compiling(candidates) {
+  const result = await postcss([tailwind({
+    ...twConfig,
+    content: [{ raw: [...candidates].join(' '), extension: 'html' }],
+    safelist: [],
+  })]).process('@tailwind utilities;', { from: undefined })
+  const emitted = new Set()
+  result.root.walkRules(rule => {
+    try {
+      selparser(sels => sels.walkClasses(c => { emitted.add(c.value) })).processSync(rule.selector)
+    } catch { /* keyframe stops and the like are not class selectors */ }
+  })
+  return new Set([...candidates].filter(c => emitted.has(c)))
+}
+
+const OPACITY_UTILITY = /^((?:[^\s:]+:)*!?(?:bg-|text-|border-|ring-|divide-|placeholder-)?opacity-)\d+$/
+
+// Class candidates are the ones Tailwind itself finds: its default extractor,
+// the one the build runs over these files. A home-made split missed shapes the
+// build reads: it split `[&>svg]:text-white/38` at the `>`, and kept the `$` of
+// a class written right before `${` in a template literal. The extractor gives
+// strings, not offsets, and also yields fragments of a longer candidate
+// (`:text-white/38` out of `[&>svg]:text-white/38`), so each candidate is placed
+// at every offset where it stands as a whole class, longest first, and never
+// inside one already placed.
+const extract = require('tailwindcss/lib/lib/defaultExtractor')
+  .defaultExtractor({ tailwindConfig: { prefix: twConfig.prefix ?? '', separator: twConfig.separator ?? ':' } })
+const STARTS_CLASS = c => c === undefined || !/[\w\-:\]/.#%&>!@[]/.test(c)
+const ENDS_CLASS = c => c === undefined || !/[\w\-/.%[\]]/.test(c)
+
+/** The classes in `src` that `keep` accepts, as { token, index }, in order. */
+function classesIn(src, keep) {
+  const placed = []
+  const candidates = [...new Set(extract(src))].filter(keep).sort((a, b) => b.length - a.length)
+  for (const token of candidates) {
+    for (let i = src.indexOf(token); i >= 0; i = src.indexOf(token, i + 1)) {
+      const j = i + token.length
+      if (!STARTS_CLASS(src[i - 1]) || !ENDS_CLASS(src[j])) continue
+      if (placed.some(p => i < p.index + p.token.length && j > p.index)) continue
+      placed.push({ token, index: i })
+    }
+  }
+  return placed.sort((a, b) => a.index - b.index)
+}
+
+/** Every dead modifier in `texts` ({ where, text } pairs), as { where, line, token }. */
+async function deadModifiers(texts) {
+  const uses = []
+  for (const { where, text } of texts) {
+    for (const { token, index } of classesIn(text, t => /\/\d+$/.test(t) || OPACITY_UTILITY.test(t))) {
+      const mod = token.match(/^(.+)\/(\d+)$/)
+      const op = token.match(OPACITY_UTILITY)
+      if (mod) uses.push({ where, line: lineAt(text, index), token, base: mod[1] })
+      else if (op) uses.push({ where, line: lineAt(text, index), token, base: `${op[1]}0` })
+    }
+  }
+  const live = await compiling(new Set(uses.flatMap(u => [u.token, u.base])))
+  return uses.filter(u => live.has(u.base) && !live.has(u.token))
+}
+
+// Known answers, run every time: a check whose oracle quietly broke (a config
+// that failed to load, a Tailwind that emits nothing) would flag nothing and pass.
+// If an upgrade starts compiling one of the DEAD probes (Tailwind 4 accepts any
+// number), this fails and says so instead of reporting on a changed premise.
+const MOD_PROBE = {
+  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97'],
+  live: ['bg-[#0a0a0f]/95', 'bg-[#0a0a0f]/[0.97]', 'hover:text-white/40', 'w-1/2', 'text-sm/6', 'opacity-95', 'text-white/[38%]'],
+  ignored: ['/v2/assets/12', '2026-10/25', 'a/b/40'],
+  // Shapes a whitespace split got wrong, each holding one dead class.
+  shapes: {
+    '<i className="[&>svg]:text-white/12" />': '[&>svg]:text-white/12',
+    "`ring-white/13${on ? ' ring-2' : ''}`": 'ring-white/13',
+  },
+}
+let staticFails = 0
+{
+  console.log('## 0. Opacity modifiers that compile to nothing')
+  const probe = await deadModifiers([{ where: 'probe',
+    text: [...MOD_PROBE.dead, ...MOD_PROBE.live, ...MOD_PROBE.ignored, ...Object.keys(MOD_PROBE.shapes)].join(' ') }])
+  const got = probe.map(u => u.token).sort().join(' ')
+  const want = [...MOD_PROBE.dead, ...Object.values(MOD_PROBE.shapes)].sort().join(' ')
+  if (got !== want) {
+    console.log(`  *** known-answer probe: expected exactly [${want}] dead, got [${got}] — the oracle or its premise has changed`)
+    staticFails++
+  }
+  const files = uiSources()
+  const dead = await deadModifiers(files.map(f => ({ where: f, text: code(f) })))
+  for (const u of dead) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
+  console.log(`  ${dead.length} dead modifier(s) across ${files.length} files.\n`)
+  staticFails += dead.length
+}
 
 /** rgba()/rgb()/#hex -> { rgb: [0..1 x3], a }. */
 function parseColor(str) {
@@ -494,4 +674,5 @@ for (const s of SURFACES) {
 }
 console.log('-'.repeat(72))
 console.log(`${fails} glass surface(s) below threshold.`)
-process.exit(fails ? 1 : 0)
+if (staticFails) console.log(`${staticFails} static check failure(s) above (dead modifiers).`)
+process.exit(fails || staticFails ? 1 : 0)

@@ -77,9 +77,9 @@ export function MediaInfoPanel({ audio, subtitles, subtitleFormat, className }: 
                   className={
                     'inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold border ' +
                     (s.forced
-                      ? 'bg-amber-500/12 border-amber-400/25 text-amber-200'
+                      ? 'bg-amber-500/[0.12] border-amber-400/25 text-amber-200'
                       : s.default
-                        ? 'bg-purple-500/12 border-purple-400/25 text-purple-200'
+                        ? 'bg-purple-500/[0.12] border-purple-400/25 text-purple-200'
                         : 'bg-white/5 border-white/10 text-white/80')
                   }
                 >

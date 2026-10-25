@@ -80,7 +80,7 @@ export function AskPreviouslyPanel({
             <DialogTitle ref={headingRef} tabIndex={-1} className="mt-2 rounded-md font-display text-[1.65rem] font-bold leading-tight outline-none focus-visible:ring-2 focus-visible:ring-purple-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#15131f] sm:text-[2rem]">
               Ask about what you’ve watched
             </DialogTitle>
-            <DialogDescription className="mt-1.5 text-[15px] text-white/68 sm:text-[18px]">
+            <DialogDescription className="mt-1.5 text-[15px] text-white/[0.68] sm:text-[18px]">
               Get a quick answer without learning what happens next.
             </DialogDescription>
           </div>
@@ -194,7 +194,7 @@ export function AskPreviouslyPanel({
                       </div>
                       <div className="mt-4 flex gap-4">
                         <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-purple-500/15 text-purple-300"><Sparkles aria-hidden="true" size={19} /></span>
-                        <p className="pt-1 text-[15.5px] leading-[1.65] text-white/82">{turn.answer}</p>
+                        <p className="pt-1 text-[15.5px] leading-[1.65] text-white/[0.82]">{turn.answer}</p>
                       </div>
                     </div>
                   </div>
@@ -211,7 +211,7 @@ export function AskPreviouslyPanel({
                 <div className="mt-4 flex gap-4">
                   <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-purple-500/15 text-purple-300"><Sparkles aria-hidden="true" size={19} /></span>
                   {pending ? (
-                    <p className="flex items-center gap-2 pt-1.5 text-sm text-white/48"><LoaderCircle aria-hidden="true" className="animate-spin" size={15} /> Thinking spoiler-safely…</p>
+                    <p className="flex items-center gap-2 pt-1.5 text-sm text-white/50"><LoaderCircle aria-hidden="true" className="animate-spin" size={15} /> Thinking spoiler-safely…</p>
                   ) : sendError ? (
                     <div>
                       <p className="pt-0.5 text-sm text-red-200/85">{sendError}</p>
@@ -243,7 +243,7 @@ export function AskPreviouslyPanel({
               {pending ? <LoaderCircle aria-hidden="true" className="animate-spin" size={18} /> : <Send aria-hidden="true" size={18} />}
             </button>
           </div>
-          <p className="mt-2.5 px-2 text-xs text-white/38">Answers stop at your latest completed episode.</p>
+          <p className="mt-2.5 px-2 text-xs text-white/50">Answers stop at your latest completed episode.</p>
         </div>
       )}
 

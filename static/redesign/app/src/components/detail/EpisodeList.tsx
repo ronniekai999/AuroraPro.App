@@ -97,7 +97,7 @@ export function EpisodeList({
                   className={cn(
                     'inline-flex items-center px-3.5 py-[7px] rounded-full text-[13px] font-semibold transition-ui border',
                     on
-                      ? 'bg-purple-500/22 border-purple-400/45 text-purple-100'
+                      ? 'bg-purple-500/[0.22] border-purple-400/45 text-purple-100'
                       : 'bg-white/[0.03] border-white/[0.07] text-white/60 hover:bg-white/[0.07] hover:text-white',
                   )}
                 >
