@@ -166,7 +166,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
         {/* ─── Section 1: Recently in ─────────────────────────────────── */}
         {lastParty && (
           <div className="mb-5">
-            <p className="text-white/40 text-[10px] uppercase tracking-wider mb-2">Recently in</p>
+            <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">Recently in</p>
             <button
               disabled={busy}
               onClick={() => void attemptJoin(lastParty.code)}
@@ -200,7 +200,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
         {/* ─── Section 2: My Rooms ────────────────────────────────────── */}
         <div className="mb-5">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-white/40 text-[10px] uppercase tracking-wider">My Rooms</p>
+            <p className="text-white/50 text-[10px] uppercase tracking-wider">My Rooms</p>
             <button
               onClick={() => setCreateOpen(o => !o)}
               className="text-purple-400 hover:text-purple-300 text-xs"
@@ -220,7 +220,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
                 onChange={e => setCreateName(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') void submitCreateRoom() }}
                 placeholder="Room name (e.g. Movie Night Crew)"
-                className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm placeholder:text-white/30 focus:bg-white/[0.06] focus:outline-none"
+                className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none"
               />
               {createError && <p className="text-red-400 text-xs mt-2">{createError}</p>}
               <div className="flex justify-end mt-2">
@@ -232,16 +232,16 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
                   {createBusy ? 'Creating…' : 'Create'}
                 </button>
               </div>
-              <p className="text-white/40 text-[10px] mt-2">
+              <p className="text-white/50 text-[10px] mt-2">
                 Stable code that survives across watch parties. Start a party from any movie's
                 detail page — your friends rejoin via the same code every time.
               </p>
             </div>
           )}
 
-          {rooms === null && <p className="text-white/40 text-xs py-2">Loading…</p>}
+          {rooms === null && <p className="text-white/50 text-xs py-2">Loading…</p>}
           {rooms !== null && rooms.length === 0 && !createOpen && (
-            <p className="text-white/40 text-xs py-2">
+            <p className="text-white/50 text-xs py-2">
               No persistent rooms yet. Create one above for a stable join code.
             </p>
           )}
@@ -259,7 +259,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
                   >
                     <div className="min-w-0 flex-1">
                       <p className="text-white/90 text-sm font-medium truncate">{r.name}</p>
-                      <p className="text-white/40 text-[10px] font-mono mt-0.5">{r.code}</p>
+                      <p className="text-white/50 text-[10px] font-mono mt-0.5">{r.code}</p>
                     </div>
                     {live ? (
                       <button
@@ -272,7 +272,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
                       </button>
                     ) : (
                       <span
-                        className="px-2.5 py-1 rounded-md bg-white/[0.04] text-white/40 text-[10px] uppercase flex-shrink-0"
+                        className="px-2.5 py-1 rounded-md bg-white/[0.04] text-white/50 text-[10px] uppercase flex-shrink-0"
                         title="Start a party from any movie's detail page — your room's code will be reused."
                       >
                         Idle
@@ -287,7 +287,7 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
 
         {/* ─── Section 3: Enter a code ─────────────────────────────────── */}
         <div>
-          <p className="text-white/40 text-[10px] uppercase tracking-wider mb-2">Or enter a code</p>
+          <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">Or enter a code</p>
           <input
             type="text"
             maxLength={6}

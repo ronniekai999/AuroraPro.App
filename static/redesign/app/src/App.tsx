@@ -109,6 +109,7 @@ import { ProfilePinDialog } from '@/components/ProfilePinDialog'
 import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, readRememberedProfileId, rememberProfileId, showsAdminUI, useSessionProfileOnVisible } from '@/lib/profileSession'
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
+import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -576,7 +577,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             <>
               <div className="flex items-center gap-3 my-6">
                 <div className="flex-1 h-px bg-white/[0.06]" />
-                <span className="text-white/30 text-xs uppercase tracking-wider">or</span>
+                <span className="text-white/50 text-xs uppercase tracking-wider">or</span>
                 <div className="flex-1 h-px bg-white/[0.06]" />
               </div>
               {/* 2-up tile grid, from a list rather than five near-identical
@@ -726,6 +727,11 @@ function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, c
 // the .stage-page gutter, padding their inner sections with .stage-gutter.
 // Anything not listed here gets the standard page pad from App's wrapper.
 const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
+
+// What My Library is passed during a profile switch's first render
+// (profileSwitchPending), module-level so it is the same array every time.
+const NO_MEDIA: Media[] = []
+const NO_CONTINUE: ContinueWatchingItem[] = []
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
@@ -962,7 +968,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/[0.12] hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>
@@ -1478,7 +1484,7 @@ function YourWeekBand() {
           <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
             <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
           </span>
-          <span className="text-[11px] text-white/40 mt-1">
+          <span className="text-[11px] text-white/50 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
           </span>
         </div>
@@ -1756,8 +1762,8 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
         <Icon name="x" size={16} />
       </button>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pr-6">
-        {!isAdmin && <p className="text-white/40 text-sm col-span-full">Server status is admin-only.</p>}
-        {isAdmin && !stats && <p className="text-white/40 text-sm col-span-full">Loading stats…</p>}
+        {!isAdmin && <p className="text-white/50 text-sm col-span-full">Server status is admin-only.</p>}
+        {isAdmin && !stats && <p className="text-white/50 text-sm col-span-full">Loading stats…</p>}
         {tiles.map(stat => (
           <div
             key={stat.label}
@@ -1775,7 +1781,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
               <div className="min-w-0">
                 <p className="text-white/50 text-xs flex items-center gap-1">
                   {stat.label}
-                  {stat.hint && <span className="text-white/30 text-[10px]">ⓘ</span>}
+                  {stat.hint && <span className="text-white/35 text-[10px]">ⓘ</span>}
                 </p>
                 <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
@@ -1907,15 +1913,15 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">Notifications</h3>
-        <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
+        <button onClick={onClose} className="text-white/40 hover:text-white transition-colors" aria-label="Close notifications">
           <Icon name="x" size={16} />
         </button>
       </div>
       <div>
         {notifications.length === 0 && (
           <div className="p-8 text-center">
-            <p className="text-white/40 text-sm">No notifications yet</p>
-            <p className="text-white/30 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
+            <p className="text-white/60 text-sm">No notifications yet</p>
+            <p className="text-white/50 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
           </div>
         )}
         {notifications.map(n => {
@@ -1959,7 +1965,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                 {invite && (
                   <>
                     {(invite.scheduled_start_at || invite.note) && (
-                      <p className="text-white/45 text-xs mt-1 truncate">
+                      <p className="text-white/50 text-xs mt-1 truncate">
                         {invite.scheduled_start_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : ''}
                         {invite.scheduled_start_at && invite.note ? ' · ' : ''}
                         {invite.note ? `“${invite.note}”` : ''}
@@ -1998,7 +2004,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   </>
                 )}
                 {inviteGone && (
-                  <p className="text-white/35 text-xs mt-1">This party has ended.</p>
+                  <p className="text-white/50 text-xs mt-1">This party has ended.</p>
                 )}
                 {isPartyType && n.type !== 'party_invite' && partyCode && (
                   <button
@@ -2009,7 +2015,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                     Join
                   </button>
                 )}
-                <p className="text-white/30 text-xs mt-1">
+                <p className="text-white/50 text-xs mt-1">
                   {fmtRel(n.created_at)}
                   {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
                 </p>
@@ -2022,13 +2028,13 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
         {isAdmin && (
           <>
             <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
-              <h4 className="text-white/40 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
+              <h4 className="text-white/50 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
             </div>
             {loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-white/40 text-sm">Loading…</p>
+              <p className="px-4 pb-4 text-white/50 text-sm">Loading…</p>
             )}
             {!loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-white/40 text-sm">No recent activity.</p>
+              <p className="px-4 pb-4 text-white/50 text-sm">No recent activity.</p>
             )}
             {entries.map(e => (
               <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
@@ -2355,6 +2361,11 @@ export default function App() {
   // When the profile list fails, or the binding is unreadable and the picker
   // is up, it loads anyway, as it did before.
   const catalogProfileSettled = activeProfileId !== null || profilesSettled
+  // The render that switches profile, until its resets have run: everything
+  // App kept for the previous profile is still in state, and the top bar
+  // already names the new one. Home, the grids, My Library and an open title
+  // render their cold state meanwhile (see lib/useProfileSwitchPending).
+  const profileSwitchPending = useProfileSwitchPending(activeProfileId, profilesSettled)
   // The admin pages and controls. The server refuses the admin role's powers
   // to a session acting as a restricted profile, so a kid's session on an
   // admin account sees none of them; they wait for the binding like
@@ -5534,12 +5545,15 @@ export default function App() {
   // A switch clears the previous profile's hero: an empty or failed pool for
   // the new profile leaves homeHero as it is, which kept the old profile's
   // pick on screen. The home-rails effect then puts the catalog fallback up
-  // until the new pool lands.
+  // until the new pool lands. The startup binding arriving is not a switch;
+  // a pick from the picker opened for an unreadable binding is (from null,
+  // after the startup load settled), and the hero on screen then is the
+  // catalog fallback fetched under the binding the server does have.
   const heroProfileRef = useRef<number | null>(null)
   useEffect(() => {
     const prev = heroProfileRef.current
     heroProfileRef.current = activeProfileId
-    if (prev === null || prev === activeProfileId) return
+    if (prev === activeProfileId || (prev === null && !profilesSettledBeforeRef.current)) return
     heroLoadRef.current++
     heroPoolRef.current = []
     setHeroPool([])
@@ -5905,7 +5919,7 @@ export default function App() {
     // who are already authenticated. Sub-100ms in the typical case.
     return (
       <div className="min-h-screen flex items-center justify-center aurora-bg">
-        <div className="text-white/40 text-sm">Loading Aurora…</div>
+        <div className="text-white/50 text-sm">Loading Aurora…</div>
       </div>
     )
   }
@@ -6103,14 +6117,19 @@ export default function App() {
             <HomeView
               onSelect={handleSelect}
               onPlay={handlePlay}
-              hero={homeHero ?? undefined}
+              // During a switch's first render (profileSwitchPending) Home
+              // gets what its cold load shows, a loading hero and rail
+              // skeletons: the hero, rails, Continue Watching and
+              // conversational results in state are the previous profile's
+              // until that render's effects clear them.
+              hero={profileSwitchPending ? undefined : homeHero ?? undefined}
               // The core rails set the catalog-fallback hero when they land,
               // so until they land (or fail) a pick is still on its way.
-              heroLoading={homeRails === undefined && !homeError}
+              heroLoading={profileSwitchPending || (homeRails === undefined && !homeError)}
               // Memoized above (homeRailsProp) — Continue Watching prepended
               // and deduped, conversational results pinned first.
-              rails={homeRailsProp}
-              loading={homeLoading}
+              rails={profileSwitchPending ? undefined : homeRailsProp}
+              loading={profileSwitchPending || homeLoading}
               convoLoading={convoLoading}
               error={homeError}
               onRetry={requestHomeReload}
@@ -6138,17 +6157,18 @@ export default function App() {
               user={typeof user === 'object' ? user : undefined}
               // Real count of the AI-curated set (hero picks + AI rails,
               // deduped) — varies, vs the old fixed ~5 hero-pool size.
-              pickCount={aiCuratedCount}
+              pickCount={profileSwitchPending ? 0 : aiCuratedCount}
               // Real library total. Prefer the count-only mount fetch
               // (homeLibraryTotal — movies+shows in one call); fall back to
               // the browse-tab counts (moviesTotal / showsTotal, populated
               // lazily when the user visits those tabs). Pass null when none
               // has loaded so HomeView OMITS the "picked from X titles"
-              // clause rather than fabricate it.
+              // clause rather than fabricate it. The browse-tab counts are
+              // the previous profile's until a switch's reset clears them.
               libraryTotal={
                 homeLibraryTotal != null
                   ? homeLibraryTotal
-                  : moviesTotal == null && showsTotal == null
+                  : profileSwitchPending || (moviesTotal == null && showsTotal == null)
                     ? null
                     : (moviesTotal ?? 0) + (showsTotal ?? 0)
               }
@@ -6212,7 +6232,7 @@ export default function App() {
               flashing the prototype's mock library to the user. */}
           {view === 'movies' && (
             <ViewSuspense fallback={<BrowseLoadingState title="Movies" />}>
-              {moviesList === null
+              {moviesList === null || profileSwitchPending
                 ? <BrowseLoadingState title="Movies" />
                 : <BrowseView
                     items={moviesList}
@@ -6240,7 +6260,7 @@ export default function App() {
           )}
           {view === 'shows' && (
             <ViewSuspense fallback={<BrowseLoadingState title="TV Shows" />}>
-              {showsList === null
+              {showsList === null || profileSwitchPending
                 ? <BrowseLoadingState title="TV Shows" />
                 : <BrowseView
                     items={showsList}
@@ -6269,9 +6289,9 @@ export default function App() {
           {view === 'library' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
-                library={library}
-                loading={!libraryLoaded}
-                continueItems={continueItems}
+                library={profileSwitchPending ? NO_MEDIA : library}
+                loading={profileSwitchPending || !libraryLoaded}
+                continueItems={profileSwitchPending ? NO_CONTINUE : continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
                 // 2026-05-27 — Continue Watching one-click resume on
@@ -6283,8 +6303,8 @@ export default function App() {
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
               page (or worse, a flash of the home view). */}
-          {view === 'detail' && !selectedMedia && <DetailSkeleton />}
-          {view === 'detail' && selectedMedia && (
+          {view === 'detail' && (!selectedMedia || profileSwitchPending) && <DetailSkeleton />}
+          {view === 'detail' && selectedMedia && !profileSwitchPending && (
             <ViewSuspense fallback={<DetailSkeleton />}>
               <DetailView
                 // Reset internal state (active tab, cast-expand) per title so
@@ -6852,8 +6872,8 @@ export default function App() {
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
-            <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
-            {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}
+            <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
+            {addToListLists === null && <p className="text-white/50 text-sm">Loading…</p>}
             {addToListLists && addToListLists.length === 0 && (
               <div className="text-white/50 text-sm mb-3">
                 No watchlists yet. Create one in Settings → Profiles &amp; Watchlists first.

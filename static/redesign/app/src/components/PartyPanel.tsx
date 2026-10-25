@@ -227,7 +227,9 @@ export function PartyPanel({
   return (
     // .stage-party-rail insets this by the theater's own offsets while the
     // theater is up — it used to straddle the boundary, ~265px over the picture
-    // and ~75px over the dimmed app behind it.
+    // and ~75px over the dimmed app behind it. Its 0.4 fill sits on the video,
+    // so faint text here fails AA over a bright frame: see NOT COVERED in
+    // scripts/audit-glass-contrast.mjs.
     <aside className="stage-party-rail aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
       {/* Header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -235,7 +237,7 @@ export function PartyPanel({
           <p className="text-white text-sm font-semibold truncate">
             {state.partyName || (state.mediaTitle ? `Watching ${state.mediaTitle}` : 'Watch Party')}
           </p>
-          <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">
+          <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">
             <span>{state.code ? `Code: ${state.code}` : 'Joining…'}</span>
             {/* 2026-05-25 — connection status badge. Shows when the
                 room socket is reconnecting after an unexpected close
@@ -356,7 +358,7 @@ export function PartyPanel({
 
       {/* Members */}
       <div className="px-5 py-3 border-b border-white/[0.06]">
-        <p className="text-white/40 text-[10px] uppercase tracking-wider mb-2">
+        <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">
           Watching ({state.participants.length})
         </p>
         <div className="flex flex-wrap gap-2">
@@ -443,7 +445,7 @@ export function PartyPanel({
               >
                 Leave Voice
               </button>
-              <span className="text-white/40 text-[10px] ml-auto">{voice.status}</span>
+              <span className="text-white/50 text-[10px] ml-auto">{voice.status}</span>
             </>
           )}
         </div>
@@ -452,15 +454,15 @@ export function PartyPanel({
       {/* Chat */}
       <div ref={chatRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
         {state.chat.length === 0 && (
-          <p className="text-white/30 text-xs text-center py-8">No messages yet — say hi!</p>
+          <p className="text-white/50 text-xs text-center py-8">No messages yet — say hi!</p>
         )}
         {state.chat.map(m => {
           const mine = m.user_id === currentUserId
           return (
             <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
               <div className="flex items-center gap-2 text-[10px] mb-0.5">
-                <span className={mine ? 'text-purple-300' : 'text-white/50'}>{m.username}</span>
-                <span className="text-white/30">{formatTime(m.timestamp)}</span>
+                <span className={mine ? 'text-purple-300' : 'text-white/60'}>{m.username}</span>
+                <span className="text-white/50">{formatTime(m.timestamp)}</span>
               </div>
               <div className={`max-w-[85%] px-3 py-1.5 rounded-2xl text-sm ${
                 mine
@@ -493,7 +495,7 @@ export function PartyPanel({
           <div className="px-5 py-3 border-b border-white/[0.06]">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-white/40 text-[10px] uppercase tracking-wider mb-0.5">
+                <p className="text-white/60 text-[10px] uppercase tracking-wider mb-0.5">
                   {iAmHost
                     ? (notReadyGuests.length === 0
                         ? `Everyone's ready (${guests.length})`
@@ -501,7 +503,7 @@ export function PartyPanel({
                     : (isReady ? "You're ready" : 'Tap "I\'m Ready" when buffered')}
                 </p>
                 {iAmHost && notReadyGuests.length > 0 && (
-                  <p className="text-white/30 text-[10px] truncate">
+                  <p className="text-white/50 text-[10px] truncate">
                     {notReadyGuests.map(g => g.username).join(', ')}
                   </p>
                 )}
@@ -541,7 +543,7 @@ export function PartyPanel({
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleSend() }}
             disabled={!state.roomConnected}
-            className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/30 focus:bg-white/[0.06] focus:outline-none disabled:opacity-50"
+            className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none disabled:opacity-50"
             maxLength={500}
           />
           <button

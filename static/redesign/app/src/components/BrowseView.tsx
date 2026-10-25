@@ -373,7 +373,7 @@ export default function BrowseView({
 
         {/* Sort — kept as a native select (accessible, compact). */}
         <div className="flex items-center gap-2 flex-none">
-          <span className="text-white/40 text-sm">Sort</span>
+          <span className="text-white/50 text-sm">Sort</span>
           <select
             value={sortBy}
             onChange={(e) => onSortChange(e.target.value as BrowseSort)}
@@ -496,7 +496,7 @@ export default function BrowseView({
               <>Load {Math.min(100, remaining).toLocaleString()} more</>
             )}
           </button>
-          <p className="text-white/40 text-xs">
+          <p className="text-white/50 text-xs">
             {remaining.toLocaleString()} title{remaining === 1 ? '' : 's'} remaining
           </p>
         </div>

@@ -166,7 +166,7 @@ export function MediaListRow({
         {item.rating !== undefined && item.rating > 0 ? (
           <span className="mlr-star"><StarSvg /> {item.rating.toFixed(1)}</span>
         ) : (
-          <span className="text-white/30">—</span>
+          <span className="text-white/50">—</span>
         )}
       </div>
 

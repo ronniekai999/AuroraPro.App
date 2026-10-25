@@ -65,7 +65,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
           <p className="text-white/80 text-sm font-medium mt-3">{error}</p>
         </div>
       )}
-      {!error && !members && <p className="text-white/40 text-sm py-16 text-center">Loading members…</p>}
+      {!error && !members && <p className="text-white/50 text-sm py-16 text-center">Loading members…</p>}
       {!error && members && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {members.map(m => {
@@ -80,8 +80,8 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
                 >
                   <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={48} />
                   <span className="min-w-0">
-                    <span className="block text-white text-sm font-medium truncate">{shownName}{isMe && <span className="text-white/35 font-normal"> (you)</span>}</span>
-                    <span className="block text-white/40 text-xs truncate">@{m.username}</span>
+                    <span className="block text-white text-sm font-medium truncate">{shownName}{isMe && <span className="text-white/50 font-normal"> (you)</span>}</span>
+                    <span className="block text-white/50 text-xs truncate">@{m.username}</span>
                   </span>
                 </button>
                 {!isMe && (

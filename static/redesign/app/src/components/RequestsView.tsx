@@ -235,8 +235,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
               Request in 4K when available
             </label>
             <div className="flex-1 overflow-y-auto space-y-2">
-              {searching && <p className="text-white/40 text-sm">Searching…</p>}
-              {!searching && searchResults.length === 0 && searchQ.trim() && <p className="text-white/40 text-sm">No matches.</p>}
+              {searching && <p className="text-white/50 text-sm">Searching…</p>}
+              {!searching && searchResults.length === 0 && searchQ.trim() && <p className="text-white/50 text-sm">No matches.</p>}
               {searchResults.map(r => (
                 <div key={`${r.media_type}-${r.tmdb_id}`} className="flex items-center gap-3 p-2 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04]">
                   {/* QA 2026-05-25 — explicit placeholder for entries
@@ -287,7 +287,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-white/90 text-sm font-medium truncate">{r.title}{r.year ? ` (${r.year})` : ''}</p>
-                    <p className="text-white/40 text-xs uppercase">{r.media_type === 'tv' ? 'TV' : 'Movie'}</p>
+                    <p className="text-white/50 text-xs uppercase">{r.media_type === 'tv' ? 'TV' : 'Movie'}</p>
                   </div>
                   <button
                     disabled={submitting === r.tmdb_id}
@@ -339,7 +339,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
           <h2 className="text-white/60 text-lg mb-2">
             No requests {filter !== 'all' ? `in "${STATUS_LABELS[filter] ?? filter}"` : 'yet'}
           </h2>
-          <p className="text-white/40 text-sm">Use the "Request New" button above to submit one.</p>
+          <p className="text-white/50 text-sm">Use the "Request New" button above to submit one.</p>
         </div>
       ) : (
         // Single column, not the previous 2-up grid: the mockup's request row

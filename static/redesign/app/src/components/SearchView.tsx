@@ -131,7 +131,7 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
         <div className="text-center py-20">
           <Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />
           <h2 className="text-white/60 text-lg">No results found</h2>
-          <p className="text-white/40 text-sm mt-1">Try a different search term</p>
+          <p className="text-white/50 text-sm mt-1">Try a different search term</p>
         </div>
       ) : (
         // 2028-05-28 — Search results converted to <MediaCardCinema/>

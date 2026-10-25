@@ -114,7 +114,7 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
         </div>
 
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-white/40">Join code</p>
+          <p className="text-[11px] uppercase tracking-[0.14em] text-white/50">Join code</p>
           <button
             type="button"
             onClick={() => void copy(normalized, 'code')}
@@ -135,7 +135,7 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
             {copied === 'link' ? 'Link copied' : 'Copy invite link'}
           </button>
 
-          <p className="mt-2 truncate text-[11px] text-white/35" title={joinUrl}>{joinUrl}</p>
+          <p className="mt-2 truncate text-[11px] text-white/50" title={joinUrl}>{joinUrl}</p>
         </div>
       </div>
     </div>

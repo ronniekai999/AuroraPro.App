@@ -25,7 +25,7 @@ export function GamificationCard() {
   }, [])
 
   if (error) return <p className="text-red-300 text-sm">{error}</p>
-  if (!stats) return <p className="text-white/40 text-sm">Loading…</p>
+  if (!stats) return <p className="text-white/50 text-sm">Loading…</p>
 
   const { xp, unlocked, achievement_catalog } = stats
   // Audit H1 fix — per-level progress now uses BOTH endpoints
@@ -62,7 +62,7 @@ export function GamificationCard() {
                 <p className="text-white text-3xl font-bold font-display">
                   🔥 {xp.current_streak}
                 </p>
-                <p className="text-white/40 text-xs mt-1">
+                <p className="text-white/50 text-xs mt-1">
                   Longest: {xp.longest_streak}
                 </p>
               </div>
@@ -102,7 +102,7 @@ export function GamificationCard() {
                   so they're correctly excluded — but only the code
                   comment said so, the user-facing label did not. */}
               <p
-                className="text-white/40 text-xs cursor-help"
+                className="text-white/50 text-xs cursor-help"
                 title="Counts items you've watched to ≥90% of their runtime. In-progress items in Continue Watching are excluded by design."
               >
                 Completed
@@ -110,7 +110,7 @@ export function GamificationCard() {
               <p className="text-white/90 text-lg font-semibold">{xp.total_watches}</p>
             </div>
             <div className="text-right">
-              <p className="text-white/40 text-xs">Achievements</p>
+              <p className="text-white/50 text-xs">Achievements</p>
               <p className="text-white/90 text-lg font-semibold">
                 {unlocked.length} / {achievement_catalog.length}
               </p>
@@ -131,13 +131,16 @@ export function GamificationCard() {
                 className={`p-4 rounded-xl border text-center transition-ui ${
                   isUnlocked
                     ? 'bg-purple-500/10 border-purple-500/30 text-white'
-                    : 'bg-white/[0.02] border-white/[0.06] text-white/40 grayscale'
+                    : 'bg-white/[0.02] border-white/[0.06] text-white/60 grayscale'
                 }`}
                 title={a.description}
               >
                 <div className="text-3xl mb-2">{a.icon}</div>
                 <p className="text-sm font-medium">{a.title}</p>
-                <p className="text-xs opacity-70 mt-1">{a.description}</p>
+                {/* One step under the title either way. On a locked tile that is
+                    /50 outright: opacity-70 would stack on the tile's /60 and
+                    drop the description under 4.5:1. */}
+                <p className={`text-xs mt-1${isUnlocked ? ' opacity-70' : ' text-white/50'}`}>{a.description}</p>
                 <p className="text-[10px] uppercase tracking-wider mt-2 text-purple-300/70">
                   +{a.xp_reward} XP
                 </p>

@@ -22,18 +22,26 @@
 //   - It skipped all of `src/components/ui/`, three of which ARE imported by
 //     first-party code, and which carry bare unprefixed `outline-none` too.
 //
-// Two checks:
+// Five checks:
 //   1. Every first-party outline suppression must be on an element whose own
 //      opening tag supplies a real indicator (ring / shadow / explicit outline),
 //      or be an input-family element covered by check 2, or be listed in ALLOWED.
 //   2. The global input :focus treatment — which the input exemption makes the
 //      only indicator for text fields that don't reset it — must clear 3:1.
+//   3. Every container that resets that treatment supplies its own indicator.
+//   4. Those resets still outrank the global focus rule.
+//   5. Every <button> whose content names nothing has an accessible name
+//      (aria-label, aria-labelledby or title). The notification panel's close
+//      button had none: a screen reader announced it as "button".
 //
 // Run: node scripts/audit-focus-indicators.mjs
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { selectorSpecificity, compareSpecificity } from './resolve-focus.mjs'
+
+const ts = createRequire(import.meta.url)('typescript')
 
 const SRC = 'src'
 const CSS = 'src/index.css'
@@ -381,6 +389,132 @@ console.log('\n## Check 4 — those resets still outrank the global focus rule')
         : '*** FAIL — LOSES to the global rule, which will paint its own ring inside this container'}`)
     }
   }
+}
+
+// ── Check 5 — icon-only buttons have an accessible name ──────────────────────
+//
+// Parsed with the TypeScript compiler, not matched: whether a button's content
+// names it is a question about JSX structure (`{busy ? <Spinner/> : <X/>}`
+// names nothing, `{label}` may), which a regex cannot answer.
+//
+// What names a button: a non-empty aria-label, aria-labelledby or title on it
+// (an expression counts, an empty string does not), or content that does. Its
+// content names it when it holds text (JSX text, a non-blank string, or any
+// expression that may hold one), an <img> with a non-empty alt, or an element
+// with a non-empty aria-label or aria-labelledby. Text inside aria-hidden names
+// nothing. A spread (`{...props}`) may carry the name, so it passes.
+//
+// One assumption, the other way: a self-closing component (`<Icon name="x"/>`)
+// is taken to render no text, because that is what the icons do. A component
+// that renders its own text or label inside a button would be flagged here;
+// name the button. Not covered: elements given role="button", links, and the
+// Radix primitives (their own components name their controls).
+{
+  console.log('\n## Check 5 — every icon-only button has an accessible name')
+  const NAMING = new Set(['aria-label', 'aria-labelledby', 'title'])
+  const attrsOf = el => (ts.isJsxElement(el) ? el.openingElement : el).attributes.properties
+  const tagOf = el => (ts.isJsxElement(el) ? el.openingElement : el).tagName.getText()
+  // Whether an attribute's value is non-empty. An expression may hold a name.
+  const hasValue = a => {
+    if (!a.initializer) return false
+    if (ts.isStringLiteral(a.initializer)) return a.initializer.text.trim() !== ''
+    const e = a.initializer.expression
+    if (!e) return false
+    if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text.trim() !== ''
+    return true
+  }
+  const attr = (el, name) => attrsOf(el).find(a => ts.isJsxAttribute(a) && a.name.getText() === name)
+  const hidden = el => {
+    const a = attr(el, 'aria-hidden')
+    if (!a) return false
+    if (!a.initializer) return true
+    if (ts.isStringLiteral(a.initializer)) return a.initializer.text === 'true'
+    const e = a.initializer.expression
+    return !!e && (e.kind === ts.SyntaxKind.TrueKeyword || (ts.isStringLiteral(e) && e.text === 'true'))
+  }
+  const names = node => {
+    if (!node) return false
+    if (ts.isJsxText(node)) return node.text.trim() !== ''
+    if (ts.isJsxExpression(node)) return names(node.expression)
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text.trim() !== ''
+    if (ts.isParenthesizedExpression(node)) return names(node.expression)
+    if (ts.isConditionalExpression(node)) return names(node.whenTrue) || names(node.whenFalse)
+    if (ts.isBinaryExpression(node)) {
+      const op = node.operatorToken.kind
+      if (op === ts.SyntaxKind.AmpersandAmpersandToken) return names(node.right)
+      if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) return names(node.left) || names(node.right)
+      return true
+    }
+    if ([ts.SyntaxKind.NullKeyword, ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword].includes(node.kind)) return false
+    if (ts.isIdentifier(node) && node.text === 'undefined') return false
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+      if (hidden(node)) return false
+      const label = ['aria-label', 'aria-labelledby'].some(n => { const a = attr(node, n); return !!a && hasValue(a) })
+      if (label) return true
+      if (tagOf(node) === 'img') { const alt = attr(node, 'alt'); return !!alt && hasValue(alt) }
+      return ts.isJsxElement(node) && node.children.some(names)
+    }
+    if (ts.isJsxFragment(node)) return node.children.some(names)
+    return true
+  }
+  const unnamed = (file, src) => {
+    const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    const out = []
+    const visit = n => {
+      if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && tagOf(n) === 'button') {
+        const named = attrsOf(n).some(a => ts.isJsxSpreadAttribute(a) || (NAMING.has(a.name.getText()) && hasValue(a)))
+        if (!named && !(ts.isJsxElement(n) && n.children.some(names))) {
+          out.push({ line: sf.getLineAndCharacterOfPosition(n.getStart()).line + 1, text: n.getText().replace(/\s+/g, ' ').slice(0, 110) })
+        }
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
+    return out
+  }
+  // Known answers, one button per line: `true` marks the ones left unnamed.
+  const PROBE = [
+    [true, '<button onClick={f}><Icon name="x" /></button>'],
+    [true, '<button>{busy ? <Spinner /> : <svg><path d="M0" /></svg>}</button>'],
+    [true, '<button><span aria-hidden="true">×</span></button>'],
+    [true, "<button>{' '}<Icon name=\"x\" /></button>"],
+    [true, '<button aria-label=""><Icon name="x" /></button>'],
+    [true, '<button onClick={f} />'],
+    [false, '<button aria-label="Close"><Icon name="x" /></button>'],
+    [false, '<button aria-label={label}><Icon name="x" /></button>'],
+    [false, '<button title="Delete"><Icon name="trash" /></button>'],
+    [false, '<button {...props}><Icon name="x" /></button>'],
+    [false, '<button><Icon name="x" /> Close</button>'],
+    [false, '<button><Icon name="x" /><span className="sr-only">Close</span></button>'],
+    [false, '<button>{label}</button>'],
+    [false, '<button><svg><title>Close</title><path d="M0" /></svg></button>'],
+    [false, '<button><svg aria-label="Close"><path d="M0" /></svg></button>'],
+    [false, '<button><img src="x.png" alt="Close" /></button>'],
+  ]
+  const want = PROBE.flatMap(([flag], i) => (flag ? [i + 1] : [])).join(',')
+  const got = unnamed('probe.tsx', `const a = <>${PROBE.map(p => p[1]).join('\n')}</>`).map(p => p.line).join(',')
+  if (got !== want) {
+    console.log(`  *** known-answer probe: expected lines ${want} unnamed, got ${got || 'none'}`)
+    problems++
+  }
+  const files = []
+  const walk = dir => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (/\.tsx$/.test(e.name) && !/\.test\.tsx$/.test(e.name)) files.push(p)
+    }
+  }
+  walk(SRC)
+  let count = 0
+  for (const f of files) {
+    for (const u of unnamed(f, fs.readFileSync(f, 'utf8'))) {
+      console.log(`  *** ${f}:${u.line}  no text and no aria-label / aria-labelledby / title: ${u.text}`)
+      problems++
+      count++
+    }
+  }
+  console.log(`  ${count} unnamed icon-only button(s) across ${files.length} files.`)
 }
 
 console.log(`\n${problems} problem(s).`)

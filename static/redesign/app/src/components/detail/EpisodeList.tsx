@@ -81,11 +81,11 @@ export function EpisodeList({
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
         <h3 className="text-lg font-semibold font-display">
           {selectedSeason ? `Season ${selectedSeason}` : 'Episodes'}
-          <span className="text-white/40 text-sm font-normal ml-2">· {count}</span>
+          <span className="text-white/50 text-sm font-normal ml-2">· {count}</span>
         </h3>
         {showPicker && (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-white/45 text-xs uppercase tracking-wider mr-1">Season</span>
+            <span className="text-white/50 text-xs uppercase tracking-wider mr-1">Season</span>
             {seasons!.map((s) => {
               const on = selectedSeason === s.season_number
               return (
@@ -97,7 +97,7 @@ export function EpisodeList({
                   className={cn(
                     'inline-flex items-center px-3.5 py-[7px] rounded-full text-[13px] font-semibold transition-ui border',
                     on
-                      ? 'bg-purple-500/22 border-purple-400/45 text-purple-100'
+                      ? 'bg-purple-500/[0.22] border-purple-400/45 text-purple-100'
                       : 'bg-white/[0.03] border-white/[0.07] text-white/60 hover:bg-white/[0.07] hover:text-white',
                   )}
                 >
@@ -120,7 +120,7 @@ export function EpisodeList({
       ) : loading ? (
         <EpisodeRowsSkeleton />
       ) : (
-        <p className="text-white/40 text-sm">{emptyText ?? 'No episodes available yet.'}</p>
+        <p className="text-white/50 text-sm">{emptyText ?? 'No episodes available yet.'}</p>
       )}
     </section>
   )

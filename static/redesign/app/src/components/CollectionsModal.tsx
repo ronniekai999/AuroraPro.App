@@ -126,7 +126,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
           {mode === 'manual' ? (
             <div>
               <label className="block text-white/70 text-sm mb-2">
-                Description <span className="text-white/30">(optional)</span>
+                Description <span className="text-white/50">(optional)</span>
               </label>
               <textarea
                 value={description}
@@ -150,7 +150,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
                 rows={3}
                 className="w-full px-3 py-2 bg-white/[0.04] border border-purple-500/30 rounded text-white text-sm resize-none focus:border-purple-500/60"
               />
-              <p className="text-white/40 text-xs mt-2">
+              <p className="text-white/50 text-xs mt-2">
                 Aurora's AI will scan your library and pick 10–12 titles that
                 match the vibe.
               </p>
@@ -168,7 +168,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
               />
               <span>
                 <span className="text-white/90">Make public</span>
-                <span className="block text-white/40 text-xs">
+                <span className="block text-white/50 text-xs">
                   Shown on every user's home view. Admins only.
                 </span>
               </span>

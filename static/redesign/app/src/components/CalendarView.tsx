@@ -316,7 +316,7 @@ export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }
       />
 
       {episodes === null ? (
-        <p className="text-white/40">Loading calendar…</p>
+        <p className="text-white/50">Loading calendar…</p>
       ) : viewMode === 'list' ? (
         <ListView
           episodes={episodes}
@@ -373,7 +373,7 @@ function ListView({
     return (
       <div className="text-center py-20">
         <p className="text-white/60 text-lg">Nothing scheduled.</p>
-        <p className="text-white/40 text-sm mt-2 max-w-md mx-auto">
+        <p className="text-white/50 text-sm mt-2 max-w-md mx-auto">
           Once you add TV shows to your library, upcoming episodes will appear here based on their TMDB air dates.
         </p>
       </div>
@@ -448,7 +448,7 @@ function PartyCalRow({ entry, onJoinParty }: { entry: PartyCalEntry; onJoinParty
           <span className="stage-eptag !bg-purple-500/20 !text-purple-100">Watch party</span>
           <span className="text-white text-sm font-semibold min-w-0 truncate">{entry.title}</span>
         </span>
-        <span className="block text-white/45 text-xs mt-1">{sub}</span>
+        <span className="block text-white/50 text-xs mt-1">{sub}</span>
       </span>
       {onJoinParty && (
         <span className="flex-none px-3 py-1.5 rounded-lg bg-purple-600/25 border border-purple-500/50 text-purple-100 text-xs font-medium">
@@ -492,7 +492,7 @@ function EpisodeRow({ ep, onOpenMedia }: { ep: UpcomingEpisode; onOpenMedia: (id
           )}
         </div>
         {ep.overview && (
-          <p className="text-white/40 text-xs line-clamp-1 mt-1">{ep.overview}</p>
+          <p className="text-white/50 text-xs line-clamp-1 mt-1">{ep.overview}</p>
         )}
       </div>
     </button>

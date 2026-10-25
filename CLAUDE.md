@@ -426,7 +426,20 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   pages (`useOnProfileChange`). Each of these used to keep the previous
   profile's titles: the grids for the session, the conversational rail until
   the next search, Home's rails and Continue Watching until a refetch
-  succeeded. A failed activation (a switch, a PIN unlock, the startup
+  succeeded. Those resets run in passive effects, after the commit that
+  already names the new profile, and React could paint that commit: the
+  previous profile's hero showed under the new name for a frame. Until they
+  run (`profileSwitchPending`), Home, the grids, My Library and an open title
+  render their cold state instead. A pick from the picker an unreadable
+  binding opens is a switch for all of this, the hero included: the catalog
+  behind the picker was fetched under the binding the server does have.
+  Home's own library count (its greeting's "titles in your library") is
+  fetched once per sign-in, keyed on the user alone and before the startup
+  binding is read, so it can count another profile's catalog with no switch
+  at all (a fresh sign-in binds the default, then the startup re-selection
+  moves to the profile this browser last showed), and after a switch it
+  still counts the previous profile's; only the greeting's fallback to the
+  grid totals is reset. A failed activation (a switch, a PIN unlock, the startup
   re-selection) re-reads the binding, because a lost answer can follow a bind
   that happened. The tab-visibility re-read starts once the startup load
   settles, also runs when another window of the browser records a switch (the
@@ -754,8 +767,23 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     latest-request guard, the keyed My Library snapshot, and what a switch
     resets: `resetForProfileChange` and its startup exemption, the cold Home
     load, the grid effects' profile dependency and the views' keys, though
-    `useOnProfileChange` itself is tested) has no App-level test, and the
-    room socket's connect-time profile and its retry
+    `useOnProfileChange` itself is tested) has no App-level test, except what
+    a switch shows: `App.profileSwitch.test.tsx` switches through the top bar
+    and through the picker an unreadable binding opens, and fails if any
+    commit puts the new name beside the previous profile's titles on Home,
+    the grids, My Library or an open title, or the Parent's grid total in
+    Home's greeting. That pins `profileSwitchPending` and the resets whose
+    loss would show something: the hero, Home's rails, Continue Watching,
+    the conversational rail (its results, and its run counter, through a
+    search answering after the switch), the grids, the Movies total (the
+    greeting case visits only `/movies`, so the Shows total's reset is
+    unpinned), their Load More aborts and loading flags, their effects'
+    profile dependency, an open title and the My Library swap. Not the
+    grids' next-page resets,
+    which the next first page replaces before a Load More can run, nor the
+    startup exemption, the hero's latest-request guard or the remounting
+    views; and
+    the room socket's connect-time profile and its retry
     are pinned only at the manager. The PIN state activation hands its bind is pinned at
     `checkUnlockHash` for every path (`TestTheUnlockReportsThePINStateItJudged`)
     and end to end only for a PIN removed and set again mid-activation; the

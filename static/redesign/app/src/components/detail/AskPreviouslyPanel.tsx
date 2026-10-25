@@ -80,12 +80,12 @@ export function AskPreviouslyPanel({
             <DialogTitle ref={headingRef} tabIndex={-1} className="mt-2 rounded-md font-display text-[1.65rem] font-bold leading-tight outline-none focus-visible:ring-2 focus-visible:ring-purple-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#15131f] sm:text-[2rem]">
               Ask about what you’ve watched
             </DialogTitle>
-            <DialogDescription className="mt-1.5 text-[15px] text-white/68 sm:text-[18px]">
+            <DialogDescription className="mt-1.5 text-[15px] text-white/[0.68] sm:text-[18px]">
               Get a quick answer without learning what happens next.
             </DialogDescription>
           </div>
           {(turns.length > 0 || (conversation?.hidden_turn_count || 0) > 0) && (
-            <button type="button" disabled={pending || conversationLoading || actionBusy} onClick={event => onConfirm('clear-history', event.currentTarget)} className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 disabled:cursor-not-allowed disabled:opacity-40">
+            <button type="button" disabled={pending || conversationLoading || actionBusy} onClick={event => onConfirm('clear-history', event.currentTarget)} className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 disabled:cursor-not-allowed disabled:opacity-40">
               <Trash2 aria-hidden="true" size={13} /> Clear history
             </button>
           )}
@@ -194,7 +194,7 @@ export function AskPreviouslyPanel({
                       </div>
                       <div className="mt-4 flex gap-4">
                         <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-purple-500/15 text-purple-300"><Sparkles aria-hidden="true" size={19} /></span>
-                        <p className="pt-1 text-[15.5px] leading-[1.65] text-white/82">{turn.answer}</p>
+                        <p className="pt-1 text-[15.5px] leading-[1.65] text-white/[0.82]">{turn.answer}</p>
                       </div>
                     </div>
                   </div>
@@ -211,7 +211,7 @@ export function AskPreviouslyPanel({
                 <div className="mt-4 flex gap-4">
                   <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-purple-500/15 text-purple-300"><Sparkles aria-hidden="true" size={19} /></span>
                   {pending ? (
-                    <p className="flex items-center gap-2 pt-1.5 text-sm text-white/48"><LoaderCircle aria-hidden="true" className="animate-spin" size={15} /> Thinking spoiler-safely…</p>
+                    <p className="flex items-center gap-2 pt-1.5 text-sm text-white/50"><LoaderCircle aria-hidden="true" className="animate-spin" size={15} /> Thinking spoiler-safely…</p>
                   ) : sendError ? (
                     <div>
                       <p className="pt-0.5 text-sm text-red-200/85">{sendError}</p>
@@ -237,13 +237,13 @@ export function AskPreviouslyPanel({
               disabled={pending || conversationLoading || actionBusy}
               aria-label="Ask about what you’ve watched"
               placeholder="Ask about what you’ve watched…"
-              className="max-h-28 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-[15px] text-white outline-none placeholder:text-white/35 disabled:opacity-50"
+              className="max-h-28 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-[15px] text-white outline-none placeholder:text-white/50 disabled:opacity-50"
             />
             <button type="button" onClick={() => void onSubmit(composer)} disabled={pending || conversationLoading || actionBusy || !composer.trim()} aria-label="Send question" className="flex size-[52px] shrink-0 items-center justify-center rounded-full bg-purple-600 text-white shadow-[0_0_18px_rgba(168,85,247,0.42)] transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/25 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-200">
               {pending ? <LoaderCircle aria-hidden="true" className="animate-spin" size={18} /> : <Send aria-hidden="true" size={18} />}
             </button>
           </div>
-          <p className="mt-2.5 px-2 text-xs text-white/38">Answers stop at your latest completed episode.</p>
+          <p className="mt-2.5 px-2 text-xs text-white/50">Answers stop at your latest completed episode.</p>
         </div>
       )}
 

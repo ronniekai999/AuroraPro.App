@@ -153,7 +153,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
             ✕
           </button>
         </div>
-        {subtitle && <p className="text-white/45 text-xs mt-1">{subtitle}</p>}
+        {subtitle && <p className="text-white/50 text-xs mt-1">{subtitle}</p>}
 
         {/* Format tabs. Switching one re-points the preview at a
             different signed URL; the token is the same for all three. */}
@@ -196,7 +196,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
           </div>
         </div>
 
-        <p className="text-white/35 text-[11px] mt-2 leading-relaxed">
+        <p className="text-white/50 text-[11px] mt-2 leading-relaxed">
           Times on the card are Eastern. Only your name appears — nobody
           you invited is shown.
         </p>

@@ -4096,8 +4096,12 @@ textarea:not([hidden]):focus {
   box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.28);
 }
 
+/* 0.5, the faint-text floor (audit-glass-contrast.mjs): this styles every
+   input without a placeholder class, and many of those placeholders carry
+   information ("4 digits", "leave empty to keep the stored key"). 0.35 was
+   about 3:1 on a field's own fill; 0.5 holds 4.5:1 up to the focused fill. */
 input::placeholder, textarea::placeholder {
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.5);
 }
 
 /* 2026-06-17 (a11y quick-win) — visible keyboard focus indicator for
@@ -4438,7 +4442,7 @@ textarea:focus-visible {
   font-size: 0.66rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.5); /* column labels: 0.4 was ~3.7:1 */
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.02);
 }

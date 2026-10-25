@@ -599,7 +599,7 @@ export default function DetailView({
                 Movies with 2+ files only. */}
             {media.type !== 'show' && files && files.length > 1 && onPlayFile && (
               <div className="mb-6 flex items-center gap-2 flex-wrap">
-                <span className="text-white/40 text-xs uppercase tracking-wider mr-1">Play in</span>
+                <span className="text-white/50 text-xs uppercase tracking-wider mr-1">Play in</span>
                 {files.map(f => {
                   const tag = f.version_tag || f.resolution || 'Unknown'
                   const is4K = /4k|2160|uhd/i.test(`${f.version_tag || ''} ${f.resolution || ''}`)
@@ -618,7 +618,7 @@ export default function DetailView({
                       }`}
                     >
                       {tag}
-                      {f.library_name && <span className="text-white/40 ml-1 font-normal">[{f.library_name}]</span>}
+                      {f.library_name && <span className="text-white/50 ml-1 font-normal">[{f.library_name}]</span>}
                     </button>
                   )
                 })}

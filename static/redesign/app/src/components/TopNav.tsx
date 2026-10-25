@@ -286,7 +286,7 @@ function AvatarMenu({
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
-            <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
+            <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5">
               {showAdmin ? (
                 <>
                   <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
@@ -498,7 +498,7 @@ function MobileSheet({
         aria-label="Menu"
         // inert during the exit fade — see AvatarMenu.
         inert={closing || undefined}
-        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
+        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/[0.97] backdrop-blur-xl border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
         style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >
         {/* Real search field, not a shortcut to the palette. The palette

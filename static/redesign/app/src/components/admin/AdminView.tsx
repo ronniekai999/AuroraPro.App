@@ -183,7 +183,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           Download a binary snapshot of Aurora's database — users, libraries, media items, watch
           parties, progress, settings. Use this before a server migration or as a periodic safety net.
         </p>
-        <p className="text-white/40 text-xs mb-4 leading-relaxed">
+        <p className="text-white/50 text-xs mb-4 leading-relaxed">
           <strong className="text-white/60">Included:</strong> all Aurora tables except ephemeral
           session state (refresh tokens, scanner progress).
           <br />
@@ -211,7 +211,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           completes, <strong>Aurora must be restarted</strong> — current connections will see stale
           state until you do.
         </p>
-        <p className="text-white/40 text-xs mb-4 leading-relaxed">
+        <p className="text-white/50 text-xs mb-4 leading-relaxed">
           The restore wraps every change in a single transaction. If any statement fails, the entire
           restore rolls back and the database is left in an empty (wiped) state — you can retry with
           a different file. Legacy <code>.sql.gz</code> backups need to be restored via the
@@ -234,7 +234,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           </button>
         </div>
         {file && !doneBlocked && (
-          <p className="text-white/40 text-xs mt-2">
+          <p className="text-white/50 text-xs mt-2">
             Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
           </p>
         )}
@@ -289,7 +289,7 @@ function NowPlayingWidget() {
   if (groups.length === 0) return (
     <div className="glass-panel rounded-2xl p-6">
       <h2 className="text-white font-semibold mb-2">Now Playing</h2>
-      <p className="text-white/40 text-sm">No active streams.</p>
+      <p className="text-white/50 text-sm">No active streams.</p>
     </div>
   )
   const kindBadge = (s: ActiveStreamRow) => (
@@ -314,7 +314,7 @@ function NowPlayingWidget() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white/90 text-sm font-medium truncate">{nameFor(s)}</p>
-                <p className="text-white/40 text-xs truncate">
+                <p className="text-white/50 text-xs truncate">
                   {s.file_name}
                   {s.resolution && ` · ${s.resolution}`}
                   {s.kind === 'direct' && ` · Direct Play`}
@@ -346,9 +346,9 @@ function NowPlayingWidget() {
                             minted, not yet leased (MarkCastHeld is earned by
                             a real fetch). Usually a blink; a persistent one
                             is a clone the TV never took. */}
-                        {!c.cast_held && <span className="text-white/40"> · connecting</span>}
+                        {!c.cast_held && <span className="text-white/50"> · connecting</span>}
                       </p>
-                      <p className="text-white/40 text-xs truncate">
+                      <p className="text-white/50 text-xs truncate">
                         {c.file_name}
                         {c.resolution && ` · ${c.resolution}`}
                       </p>
@@ -504,7 +504,7 @@ function UpdatePanel() {
     return (
       <div className="glass-panel rounded-2xl p-6">
         <h2 className="text-white font-semibold mb-2">Updates</h2>
-        <p className="text-white/40 text-sm">{error ?? 'Loading update status…'}</p>
+        <p className="text-white/50 text-sm">{error ?? 'Loading update status…'}</p>
       </div>
     )
   }
@@ -552,7 +552,7 @@ function UpdatePanel() {
         </div>
 
         {status.state === 'unknown' && (
-          <p className="text-white/40 text-xs">
+          <p className="text-white/50 text-xs">
             The auto-update timer fires every 5 minutes. If this never populates, run <code className="text-purple-300 bg-white/[0.04] px-1 rounded">systemctl status aurora-update.timer</code> on the server.
           </p>
         )}
@@ -729,8 +729,8 @@ function AdminLibrariesTab() {
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-3">Existing Libraries</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
+        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-white/50 text-sm">No libraries yet.</p>}
         {health?.install_warning && (
           <div className="mb-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
             <p className="text-amber-200 text-xs">{health.install_warning}</p>
@@ -743,7 +743,7 @@ function AdminLibrariesTab() {
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
-              <p className="text-white/40 text-xs truncate">
+              <p className="text-white/50 text-xs truncate">
                 {lib.type} · {lib.paths.join(', ')}
                 {h && h.items > 0 && (
                   <span className={h.warning ? 'text-amber-300' : ''}>
@@ -806,68 +806,68 @@ function AdminServerSettingsTab() {
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-3">Server Settings</h2>
-        {settings === null ? <p className="text-white/40 text-sm">Loading…</p> : (
+        {settings === null ? <p className="text-white/50 text-sm">Loading…</p> : (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Transcode max sessions</p>
-                <p className="text-white/40 text-xs">Concurrent FFmpeg processes; 0 = unlimited</p>
+                <p className="text-white/50 text-xs">Concurrent FFmpeg processes; 0 = unlimited</p>
               </div>
               <input type="number" min={0} max={1000} value={val('transcode_max_sessions', '0')} onChange={e => setVal('transcode_max_sessions', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Transcode max sessions per user</p>
-                <p className="text-white/40 text-xs">Streams one account may hold; 0 = default (3)</p>
+                <p className="text-white/50 text-xs">Streams one account may hold; 0 = default (3)</p>
               </div>
               <input type="number" min={0} max={100} value={val('transcode_max_sessions_per_user', '0')} onChange={e => setVal('transcode_max_sessions_per_user', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Scan interval (seconds)</p>
-                <p className="text-white/40 text-xs">Default for new libraries; 0 = manual only</p>
+                <p className="text-white/50 text-xs">Default for new libraries; 0 = manual only</p>
               </div>
               <input type="number" min={0} max={86400} value={val('scan_interval_default', '0')} onChange={e => setVal('scan_interval_default', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Now Playing broadcast</p>
-                <p className="text-white/40 text-xs">Stream notifications to admin dashboard</p>
+                <p className="text-white/50 text-xs">Stream notifications to admin dashboard</p>
               </div>
               <input type="checkbox" checked={val('now_playing_enabled', 'true') === 'true'} onChange={e => setVal('now_playing_enabled', e.target.checked ? 'true' : 'false')} />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Push notifications</p>
-                <p className="text-white/40 text-xs">Deliver via browser push services (Google/Apple/Mozilla); payloads are end-to-end encrypted</p>
+                <p className="text-white/50 text-xs">Deliver via browser push services (Google/Apple/Mozilla); payloads are end-to-end encrypted</p>
               </div>
               <input type="checkbox" checked={val('push_enabled', 'true') === 'true'} onChange={e => setVal('push_enabled', e.target.checked ? 'true' : 'false')} />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Filesystem watch</p>
-                <p className="text-white/40 text-xs">Auto-detect changes between scans</p>
+                <p className="text-white/50 text-xs">Auto-detect changes between scans</p>
               </div>
               <input type="checkbox" checked={val('filesystem_watch_enabled', 'true') === 'true'} onChange={e => setVal('filesystem_watch_enabled', e.target.checked ? 'true' : 'false')} />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Requests enabled</p>
-                <p className="text-white/40 text-xs">Users can request titles via Radarr/Sonarr</p>
+                <p className="text-white/50 text-xs">Users can request titles via Radarr/Sonarr</p>
               </div>
               <input type="checkbox" checked={val('requests_enabled', 'false') === 'true'} onChange={e => setVal('requests_enabled', e.target.checked ? 'true' : 'false')} />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Active request quota</p>
-                <p className="text-white/40 text-xs">Per user; requests over this are held for approval (default 10)</p>
+                <p className="text-white/50 text-xs">Per user; requests over this are held for approval (default 10)</p>
               </div>
               <input type="number" min={1} max={10000} value={val('requests_quota_active', '10')} onChange={e => setVal('requests_quota_active', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm">Daily request quota</p>
-                <p className="text-white/40 text-xs">Per user, rolling 24h; requests over this are held for approval (default 25)</p>
+                <p className="text-white/50 text-xs">Per user, rolling 24h; requests over this are held for approval (default 25)</p>
               </div>
               <input type="number" min={1} max={10000} value={val('requests_quota_daily', '25')} onChange={e => setVal('requests_quota_daily', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
             </div>
@@ -885,7 +885,7 @@ function AdminServerSettingsTab() {
 
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-3">Image Cache</h2>
-        <p className="text-white/40 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
+        <p className="text-white/50 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
           onClick={async () => {
             if (!window.confirm('Purge the image cache? Images will re-download on next view.')) return
@@ -941,7 +941,7 @@ function AdminServerSettingsTab() {
               onClick={save}
               className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
             >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
-            <p className="text-white/40 text-xs">
+            <p className="text-white/50 text-xs">
               Empty API key fields are ignored on save (so the stored key isn't wiped). Use Test first to verify before saving.
             </p>
           </div>
@@ -965,7 +965,7 @@ function AdminRoomsTab() {
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-3">Create Persistent Room</h2>
-        <p className="text-white/40 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
+        <p className="text-white/50 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <input value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
           <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Description (optional)" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
@@ -979,13 +979,13 @@ function AdminRoomsTab() {
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-3">Existing Rooms</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/40 text-sm">No rooms yet.</p>}
+        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-white/50 text-sm">No rooms yet.</p>}
         {items && items.map(r => (
           <div key={r.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-white/90 text-sm font-medium truncate">{r.name} <span className="text-purple-300 font-mono text-xs ml-2">{r.code}</span></p>
-              {r.description && <p className="text-white/40 text-xs truncate">{r.description}</p>}
+              {r.description && <p className="text-white/50 text-xs truncate">{r.description}</p>}
               {r.active_party_code && (
                 // Emit the working `{BASE}p/CODE` URL as an <a> so
                 // admins can right-click → copy. Pull the base from
@@ -1040,10 +1040,10 @@ function AdminRequestsTab() {
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
         <h2 className="text-white font-semibold mb-1">Pending Approvals</h2>
-        <p className="text-white/40 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
+        <p className="text-white/50 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
         {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/40 text-sm">No requests awaiting approval.</p>}
+        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-white/50 text-sm">No requests awaiting approval.</p>}
         {items && items.map(req => {
           const poster = tmdbPosterURL(req.poster_path)
           return (
@@ -1074,11 +1074,11 @@ function AdminRequestsTab() {
               <div className="min-w-0 flex-1">
                 <p className="text-white/90 text-sm font-medium truncate">{req.title}{req.year ? ` (${req.year})` : ''}</p>
                 <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                  <span className="text-white/40 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
+                  <span className="text-white/50 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
                   {req.quality_4k && <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px]">4K</span>}
                   {req.quality_1080p && <span className="badge-glass bg-white/[0.04] text-white/60 border border-white/[0.06] text-[10px]">1080p</span>}
-                  {req.username && <span className="text-white/40 text-xs">by {req.username}</span>}
-                  <span className="text-white/30 text-xs">{formatRequestDate(req.requested_at)}</span>
+                  {req.username && <span className="text-white/50 text-xs">by {req.username}</span>}
+                  <span className="text-white/50 text-xs">{formatRequestDate(req.requested_at)}</span>
                 </div>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
@@ -1158,8 +1158,8 @@ function AdminSessionsTab() {
           (direct-play has no FFmpeg process to terminate — it
           expires from the registry after 60s of no byte-serves). */}
       {err && <p className="text-red-300 text-sm">{err}</p>}
-      {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/40 text-sm">No active streams.</p>}
+      {items === null && <p className="text-white/50 text-sm">Loading…</p>}
+      {items && items.length === 0 && <p className="text-white/50 text-sm">No active streams.</p>}
       {items && items.length > 0 && (
         <table className="data-table w-full">
           <thead>
@@ -1227,9 +1227,9 @@ function AdminSessionsTab() {
                     {isTranscode ? (
                       <>
                         {s.resolution && <span className="text-white/60 text-xs">{s.resolution}</span>}
-                        {s.remux && <span className="ml-1 text-white/40 text-xs">remux</span>}
+                        {s.remux && <span className="ml-1 text-white/50 text-xs">remux</span>}
                         {s.active_variants && s.active_variants.length > 0 && (
-                          <span className="ml-1 text-white/40 text-xs">({s.active_variants.join(', ')})</span>
+                          <span className="ml-1 text-white/50 text-xs">({s.active_variants.join(', ')})</span>
                         )}
                       </>
                     ) : (
@@ -1242,7 +1242,7 @@ function AdminSessionsTab() {
                       <span className="text-white/60 text-xs">Direct Play</span>
                     )}
                   </td>
-                  <td className="text-white/40 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
+                  <td className="text-white/50 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
                   <td>
                     {isTranscode ? (
                       <div className="flex items-center gap-1.5">
@@ -1253,7 +1253,7 @@ function AdminSessionsTab() {
                       // Direct-play has no FFmpeg lifecycle to terminate.
                       // The registry GCs after 60s of no byte-serves; an
                       // explicit Kill button would mislead operators.
-                      <span className="text-white/30 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
+                      <span className="text-white/50 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
                     )}
                   </td>
                 </tr>
@@ -1279,29 +1279,29 @@ function AdminSessionsTab() {
             {diag && (
               <div className="space-y-3 font-mono text-xs">
                 <div>
-                  <div className="text-white/40">Session</div>
+                  <div className="text-white/50">Session</div>
                   <div className="text-white/80 break-all">{diag.session_id}</div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <div className="text-white/40">Source codec</div>
+                    <div className="text-white/50">Source codec</div>
                     <div className="text-white/80">{diag.source_video_codec || '—'}</div>
                   </div>
                   <div>
-                    <div className="text-white/40">HW Accel</div>
+                    <div className="text-white/50">HW Accel</div>
                     <div className="text-white/80">{diag.hw_accel}</div>
                   </div>
                   <div>
-                    <div className="text-white/40">Mode</div>
+                    <div className="text-white/50">Mode</div>
                     <div className="text-white/80">{diag.remux ? 'remux' : 'transcode'}</div>
                   </div>
                   <div>
-                    <div className="text-white/40">File path</div>
+                    <div className="text-white/50">File path</div>
                     <div className="text-white/80 break-all">{diag.file_path}</div>
                   </div>
                 </div>
                 <div>
-                  <div className="text-white/40 mb-1">Variants ({diag.variants?.length || 0})</div>
+                  <div className="text-white/50 mb-1">Variants ({diag.variants?.length || 0})</div>
                   <div className="space-y-2">
                     {diag.variants?.map((v) => (
                       <div key={v.profile} className="border border-white/[0.06] rounded-lg p-3">
@@ -1309,17 +1309,17 @@ function AdminSessionsTab() {
                           <span className="text-white/90 font-medium">{v.profile}</span>
                           {v.started && !v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">running</span>}
                           {v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-red-500/15 text-red-300 border border-red-500/30">exited</span>}
-                          {(v.restart_attempts ?? 0) > 0 && <span className="text-white/40">restarts={v.restart_attempts}</span>}
+                          {(v.restart_attempts ?? 0) > 0 && <span className="text-white/50">restarts={v.restart_attempts}</span>}
                         </div>
                         {v.error && (
                           <div className="mb-1">
-                            <div className="text-white/40">error</div>
+                            <div className="text-white/50">error</div>
                             <div className="text-red-300/90 whitespace-pre-wrap break-words">{v.error}</div>
                           </div>
                         )}
                         {v.stderr_tail && (
                           <div>
-                            <div className="text-white/40">ffmpeg stderr tail</div>
+                            <div className="text-white/50">ffmpeg stderr tail</div>
                             <pre className="text-white/70 whitespace-pre-wrap break-words bg-black/40 rounded p-2 max-h-64 overflow-y-auto">{v.stderr_tail}</pre>
                           </div>
                         )}
@@ -1447,7 +1447,7 @@ function AdminFlaggedTab() {
       <div className="flex items-start justify-between gap-4 mb-3">
         <div className="min-w-0">
           <h2 className="text-white font-semibold">Flagged Items</h2>
-          <p className="text-white/40 text-xs mt-1">
+          <p className="text-white/50 text-xs mt-1">
             Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
             The AI matcher auto-promotes high-confidence picks and suggests sub-threshold
             ones for one-click approval below. Use "Match" to manually search if neither
@@ -1491,7 +1491,7 @@ function AdminFlaggedTab() {
                   when the pass actually touched something so jobs
                   with no stuck items don't show a noisy "+0 retry". */}
               {(aiJob.retried ?? 0) > 0 && (
-                <>{' · '}retry-recovered <span className="text-emerald-300 font-mono">{aiJob.retry_matched ?? 0}</span><span className="text-white/30">/{aiJob.retried}</span></>
+                <>{' · '}retry-recovered <span className="text-emerald-300 font-mono">{aiJob.retry_matched ?? 0}</span><span className="text-white/50">/{aiJob.retried}</span></>
               )}
             </p>
           </div>
@@ -1505,8 +1505,8 @@ function AdminFlaggedTab() {
       )}
 
       {err && <p className="text-red-300 text-sm">{err}</p>}
-      {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/40 text-sm">Nothing flagged — your library is clean.</p>}
+      {items === null && <p className="text-white/50 text-sm">Loading…</p>}
+      {items && items.length === 0 && <p className="text-white/50 text-sm">Nothing flagged — your library is clean.</p>}
       {items && items.map(it => {
         const hasSuggestion = !!it.ai_suggested_tmdb_id
         const confidence = it.ai_match_confidence ?? 0
@@ -1517,7 +1517,7 @@ function AdminFlaggedTab() {
               <span className="text-amber-400 text-xs uppercase font-semibold flex-shrink-0">{it.match_status || 'flagged'}</span>
               <div className="min-w-0 flex-1">
                 <p className="text-white/90 text-sm font-medium truncate">{it.title}{it.year ? ` (${it.year})` : ''}</p>
-                <p className="text-white/40 text-xs truncate">{it.file_path}</p>
+                <p className="text-white/50 text-xs truncate">{it.file_path}</p>
               </div>
               <button
                 onClick={() => setMatchTarget(it)}
@@ -1558,7 +1558,7 @@ function AdminFlaggedTab() {
             {/* Evaluated but no pick — quieter inline note so the
                 operator knows AI tried and gave up (vs hasn't tried yet). */}
             {evaluated && !hasSuggestion && (
-              <p className="ml-[88px] mt-2 text-white/35 text-[11px] italic">
+              <p className="ml-[88px] mt-2 text-white/50 text-[11px] italic">
                 AI evaluated — no candidate fit
                 {it.ai_match_reasoning ? `: ${it.ai_match_reasoning}` : '.'}
               </p>
@@ -1599,7 +1599,7 @@ function AdminLLMTab() {
     return () => ac.abort()
   }, [])
   if (err) return <p className="text-red-300 text-sm">{err}</p>
-  if (!s) return <p className="text-white/40 text-sm">Loading…</p>
+  if (!s) return <p className="text-white/50 text-sm">Loading…</p>
   const hostedChat = s.provider === 'anthropic' || s.provider === 'openai'
   const openaiEmbeds = s.embed_provider === 'openai'
   const showAnthropicKey = s.provider === 'anthropic'
@@ -1653,9 +1653,9 @@ function AdminLLMTab() {
   return (
     <div className="glass-panel rounded-2xl p-5 space-y-3">
       <h2 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h2>
-      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
+      <p className="text-white/50 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Provider</span>
           <select value={s.provider} onChange={e => changeProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
             <option value="">Default (env config)</option>
             <option value="ollama_cloud">Ollama Cloud</option>
@@ -1664,42 +1664,42 @@ function AdminLLMTab() {
             <option value="openai">OpenAI (ChatGPT)</option>
           </select>
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embedding Provider</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embedding Provider</span>
           <select value={s.embed_provider} onChange={e => changeEmbedProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
             <option value="">Local (Ollama)</option>
             <option value="openai">OpenAI</option>
           </select>
           <span className="block text-[10px] text-amber-300/80 mt-1">Changing the embedding provider or model clears stored vectors and re-embeds the whole library on restart{openaiEmbeds ? ' (OpenAI API cost applies)' : ''}.</span>
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
           <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder={s.provider === 'ollama_cloud' ? OLLAMA_CLOUD_DEFAULT : OLLAMA_LOCAL_DEFAULT} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-          {s.provider === 'ollama_cloud' && <span className="block text-[10px] text-white/40 mt-1">Must be an https ollama.com URL — this is what actually distinguishes Ollama Cloud from Local.</span>}
+          {s.provider === 'ollama_cloud' && <span className="block text-[10px] text-white/50 mt-1">Must be an https ollama.com URL — this is what actually distinguishes Ollama Cloud from Local.</span>}
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed URL (optional)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embed URL (optional)</span>
           <input value={s.embed_url} onChange={e => setS({ ...s, embed_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Chat Model</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Chat Model</span>
           <input value={s.chat_model} onChange={e => setS({ ...s, chat_model: e.target.value })} placeholder={chatPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed Model</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embed Model</span>
           <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} placeholder={embedPlaceholder} list="llm-embed-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Fast Model (optional)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Fast Model (optional)</span>
           <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Smart Model (optional)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Smart Model (optional)</span>
           <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder={smartPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Ollama API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
           <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         {showAnthropicKey && (
-          <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Anthropic API Key {s.has_anthropic_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+          <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Anthropic API Key {s.has_anthropic_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
             <input type="password" data-screenshot-exclude="true" value={anthropicKeyEdit} onChange={e => setAnthropicKeyEdit(e.target.value)} placeholder={s.anthropic_api_key_masked || 'sk-ant-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
           </label>
         )}
         {showOpenAIKey && (
-          <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">OpenAI API Key {s.has_openai_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+          <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">OpenAI API Key {s.has_openai_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
             <input type="password" data-screenshot-exclude="true" value={openaiKeyEdit} onChange={e => setOpenaiKeyEdit(e.target.value)} placeholder={s.openai_api_key_masked || 'sk-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
           </label>
         )}
@@ -1708,11 +1708,11 @@ function AdminLLMTab() {
       <datalist id="llm-embed-models">{embedAvailable.map(m => <option key={m} value={m} />)}</datalist>
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
         <input type="checkbox" checked={s.debug_log} onChange={e => setS({ ...s, debug_log: e.target.checked })} />
-        Debug log <span className="text-white/40 text-xs">(verbose LLM call traces — adds disk I/O)</span>
+        Debug log <span className="text-white/50 text-xs">(verbose LLM call traces — adds disk I/O)</span>
       </label>
       <label className={`flex items-center gap-2 mt-2 text-sm ${hostedChat ? 'text-white/30' : 'text-white/70'}`} title={hostedChat ? 'Always on for Anthropic/OpenAI — they enforce schemas natively' : undefined}>
         <input type="checkbox" disabled={hostedChat} checked={hostedChat ? true : (s.structured_outputs ?? false)} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
-        Structured outputs <span className="text-white/40 text-xs">{hostedChat ? '(always on for Anthropic/OpenAI)' : '(OpenAI json_schema path for the hero rerank — restart required)'}</span>
+        Structured outputs <span className="text-white/50 text-xs">{hostedChat ? '(always on for Anthropic/OpenAI)' : '(OpenAI json_schema path for the hero rerank — restart required)'}</span>
       </label>
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
         Reasoning effort
@@ -1723,19 +1723,19 @@ function AdminLLMTab() {
           <option value="high">High</option>
           <option value="none">None</option>
         </select>
-        <span className="text-white/40 text-xs">{s.provider === 'anthropic' ? 'maps to Claude output effort' : s.provider === 'openai' ? 'sent as reasoning_effort' : 'gpt-oss · structured /v1 path'} · restart required</span>
+        <span className="text-white/50 text-xs">{s.provider === 'anthropic' ? 'maps to Claude output effort' : s.provider === 'openai' ? 'sent as reasoning_effort' : 'gpt-oss · structured /v1 path'} · restart required</span>
       </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker Model (optional)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Reranker Model (optional)</span>
           <input value={s.rerank_model ?? ''} onChange={e => setS({ ...s, rerank_model: e.target.value })} placeholder="fast chat model · listwise rerank · e.g. gpt-oss:20b · blank = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker URL (optional)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Reranker URL (optional)</span>
           <input value={s.rerank_url ?? ''} onChange={e => setS({ ...s, rerank_url: e.target.value })} placeholder="blank = chat endpoint · set only to run rerank on a local box" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Repeat window (hrs)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Repeat window (hrs)</span>
           <input type="number" min={0} value={s.repeat_window_hours ?? 72} onChange={e => setS({ ...s, repeat_window_hours: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} placeholder="anti-repetition · 0 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Taste modes (1–3)</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Taste modes (1–3)</span>
           <input type="number" min={1} max={3} value={s.taste_centroids ?? 3} onChange={e => setS({ ...s, taste_centroids: Math.min(3, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })} placeholder="multi-centroid taste · 1 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
       </div>
@@ -1800,7 +1800,7 @@ function AdminLLMTab() {
         <div className="mt-2 space-y-1 text-xs">
           {testResult.endpoints.map(ep => (
             <div key={ep.role + (ep.provider ?? '') + ep.url} className="text-white/70">
-              <span className="uppercase text-white/40 mr-1">{ep.role}{ep.provider ? ` · ${ep.provider}` : ''}</span>
+              <span className="uppercase text-white/50 mr-1">{ep.role}{ep.provider ? ` · ${ep.provider}` : ''}</span>
               <span className="mr-2">{ep.url}</span>
               {ep.reachable ? (
                 <span className="text-emerald-300">reachable</span>
@@ -1834,7 +1834,7 @@ function AdminOAuthTab() {
     return () => ac.abort()
   }, [])
   if (err) return <p className="text-red-300 text-sm">{err}</p>
-  if (!s) return <p className="text-white/40 text-sm">Loading…</p>
+  if (!s) return <p className="text-white/50 text-sm">Loading…</p>
   return (
     <div className="space-y-4">
       {/* Above the provider cards because it spans them: the prompt exists to
@@ -1964,7 +1964,7 @@ function ReferralPromptSection() {
     }
   }
 
-  if (loading) return <p className="text-white/40 text-sm">Loading…</p>
+  if (loading) return <p className="text-white/50 text-sm">Loading…</p>
 
   return (
     <div className="glass-panel rounded-2xl p-5 space-y-3">
@@ -2015,7 +2015,7 @@ function ReferralPromptSection() {
                         // Dashed and dimmer, with no text cursor: a field that
                         // takes focus and then discards what you type has to
                         // look like one that will.
-                        ? 'bg-white/[0.02] border-dashed border-white/[0.10] text-white/45 cursor-not-allowed'
+                        ? 'bg-white/[0.02] border-dashed border-white/[0.10] text-white/50 cursor-not-allowed'
                         : 'bg-white/[0.04] border-white/[0.06] text-white')}
                   />
                   <input
@@ -2040,7 +2040,7 @@ function ReferralPromptSection() {
                 </div>
                 {issue && <p id={errId} className="text-red-300 text-xs mt-1">{issue}</p>}
                 {locked && !issue && (
-                  <p className="text-white/35 text-xs mt-1">
+                  <p className="text-white/50 text-xs mt-1">
                     Key locked — answers are stored by it. Rename the label instead.
                   </p>
                 )}
@@ -2057,7 +2057,7 @@ function ReferralPromptSection() {
           >
             + Add option
           </button>
-          <span className="text-white/35 text-xs">
+          <span className="text-white/50 text-xs">
             “{REFERRAL_OTHER_LABEL}” with a free-text box is always offered last. It is not
             listed here because it cannot be edited or turned off.
           </span>
@@ -2086,7 +2086,7 @@ function ReferralPromptSection() {
           {saving ? 'Saving…' : 'Save prompt'}
         </button>
         {blockedReason && (
-          <span id="referral-save-blocked" className="text-white/45 text-xs">{blockedReason}</span>
+          <span id="referral-save-blocked" className="text-white/50 text-xs">{blockedReason}</span>
         )}
         <span role="status" className="text-white/55 text-xs">{saved ? 'Saved.' : ''}</span>
       </div>
@@ -2132,21 +2132,21 @@ function ReferralSummarySection() {
       </div>
 
       <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
-      {!data && !err && <p className="text-white/40 text-sm">Loading…</p>}
+      {!data && !err && <p className="text-white/50 text-sm">Loading…</p>}
       {data && (
         <>
           <div className="flex gap-6 text-sm">
-            <span className="text-white/80">{data.answered.toLocaleString()} <span className="text-white/45">answered</span></span>
-            <span className="text-white/80">{data.skipped.toLocaleString()} <span className="text-white/45">skipped</span></span>
-            <span className="text-white/80">{data.pending.toLocaleString()} <span className="text-white/45">not yet asked</span></span>
+            <span className="text-white/80">{data.answered.toLocaleString()} <span className="text-white/50">answered</span></span>
+            <span className="text-white/80">{data.skipped.toLocaleString()} <span className="text-white/50">skipped</span></span>
+            <span className="text-white/80">{data.pending.toLocaleString()} <span className="text-white/50">not yet asked</span></span>
           </div>
           {data.total === 0 ? (
-            <p className="text-white/45 text-sm">
+            <p className="text-white/50 text-sm">
               No one has been asked yet. Accounts become eligible when they sign up through a
               provider with its invite bypass turned on.
             </p>
           ) : data.by_source.length === 0 ? (
-            <p className="text-white/45 text-sm">No answers yet.</p>
+            <p className="text-white/50 text-sm">No answers yet.</p>
           ) : (
             <div className="space-y-1.5">
               {data.by_source.map(row => {
@@ -2158,7 +2158,7 @@ function ReferralSummarySection() {
                         tidies the list. A null label does NOT mean removed:
                         the implicit "other" never has a stored option, so the
                         key decides the styling, not the label's presence. */}
-                    <span className={`w-48 shrink-0 text-sm ${isRemovedSummaryRow(row) ? 'text-white/45 italic' : 'text-white/80'}`}>
+                    <span className={`w-48 shrink-0 text-sm ${isRemovedSummaryRow(row) ? 'text-white/50 italic' : 'text-white/80'}`}>
                       {row.label ?? referralSourceLabel(row.key, [])}
                     </span>
                     <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
@@ -2193,20 +2193,20 @@ function ReferralCell({ user, options, answeredAt }: {
   if (!user.referral_status) {
     // Never eligible — a password signup, an invited user, or a provider with
     // no bypass. Not "we forgot to ask".
-    return <span className="text-white/25" title="Not eligible — signed up with an invite or a password">—</span>
+    return <span className="text-white/50" title="Not eligible — signed up with an invite or a password">—</span>
   }
   if (user.referral_status === 'pending') {
-    return <span className="text-white/40 text-sm">Pending</span>
+    return <span className="text-white/50 text-sm">Pending</span>
   }
   if (user.referral_status === 'skipped') {
-    return <span className="text-white/40 text-sm">— (skipped)</span>
+    return <span className="text-white/50 text-sm">— (skipped)</span>
   }
   const label = referralSourceLabel(user.referral_source ?? '', options)
   return (
     <span className="text-white/70 text-sm" title={answeredAt ? `Answered ${answeredAt}` : undefined}>
       {label}
       {user.referral_detail && (
-        <span className="text-white/45"> — “{truncateChars(user.referral_detail, 60)}”</span>
+        <span className="text-white/50"> — “{truncateChars(user.referral_detail, 60)}”</span>
       )}
     </span>
   )
@@ -2278,7 +2278,7 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
       </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70">
-          <span className="block text-xs text-white/40 mb-1">Client ID</span>
+          <span className="block text-xs text-white/50 mb-1">Client ID</span>
           <input
             value={clientID}
             onChange={e => setField(clientIDKey, e.target.value)}
@@ -2286,7 +2286,7 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
           />
         </label>
         <label className="text-sm text-white/70">
-          <span className="block text-xs text-white/40 mb-1">
+          <span className="block text-xs text-white/50 mb-1">
             Client Secret {hasSecret && <span className="text-emerald-300 text-[10px]">SET</span>}
           </span>
           <input
@@ -2299,8 +2299,8 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
           />
         </label>
         <label className="md:col-span-2 text-sm text-white/70">
-          <span className="block text-xs text-white/40 mb-1">
-            Redirect URL <span className="text-white/30">(must match {label} Console verbatim)</span>
+          <span className="block text-xs text-white/50 mb-1">
+            Redirect URL <span className="text-white/50">(must match {label} Console verbatim)</span>
           </span>
           <input
             value={redirectURL}
@@ -2532,9 +2532,9 @@ function StatTile({ label, value, icon, color, hint, sub }: StatTileProps) {
       >
         <Icon name={icon} size={13} className={color} />
         {label}
-        {hint && <span className="text-white/30">ⓘ</span>}
+        {hint && <span className="text-white/35">ⓘ</span>}
       </div>
-      {sub && <p className="text-white/35 text-[10px] mt-1 tabular-nums">{sub}</p>}
+      {sub && <p className="text-white/50 text-[10px] mt-1 tabular-nums">{sub}</p>}
     </div>
   )
 }
@@ -2924,7 +2924,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
             <div className="mb-6 px-5 py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">{statsErr}</div>
           )}
           {statsLoading && !stats && (
-            <div className="mb-6 text-white/40 text-sm">Loading stats…</div>
+            <div className="mb-6 text-white/50 text-sm">Loading stats…</div>
           )}
           {(skipStatus?.enabled || embStatus?.enabled) && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
@@ -3005,35 +3005,35 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                 <h2 className="text-white font-semibold mb-4">Server</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Version</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Version</p>
                     <p className="text-white/90">{stats.version}</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Uptime</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Uptime</p>
                     <p className="text-white/90">{stats.uptime}</p>
                   </div>
                   <div title="Aurora's Go process RSS after the last GC. FFmpeg transcoders run as separate subprocesses and aren't counted here. PostgreSQL runs in its own container with its own memory budget.">
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1 cursor-help">Memory <span className="text-white/30">ⓘ</span></p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span></p>
                     <p className="text-white/90">{stats.memory_alloc_mb} MB</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Goroutines</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Goroutines</p>
                     <p className="text-white/90">{stats.goroutines}</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Libraries</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Libraries</p>
                     <p className="text-white/90">{stats.library_count}</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Episodes</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Episodes</p>
                     <p className="text-white/90">{stats.episode_count.toLocaleString()}</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Library Size</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Library Size</p>
                     <p className="text-white/90">{fmtBytes(stats.total_file_size_bytes)}</p>
                   </div>
                   <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Active Parties</p>
+                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Active Parties</p>
                     <p className="text-white/90">{stats.active_parties}</p>
                   </div>
                 </div>
@@ -3069,7 +3069,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
                 <h2 className="text-white font-semibold mb-1">Invite a user</h2>
-                <p className="text-white/40 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
+                <p className="text-white/50 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
               </div>
               <button
                 disabled={inviteBusy}
@@ -3103,7 +3103,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           </div>
 
           <div className="glass-panel rounded-2xl overflow-hidden">
-          {usersLoading && !users && <p className="p-6 text-white/40 text-sm">Loading users…</p>}
+          {usersLoading && !users && <p className="p-6 text-white/50 text-sm">Loading users…</p>}
           {usersErr && <p className="p-6 text-red-300 text-sm">{usersErr}</p>}
           {users && (
             <table className="data-table w-full">
@@ -3128,7 +3128,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                         </div>
                         <div>
                           <p className="text-white/90 text-sm font-medium">{u.username}</p>
-                          <p className="text-white/40 text-xs">{u.email || '—'}</p>
+                          <p className="text-white/50 text-xs">{u.email || '—'}</p>
                         </div>
                       </div>
                     </td>
@@ -3147,8 +3147,8 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                         answeredAt={u.referral_answered_at ? fmtRelative(u.referral_answered_at) : undefined}
                       />
                     </td>
-                    <td className="text-white/40">{fmtRelative(u.created_at)}</td>
-                    <td className="text-white/40">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
+                    <td className="text-white/50">{fmtRelative(u.created_at)}</td>
+                    <td className="text-white/50">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
                     <td className="text-right">
                       {/* 3-dot actions: promote/demote + delete. Hidden on the
                           current admin's own row — the server refuses both
@@ -3167,7 +3167,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                   </tr>
                 ))}
                 {users.length === 0 && (
-                  <tr><td colSpan={7} className="text-white/40 text-sm text-center py-6">No users found.</td></tr>
+                  <tr><td colSpan={7} className="text-white/50 text-sm text-center py-6">No users found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -3184,7 +3184,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                 server's distinct event types, so it can't drift from the
                 types handlers actually write, and only lists what this
                 instance has recorded. */}
-            <label className="flex items-center gap-2 text-xs text-white/40">
+            <label className="flex items-center gap-2 text-xs text-white/50">
               <span>Filter</span>
               <select
                 value={activityType}
@@ -3205,12 +3205,12 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
               </select>
             </label>
           </div>
-          {activityLoading && !activity && <p className="text-white/40 text-sm">Loading activity…</p>}
+          {activityLoading && !activity && <p className="text-white/50 text-sm">Loading activity…</p>}
           {activityErr && <p className="text-red-300 text-sm">{activityErr}</p>}
           {activity && (
             <div className="space-y-3">
               {activity.length === 0 && (
-                <p className="text-white/40 text-sm">
+                <p className="text-white/50 text-sm">
                   {activityType
                     ? `No "${activityType.replace(/_/g, ' ')}" activity recorded.`
                     : 'No recent activity.'}
@@ -3224,8 +3224,8 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                   <div className="flex-1 min-w-0">
                     <span className="text-white/70 text-sm">{e.event_type.replace(/_/g, ' ')}</span>
                   </div>
-                  {e.username && <span className="text-white/40 text-xs">{e.username}</span>}
-                  <span className="text-white/30 text-xs whitespace-nowrap">{fmtRelative(e.created_at)}</span>
+                  {e.username && <span className="text-white/50 text-xs">{e.username}</span>}
+                  <span className="text-white/50 text-xs whitespace-nowrap">{fmtRelative(e.created_at)}</span>
                 </div>
               ))}
             </div>
@@ -3270,17 +3270,17 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
             </div>
           </div>
           {logLevel === 'problems' && (
-            <p className="text-white/40 text-[11px] font-sans mb-3">
+            <p className="text-white/50 text-[11px] font-sans mb-3">
               Warnings and errors are kept in a dedicated buffer, so these reach
               much further back than the full log.
             </p>
           )}
-          {logsLoading && !logs && <p className="text-white/40 text-sm font-sans">Loading logs…</p>}
+          {logsLoading && !logs && <p className="text-white/50 text-sm font-sans">Loading logs…</p>}
           {logsErr && <p className="text-red-300 text-sm font-sans">{logsErr}</p>}
           {logs && (
             <div className="space-y-1 max-h-[500px] overflow-y-auto">
               {logs.length === 0 && (
-                <p className="text-white/40 text-sm font-sans">
+                <p className="text-white/50 text-sm font-sans">
                   {logLevel === 'problems'
                     ? 'No warnings or errors recorded.'
                     : 'No log entries.'}
@@ -3325,7 +3325,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                 }
                 return (
                   <div key={i} className="flex gap-3">
-                    <span className="text-white/40 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
+                    <span className="text-white/50 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
                     <span className={`flex-shrink-0 ${
                       entry.level === 'ERROR' || entry.level === 'error' ? 'text-red-400' :
                       entry.level === 'WARN' || entry.level === 'warn' ? 'text-amber-400' :

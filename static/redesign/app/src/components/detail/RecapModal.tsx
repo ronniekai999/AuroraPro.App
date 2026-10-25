@@ -202,7 +202,7 @@ function RecapModalSession({
                     <div className="h-4 w-[97%] rounded bg-white/10" />
                     <div className="h-4 w-[85%] rounded bg-white/10" />
                     <div className="h-4 w-[60%] rounded bg-white/10" />
-                    <p className="pt-1 text-xs text-white/40">Catching you up…</p>
+                    <p className="pt-1 text-xs text-white/50">Catching you up…</p>
                   </div>
                 )}
                 {!loading && error && (
@@ -226,7 +226,7 @@ function RecapModalSession({
               </div>
 
               <footer className="flex flex-col gap-3 border-t border-white/10 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7">
-                <p className="max-w-[290px] text-[11.5px] text-white/40">Based on what you’ve watched — never reveals anything past your spot.</p>
+                <p className="max-w-[290px] text-[11.5px] text-white/50">Based on what you’ve watched — never reveals anything past your spot.</p>
                 <div className="flex flex-wrap items-center justify-end gap-2.5">
                   <button type="button" onClick={onClose} className="rounded-full border border-white/[0.08] bg-white/[0.06] px-4 py-2 text-sm font-medium text-white/85 transition-colors hover:bg-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300">Close</button>
                   {canOpenAsk && (

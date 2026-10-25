@@ -139,14 +139,14 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
               <span className="text-white/80 text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">
                 Scanning <strong className="text-purple-200">{lib.name}</strong>
                 {s.total_files > 0 && (
-                  <span className="text-white/40 ml-2">
+                  <span className="text-white/50 ml-2">
                     {s.scanned_files.toLocaleString()} / {s.total_files.toLocaleString()}
                     {s.new_files > 0 && <> · <span className="text-emerald-300">{s.new_files} new</span></>}
                   </span>
                 )}
               </span>
               {s.current_file && (
-                <span className="text-white/40 text-[10px] truncate max-w-[40%]" title={s.current_file}>
+                <span className="text-white/50 text-[10px] truncate max-w-[40%]" title={s.current_file}>
                   {/* Audit L4 — server already passes the basename;
                       the extra split is harmless but unnecessary. */}
                   {s.current_file}

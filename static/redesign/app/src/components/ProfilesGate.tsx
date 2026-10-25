@@ -340,7 +340,7 @@ export function ProfilesGate({
               </span>
               <span>
                 <span className="block font-display text-[15px] font-bold">Add profile</span>
-                <span className="block text-[11.5px] text-white/45">Taste onboarding in Settings</span>
+                <span className="block text-[11.5px] text-white/50">Taste onboarding in Settings</span>
               </span>
             </button>
           )}
