@@ -447,12 +447,20 @@ none of them modelled here:
   `walkFailed` and prunes nothing — the check refuses to answer rather than
   guess, which is right, and still an exit you cannot clear except by fixing
   the path. That holds with GNU coreutils and with uutils (the default on
-  Ubuntu 26.04) alike; only the reason it prints differs. **A non-directory
-  partway down a root** gives exit 2 only when it is not executable; an
-  executable regular file mid-path is reported as "does not exist" instead,
-  which is the correct *answer* (the scan's
-  `EvalSymlinks` fails with ENOTDIR, so it skips the prune) under a wrong
-  explanation.
+  Ubuntu 26.04) alike, for the same reason. **A non-directory partway down a
+  root** gives exit 2 only when it is not executable; an executable regular
+  file mid-path is reported as "does not exist" instead, which is the
+  correct *answer* (the scan's `EvalSymlinks` fails with ENOTDIR, so it skips
+  the prune) under a wrong explanation.
+- **A library whose only media are links this check cannot resolve** the
+  way the scanner does — a chain of more than 40 links, a target behind a
+  directory the checking user cannot enter, a non-directory followed by more
+  path (`a.mkv/.`) — gives exit 2, listing the links. The scan may find
+  them, in which case it prunes everything else, so the check will not call
+  the library empty; it may also not (it shields a link to `a.mkv/.`), and
+  then exit 2 is an over-report. Fix the links, or re-run as the user Aurora
+  runs as. With other media found, such links are only counted as missing,
+  with a note saying so.
 
 The same script is worth running any time you want to know what a scan is about
 to do: after restoring a backup, after a disk goes missing, or before an
