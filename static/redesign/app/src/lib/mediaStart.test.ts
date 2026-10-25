@@ -150,15 +150,10 @@ describe('subtitleCueShiftQuery', () => {
   })
 
   it('adds the measured start to a remux, beside the unchanged integer start', () => {
-    expect(subtitleCueShiftQuery(25, true, 19.946009)).toBe('&start=25&remux=1&media_start=19.95')
-    expect(subtitleCueShiftQuery(20, true, 9.96)).toBe('&start=20&remux=1&media_start=9.96')
-    expect(subtitleCueShiftQuery(5, true, 0)).toBe('&start=5&remux=1&media_start=0.00')
-  })
-
-  it('sends the measured start to 10 ms, the step the server uses it at', () => {
-    expect(subtitleCueShiftQuery(25, true, 19.944)).toBe('&start=25&remux=1&media_start=19.94')
-    expect(subtitleCueShiftQuery(25, true, 19.9551)).toBe('&start=25&remux=1&media_start=19.96')
-    expect(subtitleCueShiftQuery(25, true, 24.999)).toBe('&start=25&remux=1&media_start=25.00')
+    // Echoed at the playlist line's 6 decimals.
+    expect(subtitleCueShiftQuery(25, true, 19.946009)).toBe('&start=25&remux=1&media_start=19.946009')
+    expect(subtitleCueShiftQuery(20, true, 9.96)).toBe('&start=20&remux=1&media_start=9.960000')
+    expect(subtitleCueShiftQuery(5, true, 0)).toBe('&start=5&remux=1&media_start=0.000000')
   })
 
   it('leaves a remux with nothing measured (or nothing believable) to the server prediction', () => {

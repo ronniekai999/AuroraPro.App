@@ -897,12 +897,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
   const activeTrackRef = useRef<HTMLTrackElement | null>(null)
-  // A subtitle pick made while this session's RemuxClock still awaits its
-  // measured start (no level load yet): its <track> is created once the clock
-  // knows, so the cue shift is requested once, against the measured start.
-  // Only that clock's session applies it (applyDeferredSubtitle).
-  // applySubtitleRef is the latest applySubtitle for the play effect to call.
-  const pendingSubtitleRef = useRef<{ clock: RemuxClock; index: number } | null>(null)
+  // The index of a subtitle pick made while this session's RemuxClock still
+  // awaits its measured start (no level load yet): its <track> is created once
+  // the clock knows, so the cue shift is requested once, against the measured
+  // start (applyDeferredSubtitle). The play effect's cleanup drops it with its
+  // session. applySubtitleRef is the latest applySubtitle for the play effect
+  // to call.
+  const pendingSubtitleRef = useRef<number | null>(null)
   const applySubtitleRef = useRef<(index: number) => void>(() => {})
   // Phase 5 — guard so the transcode fallback fires at most once per
   // target. Without this, a chronically broken codec would loop
@@ -2738,7 +2739,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // with B-frames) and again after. The play effect creates it then.
     const clock = remuxClockRef.current
     if (clock?.awaitingMeasuredStart) {
-      pendingSubtitleRef.current = { clock, index }
+      pendingSubtitleRef.current = index
       console.info('[Aurora.sub] <track> deferred until the remux reports its media start', { trackIndex: index })
       return
     }
@@ -3279,9 +3280,26 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Reapply the latest pick. The new content has it: one from before
         // this point was dropped just above if not, and one made after it
         // comes from the new content's own list (availableSubs).
+        //
+        // Idempotent: a <track> that exists now was built by THIS boot for
+        // the latest pick (the previous one was removed above, picks made
+        // while resolving build none, and every pick or Off replaces it), so
+        // it is kept, not rebuilt — a rebuild fetches the track again, for an
+        // uncached embedded track a second full extraction. Every caller has
+        // just disabled every text track, ours included; turn ours back on.
+        // Through applySubtitleRef, not this effect's applySubtitle: that one
+        // closes over the subtitle list of the render that started the boot,
+        // which after a title change is the previous title's (labels,
+        // languages, bitmap flags).
         const restoreSubtitle = () => {
           const wanted = currentSubIndexRef.current
-          if (wanted >= 0) applySubtitle(wanted)
+          if (wanted < 0) return
+          const built = activeTrackRef.current
+          if (built) {
+            try { if (built.track) built.track.mode = 'showing' } catch { /* defensive */ }
+            return
+          }
+          applySubtitleRef.current(wanted)
         }
 
         const resumeSec = (target.resumePositionMs && target.resumePositionMs > 0)
@@ -3588,13 +3606,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           return partyTargetAbsSec(live.tickRef.current, live.isPlaying, live.clockOffsetRef?.current ?? 0, Date.now())
         }
         // The subtitle pick applySubtitle held until this clock knew its
-        // measured start (or that none is coming), applied now. A pick held
-        // by an earlier session's clock is not this session's to apply.
+        // measured start (or that none is coming), applied now; applySubtitle
+        // replaces the hold. One held by an earlier session never reaches
+        // here: that session's cleanup dropped it before this one began.
         const applyDeferredSubtitle = () => {
           const pending = pendingSubtitleRef.current
-          if (cancelled || !pending || pending.clock !== clock) return
-          pendingSubtitleRef.current = null
-          applySubtitleRef.current(pending.index)
+          if (pending !== null) applySubtitleRef.current(pending)
         }
         const noteMediaWindow = (w: MediaWindow) => {
           if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
@@ -4364,6 +4381,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       remuxClockUnbindRef.current?.()
       remuxClockUnbindRef.current = null
       remuxClockRef.current = null
+      // A pick still held by this session's clock goes with it (the pick
+      // itself stays in currentSubIndexRef for the next boot's restore).
+      pendingSubtitleRef.current = null
       mediaCleanupRef.current?.()
       mediaCleanupRef.current = null
       closeAndCleanup()

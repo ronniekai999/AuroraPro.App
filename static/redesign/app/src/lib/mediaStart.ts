@@ -146,16 +146,15 @@ export function sessionMediaOriginSec(sessionStartSec: number, reportedSec: numb
  *
  * `start=` stays the whole-second start_sec (the server parses an integer), so
  * an older server ignores `media_start=` and predicts, as before.
- * `media_start=` is sent to 10 ms, the step the server uses it at (each
- * distinct shift is a cached VTT there; media_start.go
- * clientMediaStartStepsPerSec). `measuredStartSec` is
+ * `media_start=` echoes the playlist's value, at its 6 decimals; the server
+ * shifts by it in memory and caches nothing for it. `measuredStartSec` is
  * RemuxClock.measuredStartSec.
  */
 export function subtitleCueShiftQuery(sessionStartSec: number, remux: boolean, measuredStartSec: number | null): string {
   if (!(sessionStartSec > 0)) return ''
   if (!remux) return `&start=${sessionStartSec}`
   const measured = plausibleMediaStartSec(sessionStartSec, measuredStartSec, true)
-  return `&start=${sessionStartSec}&remux=1` + (measured === null ? '' : `&media_start=${measured.toFixed(2)}`)
+  return `&start=${sessionStartSec}&remux=1` + (measured === null ? '' : `&media_start=${measured.toFixed(6)}`)
 }
 
 /**
