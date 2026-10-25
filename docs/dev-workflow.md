@@ -42,16 +42,19 @@ flowchart TD
    `npm run audit` unless you have just built.
 
    **The browser checks need Chromium, and `npm ci` does not install it** — modern
-   Playwright has no postinstall step. On a fresh machine, once:
+   Playwright has no postinstall step. On a fresh machine, and again after a
+   Playwright upgrade (each release expects its own browser build):
 
    ```bash
    cd static/redesign/app && npx playwright install chromium
    ```
 
-   Without it the gate fails at the first browser check (page alignment), with
-   Playwright's own message suggesting `npx playwright install`; the `chromium`
-   form above is enough. Set `CHROMIUM_PATH` to override the binary before
-   review. Loop back on failure.
+   On Linux without the browser's system libraries, add `--with-deps` (it uses
+   `sudo`), as CI does. Without a browser the gate fails at the first browser
+   check (page alignment), with Playwright's own message naming the install
+   command. `CHROMIUM_PATH` set to an existing binary uses that one instead; a
+   path that does not exist is ignored, and an empty one means Playwright's own
+   browser, which is how CI runs. Loop back on failure.
 5. **Independent deep-debug agent review** — dispatch a separate, fresh-context
    agent to adversarially review *the complete current diff*. The implementing
    agent's self-review does not satisfy this gate. The reviewer is read-only and

@@ -136,16 +136,18 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('static/redesign/app/package-lock.json') }}
+          key: playwright-shell-${{ runner.os }}-${{ hashFiles('static/redesign/app/package-lock.json') }}
 
       - name: Install Chromium
         run: npx playwright install --with-deps --only-shell chromium
 
       # `npm run audit` minus its build, which ran above: the gate CLAUDE.md
-      # requires for frontend changes, which until now bound only locally. Each
-      # check exits non-zero on a problem and the chain stops at the first, so
-      # any one fails the job. A new check belongs in `audit:checks`: appended
-      # to `audit` instead, it would run locally and never here.
+      # requires for frontend changes, which until now ran only when someone ran
+      # it locally. Each check exits non-zero on any problem it asserts (the
+      # advisory rows and the cascade report only print), and the chain stops
+      # at the first, so any one fails the job. A new check belongs in
+      # `audit:checks`: appended to `audit` instead, it would run locally and
+      # never here.
       - name: Audit
         env:
           CHROMIUM_PATH: ""
