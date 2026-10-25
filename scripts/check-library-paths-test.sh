@@ -868,11 +868,14 @@ cat > "$TMP/probe.sh" <<'PROBE'
 source /dev/stdin <<< "$(sed -n '/^classify_root() {/,/^}/p' "$1")"
 classify_root "$2"
 PROBE
-cr_is() {  # $1 = path, $2 = expected first word, $3 = label
+# $4, when given, must appear in the verdict too: it names the guard a case is
+# meant to reach, so one guard cannot pass a case written for another.
+# CR_FAKEBIN, when set, goes first on PATH (the fake-realpath cases below).
+cr_is() {  # $1 = path, $2 = expected first word, $3 = label, [$4 = substring]
     local got
-    got="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$1" 2>&1)"
+    got="$(PATH="${CR_FAKEBIN:+$CR_FAKEBIN:}$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$1" 2>&1)"
     case "$got" in
-        "$2"*) ok "$3" ;;
+        "$2"*"${4:-}"*) ok "$3" ;;
         *) bad "$3 (got: $got)" ;;
     esac
 }
@@ -888,6 +891,43 @@ cr_is "$CR/dangling/child"  absent   "a path under a dangling symlink is absent"
 cr_is "$CR/via-blocked"     blocked  "a symlink INTO an untraversable directory is blocked"
 cr_is "$CR/blocked/inner"   blocked  "a direct path into an untraversable directory is blocked"
 cr_is "$CR/loopa"           blocked  "a symlink loop is blocked, never absent"
+# ── 33b. …under a realpath that FAILS on the loop ─────────────────
+# On a symlink loop `realpath -m` parts company with itself: GNU coreutils
+# carries on lexically and succeeds, so the recursion meets the depth cap;
+# uutils — the default `coreutils` on Ubuntu 26.04 — fails with ELOOP and
+# prints nothing. classify_root recursed on that nothing and printed
+# `resolved`, and the case above went red on the 26.04 runner. On a GNU
+# runner the line above never reaches the status check at all, so these
+# fakes put the uutils behaviour on PATH and pin it everywhere.
+#
+# Only `-m` is faked; every other form passes through to the real realpath.
+# Each shape reaches ONE guard and asserts that guard's message, so neither
+# can stand in for the other: dropping the status check sends the first
+# shape to the absolute-path check (wrong message) and the second straight
+# to `absent`, and dropping the absolute-path check sends the third to
+# `resolved`.
+REALRP="$(command -v realpath)"
+fake_rp() {  # $1 = name, $2 = what `realpath -m -- <target>` does instead
+    mkdir -p "$TMP/fakerp-$1"
+    printf '#!/bin/sh\n[ "$1" = -m ] && { %s; }\nexec "%s" "$@"\n' "$2" "$REALRP" > "$TMP/fakerp-$1/realpath"
+    chmod a+rx "$TMP/fakerp-$1" "$TMP/fakerp-$1/realpath"
+}
+# Exactly what uutils 0.8.0 and 0.10.0 do: an error on stderr, nothing on
+# stdout, status 1.
+fake_rp eloop 'echo "realpath: $3: Too many levels of symbolic links" >&2; exit 1'
+# Prints a path that would read as ABSENT if believed, and fails. Not a
+# shape any implementation was seen to produce; it is here because without
+# it the status check is pinned only by a message.
+fake_rp liar 'printf "%s\n" "$3-gone"; exit 1'
+# Succeeds and prints nothing: the quietly broken binary.
+fake_rp silent 'exit 0'
+CR_FAKEBIN="$TMP/fakerp-eloop"
+cr_is "$CR/loopa"           blocked  "…and under a realpath that FAILS on the loop, as uutils does" "could not be resolved"
+CR_FAKEBIN="$TMP/fakerp-liar"
+cr_is "$CR/loopa"           blocked  "…and one that prints a path but exits non-zero is not believed" "could not be resolved"
+CR_FAKEBIN="$TMP/fakerp-silent"
+cr_is "$CR/loopa"           blocked  "…and one that exits 0 and prints nothing is not 'resolved'" "not an absolute path"
+CR_FAKEBIN=""
 # Search permission, not read, is what makes an absence conclusive. 0711 is the
 # ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
 # absent root under a home directory into an exit 2 nobody could clear.
@@ -1164,22 +1204,38 @@ expect_out "could not record what find discovered" "…through the recording gua
 # one, not the exotic one.
 fixture writerorder
 R="$TMP/writerorder"; mkdir -p "$R"
-: > "$R/keep.mkv"
-# MANY dangling symlinks, and then an ASSERTED precondition. The defect needs
-# find's LAST emitted entry to take a `continue` path, and find emits in
-# readdir order — which is a hash order, not creation or name order, so it
-# cannot be arranged by naming. One symlink and one file put the FILE last on
-# every pair I tried, which would have made this case vacuous. Twenty makes it
-# overwhelmingly likely, and the check below makes it impossible for the case
-# to pass without it: a fixture that does not reproduce the ordering fails
+# MANY dangling symlinks around ONE plain file, and then an ASSERTED
+# precondition. The defect needs find's LAST emitted entry to take a
+# `continue` path, and find emits in readdir order, which is the
+# FILESYSTEM's, not find's: ext4 hands back a hash order, and tmpfs — which
+# Ubuntu 26.04's systemd mounts on /tmp by default — hands back NEWEST FIRST
+# (measured on Linux 6.18). The first version created the file first and
+# twenty symlinks after it, which put the file mid-way through an ext4 hash
+# order and LAST on tmpfs. Reproduced on tmpfs with GNU find; the likely
+# reason this case went red on the 26.04 runner with no change to either
+# script.
+# So the file sits in the MIDDLE of both creation order and name order
+# (a01…a10, then m-keep, then z01…z10): it cannot come last whether the
+# directory is read oldest first, newest first, or sorted either way. A hash
+# order can still put it last, so a few other names are tried — each one is
+# hashed afresh — and the check below then makes it impossible for the case
+# to pass without the ordering: a fixture that does not reproduce it fails
 # loudly instead of quietly asserting nothing.
-i=1; while [ "$i" -le 20 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/d$i.mkv"; i=$((i + 1)); done
+i=1; while [ "$i" -le 10 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/a$(printf %02d "$i").mkv"; i=$((i + 1)); done
+keep="$R/m-keep.mkv"; : > "$keep"
+i=1; while [ "$i" -le 10 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/z$(printf %02d "$i").mkv"; i=$((i + 1)); done
 lastentry="$(find "$R" ! -type d -print0 | tr '\0' '\n' | grep -v '^$' | tail -1)"
+try=1
+while [ ! -L "$lastentry" ] && [ "$try" -le 5 ]; do
+    rm -f "$keep"; keep="$R/m-keep$try.mkv"; : > "$keep"
+    lastentry="$(find "$R" ! -type d -print0 | tr '\0' '\n' | grep -v '^$' | tail -1)"
+    try=$((try + 1))
+done
 if [ ! -L "$lastentry" ]; then
     bad "writer-ordering: find emitted a plain file last ($lastentry), so the continue-path ordering this case needs was not built — it would pass without testing anything"
 fi
 echo "$R" > "$FIX/roots"
-printf '%s\n%s\n' "$R/keep.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+printf '%s\n%s\n' "$keep" "$R/DELETED.mkv" > "$FIX/recorded"
 OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
        bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
 RC=$?
@@ -1356,6 +1412,34 @@ exit 0' \
 guard_case '#!/bin/sh
 exit 0' \
   "did not report a directory that exists" "a find that outputs nothing at all → caught at startup" find
+
+# ── 47. A looping root, end to end ────────────────────────────────
+# Case 33b pins classify_root itself. End to end, the uutils failure did NOT
+# reach exit 0: classify_root said `resolved`, and the `realpath -e` behind
+# it — there for exactly this, "classify_root said resolved, so this should
+# be unreachable" — failed on the loop and refused instead. So the exit code
+# alone cannot tell the fix from the bug; the reason can. The verdict must
+# come from classify_root, under whichever realpath is installed (GNU meets
+# the depth cap, uutils the status check) and under the uutils-shaped fake.
+fixture e2eloop
+L="$TMP/e2eloop"; mkdir -p "$L"
+ln -s "$L/loopb" "$L/loopa"; ln -s "$L/loopa" "$L/loopb"
+echo "$L/loopa" > "$FIX/roots"
+printf '%s\n' "$L/loopa/A.mkv" > "$FIX/recorded"
+for rpbin in "" "$TMP/fakerp-eloop"; do
+    what="the installed realpath"; [ -n "$rpbin" ] && what="a realpath that fails on loops"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+    RC=$?
+    expect_rc 2 "a looping root under $what → exit 2"
+    case "$OUT" in
+        *"resolves component by component but not as a whole"*)
+            bad "…but only through the realpath -e backstop: classify_root called the loop resolved ($what)"
+            printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+        *"symlink chain too deep"*|*"could not be resolved"*)
+            ok "…and classify_root itself blocked it ($what)" ;;
+        *)  bad "…for no reason this case knows ($what)"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+    esac
+done
 
 echo
 echo "passed: $PASS   failed: $FAIL"

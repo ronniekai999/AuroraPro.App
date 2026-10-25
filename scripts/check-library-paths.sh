@@ -116,6 +116,15 @@ die()  {
 # states they cover (a stripped container, a shadowed binary on PATH) are real
 # and produce the all-clear rather than an error. Recorded so the next review
 # does not spend a round rediscovering that they survive mutation.
+#
+# GNU coreutils OR uutils. Ubuntu 26.04's default `coreutils` package is
+# uutils (find, grep and sed stay GNU there), and every coreutils
+# invocation in this file was measured against GNU 9.4 and uutils 0.8.0
+# and 0.10.0, as root and unprivileged, on the awkward inputs (loops,
+# unreadable and non-directory components, newlines, invalid UTF-8,
+# byte-distinct lookalikes). One form differs: `realpath -m` on a symlink
+# loop, which uutils refuses — see classify_root. Re-measure before
+# relying on a new flag of any of these.
 for tool in realpath psql comm sort find grep sed wc readlink mktemp tr; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
@@ -136,7 +145,12 @@ q() { "${PSQL[@]}" -c "$1"; }
 
 # canon: lexical normalisation only — no symlink resolution. This is what
 # filepath.Clean does, and resolving symlinks here would hide the very case
-# this script exists to catch.
+# this script exists to catch. GNU coreutils and uutils agree on -ms
+# (measured, loops and unreadable components included; under strace neither
+# makes a filesystem call on its operand). Its callers do not check its
+# status: both hand the answer straight to classify_root, which reports
+# anything that is not an absolute path — the empty string a failing
+# realpath leaves — as blocked.
 canon() { realpath -ms -- "$1"; }
 
 # classify_root PATH — decides why a path could not be resolved, and is the
@@ -170,6 +184,19 @@ canon() { realpath -ms -- "$1"; }
 #     than the cap — is blocked. Unknown is never absent.
 classify_root() {
     local path="$1" depth="${2:-0}" parentdir
+    # Absolute paths only. Every caller hands this one — canon() of a root
+    # already refused unless it starts with `/`, or realpath -m's answer
+    # below — so a path that is not absolute means a tool failed QUIETLY and
+    # handed over an empty string. Without this the walk below never runs
+    # and the function falls through to `resolved`: that is how a symlink
+    # loop read as `resolved` on Ubuntu 26.04, whose `realpath` (uutils)
+    # fails on a loop where GNU's does not. Checked first, before anything
+    # can be concluded about a path that is not one.
+    case "$path" in
+        /*) ;;
+        *)  printf 'blocked %s (not an absolute path: a path tool failed or printed nothing)\n' "${path:-(empty)}"
+            return ;;
+    esac
     # ELOOP guard. Linux gives up at 40; well under that is fine, and a chain
     # this deep is not something to answer confidently about anyway.
     if [ "$depth" -gt 16 ]; then
@@ -202,9 +229,33 @@ classify_root() {
                     *)  parentdir="${acc%/*}"
                         tgt="${parentdir:-}/$tgt" ;;
                 esac
-                # realpath -m is lexical and never fails, so it cannot
-                # reintroduce the conflation this function exists to avoid.
-                classify_root "$(realpath -m -- "$tgt")" "$((depth + 1))"
+                # realpath -m is neither lexical nor failure-free, and this
+                # comment used to say it was both. It FOLLOWS every symlink it
+                # can resolve and treats only the unresolvable remainder
+                # lexically (so a `..` after a resolvable link applies to the
+                # link's target, as the kernel's would). And on a symlink LOOP
+                # the two implementations part: GNU coreutils carries on
+                # lexically and succeeds — the recursion then runs into the
+                # depth cap above, which is blocked — while uutils, the
+                # default `coreutils` on Ubuntu 26.04, fails with ELOOP and
+                # prints nothing. Recursing on that empty answer printed
+                # `resolved` for a looping root. (End to end it still exited
+                # 2, but only because the caller's `realpath -e` — "should be
+                # unreachable" — failed on the loop too, and it gave the wrong
+                # reason; the test suite's case 47.) Measured against GNU 9.4
+                # and uutils 0.8.0 and 0.10.0 over the states this function
+                # sees, loops are the only place the two disagree.
+                # So its status decides, and a failure is `blocked`: a target
+                # this cannot resolve is unknown, and unknown is never absent.
+                # The empty-or-relative case is the absolute-path check at the
+                # top, on the recursion. stderr goes because the verdict line
+                # carries the reason, and callers read only that line.
+                local next
+                if ! next="$(realpath -m -- "$tgt" 2>/dev/null)"; then
+                    printf 'blocked %s (its target %s could not be resolved: a symlink loop, or realpath failed)\n' "$acc" "$tgt"
+                    return
+                fi
+                classify_root "$next" "$((depth + 1))"
                 return
             fi
             # Resolvable. Every component but the last must be traversable.
