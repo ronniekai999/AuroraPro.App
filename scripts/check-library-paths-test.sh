@@ -928,6 +928,26 @@ cr_is "$CR/loopa"           blocked  "…and one that prints a path but exits no
 CR_FAKEBIN="$TMP/fakerp-silent"
 cr_is "$CR/loopa"           blocked  "…and one that exits 0 and prints nothing is not 'resolved'" "not an absolute path"
 CR_FAKEBIN=""
+# ── 33c. A symlink target ending in a newline ─────────────────────
+# `$(...)` strips trailing newlines. A target spelled "hop<newline>" came back
+# from readlink as "hop" — another name, absent here — while the real next
+# hop is a symlink into the untraversable directory: `absent`, i.e. exit 0,
+# where the kernel answers EACCES. GNU and uutils readlink print the target
+# alike; the loss was the shell's, so this was wrong on every runner.
+# The second case is the same loss through realpath -m's answer: GNU hands a
+# loop back as itself, so a loop named "f<newline>" came back as an absent
+# "f". uutils fails on that loop instead, which the status check catches, so
+# that case pins the capture only on a GNU runner.
+if ln -s "$CR/blocked/inner" "$CR/hop"$'\n' 2>/dev/null \
+   && ln -s "$CR/hop"$'\n' "$CR/nl-target" \
+   && ln -s "$CR/f"$'\n' "$CR/f"$'\n' \
+   && ln -s "$CR/f"$'\n' "$CR/to-nl-loop" \
+   && ln -s "$CR/to-nl-loop" "$CR/via-nl-loop"; then
+    cr_is "$CR/nl-target"   blocked  "a symlink target ending in a newline is not shortened into an absent name" "contains a newline"
+    cr_is "$CR/via-nl-loop" blocked  "…nor is a realpath -m answer ending in one"
+else
+    ok "newline-terminated symlink targets: SKIPPED (filesystem refused a newline in a name)"
+fi
 # Search permission, not read, is what makes an absence conclusive. 0711 is the
 # ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
 # absent root under a home directory into an exit 2 nobody could clear.

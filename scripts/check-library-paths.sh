@@ -213,9 +213,27 @@ classify_root() {
             # The entry exists. A symlink that does not resolve is the one
             # case `-e` cannot decide; hand its target to a fresh walk.
             if [ -L "$acc" ] && [ ! -e "$acc" ]; then
+                # Captured EXACTLY. `$(...)` strips trailing newlines, so a
+                # target spelled "hop<newline>" came back as "hop": another
+                # name, which can be absent while the real next hop is a
+                # symlink into a directory this user cannot search. That read
+                # as `absent` — exit 0 — where the kernel answers EACCES;
+                # reproduced. GNU and uutils readlink print such a target
+                # identically; the loss is the shell's. The sentinel keeps
+                # every byte, readlink's own newline is then removed, and a
+                # newline anywhere in a target is refused rather than walked,
+                # as this file refuses one in a recorded path, a root or a
+                # filename. realpath -m's answer below is captured the same
+                # way, for the same reason.
                 local tgt
-                tgt="$(readlink -- "$acc" 2>/dev/null)" \
+                tgt="$(readlink -- "$acc" 2>/dev/null && printf x)" \
                     || { printf 'blocked %s (symlink unreadable)\n' "$acc"; return; }
+                tgt="${tgt%x}"; tgt="${tgt%$'\n'}"
+                case "$tgt" in
+                    ''|*$'\n'*)
+                        printf 'blocked %s (symlink target is empty or contains a newline)\n' "$acc"
+                        return ;;
+                esac
                 case "$tgt" in
                     /*) ;;
                     # Parameter expansion, not `dirname`. A dirname that is
@@ -250,11 +268,22 @@ classify_root() {
                 # The empty-or-relative case is the absolute-path check at the
                 # top, on the recursion. stderr goes because the verdict line
                 # carries the reason, and callers read only that line.
+                # Captured exactly, as readlink's is above: realpath -m
+                # resolves symlinks of its own, so its answer can end in a
+                # newline the target did not have — under GNU, a loop named
+                # "f<newline>" comes back as itself, and stripped it read as
+                # an absent "f". The `&& printf x` keeps the status.
                 local next
-                if ! next="$(realpath -m -- "$tgt" 2>/dev/null)"; then
+                if ! next="$(realpath -m -- "$tgt" 2>/dev/null && printf x)"; then
                     printf 'blocked %s (its target %s could not be resolved: a symlink loop, or realpath failed)\n' "$acc" "$tgt"
                     return
                 fi
+                next="${next%x}"; next="${next%$'\n'}"
+                case "$next" in
+                    *$'\n'*)
+                        printf 'blocked %s (its target %s resolves through a name containing a newline)\n' "$acc" "$tgt"
+                        return ;;
+                esac
                 classify_root "$next" "$((depth + 1))"
                 return
             fi
