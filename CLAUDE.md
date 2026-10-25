@@ -940,13 +940,15 @@ capability declarations.
   only before it plays; once it has played, without runway, or while an
   explicit seek is pending, the drift loop and the seek handling own its
   position, and it sends nothing. Until a remux's first level load (natively,
-  until its one fetch is applied or fails), a guest leaves explicit seeks and
-  drift corrections unjudged when the room position is at or after
-  `start_sec - 60` (`holdsPartyPosition`, at most 4 s), so a host's re-anchor
-  into the key-frame gap is served in the window instead of rebuilding a
-  still-booting guest. Native HLS fetches the variant playlist once and
-  applies it at `loadedmetadata`, failing safe to `start_sec`. Transcodes and
-  the Android TV client still anchor on `start_sec`.
+  until its one fetch has been applied at `loadedmetadata` or has failed; the
+  element's `progress`/`durationchange` retries attach only after it is
+  applied, since any window reaching the clock ends the hold), a guest leaves
+  explicit seeks and drift corrections unjudged when the room position is at
+  or after `start_sec - 60` (`holdsPartyPosition`, at most 4 s), so a host's
+  re-anchor into the key-frame gap is served in the window instead of
+  rebuilding a still-booting guest. Native HLS fetches the variant playlist
+  once and applies it at `loadedmetadata`, failing safe to `start_sec`.
+  Transcodes and the Android TV client still anchor on `start_sec`.
 - Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
   and it assumes Safari's media time 0 is the first segment's start, as
   hls.js's is (unverified); the remux subtitle cue shift still uses

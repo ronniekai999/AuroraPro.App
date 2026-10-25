@@ -3749,12 +3749,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // tags, so read the variant playlist ourselves, once, beside the
           // load above (which this does not touch), and apply it at
           // loadedmetadata, when the element accepts a seek. Later retries of
-          // the alignment read the produced window from the element's own
-          // seekable range. Fail-safe by construction: any failure, a missing
-          // line or an implausible value leaves the clock on start_sec and the
-          // element untouched, exactly as before; a start that arrives after
-          // playback began is refused by the clock (M2). Unverified on a real
-          // Safari or iPhone: nothing here can run WebKit.
+          // the alignment, from then on, read the produced window from the
+          // element's own seekable range. Fail-safe by construction: any
+          // failure, a missing line or an implausible value leaves the clock on
+          // start_sec and the element untouched, exactly as before; a start
+          // that arrives after playback began is refused by the clock (M2).
+          // Unverified on a real Safari or iPhone: nothing here can run WebKit.
           if (clock.wantsMeasuredOrigin) {
             void fetchNativeMediaWindow(masterUrl, ac.signal).then(fetched => {
               if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
@@ -3767,16 +3767,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   return s && s.length > 0 ? s.end(s.length - 1) : 0
                 } catch { return 0 }
               }
-              const applyFetched = () => noteMediaWindow(fetched)
               const retryFromElement = () => noteMediaWindow({
                 reportedSec: null,
                 producedEndSec: Math.max(fetched.producedEndSec, seekableEnd()),
                 runwaySec: fetched.runwaySec,
               })
+              // The element's retries start only once the fetched window has
+              // been applied. Any window reaching the clock counts as its first
+              // level load, so one from `durationchange` (which always fires
+              // just before loadedmetadata) or an early `progress` would end a
+              // guest's hold (holdsPartyPosition) while the origin was still
+              // start_sec — and could adopt nothing anyway.
+              const applyFetched = () => {
+                noteMediaWindow(fetched)
+                vid.addEventListener('progress', retryFromElement)
+                vid.addEventListener('durationchange', retryFromElement)
+              }
               if (vid.readyState >= HTMLMediaElement.HAVE_METADATA) applyFetched()
               else vid.addEventListener('loadedmetadata', applyFetched, { once: true })
-              vid.addEventListener('progress', retryFromElement)
-              vid.addEventListener('durationchange', retryFromElement)
               const unbindClock = remuxClockUnbindRef.current
               remuxClockUnbindRef.current = () => {
                 unbindClock?.()

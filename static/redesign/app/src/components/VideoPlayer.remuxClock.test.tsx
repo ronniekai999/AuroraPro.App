@@ -666,6 +666,42 @@ describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', (
     expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
   })
 
+  it('keeps holding through durationchange and progress before loadedmetadata', async () => {
+    // Safari fires durationchange one task before loadedmetadata, and
+    // progress whenever it buffers: neither is the fetched start applied.
+    readyState = 0
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    const rebuild = vi.fn()
+    const guest = party({ isHost: false, tickRef: { current: roomTick(REANCHOR_MS) } })
+    render(<VideoPlayer target={movie} onClose={() => {}} party={guest} onSeekRebuild={rebuild} />)
+    await settle(); await settle()
+    fireEvent(video(), new Event('durationchange'))
+    fireEvent(video(), new Event('progress')); await settle()
+    guest.seekRef.current = hostSeek(REANCHOR_MS)
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    readyState = 1
+    fireEvent(video(), new Event('loadedmetadata')); await settle()
+    await partyTick()
+    expect(rebuild).not.toHaveBeenCalled()
+    expect(video().currentTime).toBeCloseTo(REANCHOR_MS / 1000 - ORIGIN, 6)
+  })
+
+  it('still retries the alignment from the element after loadedmetadata', async () => {
+    readyState = 0
+    const oneSegment = variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`).replace('#EXTINF:10.000000,\nseg_00001.m4s\n', '')
+    serve(oneSegment)
+    await bootNative()
+    readyState = 1
+    fireEvent(video(), new Event('loadedmetadata')); await settle()
+    expect(video().currentTime).toBe(0)
+    playing(); video().currentTime = 1
+    vi.spyOn(HTMLMediaElement.prototype, 'seekable', 'get').mockImplementation(
+      () => ({ length: 1, start: () => 0, end: () => 30 }) as unknown as TimeRanges)
+    fireEvent(video(), new Event('durationchange')); await settle()
+    expect(video().currentTime).toBeCloseTo(ALIGNED, 6)
+  })
+
   it('stops holding a guest once its fetch has failed', async () => {
     serve(new TypeError('Failed to fetch'))
     const rebuild = vi.fn()
