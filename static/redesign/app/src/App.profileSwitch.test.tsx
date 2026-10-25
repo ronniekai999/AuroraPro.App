@@ -32,6 +32,12 @@
 // after the switch (a Load More, a first grid page, a vibe search). What no
 // commit shows is not pinned: the grids' next-page resets are replaced by the
 // next first page before a Load More can run.
+//
+// Home's own library count, in its greeting, is held to the profile the app
+// acts as on every commit, from the start: after the startup load re-selects
+// the profile this browser last showed (not a switch), after a switch, and
+// when the previous profile's answer arrives after one. It is asked for once
+// per profile, not again when the user object is replaced.
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,26 +83,45 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *
  *  `hold(key)` keeps one answer back until the returned release is called;
  *  a browse page's key is `<type>-p<page>-<bound profile>`, a vibe search's
- *  `search-<bound profile>`. An aborted request rejects as fetch's does, once
- *  its answer would have arrived. */
+ *  `search-<bound profile>`, Home's own library count's
+ *  `count-<bound profile>`, the signed-in user's (`/api/auth/me`) `me`. An
+ *  aborted request rejects as fetch's does, once its answer would have
+ *  arrived.
+ *
+ *  `counts` lists the profile the session was bound to when each request for
+ *  Home's own library count was sent; `activations`, each profile bound;
+ *  `profileLists`, how many times the profile list was asked for. */
 function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) {
   let bound = 1
   const holds = new Map<string, Promise<void>>()
+  const counts: number[] = []
+  const activations: number[] = []
+  let profileLists = 0
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
-    const sees = SEES[bound]
+    // A list is answered for the binding it was asked under, even when the
+    // answer arrives after a switch.
+    const asked = bound
+    const sees = SEES[asked]
     const page = Number(url.searchParams.get('page') ?? 1)
-    const held = holds.get(p === '/api/media/search' ? `search-${bound}` : `${url.searchParams.get('type')}-p${page}-${bound}`)
+    // Home's own count is the one catalog list asked for with no type.
+    const isCount = p === '/api/media' && !url.searchParams.has('type')
+    if (isCount) counts.push(asked)
+    if (p === '/api/profiles') profileLists++
+    const held = holds.get(p === '/api/auth/me' ? 'me'
+      : p === '/api/media/search' ? `search-${asked}`
+        : p !== '/api/media' ? ''
+          : isCount ? `count-${asked}` : `${url.searchParams.get('type')}-p${page}-${asked}`)
     // The Kid's answers take a moment, as a server's do. Answered at once, they
     // land in the same render as the switch's resets and would hide a reset
     // that cleared nothing: the previous profile's titles would never be
     // committed beside the Kid's name for this to see. Well over one render of
     // App: at 25ms, a slow render sometimes let them land together.
     if (bound === 2 && init?.method !== 'POST') await new Promise(done => setTimeout(done, 120))
-    if ((p === '/api/media' || p === '/api/media/search') && held) await held
+    if (held) await held
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
@@ -105,15 +130,19 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
       return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(PROFILES.find(x => x.id === bound))
     }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
-    if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
+    if (activate && init?.method === 'POST') {
+      bound = Number(activate[1])
+      activations.push(bound)
+      return new Response(null, { status: 204 })
+    }
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
       return json([{ media_item_id: sees.saved.id, title: sees.saved.title, type: 'movie', year: 2020 }])
     }
     if (p === '/api/me/hero') return json({ picks: sees.hero.map(it => ({ item: it, reason: 'Picked for you' })), slate_token: `slate-${bound}` })
     if (p === '/api/media/recent') return json({ data: [sees.catalog] })
-    if (p === '/api/media' && homeCountFails && !url.searchParams.has('type')) return json({ error: 'unavailable' }, 503)
+    if (isCount && homeCountFails) return json({ error: 'unavailable' }, 503)
     if (p === '/api/media') {
-      return json({ data: [page === 1 ? sees.catalog : sees.page2], page, per_page: 1, total_items: bound === 1 ? 37 : 2, total_pages: 2 })
+      return json({ data: [page === 1 ? sees.catalog : sees.page2], page, per_page: 1, total_items: asked === 1 ? 37 : 2, total_pages: 2 })
     }
     if (p === '/api/media/search') return json([sees.vibe])
     if (p === '/api/progress/continue') {
@@ -133,6 +162,9 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
   return {
+    counts,
+    activations,
+    get profileLists() { return profileLists },
     hold(key: string) {
       let release!: () => void
       holds.set(key, new Promise<void>(done => { release = done }))
@@ -190,14 +222,16 @@ function switchToKid() {
 const kidOverParent = (commits: Commit[]) => commits.filter(c => c.label === 'Kid' && c.parentTitles).length
 const kid = (commits: Commit[]) => commits.filter(c => c.label === 'Kid')
 
+function signedIn() {
+  localStorage.clear()
+  localStorage.setItem('aurora_user', JSON.stringify(USER))
+  // The "Who's watching?" gate opens on a first visit to a multi-profile account.
+  localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+  server = stubServer()
+}
+
 describe('a profile switch never commits the new name over the previous profile’s titles', () => {
-  beforeEach(() => {
-    localStorage.clear()
-    localStorage.setItem('aurora_user', JSON.stringify(USER))
-    // The "Who's watching?" gate opens on a first visit to a multi-profile account.
-    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
-    server = stubServer()
-  })
+  beforeEach(signedIn)
   afterEach(() => { vi.unstubAllGlobals() })
 
   it('on Home: the hero, the rails and Continue Watching', async () => {
@@ -339,4 +373,82 @@ describe('a profile switch never commits the new name over the previous profile�
       expect(kid(commits).length).toBeGreaterThan(0)
       expect(kidOverParent(commits)).toBe(0)
     })
+})
+
+// Home's greeting counts the library from its own fetch ("N titles in your
+// library"), and the server counts what the session's profile may see: the
+// Parent's catalog totals 37 titles and the Kid's 2. No commit may show one
+// profile's count while the app acts as another.
+describe('Home’s library count is the acting profile’s', () => {
+  beforeEach(signedIn)
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const total = (n: number) => new RegExp(`\\b${n} titles in your library`)
+  const greetingCounts = (n: number) =>
+    waitFor(() => expect(document.body.textContent).toMatch(total(n)), { timeout: 5000 })
+
+  // A fresh sign-in on a browser the Kid last used: the server binds the
+  // default (the Parent), then the startup load re-selects the Kid. That is
+  // not a switch, and resets nothing, so a count asked before it would stay
+  // the Parent's.
+  it('after the startup load re-selects the remembered profile', async () => {
+    localStorage.setItem('aurora_active_profile_id', '2')
+    // A cold start shows the cached user at once and replaces it with the
+    // server's answer for /me, held here until the startup load has settled.
+    const releaseUser = server.hold('me')
+    const commits = renderApp('/')
+    await greetingCounts(2)
+    // Not vacuous: the session was the Parent's until the re-selection.
+    expect(server.activations).toEqual([2])
+    expect(commits.filter(c => c.parentTotal)).toEqual([])
+    // Asked once, after the startup load settled.
+    expect(server.counts).toEqual([2])
+    // The new user object changes neither the session nor its profile, so the
+    // count is not asked again. The profile load, keyed on the user object,
+    // asks for the list again in the effects of the commit that replaced it,
+    // so once it has, a count keyed on the user object would have been asked
+    // too.
+    const lists = server.profileLists
+    releaseUser()
+    await waitFor(() => expect(server.profileLists).toBe(lists + 1), { timeout: 5000 })
+    expect(server.counts).toEqual([2])
+    expect(document.body.textContent).toMatch(total(2))
+  })
+
+  it.each([
+    ['through the top bar', false],
+    ['through the picker an unreadable binding opens', true],
+  ])('after a switch %s', async (_how, bindingUnreadable) => {
+    vi.unstubAllGlobals()
+    server = stubServer({ bindingUnreadable })
+    const commits = renderApp('/')
+    // Not vacuous: the greeting counted the Parent's library first (with the
+    // binding unreadable, behind the picker, under the binding the server
+    // does have).
+    await greetingCounts(37)
+    if (bindingUnreadable) {
+      const picker = await screen.findByRole('dialog', { name: "Who's watching?" }, { timeout: 5000 })
+      fireEvent.click(within(picker).getByRole('radio', { name: /Kid/ }))
+    } else {
+      switchToKid()
+    }
+    await greetingCounts(2)
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
+    // Once for each profile.
+    expect(server.counts).toEqual([1, 2])
+  })
+
+  it('drops an answer for the previous profile that arrives after a switch', async () => {
+    const release = server.hold('count-1')
+    const commits = renderApp('/')
+    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    await waitFor(() => expect(server.counts).toEqual([1]), { timeout: 5000 })
+    switchToKid()
+    await greetingCounts(2)
+    release()
+    await new Promise(done => setTimeout(done, 100))
+    expect(document.body.textContent).toMatch(total(2))
+    expect(commits.filter(c => c.parentTotal)).toEqual([])
+  })
 })
