@@ -1176,7 +1176,7 @@ done
 # first, or die() would blame the last library.
 LIB=""
 if [ "$CHECKED" -ne "$n_ids" ] || [ "$CHECKED" -eq 0 ]; then
-    die "examined $CHECKED of $n_ids librarie(s) — the list of libraries was not read whole, so no summary is given"
+    die "examined $CHECKED of $n_ids library(ies) — the list of libraries was not read whole, so no summary is given"
 fi
 
 printf '\n'
@@ -1184,7 +1184,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
     # Exit 1, not 2: this is a successful check with a bad answer, which is
     # different from being unable to check at all.
     printf '\033[1;31m[FAIL]\033[0m %s\n' \
-        "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
+        "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING library(ies) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
     exit 1
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
@@ -1202,5 +1202,5 @@ if [ "$CHECKED_FULLY" -ne "$CHECKED" ]; then
     # discovers nothing). But "nothing would be pruned" and "I compared every
     # recorded row against the disk" are different statements, and the runbook
     # tells the operator to act on exit 0. Say which one they got.
-    warn "$CHECKED_FULLY of $CHECKED librarie(s) were compared row by row. The rest were skipped above, each because the scan will not prune them either — read those warnings before starting Aurora."
+    warn "$CHECKED_FULLY of $CHECKED library(ies) were compared row by row. The rest were skipped above, each because the scan will not prune them either — read those warnings before starting Aurora."
 fi
