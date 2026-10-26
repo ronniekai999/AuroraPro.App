@@ -1016,6 +1016,7 @@ cr_is "$CR/execfile/"        absent   "an executable file with a trailing slash 
 cr_is "$CR/real/deep/"       resolved "…and a directory with one still resolves"
 # `/` itself ends in a slash, and the walk never runs for it, so the
 # trailing-slash test once saw an empty path and read `/` as blocked.
+# Only `/` pins that; `//` and `/.` are controls (they resolved either way).
 for p in / // /.; do
     cr_is "$p"               resolved "…and so does the root directory, spelled $p"
 done
@@ -1905,10 +1906,12 @@ guard_case '#!/bin/sh
 exec /usr/bin/grep "$@"' \
   "found no media it could confirm" "a grep that fails its -qEi form changes nothing: is_video is bash's own match" grep
 # And it folds case, as grep -i did and as the scanner's IsVideoFile does
-# (it lowercases the extension): `LINK.MKV` is a video. Read as "not a
-# video", the library's only media was skipped and the run said "no media
-# found", exit 0, while the scanner, which follows 41 links, discovered it
-# and pruned gone.mkv.
+# (it lowercases the extension): `LINK.MKV` is a video, so the link is
+# recorded as unresolved and the library exits 2. Read as "not a video",
+# the link was skipped and the run said "no media found", exit 0. This
+# pins the folding only: the chain ends outside this root, so here the
+# scanner rejects the link as escaping and that exit 0 would happen to be
+# true. Case 51's chain, which ends inside its root, is the prune case.
 fixture upperlink
 R="$TMP/upperlink"; mkdir -p "$R"
 ln -s "$TMP/chain41/links/c41" "$R/LINK.MKV" || bad "is_video folds case: could not build the fixture"

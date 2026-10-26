@@ -1034,11 +1034,13 @@ operator runbook must keep saying so.
   `BASH_COMPAT=50`, writes every one to a file in TMPDIR (5.1 and later,
   one larger than the 64 KiB pipe buffer), and a full TMPDIR made a loop
   silently run zero times (exit 0). Loops take a `for` over ids (split
-  once, with globbing off) or a process substitution, and both are counted
-  against what there is to read, since a process substitution fails
-  without `/proc` and a stdin-reading command in the loop swallows the
-  rest. Case 57 reruns four fixtures under `BASH_COMPAT=50` with every
-  write failing.
+  once, with globbing off) or a process substitution. The ids loop and the
+  roots loop are counted against what there is to read, since a process
+  substitution fails without `/proc` and a stdin-reading command in the
+  roots loop swallows the rest; the find loop is not counted, so a
+  stdin-reading tool inside it can still cut the walk short (follow-up).
+  Case 57 reruns four fixtures under `BASH_COMPAT=50` with every write
+  failing.
 - Answers must not depend on GNU coreutils versus uutils (Ubuntu 26.04's
   default `coreutils`). Three forms were measured to differ. `realpath -m`
   through a symlink loop fails under uutils; `classify_root` no longer calls
