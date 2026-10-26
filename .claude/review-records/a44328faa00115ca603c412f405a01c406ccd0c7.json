@@ -1,0 +1,10 @@
+{
+  "sha": "a44328faa00115ca603c412f405a01c406ccd0c7",
+  "verdict": "lows-only",
+  "summary": "Round 7 on a44328f (CodeRabbit's darkShadow finding on #550): per-layer darkShadow correct across inertShadow, checkCssRules, glowLayers; output unchanged. New nit: legitimate dark shadows refused (rgb(0 0 0 / 55%), #0008, Black, ch/vw/calc lengths), fail closed. Carried from round 6: low - exclusive() compares guard source text (shadowed callback parameter); nit - comment wording, opacity-[1]/unknown-variant lifts over-counted, -webkit-box-shadow and CSS scale/rotate unread on neighbours.",
+  "reviewer": "independent-review-agent",
+  "findings": "3",
+  "diff_digest": "d73166f49bab843c937bfa34744d592839163a880ee22101c019f1daeb67b804",
+  "branch": "claude/sweet-brown-36veir",
+  "recorded_at": "2026-10-26T19:21:32Z"
+}
