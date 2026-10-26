@@ -52,7 +52,9 @@ import { createRequire } from 'node:module'
 // read at all: anything above the hero's root, rules in index.css that select
 // by element rather than class, what a component renders, an element built
 // elsewhere and rendered from a variable (`{extra}`), SVG geometry, other
-// widths, and interaction states (hover, focus, active).
+// widths, and interaction states (hover, focus, active). Not modelled: a box
+// that overflows a parent of fixed height in the flow (an `h-12` fill inside
+// an `h-0` div) spills over the text beside it unseen.
 
 const require = createRequire(import.meta.url)
 const APP_DIR = path.resolve(import.meta.dirname, '..')
@@ -195,10 +197,10 @@ const MODELS = { color: ['color'], size: ['font-size'], weight: ['font-weight'],
  *  interaction (`:hover`). A rule for a pseudo-element of the class carries its
  *  name (`before`), since one with content paints a box of its own. A class used
  *  as an ancestor (`.cls p`) or inside :not() counts too, failing closed. */
-const CSS_RULES = (() => {
+function cssRulesOf(text) {
   const map = new Map()
   const interaction = /^:(hover|focus|focus-visible|focus-within|active)$/
-  postcss.parse(css).walkRules(rule => {
+  postcss.parse(text).walkRules(rule => {
     for (const sel of rule.selectors) {
       selparser(root => root.walkClasses(c => {
         const nodes = c.parent.nodes
@@ -213,13 +215,14 @@ const CSS_RULES = (() => {
     }
   })
   return map
-})()
+}
+const CSS_RULES = cssRulesOf(css)
 
 /** Dies when index.css gives `cls` a declaration this audit does not model:
  *  one not SAFE and not covered by its classification (`allowed`). Of the
  *  rest, `opacity: 1` and `transform: none` change nothing, and an animation
- *  must neither hold its end state (`forwards`, `both`: the last keyframe is
- *  then the resting style) nor run for ever. A rule for its ::before or
+ *  must neither hold a keyframe (`forwards`, `both`: the last is then the
+ *  resting style; `paused`: the one it stopped on) nor run for ever. A rule for its ::before or
  *  ::after that sets content paints a box this audit does not model. */
 function checkCssRules(cls, token, allowed = []) {
   for (const { rule, pseudo } of CSS_RULES.get(cls) ?? []) {
@@ -235,8 +238,8 @@ function checkCssRules(cls, token, allowed = []) {
         if (/^first-(line|letter)$/.test(pseudo) && !SAFE.test(prop)) refuse(d)
         continue
       }
-      if (prop === 'animation' || prop === 'animation-fill-mode' || prop === 'animation-iteration-count') {
-        if (/\b(forwards|both|infinite)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
+      if (/^animation(-fill-mode|-iteration-count|-play-state)?$/.test(prop)) {
+        if (/\b(forwards|both|infinite|paused)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
         continue
       }
       if (prop === 'text-shadow') { if (v !== 'none' && !darkShadow(v)) refuse(d, 'a light or coloured shadow this audit does not model'); continue }
@@ -261,10 +264,11 @@ function declsOf(rule) {
 /** The colours this audit reads in a shadow: rgb()/rgba(), #hex and the three
  *  keywords, in any case, as CSS reads them. */
 const COLOUR = () => /rgba?\([^)]*\)|#[0-9a-f]{3,8}\b|\b(?:white|black|transparent)\b/gi
-/** A shadow's length: a number with a unit, or 0, or a calc(), min(), max()
- *  or clamp() over lengths and numbers. Not var(): it can expand to a colour.
- *  Not a percentage, which a shadow does not take. */
-const SHADOW_LENGTH = new RegExp(String.raw`^(?:-?(?:\d+\.?\d*|\.\d+)(?:px|r?em|ch|ex|vw|vh|vmin|vmax)|-?(?:0+\.?0*|\.0+)|(?:calc|min|max|clamp)\((?:[\d.\s+\-*/,()]|px|r?em|ch|ex|vw|vh|vmin|vmax|calc|min|max|clamp)*\))$`, 'i')
+/** A shadow's length as CSS writes one: a number (`2`, `2.5`, `.5`, not `2.`)
+ *  with a unit (px, rem, em, ch, ex, vw, vh, vmin or vmax), or 0, or a calc(),
+ *  min(), max() or clamp() over lengths and numbers. Not var(): it can expand
+ *  to a colour. Not a percentage, which a shadow does not take. */
+const SHADOW_LENGTH = new RegExp(String.raw`^(?:-?(?:\d+|\d*\.\d+)(?:px|r?em|ch|ex|vw|vh|vmin|vmax)|-?(?:0+|0*\.0+)|(?:calc|min|max|clamp)\((?:[\d.\s+\-*/,()]|px|r?em|ch|ex|vw|vh|vmin|vmax|calc|min|max|clamp)*\))$`, 'i')
 
 /** Whether every colour in a shadow value is black at some alpha. A dark
  *  shadow cast UNDER the text only darkens its backdrop. A light or coloured
@@ -479,7 +483,7 @@ function parseColor(str, ctx) {
     if (alpha !== undefined) parts.push(alpha)
   }
   const num = (p, full) => {
-    const m = p.match(/^(-?(?:\d+\.?\d*|\.\d+))(%?)$/)
+    const m = p.match(/^(-?(?:\d+|\d*\.\d+))(%?)$/)
     if (!m) fail()
     return Math.min(1, Math.max(0, (m[2] ? Number(m[1]) / 100 : Number(m[1]) / full)))
   }
@@ -1188,7 +1192,7 @@ function glowLayers(value, where_) {
     const insets = toks.flatMap((t, i) => (/^inset$/i.test(t) ? [i] : []))
     const rest = toks.filter(t => !/^inset$/i.test(t))
     const ci = rest.flatMap((t, i) => (/^(?:rgba?\(.*\)|#[0-9a-f]{3,8}|white|black|transparent)$/i.test(t) ? [i] : []))
-    const lens = rest.filter((_, i) => !ci.includes(i)).map(l => (/^-?0+\.?0*$/.test(l) ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
+    const lens = rest.filter((_, i) => !ci.includes(i)).map(l => (/^-?(?:0+|0*\.0+)$/.test(l) ? 0 : Number(l.match(/^(-?(?:\d+|\d*\.\d+))px$/)?.[1] ?? NaN)))
     if (insets.length > 1 || (insets.length && insets[0] !== 0 && insets[0] !== toks.length - 1) || ci.length !== 1 || (ci[0] !== 0 && ci[0] !== rest.length - 1)
       || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN) || (lens[2] ?? 0) < 0)
       throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
@@ -1204,6 +1208,13 @@ function glowLayers(value, where_) {
 function boxShadowOf(decls) {
   const shadows = decls.filter(d => /^(-webkit-)?box-shadow$/i.test(d.prop))
   return shadows.filter(d => d.important).pop() ?? shadows.pop() ?? null
+}
+/** Whether a utility takes a neighbour out of the flow: positioned out of it,
+ *  offset (physically or logically), transformed, or pulled by a negative
+ *  margin. */
+function movesClass(util) {
+  return /^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|start|end|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
+    || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)
 }
 /** Whether a declaration on a neighbour takes it out of the flow, prefixed or
  *  not: positioned other than relative or static, offset (physically or
@@ -1225,7 +1236,7 @@ function refusedDecl(prop, v) {
     || /^outline-(width|style|color|offset)$/.test(p)
     || (p === 'order' && v !== '0') || (p === 'float' && v !== 'none') || (p === 'mix-blend-mode' && v !== 'normal')
     || (p === 'border-image-outset' && !/^(?:0+[a-z]*\s*)+$/.test(v)) || (p === 'border-image' && (v.match(/\//g) ?? []).length >= 2)
-    || (/^animation(-fill-mode|-iteration-count)?$/.test(p) && /\b(forwards|both|infinite)\b/.test(v))
+    || (/^animation(-fill-mode|-iteration-count|-play-state)?$/.test(p) && /\b(forwards|both|infinite|paused)\b/.test(v))
 }
 
 /** What an element in a text layer that encloses no surface does beyond its
@@ -1254,8 +1265,7 @@ function neighbourOf(el) {
     const { applies, unplaced } = variantState(variants)
     if (!applies) continue
     const fail = why => { throw new Error(`audit: ${where(el)}: ${t} ${why} — the audit is out of date, not passing`) }
-    if (/^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|start|end|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
-      || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)) { res.out ??= `carries ${t}`; continue }
+    if (movesClass(util)) { res.out ??= `carries ${t}`; continue }
     // Tailwind's shadows, filters and outlines paint past the box or change
     // it, and are not read here: a glow belongs in a project class whose
     // box-shadow GLOWS measures.
@@ -1377,9 +1387,11 @@ function spacing(el, re) {
 // (an earlier block's shadow painted over or under later text), null where it
 // was not, or where engines disagree, or the value cannot be read, which leaves
 // the side open. Measured as not lifting there: `container-type`, `contain:
-// size`, `will-change: z-index`, `mask-border` (unsupported), and a z-index on
-// an element that is not a flex item. A property not listed is read as not
-// lifting.
+// size`, `will-change: z-index`, `mask-border` (unsupported), a z-index on an
+// element that is not a flex item, and every property NON_LIFTING lists. A
+// property in neither list is left open too: a review found three that lift
+// (`backface-visibility: hidden`, its -webkit- form, `-webkit-mask-box-image`)
+// read as not lifting while the default was "not listed, not lifting".
 const LIFT_CLASSES = [
   ['position', /^(?:relative|absolute|fixed|sticky|static)$/, u => u !== 'static'],
   ['opacity', /^opacity-/, u => twOpacity(u.slice(8), u) < 1],
@@ -1406,7 +1418,20 @@ function willChangeLifts(v) {
 // The -webkit- forms Chromium 153 supports and paints as their own property.
 // Any other prefixed form that would lift is left open: Chromium ignores it
 // (so it does not lift there), and another engine may not.
-const WEBKIT_ALIASES = /^-webkit-(?:opacity|transform|transform-style|perspective|filter|clip-path|mask|mask-image)$/
+const WEBKIT_ALIASES = /^-webkit-(?:opacity|transform|transform-style|perspective|filter|clip-path|mask|mask-image|mask-box-image|backface-visibility)$/
+// Properties measured in Chromium 153 as not lifting an element (78 checked,
+// with values that do something). An animation is here because one that
+// holds a keyframe or never ends dies before this is read (`checkCssRules`,
+// `refusedDecl`), and one that has ended leaves the element as it was.
+const NON_LIFTING = new RegExp('^(?:' + [
+  'color|background(?:-.+)?|(?:-webkit-)?box-shadow|text-shadow|font(?:-.+)?|text-(?:decoration|underline|transform|align|overflow|rendering|indent|wrap)(?:-.+)?',
+  'letter-spacing|word-spacing|line-height|white-space|word-break|overflow-wrap|hyphens|vertical-align|direction|writing-mode|image-rendering|quotes',
+  'display|visibility|overflow(?:-[xy])?|box-sizing|(?:min-|max-)?(?:width|height|block-size|inline-size)|aspect-ratio|contain-intrinsic-.+',
+  '(?:padding|margin|scroll-margin|scroll-padding|border|outline|inset)(?:-.+)?|top|right|bottom|left|gap|row-gap|column-gap',
+  'flex(?:-.+)?|grid(?:-.+)?|order|align-.+|justify-.+|place-.+|float|clear|object-.+|list-style(?:-.+)?|resize|content',
+  'animation(?:-.+)?|transition(?:-.+)?|cursor|pointer-events|user-select|touch-action|overscroll-behavior(?:-.+)?|appearance|caret-color|accent-color|color-scheme',
+  '-webkit-(?:line-clamp|box-orient|font-smoothing|tap-highlight-color|text-fill-color|appearance)|-moz-osx-font-smoothing|--.+',
+].join('|') + ')$')
 function liftDecl(d) {
   const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
   const group = prop.replace(/^-webkit-/, '').replace(/^mask-image$/, 'mask')
@@ -1414,7 +1439,7 @@ function liftDecl(d) {
   let lifts
   switch (group) {
     case 'position': lifts = /^(?:relative|absolute|fixed|sticky)$/.test(v) ? true : v === 'static' ? false : null; break
-    case 'opacity': { const m = v.match(/^([\d.]+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
+    case 'opacity': { const m = v.match(/^(\d+|\d*\.\d+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
     case 'isolation': lifts = v === 'isolate' ? true : v === 'auto' ? false : null; break
     case 'will-change': lifts = unread ? null : willChangeLifts(v); break
     case 'contain': lifts = unread ? null : /paint|layout|strict|content/.test(v); break
@@ -1423,8 +1448,10 @@ function liftDecl(d) {
     case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
     case 'filter': case 'backdrop-filter': case 'transform': case 'translate': case 'scale': case 'rotate': case 'perspective':
     case 'clip-path': case 'mask': case 'view-transition-name': lifts = unread ? null : v !== 'none'; break
+    case 'backface-visibility': lifts = v === 'hidden' ? true : v === 'visible' ? false : null; break
+    case 'mask-box-image': lifts = unread ? null : v !== 'none'; break
     case 'container-type': case 'z-index': case 'mask-border': case 'offset-path': lifts = /^(?:normal|auto|none)$/.test(v) ? false : null; break
-    default: return null
+    default: return NON_LIFTING.test(prop) ? null : { group, lifts: null }
   }
   // A prefixed form that cannot lift where it is honoured (`none`) stays false.
   if (prop.startsWith('-webkit-') && !WEBKIT_ALIASES.test(prop) && lifts !== false) lifts = null
@@ -1436,7 +1463,7 @@ function liftDecl(d) {
  *  does, and nothing else that may apply sets the property otherwise. A class
  *  under a variant this audit cannot place, and a rule under another selector,
  *  may apply; one of those lifting makes a lift possible. */
-function liftedClasses(strs, strict) {
+function liftedClasses(strs, strict, rules = CSS_RULES) {
   const one = s => {
     const groups = new Map()
     const add = (m, certain) => {
@@ -1453,7 +1480,7 @@ function liftedClasses(strs, strict) {
       if (!st.applies) continue
       const u = raw.replace(/^!/, '')
       add(liftClass(u), !st.unplaced)
-      for (const { rule, pseudo } of CSS_RULES.get(u) ?? []) {
+      for (const { rule, pseudo } of rules.get(u) ?? []) {
         if (pseudo) continue
         const own = !st.unplaced && rule.parent.type === 'root' && rule.selector === `.${u}`
         for (const d of declsOf(rule)) add(liftDecl(d), own)
@@ -1524,7 +1551,8 @@ function guardModel(sf, root) {
   if (!ts.isFunctionLike(component)) throw new Error(`audit: ${sf.fileName}: the root is not returned straight from its component; this audit reads conditions against the component's own names`)
   // Every name the file writes: an assignment's target (destructuring
   // included), an increment, a delete, a for…in/of target. A write into a
-  // property counts against the whole object. A call that mutates one is not
+  // property counts against the whole object. A call that mutates one, or a
+  // write through another name for it (`const t = s; t.on = …`), is not
   // seen.
   const written = new Set()
   const mark = t => {
@@ -1675,7 +1703,11 @@ function reach(gEl, sChain, layer, exclusive) {
     ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false],
     ['mix-blend-mode: multiply', true], ['mask-image: linear-gradient(black, black)', true], ['view-transition-name: x', true], ['-webkit-opacity: .5', true],
     ['mask-border: url(x.png) 30', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
-    ['-webkit-backdrop-filter: blur(1px)', null], ['-webkit-backdrop-filter: none', false], ['will-change: backdrop-filter', true]])
+    ['-webkit-backdrop-filter: blur(1px)', null], ['-webkit-backdrop-filter: none', false], ['will-change: backdrop-filter', true],
+    ['backface-visibility: hidden', true], ['-webkit-backface-visibility: hidden', true], ['-webkit-mask-box-image: linear-gradient(black,black) 1 / 1px / 40px', true],
+    ['mask-box-image: none', false], ['no-such-property: 1', null], ['color: red', undefined], ['--glow: 1', undefined], ['animation: x 1s', undefined],
+    ['contain: size', false], ['contain: paint', true], ['transform: var(--t)', null], ['mix-blend-mode: inherit', null], ['position: var(--p)', null],
+    ['position: static', false], ['opacity: 1.', null]])
     expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
   const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
   for (const [g, s, after, allAtOnce, want] of [
@@ -1689,11 +1721,20 @@ function reach(gEl, sChain, layer, exclusive) {
   for (const [prop, v, moves, refused] of [['-webkit-transform', 'translateY(-40px)', true, false], ['translate', 'none', false, false], ['scale', '2', true, false],
     ['inset-inline-start', '4px', true, false], ['-webkit-filter', 'drop-shadow(0 0 12px white)', false, true], ['order', '2', false, true],
     ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false],
-    ['border-image-outset', '10px', false, true], ['border-image-outset', '0', false, false], ['border-image', 'url(x.png) 30 / 1 / 8px', false, true]])
+    ['border-image-outset', '10px', false, true], ['border-image-outset', '0', false, false], ['border-image', 'url(x.png) 30 / 1 / 8px', false, true],
+    ['animation', 'pz 1s paused', false, true], ['animation-play-state', 'paused', false, true], ['animation', 'pz 1s', false, false]])
     expect(`neighbour ${prop}: ${v}`, [movesDecl(prop, v), refusedDecl(prop, v)], [moves, refused])
+  for (const [util, want] of [['start-4', true], ['-end-2', true], ['inset-x-2', true], ['absolute', true], ['-mt-2', true], ['mt-[-4px]', true], ['mt-2', false], ['relative', false]])
+    expect(`neighbour class ${util} moves it`, movesClass(util), want)
+  // A class's own top-level rule lifts for certain; a rule under another
+  // selector, or inside an at-rule, only possibly.
+  const probeRules = cssRulesOf('.p1 { position: relative } .x .p2 { position: relative } @media (min-width: 1px) { .p3 { isolation: isolate } }')
+  for (const [cls, sure, possible] of [['p1', true, true], ['p2', false, true], ['p3', false, true]])
+    expect(`lift of .${cls}`, [liftedClasses([cls], true, probeRules), liftedClasses([cls], false, probeRules)], [sure, possible])
   // A glow layer is read strictly, inset ones and `inset` as a word included.
-  for (const [value, want] of [['0 0 2px White', [[1, 1, 1, 1]]], ['inset 0 0 4px black, 0 0 2px #fff8', [[1, 1, 1, 0x88 / 255]]],
-    ['0 0 -2px black', 'dies'], ['inset nonsense', 'dies'], ['0 0 var(--inset-r) white', 'dies'], ['0 red 0', 'dies'], ['0 0 2px inset black', 'dies']]) {
+  for (const [value, want] of [['0 0 2px White', [[1, 1, 1, 1]]], ['inset 0 0 4px black, 0 0 2px #fff8', [[1, 1, 1, 0x88 / 255]]], ['0 0 .5px black', [[0, 0, 0, 1]]],
+    ['0 0 -2px black', 'dies'], ['inset nonsense', 'dies'], ['0 0 var(--inset-r) white', 'dies'], ['0 red 0', 'dies'], ['0 black 0', 'dies'], ['0 0 2px inset black', 'dies'],
+    ['0 0 2.px black', 'dies'], ['0. 0 2px black', 'dies'], ['0 0 2px rgba(0,0,0,1.)', 'dies']]) {
     let got
     try { got = glowLayers(value, 'probe').map(L => [...L.rgb, L.a]) } catch { got = 'dies' }
     expect(`the box-shadow ${value}`, got, want)
