@@ -431,14 +431,17 @@ alone. Exit 2 is never "probably fine"; it means the answer is unknown.
 
 **A library whose only media are links this check cannot resolve** the way
 the scanner does gives exit 2, listing the links: a chain of more than 40
-links, a target behind a directory the checking user cannot enter, or a
-non-directory followed by more path (`a.mkv/.` when `a.mkv` is not
-executable; an executable one reads as absent, exit 0, which is also the
-scan's answer). The scan may find those links, and then it prunes
-everything else, so the check will not call the library empty; it may also
-not (it shields a link to `a.mkv/.`), and then exit 2 is an over-report. Fix
-the links, or re-run as the user Aurora runs as. With other media found,
-such links are counted as missing, with a note saying so.
+links, a target behind a directory the checking user cannot enter, a
+filesystem that refuses the checking user (a FUSE mount without
+`allow_other`), a target too long as written, or a non-directory followed
+by more path (`a.mkv/.`, `a.mkv/` or `a.mkv//` when `a.mkv` is not
+executable; an executable one reads as absent in all three spellings, exit
+0, which is also the scan's answer). The scan may find those links, and
+then it prunes everything else, so the check will not call the library
+empty; it may also not (it shields a link to `a.mkv/.`), and then exit 2 is
+an over-report. Fix the links, or re-run as the user Aurora runs as. With
+other media found, such links are counted as missing, with a note saying
+so.
 
 **What exit 0 does and does not promise.** At best it means: every path
 recorded for these libraries was found by *this* walk, run as *this* user. It

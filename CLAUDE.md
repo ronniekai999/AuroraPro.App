@@ -1029,7 +1029,12 @@ operator runbook must keep saying so.
   including symlinks and unusual entries.
 - Line-oriented comparison cannot represent newline or empty paths; SQL counts
   those rows explicitly. Quietly failing tools need status checks, contradiction
-  checks, or known-answer probes, as appropriate.
+  checks, or known-answer probes, as appropriate. The script uses no
+  here-strings or heredocs: bash before 5.1, and any bash under
+  `BASH_COMPAT=50`, writes them to a file in TMPDIR, and a full TMPDIR made
+  a loop silently run zero times (exit 0). Loops take a `for` over ids or a
+  process substitution, and the suite runs its write-failure cases under
+  `BASH_COMPAT=50` too.
 - Answers must not depend on GNU coreutils versus uutils (Ubuntu 26.04's
   default `coreutils`). Three forms were measured to differ. `realpath -m`
   through a symlink loop fails under uutils; `classify_root` no longer calls
@@ -1038,16 +1043,17 @@ operator runbook must keep saying so.
   non-directory (`a.mkv/.`, `a.mkv/..`, or `a.mkv/` from a link's target; a
   FIFO likewise) fails under GNU with ENOTDIR and resolves under uutils;
   both of its call sites test `[ -e ]` first, so it only sees paths the
-  kernel resolves. uutils 0.10.0 `comm` rejects byte-sorted input where one
-  path is another followed by a byte 0x01-0x09 (`a.mkv` beside
-  `a.mkv<TAB>.mkv`) and exits 1; its status is checked, so that is exit 2,
-  and `--nocheck-order` is not to be added. The suite pins the first two
-  with fakes on `PATH`.
+  kernel resolves. uutils `comm` (0.8.0 and 0.10.0, measured) rejects
+  byte-sorted input where one path is another followed by a byte
+  0x01-0x09 (`a.mkv` beside `a.mkv<TAB>.mkv`) and exits 1; its status is
+  checked, so that is exit 2, and `--nocheck-order` is not to be added.
+  The suite pins the first two with fakes on `PATH`.
 - `classify_root` calls a missing component absent only when the kernel
-  says why and the answer is ENOENT or ENOTDIR (asked with `cd -P` in the C
-  locale). EACCES from a filesystem that refuses this user under a
-  searchable parent (FUSE without `allow_other`), ENAMETOOLONG and every
-  other error are blocked. A video-named link the kernel refuses is skipped
+  says why and the answer is ENOENT or ENOTDIR (asked with `builtin cd -P`
+  in the C locale; a trailing slash after a non-directory too). EACCES
+  from a filesystem that refuses this user under a searchable parent
+  (FUSE without `allow_other`), ENAMETOOLONG and every other error are
+  blocked. A video-named link the kernel refuses is skipped
   only when `classify_root` calls it absent; otherwise it is recorded as
   unresolved, and a library whose walk finds nothing else exits 2 (the
   kernel stops at 40 links and at this user's permissions, the scanner at
