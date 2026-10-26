@@ -234,6 +234,20 @@ describe('fetchNativeMediaWindow', () => {
       expect((fetchImpl.mock.calls[1][1]?.signal as AbortSignal).aborted).toBe(true)
     })
   })
+
+  describe('a prompt answer', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('clears its timeout', async () => {
+      const fetchImpl = vi.fn(async (url: string, _init?: RequestInit) => url.endsWith('master.m3u8')
+        ? response('#EXTM3U\nsource/stream.m3u8\n')
+        : response(NATIVE_FMP4))
+      const w = await fetchNativeMediaWindow('/m/master.m3u8', undefined, fetchImpl as unknown as typeof fetch)
+      expect(w?.reportedSec).toBe(19.946009)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
 })
 
 describe('RemuxClock', () => {

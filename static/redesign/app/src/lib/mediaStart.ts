@@ -273,13 +273,14 @@ export function firstVariantUri(masterText: string): string | null {
 }
 
 /**
- * How long the native path's look at the variant playlist may take. The
- * server answers a remux's first variant request once its first segment
- * exists, plus at most ~2.75 s for the measurement; much past that the fetch
- * has stalled, and WebKit's own timeout is about a minute, which a subtitle
- * pick held for the measurement would wait out. On the timeout the result is
- * null, as for a failed fetch: the clock stays on start_sec and a held pick is
- * applied with the server's prediction.
+ * How long the native path's look at the variant playlist may take: a
+ * trade-off, not a sign of a stall. The server answers a remux's first variant
+ * request once its first segment exists, which it may wait up to 40 s for
+ * (`readinessTimeout`), plus at most ~2.75 s for the measurement; it is
+ * usually far quicker, and a subtitle pick held for the measurement waits for
+ * this, so 8 s rather than the 40. On the timeout the result is null, as for
+ * a failed fetch: the clock stays on start_sec and a held pick is applied with
+ * the server's prediction, a GOP off on the Matroska key-frame case.
  */
 export const NATIVE_MEDIA_WINDOW_TIMEOUT_MS = 8000
 
