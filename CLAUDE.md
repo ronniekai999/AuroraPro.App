@@ -1081,7 +1081,44 @@ operator runbook must keep saying so.
   including symlinks and unusual entries.
 - Line-oriented comparison cannot represent newline or empty paths; SQL counts
   those rows explicitly. Quietly failing tools need status checks, contradiction
-  checks, or known-answer probes, as appropriate.
+  checks, or known-answer probes, as appropriate. The script uses no
+  here-strings or heredocs: bash before 5.1, and any bash under
+  `BASH_COMPAT=50`, writes every one to a file in TMPDIR (5.1 and later,
+  one larger than the 64 KiB pipe buffer), and a full TMPDIR made a loop
+  silently run zero times (exit 0). Loops take a `for` over ids (split
+  once, with globbing off) or a process substitution. The ids loop and the
+  roots loop are counted against what there is to read, since a process
+  substitution fails without `/proc` and a stdin-reading command in the
+  roots loop swallows the rest; the find loop is not counted, so a
+  stdin-reading tool inside it can still cut the walk short (follow-up).
+  Case 57 reruns four fixtures under `BASH_COMPAT=50` with every write
+  failing.
+- Answers must not depend on GNU coreutils versus uutils (Ubuntu 26.04's
+  default `coreutils`). Three forms were measured to differ. `realpath -m`
+  through a symlink loop fails under uutils; `classify_root` no longer calls
+  it, walking a link's target as written, so a loop meets its depth cap and
+  a `..` is resolved by the kernel, never lexically. `realpath -e` past a
+  non-directory (`a.mkv/.`, `a.mkv/..`, or `a.mkv/` from a link's target; a
+  FIFO likewise) fails under GNU with ENOTDIR and resolves under uutils;
+  both of its call sites test `[ -e ]` first, so it only sees paths the
+  kernel resolves. uutils `comm` (0.8.0 and 0.10.0, measured) rejects
+  byte-sorted input where one path is another followed by a byte
+  0x01-0x09 (`a.mkv` beside `a.mkv<TAB>.mkv`) and exits 1; its status is
+  checked, so that is exit 2, and `--nocheck-order` is not to be added.
+  The suite pins the first two with fakes on `PATH`.
+- `classify_root` calls a missing component absent only when the kernel
+  says why and the answer is ENOENT or ENOTDIR (asked with `builtin cd -P`
+  in the C locale; a trailing slash after an executable non-directory too,
+  while a non-executable one is blocked by the walk's `-x` test). EACCES
+  from a filesystem that refuses this user under a searchable parent
+  (FUSE without `allow_other`), ENAMETOOLONG and every other error are
+  blocked. A video-named link the kernel refuses is skipped
+  only when `classify_root` calls it absent; otherwise it is recorded as
+  unresolved, and a library whose walk finds nothing else exits 2 (the
+  kernel stops at 40 links and at this user's permissions, the scanner at
+  255 links and the service user's). `find` emits in the filesystem's
+  readdir order (tmpfs listed newest first on Linux 6.18), so a fixture
+  that needs an order must assert it.
 - The script intentionally over-reports unreadable subtrees, does not model the
   empty-item sweep, and does not reproduce every `walkFailed` condition.
 - `scripts/check-library-paths-test.sh` drops privileges for permission cases;
