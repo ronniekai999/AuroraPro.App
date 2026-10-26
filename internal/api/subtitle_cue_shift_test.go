@@ -458,6 +458,37 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		if got := len(shiftedFiles(t)); got != before+1 {
 			t.Errorf("the capped track's prediction left %d new cached files, want its one", got-before)
 		}
+
+		// A measured start at 0 is no shift: the source as is, as for any
+		// offset <= 0, not rewritten (which would drop its CRs and the cue
+		// ending at zero). Track 1002 sorts after .zzz.vtt.
+		raw := "WEBVTT\r\n\r\n00:00:00.000 --> 00:00:00.000\r\nzero\r\n\r\n00:00:25.000 --> 00:00:27.000\r\nTwenty-five\r\n"
+		if err := os.WriteFile(strings.TrimSuffix(src, filepath.Ext(src))+".zzzz.vtt", []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before = len(shiftedFiles(t))
+		if rr := getTrack(t, "1002", start+"&remux=1&media_start=0.000000", nil); rr.Code != http.StatusOK || rr.Body.String() != raw {
+			t.Errorf("media_start=0: HTTP %d, body %q; want the source untouched", rr.Code, rr.Body.String())
+		}
+		if got := len(shiftedFiles(t)); got != before {
+			t.Errorf("media_start=0 left %d new cached files", got-before)
+		}
+
+		// The line for an in-memory shift is written once the response is
+		// done, with what was built: here shorter than its source (the cue
+		// ending at zero is dropped).
+		var shiftedResp *httptest.ResponseRecorder
+		logs = captureLogs(t, func() {
+			shiftedResp = getTrack(t, "1002", start+"&remux=1&media_start="+mediaStartParam, nil)
+		})
+		if shiftedResp.Code != http.StatusOK || shiftedResp.Body.Len() >= len(raw) {
+			t.Fatalf("in-memory shift of track 1002: HTTP %d, %d bytes from a %d-byte source", shiftedResp.Code, shiftedResp.Body.Len(), len(raw))
+		}
+		for _, want := range []string{"in_memory=true", "shifted=true", fmt.Sprintf("vtt_bytes=%d\n", shiftedResp.Body.Len())} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("the served line lacks %q:\n%s", want, logs)
+			}
+		}
 	})
 }
 

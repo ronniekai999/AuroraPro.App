@@ -2474,7 +2474,10 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		if startSec > 0 {
 			shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, rawMediaStart)
 			var err error
-			if shiftBasis == subtitleShiftMeasured {
+			// A measured start at or before 0 is no shift: the source is
+			// served as is, as for any offset <= 0 (ShiftVTTCues), not
+			// rewritten.
+			if shiftBasis == subtitleShiftMeasured && shiftOffset > 0 {
 				// media_start= is the client's to choose, so its shift is
 				// never written to the cache: a file per distinct value would
 				// let any client fill the disk. The extracted track it is
@@ -2508,30 +2511,34 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 					"error", err, "vtt", vttPath, "start_sec", startSec, "shift_offset", shiftOffset)
 			}
 		}
-		var byteSize int64 // the source's size for an in-memory shift
-		if inMemory {
-			byteSize = srcInfo.Size()
-		} else if info, statErr := os.Stat(served); statErr == nil {
-			byteSize = info.Size()
+		logServed := func(shifted bool, vttBytes int64) {
+			slog.Info("subtitle served",
+				"file_id", fileID,
+				"track_idx", trackIdx,
+				"file_type", fileType,
+				"start_sec", startSec,
+				"is_remux", isRemux,
+				"shift_offset", shiftOffset,
+				"shift_basis", shiftBasis,
+				"keyframe_gap", float64(startSec)-shiftOffset,
+				"shifted", shifted,
+				"in_memory", inMemory,
+				"vtt_path", served,
+				"vtt_bytes", vttBytes,
+			)
 		}
-		slog.Info("subtitle served",
-			"file_id", fileID,
-			"track_idx", trackIdx,
-			"file_type", fileType,
-			"start_sec", startSec,
-			"is_remux", isRemux,
-			"shift_offset", shiftOffset,
-			"shift_basis", shiftBasis,
-			"keyframe_gap", float64(startSec)-shiftOffset,
-			"shifted", startSec > 0 && shiftErr == nil,
-			"in_memory", inMemory,
-			"vtt_path", served,
-			"vtt_bytes", byteSize,
-		)
 		if inMemory {
-			streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset, srcInfo)
+			// Logged once the response is done: the shift is built while it
+			// is served, and may fail (or be a 304 that needs none).
+			built, buildErr := streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset, srcInfo)
+			logServed(buildErr == nil, built)
 			return
 		}
+		var byteSize int64
+		if info, statErr := os.Stat(served); statErr == nil {
+			byteSize = info.Size()
+		}
+		logServed(startSec > 0 && shiftErr == nil, byteSize)
 		streaming.ServeSubtitle(w, r, served)
 	}
 

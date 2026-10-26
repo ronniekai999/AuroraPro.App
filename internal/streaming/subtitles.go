@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -674,7 +675,7 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	}
 
 	// Read before creating the output, so a failed read leaves no file.
-	text, err := readVTTSource(src, srcInfo)
+	text, err := readVTTSource(src, srcInfo.Size(), 0)
 	if err != nil {
 		return "", err
 	}
@@ -694,9 +695,12 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 
 // MaxInMemoryShiftSourceBytes caps the source VTT a client-chosen shift is
 // built from in memory. The rewrite allocates about 4x the source (the read,
-// its string, the output, ~3x of it live at once) and takes ~25 ms of CPU per
-// MB: measured on an 8 MB source, 36 MB and 190 ms (it was 121 MB and 390 ms
-// before the rewrite stopped holding every line). That is paid per request,
+// its string, the output, ~3x of it live at once) and typically takes ~20-25
+// ms of CPU per MB: on an 8 MB source of ordinary cues, 36 MB and ~165-190 ms
+// (it was 121 MB and 390 ms before the rewrite stopped holding every line).
+// The worst shape measured, one timing line as long as the cap, takes ~70 ms
+// per MB (the cue-line regex walks it; BenchmarkShiftedVTT has both). That is
+// paid per request,
 // not once per (track, offset) as on the cached path; a revalidation pays
 // nothing (ServeShiftedSubtitle). Full-length tracks are typically well
 // under 1 MB. Above the cap the subtitle endpoint ignores media_start= and
@@ -704,19 +708,31 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 // (InMemoryShiftSource).
 const MaxInMemoryShiftSourceBytes = 8 << 20
 
-// ErrShiftSourceTooLarge is InMemoryShiftSource's answer for a source above
-// MaxInMemoryShiftSourceBytes.
+// ErrShiftSourceTooLarge is the answer for a source above
+// MaxInMemoryShiftSourceBytes: from InMemoryShiftSource at the stat, or from
+// ShiftedVTT if the file has grown past it by the time it is read.
 var ErrShiftSourceTooLarge = errors.New("subtitle source too large to shift in memory")
 
-// inMemoryShiftSlots bounds concurrent in-memory rewrites, so a burst of
-// requests cannot hold more than a few rewrites' memory at once (four at the
-// cap: about 100 MB live, with the rewrites' CPU on at most four cores). A
-// request
-// waits for a slot (until its own context ends) rather than falling back: the
-// fallback, the key-frame prediction, is a GOP wrong on exactly the sources
-// media_start= exists for, and costs an ffprobe plus a cached file per offset.
+// inMemoryShiftSlots bounds concurrent in-memory REWRITES: at most four run at
+// once, so a burst of requests spends at most four rewrites' CPU and build
+// memory (about 25 MB each at the cap). A request waits for a slot (until its
+// own context ends) rather than falling back: the fallback, the key-frame
+// prediction, is a GOP wrong on exactly the sources media_start= exists for,
+// and costs an ffprobe plus a cached file per offset.
+//
+// A built body (about its source's size, so at most ~8 MB) then lives until
+// its response has been sent, like any in-memory response, and the slot does
+// not wait for that: slow readers can each hold one body. Holding the slot for
+// the send would bound that memory too, but a slow reader would then keep a
+// slot for minutes (an embedded track's response may take ten) and stall every
+// other client's shift behind it.
+//
 // A var so tests can occupy its slots.
 var inMemoryShiftSlots = make(chan struct{}, 4)
+
+// inMemoryShiftBuilds counts in-memory rewrites started (tests read it: a
+// revalidation must start none).
+var inMemoryShiftBuilds atomic.Int64
 
 // InMemoryShiftSource is the check before ServeShiftedSubtitle: vttPath's
 // FileInfo, ErrShiftSourceTooLarge above MaxInMemoryShiftSourceBytes, or the
@@ -736,7 +752,9 @@ func InMemoryShiftSource(vttPath string) (os.FileInfo, error) {
 // shifted by -offsetSec, and the source's FileInfo. For an offset the CLIENT
 // chose (the subtitle endpoint's media_start=), where a file per distinct
 // value would let any client fill the cache; the expensive half, extracting
-// the track, stays cached per track.
+// the track, stays cached per track. It reads at most
+// MaxInMemoryShiftSourceBytes, whatever the file has grown to since the
+// endpoint's stat: more is ErrShiftSourceTooLarge.
 func ShiftedVTT(vttPath string, offsetSec float64) ([]byte, os.FileInfo, error) {
 	src, err := os.Open(vttPath)
 	if err != nil {
@@ -747,7 +765,7 @@ func ShiftedVTT(vttPath string, offsetSec float64) ([]byte, os.FileInfo, error) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat vtt source: %w", err)
 	}
-	text, err := readVTTSource(src, srcInfo)
+	text, err := readVTTSource(src, srcInfo.Size(), MaxInMemoryShiftSourceBytes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -778,12 +796,20 @@ func shiftedSubtitleETag(vttPath string, srcInfo os.FileInfo, offsetSec float64)
 // content, so a revalidation rewrites nothing. The rewrite then waits for one
 // of inMemoryShiftSlots; a context that ends first, or a failed rewrite, is a
 // 500 (nothing has been written by then).
-func ServeShiftedSubtitle(w http.ResponseWriter, r *http.Request, vttPath string, offsetSec float64, srcInfo os.FileInfo) {
+//
+// It reports what happened, for the caller's log: the size of the body built
+// (0 when the request needed none, a revalidation), and the error that
+// stopped it building one.
+func ServeShiftedSubtitle(w http.ResponseWriter, r *http.Request, vttPath string, offsetSec float64, srcInfo os.FileInfo) (builtBytes int64, err error) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("ETag", shiftedSubtitleETag(vttPath, srcInfo, offsetSec))
-	http.ServeContent(w, r, filepath.Base(vttPath), srcInfo.ModTime(),
-		&lazyShiftedVTT{ctx: r.Context(), path: vttPath, offsetSec: offsetSec})
+	body := &lazyShiftedVTT{ctx: r.Context(), path: vttPath, offsetSec: offsetSec}
+	http.ServeContent(w, r, filepath.Base(vttPath), srcInfo.ModTime(), body)
+	if body.body != nil {
+		builtBytes = body.body.Size()
+	}
+	return builtBytes, body.err
 }
 
 // lazyShiftedVTT is ServeShiftedSubtitle's body: the shift, built on the first
@@ -806,8 +832,12 @@ func (l *lazyShiftedVTT) load() error {
 		l.err = l.ctx.Err()
 		return l.err
 	}
-	body, _, err := ShiftedVTT(l.path, l.offsetSec)
-	<-inMemoryShiftSlots
+	inMemoryShiftBuilds.Add(1)
+	body, err := func() ([]byte, error) {
+		defer func() { <-inMemoryShiftSlots }() // released even if the rewrite panics
+		b, _, err := ShiftedVTT(l.path, l.offsetSec)
+		return b, err
+	}()
 	if err != nil {
 		l.err = err
 		slog.Warn("in-memory subtitle shift failed", "vtt", l.path, "shift_offset", l.offsetSec, "error", err)
@@ -831,13 +861,24 @@ func (l *lazyShiftedVTT) Seek(offset int64, whence int) (int64, error) {
 	return l.body.Seek(offset, whence)
 }
 
-// readVTTSource reads an open subtitle file whole, in one allocation sized
-// from its FileInfo.
-func readVTTSource(f *os.File, info os.FileInfo) (string, error) {
+// readVTTSource reads a subtitle source whole, in one allocation sized from
+// sizeHint (its stat size). With limit > 0 it reads at most limit+1 bytes and
+// answers ErrShiftSourceTooLarge for more, so a file that grew after its stat
+// cannot take more memory than the limit; limit 0 reads everything.
+func readVTTSource(r io.Reader, sizeHint, limit int64) (string, error) {
+	if limit > 0 {
+		if sizeHint > limit {
+			return "", ErrShiftSourceTooLarge
+		}
+		r = io.LimitReader(r, limit+1)
+	}
 	var buf bytes.Buffer
-	buf.Grow(int(info.Size()) + bytes.MinRead)
-	if _, err := buf.ReadFrom(f); err != nil {
+	buf.Grow(int(sizeHint) + bytes.MinRead)
+	if _, err := buf.ReadFrom(r); err != nil {
 		return "", fmt.Errorf("read vtt: %w", err)
+	}
+	if limit > 0 && int64(buf.Len()) > limit {
+		return "", ErrShiftSourceTooLarge
 	}
 	return buf.String(), nil
 }

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -129,6 +130,7 @@ func TestServeShiftedSubtitleRevalidatesWithoutRewriting(t *testing.T) {
 	if err := os.Remove(src); err != nil {
 		t.Fatal(err)
 	}
+	builds := inMemoryShiftBuilds.Load()
 	for name, h := range map[string]http.Header{
 		"If-None-Match":     {"If-None-Match": {etag}},
 		"If-Modified-Since": {"If-Modified-Since": {lastModified}},
@@ -137,9 +139,85 @@ func TestServeShiftedSubtitleRevalidatesWithoutRewriting(t *testing.T) {
 			t.Errorf("%s: HTTP %d with %d bytes, want 304 and no rewrite", name, got.Code, got.Body.Len())
 		}
 	}
+	if n := inMemoryShiftBuilds.Load() - builds; n != 0 {
+		t.Errorf("two revalidations started %d rewrites, want none", n)
+	}
 	if got := serveShiftedWith(src, 10, info, http.Header{"If-None-Match": {`"another"`}}, ctx); got.Code != http.StatusInternalServerError {
 		t.Errorf("control: a request that needs the body got HTTP %d; it should have tried the (removed) source", got.Code)
 	}
+	if n := inMemoryShiftBuilds.Load() - builds; n != 1 {
+		t.Errorf("control: a request that needs the body started %d rewrites, want 1", n)
+	}
+}
+
+// What ServeShiftedSubtitle reports, for the endpoint's log line: the body it
+// built, none for a revalidation, and the error that stopped a build.
+func TestServeShiftedSubtitleReportsWhatItServed(t *testing.T) {
+	src := writeTempVTT(t, t.TempDir(), "in.vtt", memoryShiftFixture)
+	info := mustStat(t, src)
+	serve := func(h http.Header) (*httptest.ResponseRecorder, int64, error) {
+		rr := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/sub", nil)
+		r.Header = h
+		n, err := ServeShiftedSubtitle(rr, r, src, 10, info)
+		return rr, n, err
+	}
+	if rr, n, err := serve(http.Header{}); err != nil || n != int64(rr.Body.Len()) || n == 0 {
+		t.Errorf("a served shift reported %d bytes, %v; the body was %d bytes", n, err, rr.Body.Len())
+	}
+	if _, n, err := serve(http.Header{"If-None-Match": {shiftedSubtitleETag(src, info, 10)}}); err != nil || n != 0 {
+		t.Errorf("a revalidation reported %d bytes, %v; want 0, nil", n, err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if rr, n, err := serve(http.Header{}); err == nil || n != 0 || rr.Code != http.StatusInternalServerError {
+		t.Errorf("a failed build reported %d bytes, %v (HTTP %d); want 0, an error, 500", n, err, rr.Code)
+	}
+}
+
+// The cap holds at read time too: a source that grew past it after the
+// endpoint's stat is refused having read at most the cap and one byte.
+func TestReadVTTSourceStopsAtTheLimit(t *testing.T) {
+	const limit = 1000
+	counted := &countingReader{r: strings.NewReader(strings.Repeat("x", 5*limit))}
+	if _, err := readVTTSource(counted, 10, limit); !errors.Is(err, ErrShiftSourceTooLarge) {
+		t.Errorf("5x the limit, stat said 10 bytes: %v, want ErrShiftSourceTooLarge", err)
+	}
+	if counted.n > limit+1 {
+		t.Errorf("read %d bytes of an over-limit source; at most %d", counted.n, limit+1)
+	}
+	counted = &countingReader{r: strings.NewReader(strings.Repeat("x", 5*limit))}
+	if _, err := readVTTSource(counted, 5*limit, limit); !errors.Is(err, ErrShiftSourceTooLarge) || counted.n != 0 {
+		t.Errorf("a stat already over the limit: %v after %d bytes read; want ErrShiftSourceTooLarge, nothing read", err, counted.n)
+	}
+	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", limit)), 0, limit); err != nil || len(got) != limit {
+		t.Errorf("exactly the limit: %d bytes, %v", len(got), err)
+	}
+	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", 5*limit)), 0, 0); err != nil || len(got) != 5*limit {
+		t.Errorf("no limit (the cached path): %d bytes, %v", len(got), err)
+	}
+	big := filepath.Join(t.TempDir(), "big.vtt")
+	if err := os.WriteFile(big, []byte("WEBVTT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, MaxInMemoryShiftSourceBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ShiftedVTT(big, 10); !errors.Is(err, ErrShiftSourceTooLarge) {
+		t.Errorf("ShiftedVTT of a source past the cap: %v, want ErrShiftSourceTooLarge", err)
+	}
+}
+
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }
 
 func TestInMemoryShiftSourceCapsTheSize(t *testing.T) {
@@ -194,10 +272,17 @@ func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 	if took := time.Since(began); took < 90*time.Millisecond || took > 2*time.Second {
 		t.Errorf("waited %v for a slot; want about the context's 100 ms", took)
 	}
-	// A 304 needs no slot at all.
+	// A 304 needs no slot at all: it answers at once, well inside a context
+	// that a slot wait would run out.
 	etag := shiftedSubtitleETag(src, mustStat(t, src), 10)
-	if got := serveShifted(t, src, 10, http.Header{"If-None-Match": {etag}}, context.Background()); got.Code != http.StatusNotModified {
+	revalidate, cancelRevalidate := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRevalidate()
+	began = time.Now()
+	if got := serveShifted(t, src, 10, http.Header{"If-None-Match": {etag}}, revalidate); got.Code != http.StatusNotModified {
 		t.Errorf("a revalidation with every slot taken: HTTP %d, want 304", got.Code)
+	}
+	if took := time.Since(began); took > 500*time.Millisecond {
+		t.Errorf("a revalidation with every slot taken took %v: it waited for a slot", took)
 	}
 
 	done := make(chan *httptest.ResponseRecorder, 1)
@@ -246,22 +331,34 @@ func TestShiftedSubtitleETagNamesTheExactShiftOfOneSource(t *testing.T) {
 //
 //	go test ./internal/streaming/ -run XXX -bench BenchmarkShiftedVTT -benchtime 5x
 func BenchmarkShiftedVTT(b *testing.B) {
-	var sb strings.Builder
-	sb.WriteString("WEBVTT\n\n")
-	for i := 0; sb.Len() < MaxInMemoryShiftSourceBytes; i++ {
-		s := float64(i) * 2.5
-		fmt.Fprintf(&sb, "%d\n%s --> %s align:start\nLine number %d of the subtitle text, long enough to look real.\nSecond line %d.\n\n",
-			i, formatVTTTimestamp(s), formatVTTTimestamp(s+2), i, i)
-	}
-	p := filepath.Join(b.TempDir(), "bench.vtt")
-	if err := os.WriteFile(p, []byte(sb.String()), 0o644); err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, _, err := ShiftedVTT(p, 61.25); err != nil {
-			b.Fatal(err)
+	const under = MaxInMemoryShiftSourceBytes - 1024 // the last cue must not cross the cap
+	typical := func() string {
+		var sb strings.Builder
+		sb.WriteString("WEBVTT\n\n")
+		for i := 0; sb.Len() < under; i++ {
+			s := float64(i) * 2.5
+			fmt.Fprintf(&sb, "%d\n%s --> %s align:start\nLine number %d of the subtitle text, long enough to look real.\nSecond line %d.\n\n",
+				i, formatVTTTimestamp(s), formatVTTTimestamp(s+2), i, i)
 		}
+		return sb.String()
+	}
+	// The worst shape measured: one timing line as long as the cap allows,
+	// which the cue-line regex walks to its end.
+	longTiming := "WEBVTT\n\n00:01:00.000 --> 00:01:02.000 " + strings.Repeat("x", under) + "\ntext\n"
+	for _, tc := range []struct{ name, body string }{{"typical", typical()}, {"one long timing line", longTiming}} {
+		b.Run(tc.name, func(b *testing.B) {
+			p := filepath.Join(b.TempDir(), "bench.vtt")
+			if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(int64(len(tc.body)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, _, err := ShiftedVTT(p, 61.25); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
