@@ -386,15 +386,15 @@ prefix you happened to type.
 **6b — an advisory check on what the next scan would prune.**
 
 > **Read this before you rely on it.** This check is a second opinion, not a
-> gate. Nine independent adversarial reviews of it found FOURTEEN states in
-> which it reported "nothing would be pruned" while the scan would have deleted
-> rows and cascaded the watch history away — five in one class (a permission
-> failure it could not distinguish from "the path is gone", which is the one
-> state it treats as safe), and nine where a command failed quietly and its
-> empty output read as good news. One of the eleven was inside the fix for
-> another. All are fixed and each has a test that
-> fails if the fix is reverted — but eleven across eight rounds is a track
-> record, and the useful inference is not "it is correct now".
+> gate. Round after round of independent adversarial review has found states
+> in which it reported "nothing would be pruned" while the scan would have
+> deleted rows and cascaded the watch history away: a permission or
+> filesystem refusal it could not distinguish from "the path is gone" (the
+> one state it treats as safe), a command that failed quietly so its empty
+> output read as good news, and more than once a hole inside the fix for the
+> last one. All found so far are fixed and each has a test that fails if the
+> fix is reverted — but that is a track record, and the useful inference is
+> not "it is correct now".
 >
 > So: **exit 0 is evidence, not permission.** It can tell you something IS
 > wrong. It cannot tell you nothing is. Do not skip the backup in step 1 on the
@@ -421,10 +421,27 @@ backup from step 1 — and run it again.
 
 **Run it as the user Aurora runs as** (`sudo -u aurora ./scripts/check-library-paths.sh`
 if `postgres` access allows it, otherwise as root). The script predicts what
-*the service* will walk, so if it can see less than the service can, it says so
-and exits 2 rather than guessing — but if it can see MORE, it quietly
-over-reports rows the scan would leave alone. Exit 2 is never "probably fine";
-it means the answer is unknown.
+*the service* will walk. Where it can see less than the service can, in the
+cases it knows of — an unreadable root, subtree or ancestor, a filesystem
+that refuses this user (a FUSE mount without `allow_other` refuses even
+root), a link it cannot resolve — it says so: exit 2 where that blindness
+could hide a prune, and otherwise a note beside rows it counts as missing.
+Where it can see MORE, it quietly over-reports rows the scan would leave
+alone. Exit 2 is never "probably fine"; it means the answer is unknown.
+
+**A library whose only media are links this check cannot resolve** the way
+the scanner does gives exit 2, listing the links: a chain of more than 40
+links, a target behind a directory the checking user cannot enter, a
+filesystem that refuses the checking user (a FUSE mount without
+`allow_other`), a target too long as written, or a non-directory followed
+by more path (`a.mkv/.`, `a.mkv/` or `a.mkv//` when `a.mkv` is not
+executable; an executable one reads as absent in all three spellings, exit
+0, which is also the scan's answer). The scan may find those links, and
+then it prunes everything else, so the check will not call the library
+empty; it may also not (it shields a link to `a.mkv/.`), and then exit 2 is
+an over-report. Fix the links, or re-run as the user Aurora runs as. With
+other media found, such links are counted as missing, with a note saying
+so.
 
 **What exit 0 does and does not promise.** At best it means: every path
 recorded for these libraries was found by *this* walk, run as *this* user. It
@@ -446,11 +463,12 @@ none of them modelled here:
 - **A symlink loop as a root** gives exit 2 here while the scan sets
   `walkFailed` and prunes nothing — the check refuses to answer rather than
   guess, which is right, and still an exit you cannot clear except by fixing
-  the path. **A non-directory partway down a root** gives exit 2 only when it
-  is not executable; an executable regular file mid-path is reported as
-  "does not exist" instead, which is the correct *answer* (the scan's
-  `EvalSymlinks` fails with ENOTDIR, so it skips the prune) under a wrong
-  explanation.
+  the path. That holds with GNU coreutils and with uutils (the default on
+  Ubuntu 26.04) alike, for the same reason. **A non-directory partway down a
+  root** gives exit 2 only when it is not executable; an executable regular
+  file mid-path is reported as "does not exist" instead, which is the
+  correct *answer* (the scan's `EvalSymlinks` fails with ENOTDIR, so it skips
+  the prune) under a wrong explanation.
 
 The same script is worth running any time you want to know what a scan is about
 to do: after restoring a backup, after a disk goes missing, or before an

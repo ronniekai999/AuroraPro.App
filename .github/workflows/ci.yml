@@ -125,6 +125,35 @@ jobs:
       - name: Test
         run: npm test
 
+      # The audit's browser checks (page alignment, mobile layout, PWA) need a
+      # Chromium that `npm ci` does not install. npx runs the lockfile's
+      # Playwright, so the browser build always matches it. The Audit step sets
+      # CHROMIUM_PATH empty, which the scripts read as "no binary" (it also
+      # skips their pinned /opt/pw-browsers path), so they launch Playwright's
+      # default: in headless mode the headless shell, so the full browser is
+      # not downloaded. The cache holds only the download; --with-deps
+      # reinstalls the system libraries on every run.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-shell-${{ runner.os }}-${{ hashFiles('static/redesign/app/package-lock.json') }}
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps --only-shell chromium
+
+      # `npm run audit` minus its build, which ran above: the gate CLAUDE.md
+      # requires for frontend changes, which until now ran only when someone ran
+      # it locally. Each check exits non-zero on any problem it asserts;
+      # allowlisted known exceptions and informational reports print without
+      # failing, so a green log can still name them. The chain stops at the
+      # first failing check, so any one fails the job. A new check belongs in
+      # `audit:checks`: appended to `audit` instead, it would run locally and
+      # never here.
+      - name: Audit
+        env:
+          CHROMIUM_PATH: ""
+        run: npm run audit:checks
+
   review-gate:
     name: Review gate self-test
     runs-on: ubuntu-latest
