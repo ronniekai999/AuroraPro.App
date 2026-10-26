@@ -189,3 +189,32 @@ func TestPWASourceContract(t *testing.T) {
 		}
 	}
 }
+
+// TestV2IndexIsServedByteForByte pins what scripts/aurora-update.sh's deploy
+// verification relies on: GET /v2/ returns the installed index.html exactly,
+// through the same middleware the router mounts it behind. Anything that
+// rewrote it on the way out (a CSP nonce, an injected tag, compression without
+// being asked) would make every update fail verification and roll back.
+func TestV2IndexIsServedByteForByte(t *testing.T) {
+	staticDir := t.TempDir()
+	v2 := filepath.Join(staticDir, "v2")
+	if err := os.MkdirAll(v2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := []byte("<!doctype html>\n<html><head><meta name=\"aurora-build\" content=\"0123456789abcdef0123\"></head><body></body></html>\n")
+	if err := os.WriteFile(filepath.Join(v2, "index.html"), index, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := frontendHeaders(newV2Handler(staticDir, filepath.Join(v2, "index.html")))
+	for _, path := range []string{"/v2/", "/v2/library/123"} {
+		rec := httptest.NewRecorder()
+		// What curl sends: no Accept-Encoding, no conditional headers.
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", path, rec.Code)
+		}
+		if got := rec.Body.Bytes(); string(got) != string(index) {
+			t.Errorf("GET %s served %q, want the installed file byte for byte", path, got)
+		}
+	}
+}

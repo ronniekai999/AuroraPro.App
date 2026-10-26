@@ -194,7 +194,8 @@ try {
   if (!/^[0-9a-f]{20}$/.test(own)) {
     fail(`built index.html has no aurora-build id (got "${own}") — is auroraBuildId() still in vite.config.ts?`)
   } else {
-    const notice = page.getByText('Aurora was updated', { exact: false })
+    // The visible card; the same words also sit in a screen-reader-only live region.
+    const notice = page.locator('.toast', { hasText: 'Aurora was updated' })
     // The same build deployed: a check must stay quiet.
     await page.evaluate(() => window.dispatchEvent(new Event('aurora:stale-bundle')))
     await page.waitForTimeout(1500)

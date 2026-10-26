@@ -102,8 +102,10 @@ export function useNewBuildAvailable(options: Options = {}): { available: boolea
     lastCheck.current = now.current()
     try {
       const deployed = await fetchDeployed.current()
-      // A failed or unreadable answer (a deploy mid-restart, offline) says nothing.
-      if (deployed && deployed !== own.current) setNewer(deployed)
+      // A failed or unreadable answer (a deploy mid-restart, offline) says
+      // nothing. This tab's own build served again (an update that was rolled
+      // back) withdraws the notice.
+      if (deployed) setNewer(deployed === own.current ? null : deployed)
     } finally {
       inFlight.current = false
     }

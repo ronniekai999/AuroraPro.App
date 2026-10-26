@@ -1073,7 +1073,7 @@ func main() {
 		// record naming this pid means the boot got that far.
 		rec := newServingRecord(ln, autoCertTLS || manualTLS, cfg.TLS.Domain)
 		if err := writeServingRecord(defaultServingRecordFile, rec); err != nil {
-			slog.Warn("serving record: write failed; the updater will fall back to the configured address",
+			slog.Warn("serving record: write failed; the updater will take the scheme from aurora.env",
 				"path", defaultServingRecordFile, "error", err)
 		}
 		defer clearServingRecord(defaultServingRecordFile)

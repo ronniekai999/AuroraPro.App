@@ -1090,30 +1090,47 @@ count restarts).
   the SPA source fails; there is no fallback to a leftover `static/v2`.
 - The drain and the model pull run before any live file changes, so the old
   backend never serves the new frontend while it waits.
-- A deploy counts only when `MainPID`'s `/proc/<pid>/exe` hashes to the binary
-  just built, `/api/health` says `status: ok` with `db_connected: true`, `/v2/`
-  is byte-identical to the installed `index.html`, and the same pid passes again
-  `VERIFY_SETTLE` rounds later. The anonymous health route still names no
+- A deploy counts only when the main pid right after the restart is still the
+  main pid throughout (any change fails at once), its `/proc/<pid>/exe` hashes
+  to the binary just built, `/api/health` says `status: ok` with
+  `db_connected: true`, `/v2/` is byte-identical to the installed `index.html`
+  (`TestV2IndexIsServedByteForByte`), all within `VERIFY_TIMEOUT` seconds and
+  again `VERIFY_SETTLE` seconds later. The anonymous health route still names no
   version.
-- Where to connect comes from `/var/lib/aurora/serving.json`
-  (`cmd/aurora/serving_record.go`, written after migrations and the bind), and
-  only when its pid is `MainPID`; otherwise `AURORA_HOST`/`AURORA_PORT`, else
-  `127.0.0.1:8484`, plain HTTP. `TestServingRecordContractMatchesUpdater` pins
-  the path and keys on both sides.
+- The port is always one that pid listens on, read from `/proc/<pid>/fd` and its
+  TCP tables, so the answer comes from that process. How to speak to it comes
+  from `/var/cache/aurora/serving.json` (`cmd/aurora/serving_record.go`, written
+  after migrations and the bind) when the record names that pid and port, else
+  from `TLS_*` in `aurora.env`; the port is then `AURORA_PORT`, else the pid's
+  only listener, else 8484. `TestServingRecordContractMatchesUpdater` pins the
+  path and keys on both sides.
+- `/var/lib/aurora` is `root:root 0755` (the source mirror lives there): the
+  server cannot write it, which is why the record and the drain snapshot
+  (`stream-state.json`, which silently never existed there) are in
+  `/var/cache/aurora`. That directory is the aurora user's, so root reads both
+  with `read_untrusted` / `O_NOFOLLOW|O_NONBLOCK`, regular files only, capped.
 - Leaving in phase `files` or `restarted` for any reason rolls back the binary,
   static tree and migration files and verifies the restored service; it hangs
   off the EXIT trap because the ERR trap does not run inside functions. The
   database is not rolled back. Past `verified`, failures keep the new release.
-- The SPA stamps a bundle hash as `<meta name="aurora-build">`
-  (`vite-build-id.ts`); `lib/buildUpdate.ts` re-reads `/v2/` and shows a Reload
-  notice, never reloading by itself. `verify-pwa.mjs` checks it end to end.
+  Restored static files are touched: the server answers conditional requests
+  from Last-Modified alone, and the snapshot's old mtimes would let a browser
+  keep the failed release's `index.html` (a blank page).
+- The SPA stamps a hash of the bundle, `public/` and the page as
+  `<meta name="aurora-build">` (`vite-build-id.ts`); `lib/buildUpdate.ts`
+  re-reads `/v2/` and shows a Reload notice (withdrawn when this tab's build is
+  served again), never reloading by itself. `verify-pwa.mjs` checks it end to
+  end under the production CSP.
 - Known gaps: idle ticks check installed files, not the running process; TLS is
-  probed with `--insecure` (identity comes from the pid and exe); a SIGKILL
-  mid-install still leaves a partial tree (the pending record blocks automatic
-  retry); a rollback generation kept from an older updater has no migration
-  snapshot; drain, builds and two verifications can approach the unit's
-  10-minute `TimeoutStartSec`; `install.sh` and `redeploy.sh` keep the old
-  `:8484` liveness check.
+  probed with `--insecure`; a crash more than `VERIFY_SETTLE` seconds after the
+  first good answer is not seen; a SIGKILL mid-install still leaves a partial
+  tree (the pending record blocks automatic retry); a rollback generation kept
+  from an older updater has no migration snapshot, and a rollback to a binary
+  that writes no record falls back to `aurora.env` for TLS; a migration longer
+  than the window can never deploy; the Node gate reads the checkout before the
+  merge; drain, builds and two verifications can approach the unit's 10-minute
+  `TimeoutStartSec`; `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
+  (`--skip-npm`, `:8484` health check) are unchanged.
 
 ### Node build floor
 

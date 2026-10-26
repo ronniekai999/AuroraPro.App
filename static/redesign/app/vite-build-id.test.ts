@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { BUILD_ID_META_NAME, auroraBuildId, buildIdFromBundle } from './vite-build-id'
+import { BUILD_ID_META_NAME, auroraBuildId, buildIdFromBundle, readTree } from './vite-build-id'
 import { BUILD_ID_META_NAME as RUNTIME_META_NAME } from './src/lib/buildUpdate'
 import viteConfig from './vite.config'
 
@@ -24,8 +27,30 @@ describe('buildIdFromBundle', () => {
     expect(buildIdFromBundle({ ...bundle, d: chunk('assets/AdminView-2.js', 'admin') })).not.toBe(id)
   })
 
-  it('ignores the HTML, which is what carries the id', () => {
+  // The page counts through `html` (taken before the id goes into it), not as
+  // a bundle entry, which would be the page WITH the id.
+  it('takes the page as passed, not its bundle entry', () => {
     expect(buildIdFromBundle({ ...bundle, c: asset('index.html', '<html lang="en">') })).toBe(buildIdFromBundle(bundle))
+    expect(buildIdFromBundle(bundle, '<html lang="en">')).not.toBe(buildIdFromBundle(bundle, '<html>'))
+  })
+
+  // public/ is copied verbatim and Rollup never sees it: a deploy that only
+  // changes sw.js or the manifest must still read as a new build.
+  it('changes when a public/ file does', () => {
+    const before = buildIdFromBundle(bundle, '', [['sw.js', new TextEncoder().encode('a')]])
+    expect(buildIdFromBundle(bundle, '', [['sw.js', new TextEncoder().encode('b')]])).not.toBe(before)
+  })
+})
+
+describe('readTree', () => {
+  it('lists every file under a directory in a stable order', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'build-id-'))
+    mkdirSync(path.join(dir, 'icons'))
+    writeFileSync(path.join(dir, 'sw.js'), 'worker')
+    writeFileSync(path.join(dir, 'icons', 'a.png'), 'png')
+    expect(readTree(dir).map(([name, data]) => [name, Buffer.from(data).toString()]))
+      .toEqual([['icons/a.png', 'png'], ['sw.js', 'worker']])
+    expect(readTree(path.join(dir, 'absent'))).toEqual([])
   })
 })
 

@@ -96,14 +96,17 @@ VERIFY_INDEX="$DEPLOY_STATE_DIR/.verify-index.html"
 SPA_SRC_DIR=static/redesign/app
 SPA_OUTPUT_DIR=static/v2
 # Written by the server once it has bound its listener (cmd/aurora/
-# serving_record.go): which pid listens where, over which scheme.
-SERVING_FILE=/var/lib/aurora/serving.json
+# serving_record.go): which pid listens where, over which scheme. It lives in
+# the aurora user's cache dir (the server cannot write /var/lib/aurora), so it
+# is read as untrusted input; see read_untrusted.
+SERVING_FILE=/var/cache/aurora/serving.json
 PROC_ROOT=/proc
-# How long a restarted service gets to pass verification, and how long it must
-# then stay up as the same process. Both count probe rounds (one second each),
-# not wall-clock time.
+# A restarted service gets VERIFY_TIMEOUT seconds (and at most that many probe
+# rounds; rounds bound the stubbed tests, where sleep returns at once) to pass
+# verification, then must pass again VERIFY_SETTLE seconds later as the same
+# process. RestartSec=5, so a crash in that window shows as a changed pid.
 VERIFY_TIMEOUT=60
-VERIFY_SETTLE=5
+VERIFY_SETTLE=10
 # none → files (live files are being replaced) → restarted → verified, or
 # rolling_back. The EXIT trap rolls back whenever the script leaves in `files`
 # or `restarted`, whatever the reason.
@@ -479,9 +482,10 @@ node_vite_verdict() {
     return 3
 }
 
-# Only when we actually build the SPA from source. build_frontend_bundle
-# falls back to the committed static/v2 bundle when the source tree is
-# absent, and that path needs no Node at all.
+# Only when the checkout has the SPA source. build_frontend_bundle has no
+# fallback, so a target without it fails at the build whatever Node says. This
+# reads the checkout BEFORE the merge: a target that first adds the source is
+# not gated here, and an unusable Node then fails at the build instead.
 # AURORA-NODE-GATE-BEGIN (extracted by scripts/node-version-test.sh)
 if [ -d "$SPA_SRC_DIR" ]; then
     NODE_VERDICT=0
@@ -657,8 +661,9 @@ refresh_installed_updater() {
 # the port (an AURORA_PORT install failed every update), assumed plain HTTP (a
 # server terminating its own TLS failed every update), passed with the
 # database down (the route answers 200 "degraded"), never asked which binary
-# was running, and never looked at the frontend. Each helper below checks one
-# of those things on the process systemd is actually running.
+# was running or which process answered, and never looked at the frontend.
+# Each helper below checks one of those things on the process systemd is
+# actually running.
 
 file_sha256() {
     python3 -c '
@@ -668,6 +673,26 @@ with open(sys.argv[1], "rb") as stream:
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
         digest.update(chunk)
 print(digest.hexdigest())' "$1"
+}
+
+# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
+# or anything large. For files in directories the aurora user can write (the
+# serving record, the drain snapshot): they must not steer root into reading
+# some other file, or hang it on a pipe nobody writes.
+read_untrusted() {
+    python3 -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        sys.exit(1)
+    data = stream.read(65537)
+if len(data) > 65536:
+    sys.exit(1)
+sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
 }
 
 # main_pid — aurora.service's main process, or failure when it has none
@@ -690,55 +715,132 @@ runs_binary() {
 }
 
 # service_endpoint PID — "scheme|host|port|tls-name|source" for reaching that
-# process. The serving record is believed only when it names PID; otherwise
-# (no record yet, or a binary that predates it) the configured AURORA_HOST /
-# AURORA_PORT from aurora.env, else the default 8484, over plain HTTP.
+# process, or a reason (and failure) when it cannot be reached yet.
+#
+# The port is always one PID itself listens on, read from /proc/<pid>/fd and the
+# process's TCP tables, so whatever answers there is that process (another
+# socket can share the port only through SO_REUSEPORT as the same user). The
+# serving record, when it names
+# PID and one of those ports, says how to speak to it (scheme, TLS name), which
+# covers a port or TLS set only in the config file. Without one, the scheme
+# follows the TLS_* settings from aurora.env, and the port is AURORA_PORT, else
+# the only one PID listens on, else 8484.
 service_endpoint() {
-    SERVING_FILE_ENV="$SERVING_FILE" PID_ENV="$1" \
-    FALLBACK_HOST_ENV="${AURORA_HOST:-}" FALLBACK_PORT_ENV="${AURORA_PORT:-}" \
+    PROC_ROOT_ENV="$PROC_ROOT" SERVING_FILE_ENV="$SERVING_FILE" PID_ENV="$1" \
     python3 <<'PY'
-import ipaddress, json, os
+import ipaddress, json, os, re, socket, stat, sys
 
-def url_host(host):
-    host = host.strip().strip("[]")
-    if host in ("", "localhost"):
-        return "127.0.0.1"
+proc, pid = os.environ["PROC_ROOT_ENV"], os.environ["PID_ENV"]
+NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+def listening():
+    inodes = set()
+    fd_dir = os.path.join(proc, pid, "fd")
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return host
-    if ip.is_unspecified:
+        names = os.listdir(fd_dir)
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            target = os.readlink(os.path.join(fd_dir, name))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            inodes.add(target[8:-1])
+    found = {}
+    for table, family in (("tcp", socket.AF_INET), ("tcp6", socket.AF_INET6)):
+        try:
+            with open(os.path.join(proc, pid, "net", table)) as stream:
+                rows = stream.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            f = row.split()
+            if len(f) < 10 or f[3] != "0A" or f[9] not in inodes:
+                continue
+            addr, _, port = f[1].partition(":")
+            raw = bytes.fromhex(addr)
+            if sys.byteorder == "little":
+                # The kernel prints each 32-bit word as a host-order integer.
+                raw = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+            found.setdefault(int(port, 16), socket.inet_ntop(family, raw))
+    return found
+
+def connect_host(ip):
+    addr = ipaddress.ip_address(ip)
+    if addr.is_unspecified:
         # A wildcard bind, including Go's dual-stack "[::]", accepts loopback.
         return "127.0.0.1"
-    return "[%s]" % host if ip.version == 6 else host
+    if addr.version == 6:
+        return str(addr.ipv4_mapped) if addr.ipv4_mapped else "[%s]" % addr
+    return str(addr)
 
-try:
-    with open(os.environ["SERVING_FILE_ENV"]) as stream:
-        rec = json.load(stream)
-except (OSError, ValueError):
-    rec = None
-if isinstance(rec, dict) and rec.get("pid") == int(os.environ["PID_ENV"]):
-    host, _, port = str(rec.get("addr") or "").rpartition(":")
+def serving_record():
+    try:
+        fd = os.open(os.environ["SERVING_FILE_ENV"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            return None
+        data = stream.read(4097)
+    try:
+        rec = json.loads(data) if len(data) <= 4096 else None
+    except ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+ports = listening()
+if not ports:
+    print("pid %s is not listening on any TCP port (yet)" % pid)
+    sys.exit(1)
+
+rec = serving_record()
+if rec is not None and rec.get("pid") == int(pid):
+    _, _, port = str(rec.get("addr") or "").rpartition(":")
     scheme = rec.get("scheme")
-    if port.isdigit() and scheme in ("http", "https"):
-        name = str(rec.get("server_name") or "") if scheme == "https" else ""
-        print("|".join((scheme, url_host(host), port, name, "serving record")))
-        raise SystemExit(0)
-port = os.environ["FALLBACK_PORT_ENV"].strip()
-if not port.isdigit():
-    port = "8484"
-print("|".join(("http", url_host(os.environ["FALLBACK_HOST_ENV"]), port, "",
-                "configured address; no serving record names this process")))
+    name = str(rec.get("server_name") or "") if scheme == "https" else ""
+    if port.isdigit() and int(port) in ports and scheme in ("http", "https") and (not name or NAME.match(name)):
+        print("|".join((scheme, connect_host(ports[int(port)]), port, name, "serving record")))
+        sys.exit(0)
+
+def setting(key):
+    return os.environ.get(key, "").strip()
+
+want = setting("AURORA_PORT")
+if want.isdigit() and int(want) in ports:
+    port = int(want)
+elif len(ports) == 1:
+    port = next(iter(ports))
+elif 8484 in ports:
+    port = 8484
+else:
+    print("pid %s listens on ports %s, and neither a serving record nor AURORA_PORT says which is Aurora's"
+          % (pid, ", ".join(str(p) for p in sorted(ports))))
+    sys.exit(1)
+# The same choice the server makes (cmd/aurora/main.go): autocert needs a domain,
+# a manual certificate needs both files.
+domain = setting("TLS_DOMAIN") if NAME.match(setting("TLS_DOMAIN")) else ""
+if setting("TLS_AUTO_CERT").lower() in ("true", "1", "yes") and domain:
+    scheme, name = "https", domain
+elif setting("TLS_CERT_FILE") and setting("TLS_KEY_FILE"):
+    scheme, name = "https", domain
+else:
+    scheme, name = "http", ""
+print("|".join((scheme, connect_host(ports[port]), str(port), name,
+                "listening socket, scheme from aurora.env; no serving record names this process")))
 PY
 }
 
 # curl_service PATH — GET PATH from the endpoint probe_service resolved.
 curl_service() {
     local url="$SVC_SCHEME://$SVC_HOST:$SVC_PORT$1"
-    local args=(-sf --max-time 5 --proto '=http,https')
+    # --noproxy: aurora.env is sourced, and an http_proxy there would otherwise
+    # carry this loopback request off to the proxy.
+    local args=(-sf --max-time 5 --noproxy '*' --proto '=http,https')
     if [ "$SVC_SCHEME" = https ]; then
-        # Which process answers is proved by its pid and /proc/<pid>/exe, not
-        # by the certificate, which names the public domain, not loopback.
+        # The certificate names the public domain, not loopback. Which process
+        # answers is already settled: the port is one the verified pid listens on.
         args+=(--insecure)
         if [ -n "$SVC_TLS_NAME" ]; then
             # autocert refuses a handshake without the configured name (SNI).
@@ -749,25 +851,38 @@ curl_service() {
     curl "${args[@]}" "$url"
 }
 
-# probe_service SHA256 INDEX — one round of checks against the running service.
-# Sets PROBED_PID, and VERIFY_REASON when a check fails.
+# probe_service SHA256 INDEX BASELINE_PID — one round of checks against the
+# running service. Sets PROBED_PID, and VERIFY_REASON when a check fails;
+# VERIFY_FATAL=true when waiting cannot help (the process is gone, was
+# replaced, or runs some other binary).
 probe_service() {
-    local expected="$1" index="$2" pid endpoint body where
+    local expected="$1" index="$2" baseline="$3" pid endpoint body where
     PROBED_PID=""
+    VERIFY_FATAL=false
     if ! pid="$(main_pid)"; then
-        VERIFY_REASON="aurora.service has no running main process"
+        VERIFY_REASON="aurora.service's main process (pid $baseline) exited"
+        VERIFY_FATAL=true
         return 1
     fi
     PROBED_PID="$pid"
+    if [ "$pid" != "$baseline" ]; then
+        VERIFY_REASON="aurora.service's main process changed from pid $baseline to $pid (it exited and was restarted)"
+        VERIFY_FATAL=true
+        return 1
+    fi
     if ! runs_binary "$pid" "$expected"; then
         VERIFY_REASON="aurora.service's main process (pid $pid) is not running the binary just installed at $INSTALL_BIN"
+        VERIFY_FATAL=true
         return 1
     fi
     if ! endpoint="$(service_endpoint "$pid")"; then
-        VERIFY_REASON="could not work out where pid $pid listens"
+        VERIFY_REASON="${endpoint:-could not work out where pid $pid listens}"
         return 1
     fi
-    IFS='|' read -r SVC_SCHEME SVC_HOST SVC_PORT SVC_TLS_NAME SVC_SOURCE <<< "$endpoint"
+    SVC_SCHEME="${endpoint%%|*}"; endpoint="${endpoint#*|}"
+    SVC_HOST="${endpoint%%|*}"; endpoint="${endpoint#*|}"
+    SVC_PORT="${endpoint%%|*}"; endpoint="${endpoint#*|}"
+    SVC_TLS_NAME="${endpoint%%|*}"; SVC_SOURCE="${endpoint#*|}"
     where="$SVC_SCHEME://$SVC_HOST:$SVC_PORT (from the $SVC_SOURCE)"
     if ! body="$(curl_service /api/health)"; then
         VERIFY_REASON="GET /api/health at $where did not answer"
@@ -794,30 +909,35 @@ sys.exit(0 if ok else 1)'; then
     fi
 }
 
-# verify_service SHA256 INDEX — the service must pass probe_service within
-# VERIFY_TIMEOUT rounds, then pass again VERIFY_SETTLE seconds later as the SAME
-# process. Without the second look, Restart=on-failure lets a binary that
-# crashes just after its first answer count as healthy.
+# verify_service SHA256 INDEX BASELINE_PID — BASELINE_PID (the main process
+# right after the restart) must pass probe_service within VERIFY_TIMEOUT
+# seconds, then pass again VERIFY_SETTLE seconds later. Any change of main
+# process fails at once: under Restart=on-failure a binary that crashes and
+# comes back must not count as healthy, nor one that answers once and then
+# dies. A pass followed by a failed second look fails too, without waiting.
 verify_service() {
-    local expected="$1" index="$2" waited=0 first
+    local expected="$1" index="$2" baseline="$3" rounds=0 deadline=$((SECONDS + VERIFY_TIMEOUT))
     VERIFY_REASON="no check ran"
-    while [ "$waited" -le "$VERIFY_TIMEOUT" ]; do
-        if probe_service "$expected" "$index"; then
-            first="$PROBED_PID"
-            sleep "$VERIFY_SETTLE"
-            waited=$((waited + VERIFY_SETTLE))
-            if probe_service "$expected" "$index"; then
-                if [ "$PROBED_PID" = "$first" ]; then
-                    log "verified: pid $first runs the expected binary, reports healthy at $SVC_SCHEME://$SVC_HOST:$SVC_PORT ($SVC_SOURCE) and serves the installed frontend"
+    if [ -z "$baseline" ]; then
+        VERIFY_REASON="aurora.service had no running main process right after it was started"
+    else
+        while :; do
+            if probe_service "$expected" "$index" "$baseline"; then
+                sleep "$VERIFY_SETTLE"
+                if probe_service "$expected" "$index" "$baseline"; then
+                    log "verified: pid $baseline runs the expected binary, reports healthy at $SVC_SCHEME://$SVC_HOST:$SVC_PORT ($SVC_SOURCE) and serves the installed frontend"
                     return 0
                 fi
-                VERIFY_REASON="aurora.service's main process changed from pid $first to $PROBED_PID within ${VERIFY_SETTLE}s (it exited and was restarted)"
+                break
             fi
-            continue
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
+            "$VERIFY_FATAL" && break
+            rounds=$((rounds + 1))
+            if [ "$rounds" -ge "$VERIFY_TIMEOUT" ] || [ "$SECONDS" -ge "$deadline" ]; then
+                break
+            fi
+            sleep 1
+        done
+    fi
     log "verification failed: $VERIFY_REASON"
     return 1
 }
@@ -841,7 +961,7 @@ restore_dir() {
 # Sets ROLLBACK_RESULT to restored, unhealthy or unavailable. Never exits, and
 # runs with errexit and the ERR trap off: a rollback must try every step.
 roll_back_install() {
-    local reason="$1" expected="" pid problems=""
+    local reason="$1" expected="" pid baseline="" problems=""
     INSTALL_PHASE=rolling_back
     trap - ERR
     set +e
@@ -861,7 +981,16 @@ roll_back_install() {
         problems="$problems the binary;"
     fi
     if [ -d "$ROLLBACK_STATIC" ]; then
-        restore_dir "$ROLLBACK_STATIC" "$INSTALL_DIR/static" || problems="$problems the static tree;"
+        if restore_dir "$ROLLBACK_STATIC" "$INSTALL_DIR/static"; then
+            # cp -a kept the snapshot's old mtimes, and the server answers
+            # conditional requests from Last-Modified alone. A browser that
+            # loaded the failed release's index.html (newer) would get 304 and
+            # keep it, pointing at chunks that no longer exist: a blank page.
+            find "$INSTALL_DIR/static" -type f -exec touch -- {} + \
+                || log "could not refresh mtimes under $INSTALL_DIR/static; browsers that loaded the failed release may need a hard reload"
+        else
+            problems="$problems the static tree;"
+        fi
     else
         problems="$problems the static tree (no snapshot of it);"
     fi
@@ -881,14 +1010,16 @@ roll_back_install() {
     # just put back; restarting it would interrupt viewers for nothing.
     if pid="$(main_pid)" && runs_binary "$pid" "$expected"; then
         log "pid $pid already runs the restored binary; not restarting it"
+        baseline="$pid"
     else
         log "restarting aurora.service on the restored snapshot"
         systemctl restart aurora >>"$LOG_FILE" 2>&1 || log "systemctl restart failed during rollback"
+        baseline="$(main_pid)" || baseline=""
     fi
     if [ -n "$problems" ]; then
         VERIFY_REASON="the rollback could not restore:$problems"
         ROLLBACK_RESULT=unhealthy
-    elif verify_service "$expected" "$INSTALL_DIR/static/v2/index.html"; then
+    elif verify_service "$expected" "$INSTALL_DIR/static/v2/index.html" "$baseline"; then
         ROLLBACK_RESULT=restored
     else
         ROLLBACK_RESULT=unhealthy
@@ -1140,8 +1271,11 @@ ensure_llm_models
 # hour. Observed twice in production on 2026-08-02.
 #
 # The server now publishes the honest count — sessions a client is still
-# holding, playing or paused — to $STREAM_STATE_FILE every 30 s.
-STREAM_STATE_FILE=/var/lib/aurora/stream-state.json
+# holding, playing or paused — to $STREAM_STATE_FILE every 30 s. It used to be
+# /var/lib/aurora/stream-state.json, which the server (the aurora user) cannot
+# create there, so on a standard install this was the ffmpeg check alone. The
+# aurora user can write this directory, so it is read with read_untrusted.
+STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
 _STREAM_STATE_MAX_AGE=90   # snapshot older than this is "unknown", not "zero"
 
 # viewers_held echoes the number of sessions a client is still holding, or the
@@ -1154,11 +1288,12 @@ _STREAM_STATE_MAX_AGE=90   # snapshot older than this is "unknown", not "zero"
 # which is what makes the script safe to deploy before the binary that writes
 # it (the drain reads the OLD, still-running server).
 viewers_held() {
-    [ -r "$STREAM_STATE_FILE" ] || return 0
+    local state
+    state="$(read_untrusted "$STREAM_STATE_FILE" 2>/dev/null)" || return 0
 
     _vh_now=$(date +%s)
-    _vh_ts=$(sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$STREAM_STATE_FILE")
-    _vh_held=$(sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$STREAM_STATE_FILE")
+    _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
     # Validate each field independently. A partially-written or renamed-key
     # file must land on "unknown" (fall back to pgrep), never on a bare 0
     # that would wave a deploy through while someone is watching.
@@ -1288,9 +1423,11 @@ INSTALL_PHASE=restarted
 # A failed restart used to trip set -e and exit with the new files installed
 # and nothing running them, no rollback attempted.
 systemctl restart aurora >>"$LOG_FILE" 2>&1 || fail_install "'systemctl restart aurora' failed"
+# The process verification is about. Any later main pid means it exited.
+RESTART_PID="$(main_pid)" || RESTART_PID=""
 
 write_status restarting "Verifying the restarted service" "$OLD_SHA" "$NEW_SHA"
-if ! verify_service "$NEW_BIN_SHA" "$INSTALL_DIR/static/v2/index.html"; then
+if ! verify_service "$NEW_BIN_SHA" "$INSTALL_DIR/static/v2/index.html" "$RESTART_PID"; then
     fail_install "the restarted service failed verification: $VERIFY_REASON"
 fi
 # The new release is verified and serving. Failures past this point leave it in

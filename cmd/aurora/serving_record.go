@@ -23,7 +23,9 @@ import (
 // bound, and names the process (pid) and the address the kernel actually gave
 // it. The updater only believes a record whose pid is aurora.service's current
 // main process, so a record left behind by the previous process is never
-// mistaken for the new one. It is a root-readable file rather than an HTTP
+// mistaken for the new one. It finds the listening port itself from /proc, so
+// what the record adds is how to speak to that port: the scheme, and the TLS
+// name a config-file-only TLS setup would otherwise leave it guessing. It is a root-readable file rather than an HTTP
 // endpoint for the reason drainstate.go gives: behind the nginx proxy every
 // internet request arrives from 127.0.0.1, so a "localhost only" route would be
 // reachable from anywhere.
@@ -33,10 +35,17 @@ import (
 // nothing here needs to be trusted for identity, and the anonymous health route
 // still does not disclose the build.
 
-// defaultServingRecordFile matches the state dir aurora.service grants in
-// ReadWritePaths. scripts/aurora-update.sh reads the same path (SERVING_FILE);
-// TestServingRecordContractMatchesUpdater pins the two together.
-const defaultServingRecordFile = "/var/lib/aurora/serving.json"
+// defaultServingRecordFile is in /var/cache/aurora, not /var/lib/aurora:
+// install.sh creates /var/lib/aurora root:root 0755 on purpose (it holds the
+// root-owned source mirror the updater builds from), so this process, running
+// as the aurora user, cannot create files there; ReadWritePaths only lifts the
+// read-only mount. /var/cache/aurora is aurora's own and is in ReadWritePaths
+// on every unit install.sh has written. The updater reads it as untrusted
+// input (no symlinks, regular files only, size-capped) and believes a port
+// only when this pid is listening on it. scripts/aurora-update.sh reads the
+// same path (SERVING_FILE); TestServingRecordContractMatchesUpdater pins the
+// two together.
+const defaultServingRecordFile = "/var/cache/aurora/serving.json"
 
 // servingRecord is the on-disk shape consumed by scripts/aurora-update.sh.
 type servingRecord struct {
@@ -73,8 +82,8 @@ func newServingRecord(ln net.Listener, tlsEnabled bool, serverName string) servi
 
 // writeServingRecord publishes rec at path, atomically (temp file + rename) so
 // the updater never parses half a record. A missing parent directory is not an
-// error: a source checkout or dev box has no /var/lib/aurora, and the updater
-// falls back to the configured address when no record names the process.
+// error: a source checkout or dev box has no /var/cache/aurora, and the updater
+// finds the port from /proc and the scheme from aurora.env without one.
 func writeServingRecord(path string, rec servingRecord) error {
 	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
 		return nil

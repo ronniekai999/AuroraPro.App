@@ -128,6 +128,18 @@ describe('useNewBuildAvailable', () => {
     expect(view.result.current.available).toBe(true)
   })
 
+  // An update that was rolled back: the server is serving this tab's build again.
+  it('withdraws the notice when this build is served again', async () => {
+    let answer = 'new'
+    const { view, advance } = setup(async () => answer)
+    await becomeVisible()
+    expect(view.result.current.available).toBe(true)
+    answer = 'old'
+    advance(MIN_CHECK_INTERVAL_MS)
+    await becomeVisible()
+    expect(view.result.current.available).toBe(false)
+  })
+
   it('a dismissal holds for that build, and a later one shows again', async () => {
     let answer = 'new'
     const { view, advance } = setup(async () => answer)

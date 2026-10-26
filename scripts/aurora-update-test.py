@@ -24,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 parser = argparse.ArgumentParser(add_help=False)
@@ -39,7 +40,29 @@ if not BASH or not GIT:
 # The service the updater restarts. MainPID and <proc>/<pid>/exe model what
 # systemd runs; a restart execs whatever the installed file holds at that
 # moment, unless exec-elsewhere models a drop-in ExecStart pointing elsewhere.
-SYSTEMCTL_STUB = r"""
+PROC_SOCKETS = r"""
+# proc_sockets PID HOST:PORT — model PID's /proc/<pid>/fd and TCP tables.
+proc_sockets() {
+  _port="${2##*:}"; _host="${2%:*}"; _inode=$(( $1 + 5000 ))
+  mkdir -p "$TEST_PROC/$1/fd" "$TEST_PROC/$1/net"
+  ln -sf "socket:[$_inode]" "$TEST_PROC/$1/fd/3"
+  ln -sf "socket:[$(( _inode + 1 ))]" "$TEST_PROC/$1/fd/4"
+  case "$_host" in
+    '[::]') _table=tcp6 _addr=00000000000000000000000000000000 ;;
+    0.0.0.0) _table=tcp _addr=00000000 ;;
+    127.0.0.1) _table=tcp _addr=0100007F ;;
+  esac
+  printf '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n' > "$TEST_PROC/$1/net/tcp"
+  cp "$TEST_PROC/$1/net/tcp" "$TEST_PROC/$1/net/tcp6"
+  printf '   0: %s:%04X %s:0000 0A 00000000:00000000 00:00000000 00000000   997        0 %s 1 0000000000000000 100 0 0 10 0\n' \
+    "$_addr" "$_port" "$_addr" "$_inode" >> "$TEST_PROC/$1/net/$_table"
+  # ESTABLISHED (01) from local port 40000 to PostgreSQL: not a listener.
+  printf '   1: 0100007F:9C40 0100007F:1538 01 00000000:00000000 00:00000000 00000000   997        0 %s 1 0000000000000000 20 4 0 10 -1\n' \
+    "$(( _inode + 1 ))" >> "$TEST_PROC/$1/net/tcp"
+}
+"""
+
+SYSTEMCTL_STUB = PROC_SOCKETS + r"""
 case "$*" in
   'show -p MainPID --value aurora') cat "$TEST_CONTROL/mainpid"; exit 0 ;;
   'restart aurora') ;;
@@ -58,10 +81,11 @@ if [ -f "$TEST_CONTROL/exec-elsewhere" ] && grep -q new "$TEST_INSTALL_BIN"; the
 else
   cp "$TEST_INSTALL_BIN" "$TEST_PROC/$pid/exe"
 fi
+proc_sockets "$pid" "${TEST_LISTEN:-[::]:8484}"
 echo "$pid" > "$TEST_CONTROL/mainpid"
 if [ ! -f "$TEST_CONTROL/no-serving-record" ]; then
   printf '{"pid": %s, "addr": "%s", "scheme": "%s", "server_name": "%s", "unix_time": 1}\n' \
-    "$pid" "${TEST_LISTEN:-[::]:8484}" "${TEST_SCHEME:-http}" "${TEST_TLS_NAME:-}" > "$TEST_SERVING"
+    "$pid" "${TEST_RECORD_ADDR:-${TEST_LISTEN:-[::]:8484}}" "${TEST_SCHEME:-http}" "${TEST_TLS_NAME:-}" > "$TEST_SERVING"
 fi
 """
 
@@ -69,12 +93,15 @@ fi
 # a TLS listener only to a client that skips verification with the expected
 # --resolve, and with the health and /v2/ that process serves.
 CURL_STUB = r"""
-url="" insecure=0 resolve="" prev=""
+url="" insecure=0 resolve="" noproxy="" prev=""
 for a in "$@"; do
   case "$a" in http://*|https://*) url="$a" ;; --insecure) insecure=1 ;; esac
   [ "$prev" != --resolve ] || resolve="$a"
+  [ "$prev" != --noproxy ] || noproxy="$a"
   prev="$a"
 done
+# An http_proxy in aurora.env would otherwise take loopback requests elsewhere.
+[ "$noproxy" = '*' ] || exit 5
 echo "curl:$url" >> "$TEST_EVENTS"
 pid=$(cat "$TEST_CONTROL/mainpid")
 [ "$pid" != 0 ] || exit 7
@@ -103,6 +130,11 @@ case "$url" in
     fi
     echo '{"status":"ok","db_connected":true}' ;;
   */v2/)
+    if [ -f "$TEST_CONTROL/term-during-verify" ] && grep -q new "$exe"; then
+      # systemd's TimeoutStartSec, after the restart. curl_service runs in the
+      # updater's own shell here, so PPID is the updater.
+      kill -TERM "$PPID"
+    fi
     if [ -f "$TEST_CONTROL/stale-frontend" ] && grep -q new "$exe"; then
       echo 'some other frontend'; exit 0
     fi
@@ -128,7 +160,9 @@ class UpdaterTest(unittest.TestCase):
         self.status = self.root / "ui-state/update-status.json"
         self.events, self.lock = self.root / "events", self.root / "deploy.lock"
         self.proc = self.root / "proc"
-        self.serving = self.status.parent / "serving.json"
+        self.cache = self.root / "cache"
+        self.serving = self.cache / "serving.json"
+        self.started = time.time()
         self.env = {
             **os.environ, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
@@ -140,13 +174,13 @@ class UpdaterTest(unittest.TestCase):
             "TEST_LIVE": str(self.live),
         }
         for key in list(self.env):
-            if key.startswith(("AURORA_", "LLM_")) or key in {
+            if key.startswith(("AURORA_", "LLM_", "TLS_")) or key in {
                 "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "BASH_ENV", "ENV"
             }:
                 self.env.pop(key)
         for name in ("bash", "python3", "git", "dirname", "mkdir", "date", "mv", "chmod",
                      "rm", "tee", "mktemp", "install", "cp", "find", "seq", "sed", "tr",
-                     "grep", "flock", "cat", "touch", "cmp", "tar"):
+                     "grep", "flock", "cat", "touch", "cmp", "tar", "ln"):
             executable = shutil.which(name)
             if not executable:
                 self.fail(f"Required fixture tool missing: {name}")
@@ -230,10 +264,15 @@ cat ./revision >> "$out"
         (self.control / "mainpid").write_text("100\n")
         (self.proc / "100").mkdir(parents=True)
         (self.proc / "100/exe").write_text("old binary\n")
+        subprocess.run([BASH, "-c", PROC_SOCKETS + 'proc_sockets 100 "[::]:8484"'],
+                       env={**self.env, "PATH": os.environ["PATH"]}, check=True)
         self.live_updater.write_text("old updater\n")
         (self.live / "static/v2/index.html").write_text("old frontend\n")
+        # Built long ago: a rollback must not hand browsers this mtime back.
+        os.utime(self.live / "static/v2/index.html", (1e9, 1e9))
         (self.live / "migrations/001.sql").write_text("-- old migration\n")
         self.status.parent.mkdir()
+        self.cache.mkdir()
         self.serving.write_text('{"pid": 100, "addr": "[::]:8484", "scheme": "http"}\n')
         self.status.write_text('{"state":"sentinel"}\n')
         self.config = self.root / "aurora.env"
@@ -246,18 +285,20 @@ cat ./revision >> "$out"
             "/usr/local/go/bin": str(self.root / "absent-go"),
             "/var/lib/aurora-updater": str(self.state_dir),
             "/var/lib/aurora/": str(self.status.parent) + "/",
+            "/var/cache/aurora/": str(self.cache) + "/",
             "/var/log/aurora/": str(self.root / "logs") + "/",
             "/var/lock/aurora-deploy.lock": str(self.lock), "/opt/aurora": str(self.live),
             "/proc": str(self.proc),
             # Rounds, not seconds (sleep is a no-op here): keep failing
             # verifications short without changing what they check.
-            "VERIFY_TIMEOUT=60": "VERIFY_TIMEOUT=4", "VERIFY_SETTLE=5": "VERIFY_SETTLE=2",
+            "VERIFY_TIMEOUT=60": "VERIFY_TIMEOUT=4", "VERIFY_SETTLE=10": "VERIFY_SETTLE=2",
         }
         runner = UPDATER
         for old, new in rewrites.items():
             runner = runner.replace(old, new)
         for forbidden in ("=/opt/aurora", "=/usr/local/bin/aurora", "=/var/lib/aurora",
-                          "=/var/lock/aurora", "-f /etc/aurora", "=/proc", "VERIFY_TIMEOUT=60"):
+                          "=/var/lock/aurora", "-f /etc/aurora", "=/proc", "VERIFY_TIMEOUT=60",
+                          "=/var/cache/aurora", "VERIFY_SETTLE=10"):
             self.assertNotIn(forbidden, runner)
         self.runner = self.root / "runner.sh"
         self.runner.write_text(runner)
@@ -320,6 +361,7 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
         self.assertEqual((self.live / "migrations/001.sql").read_text(), "-- old migration\n")
         self.assertEqual(self.running(), "old binary\n")
+        self.assertGreater((self.live / "static/v2/index.html").stat().st_mtime, self.started - 5)
         self.assertFalse((self.state_dir / "deployed").exists())
         self.assertEqual((self.state_dir / "pending").read_text().strip(), self.head())
 
@@ -778,6 +820,7 @@ exec {shlex.quote(real_mv)} "$@"
         self.flag("no-serving-record")
         with self.config.open("a") as config:
             config.write("AURORA_PORT=9999\n")
+        self.env["TEST_LISTEN"] = "[::]:9999"
         self.env["TEST_URL_PREFIX"] = "http://127.0.0.1:9999"
         self.assertEqual(self.run_update()["state"], "success")
 
@@ -799,6 +842,64 @@ exec {shlex.quote(real_cp)} "$@"
 ''')
         status = self.run_update(expected=143)
         self.assertIn("stopped unexpectedly while installing files", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_a_record_from_another_process_is_ignored(self) -> None:
+        # The previous process's record, on the same port, claiming a scheme
+        # the new one does not speak. Believing it would fail verification.
+        self.flag("no-serving-record")
+        self.serving.write_text('{"pid": 100, "addr": "[::]:8484", "scheme": "https"}\n')
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_record_naming_a_port_the_process_does_not_listen_on_is_ignored(self) -> None:
+        self.env["TEST_RECORD_ADDR"] = "[::]:9999"
+        self.assertEqual(self.run_update()["state"], "success")
+        self.assertNotIn(":9999/", self.events.read_text())
+
+    def test_config_file_port_without_record_or_env(self) -> None:
+        # server.port in aurora.yaml: nothing in aurora.env says so, and no
+        # record arrives. The port the process listens on is the answer, and
+        # its established database connection is not.
+        self.flag("no-serving-record")
+        self.env["TEST_LISTEN"] = "0.0.0.0:9999"
+        self.env["TEST_URL_PREFIX"] = "http://127.0.0.1:9999"
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_tls_settings_in_aurora_env_without_record(self) -> None:
+        self.flag("no-serving-record")
+        with self.config.open("a") as config:
+            config.write("TLS_CERT_FILE=/etc/aurora/cert.pem\nTLS_KEY_FILE=/etc/aurora/key.pem\n")
+        self.env.update({"TEST_LISTEN": "[::]:8443", "TEST_URL_PREFIX": "https://127.0.0.1:8443"})
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_autocert_settings_in_aurora_env_without_record(self) -> None:
+        self.flag("no-serving-record")
+        with self.config.open("a") as config:
+            config.write("TLS_AUTO_CERT=true\nTLS_DOMAIN=media.example\n")
+        self.env.update({
+            "TEST_LISTEN": "[::]:443", "TEST_URL_PREFIX": "https://media.example:443",
+            "TEST_RESOLVE": "media.example:443:127.0.0.1",
+        })
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_hostile_files_from_the_aurora_user_do_not_steer_or_hang_root(self) -> None:
+        # The aurora user can write /var/cache/aurora. A FIFO must not hang the
+        # drain, and a symlinked record must not be followed: this one claims
+        # the next process speaks HTTPS, and believing it would fail.
+        self.flag("no-serving-record")
+        os.mkfifo(self.cache / "stream-state.json")
+        decoy = self.root / "decoy.json"
+        decoy.write_text('{"pid": 101, "addr": "[::]:8484", "scheme": "https"}\n')
+        self.serving.unlink()
+        self.serving.symlink_to(decoy)
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_signal_after_the_restart_rolls_back(self) -> None:
+        # systemd's TimeoutStartSec is most likely to land here, while waiting
+        # on a slow verification.
+        self.flag("term-during-verify")
+        status = self.run_update(expected=143)
+        self.assertIn("stopped unexpectedly after restarting the service", status["message"])
         self.assert_rolled_back(status)
 
     def test_frontend_and_backend_change_together(self) -> None:

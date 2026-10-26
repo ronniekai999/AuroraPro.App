@@ -129,33 +129,50 @@ application-owned UI status and installation directories:
 
 ## What a deploy has to prove
 
-After the restart, the updater accepts the new release only when, within about
-a minute, all of these hold, and still hold for the same process a few seconds
-later (so a binary that crashes right after its first answer, and is restarted
-by `Restart=on-failure`, does not pass):
+After the restart, the updater accepts the new release only when, within 60
+seconds, all of these hold, and still hold ten seconds later. The process is
+the main pid right after the restart; if the main pid changes at any point (a
+crash and `Restart=on-failure`), verification fails at once rather than giving
+the next incarnation a chance:
 
-- `aurora.service`'s main process (`systemctl show -p MainPID`) is running
-  exactly the binary just built: `/proc/<pid>/exe` hashes to it. A drop-in
-  `ExecStart` pointing at some other file fails here.
+- That process is running exactly the binary just built: `/proc/<pid>/exe`
+  hashes to it. A drop-in `ExecStart` pointing at some other file fails here.
 - `GET /api/health` answers `status: "ok"` with `db_connected: true`. The route
   answers 200 `"degraded"` with the database down; that no longer passes.
 - `GET /v2/` is byte-identical to the `index.html` just installed, so the
   server is serving the new frontend and not some other static directory.
 
-The address comes from `/var/lib/aurora/serving.json`, which the server writes
-once it has run its migrations and bound its listener: its pid, the bound
-address, and whether it terminates TLS itself (and for which name). The updater
-believes it only when its pid is the current main process. Otherwise it uses
-`AURORA_HOST`/`AURORA_PORT` from `aurora.env`, else `127.0.0.1:8484`, over plain
-HTTP. A TLS listener is probed with certificate checks off; which process answers
-is established by its pid and executable, not by the certificate.
+The port is always one that process listens on, read from `/proc/<pid>/fd` and
+its TCP tables, so the answer comes from it and not from whatever else might be
+on 8484. How to speak to it comes from `/var/cache/aurora/serving.json`, which the
+server writes once it has run its migrations and bound its listener (its pid,
+the bound address, and whether it terminates TLS itself, for which name), when
+the record names that pid and one of its ports. Otherwise the scheme follows the
+`TLS_*` settings in `aurora.env`, and the port is `AURORA_PORT`, else the
+process's only listening port, else 8484. A port or TLS set only in the config
+file is therefore covered by the record, and a port alone even without it. A
+TLS listener is probed with certificate checks off (the certificate names the
+public domain, not loopback), and every probe bypasses any proxy `aurora.env`
+sets.
+
+`/var/lib/aurora` is `root:root 0755` on purpose (the root-owned source mirror
+lives there), so the server cannot write files in it. That is why the record,
+and the viewer-drain snapshot `stream-state.json`, now live in
+`/var/cache/aurora`. The drain snapshot used to be written to `/var/lib/aurora`,
+failed silently, and left the drain on its `pgrep ffmpeg` fallback on standard
+installs, so paused viewers were restarted on. The aurora user can write
+`/var/cache/aurora`, so root reads both files without following symlinks or
+blocking on a FIFO, and only small regular files.
 
 Any failure once installation has begun, including a failed `systemctl restart`,
 a failed copy, a failed verification, an unexpected abort, `SIGTERM` from the
 unit's `TimeoutStartSec`, or Ctrl-C, restores the rollback generation and
 verifies the restored service the same way. When the failure came before the
 restart and the running process already runs the restored binary, it is not
-restarted. The status message names the check that failed, and whether the
+restarted. Restored static files get a fresh mtime: the server answers
+conditional requests from Last-Modified alone, so a browser that loaded the
+failed release's `index.html` would otherwise keep it, pointing at deleted
+chunks. The status message names the check that failed, and whether the
 restored release verified. Only `SIGKILL` (or power loss) can still leave a
 half-installed tree; the `pending` record then blocks automatic retries.
 
@@ -165,9 +182,11 @@ backend served the new frontend.
 
 Browser tabs left open across a deploy run the build they loaded, and the
 previous build's chunks are deleted. The SPA compares the build id it was loaded
-with (`<meta name="aurora-build">`) with the one `/v2/` serves, on focus, on
-becoming visible, every five minutes, and at once when a chunk fails to load,
-and shows a **Reload** notice when they differ. It never reloads by itself.
+with (`<meta name="aurora-build">`, a hash of the bundle, `public/` and the page)
+with the one `/v2/` serves, on focus, on becoming visible, every five minutes,
+and at once when a chunk fails to load, and shows a **Reload** notice when they
+differ; the notice goes away again if this tab's build is served once more (a
+rolled-back update). It never reloads by itself.
 
 A failed frontend/dependency/Go build has not started installation, so the
 same revision is retried normally. A failed or interrupted **installation** is
@@ -206,7 +225,10 @@ applied versions that have no file). A rollback generation kept from an attempt
 by an older updater has no migration snapshot, and leaves the new files in
 place. Verification attests the running binary by content, not by Git SHA, and
 runs only after a deploy: idle ticks check the installed files, not the running
-process. `old_sha` in the UI status remains the source checkout at the start, not
+process. A binary that crashes more than ten seconds after its first good answer
+passes. A migration that runs longer than the verification window can never
+deploy (it always could not; the window was 30 seconds). A rollback to a binary
+that writes no serving record is verified with the `aurora.env` TLS settings. `old_sha` in the UI status remains the source checkout at the start, not
 a claimed previous running revision. The ledger is a record of successful
 deployment, not continuous service-health monitoring. A slow box whose builds,
 viewer drain (up to five minutes) and two verifications exceed the unit's

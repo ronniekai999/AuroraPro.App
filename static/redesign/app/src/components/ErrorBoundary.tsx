@@ -69,10 +69,12 @@ export class ErrorBoundary extends Component<Props, State> {
       return this.props.fallback(error, this.retry)
     }
 
-    // A chunk of the build this tab started with is gone: Aurora was updated
-    // while the page was open (each deploy deletes the previous build's
-    // files). Retrying cannot help, since the browser keeps the failed import,
-    // so the only way forward offered is a reload.
+    // A chunk this page needs did not load. Usually Aurora was updated while
+    // the page was open (each deploy deletes the previous build's files), but
+    // a dropped connection reads the same, so the wording claims neither.
+    // Retrying cannot help either way, since the browser keeps the failed
+    // import, so the only way forward offered is a reload; the update notice
+    // is asked to check, and says so separately when it was a deploy.
     const stale = isStaleBundleError(error)
 
     // Default fallback. Kept inline + minimal so it doesn't depend
@@ -94,11 +96,11 @@ export class ErrorBoundary extends Component<Props, State> {
       >
         <div style={{ maxWidth: 480, textAlign: 'center' }}>
           <h1 style={{ fontSize: 22, marginBottom: 12, fontWeight: 600 }}>
-            {stale ? 'Aurora was updated' : 'Aurora hit an unexpected error'}
+            {stale ? "Part of Aurora couldn't load" : 'Aurora hit an unexpected error'}
           </h1>
           <p style={{ fontSize: 14, opacity: 0.7, marginBottom: 24, lineHeight: 1.5 }}>
             {stale
-              ? 'This page was opened before the latest update, and part of it can no longer load. Reload to use the current version. Your data is safe.'
+              ? 'This usually means Aurora was updated while this page was open, or the connection dropped. Reload to continue. Your data is safe.'
               : 'Something went wrong rendering this page. Your data is safe — only the in-memory view is affected.'}
           </p>
           {import.meta.env.DEV && (
