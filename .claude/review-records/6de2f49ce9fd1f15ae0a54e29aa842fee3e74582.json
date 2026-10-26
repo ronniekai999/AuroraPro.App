@@ -1,0 +1,10 @@
+{
+  "sha": "6de2f49ce9fd1f15ae0a54e29aa842fee3e74582",
+  "verdict": "lows-only",
+  "summary": "Newline-named files decided by is_video instead of printf|grep (closes a grep-failure false all-clear; matches the scanner on 5,509 names across bash 4.4/5.0/5.2), the test's fake grep resolves the real binary, and 'library(ies)' in three messages. Reviewed e92d2d0+6de2f49: no regression; lows: newline-branch case folding unpinned, the a.mkv<NL>b behaviour change untested, command -v vs type -P in the fakes. Medium found but pre-existing on main and unchanged here: U+0130/U+212A fold to ASCII in Go's ToLower only (follow-up list).",
+  "reviewer": "independent-review-agent",
+  "findings": "4",
+  "diff_digest": "1b6fda047a53cbaa12cb8d215f0df098429efa0d6ed1e7b690c02ecf0cbe68ce",
+  "branch": "claude/sweet-brown-36veir-runner-2604",
+  "recorded_at": "2026-10-26T03:09:47Z"
+}
