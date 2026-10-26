@@ -433,8 +433,10 @@ classify_root() {
 # `printf | grep -q` either: under pipefail a SIGPIPE answers "no" too.
 # `${1,,}` and grep -i fold the same letters under LC_ALL=C (ASCII only, no
 # Unicode case rules): measured identical on 20,495 names, mixed case,
-# non-ASCII and invalid bytes included. (The walk diverts newline names
-# before this is reached, so `$` is the end of the whole name.)
+# non-ASCII and invalid bytes included. Newline names reach it too (the
+# walk's newline branch): bash's `$` matches only at the end of the whole
+# string, measured on `name.mkv<NL>` (no match) and `weird<NL>name.mkv`
+# (a match), which is what the scanner's filepath.Ext reads as well.
 is_video() {
     [[ ${1,,} =~ $VIDEO_RE ]]
     case $? in
@@ -793,9 +795,17 @@ for LIB in "${ids[@]}"; do
             case "$f" in
                 *"$NL"*)
                     # Only a video-extension name can affect the comparison;
-                    # anything else is filtered out below regardless.
-                    printf '%s' "$f" | grep -qEi "$VIDEO_RE" \
-                        && { printf '%s\n' "$f" >> "$WORK/badnames" || exit 9; }
+                    # anything else is filtered out below regardless. Through
+                    # is_video, not `printf | grep -qEi`: grep read a failure
+                    # (status 2) as "not a video", so a library whose only
+                    # media had a newline in its name said "no media found",
+                    # exit 0, while the scanner discovered it and pruned. And
+                    # grep matched any LINE of the name, where the scanner
+                    # (and `$` in bash's match, measured) takes the extension
+                    # at the end of the whole name.
+                    if is_video "$f"; then
+                        printf '%s\n' "$f" >> "$WORK/badnames" || exit 9
+                    fi
                     continue ;;
             esac
             if [ -L "$f" ]; then
