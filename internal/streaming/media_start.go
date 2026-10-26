@@ -173,7 +173,7 @@ func mediaStartPlausible(sec float64, startSec int) bool {
 // no sign, exponent, NaN or Inf) inside the window the line is published
 // under for this start_sec; anything else is ok=false, and the caller keeps
 // its prediction. The value is the client's choice, so the endpoint shifts by
-// it in memory and caches nothing (ShiftedVTT).
+// it in memory and caches nothing (ServeShiftedSubtitle).
 func ParseClientMediaStart(raw string, startSec int) (float64, bool) {
 	if !isDecimalSeconds(raw) {
 		return 0, false

@@ -186,8 +186,8 @@ func TestWriteShiftedVTTMatchesMainsRewrite(t *testing.T) {
 			if got.String() != want {
 				t.Fatalf("input %d, offset %v: output differs from main's rewrite\ninput:\n%q\n got:\n%q\nwant:\n%q", i, offset, in, got.String(), want)
 			}
-			if body, _, err := ShiftedVTT(p, offset); err != nil || string(body) != want {
-				t.Fatalf("input %d, offset %v: ShiftedVTT = %q, %v", i, offset, body, err)
+			if body := shiftFileInMemory(t, p, offset); string(body) != want {
+				t.Fatalf("input %d, offset %v: the in-memory shift = %q", i, offset, body)
 			}
 			cached, err := ShiftVTTCues(p, offset, cacheDir)
 			if err != nil {

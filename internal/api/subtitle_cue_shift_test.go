@@ -28,7 +28,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/config"
 	"github.com/aurora-media/aurora/internal/models"
@@ -242,11 +244,11 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		if err := os.WriteFile(vtt, []byte("WEBVTT\n\n00:00:25.000 --> 00:00:27.000\nTwenty-five\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		body, _, err := streaming.ShiftedVTT(vtt, shift)
-		if err != nil {
+		rr := httptest.NewRecorder()
+		if _, _, err := streaming.ServeShiftedSubtitle(rr, httptest.NewRequest(http.MethodGet, "/sub", nil), vtt, shift); err != nil {
 			t.Fatalf("shift VTT: %v", err)
 		}
-		at := firstCueStartSec(t, string(body))
+		at := firstCueStartSec(t, rr.Body.String())
 		if d := at - (shiftCueSourceSec - published); d > 0.002 || d < -0.002 {
 			t.Errorf("cue at %.3fs of media time, want %.3fs", at, shiftCueSourceSec-published)
 		}
@@ -407,8 +409,17 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		if a, b := measuredResp.Header().Get("ETag"), get(t, start+"&remux=1&media_start=0.500000", nil).Header().Get("ETag"); a == b {
 			t.Errorf("two different shifts share the ETag %s", a)
 		}
-		if again := get(t, start+"&remux=1&media_start="+mediaStartParam, http.Header{"If-None-Match": {measuredResp.Header().Get("ETag")}}); again.Code != http.StatusNotModified {
+		var again *httptest.ResponseRecorder
+		logs := captureLogs(t, func() {
+			again = get(t, start+"&remux=1&media_start="+mediaStartParam, http.Header{"If-None-Match": {measuredResp.Header().Get("ETag")}})
+		})
+		if again.Code != http.StatusNotModified {
 			t.Errorf("a conditional request for the same in-memory shift: HTTP %d, want 304", again.Code)
+		}
+		for _, want := range []string{"in_memory=true", "vtt_bytes=0", "revalidated=true"} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("the 304's served line lacks %q:\n%s", want, logs)
+			}
 		}
 		// A transcode: start_sec, with or without a stray media_start.
 		expectCue(t, start, startSec)
@@ -444,7 +455,7 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := len(shiftedFiles(t))
-		logs := captureLogs(t, func() {
+		logs = captureLogs(t, func() {
 			for i := 0; i < 2; i++ {
 				expectTrackCue(t, "1001", start+"&remux=1&media_start="+mediaStartParam, predicted)
 			}
@@ -484,12 +495,126 @@ func TestSubtitleCueShift_MatroskaKeyFrameStart(t *testing.T) {
 		if shiftedResp.Code != http.StatusOK || shiftedResp.Body.Len() >= len(raw) {
 			t.Fatalf("in-memory shift of track 1002: HTTP %d, %d bytes from a %d-byte source", shiftedResp.Code, shiftedResp.Body.Len(), len(raw))
 		}
-		for _, want := range []string{"in_memory=true", "shifted=true", fmt.Sprintf("vtt_bytes=%d\n", shiftedResp.Body.Len())} {
+		for _, want := range []string{"in_memory=true", "shifted=true", fmt.Sprintf("vtt_bytes=%d revalidated=false\n", shiftedResp.Body.Len())} {
 			if !strings.Contains(logs, want) {
 				t.Errorf("the served line lacks %q:\n%s", want, logs)
 			}
 		}
+
+		// The budget: responses nobody reads hold their bodies' charge, so
+		// enough of them on a track near the cap fill it. The next request
+		// gets the prediction, through the cache (said at most once a
+		// minute), and once they are read, the in-memory shift again.
+		var near strings.Builder
+		near.WriteString("WEBVTT\n\nNOTE padding up to the in-memory cap\n")
+		for near.Len() < streaming.MaxInMemoryShiftSourceBytes-4096 {
+			near.WriteString(strings.Repeat("padding ", 12) + "\n")
+		}
+		near.WriteString("\n00:00:25.000 --> 00:00:27.000\nTwenty-five\n")
+		if err := os.WriteFile(strings.TrimSuffix(src, filepath.Ext(src))+".zzzzz.vtt", []byte(near.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		charge := streaming.InMemoryShiftBodyBound(int64(near.Len()))
+		fill := int(streaming.InMemoryShiftBudgetBytes / charge)
+		if fill < 1 || streaming.InMemoryShiftBudgetBytes-int64(fill)*charge >= charge {
+			t.Fatalf("%d bodies charged %d bytes each do not fill the budget", fill, charge)
+		}
+		measured := start + "&remux=1&media_start=" + mediaStartParam
+		read := make(chan struct{})
+		var readOnce sync.Once
+		letRead := func() { readOnce.Do(func() { close(read) }) }
+		sending := make(chan http.Header, fill)
+		var stalled sync.WaitGroup
+		// Read whatever happens: a budget left held would fail later tests.
+		t.Cleanup(func() { letRead(); stalled.Wait() })
+		for i := 0; i < fill; i++ {
+			stalled.Add(1)
+			go func() {
+				defer stalled.Done()
+				r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles/1003?type=media"+measured,
+					map[string]string{"fileID": i64(file.ID), "trackIdx": "1003"})
+				h.ServeSubtitle(&unreadResponse{header: http.Header{}, sending: sending, read: read}, rcClaimsCtx(r, userID, refreshID))
+			}()
+		}
+		for i := 0; i < fill; i++ {
+			select {
+			case sent := <-sending:
+				if sent.Get("ETag") == "" {
+					t.Fatalf("a stalled request is not sending the in-memory shift: %v", sent)
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatalf("%d of %d stalled requests began sending", i, fill)
+			}
+		}
+		resetEveryMinute(&inMemoryShiftBudgetLog)
+		before = len(shiftedFiles(t))
+		logs = captureLogs(t, func() {
+			for i := 0; i < 2; i++ {
+				expectTrackCue(t, "1003", measured, predicted)
+			}
+		})
+		if n := strings.Count(logs, "budget full"); n != 1 || !strings.Contains(logs, "fallbacks=1") {
+			t.Errorf("a full budget's fallback was logged %d times over two requests, want once, counting one:\n%s", n, logs)
+		}
+		if !strings.Contains(logs, "shift_basis=predicted") {
+			t.Errorf("the fallback's served line does not name the prediction:\n%s", logs)
+		}
+		if got := len(shiftedFiles(t)); got != before+1 {
+			t.Errorf("the full budget's prediction left %d new cached files, want its one", got-before)
+		}
+		letRead()
+		stalled.Wait()
+		if rr := expectTrackCue(t, "1003", measured, published); rr.Header().Get("ETag") == "" {
+			t.Error("once the stalled responses were read, the shift was not built in memory")
+		}
 	})
+}
+
+// unreadResponse is a client that reads nothing until read is closed: its
+// first Write reports the headers it was sent and blocks.
+type unreadResponse struct {
+	header  http.Header
+	sending chan<- http.Header
+	read    <-chan struct{}
+	once    sync.Once
+}
+
+func (u *unreadResponse) Header() http.Header { return u.header }
+func (u *unreadResponse) WriteHeader(int)     {}
+func (u *unreadResponse) Write(p []byte) (int, error) {
+	u.once.Do(func() { u.sending <- u.header.Clone() })
+	<-u.read
+	return len(p), nil
+}
+
+// The full budget's line: one a minute, counting the events since the last.
+func TestEveryMinuteAdmitsOneAMinuteAndCountsTheRest(t *testing.T) {
+	var e everyMinute
+	t0 := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, step := range []struct {
+		at     time.Duration
+		events int
+		ok     bool
+	}{
+		{0, 1, true},
+		{10 * time.Second, 0, false},
+		{59 * time.Second, 0, false},
+		{time.Minute, 3, true},
+		{time.Minute + time.Second, 0, false},
+		{5 * time.Minute, 2, true},
+	} {
+		if events, ok := e.note(t0.Add(step.at)); events != step.events || ok != step.ok {
+			t.Errorf("at +%v: (%d, %v), want (%d, %v)", step.at, events, ok, step.events, step.ok)
+		}
+	}
+}
+
+// resetEveryMinute forgets what e has admitted, so a test sees the next
+// event logged.
+func resetEveryMinute(e *everyMinute) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.last, e.events = time.Time{}, 0
 }
 
 // An unusable media_start= is client text, and the prediction's warning logs

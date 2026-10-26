@@ -1,10 +1,12 @@
 package streaming
 
-// ShiftedVTT and ServeShiftedSubtitle: the subtitle endpoint's in-memory
-// shift for a client-chosen offset (media_start=). Same rewrite as the
-// cached ShiftVTTCues, nothing written, served with what ServeSubtitle sends
-// for a cached file, built only when a request needs the body, for sources
-// up to MaxInMemoryShiftSourceBytes, a few at a time.
+// ServeShiftedSubtitle: the subtitle endpoint's in-memory shift for a
+// client-chosen offset (media_start=). Same rewrite as the cached
+// ShiftVTTCues, nothing written to disk, served with what ServeSubtitle sends
+// for a cached file. A revalidation builds nothing; anything else is charged
+// against a byte budget until it has been sent, built a few at a time, for
+// sources up to MaxInMemoryShiftSourceBytes; and whatever stops it is
+// reported before anything is written.
 
 import (
 	"context"
@@ -16,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,7 +30,36 @@ const memoryShiftFixture = "WEBVTT\n\nSTYLE\n::cue {\n  color: yellow;\n}\n\nNOT
 	"timing only\n00:00:40.000 --> 00:00:41.000\n\n" +
 	"00:01:00.500 --> 00:01:02.250line:0\nlater\n"
 
-func TestShiftedVTTMatchesTheCachedShiftAndWritesNothing(t *testing.T) {
+// shiftFileInMemory is ServeShiftedSubtitle's build of path, without the
+// response: what it reads, and the body it would send. It fails the test if
+// the body outgrew the buffer it is built in, InMemoryShiftBodyBound of its
+// source, the charge the budget took for it.
+func shiftFileInMemory(t testing.TB, path string, offset float64) []byte {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := shiftVTTInMemory(f, info.Size(), offset)
+	if err != nil {
+		t.Fatalf("in-memory shift of %s: %v", path, err)
+	}
+	bound := InMemoryShiftBodyBound(info.Size())
+	// The allocator rounds a request up (to a size class, or a page past
+	// 32 KB); a buffer that grew past the bound doubles instead.
+	if int64(len(body)) > bound || int64(cap(body)) > bound+8192 {
+		t.Fatalf("%s (%d bytes): body %d bytes in a %d-byte buffer; the charge was %d",
+			path, info.Size(), len(body), cap(body), bound)
+	}
+	return body
+}
+
+func TestShiftVTTInMemoryMatchesTheCachedShiftAndWritesNothing(t *testing.T) {
 	srcDir := t.TempDir()
 	src := writeTempVTT(t, srcDir, "in.vtt", memoryShiftFixture)
 	for _, offset := range []float64{9.946009, 10, 0.25, 61} {
@@ -39,42 +71,32 @@ func TestShiftedVTTMatchesTheCachedShiftAndWritesNothing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, info, err := ShiftedVTT(src, offset)
-		if err != nil {
-			t.Fatalf("offset %v: in-memory shift: %v", offset, err)
-		}
-		if string(got) != string(want) {
+		if got := shiftFileInMemory(t, src, offset); string(got) != string(want) {
 			t.Errorf("offset %v: in-memory shift differs from the cached one\n got:\n%s\nwant:\n%s", offset, got, want)
 		}
-		if srcInfo, _ := os.Stat(src); info == nil || !info.ModTime().Equal(srcInfo.ModTime()) || info.Size() != srcInfo.Size() {
-			t.Errorf("offset %v: ShiftedVTT returned %v, want the source's FileInfo", offset, info)
+		if got, _, _, err := serveShifted(src, offset, http.Header{}, context.Background()); err != nil || got.Body.String() != string(want) {
+			t.Errorf("offset %v: served %q, %v; want the cached shift", offset, got.Body.String(), err)
 		}
 	}
 	if entries, _ := os.ReadDir(srcDir); len(entries) != 1 {
 		t.Errorf("the in-memory shift wrote beside its source: %v", entries)
 	}
-	if _, _, err := ShiftedVTT(filepath.Join(srcDir, "missing.vtt"), 10); err == nil {
-		t.Error("a missing source must be an error, so the endpoint can serve unshifted")
-	}
 }
 
-// serveShifted runs ServeShiftedSubtitle for src the way the endpoint does:
-// InMemoryShiftSource first, then the response.
-func serveShifted(t *testing.T, src string, offset float64, h http.Header, ctx context.Context) *httptest.ResponseRecorder {
-	t.Helper()
-	info, err := InMemoryShiftSource(src)
-	if err != nil {
-		t.Fatalf("InMemoryShiftSource: %v", err)
-	}
-	return serveShiftedWith(src, offset, info, h, ctx)
-}
-
-func serveShiftedWith(src string, offset float64, info os.FileInfo, h http.Header, ctx context.Context) *httptest.ResponseRecorder {
-	rr := httptest.NewRecorder()
+// serveShifted runs ServeShiftedSubtitle for src.
+func serveShifted(src string, offset float64, h http.Header, ctx context.Context) (rr *httptest.ResponseRecorder, revalidated bool, built int64, err error) {
+	rr = httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/sub", nil).WithContext(ctx)
 	r.Header = h
-	ServeShiftedSubtitle(rr, r, src, offset, info)
-	return rr
+	revalidated, built, err = ServeShiftedSubtitle(rr, r, src, offset)
+	return rr, revalidated, built, err
+}
+
+// wroteNothing reports whether ServeShiftedSubtitle left rr untouched,
+// headers included, so the endpoint can still serve something else (a stray
+// ETag would name the in-memory shift on the fallback's body).
+func wroteNothing(rr *httptest.ResponseRecorder) bool {
+	return len(rr.Header()) == 0 && rr.Body.Len() == 0 && rr.Code == http.StatusOK && !rr.Flushed
 }
 
 func TestServeShiftedSubtitleSendsWhatTheFilePathSends(t *testing.T) {
@@ -91,9 +113,10 @@ func TestServeShiftedSubtitleSendsWhatTheFilePathSends(t *testing.T) {
 		return rr
 	}
 	ctx := context.Background()
-	file, mem := serveFile(http.Header{}), serveShifted(t, src, 10, http.Header{}, ctx)
-	if file.Code != http.StatusOK || mem.Code != http.StatusOK {
-		t.Fatalf("HTTP file %d, memory %d", file.Code, mem.Code)
+	file := serveFile(http.Header{})
+	mem, _, _, err := serveShifted(src, 10, http.Header{}, ctx)
+	if err != nil || file.Code != http.StatusOK || mem.Code != http.StatusOK {
+		t.Fatalf("HTTP file %d, memory %d (%v)", file.Code, mem.Code, err)
 	}
 	if mem.Body.String() != file.Body.String() {
 		t.Errorf("bodies differ:\n%s\nvs\n%s", mem.Body.String(), file.Body.String())
@@ -103,109 +126,106 @@ func TestServeShiftedSubtitleSendsWhatTheFilePathSends(t *testing.T) {
 			t.Errorf("%s: in-memory %q, file %q", name, got, want)
 		}
 	}
-	srcInfo, _ := os.Stat(src)
+	srcInfo := mustStat(t, src)
 	if got := mem.Header().Get("Last-Modified"); got != srcInfo.ModTime().UTC().Format(http.TimeFormat) {
 		t.Errorf("Last-Modified %q, want the source's %q", got, srcInfo.ModTime().UTC().Format(http.TimeFormat))
 	}
 	if etag := mem.Header().Get("ETag"); !strings.HasPrefix(etag, `"`) || etag != shiftedSubtitleETag(src, srcInfo, 10) {
 		t.Errorf("ETag %q, want shiftedSubtitleETag's", etag)
 	}
-	if got := serveShifted(t, src, 10, http.Header{"Range": {"bytes=0-5"}}, ctx); got.Code != http.StatusPartialContent || got.Body.String() != "WEBVTT" {
+	if got, _, _, _ := serveShifted(src, 10, http.Header{"Range": {"bytes=0-5"}}, ctx); got.Code != http.StatusPartialContent || got.Body.String() != "WEBVTT" {
 		t.Errorf("Range: HTTP %d %q, want 206 \"WEBVTT\" as the file path gives", got.Code, got.Body.String())
 	}
 }
 
-// A revalidation must not pay for the rewrite: the source is removed after
-// the endpoint's stat, so a request that rewrote would fail (the control),
-// and a 304 shows nothing read it.
+// useShiftBudget swaps in a budget of limit bytes for the test.
+func useShiftBudget(t *testing.T, limit int64) *shiftBudget {
+	t.Helper()
+	saved := inMemoryShiftBudget
+	b := &shiftBudget{limit: limit}
+	inMemoryShiftBudget = b
+	t.Cleanup(func() { inMemoryShiftBudget = saved })
+	return b
+}
+
+// A revalidation pays for nothing: no rewrite and no budget, so it is
+// answered even with the budget full (here, one that takes nothing).
 func TestServeShiftedSubtitleRevalidatesWithoutRewriting(t *testing.T) {
 	ctx := context.Background()
 	src := writeTempVTT(t, t.TempDir(), "in.vtt", memoryShiftFixture)
-	first := serveShifted(t, src, 10, http.Header{}, ctx)
-	etag, lastModified := first.Header().Get("ETag"), first.Header().Get("Last-Modified")
-	info, err := InMemoryShiftSource(src)
+	first, _, _, err := serveShifted(src, 10, http.Header{}, ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(src); err != nil {
-		t.Fatal(err)
-	}
+	etag, lastModified := first.Header().Get("ETag"), first.Header().Get("Last-Modified")
+	useShiftBudget(t, 0)
 	builds := inMemoryShiftBuilds.Load()
-	for name, h := range map[string]http.Header{
-		"If-None-Match":     {"If-None-Match": {etag}},
-		"If-Modified-Since": {"If-Modified-Since": {lastModified}},
+	for _, tc := range []struct {
+		name string
+		h    http.Header
+		code int
+	}{
+		{"If-None-Match", http.Header{"If-None-Match": {etag}}, http.StatusNotModified},
+		{"If-None-Match, weak and in a list", http.Header{"If-None-Match": {`"other", W/` + etag}}, http.StatusNotModified},
+		{"If-Modified-Since", http.Header{"If-Modified-Since": {lastModified}}, http.StatusNotModified},
+		{"a failed If-Match", http.Header{"If-Match": {`"other"`}}, http.StatusPreconditionFailed},
 	} {
-		if got := serveShiftedWith(src, 10, info, h, ctx); got.Code != http.StatusNotModified || got.Body.Len() != 0 {
-			t.Errorf("%s: HTTP %d with %d bytes, want 304 and no rewrite", name, got.Code, got.Body.Len())
+		got, revalidated, built, err := serveShifted(src, 10, tc.h, ctx)
+		if err != nil || got.Code != tc.code || got.Body.Len() != 0 || !revalidated || built != 0 {
+			t.Errorf("%s: HTTP %d with %d bytes, revalidated=%v built=%d, %v; want %d, nothing built",
+				tc.name, got.Code, got.Body.Len(), revalidated, built, err, tc.code)
+		}
+		if tc.code == http.StatusNotModified && got.Header().Get("ETag") != etag {
+			t.Errorf("%s: the 304 carries ETag %q, want %q", tc.name, got.Header().Get("ETag"), etag)
 		}
 	}
 	if n := inMemoryShiftBuilds.Load() - builds; n != 0 {
-		t.Errorf("two revalidations started %d rewrites, want none", n)
+		t.Errorf("the revalidations started %d rewrites, want none", n)
 	}
-	if got := serveShiftedWith(src, 10, info, http.Header{"If-None-Match": {`"another"`}}, ctx); got.Code != http.StatusInternalServerError {
-		t.Errorf("control: a request that needs the body got HTTP %d; it should have tried the (removed) source", got.Code)
-	}
-	if n := inMemoryShiftBuilds.Load() - builds; n != 1 {
-		t.Errorf("control: a request that needs the body started %d rewrites, want 1", n)
+	// The control: one that needs the body needs the budget.
+	got, revalidated, _, err := serveShifted(src, 10, http.Header{"If-None-Match": {`"another"`}}, ctx)
+	if !errors.Is(err, ErrShiftBudgetFull) || revalidated || !wroteNothing(got) {
+		t.Errorf("control: a request that needs the body, budget full: %v, revalidated=%v, HTTP %d %v; want ErrShiftBudgetFull, nothing written",
+			err, revalidated, got.Code, got.Header())
 	}
 }
 
-// What ServeShiftedSubtitle reports, for the endpoint's log line: the body it
-// built, none for a revalidation, and the error that stopped a build.
+// What ServeShiftedSubtitle reports, for the endpoint's log line, and that it
+// writes nothing when it fails.
 func TestServeShiftedSubtitleReportsWhatItServed(t *testing.T) {
 	src := writeTempVTT(t, t.TempDir(), "in.vtt", memoryShiftFixture)
-	info := mustStat(t, src)
-	serve := func(h http.Header) (*httptest.ResponseRecorder, int64, error) {
-		rr := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/sub", nil)
-		r.Header = h
-		n, err := ServeShiftedSubtitle(rr, r, src, 10, info)
-		return rr, n, err
-	}
-	if rr, n, err := serve(http.Header{}); err != nil || n != int64(rr.Body.Len()) || n == 0 {
-		t.Errorf("a served shift reported %d bytes, %v; the body was %d bytes", n, err, rr.Body.Len())
-	}
-	if _, n, err := serve(http.Header{"If-None-Match": {shiftedSubtitleETag(src, info, 10)}}); err != nil || n != 0 {
-		t.Errorf("a revalidation reported %d bytes, %v; want 0, nil", n, err)
+	ctx := context.Background()
+	if rr, revalidated, n, err := serveShifted(src, 10, http.Header{}, ctx); err != nil || revalidated || n != int64(rr.Body.Len()) || n == 0 {
+		t.Errorf("a served shift reported %d bytes, revalidated=%v, %v; the body was %d bytes", n, revalidated, err, rr.Body.Len())
 	}
 	if err := os.Remove(src); err != nil {
 		t.Fatal(err)
 	}
-	if rr, n, err := serve(http.Header{}); err == nil || n != 0 || rr.Code != http.StatusInternalServerError {
-		t.Errorf("a failed build reported %d bytes, %v (HTTP %d); want 0, an error, 500", n, err, rr.Code)
+	if rr, _, n, err := serveShifted(src, 10, http.Header{}, ctx); err == nil || n != 0 || !wroteNothing(rr) {
+		t.Errorf("a missing source reported %d bytes, %v (HTTP %d %v); want an error, nothing written", n, err, rr.Code, rr.Header())
 	}
 }
 
-// The cap holds at read time too: a source that grew past it after the
-// endpoint's stat is refused having read at most the cap and one byte.
-func TestReadVTTSourceStopsAtTheLimit(t *testing.T) {
-	const limit = 1000
-	counted := &countingReader{r: strings.NewReader(strings.Repeat("x", 5*limit))}
-	if _, err := readVTTSource(counted, 10, limit); !errors.Is(err, ErrShiftSourceTooLarge) {
-		t.Errorf("5x the limit, stat said 10 bytes: %v, want ErrShiftSourceTooLarge", err)
+// The read takes what the stat said and no more: a source that grew after
+// it is refused, having read at most one byte past it, so the one allocation
+// sized from the stat is all the read takes.
+func TestReadVTTSourceStopsAtItsStat(t *testing.T) {
+	const size = 1000
+	counted := &countingReader{r: strings.NewReader(strings.Repeat("x", 5*size))}
+	if _, err := readVTTSource(counted, size, true); !errors.Is(err, errShiftSourceGrew) {
+		t.Errorf("5x its stat: %v, want errShiftSourceGrew", err)
 	}
-	if counted.n > limit+1 {
-		t.Errorf("read %d bytes of an over-limit source; at most %d", counted.n, limit+1)
+	if counted.n > size+1 {
+		t.Errorf("read %d bytes of a source that grew; at most %d", counted.n, size+1)
 	}
-	counted = &countingReader{r: strings.NewReader(strings.Repeat("x", 5*limit))}
-	if _, err := readVTTSource(counted, 5*limit, limit); !errors.Is(err, ErrShiftSourceTooLarge) || counted.n != 0 {
-		t.Errorf("a stat already over the limit: %v after %d bytes read; want ErrShiftSourceTooLarge, nothing read", err, counted.n)
+	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", size)), size, true); err != nil || len(got) != size {
+		t.Errorf("exactly its stat: %d bytes, %v", len(got), err)
 	}
-	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", limit)), 0, limit); err != nil || len(got) != limit {
-		t.Errorf("exactly the limit: %d bytes, %v", len(got), err)
+	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", size/2)), size, true); err != nil || len(got) != size/2 {
+		t.Errorf("shorter than its stat: %d bytes, %v", len(got), err)
 	}
-	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", 5*limit)), 0, 0); err != nil || len(got) != 5*limit {
-		t.Errorf("no limit (the cached path): %d bytes, %v", len(got), err)
-	}
-	big := filepath.Join(t.TempDir(), "big.vtt")
-	if err := os.WriteFile(big, []byte("WEBVTT\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(big, MaxInMemoryShiftSourceBytes+1); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ShiftedVTT(big, 10); !errors.Is(err, ErrShiftSourceTooLarge) {
-		t.Errorf("ShiftedVTT of a source past the cap: %v, want ErrShiftSourceTooLarge", err)
+	if got, err := readVTTSource(strings.NewReader(strings.Repeat("x", 5*size)), 0, false); err != nil || len(got) != 5*size {
+		t.Errorf("not exact (the cached path): %d bytes, %v", len(got), err)
 	}
 }
 
@@ -220,7 +240,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func TestInMemoryShiftSourceCapsTheSize(t *testing.T) {
+func TestServeShiftedSubtitleCapsTheSource(t *testing.T) {
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		size int64
@@ -236,12 +256,16 @@ func TestInMemoryShiftSourceCapsTheSize(t *testing.T) {
 		if err := os.Truncate(p, tc.size); err != nil { // sparse: no 8 MB write
 			t.Fatal(err)
 		}
-		if _, err := InMemoryShiftSource(p); !errors.Is(err, tc.want) {
+		rr, _, built, err := serveShifted(p, 10, http.Header{}, context.Background())
+		if !errors.Is(err, tc.want) {
 			t.Errorf("a %d-byte source: %v, want %v", tc.size, err, tc.want)
 		}
-	}
-	if _, err := InMemoryShiftSource(filepath.Join(dir, "missing.vtt")); err == nil || errors.Is(err, ErrShiftSourceTooLarge) {
-		t.Errorf("a missing source: %v, want the stat error", err)
+		if tc.want != nil && !wroteNothing(rr) {
+			t.Errorf("a %d-byte source, refused: HTTP %d %v; want nothing written", tc.size, rr.Code, rr.Header())
+		}
+		if tc.want == nil && (rr.Code != http.StatusOK || built < tc.size) {
+			t.Errorf("a %d-byte source at the cap: HTTP %d, %d bytes built", tc.size, rr.Code, built)
+		}
 	}
 }
 
@@ -249,6 +273,7 @@ func TestInMemoryShiftSourceCapsTheSize(t *testing.T) {
 // context lasts, and gets one once a slot frees.
 func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 	src := writeTempVTT(t, t.TempDir(), "in.vtt", memoryShiftFixture)
+	budget := useShiftBudget(t, InMemoryShiftBudgetBytes)
 	for i := 0; i < cap(inMemoryShiftSlots); i++ {
 		inMemoryShiftSlots <- struct{}{}
 	}
@@ -266,11 +291,14 @@ func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	began := time.Now()
-	if got := serveShifted(t, src, 10, http.Header{}, ctx); got.Code != http.StatusInternalServerError {
-		t.Errorf("no free slot, context ended: HTTP %d, want 500", got.Code)
+	if got, _, _, err := serveShifted(src, 10, http.Header{}, ctx); !errors.Is(err, context.DeadlineExceeded) || !wroteNothing(got) {
+		t.Errorf("no free slot, context ended: %v, HTTP %d %v; want its error, nothing written", err, got.Code, got.Header())
 	}
 	if took := time.Since(began); took < 90*time.Millisecond || took > 2*time.Second {
 		t.Errorf("waited %v for a slot; want about the context's 100 ms", took)
+	}
+	if held := budget.inUse(); held != 0 {
+		t.Errorf("a request that gave up waiting still holds %d bytes of the budget", held)
 	}
 	// A 304 needs no slot at all: it answers at once, well inside a context
 	// that a slot wait would run out.
@@ -278,7 +306,7 @@ func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 	revalidate, cancelRevalidate := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelRevalidate()
 	began = time.Now()
-	if got := serveShifted(t, src, 10, http.Header{"If-None-Match": {etag}}, revalidate); got.Code != http.StatusNotModified {
+	if got, _, _, _ := serveShifted(src, 10, http.Header{"If-None-Match": {etag}}, revalidate); got.Code != http.StatusNotModified {
 		t.Errorf("a revalidation with every slot taken: HTTP %d, want 304", got.Code)
 	}
 	if took := time.Since(began); took > 500*time.Millisecond {
@@ -286,7 +314,10 @@ func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 	}
 
 	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- serveShifted(t, src, 10, http.Header{}, context.Background()) }()
+	go func() {
+		rr, _, _, _ := serveShifted(src, 10, http.Header{}, context.Background())
+		done <- rr
+	}()
 	select {
 	case <-done:
 		t.Fatal("a request got a rewrite slot while all were taken")
@@ -300,6 +331,103 @@ func TestServeShiftedSubtitleWaitsForARewriteSlot(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a waiting request never got the freed slot")
+	}
+}
+
+// stalledResponse is a client that reads nothing until told to: its first
+// Write blocks until read is closed. It records the write deadline set on it.
+type stalledResponse struct {
+	header   http.Header
+	sending  chan<- *stalledResponse // told once, at the first Write
+	read     <-chan struct{}
+	once     sync.Once
+	deadline time.Time
+}
+
+func (s *stalledResponse) Header() http.Header { return s.header }
+func (s *stalledResponse) WriteHeader(int)     {}
+func (s *stalledResponse) Write(p []byte) (int, error) {
+	s.once.Do(func() { s.sending <- s })
+	<-s.read
+	return len(p), nil
+}
+func (s *stalledResponse) SetWriteDeadline(d time.Time) error {
+	s.deadline = d
+	return nil
+}
+
+// The budget holds each body's charge from before it is built until its
+// response has been sent: responses nobody reads fill it, the next request is
+// refused at once with nothing written (the endpoint then uses the
+// prediction), a revalidation is still answered, and each charge comes back
+// when its response is done.
+func TestServeShiftedSubtitleChargesTheBudgetUntilSent(t *testing.T) {
+	src := writeTempVTT(t, t.TempDir(), "in.vtt", memoryShiftFixture)
+	charge := InMemoryShiftBodyBound(int64(len(memoryShiftFixture)))
+	budget := useShiftBudget(t, 2*charge+charge/2) // room for two
+	sending := make(chan *stalledResponse, 2)
+	reads := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	var once [2]sync.Once
+	letRead := func(i int) { once[i].Do(func() { close(reads[i]) }) }
+	var wg sync.WaitGroup
+	t.Cleanup(func() { letRead(0); letRead(1); wg.Wait() })
+	finished := make([]chan struct{}, 2)
+	sentAt := time.Now()
+	for i := range reads {
+		finished[i] = make(chan struct{})
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer close(finished[i])
+			w := &stalledResponse{header: http.Header{}, sending: sending, read: reads[i]}
+			ServeShiftedSubtitle(w, httptest.NewRequest(http.MethodGet, "/sub", nil), src, 10)
+		}(i)
+	}
+	for range reads {
+		select {
+		case w := <-sending:
+			// Sent under the endpoint's ordinary two minutes, not whatever
+			// the request had before.
+			if want := sentAt.Add(inMemoryShiftSendTimeout); w.deadline.Before(want) || w.deadline.After(want.Add(5*time.Second)) {
+				t.Errorf("a body is sent under the write deadline %v, want %v from the send", w.deadline, inMemoryShiftSendTimeout)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a stalled response never began sending")
+		}
+	}
+	if held := budget.inUse(); held != 2*charge {
+		t.Fatalf("two unread responses hold %d bytes of the budget, want %d (two bodies' bound)", held, 2*charge)
+	}
+
+	builds := inMemoryShiftBuilds.Load()
+	began := time.Now()
+	got, _, _, err := serveShifted(src, 10, http.Header{}, context.Background())
+	if !errors.Is(err, ErrShiftBudgetFull) || !wroteNothing(got) {
+		t.Errorf("a third request, budget full: %v, HTTP %d %v; want ErrShiftBudgetFull, nothing written", err, got.Code, got.Header())
+	}
+	if took := time.Since(began); took > 500*time.Millisecond {
+		t.Errorf("the refusal took %v: it waited", took)
+	}
+	if n := inMemoryShiftBuilds.Load() - builds; n != 0 {
+		t.Errorf("the refused request started %d rewrites", n)
+	}
+	etag := shiftedSubtitleETag(src, mustStat(t, src), 10)
+	if rr, _, _, err := serveShifted(src, 10, http.Header{"If-None-Match": {etag}}, context.Background()); err != nil || rr.Code != http.StatusNotModified {
+		t.Errorf("a revalidation, budget full: HTTP %d, %v; want 304", rr.Code, err)
+	}
+
+	letRead(0)
+	<-finished[0]
+	if held := budget.inUse(); held != charge {
+		t.Errorf("after one response was read the budget holds %d bytes, want %d", held, charge)
+	}
+	if rr, _, _, err := serveShifted(src, 10, http.Header{}, context.Background()); err != nil || rr.Code != http.StatusOK {
+		t.Errorf("once a response was read: HTTP %d, %v; want the in-memory shift again", rr.Code, err)
+	}
+	letRead(1)
+	<-finished[1]
+	if held := budget.inUse(); held != 0 {
+		t.Errorf("with every response read the budget holds %d bytes", held)
 	}
 }
 
@@ -326,26 +454,89 @@ func TestShiftedSubtitleETagNamesTheExactShiftOfOneSource(t *testing.T) {
 	}
 }
 
+// growthShapes are the sources the rewrite grows most: its smallest cue
+// blocks, whose timestamps it writes back at full width with spaces round
+// the arrow and before settings. shortFormNoSpaces is a sidecar of timing
+// lines alone written that way; smallestBlocks adds one-byte settings, the
+// most the rewrite can grow a source (InMemoryShiftBodyBound), and has no
+// final newline, so its last block gains two.
+func shortFormNoSpaces(size int) string {
+	var sb strings.Builder
+	sb.WriteString("WEBVTT\n\n")
+	for i := 0; sb.Len() < size; i++ {
+		fmt.Fprintf(&sb, "%d:%02d.%03d-->%d:%02d.%03d\n\n", i/600%10, i/10%60, i%10*100, i/600%10, i/10%60, i%10*100+50)
+	}
+	return sb.String()
+}
+
+func smallestBlocks(size int) string {
+	var sb strings.Builder
+	sb.WriteString("WEBVTT\n\n")
+	for sb.Len() < size {
+		sb.WriteString("0:00.000-->9:59.999x\n\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n\n")
+}
+
+// The bound is what the budget charges and the buffer the body is built in,
+// so no body may outgrow it (shiftFileInMemory checks each against it, here
+// and for the oracle's inputs), and the shapes above come close to it.
+func TestInMemoryShiftBodyBoundHoldsTheBody(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		src      string
+		minRatio float64
+	}{
+		{"short-form, no spaces", shortFormNoSpaces(1 << 20), 1.4},
+		{"smallest blocks", smallestBlocks(1 << 20), 1.49},
+		{"a header with no newline", "WEBVTT", 1.3},
+		{"empty", "", 0},
+	} {
+		p := writeTempVTT(t, t.TempDir(), "in.vtt", tc.src)
+		body := shiftFileInMemory(t, p, 10)
+		ratio := 1.0
+		if len(tc.src) > 0 {
+			ratio = float64(len(body)) / float64(len(tc.src))
+		}
+		t.Logf("%s: %d bytes from %d (%.3fx); the bound is %d", tc.name, len(body), len(tc.src), ratio, InMemoryShiftBodyBound(int64(len(tc.src))))
+		if ratio < tc.minRatio {
+			t.Errorf("%s grew %.3fx, want at least %.2fx: not the shape it claims", tc.name, ratio, tc.minRatio)
+		}
+	}
+}
+
 // BenchmarkShiftedVTT is the per-request cost MaxInMemoryShiftSourceBytes
-// documents: an in-memory shift of a source at the cap.
+// documents: an in-memory shift of a source just under the cap, read and
+// rewritten, in four shapes (body/src is how much the rewrite grew it).
 //
 //	go test ./internal/streaming/ -run XXX -bench BenchmarkShiftedVTT -benchtime 5x
 func BenchmarkShiftedVTT(b *testing.B) {
 	const under = MaxInMemoryShiftSourceBytes - 1024 // the last cue must not cross the cap
-	typical := func() string {
+	cues := func(cue func(i int, s float64) string) string {
 		var sb strings.Builder
 		sb.WriteString("WEBVTT\n\n")
 		for i := 0; sb.Len() < under; i++ {
-			s := float64(i) * 2.5
-			fmt.Fprintf(&sb, "%d\n%s --> %s align:start\nLine number %d of the subtitle text, long enough to look real.\nSecond line %d.\n\n",
-				i, formatVTTTimestamp(s), formatVTTTimestamp(s+2), i, i)
+			sb.WriteString(cue(i, float64(i)*0.25))
 		}
 		return sb.String()
 	}
-	// The worst shape measured: one timing line as long as the cap allows,
-	// which the cue-line regex walks to its end.
+	typical := cues(func(i int, s float64) string {
+		return fmt.Sprintf("%d\n%s --> %s align:start\nLine number %d of the subtitle text, long enough to look real.\nSecond line %d.\n\n",
+			i, formatVTTTimestamp(s*10), formatVTTTimestamp(s*10+2), i, i)
+	})
+	// FFmpeg's WebVTT for a karaoke ASS track: a cue per syllable.
+	dense := cues(func(i int, s float64) string {
+		return fmt.Sprintf("%s --> %s\n<c.k>ka</c>\n\n", formatVTTTimestamp(s), formatVTTTimestamp(s+0.25))
+	})
+	// One timing line as long as the cap allows, which the cue-line regex
+	// walks to its end.
 	longTiming := "WEBVTT\n\n00:01:00.000 --> 00:01:02.000 " + strings.Repeat("x", under) + "\ntext\n"
-	for _, tc := range []struct{ name, body string }{{"typical", typical()}, {"one long timing line", longTiming}} {
+	for _, tc := range []struct{ name, body string }{
+		{"typical", typical},
+		{"dense one-line cues", dense},
+		{"short-form, no spaces", shortFormNoSpaces(under)},
+		{"one long timing line", longTiming},
+	} {
 		b.Run(tc.name, func(b *testing.B) {
 			p := filepath.Join(b.TempDir(), "bench.vtt")
 			if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
@@ -354,11 +545,11 @@ func BenchmarkShiftedVTT(b *testing.B) {
 			b.SetBytes(int64(len(tc.body)))
 			b.ReportAllocs()
 			b.ResetTimer()
+			var out []byte
 			for i := 0; i < b.N; i++ {
-				if _, _, err := ShiftedVTT(p, 61.25); err != nil {
-					b.Fatal(err)
-				}
+				out = shiftFileInMemory(b, p, 61.25)
 			}
+			b.ReportMetric(float64(len(out))/float64(len(tc.body)), "body/src")
 		})
 	}
 }
