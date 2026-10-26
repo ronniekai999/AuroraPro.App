@@ -18,8 +18,10 @@
 // servers, a failed measurement) the player keeps start_sec, as before.
 //
 // start_sec itself is unchanged and still owns what it always did: the
-// whole-second `-ss` anchor the session was asked for, the subtitle cue-shift
-// request and the cast receiver conversion.
+// whole-second `-ss` anchor the session was asked for (the subtitle request's
+// `start=`) and the cast receiver conversion. The subtitle request adds the
+// measured start as `media_start=` (subtitleCueShiftQuery), so its cues are
+// shifted to where the media really begins, not to the server's prediction.
 
 /** hls.js's name for the comment line; media_start.go writes the same one. */
 export const MEDIA_START_TAG = 'AURORA-MEDIA-START'
@@ -126,6 +128,33 @@ export function plausibleMediaStartSec(sessionStartSec: number, reportedSec: num
 export function sessionMediaOriginSec(sessionStartSec: number, reportedSec: number | null, remux: boolean): number {
   const start = Number.isFinite(sessionStartSec) && sessionStartSec > 0 ? sessionStartSec : 0
   return plausibleMediaStartSec(sessionStartSec, reportedSec, remux) ?? start
+}
+
+/**
+ * The cue-shift part of a sidecar subtitle URL (`/api/stream/{id}/subtitles/
+ * {idx}`): what tells the server where this session's media time 0 is in the
+ * file, so it can shift every cue there.
+ *
+ * - No start (direct play, a session from 0): nothing; cues already match.
+ * - A transcode: `start=<start_sec>`. An accurate seek begins there.
+ * - A remux: `start=<start_sec>&remux=1`, which makes the server PREDICT the
+ *   key frame FFmpeg began on (ProbeSeekKeyframe), plus, once the session's
+ *   playlist has reported where it really began, `media_start=<seconds>`,
+ *   which the server uses instead. The prediction is a whole GOP late (cues a
+ *   GOP early) where `-noaccurate_seek` lands one key frame earlier still:
+ *   Matroska, MPEG-TS and AVI with B-frames, a start on a key frame.
+ *
+ * `start=` stays the whole-second start_sec (the server parses an integer), so
+ * an older server ignores `media_start=` and predicts, as before.
+ * `media_start=` echoes the playlist's value, at its 6 decimals; the server
+ * shifts by it in memory and caches nothing for it. `measuredStartSec` is
+ * RemuxClock.measuredStartSec.
+ */
+export function subtitleCueShiftQuery(sessionStartSec: number, remux: boolean, measuredStartSec: number | null): string {
+  if (!(sessionStartSec > 0)) return ''
+  if (!remux) return `&start=${sessionStartSec}`
+  const measured = plausibleMediaStartSec(sessionStartSec, measuredStartSec, true)
+  return `&start=${sessionStartSec}&remux=1` + (measured === null ? '' : `&media_start=${measured.toFixed(6)}`)
 }
 
 /**
@@ -244,29 +273,62 @@ export function firstVariantUri(masterText: string): string | null {
 }
 
 /**
+ * How long the native path's look at the variant playlist may take: a
+ * trade-off, not a sign of a stall. The server answers a remux's first variant
+ * request once its first segment exists, which it may wait up to 40 s for
+ * (`readinessTimeout`), plus at most ~2.75 s for the measurement; it is
+ * usually far quicker, and a subtitle pick held for the measurement waits for
+ * this, so 8 s rather than the 40. On the timeout the result is null, as for
+ * a failed fetch: the clock stays on start_sec and a held pick is applied with
+ * the server's prediction, a GOP off on the Matroska key-frame case.
+ */
+export const NATIVE_MEDIA_WINDOW_TIMEOUT_MS = 8000
+
+/**
  * The native-HLS path's one look at the variant playlist: fetch the master,
  * then its first variant (a remux has one), and parse the window. Never
- * throws: any failure is null, and the caller then behaves exactly as before
- * this existed. Nothing here touches the media element or how Safari loads
- * the stream.
+ * throws: any failure, or no answer within `timeoutMs`, is null, and the
+ * caller then behaves exactly as before this existed. Nothing here touches the
+ * media element or how Safari loads the stream.
  */
 export async function fetchNativeMediaWindow(
   masterUrl: string,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = NATIVE_MEDIA_WINDOW_TIMEOUT_MS,
 ): Promise<MediaWindow | null> {
+  // The caller's signal or the timeout aborts the fetches. A timer and a
+  // controller rather than AbortSignal.any, which needs Safari 17.4 (the build
+  // targets Safari 16); the race ends the wait even for a fetch that ignores
+  // its signal.
+  const limit = new AbortController()
+  const abort = () => limit.abort()
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<null>(resolve => {
+    timer = setTimeout(() => { abort(); resolve(null) }, timeoutMs)
+  })
+  const read = async (): Promise<MediaWindow | null> => {
+    try {
+      const base = typeof window !== 'undefined' ? window.location.href : undefined
+      const masterAbs = new URL(masterUrl, base)
+      const master = await fetchImpl(masterAbs.toString(), { credentials: 'include', signal: limit.signal })
+      if (!master.ok) return null
+      const uri = firstVariantUri(await master.text())
+      if (!uri) return null
+      const variant = await fetchImpl(new URL(uri, masterAbs).toString(), { credentials: 'include', signal: limit.signal })
+      if (!variant.ok) return null
+      return parseMediaPlaylistWindow(await variant.text())
+    } catch {
+      return null
+    }
+  }
   try {
-    const base = typeof window !== 'undefined' ? window.location.href : undefined
-    const masterAbs = new URL(masterUrl, base)
-    const master = await fetchImpl(masterAbs.toString(), { credentials: 'include', signal })
-    if (!master.ok) return null
-    const uri = firstVariantUri(await master.text())
-    if (!uri) return null
-    const variant = await fetchImpl(new URL(uri, masterAbs).toString(), { credentials: 'include', signal })
-    if (!variant.ok) return null
-    return parseMediaPlaylistWindow(await variant.text())
-  } catch {
-    return null
+    return await Promise.race([read(), timedOut])
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
 }
 
@@ -310,6 +372,7 @@ export class RemuxClock {
   readonly sessionStartSec: number
   readonly remux: boolean
   private origin: number
+  private measured: number | null = null
   private adopted = false
   private refused = false
   private played = false
@@ -331,6 +394,14 @@ export class RemuxClock {
   get hasMeasuredOrigin(): boolean { return this.adopted }
   /** A measured start arrived after playback began and was refused. */
   get refusedLateStart(): boolean { return this.refused }
+  /**
+   * Where the session's media really begins, in source seconds, once a load
+   * has reported a plausible start, ADOPTED OR REFUSED; else null. The
+   * subtitle cue shift wants it either way: a refusal keeps the clock's
+   * conversions on start_sec so nothing moves under the viewer, but the
+   * element's media time 0 is still this, and cues are timed on the element.
+   */
+  get measuredStartSec(): number | null { return this.measured }
   /** Whether a remux session could have a measured start at all. */
   get wantsMeasuredOrigin(): boolean { return this.remux && this.sessionStartSec > 0 }
   /**
@@ -387,6 +458,7 @@ export class RemuxClock {
     if (!this.adopted && !this.refused) {
       const start = plausibleMediaStartSec(this.sessionStartSec, w.reportedSec, this.remux)
       if (start !== null) {
+        this.measured = start
         if (this.played) {
           this.refused = true
         } else {

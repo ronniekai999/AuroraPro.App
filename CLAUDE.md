@@ -1002,11 +1002,63 @@ capability declarations.
   rebuilding a still-booting guest. Native HLS fetches the variant playlist
   once and applies it at `loadedmetadata`, failing safe to `start_sec`.
   Transcodes and the Android TV client still anchor on `start_sec`.
+- Sidecar subtitle cue shift (`ServeSubtitle`, `subtitleCueShift`): a
+  transcode shifts by `start_sec`; a remux by `media_start=`, the measured
+  start the web player sends beside `start=<start_sec>&remux=1`
+  (`subtitleCueShiftQuery`), taken only as a plain decimal inside the
+  publication window (`ParseClientMediaStart`); otherwise by the
+  `ProbeSeekKeyframe` prediction, as before. A `media_start=` shift is the
+  client's choice, so it is built in memory per request and never written to
+  the subtitle cache (`ServeShiftedSubtitle`, with the file path's headers).
+  A revalidation is a 304 that builds nothing and takes no budget
+  (`http.ServeContent`'s own precondition check, run first). Any other request
+  is charged its body's worst case, 1.5x its source plus 64 bytes
+  (`InMemoryShiftBodyBound`, also the buffer it is built in), against a 64 MB
+  budget from before the build until its send ends (`InMemoryShiftBudgetBytes`),
+  and is sent under a two-minute write deadline. At most four rewrites run at
+  once: a request waits for a slot until its context ends, holding its charge,
+  and the slot is freed once the body is built. Sources are capped at 8 MB
+  (`MaxInMemoryShiftSourceBytes`), and the read takes no more than the stat
+  said. Whatever stops the shift (the cap, a full budget, an unreadable source)
+  does so before anything is written, and the prediction is used, through the
+  cache: logged once per track for the cap, once a minute for the budget. A
+  client that leaves while waiting for a slot gets a 503. A measured start at
+  or before 0 is no shift: the source is served as is.
+  The server-derived shifts keep one cached file per (track, offset), and
+  the extracted track is cached either way. The native path gives its
+  variant fetch 8 s (`NATIVE_MEDIA_WINDOW_TIMEOUT_MS`), then fails safe as
+  for a failed fetch. The player sends the measured start whether its clock adopted or
+  refused it (`measuredStartSec`: cues are timed on the element). Until a
+  boot knows its delivery (stream info, the session create, and for direct
+  play on WebKit the AirPlay token mint) a pick is only recorded; the boot's
+  restore reads the latest pick when the delivery can take it, so one made
+  during the boot, Off included, wins over the pick the boot began with. Only
+  the active `<track>`'s `error` rolls the pick back: one a boot or a later
+  pick removed is ignored. A remux pick (the restore included) is then held
+  while the clock awaits its first level load (natively, until the fetched
+  result is applied at `loadedmetadata` or the fetch fails), and its
+  `<track>` created once that settles. A restore keeps a `<track>` the boot
+  already built, turning it back on after the restore's own disable, so each
+  pick is requested once per boot.
 - Known gaps: the native-HLS path is NOT verified on a real Safari or iPhone,
   and it assumes Safari's media time 0 is the first segment's start, as
-  hls.js's is (unverified); the remux subtitle cue shift still uses
-  `ProbeSeekKeyframe` (`phase2_handlers.go` `ServeSubtitle`), a GOP off on the
-  Matroska key-frame case; after the unreadable-playlist resume fallback the
+  hls.js's is (unverified); older clients and a remux whose playlist reported
+  no start still get the `ProbeSeekKeyframe` subtitle shift, a GOP off on the
+  Matroska key-frame case, and so does a track created before a start that
+  arrives late; a held pick waits for local loading, which a boot while
+  casting does not start and a cast that connects during the hold stops
+  (`stopLoad`); a `media_start=` shift is paid on every non-304 request
+  (about 2 µs of CPU per cue: per MB ~20 ms for ordinary cues, ~50 ms for
+  one-syllable karaoke cues and ~100 ms for timing lines alone, allocating 4
+  to 15 times the source, mostly short-lived; up to ~0.85 s a request at the
+  cap; `BenchmarkShiftedVTT`), where a cached shift was paid once per track
+  and offset; a full budget (five clients not reading tracks at the cap, or
+  forty-odd not reading ordinary ones, each for up to the two-minute send
+  deadline) sends every other `media_start=` request to the GOP-off
+  prediction until they finish, and so does a source above 8 MB; a
+  native-HLS server slower than 8 s to its first variant playlist leaves that
+  session's clock and subtitles on start_sec and the prediction; after the
+  unreadable-playlist resume fallback the
   cached start describes segment 0 of a playlist that no longer lists it; a
   measurement that lands after the first request's budget reaches only
   players that have not started.

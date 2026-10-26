@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   MEDIA_START_ALIGN_EDGE_SEC,
   MEDIA_START_MAX_LAG_SEC,
   MEDIA_START_MAX_LEAD_SEC,
   MEDIA_START_PARTY_HOLD_MS,
   MEDIA_START_TAG,
+  NATIVE_MEDIA_WINDOW_TIMEOUT_MS,
   RemuxClock,
   alignmentWithRunwaySec,
   fetchNativeMediaWindow,
@@ -15,6 +16,7 @@ import {
   parseMediaPlaylistWindow,
   reportedMediaStartSec,
   sessionMediaOriginSec,
+  subtitleCueShiftQuery,
   type MediaWindow,
 } from './mediaStart'
 
@@ -136,6 +138,34 @@ const NATIVE_FMP4 = [
   '#AURORA-MEDIA-START:19.946009', '#EXTINF:10.000000,', 'seg_00000.m4s?token=t', '#EXTINF:9.5,', 'seg_00001.m4s?token=t', '',
 ].join('\r\n')
 
+describe('subtitleCueShiftQuery', () => {
+  it('sends nothing without a start: direct play and sessions from 0', () => {
+    expect(subtitleCueShiftQuery(0, false, null)).toBe('')
+    expect(subtitleCueShiftQuery(0, true, 0.02)).toBe('')
+    expect(subtitleCueShiftQuery(Number.NaN, true, null)).toBe('')
+  })
+
+  it('keeps a transcode on start_sec, whatever was measured', () => {
+    expect(subtitleCueShiftQuery(25, false, null)).toBe('&start=25')
+    expect(subtitleCueShiftQuery(25, false, 19.946009)).toBe('&start=25')
+  })
+
+  it('adds the measured start to a remux, beside the unchanged integer start', () => {
+    // Echoed at the playlist line's 6 decimals.
+    expect(subtitleCueShiftQuery(25, true, 19.946009)).toBe('&start=25&remux=1&media_start=19.946009')
+    expect(subtitleCueShiftQuery(20, true, 9.96)).toBe('&start=20&remux=1&media_start=9.960000')
+    expect(subtitleCueShiftQuery(5, true, 0)).toBe('&start=5&remux=1&media_start=0.000000')
+  })
+
+  it('leaves a remux with nothing measured (or nothing believable) to the server prediction', () => {
+    expect(subtitleCueShiftQuery(25, true, null)).toBe('&start=25&remux=1')
+    expect(subtitleCueShiftQuery(25, true, 25 + MEDIA_START_MAX_LEAD_SEC + 0.1)).toBe('&start=25&remux=1')
+    expect(subtitleCueShiftQuery(3600, true, 3600 - MEDIA_START_MAX_LAG_SEC - 0.1)).toBe('&start=3600&remux=1')
+    expect(subtitleCueShiftQuery(25, true, -0.5)).toBe('&start=25&remux=1')
+    expect(subtitleCueShiftQuery(25, true, Number.NaN)).toBe('&start=25&remux=1')
+  })
+})
+
 describe('parseMediaPlaylistWindow (native path)', () => {
   it('reads the start, the produced end and the reload runway of a live playlist', () => {
     expect(parseMediaPlaylistWindow(NATIVE_FMP4)).toEqual({ reportedSec: 19.946009, producedEndSec: 19.5, runwaySec: 9.5 })
@@ -174,6 +204,50 @@ describe('fetchNativeMediaWindow', () => {
   ])('is null, never a throw, when the %s', async (_name, impl) => {
     await expect(fetchNativeMediaWindow('/m/master.m3u8', undefined, vi.fn(impl) as unknown as typeof fetch)).resolves.toBeNull()
   })
+
+  describe('a stalled fetch', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+    // The variant never answers, and ignores its signal (the race must end
+    // the wait anyway); the master answers at once.
+    const stalled = () => vi.fn((url: string, _init?: RequestInit) => url.endsWith('master.m3u8')
+      ? Promise.resolve(response('#EXTM3U\nsource/stream.m3u8\n'))
+      : new Promise<Response>(() => {}))
+
+    it(`is null after ${NATIVE_MEDIA_WINDOW_TIMEOUT_MS} ms, and aborts the fetch`, async () => {
+      const fetchImpl = stalled()
+      let settled: MediaWindow | null | undefined
+      void fetchNativeMediaWindow('/m/master.m3u8', undefined, fetchImpl as unknown as typeof fetch).then(w => { settled = w })
+      await vi.advanceTimersByTimeAsync(NATIVE_MEDIA_WINDOW_TIMEOUT_MS - 1)
+      expect(settled).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBeNull()
+      expect((fetchImpl.mock.calls[1][1]?.signal as AbortSignal).aborted).toBe(true)
+    })
+
+    it("still follows the caller's signal", async () => {
+      const fetchImpl = stalled()
+      const caller = new AbortController()
+      void fetchNativeMediaWindow('/m/master.m3u8', caller.signal, fetchImpl as unknown as typeof fetch)
+      await vi.advanceTimersByTimeAsync(10)
+      caller.abort()
+      expect((fetchImpl.mock.calls[1][1]?.signal as AbortSignal).aborted).toBe(true)
+    })
+  })
+
+  describe('a prompt answer', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('clears its timeout', async () => {
+      const fetchImpl = vi.fn(async (url: string, _init?: RequestInit) => url.endsWith('master.m3u8')
+        ? response('#EXTM3U\nsource/stream.m3u8\n')
+        : response(NATIVE_FMP4))
+      const w = await fetchNativeMediaWindow('/m/master.m3u8', undefined, fetchImpl as unknown as typeof fetch)
+      expect(w?.reportedSec).toBe(19.946009)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
 })
 
 describe('RemuxClock', () => {
@@ -203,6 +277,44 @@ describe('RemuxClock', () => {
   it('never moves a transcode or an unseeked session', () => {
     expect(new RemuxClock(S, false).noteLevel(windowOf(O, 20), owner()).originChanged).toBe(false)
     expect(new RemuxClock(0, true).noteLevel(windowOf(0.02, 20), owner()).originChanged).toBe(false)
+  })
+
+  describe('measuredStartSec (the subtitle cue shift)', () => {
+    it('is the adopted start', () => {
+      const c = new RemuxClock(S, true)
+      expect(c.measuredStartSec).toBeNull()
+      c.noteLevel(windowOf(O, 20), owner())
+      expect(c.measuredStartSec).toBe(O)
+    })
+
+    it('is a refused late start too: the element still begins there', () => {
+      const c = new RemuxClock(S, true)
+      c.noteLevel(windowOf(null, 10), owner())
+      expect(c.measuredStartSec).toBeNull()
+      c.notePlayed()
+      c.noteLevel(windowOf(O, 20), owner(9.8))
+      expect(c.originSec).toBe(S)
+      expect(c.measuredStartSec).toBe(O)
+    })
+
+    it('keeps the first start a session reported', () => {
+      const c = new RemuxClock(S, true)
+      c.noteLevel(windowOf(O, 20), owner())
+      c.noteLevel(windowOf(O - 10, 30), owner(1))
+      expect(c.measuredStartSec).toBe(O)
+    })
+
+    it('is null for an implausible start, a transcode and an unseeked session', () => {
+      const late = new RemuxClock(S, true)
+      late.noteLevel(windowOf(S + MEDIA_START_MAX_LEAD_SEC + 0.5, 20), owner())
+      expect(late.measuredStartSec).toBeNull()
+      const transcode = new RemuxClock(S, false)
+      transcode.noteLevel(windowOf(O, 20), owner())
+      expect(transcode.measuredStartSec).toBeNull()
+      const fromZero = new RemuxClock(0, true)
+      fromZero.noteLevel(windowOf(0.02, 20), owner())
+      expect(fromZero.measuredStartSec).toBeNull()
+    })
   })
 
   it('retries the alignment on later loads while the playhead is short of start_sec (H1)', () => {

@@ -12,9 +12,10 @@ package streaming
 // and one asked for 40 s on the Matroska copy showed 30.0 s.
 //
 // start_sec stays what it is (the whole-second -ss anchor the session was
-// asked for: the subtitle cue shift, cast receivers and older clients all key
-// off it). What this adds is the measured origin, published in the variant
-// playlist as an HLS COMMENT line:
+// asked for: cast receivers and older clients key off it, and the subtitle
+// endpoint still predicts from it when a client sends no measured start).
+// What this adds is the measured origin, published in the variant playlist as
+// an HLS COMMENT line:
 //
 //	#AURORA-MEDIA-START:19.946009
 //
@@ -162,6 +163,51 @@ func probeMediaStartSec(ctx context.Context, variantDir string, fmp4 bool) (floa
 func mediaStartPlausible(sec float64, startSec int) bool {
 	anchor := float64(startSec)
 	return sec >= 0 && sec >= anchor-mediaStartMaxLagSec && sec <= anchor+mediaStartMaxLeadSec
+}
+
+// ParseClientMediaStart reads a media start a client sends back: the value of
+// this session's #AURORA-MEDIA-START line, which the subtitle endpoint takes
+// as media_start= so the cue shift lands where the remux really began rather
+// than where ProbeSeekKeyframe predicts it did. Accepted only as a plain
+// decimal number of seconds (what the line carries and the web player sends:
+// no sign, exponent, NaN or Inf) inside the window the line is published
+// under for this start_sec; anything else is ok=false, and the caller keeps
+// its prediction. The value is the client's choice, so the endpoint shifts by
+// it in memory and caches nothing (ServeShiftedSubtitle).
+func ParseClientMediaStart(raw string, startSec int) (float64, bool) {
+	if !isDecimalSeconds(raw) {
+		return 0, false
+	}
+	// The shape check already excludes NaN and Inf; an out-of-range decimal
+	// is an error here, and anything huge falls outside the window anyway.
+	sec, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !mediaStartPlausible(sec, startSec) {
+		return 0, false
+	}
+	return sec, true
+}
+
+// isDecimalSeconds reports whether s is digits with an optional fractional
+// part: `\d+(\.\d+)?`, with nothing trimmed. (The SPA's parser for the
+// playlist line, parseSeconds, applies the same shape after trimming
+// whitespace; the value the SPA sends back has none.)
+func isDecimalSeconds(s string) bool {
+	intDigits, fracDigits, sawDot := 0, 0, false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			if sawDot {
+				fracDigits++
+			} else {
+				intDigits++
+			}
+		case c == '.' && !sawDot:
+			sawDot = true
+		default:
+			return false
+		}
+	}
+	return intDigits > 0 && (!sawDot || fracDigits > 0)
 }
 
 // sessionMediaStart returns the measured origin to publish for this session,

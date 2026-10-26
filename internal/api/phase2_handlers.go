@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -2384,13 +2385,24 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 //
 // Query params:
 //   - type=movie|episode|media — disambiguates ID collisions.
-//   - start=<sec> — resume offset (Issue #131). When > 0, every cue
-//     timestamp is shifted by -start seconds so the player's HLS
-//     time domain (currentTime=0 corresponds to file-time=start)
-//     matches the subtitle cue domain. Without this, cues fire
-//     `start` seconds late or never (when past EOF). The shifted
-//     VTT is cached separately from the raw extracted VTT keyed by
-//     (fileID, trackIdx, start).
+//   - start=<sec> — the session's whole-second start_sec (Issue #131). When
+//     > 0, every cue timestamp is shifted back by where the player's media
+//     time 0 sits in the file (subtitleCueShift), so cues match the HLS
+//     time domain. Without this, cues fire `start` seconds late or never
+//     (when past EOF). A shift the server derived (start_sec, the key-frame
+//     prediction) is cached separately from the raw extracted VTT, keyed by
+//     (VTT path, shift).
+//   - remux=1 — the session copies video (Issue #141); see subtitleCueShift.
+//   - media_start=<sec> — with remux=1, the measured start the session's
+//     variant playlist reported (#AURORA-MEDIA-START, media_start.go). It
+//     replaces the server's key-frame prediction. Older clients omit it. Its
+//     shift is the client's choice, so it is built in memory per request and
+//     never cached (streaming.ServeShiftedSubtitle; a revalidation builds
+//     nothing). When it cannot be (a source above
+//     streaming.MaxInMemoryShiftSourceBytes, a full
+//     streaming.InMemoryShiftBudgetBytes, an unreadable source), nothing has
+//     been written and the prediction is used, through the cache; a request
+//     whose client leaves while it waits for a rewrite slot gets a 503.
 func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -2452,50 +2464,59 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	// the size of the served VTT? did the shift fail silently? With
 	// these in journalctl we can diagnose without redeploying.
 	// Issue #141 — `remux=1` signals the active HLS session is REMUXING
-	// (-c:v copy). This determines the subtitle cue-shift offset:
-	//
-	//   Remux:     input seek (-ss before -i) can't start mid-GOP, so
-	//              the stream's t=0 is the KEYFRAME at-or-before
-	//              startSec. Since #431 (-noaccurate_seek on the remux
-	//              path) re-encoded audio ALSO starts at that keyframe
-	//              (before the fix it was trimmed to ~startSec, which
-	//              opened a GOP-sized A/V gap hls.js glued shut into a
-	//              constant desync). hls.js anchors currentTime to the
-	//              earliest PTS — now the audio packet a hair before
-	//              the video keyframe (~1 audio frame, <100ms; within
-	//              the skew already tolerated below). Shift cues by
-	//              the keyframe.
-	//   Transcode: the decoder accurate-seeks and discards up to
-	//              startSec, so t=0 ≈ startSec. Shift cues by startSec.
-	//
-	// Verified empirically by ffprobing seg_000 of both paths: remux
-	// seg starts at the keyframe PTS, transcode seg starts at startSec.
-	// Getting this wrong inverts the bug (cues land a GOP early OR
-	// late), which is exactly the #141 regression risk.
+	// (-c:v copy), whose media time 0 is not startSec; subtitleCueShift
+	// decides the offset.
 	isRemux := r.URL.Query().Get("remux") == "1"
+	rawMediaStart := r.URL.Query().Get("media_start")
 	serve := func(vttPath string) {
 		served := vttPath
 		shiftErr := error(nil)
-		shiftOffset := 0.0
+		shiftOffset, shiftBasis := 0.0, subtitleShiftNone
 		if startSec > 0 {
-			if isRemux {
-				// Remux: shift by the keyframe the input seek lands on.
-				// ProbeSeekKeyframe falls back to startSec on any probe
-				// failure, so this never regresses below pre-#141.
-				// Bounded by ffprobeGate (audit MED); if we can't get a
-				// slot (ctx cancelled), fall back to startSec directly.
-				shiftOffset = float64(startSec)
-				if release, gErr := acquireFFprobeSlot(r.Context()); gErr == nil {
-					shiftOffset = streaming.ProbeSeekKeyframe(r.Context(), filePath, float64(startSec))
-					release()
-				}
-			} else {
-				// Transcode (or unknown): accurate seek lands on
-				// startSec; shift by it directly.
-				shiftOffset = float64(startSec)
-			}
-			shifted, err := streaming.ShiftVTTCues(vttPath, shiftOffset, h.subCache)
+			shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, rawMediaStart)
+		}
+		logServed := func(shifted, inMemory bool, vttBytes int64, extra ...any) {
+			slog.Info("subtitle served", append([]any{
+				"file_id", fileID,
+				"track_idx", trackIdx,
+				"file_type", fileType,
+				"start_sec", startSec,
+				"is_remux", isRemux,
+				"shift_offset", shiftOffset,
+				"shift_basis", shiftBasis,
+				"keyframe_gap", float64(startSec) - shiftOffset,
+				"shifted", shifted,
+				"in_memory", inMemory,
+				"vtt_path", served,
+				"vtt_bytes", vttBytes,
+			}, extra...)...)
+		}
+		// A measured start at or before 0 is no shift: the source is served
+		// as is, as for any offset <= 0 (ShiftVTTCues), not rewritten.
+		if shiftBasis == subtitleShiftMeasured && shiftOffset > 0 {
+			// media_start= is the client's to choose, so its shift is never
+			// written to the cache: a file per distinct value would let any
+			// client fill the disk. The extracted track it is built from is
+			// cached as before. Logged once the response is done.
+			revalidated, built, err := streaming.ServeShiftedSubtitle(w, r, vttPath, shiftOffset)
 			if err == nil {
+				logServed(true, true, built, "revalidated", revalidated)
+				return
+			}
+			if r.Context().Err() != nil {
+				// It gave up waiting for a rewrite slot: the client has gone.
+				writeError(w, http.StatusServiceUnavailable, "server busy, try again")
+				return
+			}
+			// Nothing has been written: the prediction, through the cache,
+			// as before media_start= existed.
+			logInMemoryShiftFallback(vttPath, err)
+			shiftOffset, shiftBasis = subtitleCueShift(r.Context(), filePath, startSec, isRemux, "")
+		}
+		if startSec > 0 {
+			// Offsets the server derived (start_sec, the key-frame
+			// prediction): one cached file per (track, offset), as before.
+			if shifted, err := streaming.ShiftVTTCues(vttPath, shiftOffset, h.subCache); err == nil {
 				served = shifted
 			} else {
 				shiftErr = err
@@ -2507,18 +2528,7 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		if info, statErr := os.Stat(served); statErr == nil {
 			byteSize = info.Size()
 		}
-		slog.Info("subtitle served",
-			"file_id", fileID,
-			"track_idx", trackIdx,
-			"file_type", fileType,
-			"start_sec", startSec,
-			"is_remux", isRemux,
-			"shift_offset", shiftOffset,
-			"keyframe_gap", float64(startSec)-shiftOffset,
-			"shifted", startSec > 0 && shiftErr == nil,
-			"vtt_path", served,
-			"vtt_bytes", byteSize,
-		)
+		logServed(startSec > 0 && shiftErr == nil, false, byteSize)
 		streaming.ServeSubtitle(w, r, served)
 	}
 
@@ -2602,6 +2612,114 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serve(vttPath)
+}
+
+// logInMemoryShiftFallback says why a media_start= shift fell back to the
+// prediction: a source above the cap once per track (per process), a full
+// budget at most once a minute with how many fell back since (it comes in
+// bursts, from load or from clients that do not read), and anything else (an
+// unreadable source, or one that grew while read) each time, as a warning.
+func logInMemoryShiftFallback(vttPath string, err error) {
+	switch {
+	case errors.Is(err, streaming.ErrShiftSourceTooLarge):
+		if _, seen := inMemoryShiftCapLogged.LoadOrStore(vttPath, true); !seen {
+			slog.Info("subtitle too large to shift in memory; using the key-frame prediction for media_start",
+				"vtt", vttPath, "max_bytes", streaming.MaxInMemoryShiftSourceBytes)
+		}
+	case errors.Is(err, streaming.ErrShiftBudgetFull):
+		if fallbacks, ok := inMemoryShiftBudgetLog.note(time.Now()); ok {
+			slog.Info("in-memory subtitle shift budget full; using the key-frame prediction for media_start",
+				"vtt", vttPath, "budget_bytes", streaming.InMemoryShiftBudgetBytes, "fallbacks", fallbacks)
+		}
+	default:
+		slog.Warn("in-memory subtitle shift failed; using the key-frame prediction for media_start",
+			"vtt", vttPath, "error", err)
+	}
+}
+
+// inMemoryShiftCapLogged holds the source VTTs ServeSubtitle has already said
+// are too large to shift in memory, so the fallback is logged once per track
+// (per process), not on every request.
+var inMemoryShiftCapLogged sync.Map
+
+// inMemoryShiftBudgetLog limits the full budget's line to one a minute.
+var inMemoryShiftBudgetLog everyMinute
+
+// everyMinute admits one event a minute and counts the rest.
+type everyMinute struct {
+	mu     sync.Mutex
+	last   time.Time
+	events int
+}
+
+// note records an event at now: ok once a minute, with the events since the
+// last one admitted, this one included.
+func (e *everyMinute) note(now time.Time) (events int, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events++
+	if !e.last.IsZero() && now.Sub(e.last) < time.Minute {
+		return 0, false
+	}
+	events, e.events, e.last = e.events, 0, now
+	return events, true
+}
+
+// What a subtitle cue shift rests on, for ServeSubtitle's log line.
+const (
+	subtitleShiftNone      = "none"      // start <= 0: direct play, or a session from 0
+	subtitleShiftStartSec  = "start_sec" // a transcode: an accurate seek begins at start_sec
+	subtitleShiftMeasured  = "measured"  // a remux: the media start its playlist reported
+	subtitleShiftPredicted = "predicted" // a remux without one: ProbeSeekKeyframe
+)
+
+// subtitleCueShift returns the seconds ServeSubtitle subtracts from every cue
+// so cue times are in the player's media time, whose 0 is the session's first
+// sample, and the basis of that figure.
+//
+//   - A transcode (no remux=1) decodes, accurate-seeks and discards up to
+//     startSec, so its media time 0 IS startSec. media_start= is ignored.
+//   - A remux copies video, so `-ss startSec -noaccurate_seek` can only begin
+//     at a key frame before startSec. Since #431 its re-encoded audio starts
+//     there too, and hls.js anchors media time 0 on the earliest sample. A
+//     client that read the session's measured start (#AURORA-MEDIA-START,
+//     media_start.go) sends it as media_start=, and that is the shift: it is
+//     where this session's first segment really begins.
+//   - A remux without a usable media_start= (an older client, or a session
+//     whose measurement failed) keeps the prediction: ProbeSeekKeyframe, the
+//     largest key frame <= startSec, under the ffprobe gate (audit MED), or
+//     startSec itself without a slot or on a probe failure. The prediction is
+//     a whole GOP late (cues that GOP early) when FFmpeg's seek lands one key
+//     frame earlier: Matroska, MPEG-TS and AVI sources with B-frames, a target
+//     within 130 ms after a key frame (CLAUDE.md, the remux clock).
+//
+// media_start= is trusted only within the window the playlist publishes it
+// under for startSec (streaming.ParseClientMediaStart); it can only move the
+// requester's own cues. Being the client's choice, the shift it yields is
+// built per request and never cached (ServeSubtitle,
+// streaming.ServeShiftedSubtitle); the other bases are the server's own and
+// keep the per-offset disk cache.
+func subtitleCueShift(ctx context.Context, filePath string, startSec int, isRemux bool, rawMediaStart string) (float64, string) {
+	if startSec <= 0 {
+		return 0, subtitleShiftNone
+	}
+	if !isRemux {
+		return float64(startSec), subtitleShiftStartSec
+	}
+	if sec, ok := streaming.ParseClientMediaStart(rawMediaStart, startSec); ok {
+		return sec, subtitleShiftMeasured
+	}
+	if rawMediaStart != "" {
+		// Client text: bounded before it reaches the log.
+		slog.Warn("subtitle media_start unusable for this start; predicting the key frame",
+			"start_sec", startSec, "media_start", truncateRunes(rawMediaStart, 32), "media_start_bytes", len(rawMediaStart))
+	}
+	shift := float64(startSec)
+	if release, err := acquireFFprobeSlot(ctx); err == nil {
+		shift = streaming.ProbeSeekKeyframe(ctx, filePath, float64(startSec))
+		release()
+	}
+	return shift, subtitleShiftPredicted
 }
 
 // ============================================================

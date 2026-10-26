@@ -1,0 +1,10 @@
+{
+  "sha": "cf4fe3804c795ddd2b6a7c4eb7c682aadd47baa0",
+  "verdict": "lows-only",
+  "summary": "Remux subtitle cues shift by the session's measured media start (media_start=), built in memory under an 8 MB source cap, 4 rewrite slots and a 64 MB byte budget, with prediction-through-cache fallback; player holds picks made while a boot resolves. Six full/delta review rounds; final at cf4fe38: two lows (the stat-size read limit and the handler's 503 branch are unpinned) and three nits. No high/critical/medium.",
+  "reviewer": "independent-review-agent",
+  "findings": "5",
+  "diff_digest": "cb6b2627f1aae134a5471d9eb3c5e844e51a0c818b3043aefdd935388f468c9f",
+  "branch": "claude/sweet-brown-36veir-remux-subs",
+  "recorded_at": "2026-10-26T02:01:15Z"
+}

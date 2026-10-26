@@ -61,7 +61,7 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
-import { RemuxClock, fetchNativeMediaWindow, levelMediaWindow, observePlayback, type ClockUpdate, type MediaWindow } from '@/lib/mediaStart'
+import { RemuxClock, fetchNativeMediaWindow, levelMediaWindow, observePlayback, subtitleCueShiftQuery, type ClockUpdate, type MediaWindow } from '@/lib/mediaStart'
 import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
 // Delivery/viewing identity rules are also exercised by the mounted-player
 // regressions, alongside their unit coverage in playbackQoESession.
@@ -613,8 +613,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // whole-second anchor may read it: those read sessionStartSecRef.
   const startSecRef = useRef<number>(0)
   // The session's start_sec exactly as the server returned it (0 for direct
-  // play): the `-ss` anchor the subtitle cue shift is requested against and the
-  // legacy receiver-conversion fallback. Never the media clock.
+  // play): the subtitle request's whole-second `start=` (beside the measured
+  // `media_start=`, subtitleCueShiftQuery) and the legacy receiver-conversion
+  // fallback. Never the media clock.
   const sessionStartSecRef = useRef<number>(0)
   // The current HLS session's RemuxClock (lib/mediaStart.ts), which owns
   // startSecRef's refinement, the boot/retry alignment, the alignment's
@@ -660,9 +661,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const consumedPauseOnBootTokenRef = useRef<number | undefined>(undefined)
   // Issue #141 — true when the active HLS session is REMUXING (-c:v
   // copy), false when full-transcoding. Drives the subtitle cue-shift
-  // offset: remux can't accurate-seek so the stream's t=0 is the
-  // keyframe BEFORE startSec; transcode accurate-seeks so t=0 ≈
-  // startSec. The server needs to know which to align cues correctly.
+  // offset: remux can't accurate-seek so the stream's t=0 is a key
+  // frame before startSec, which the request names as the measured
+  // media start (media_start=) once the playlist has reported it, else
+  // the server predicts; transcode accurate-seeks so t=0 ≈ startSec.
   // Stays false for direct-play (startSecRef is 0 there, so no shift
   // is requested at all). Also the gate on refining startSecRef from the
   // playlist's measured media start: a transcode's clock never moves.
@@ -896,6 +898,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
   const activeTrackRef = useRef<HTMLTrackElement | null>(null)
+  // The index of a subtitle pick made while this session's RemuxClock still
+  // awaits its measured start (no level load yet): its <track> is created once
+  // the clock knows, so the cue shift is requested once, against the measured
+  // start (applyDeferredSubtitle). The play effect's cleanup drops it with its
+  // session. applySubtitleRef is the latest applySubtitle for the play effect
+  // to call.
+  const pendingSubtitleRef = useRef<number | null>(null)
+  const applySubtitleRef = useRef<(index: number) => void>(() => {})
   // Phase 5 — guard so the transcode fallback fires at most once per
   // target. Without this, a chronically broken codec would loop
   // (fallback to transcode → also fails → fallback again).
@@ -2649,6 +2659,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!vid) return
     // Mirror to ref so hls.js event listeners see the latest pick.
     currentSubIndexRef.current = index
+    // A new pick, or subtitles off, replaces one still waiting for the clock.
+    pendingSubtitleRef.current = null
     // Issue #135 — diagnostic logging. The console.warn calls are
     // intentional and load-bearing: the bug reporter's diagnostic
     // buffer captures `warn` entries, and <track> requests bypass
@@ -2708,17 +2720,33 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // HLS-relative (0 = resume point), so every cue fires `startSec`
     // seconds late — or never, when past EOF. The server endpoint
     // ignores start=0, so this is safe to always send.
-    // The session's whole-second anchor, never the refined media origin: the
-    // endpoint parses an integer and derives the remux shift itself.
-    const startSec = sessionStartSecRef.current
-    // Issue #141 — tell the server whether this session is REMUXING.
-    // It picks the cue-shift offset accordingly: keyframe-≤-startSec
-    // for remux (input seek can't land mid-GOP), raw startSec for
-    // transcode (accurate seek lands exactly on startSec). Only
-    // meaningful when startSec>0; direct-play keeps startSec=0 and
-    // sends neither param (cues already match native currentTime).
+    // Issue #141 — tell the server whether this session is REMUXING, and
+    // for a remux where its media really begins (subtitleCueShiftQuery):
+    // `start=` stays the whole-second start_sec, `media_start=` is the
+    // measured start. Direct play sends neither (cues already match).
+    //
+    // Until this boot knows its delivery (stream info, the session create,
+    // and for direct play on WebKit the AirPlay token mint) there is
+    // nothing to shift against: start_sec and the clock are reset
+    // and unknown. The pick is only recorded (the state and ref above); the
+    // boot's restore reads the latest one once the delivery can take it.
+    if (deliveryModeRef.current === 'resolving') {
+      console.info('[Aurora.sub] <track> deferred until the delivery is known', { trackIndex: index })
+      return
+    }
+    // A remux whose clock has not yet heard from its first level load (the
+    // restore at MANIFEST_PARSED, or a pick that early) waits for it, so the
+    // track is requested once, against the measured start, rather than
+    // against the server's key-frame prediction (a GOP early on Matroska
+    // with B-frames) and again after. The play effect creates it then.
+    const clock = remuxClockRef.current
+    if (clock?.awaitingMeasuredStart) {
+      pendingSubtitleRef.current = index
+      console.info('[Aurora.sub] <track> deferred until the remux reports its media start', { trackIndex: index })
+      return
+    }
     const trackURL = `/api/stream/${target.fileId}/subtitles/${index}?type=${target.fileType}` +
-      (startSec > 0 ? `&start=${startSec}${sessionRemuxRef.current ? '&remux=1' : ''}` : '')
+      subtitleCueShiftQuery(sessionStartSecRef.current, sessionRemuxRef.current, clock?.measuredStartSec ?? null)
     const track = document.createElement('track')
     track.kind = 'subtitles'
     track.src = withToken(trackURL)
@@ -2745,6 +2773,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // errors silently by default; without this handler a 4xx
     // response from the server produces no UI feedback at all.
     track.addEventListener('error', () => {
+      // Only the active track speaks for the pick. A track a later pick, Off
+      // or a boot has already removed (its fetch aborted, or failing late)
+      // must not roll back the pick that replaced it: the boot's restore
+      // reads the pick when it runs, so that rollback cancelled it, and a
+      // later pick's track would play under an "Off" picker.
+      if (activeTrackRef.current !== track) {
+        console.info('[Aurora.sub] <track> error from a track no longer active; ignored', { trackIndex: index, url: trackURL })
+        return
+      }
       const msg = `Couldn't load "${trackLabel}" subtitle track`
       console.warn('[Aurora.sub] <track> error event fired', {
         trackIndex: index,
@@ -2761,7 +2798,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       try {
         if (track.parentNode) track.parentNode.removeChild(track)
       } catch { /* defensive */ }
-      if (activeTrackRef.current === track) activeTrackRef.current = null
+      activeTrackRef.current = null
     })
     // Issue #135 — log when the <track>'s underlying TextTrack
     // populates. This tells us if the VTT was fetched + parsed
@@ -2914,6 +2951,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     promote()
   }, [target, availableSubs])
+  useEffect(() => { applySubtitleRef.current = applySubtitle }, [applySubtitle])
 
   // The QoE row is closed HERE, not in closeAndCleanup and not on unmount.
   //
@@ -3226,14 +3264,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // Audit M2 (Phase 4.5) — preserve the user's subtitle
         // selection across audio-track switches. Audio switches
         // re-trigger the play effect (target identity changes); the
-        // selected sub would otherwise reset to -1 (off). Capture
-        // the prior index in a ref-like read here and reapply it
-        // after the new session loads. The `applySubtitle` call
-        // happens below, threaded into the HLS MANIFEST_PARSED /
-        // direct-play canplay hooks.
-        const subToRestore = currentSubIndex
-        // Always clear the local <track> + state first; the new
-        // session's <video> may have re-created its TextTracks list.
+        // selected sub would otherwise reset to -1 (off). The pick is
+        // reapplied after the new session loads, by the HLS
+        // MANIFEST_PARSED / canplay hooks below (restoreSubtitle).
+        //
+        // Always clear the local <track> first; the new session's <video>
+        // may have re-created its TextTracks list. The pick itself stays
+        // (currentSubIndexRef) and is read when the restore runs, so one
+        // made while this boot resolves — during stream info, the session
+        // create or the AirPlay token mint, which applySubtitle only records
+        // — wins over the pick in
+        // force when the boot began, Off included. Dropped here only when
+        // the new content has no such track.
         if (activeTrackRef.current) {
           try {
             if (activeTrackRef.current.parentNode) {
@@ -3242,8 +3284,35 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           } catch { /* defensive */ }
           activeTrackRef.current = null
         }
-        setCurrentSubIndex(-1)
-        currentSubIndexRef.current = -1
+        const newContentSubs = info.subtitles || []
+        if (currentSubIndexRef.current >= 0 && !newContentSubs.some(s => s.index === currentSubIndexRef.current)) {
+          setCurrentSubIndex(-1)
+          currentSubIndexRef.current = -1
+        }
+        // Reapply the latest pick. The new content has it: one from before
+        // this point was dropped just above if not, and one made after it
+        // comes from the new content's own list (availableSubs).
+        //
+        // Idempotent: a <track> that exists now was built by THIS boot for
+        // the latest pick (the previous one was removed above, picks made
+        // while resolving build none, and every pick or Off replaces it), so
+        // it is kept, not rebuilt — a rebuild fetches the track again, for an
+        // uncached embedded track a second full extraction. Every caller has
+        // just disabled every text track, ours included; turn ours back on.
+        // Through applySubtitleRef, not this effect's applySubtitle: that one
+        // closes over the subtitle list of the render that started the boot,
+        // which after a title change is the previous title's (labels,
+        // languages, bitmap flags).
+        const restoreSubtitle = () => {
+          const wanted = currentSubIndexRef.current
+          if (wanted < 0) return
+          const built = activeTrackRef.current
+          if (built) {
+            try { if (built.track) built.track.mode = 'showing' } catch { /* defensive */ }
+            return
+          }
+          applySubtitleRef.current(wanted)
+        }
 
         const resumeSec = (target.resumePositionMs && target.resumePositionMs > 0)
           ? Math.floor(target.resumePositionMs / 1000)
@@ -3367,15 +3436,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // tracks are caught regardless of which event populates
           // textTracks first (browser-dependent — Chromium promotes
           // at loadedmetadata, some others at canplay).
-          const newSubs = info.subtitles || []
           const onLoadedMetadata = () => {
             disableAllTextTracks(vid)
           }
           const onCanPlayForSub = () => {
             disableAllTextTracks(vid)
-            if (subToRestore >= 0 && newSubs.some(s => s.index === subToRestore)) {
-              applySubtitle(subToRestore)
-            }
+            restoreSubtitle()
             vid.removeEventListener('canplay', onCanPlayForSub)
             vid.removeEventListener('loadedmetadata', onLoadedMetadata)
           }
@@ -3510,8 +3576,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         startSecRef.current = sessionStartSecRef.current
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
         // already folds in forceTranscode). The subtitle endpoint uses
-        // this to pick the cue-shift offset: keyframe for remux, raw
-        // startSec for transcode. (remux is optional on the request type;
+        // this to pick the cue-shift offset: the measured media start for a
+        // remux (its key-frame prediction without one), raw startSec for
+        // transcode. (remux is optional on the request type;
         // buildSessionRequest always sets a concrete boolean.)
         sessionRemuxRef.current = !!sessionReq.remux
         // Cast follows the local session: now that the new session exists,
@@ -3551,6 +3618,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               shouldApplyExplicitPartySeek(seek.by, live.currentUserId)) return null
           return partyTargetAbsSec(live.tickRef.current, live.isPlaying, live.clockOffsetRef?.current ?? 0, Date.now())
         }
+        // The subtitle pick applySubtitle held until this clock knew its
+        // measured start (or that none is coming), applied now; applySubtitle
+        // replaces the hold. One held by an earlier session never reaches
+        // here: that session's cleanup dropped it before this one began.
+        const applyDeferredSubtitle = () => {
+          const pending = pendingSubtitleRef.current
+          if (pending !== null) applySubtitleRef.current(pending)
+        }
         const noteMediaWindow = (w: MediaWindow) => {
           if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
           const owns = ownsPlayhead()
@@ -3567,6 +3642,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             logicalAbsoluteSecRef.current = Math.max(0, vid.currentTime + clock.originSec)
             setCurrentSec(logicalAbsoluteSecRef.current)
           }
+          applyDeferredSubtitle()
         }
 
         // Prefer native HLS when the browser supports it natively (Safari on
@@ -3623,13 +3699,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // Disable DEFAULT=YES subtitle groups the native player auto-selects
           // and reapply the user's prior sub choice. Mirrors the direct_play
           // loadedmetadata/canplay pattern (lines ~1287-1299).
-          const newSubsNative = info.subtitles || []
           const onNativeLoadedMetadata = () => { disableAllTextTracks(vid) }
           const onNativeCanPlay = () => {
             disableAllTextTracks(vid)
-            if (subToRestore >= 0 && newSubsNative.some(s => s.index === subToRestore)) {
-              applySubtitle(subToRestore)
-            }
+            restoreSubtitle()
             vid.removeEventListener('canplay', onNativeCanPlay)
             vid.removeEventListener('loadedmetadata', onNativeLoadedMetadata)
           }
@@ -3760,7 +3833,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               if (cancelled || remuxClockRef.current !== clock || videoRef.current !== vid) return
               // No window is coming: a party guest stops holding its room
               // positions for one (RemuxClock.holdsPartyPosition).
-              if (!fetched) { clock.noteNoMeasurement(); return }
+              if (!fetched) { clock.noteNoMeasurement(); applyDeferredSubtitle(); return }
               const seekableEnd = () => {
                 try {
                   const s = vid.seekable
@@ -3792,7 +3865,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 vid.removeEventListener('progress', retryFromElement)
                 vid.removeEventListener('durationchange', retryFromElement)
               }
-            }).catch(() => { clock.noteNoMeasurement() /* fail-safe: stay on start_sec */ })
+            }).catch(() => {
+              // Defensive: fetchNativeMediaWindow never rejects, so only a throw
+              // inside the callback above lands here. Fail safe to start_sec
+              // and release a held subtitle pick, as for a failed fetch.
+              clock.noteNoMeasurement(); applyDeferredSubtitle()
+            })
           }
 
           await completeTargetPlaybackBoot(vid)
@@ -4023,10 +4101,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // and re-promote DEFAULT tracks; this idempotent set keeps
           // them off until the user opts in via the picker.
           try { hls.subtitleTrack = -1 } catch { /* defensive */ }
-          const newSubsHls = info.subtitles || []
-          if (subToRestore >= 0 && newSubsHls.some(s => s.index === subToRestore)) {
-            applySubtitle(subToRestore)
-          }
+          restoreSubtitle()
           // Booted: manifest parsed + start_sec applied. completePlaybackBoot
           // either preserves a seek-rebuild pause or re-enables broadcasts for
           // the intended play; transient boot seeks stayed suppressed. Guard
@@ -4319,12 +4394,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       remuxClockUnbindRef.current?.()
       remuxClockUnbindRef.current = null
       remuxClockRef.current = null
+      // A pick still held by this session's clock goes with it (the pick
+      // itself stays in currentSubIndexRef for the next boot's restore).
+      pendingSubtitleRef.current = null
       mediaCleanupRef.current?.()
       mediaCleanupRef.current = null
       closeAndCleanup()
     }
-    // currentSubIndex is read once to restore subtitles across target changes;
-    // adding it as a dependency would restart playback when the user toggles subs.
+    // The subtitle pick is restored across target changes from
+    // currentSubIndexRef, read when each restore runs; applySubtitle (and the
+    // other callbacks read here) must not restart playback by changing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, videoElement, closeAndCleanup, completePlaybackBoot])
 

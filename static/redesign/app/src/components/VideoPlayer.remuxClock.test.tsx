@@ -2,12 +2,14 @@
 // The remux playback clock through the real VideoPlayer (lib/mediaStart.ts):
 // a remux's media time 0 is the key frame BEFORE start_sec, and the variant
 // playlist reports where that is. Every consumer of the media clock must use
-// the reported origin; the whole-second start_sec keeps the subtitle shift and
-// the receiver fallback. Mocks only delivery, telemetry and CAF.
+// the reported origin; the whole-second start_sec keeps the receiver fallback
+// and the subtitle request's `start=`, beside which the measured start rides
+// as `media_start=`. Mocks only delivery, telemetry and CAF.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createCastToken, createSession, getStreamInfo, keepalive } from '@/lib/streaming'
+import { NATIVE_MEDIA_WINDOW_TIMEOUT_MS } from '@/lib/mediaStart'
 import { reportProgress } from '@/lib/api'
 import { getSyncSamples } from '@/lib/syncDebug'
 
@@ -95,6 +97,12 @@ async function bootHls(mediaStart: string | null = ORIGIN.toFixed(6), fragments 
     fake.hls.at(-1)!.emit('LEVEL_UPDATED', { details, level: 0 })
     fake.hls.at(-1)!.emit('LEVEL_LOADED', { details, level: 0 })
   }); await settle()
+}
+// The query of a sidecar subtitle <track> URL: what tells the server where to
+// shift the cues.
+function trackQuery(src: string | null | undefined) {
+  expect(src).toMatch(/^\/api\/stream\/10\/subtitles\/2\?/)
+  return src!.slice(src!.indexOf('?'))
 }
 function party(overrides: Partial<PartySync>): PartySync {
   return {
@@ -195,13 +203,14 @@ describe('remux clock: media time 0 is the measured key frame, not start_sec', (
     expect(fake.cast.remote.currentTime).toBeCloseTo(ORIGIN + 7 - START_SEC, 6)
   })
 
-  it('keeps the whole-second start_sec for the subtitle cue shift', async () => {
+  it('shifts subtitle cues to the measured start, beside the whole-second start_sec', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
     fireEvent.click(screen.getByRole('button', { name: /English subs/ })); await settle()
-    // The endpoint Atoi()s `start`; a fractional origin there would disable
-    // the shift entirely.
-    expect(document.querySelector('track')!.getAttribute('src')).toContain(`start=${START_SEC}&remux=1`)
+    // The endpoint Atoi()s `start`, so it stays start_sec; the measured start
+    // rides beside it and replaces the server's key-frame prediction.
+    expect(trackQuery(document.querySelector('track')!.getAttribute('src')))
+      .toBe(`?type=media&start=${START_SEC}&remux=1&media_start=19.946009`)
   })
 
   it('broadcasts a host pause on the true clock, and not the boot alignment as a seek', async () => {
@@ -561,6 +570,360 @@ describe('remux clock M2: a start that appears late', () => {
   })
 })
 
+// Every sidecar subtitle <track> the player creates, as its src.
+function watchTracks() {
+  const spy = vi.spyOn(document, 'createElement')
+  return () => spy.mock.results
+    .map(r => r.value as unknown)
+    .filter((el): el is HTMLTrackElement => el instanceof HTMLTrackElement)
+    .map(el => el.getAttribute('src'))
+}
+async function pickSubtitle(name: RegExp | string = /English subs/) {
+  fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+  fireEvent.click(screen.getByRole('button', { name })); await settle()
+}
+// The stream info of a title the browser plays directly.
+function directPlayInfo() {
+  const remux = info('direct_stream')
+  return { ...remux, stream: { ...remux.stream, decision: 'direct_play', remux: false } } as unknown as Awaited<ReturnType<typeof getStreamInfo>>
+}
+const REMUX_QUERY = `?type=media&start=${START_SEC}&remux=1`
+const MEASURED_QUERY = `${REMUX_QUERY}&media_start=19.946009`
+
+type FakeTextTrack = { mode: TextTrackMode; kind: string; label: string; cues: null }
+// jsdom has no TextTrack: give every <track> one, and every media element a
+// textTracks list of its <track> children, so the modes the player sets (and
+// disableAllTextTracks clears) can be read back. Undone when the test ends.
+function stubTextTracks() {
+  const byElement = new WeakMap<HTMLTrackElement, FakeTextTrack>()
+  const trackOf = (el: HTMLTrackElement) => {
+    let tt = byElement.get(el)
+    if (!tt) { tt = { mode: 'disabled', kind: 'subtitles', label: el.label, cues: null }; byElement.set(el, tt) }
+    return tt
+  }
+  const own = Object.getOwnPropertyDescriptor(HTMLTrackElement.prototype, 'track')
+  Object.defineProperty(HTMLTrackElement.prototype, 'track', { configurable: true, get(this: HTMLTrackElement) { return trackOf(this) } })
+  vi.spyOn(HTMLMediaElement.prototype, 'textTracks', 'get').mockImplementation(function(this: HTMLMediaElement) {
+    return Array.from(this.querySelectorAll('track')).map(trackOf) as unknown as TextTrackList
+  })
+  onTestFinished(() => {
+    if (own) Object.defineProperty(HTMLTrackElement.prototype, 'track', own)
+    else delete (HTMLTrackElement.prototype as { track?: unknown }).track
+  })
+}
+const shownTrack = () => {
+  const el = document.querySelector('track') as (HTMLTrackElement & { track: FakeTextTrack }) | null
+  return el ? { mode: el.track.mode, label: el.label, srclang: el.srclang } : null
+}
+
+// The sidecar subtitle cue shift. The server used to predict the key frame a
+// remux began on (ProbeSeekKeyframe), which on Matroska with B-frames and a
+// start on a key frame is one GOP late: every cue showed a GOP early.
+describe('remux clock: subtitle cues are shifted to the measured start', () => {
+  it('waits for the first level load, then requests the track once, against the measured start', async () => {
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    // Built now, it could only carry the prediction, and would be fetched
+    // (and possibly extracted) twice.
+    expect(tracks()).toEqual([])
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+  })
+
+  it("restores a rebuilt session's subtitle against that session's own measured start", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+    // A rebuild at 40 s: the Matroska case PR #544 measured, a start on a key
+    // frame that really begins at the one before, 30 s.
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />)
+    await manifestOnly()
+    expect(document.querySelector('track')).toBeNull()
+    expect(tracks()).toHaveLength(1)
+    await firstLevel('30.000000')
+    expect(tracks().slice(1).map(trackQuery)).toEqual(['?type=media&start=40&remux=1&media_start=30.000000'])
+  })
+
+  it('keeps the server prediction when the playlist reports no start (older server)', async () => {
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    await firstLevel(null)
+    expect(tracks().map(trackQuery)).toEqual([REMUX_QUERY])
+  })
+
+  it('times the cues on a start the clock refused as late: the element still begins there', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={7} />); await bootHls(null)
+    playing(); video().currentTime = 4
+    await levelUpdate(ORIGIN.toFixed(6), 3)
+    await pickSubtitle()
+    expect(trackQuery(document.querySelector('track')!.getAttribute('src'))).toBe(MEASURED_QUERY)
+    // The clock itself stays on start_sec.
+    await act(async () => { vi.advanceTimersByTime(10000) }); await settle()
+    expect(reportProgress).toHaveBeenLastCalledWith(1, expect.objectContaining({ position_ms: (START_SEC + 4) * 1000 }), expect.any(AbortSignal))
+  })
+
+  it("drops a waiting pick when the player moves to a title that lacks the track", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    vi.mocked(getStreamInfo).mockResolvedValue({ ...info('direct_stream'), subtitles: [] } as unknown as Awaited<ReturnType<typeof getStreamInfo>>)
+    view.rerender(<VideoPlayer target={{ ...movie, mediaItemId: 2, fileId: 11, title: 'Other' }} onClose={() => {}} />)
+    await manifestOnly()
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(tracks()).toEqual([])
+  })
+
+  it('creates nothing once subtitles are turned off while waiting', async () => {
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    await pickSubtitle('Off')
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(tracks()).toEqual([])
+  })
+
+  it('sends no shift at all for direct play, and never waits', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(directPlayInfo())
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    expect(createSession).not.toHaveBeenCalled()
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual(['?type=media'])
+  })
+
+  it('never waits for, or sends, a measured start on a transcode', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Awaited<ReturnType<typeof getStreamInfo>>)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`])
+    await firstLevel(ORIGIN.toFixed(6))
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`, `?type=media&start=${START_SEC}`])
+  })
+})
+
+// Before the delivery is known (stream info, then the session create) the
+// boot has reset start_sec and the clock: a <track> built then carried no
+// shift at all (cues a whole start_sec late), and the boot's restore then
+// replayed the pick it captured when it began, dropping or overriding a newer
+// one.
+describe('remux clock: a subtitle pick made while the boot resolves', () => {
+  function gate<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(r => { resolve = r })
+    return { promise, resolve }
+  }
+  type Session = Awaited<ReturnType<typeof createSession>>
+  type Info = Awaited<ReturnType<typeof getStreamInfo>>
+  const session = (startSec: number) => ({ session_id: `held-${startSec}`, master_playlist: '/api/stream/session/master.m3u8', start_sec: startSec }) as Session
+
+  it('during the session create, is requested once, against the measured start', async () => {
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    expect(fake.hls).toHaveLength(0)
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { created.resolve(session(START_SEC)) }); await manifestOnly()
+    expect(tracks()).toEqual([])
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+    expect(document.querySelectorAll('track')).toHaveLength(1)
+  })
+
+  it('during the session create of a transcode, is requested once with start_sec', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Info)
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { created.resolve(session(START_SEC)) }); await manifestOnly()
+    expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`])
+  })
+
+  it("during a rebuild's stream info, survives the boot and uses the new session's start", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    const infoGate = gate<Info>()
+    vi.mocked(getStreamInfo).mockImplementationOnce(() => infoGate.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />); await settle()
+    // The picker still lists the title's tracks while its stream info loads.
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { infoGate.resolve(info('direct_stream') as Info) }); await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks().map(trackQuery)).toEqual(['?type=media&start=40&remux=1&media_start=30.000000'])
+  })
+
+  it("Off during a rebuild's session create wins over the pick the boot began with", async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    await pickSubtitle()
+    expect(tracks()).toHaveLength(1)
+    const created = gate<Session>()
+    vi.mocked(createSession).mockImplementationOnce(() => created.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />)
+    await settle(); await settle()
+    await pickSubtitle('Off')
+    await act(async () => { created.resolve(session(40)) }); await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks()).toHaveLength(1)
+    expect(document.querySelector('track')).toBeNull()
+  })
+
+  it('is dropped by a title without that track, so a later title with it does not restore it', async () => {
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    expect(tracks()).toHaveLength(1)
+    vi.mocked(getStreamInfo).mockResolvedValueOnce({ ...info('direct_stream'), subtitles: [] } as unknown as Info)
+    view.rerender(<VideoPlayer target={{ ...movie, mediaItemId: 2, fileId: 11, title: 'No subs' }} onClose={() => {}} />); await bootHls()
+    view.rerender(<VideoPlayer target={{ ...movie, mediaItemId: 3, fileId: 12, title: 'Subs again' }} onClose={() => {}} />); await bootHls()
+    expect(tracks()).toHaveLength(1)
+    expect(document.querySelector('track')).toBeNull()
+  })
+
+  it('during the stream info of a direct-play title, is created at canplay with no shift', async () => {
+    vi.mocked(getStreamInfo).mockResolvedValue(directPlayInfo())
+    const tracks = watchTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    const infoGate = gate<Info>()
+    vi.mocked(getStreamInfo).mockImplementationOnce(() => infoGate.promise)
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} />); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => { infoGate.resolve(directPlayInfo()) }); await settle(); await settle()
+    expect(tracks()).toEqual([])
+    fireEvent(video(), new Event('canplay')); await settle()
+    expect(tracks().map(trackQuery)).toEqual(['?type=media'])
+    expect(document.querySelectorAll('track')).toHaveLength(1)
+  })
+})
+
+// Each delivery's restore (direct-play and native canplay, hls.js
+// MANIFEST_PARSED) runs after disabling every text track. A pick made once the
+// delivery was known, before the restore, already has its <track>; the
+// restore used to build a second one, fetching (for an uncached embedded
+// track, extracting) it again.
+describe('remux clock: the restore keeps a track the boot already built', () => {
+  type Info = Awaited<ReturnType<typeof getStreamInfo>>
+  const french = { index: 2, language: 'fra', title: 'Français', codec: 'subrip' }
+  const withSubs = (decision: 'direct_stream' | 'transcode', subtitles: unknown[]) => ({ ...info(decision), subtitles }) as unknown as Info
+  const other = { ...movie, mediaItemId: 2, fileId: 11, title: 'Other' }
+
+  it('hls.js transcode: a pick before MANIFEST_PARSED is requested once and stays showing', async () => {
+    stubTextTracks()
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Info)
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    expect(fake.hls).toHaveLength(1)
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual([`?type=media&start=${START_SEC}`])
+    await act(async () => { fake.hls.at(-1)!.emit('MANIFEST_PARSED') }); await settle()
+    expect(tracks()).toHaveLength(1)
+    expect(shownTrack()).toMatchObject({ mode: 'showing' })
+  })
+
+  it('direct play: a pick before canplay is requested once and stays showing', async () => {
+    stubTextTracks()
+    vi.mocked(getStreamInfo).mockResolvedValue(directPlayInfo())
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await settle(); await settle()
+    await pickSubtitle()
+    expect(tracks().map(trackQuery)).toEqual(['?type=media'])
+    fireEvent(video(), new Event('loadedmetadata'))
+    fireEvent(video(), new Event('canplay')); await settle()
+    expect(tracks()).toHaveLength(1)
+    expect(shownTrack()).toMatchObject({ mode: 'showing' })
+  })
+
+  it("creates a pick held across a title change with the new title's label and language", async () => {
+    stubTextTracks()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    vi.mocked(getStreamInfo).mockResolvedValue(withSubs('direct_stream', [french]))
+    view.rerender(<VideoPlayer target={other} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle(/Français/)
+    expect(document.querySelector('track')).toBeNull()
+    await firstLevel(ORIGIN.toFixed(6))
+    expect(shownTrack()).toMatchObject({ label: 'Français', srclang: 'fra' })
+  })
+
+  it("restores a pick across a title change with the new title's label and language", async () => {
+    stubTextTracks()
+    vi.mocked(getStreamInfo).mockResolvedValue(info('transcode') as Info)
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await manifestOnly()
+    await pickSubtitle()
+    expect(shownTrack()).toMatchObject({ label: 'English subs', srclang: 'eng' })
+    vi.mocked(getStreamInfo).mockResolvedValue(withSubs('transcode', [french]))
+    view.rerender(<VideoPlayer target={other} onClose={() => {}} />); await manifestOnly()
+    expect(shownTrack()).toMatchObject({ label: 'Français', srclang: 'fra', mode: 'showing' })
+  })
+})
+
+// A <track> fires `error` when its fetch fails, including one a boot or a
+// later pick has already removed (an aborted or late-failing fetch of an
+// uncached embedded track). Only the active track may roll the pick back.
+describe('remux clock: an error from a track no longer active', () => {
+  // Every <track> the player creates, in order.
+  function watchTrackElements() {
+    const spy = vi.spyOn(document, 'createElement')
+    return () => spy.mock.results.map(r => r.value as unknown).filter((el): el is HTMLTrackElement => el instanceof HTMLTrackElement)
+  }
+  const englishSelected = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+    const selected = screen.getByRole('button', { name: /English subs/ }).className.includes('text-purple-300')
+    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+    return selected
+  }
+
+  it('does not cancel the restore of a rebuild that removed it', async () => {
+    const tracks = watchTrackElements()
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls()
+    await pickSubtitle()
+    const [removed] = tracks()
+    view.rerender(<VideoPlayer target={{ ...movie, resumePositionMs: 40_000 }} onClose={() => {}} onSeekRebuild={vi.fn()} />)
+    await settle(); await settle()
+    expect(removed.isConnected).toBe(false)
+    fireEvent(removed, new Event('error')); await settle()
+    await manifestOnly()
+    await firstLevel('30.000000')
+    expect(tracks().slice(1).map(el => trackQuery(el.getAttribute('src')))).toEqual(['?type=media&start=40&remux=1&media_start=30.000000'])
+    expect(screen.queryByText(/Couldn't load/)).toBeNull()
+    expect(englishSelected()).toBe(true)
+  })
+
+  it('does not turn the picker Off under the track that replaced it', async () => {
+    const tracks = watchTrackElements()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    await pickSubtitle('Off')
+    await pickSubtitle()
+    const [first, second] = tracks()
+    fireEvent(first, new Event('error')); await settle()
+    expect(second.isConnected).toBe(true)
+    expect(screen.queryByText(/Couldn't load/)).toBeNull()
+    expect(englishSelected()).toBe(true)
+  })
+
+  it('still rolls back, and says so, when the active track fails', async () => {
+    const tracks = watchTrackElements()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    await pickSubtitle()
+    const [active] = tracks()
+    fireEvent(active, new Event('error')); await settle()
+    expect(active.isConnected).toBe(false)
+    expect(screen.getByText(/Couldn't load "English subs" subtitle track/)).toBeDefined()
+    expect(englishSelected()).toBe(false)
+  })
+})
+
 describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', () => {
   const MASTER = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000\nsource/stream.m3u8\n'
   const variant = (line: string | null) => [
@@ -719,5 +1082,71 @@ describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', (
     await bootNative()
     expect(fetchMock).not.toHaveBeenCalled()
     expect(await progressAfter(7)).toBe((START_SEC + 7) * 1000)
+  })
+
+  it('holds a subtitle pick until the fetched start is applied, then shifts to it', async () => {
+    let release!: (body: string) => void
+    serve(new Promise<string>(resolve => { release = resolve }))
+    const tracks = watchTracks()
+    await bootNative()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    release(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`)); await settle(); await settle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+  })
+
+  it('restores a pick made during the session create at canplay, against the fetched start', async () => {
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    let created!: (s: Awaited<ReturnType<typeof createSession>>) => void
+    vi.mocked(createSession).mockImplementationOnce(() => new Promise(r => { created = r }))
+    const tracks = watchTracks()
+    render(<VideoPlayer target={movie} onClose={() => {}} profileId={7} />); await settle(); await settle()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    await act(async () => {
+      created({ session_id: 'native-held', master_playlist: '/api/stream/session/master.m3u8', start_sec: START_SEC } as Awaited<ReturnType<typeof createSession>>)
+    }); await settle(); await settle()
+    expect(tracks()).toEqual([])
+    fireEvent(video(), new Event('canplay')); await settle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+  })
+
+  it('does not rebuild at canplay a held pick released at loadedmetadata', async () => {
+    stubTextTracks()
+    readyState = 0
+    serve(variant(`#AURORA-MEDIA-START:${ORIGIN.toFixed(6)}`))
+    const tracks = watchTracks()
+    await bootNative()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    readyState = 1
+    fireEvent(video(), new Event('loadedmetadata')); await settle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+    readyState = 4
+    fireEvent(video(), new Event('canplay')); await settle()
+    expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
+    expect(shownTrack()).toMatchObject({ mode: 'showing' })
+  })
+
+  it('applies a held subtitle pick with the server prediction once a stalled fetch times out', async () => {
+    serve(new Promise<string>(() => {}))
+    const tracks = watchTracks()
+    await bootNative()
+    await pickSubtitle()
+    await act(async () => { vi.advanceTimersByTime(NATIVE_MEDIA_WINDOW_TIMEOUT_MS - 1) }); await settle()
+    expect(tracks()).toEqual([])
+    await act(async () => { vi.advanceTimersByTime(1) }); await settle(); await settle()
+    expect(tracks().map(trackQuery)).toEqual([REMUX_QUERY])
+  })
+
+  it('applies a held subtitle pick with the server prediction once the fetch fails', async () => {
+    let fail!: (e: Error) => void
+    serve(new Promise<string>((_resolve, reject) => { fail = reject }))
+    const tracks = watchTracks()
+    await bootNative()
+    await pickSubtitle()
+    expect(tracks()).toEqual([])
+    fail(new TypeError('Failed to fetch')); await settle(); await settle()
+    expect(tracks().map(trackQuery)).toEqual([REMUX_QUERY])
   })
 })

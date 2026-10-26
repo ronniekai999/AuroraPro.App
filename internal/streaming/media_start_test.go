@@ -536,6 +536,56 @@ func TestProbeMediaStartSec_PassesItsProbeLimits(t *testing.T) {
 	}
 }
 
+// The subtitle endpoint's media_start= (ParseClientMediaStart): the value a
+// client read from #AURORA-MEDIA-START, accepted only as a plain decimal and
+// only inside the window the line is published under for that start_sec.
+func TestParseClientMediaStart(t *testing.T) {
+	for _, tc := range []struct {
+		raw      string
+		startSec int
+		want     float64
+		ok       bool
+	}{
+		// Used as sent: it shifts in memory, so no precision mints a cache file.
+		{"19.946009", 25, 19.946009, true},
+		{"19.95", 25, 19.95, true},
+		{mediaStartLine(9.960000)[len(mediaStartTagPrefix):], 20, 9.96, true}, // exactly what the playlist carries
+		{"20", 20, 20, true},
+		{"3600.999", 3600, 3600.999, true},
+		{"3539.996", 3600, 0, false},
+		{"0", 5, 0, true}, // a copy from the very first key frame
+		{"0.000000", 5, 0, true},
+		// The window's edges are in, one microsecond past each is out.
+		{"3540", 3600, 3540, true},
+		{"3601", 3600, 3601, true},
+		{"3539.999999", 3600, 0, false},
+		{"3601.000001", 3600, 0, false},
+		// Not a plain decimal: never parsed, whatever it would evaluate to.
+		{"", 25, 0, false},
+		{"abc", 25, 0, false},
+		{"NaN", 25, 0, false},
+		{"Inf", 25, 0, false},
+		{"+Inf", 25, 0, false},
+		{"-1", 25, 0, false},
+		{"-0", 25, 0, false},
+		{"+20", 25, 0, false},
+		{"2e1", 25, 0, false},
+		{"0x1p4", 25, 0, false},
+		{"20.", 25, 0, false},
+		{".5", 1, 0, false},
+		{"20.0.0", 25, 0, false},
+		{" 20", 25, 0, false},
+		{"20 ", 25, 0, false},
+		{"2_0", 25, 0, false},
+		{strings.Repeat("9", 400), 25, 0, false}, // out of float64 range
+	} {
+		got, ok := ParseClientMediaStart(tc.raw, tc.startSec)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("ParseClientMediaStart(%q, %d) = %v, %v; want %v, %v", tc.raw, tc.startSec, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
 func TestProbeMediaStartSec_RefusesAConcatSeparatorInThePath(t *testing.T) {
 	if _, err := probeMediaStartSec(context.Background(), "/tmp/a|b", true); err == nil {
 		t.Fatal("a '|' in an fMP4 segment path must not reach the concat protocol")
