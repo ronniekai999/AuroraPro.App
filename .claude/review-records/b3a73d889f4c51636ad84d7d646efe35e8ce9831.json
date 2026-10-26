@@ -1,0 +1,10 @@
+{
+  "sha": "b3a73d889f4c51636ad84d7d646efe35e8ce9831",
+  "verdict": "lows-only",
+  "summary": "Six rounds on the on-art contrast audit (6158aab..b3a73d8). Rounds 1-5 fix-first (7, 6, 5, 4, 3 findings), each fixed and re-verified by the reviewer's own harness and, for paint order and the glow falloff, in Chromium. Final: low - exclusive() compares guard source text, so a callback parameter shadowing an outer prop (or a negated compound guard) can drop a glow that does render; nit - darkShadow/stricter-side comment wording, opacity-[1] and unknown-variant lifts over-counted (fail closed), -webkit-box-shadow and CSS scale/rotate unread on neighbours.",
+  "reviewer": "independent-review-agent",
+  "findings": "2",
+  "diff_digest": "e333f5f3483f263872a701f8221162ae26bd13bd368542821b84d06f5f129611",
+  "branch": "claude/sweet-brown-36veir",
+  "recorded_at": "2026-10-26T19:09:19Z"
+}
