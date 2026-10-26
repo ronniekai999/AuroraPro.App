@@ -41,9 +41,11 @@ import { createRequire } from 'node:module'
 // z-index and anything else this audit does not model; the root's own layers,
 // the scrim, glow and vignette composited beneath the text, are pinned in their
 // paint order and their strength, with the index.css rules their values come
-// from (LAYERS, PINNED_RULES); and anything else in the text's two layers that
-// leaves the flow, and so could sit over or under it, dies unless listed
-// (OVERLAP_OK). The run fails if a value it depends on has moved or cannot be
+// from, their gradients' directions and the veil's shape (LAYERS,
+// PINNED_RULES); every other element in the text's two layers must have
+// classes this audit can read, dies if it leaves the flow unless listed
+// (OVERLAP_OK), and has its box-shadow glow measured into every surface it can
+// reach (GLOWS). The run fails if a value it depends on has moved or cannot be
 // read. NOT derived: each surface's sample point (x, y), measured by hand at
 // the 1440x900 frame its classes are resolved at, and the list of surfaces
 // itself, so text HeroSection gains is measured only once it is listed. Not
@@ -118,6 +120,7 @@ function parseLinearStops(value, which) {
     stops.push([Number(m[2]) / 100, a])
   }
   if (stops.length < 3) throw new Error('audit: could not parse the hero scrim stops')
+  if (stops.some((s, i) => i > 0 && s[0] < stops[i - 1][0])) throw new Error('audit: a hero scrim layer lists its stops out of order; model it')
   return stops
 }
 
@@ -155,8 +158,15 @@ const INERT = new RegExp('^(?:' + [
   'italic|not-italic|uppercase|lowercase|capitalize|normal-case|tracking-.+|leading-.+|underline|no-underline',
   'rounded(?:-.+)?|border(?:-.+)?|outline(?:-.+)?',
   'transition(?:-.+)?|duration-.+|ease-.+|delay-.+|cursor-.+|pointer-events-.+|select-.+|align-.+|aspect-.+|object-.+',
-  String.raw`drop-shadow(?:-.+)?|font-(?:sans|serif|mono)|\[text-shadow:.+\]`,
+  String.raw`drop-shadow(?:-(?:sm|md|lg|xl|2xl|none))?|font-(?:sans|serif|mono)`,
 ].join('|') + ')$')
+// The theme's drop shadows are black. An arbitrary one, or an arbitrary
+// text-shadow, is INERT only while every colour in it is black (`darkShadow`):
+// `[text-shadow:0_0_20px_white]` puts a light halo round the glyphs.
+const inertShadow = util => {
+  const m = util.match(/^(?:\[text-shadow:(.+)\]|drop-shadow-\[(.+)\])$/)
+  return !!m && darkShadow((m[1] ?? m[2]).replace(/_/g, ' '))
+}
 
 // Declarations index.css may give a class on a surface or on an element
 // enclosing one without changing what the surface is measured on: layout,
@@ -168,7 +178,7 @@ const INERT = new RegExp('^(?:' + [
 // allowlist, not a list of the dangerous: a review found a list of those
 // missing mask-image, custom properties and infinite animations.
 const SAFE = new RegExp('^(?:' + [
-  'font-family|line-height|letter-spacing|word-spacing|text-transform|text-align|text-wrap|white-space|text-overflow|text-shadow',
+  'font-family|line-height|letter-spacing|word-spacing|text-transform|text-align|text-wrap|white-space|text-overflow',
   'display|overflow(?:-[xy])?|-webkit-line-clamp|-webkit-box-orient|cursor|pointer-events|user-select',
   '(?:padding|margin)(?:-(?:top|right|bottom|left|inline|block)(?:-(?:start|end))?)?|(?:min-|max-)?(?:width|height)',
   'gap|row-gap|column-gap|flex(?:-(?:grow|shrink|basis|direction|wrap))?|align-(?:items|self|content)|justify-(?:content|items|self)',
@@ -228,6 +238,7 @@ function checkCssRules(cls, token, allowed = []) {
         if (/\b(forwards|both|infinite)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
         continue
       }
+      if (prop === 'text-shadow') { if (v !== 'none' && !darkShadow(v)) refuse(d, 'a light or coloured shadow this audit does not model'); continue }
       if (allowed.includes(prop) || SAFE.test(prop) || (prop === 'opacity' && Number(v) === 1) || (prop === 'transform' && v === 'none')) continue
       refuse(d)
     }
@@ -237,9 +248,21 @@ function checkCssRules(cls, token, allowed = []) {
 /** Whether a resolved z value restacks anything: `z-auto` is the default. */
 const stacks = z => z !== undefined && z !== 'auto'
 
-/** A rule's own declarations. */
+/** A rule's own declarations. Anything else inside it dies: an `@apply` is
+ *  compiled into declarations this audit would not see (a review dimmed the
+ *  scrim with `@apply opacity-40`), and so would a nested rule. */
 function declsOf(rule) {
+  const other = (rule.nodes ?? []).find(n => n.type !== 'decl' && n.type !== 'comment')
+  if (other) throw new Error(`audit: index.css's ${rule.selector} holds ${other.type === 'atrule' ? `@${other.name} ${other.params}` : `a nested ${other.type}`}; this audit reads plain declarations only — the audit is out of date, not passing`)
   return (rule.nodes ?? []).filter(n => n.type === 'decl')
+}
+
+/** Whether every colour in a shadow value is black at some alpha. A dark
+ *  shadow only darkens what is under it, which cannot lower the contrast of
+ *  this hero's light text; a light or coloured one can. */
+function darkShadow(value) {
+  const cols = value.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|\b(?:white|black|transparent)\b/g) ?? []
+  return cols.length > 0 && cols.every(c => c === 'black' || c === 'transparent' || (c !== 'white' && parseColor(c).rgb.every(v => v === 0)))
 }
 
 // The hero, parsed. Elements are found in the tree rather than by scanning the
@@ -489,33 +512,43 @@ function classify(util) {
   return { key: 'color', value: twColor(v, util) }
 }
 
+/** Whether a class with these variants applies at rest at VIEWPORT_W, the
+ *  breakpoint it applies from (`rank`), and why it cannot be placed when that
+ *  is unknown (`unplaced`). */
+function variantState(variants) {
+  let rank = 0, applies = true, unplaced = null
+  for (const v of variants) {
+    const max = v.match(/^max-(\w+)$/)
+    if (INTERACTION.has(v)) applies = false
+    else if (v in SCREENS) { if (VIEWPORT_W >= SCREENS[v]) rank = Math.max(rank, SCREENS[v]); else applies = false }
+    else if (max && max[1] in SCREENS) { if (VIEWPORT_W < SCREENS[max[1]]) unplaced = `applies at ${VIEWPORT_W}px; this audit does not model max-* breakpoints`; else applies = false }
+    else unplaced = `this audit cannot tell whether the ${v}: variant applies at rest`
+  }
+  return { applies, rank, unplaced }
+}
+const isInert = util => INERT.test(util) || inertShadow(util)
+  || (/^text-/.test(util) && NON_COLOUR_TEXT.test(util.slice(5))) || (/^bg-/.test(util) && NON_COLOUR_BG.test(util.slice(3)))
+
 /** What `classes` set at rest at VIEWPORT_W: { color, size, weight, opacity,
- *  fill, position }, each from the one class that wins. An interaction variant
- *  (hover:, focus: …) is not at rest. A breakpoint applies once VIEWPORT_W
- *  reaches it, and the widest that applies wins, as Tailwind orders its media
- *  queries. Every class that applies must be one this audit can place: classified
- *  above, INERT, or defined in index.css with nothing it does not model. Anything
- *  else dies: an unknown class, a `max-*` breakpoint that applies, any other
- *  variant on a class that matters, an `!important` one, or two classes for one
- *  property at one breakpoint (CSS order decides those, not class order). */
+ *  fill, position, z }, each from the one class that wins. An interaction
+ *  variant (hover:, focus: …) is not at rest. A breakpoint applies once
+ *  VIEWPORT_W reaches it, and the widest that applies wins, as Tailwind orders
+ *  its media queries. Every class that applies must be one this audit can
+ *  place: classified above, INERT, or defined in index.css with nothing it does
+ *  not model. Anything else dies: an unknown class, a `max-*` breakpoint that
+ *  applies, any other variant on a class that matters, an `!important` one, or
+ *  two classes for one property at one breakpoint (CSS order decides those, not
+ *  class order). */
 function resting(classes) {
   const won = {}
   for (const token of classes.split(/\s+/).filter(Boolean)) {
     const [variants, raw] = splitVariants(token)
     const important = raw.startsWith('!')
     const util = important ? raw.slice(1) : raw
-    let rank = 0, applies = true, unplaced = null
-    for (const v of variants) {
-      const max = v.match(/^max-(\w+)$/)
-      if (INTERACTION.has(v)) applies = false
-      else if (v in SCREENS) { if (VIEWPORT_W >= SCREENS[v]) rank = Math.max(rank, SCREENS[v]); else applies = false }
-      else if (max && max[1] in SCREENS) { if (VIEWPORT_W < SCREENS[max[1]]) unplaced = `applies at ${VIEWPORT_W}px; this audit does not model max-* breakpoints`; else applies = false }
-      else unplaced = `this audit cannot tell whether the ${v}: variant applies at rest`
-    }
+    const { applies, rank, unplaced } = variantState(variants)
     if (!applies) continue
     const prop = classify(util)
-    const inert = INERT.test(util) || /^text-/.test(util) && NON_COLOUR_TEXT.test(util.slice(5)) || /^bg-/.test(util) && NON_COLOUR_BG.test(util.slice(3))
-    if (!prop && inert && !CSS_RULES.has(util)) continue
+    if (!prop && isInert(util) && !CSS_RULES.has(util)) continue
     if (unplaced) throw new Error(`audit: ${token}: ${unplaced}`)
     if (important) throw new Error(`audit: ${token} is !important; this audit does not model it`)
     if (!prop && !CSS_RULES.has(util)) throw new Error(`audit: ${token} is not a class this audit can place (not a colour, size, weight, opacity, fill or position, not INERT, not in index.css) — the audit is out of date, not passing`)
@@ -673,6 +706,25 @@ const rampA = (stops, t) => {
 // A partial layer model is worse than none: it produces confident wrong numbers.
 // .stage-hero-scrim, in index.css — first layer listed paints ON TOP.
 const scrim = cssValue('.stage-hero-scrim', 'background')
+/** A background's layers, split on its top-level commas. */
+function bgLayers(value) {
+  const out = []
+  let depth = 0, start = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '(') depth++
+    else if (value[i] === ')') depth--
+    else if (value[i] === ',' && depth === 0) { out.push(value.slice(start, i).trim()); start = i + 1 }
+  }
+  return [...out, value.slice(start).trim()]
+}
+// The model reads stops, not directions, so the directions and the layer count
+// are pinned: a review flipped the horizontal ramp to 270deg (10 surfaces really
+// failing) and added a light radial layer first, both unread.
+{
+  const L = bgLayers(scrim)
+  if (L.length !== 2 || !/^linear-gradient\(\s*90deg\s*,/.test(L[0]) || !/^linear-gradient\(\s*0deg\s*,/.test(L[1]))
+    throw new Error(`audit: .stage-hero-scrim's background is no longer a 90deg linear-gradient over a 0deg one and nothing else; model it — the audit is out of date, not passing`)
+}
 const HERO = {
   // linear-gradient(90deg, ...) → 0% is the LEFT edge. Layer 0 = painted on top.
   horiz: parseLinearStops(scrim, 0),
@@ -739,7 +791,7 @@ const LAYER_ELS = (() => {
       if (!pseudo && d.prop === 'z-index') throw new Error(`audit: ${where(el)} (${L.what}): index.css (${rule.selector}) sets z-index; re-model the paint order`)
     }
     if (L.attrs) {
-      const names = [...attrsOf(el).keys()].sort()
+      const names = [...attrsOf(el).keys()].filter(n => n !== 'aria-hidden').sort()
       if (names.join() !== [...L.attrs].sort().join()) throw new Error(`audit: ${where(el)} (${L.what}) carries ${names.join(', ')}, not exactly ${L.attrs.join(', ')}; model it — the audit is out of date, not passing`)
       const branches = classBranches(el)
       const own = branches.length === 1 ? branches[0].text.split(/\s+/).filter(Boolean) : null
@@ -818,7 +870,7 @@ const GLOW = (() => {
 // the coordinates below were taken at (VIEWPORT_H), not assumed.
 const FEATHER = (() => {
   const bg = cssValue('.stage-hero-scrim::before', 'background')
-  if (!/linear-gradient\(180deg/.test(bg)) throw new Error('audit: the hero top feather is no longer a top-down (180deg) linear-gradient')
+  if (bgLayers(bg).length !== 1 || !/^linear-gradient\(\s*180deg\s*,/.test(bg)) throw new Error('audit: the hero top feather is no longer one top-down (180deg) linear-gradient')
   const h = cssValue('.stage-hero-scrim::before', 'height').match(/^([\d.]+)px$/)
   if (!h) throw new Error('audit: the hero top feather height is no longer a px length')
   const sizes = hero.match(/'relative w-full h-\[(\d+)vh\] min-h-\[(\d+)px\] max-h-\[(\d+)px\]/)
@@ -862,13 +914,23 @@ function heroBackdrop(x, yFromBottom, frame) {
 }
 
 // The veil's rule is pinned with the scrim's (PINNED_RULES): it may only place
-// it and paint its background.
+// it and paint its background. The surfaces are credited the veil's plateau,
+// so the background's shape is pinned too: closest-side, flat to 72%, clear at
+// 100%, with only the plateau's alpha read. A review deleted the 72% stop, so
+// the veil faded from its centre and the eyebrow sat on about 0.32 of it,
+// while the audit still credited 0.72.
 const VEIL = (() => {
   const v = cssValue('.stage-hero-match-veil', 'background')
-  const m = v.match(/rgba\(([^)]*)\)/)
-  if (!m) throw new Error('audit: .stage-hero-match-veil no longer uses an rgba plateau')
-  return Number(m[1].split(',')[3])
+  const m = v.match(/^radial-gradient\(\s*closest-side,\s*rgba\(\s*5,\s*5,\s*5,\s*([\d.]+)\)\s+0%,\s*rgba\(\s*5,\s*5,\s*5,\s*([\d.]+)\)\s+72%,\s*rgba\(\s*5,\s*5,\s*5,\s*0\)\s+100%\s*\)$/)
+  if (!m || m[1] !== m[2]) throw new Error('audit: .stage-hero-match-veil is no longer a closest-side radial plateau, flat to 72% — model its shape, do not pass')
+  return Number(m[1])
 })()
+{
+  const veils = []
+  const find = n => { if (isVeil(n)) veils.push(n); ts.forEachChild(n, find) }
+  find(HERO_ROOT)
+  if (veils.length !== 1) throw new Error(`audit: the hero has ${veils.length} .stage-hero-match-veil elements; this audit models exactly one — a second paints over whatever follows it`)
+}
 
 // Known answers for the class reader, run every time: a reader that quietly
 // misread a class (a hover alpha taken as the resting one, a breakpoint that
@@ -888,10 +950,12 @@ const VEIL = (() => {
   ]
   PROBE.push(['relative drop-shadow-lg [text-shadow:0_1px_3px_rgba(0,0,0,0.5)] line-clamp-2 max-sm:sr-only aria-selected:px-4',
     r => r.position === 'relative' && Object.keys(r).length === 1])
+  PROBE.push(['z-auto', r => r.z === 'auto' && !stacks(r.z)])
   const DIES = ['text-white/97', 'text-white/70 text-white/50', 'md:!text-white', 'max-2xl:text-white/40',
     'aria-selected:text-white/40', 'disabled:text-white/20', 'visited:text-white/20', 'text-current',
     'text-[color:var(--no-such-token)]', '[color:rgba(255,255,255,0.3)]', '[opacity:0.3]', 'brightness-50',
-    'mix-blend-screen', 'shadow-inner', 'no-such-class']
+    'mix-blend-screen', 'shadow-inner', 'no-such-class', '[text-shadow:0_0_20px_white]', 'drop-shadow-[0_0_20px_rgba(255,255,255,0.8)]',
+    'order-first', 'ring-2']
   const wrong = []
   for (const [classes, ok] of PROBE) {
     let r
@@ -967,64 +1031,249 @@ const SURFACES = [
 ]
 
 // ── what else the two text layers hold ────────────────────────────────────
-// An element in a surface layer that encloses no surface can still sit over or
-// under one once it leaves the flow: positioned absolute, fixed or sticky,
-// offset, translated or pulled by a negative margin, through a class, an inline
-// style or its index.css rules. A review added a purple halo behind the match
-// ring (`absolute inset-0 bg-purple-400/40`): the eyebrow measured 4.22:1 with
-// it, and the audit passed unchanged. Each such element dies unless it is the
-// veil (modelled) or listed here with the reason it covers no measured text,
-// and an entry that no longer matches such an element dies as unneeded.
-// In-flow elements are not read: they lay out beside the text, not over it.
-// Neither is SVG geometry: a shape drawn over the ring's track is not seen.
+// Every other element in the text's two layers (the buttons, badges, pill,
+// icons, the ring's arc) is read too, because it can reach measured text
+// without enclosing it, in two ways.
+//
+// Out of the flow: positioned absolute, fixed or sticky, offset, transformed,
+// pulled by a negative margin, or drawing a ::before or ::after box, through a
+// class, an inline style or its index.css rules. Such an element can sit over
+// or under any text, so it dies unless it is the veil (modelled) or listed in
+// OVERLAP_OK, matched by its tag and exact classes, with the reason it covers
+// no measured text; an entry that no longer matches dies as unneeded. A review
+// added a purple halo behind the match ring (`absolute inset-0
+// bg-purple-400/40`): the eyebrow measured 4.22:1 with it while the audit
+// passed unchanged.
+//
+// Past its own box, in the flow: a box-shadow glow. Those are measured (GLOWS
+// below). A dark shadow only darkens what it reaches, which cannot lower the
+// contrast of this hero's light text, so it passes; filters and Tailwind's
+// coloured shadow and ring utilities die.
+//
+// So every class such an element can carry must be readable: its className is
+// a literal, or literals chosen by conditions and template slots, enumerated
+// (a class list held in a variable, as a review's `className={HALO}` was, dies),
+// and every class in it is classified, INERT, or an index.css class whose
+// rules this audit reads. Its inline style may size it or dash an SVG stroke,
+// nothing else. What a component renders is not read, and neither is SVG
+// geometry: a shape drawn over the ring's track is not seen.
 const OVERLAP_OK = [
-  { has: 'absolute left-0 right-0 bottom-0 h-[3px] bg-white/25', why: "the Resume button's 3px progress bar, along that button's own bottom edge; the button holds no measured text" },
+  { tag: 'span', classes: 'absolute left-0 right-0 bottom-0 h-[3px] bg-white/25',
+    why: "the Resume button's 3px progress bar, along that button's own bottom edge, and its fill's 8px glow below it, where nothing is measured; the button holds no measured text" },
 ]
-{
-  const ENCLOSING = new Set(SURFACES.flatMap(s => s.nodes))
-  const OUT_OF_FLOW_CSS = /^(inset|top|right|bottom|left|translate)$/
-  const outOfFlow = el => {
-    const attrs = openingOf(el).attributes.properties
-    if (attrs.some(a => ts.isJsxSpreadAttribute(a))) return 'spreads props'
-    const style = attrs.find(a => ts.isJsxAttribute(a) && a.name.getText(HERO_SF) === 'style')
-    if (style) {
-      const e = style.initializer && ts.isJsxExpression(style.initializer) ? style.initializer.expression : null
-      if (!e || !ts.isObjectLiteralExpression(e)) return 'has an inline style this audit cannot read'
-      const hit = e.properties.find(p => !ts.isPropertyAssignment(p) || /^(position|inset|top|right|bottom|left|transform|translate|margin.*|zIndex)$/.test(p.name.getText(HERO_SF)))
-      if (hit) return `sets ${ts.isPropertyAssignment(hit) ? hit.name.getText(HERO_SF) : 'a spread'} inline`
-    }
-    const cls = attrs.find(a => ts.isJsxAttribute(a) && a.name.getText(HERO_SF) === 'className')
-    for (const t of (cls?.initializer?.getText(HERO_SF) ?? '').split(/[\s"'`{}]+/).filter(Boolean)) {
-      const [variants, raw] = splitVariants(t)
-      const util = raw.replace(/^!/, '')
-      const idle = variants.some(v => INTERACTION.has(v) || (v in SCREENS && VIEWPORT_W < SCREENS[v])
-        || (/^max-\w+$/.test(v) && v.slice(4) in SCREENS && VIEWPORT_W >= SCREENS[v.slice(4)]))
-      if (idle) continue
-      if (/^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|inset(-[xy])?|translate-[xy])-/.test(util) || /^-m[xytrblse]?-/.test(util)) return `carries ${t}`
-      for (const { rule, pseudo } of CSS_RULES.get(util) ?? []) {
-        if (pseudo) continue
-        const d = declsOf(rule).find(d => (d.prop === 'position' && /^(absolute|fixed|sticky)$/.test(d.value.trim()))
-          || OUT_OF_FLOW_CSS.test(d.prop) || (d.prop === 'transform' && d.value.trim() !== 'none') || (/^margin/.test(d.prop) && d.value.includes('-')))
-        if (d) return `is ${d.prop}: ${d.value} through ${rule.selector}`
+
+/** Every class string an element's className can produce: a literal, either
+ *  branch of a condition, and each combination of a template's slots, so a
+ *  class list held in a variable or built by a call dies. */
+function classStrings(el) {
+  const init = attrsOf(el).get('className')
+  if (init === undefined) return ['']
+  const strs = n => {
+    while (n && ts.isParenthesizedExpression(n)) n = n.expression
+    if (!n) return null
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return [n.text]
+    if (ts.isConditionalExpression(n)) { const a = strs(n.whenTrue), b = strs(n.whenFalse); return a && b ? [...a, ...b] : null }
+    if (ts.isTemplateExpression(n)) {
+      let out = [n.head.text]
+      for (const span of n.templateSpans) {
+        const v = strs(span.expression)
+        if (!v) return null
+        out = out.flatMap(o => v.map(x => o + x + span.literal.text))
+        if (out.length > 64) return null
       }
+      return out
     }
     return null
   }
-  const used = new Set()
+  const v = strs(ts.isJsxExpression(init) ? init.expression : init)
+  if (!v) throw new Error(`audit: the className of ${where(el)} is not a literal this audit can enumerate (a variable, a call); spell it out — the audit is out of date, not passing`)
+  return v
+}
+
+/** A box-shadow value's layers that paint outside the box and could lighten
+ *  text: not inset, not dark. Each as { x, y, blur, spread, rgb, a }. */
+function glowLayers(value, where_) {
+  let v = value.trim()
+  const tok = v.match(/^var\((--[\w-]+)\)$/)
+  if (tok) v = rootToken(tok[1])
+  if (v === 'none') return []
+  return bgLayers(v).flatMap(layer => {
+    if (/\binset\b/.test(layer) || darkShadow(layer)) return []
+    const colour = layer.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/)
+    const lens = layer.replace(colour?.[0] ?? '', '').trim().split(/\s+/).filter(Boolean)
+      .map(l => (l === '0' ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
+    if (!colour || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN)) throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
+    const c = parseColor(colour[0])
+    return [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a }]
+  })
+}
+
+/** What an element in a text layer that encloses no surface does beyond its
+ *  own box: { out } when it leaves the flow (why), and { glows } for the
+ *  box-shadow layers it casts. Dies on anything it cannot read. */
+function neighbourOf(el) {
+  const res = { out: null, glows: [] }
+  const attrs = openingOf(el).attributes.properties
+  if (attrs.some(a => ts.isJsxSpreadAttribute(a))) throw new Error(`audit: ${where(el)} spreads props; this audit cannot read them`)
+  const style = attrsOf(el).get('style')
+  if (style !== undefined) {
+    const e = ts.isJsxExpression(style) ? style.expression : null
+    if (!e || !ts.isObjectLiteralExpression(e)) throw new Error(`audit: ${where(el)} has an inline style this audit cannot read`)
+    for (const p of e.properties) {
+      const name = ts.isPropertyAssignment(p) ? p.name.getText(HERO_SF) : null
+      if (name && /^(position|inset|top|right|bottom|left|transform|translate|margin.*)$/.test(name)) res.out ??= `sets ${name} inline`
+      else if (!name || !/^((min|max)?(width|height|Width|Height)|strokeDash(array|offset))$/.test(name))
+        throw new Error(`audit: ${where(el)} sets ${name ?? 'a spread'} inline; this audit reads only sizes and stroke dashes there — model it`)
+    }
+  }
+  // Each class once, though it may appear in several of the strings: a glow
+  // counted per string was counted twice on the Play button.
+  for (const t of new Set(classStrings(el).flatMap(str => str.split(/\s+/).filter(Boolean)))) {
+    const [variants, raw] = splitVariants(t)
+    const util = raw.replace(/^!/, '')
+    const { applies, unplaced } = variantState(variants)
+    if (!applies) continue
+    const fail = why => { throw new Error(`audit: ${where(el)}: ${t} ${why} — the audit is out of date, not passing`) }
+    if (/^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
+      || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)) { res.out ??= `carries ${t}`; continue }
+    if (/^(shadow|ring|blur|brightness|contrast|saturate|hue-rotate|invert|sepia|grayscale|drop-shadow)(-|$)/.test(util)
+      && !/^shadow(-(sm|md|lg|xl|2xl|inner|none))?$/.test(util) && !isInert(util)) fail('paints past its box in a way this audit does not model')
+    if (/^(from|via|to)-/.test(util)) continue // a gradient's stops: its own fill, inside its box
+    const prop = classify(util)
+    if (prop?.key === 'z' && stacks(prop.value)) fail('sets a z-index; this audit does not model where that paints it')
+    if (unplaced && (prop || !isInert(util))) fail(unplaced)
+    if (prop || (isInert(util) && !CSS_RULES.has(util)) || /^shadow(-(sm|md|lg|xl|2xl|inner|none))?$/.test(util)) continue
+    if (!CSS_RULES.has(util)) fail('is not a class this audit can place')
+    for (const { rule, pseudo } of CSS_RULES.get(util)) {
+      const decls = declsOf(rule)
+      if (pseudo) {
+        if (/^(before|after)$/.test(pseudo) && decls.some(d => d.prop === 'content' && !/^(none|normal)$/.test(d.value.trim()))) res.out ??= `draws a ::${pseudo} box through ${rule.selector}`
+        continue
+      }
+      for (const d of decls) {
+        const v = d.value.trim()
+        if ((d.prop === 'position' && !/^(relative|static)$/.test(v)) || /^(inset|top|right|bottom|left|translate)$/.test(d.prop)
+          || (d.prop === 'transform' && v !== 'none') || (/^margin/.test(d.prop) && v.includes('-'))) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
+        else if (d.prop === 'box-shadow') res.glows.push(...glowLayers(v, `${where(el)} (${rule.selector})`))
+        else if (/^(filter|z-index|-webkit-text-stroke.*)$/.test(d.prop) || (d.prop === 'text-shadow' && v !== 'none' && !darkShadow(v))
+          || (/^animation(-fill-mode|-iteration-count)?$/.test(d.prop) && /\b(forwards|both|infinite)\b/.test(v)))
+          fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
+      }
+    }
+  }
+  return res
+}
+
+/** The elements in the text layers that enclose no surface, each with what
+ *  `neighbourOf` found, allowed overlays' contents skipped. */
+const NEIGHBOURS = (() => {
+  const ENCLOSING = new Set(SURFACES.flatMap(s => s.nodes))
+  const out = [], used = new Set()
   const visit = n => {
     if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && !ENCLOSING.has(n) && !isVeil(n)) {
-      const why = outOfFlow(n)
-      if (why) {
-        const ok = OVERLAP_OK.find(o => openingOf(n).getText(HERO_SF).includes(o.has))
-        if (!ok) throw new Error(`audit: ${where(n)} in a surface layer ${why}, so it can sit over or under measured text; model it or list it in OVERLAP_OK with the reason it cannot`)
+      const nb = neighbourOf(n)
+      if (nb.out) {
+        const strs = classStrings(n)
+        const ok = OVERLAP_OK.find(o => tagName(n) === o.tag && strs.length === 1 && strs[0] === o.classes)
+        if (!ok) throw new Error(`audit: ${where(n)} in a text layer ${nb.out}, so it can sit over or under measured text; model it or list it in OVERLAP_OK with the reason it cannot`)
         used.add(ok)
         return // what an allowed overlay holds sits inside it
       }
+      if (nb.glows.length) out.push({ el: n, glows: nb.glows })
     }
     ts.forEachChild(n, visit)
   }
   for (const layer of SURFACE_LAYERS) ts.forEachChild(layer, visit)
-  for (const o of OVERLAP_OK) if (!used.has(o)) throw new Error(`audit: OVERLAP_OK lists "${o.has}", which no longer matches an out-of-flow element in a surface layer; remove the entry`)
+  for (const o of OVERLAP_OK) if (!used.has(o)) throw new Error(`audit: OVERLAP_OK lists <${o.tag} className="${o.classes}">, which no longer matches an out-of-flow element in a text layer; remove the entry`)
+  return out
+})()
+
+// ── GLOWS: how far each neighbour's glow reaches into each surface ──────────
+// For a glowing element G and a surface S in the same layer, take A, the
+// nearest element enclosing both, and A's two children leading to them. Their
+// gap is read from the layout at its smallest: in a flex row, A's column gap
+// (or its row gap when it wraps, if smaller); in a block or a flex column, the
+// earlier child's bottom margin (plus a column gap), as if nothing rendered
+// between them and the margins collapsed in the glow's favour. A negative
+// margin there, or a reversed flex direction, dies. Across that gap each
+// shadow layer falls off as a blurred edge does, alpha·½·erfc(d / (σ√2)) with
+// σ = blur/2 and d the gap less its spread, plus or minus its offset along the
+// axis; its corner, where it is fainter, is not modelled. A glow painted after
+// the text (G later in tree order, or positioned where S is not) lies over the
+// glyphs and their backdrop alike; one painted before lies under them. Each
+// surface is then measured under every set of glows that can render together
+// (the two branches of one condition cannot), and its worst figure is
+// asserted with the rest. A pairing that never renders together (separate
+// `compact` conditions, say) is still counted, the stricter answer.
+const erfc = x => {
+  // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7.
+  const t = 1 / (1 + 0.3275911 * Math.abs(x))
+  const y = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-x * x)
+  return x >= 0 ? y : 2 - y
+}
+const spacingPx = (v, token) => {
+  const s = v.startsWith('[') ? v.slice(1, -1) : THEME.spacing[v]
+  if (s === undefined) throw new Error(`audit: ${token} is off the spacing scale`)
+  return cssLengthPx(String(s))
+}
+/** The resting classes of an element (every branch) as tokens. */
+const restingTokens = el => classStrings(el).flatMap(s => s.split(/\s+/).filter(Boolean))
+  .map(t => splitVariants(t)).filter(([v]) => variantState(v).applies).map(([, u]) => u.replace(/^!/, ''))
+/** The smallest spacing token matching `re` on an element, in px (0 if none);
+ *  a negative one dies. */
+function spacing(el, re) {
+  let px = Infinity
+  for (const u of restingTokens(el)) {
+    const m = u.match(re)
+    if (!m || m[1] === 'auto') continue
+    if (u.startsWith('-') || m[1].startsWith('[-')) throw new Error(`audit: ${where(el)} carries ${u}, a negative spacing that brings neighbours closer than this audit models`)
+    px = Math.min(px, spacingPx(m[1], u))
+  }
+  return px === Infinity ? 0 : px
+}
+const positioned = el => restingTokens(el).some(u => /^(relative|absolute|fixed|sticky)$/.test(u))
+  || restingTokens(el).some(u => (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo && declsOf(rule).some(d => d.prop === 'position' && d.value.trim() !== 'static')))
+/** The ConditionalExpression whose two branches hold `a` and `b`, if any. */
+function exclusive(a, b) {
+  for (let n = a.parent; n; n = n.parent) {
+    if (ts.isConditionalExpression(n)) {
+      const inT = x => x.pos >= n.whenTrue.pos && x.end <= n.whenTrue.end
+      const inF = x => x.pos >= n.whenFalse.pos && x.end <= n.whenFalse.end
+      if ((inT(a) && inF(b)) || (inF(a) && inT(b))) return true
+    }
+  }
+  return false
+}
+const GLOWS = []
+for (const s of SURFACES) {
+  const sChain = s.nodes
+  const layer = sChain[sChain.length - 2]
+  for (const g of NEIGHBOURS) {
+    const gChain = [g.el]
+    for (let n = g.el.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
+    if (!gChain.includes(layer)) continue
+    const A = gChain.find(n => sChain.includes(n))
+    const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
+    const after = cG.getStart(HERO_SF) > cS.getStart(HERO_SF)
+    const aTok = restingTokens(A)
+    if (aTok.some(u => /^flex-(row|col)-reverse$/.test(u))) throw new Error(`audit: ${where(A)} reverses its flex direction; this audit does not model which side its glows reach`)
+    const row = aTok.some(u => /^(inline-)?flex$/.test(u)) && !aTok.includes('flex-col')
+    let gap
+    const colGap = () => spacing(A, /^gap-(?!y-)(?:x-)?(.+)$/), rowGap = () => spacing(A, /^gap-(?!x-)(?:y-)?(.+)$/)
+    if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
+    else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
+    for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
+    const posG = gChain.slice(0, gChain.indexOf(A)).some(positioned)
+    const posS = sChain.slice(0, sChain.indexOf(A)).some(n => classBranches(n).some(b => /(^|\s)(relative|absolute|fixed|sticky)(\s|$)/.test(b.text)))
+    const side = posG !== posS ? (posG ? 'over' : 'under') : (after ? 'over' : 'under')
+    const layers = g.glows.map(L => {
+      const off = row ? L.x : L.y
+      const d = gap - L.spread + (after ? off : -off)
+      const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
+      return { rgb: L.rgb, a: Math.min(L.a, a) }
+    }).filter(L => L.a > 1e-4)
+    if (layers.length) GLOWS.push({ s, g: g.el, side, gap, layers })
+  }
 }
 
 const need = s => (s.nonText ? 3.0 : (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5)
@@ -1059,5 +1308,31 @@ for (const s of SURFACES) {
   console.log(`${label}${String(s.px).padStart(3)} ${req.toFixed(1).padStart(5)}   ${rk.toFixed(2).padStart(10)}  ${rw.toFixed(2).padStart(11)}  ${verdict}`)
 }
 console.log('-'.repeat(LABEL_W + 54))
+{
+  const bySurface = new Map()
+  for (const r of GLOWS) bySurface.set(r.s, [...(bySurface.get(r.s) ?? []), r])
+  console.log(`\nunder neighbour glows (GLOWS): each surface's worst frame under every set of glows that can render together`)
+  for (const [s, rs] of bySurface) {
+    let worst = Infinity, worstSet = []
+    for (let mask = 1; mask < 1 << rs.length; mask++) {
+      const set = rs.filter((_, i) => mask & (1 << i))
+      if (set.some((a, i) => set.some((b, j) => j > i && exclusive(a.g, b.g)))) continue
+      for (const frame of [K, W]) {
+        let bg = backdropFor(s, frame)
+        for (const r of set) if (r.side === 'under') for (const L of r.layers) bg = over(L.rgb, L.a, bg)
+        let fg = over(s.color, s.alpha, bg)
+        for (const r of set) if (r.side === 'over') for (const L of r.layers) { fg = over(L.rgb, L.a, fg); bg = over(L.rgb, L.a, bg) }
+        const v = ratio(fg, bg)
+        if (v < worst) { worst = v; worstSet = set }
+      }
+    }
+    const req = need(s)
+    const ok = worst >= req
+    if (!ok && !s.advisory) fails++
+    const from = worstSet.map(r => `${where(r.g).replace(` at ${SRC_HERO}`, '')} ${r.side} ${r.layers.reduce((t, L) => t + L.a, 0).toFixed(3)} at ${r.gap}px`).join(', ')
+    console.log(`${`${s.what} (${s.file})`.padEnd(LABEL_W)}${String(s.px).padStart(3)} ${req.toFixed(1).padStart(5)}   ${worst.toFixed(2).padStart(10)}  ${(ok ? 'PASS' : '*** FAIL ***').padStart(11)}  ${from}`)
+  }
+  console.log('-'.repeat(LABEL_W + 54))
+}
 console.log(`${fails} surface(s) below threshold at their worst frame; ${advisories} advisory.`)
 process.exit(fails ? 1 : 0)
