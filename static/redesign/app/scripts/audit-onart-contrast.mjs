@@ -36,15 +36,17 @@ import { createRequire } from 'node:module'
 // (`text-white/75` back to `/60`) again left the output byte-identical and exit 0.
 // Now each surface's colour, alpha, size, weight and fill are read from the
 // classes of its element, or of the element it inherits them from (`text()`
-// below); whether it sits over the match veil is read from the tree; and every
-// element enclosing it up to the hero's <section> is checked for opacity, fills
-// and anything else this audit does not model. The run fails if a value it
-// depends on has moved or cannot be read. NOT derived: each surface's sample
-// point (x, y), measured by hand at the 1440x900 frame its classes are resolved
-// at, and the list of surfaces itself, so text HeroSection gains is measured
-// only once it is listed. Not read at all: anything above the <section>, rules
-// in index.css that select by element rather than class, other widths, and
-// hover states.
+// below); whether it sits over the match veil is read from the tree; every
+// element enclosing it up to the hero's root is checked for opacity, fills,
+// z-index and anything else this audit does not model; and the root's own
+// layers, the scrim, glow and vignette composited beneath the text, are pinned
+// in their paint order (LAYERS). The run fails if a value it depends on has
+// moved or cannot be read. NOT derived: each surface's sample point (x, y),
+// measured by hand at the 1440x900 frame its classes are resolved at, and the
+// list of surfaces itself, so text HeroSection gains is measured only once it
+// is listed. Not read at all: anything above the hero's root, rules in
+// index.css that select by element rather than class, other widths, and
+// interaction states (hover, focus, active).
 
 const require = createRequire(import.meta.url)
 const APP_DIR = path.resolve(import.meta.dirname, '..')
@@ -130,49 +132,65 @@ const SCREENS = Object.fromEntries(Object.entries(THEME.screens).map(([k, v]) =>
 const INTERACTION = new Set(['hover', 'focus', 'focus-visible', 'focus-within', 'active',
   'group-hover', 'group-focus', 'group-focus-within', 'peer-hover', 'peer-focus'])
 
-// Utilities that cannot change a text's colour, alpha, size or weight, or paint
-// behind it: layout, spacing, borders, transitions, transforms, and shadows,
-// which this audit never credits. A class neither classified below nor matched
-// here dies unless index.css defines it, and then its rules are checked
-// (`checkCssRules`). Skipped instead, `[color:…]` beside `text-white/75` painted
-// 0.3 while the audit read 0.75.
+// Utilities that cannot change a text's colour, alpha, size or weight, paint
+// behind it, or move it in the paint order: layout, spacing, borders,
+// transitions, transforms, the `group`/`peer` markers, and text and drop
+// shadows, which this audit never credits. Not `z-*` (classified below) or
+// `ring-*` (an inset ring is a box-shadow painted behind the text). A class
+// neither classified nor matched here dies unless index.css defines it, and
+// then its rules are checked (`checkCssRules`). Skipped instead, `[color:…]`
+// beside `text-white/75` painted 0.3 while the audit read 0.75.
 const INERT = new RegExp('^(?:' + [
-  String.raw`-?(?:m[xytrblse]?|p[xytrblse]?|gap(?:-[xy])?|space-[xy]|w|h|size|min-w|min-h|max-w|max-h|inset(?:-[xy])?|top|right|bottom|left|start|end|z|basis|order|translate-[xy]|rotate|scale(?:-[xy])?)-.+`,
-  'block|inline|inline-block|flex|inline-flex|grid|inline-grid|contents|hidden|isolate',
+  String.raw`-?(?:m[xytrblse]?|p[xytrblse]?|gap(?:-[xy])?|space-[xy]|w|h|size|min-w|min-h|max-w|max-h|inset(?:-[xy])?|top|right|bottom|left|start|end|basis|order|translate-[xy]|rotate|scale(?:-[xy])?)-.+`,
+  'block|inline|inline-block|flex|inline-flex|grid|inline-grid|contents|hidden|isolate|group|peer|antialiased|subpixel-antialiased',
   'flex-.+|grow(?:-.+)?|shrink(?:-.+)?|items-.+|justify-.+|content-.+|self-.+|place-.+',
   'overflow-.+|whitespace-.+|break-.+|truncate|line-clamp-.+|sr-only|not-sr-only',
   'italic|not-italic|uppercase|lowercase|capitalize|normal-case|tracking-.+|leading-.+|underline|no-underline',
-  'rounded(?:-.+)?|border(?:-.+)?|outline(?:-.+)?|ring(?:-.+)?',
+  'rounded(?:-.+)?|border(?:-.+)?|outline(?:-.+)?',
   'transition(?:-.+)?|duration-.+|ease-.+|delay-.+|cursor-.+|pointer-events-.+|select-.+|align-.+|aspect-.+|object-.+',
   String.raw`drop-shadow(?:-.+)?|font-(?:sans|serif|mono)|\[text-shadow:.+\]`,
 ].join('|') + ')$')
 
-// Declarations that can change what a surface is measured on: its colour,
-// alpha, size or weight, or what paints behind it.
-const RISKY = /^(color|opacity|font|font-size|font-weight|background|background-color|background-image|filter|backdrop-filter|mix-blend-mode|box-shadow|visibility|-webkit-text-fill-color|-webkit-text-stroke(-color|-width)?)$/
+// Declarations index.css may give a class on a surface or on an element
+// enclosing one without changing what the surface is measured on: layout,
+// spacing, borders, type metrics, transitions, an animation's delay, shadows.
+// Anything else dies unless the class's classification models it (MODELS):
+// colour, opacity, size, weight, fills, filters, masks, clip paths, blend
+// modes, z-index, position, transforms, and custom properties, since
+// `text-white` paints `rgb(255 255 255 / var(--tw-text-opacity, 1))`. An
+// allowlist, not a list of the dangerous: a review found a list of those
+// missing mask-image, custom properties and infinite animations.
+const SAFE = new RegExp('^(?:' + [
+  'font-family|line-height|letter-spacing|word-spacing|text-transform|text-align|text-wrap|white-space|text-overflow|text-shadow',
+  'display|overflow(?:-[xy])?|-webkit-line-clamp|-webkit-box-orient|cursor|pointer-events|user-select',
+  '(?:padding|margin)(?:-(?:top|right|bottom|left|inline|block)(?:-(?:start|end))?)?|(?:min-|max-)?(?:width|height)',
+  'gap|row-gap|column-gap|flex(?:-(?:grow|shrink|basis|direction|wrap))?|align-(?:items|self|content)|justify-(?:content|items|self)|order',
+  'border(?:-.+)?|outline(?:-.+)?|transition(?:-.+)?|animation-(?:delay|duration|timing-function|name)',
+].join('|') + ')$')
 // What each classified property already accounts for.
 const MODELS = { color: ['color'], size: ['font-size'], weight: ['font-weight'], opacity: ['opacity'],
-  fill: ['background', 'background-color', 'background-image'], position: [] }
+  fill: ['background', 'background-color', 'background-image'], position: ['position'], z: ['z-index'] }
 
-/** index.css rules that can style an element carrying a class, by class name:
- *  every rule naming `.cls` in a selector, unless that compound styles a
- *  pseudo-element (`::before`) or holds only under interaction (`:hover`). A
- *  class used as an ancestor (`.cls p`) counts too, failing closed. */
+/** index.css rules that can style an element carrying a class, by class name,
+ *  each as { rule, pseudo }: every rule naming `.cls` in a selector, including
+ *  inside :is(), :where() or :has(), unless its compound holds only under
+ *  interaction (`:hover`). A rule for a pseudo-element of the class carries its
+ *  name (`before`), since one with content paints a box of its own. A class used
+ *  as an ancestor (`.cls p`) or inside :not() counts too, failing closed. */
 const CSS_RULES = (() => {
   const map = new Map()
-  const away = /^(::.*|:before|:after|:hover|:focus|:focus-visible|:focus-within|:active)$/
+  const interaction = /^:(hover|focus|focus-visible|focus-within|active)$/
   postcss.parse(css).walkRules(rule => {
     for (const sel of rule.selectors) {
-      selparser(root => root.each(s => {
-        let compound = []
-        const flush = () => {
-          if (!compound.some(n => n.type === 'pseudo' && away.test(n.value))) {
-            for (const n of compound) if (n.type === 'class') map.set(n.value, [...(map.get(n.value) ?? []), rule])
-          }
-          compound = []
-        }
-        s.each(n => { if (n.type === 'combinator') flush(); else compound.push(n) })
-        flush()
+      selparser(root => root.walkClasses(c => {
+        const nodes = c.parent.nodes
+        let a = nodes.indexOf(c), b = a
+        while (a > 0 && nodes[a - 1].type !== 'combinator') a--
+        while (b < nodes.length - 1 && nodes[b + 1].type !== 'combinator') b++
+        const compound = nodes.slice(a, b + 1)
+        if (compound.some(n => n.type === 'pseudo' && interaction.test(n.value))) return
+        const pe = compound.find(n => n.type === 'pseudo' && /^(::|:before$|:after$|:first-line$|:first-letter$)/.test(n.value))
+        map.set(c.value, [...(map.get(c.value) ?? []), { rule, pseudo: pe ? pe.value.replace(/^:+/, '') : null }])
       })).processSync(sel)
     }
   })
@@ -180,16 +198,29 @@ const CSS_RULES = (() => {
 })()
 
 /** Dies when index.css gives `cls` a declaration this audit does not model:
- *  a RISKY one beyond what its classification covers (`allowed`), or an
- *  animation that holds its end state, since the last keyframe is then the
- *  resting style. `opacity: 1` dims nothing. */
+ *  one not SAFE and not covered by its classification (`allowed`). Of the
+ *  rest, `opacity: 1` and `transform: none` change nothing, and an animation
+ *  must neither hold its end state (`forwards`, `both`: the last keyframe is
+ *  then the resting style) nor run for ever. A rule for its ::before or
+ *  ::after that sets content paints a box this audit does not model. */
 function checkCssRules(cls, token, allowed = []) {
-  for (const rule of CSS_RULES.get(cls) ?? []) {
+  for (const { rule, pseudo } of CSS_RULES.get(cls) ?? []) {
+    const refuse = (d, why = 'which this audit does not model') => {
+      throw new Error(`audit: ${token}: index.css (${rule.selector}) sets ${d.prop}: ${d.value}, ${why} — the audit is out of date, not passing`)
+    }
     rule.walkDecls(d => {
-      const prop = d.prop.toLowerCase()
-      if (allowed.includes(prop) || (prop === 'opacity' && Number(d.value) === 1)) return
-      if (RISKY.test(prop) || (/^animation(-fill-mode)?$/.test(prop) && /\b(forwards|both)\b/.test(d.value)))
-        throw new Error(`audit: ${token}: index.css (${rule.selector}) sets ${prop}: ${d.value}, which this audit does not model — the audit is out of date, not passing`)
+      const prop = d.prop.toLowerCase(), v = d.value.trim()
+      if (pseudo) {
+        if (/^(before|after)$/.test(pseudo) && prop === 'content' && !/^(none|normal)$/.test(v)) refuse(d, `so its ::${pseudo} paints a box this audit does not model`)
+        if (/^first-(line|letter)$/.test(pseudo) && !SAFE.test(prop)) refuse(d)
+        return
+      }
+      if (prop === 'animation' || prop === 'animation-fill-mode' || prop === 'animation-iteration-count') {
+        if (/\b(forwards|both|infinite)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
+        return
+      }
+      if (allowed.includes(prop) || SAFE.test(prop) || (prop === 'opacity' && Number(v) === 1) || (prop === 'transform' && v === 'none')) return
+      refuse(d)
     })
   }
 }
@@ -197,6 +228,12 @@ function checkCssRules(cls, token, allowed = []) {
 // The hero, parsed. Elements are found in the tree rather than by scanning the
 // text back to a `<`, which a comparison inside an expression also satisfies.
 const HERO_SF = ts.createSourceFile(SRC_HERO, heroRaw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+// The parser recovers from errors, so a file that does not parse still yields a
+// tree, just not the one the browser gets. Refuse it.
+if (HERO_SF.parseDiagnostics?.length) {
+  const d = HERO_SF.parseDiagnostics[0]
+  throw new Error(`audit: ${SRC_HERO}:${HERO_SF.getLineAndCharacterOfPosition(d.start).line + 1} does not parse (${ts.flattenDiagnosticMessageText(d.messageText, ' ')})`)
+}
 const lineOf = pos => HERO_SF.getLineAndCharacterOfPosition(pos).line + 1
 const openingOf = el => (ts.isJsxElement(el) ? el.openingElement : el)
 const tagName = el => openingOf(el).tagName.getText(HERO_SF)
@@ -258,16 +295,32 @@ function classesOf({ el, pos }) {
   return { classes: hit.text, line: lineOf(hit.from) }
 }
 
+/** The hero's root: the element carrying `ref={sectionRef}`, which owns the
+ *  parallax and the rotation pause. Not "the first <section> up the tree": a
+ *  <section> wrapped around the text column would be taken for it, and its
+ *  fill let through. */
+const HERO_ROOT = (() => {
+  const found = []
+  const visit = n => {
+    if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && openingOf(n).attributes.properties.some(a =>
+      ts.isJsxAttribute(a) && a.name.getText(HERO_SF) === 'ref' && a.initializer?.getText(HERO_SF) === '{sectionRef}')) found.push(n)
+    ts.forEachChild(n, visit)
+  }
+  visit(HERO_SF)
+  if (found.length !== 1 || !ts.isJsxElement(found[0])) throw new Error(`audit: ${SRC_HERO} has ${found.length} elements with ref={sectionRef}; this audit needs exactly one hero root — the audit is out of date, not passing`)
+  return found[0]
+})()
+
 /** The JSX elements enclosing `el`, nearest first, up to and including the
- *  hero's <section>. */
+ *  hero's root. */
 function ancestorsOf(el) {
   const out = []
   for (let n = el.parent; n; n = n.parent) {
     if (!ts.isJsxElement(n)) continue
     out.push(n)
-    if (tagName(n) === 'section') return out
+    if (n === HERO_ROOT) return out
   }
-  throw new Error(`audit: ${where(el)} is not inside the hero's <section>`)
+  throw new Error(`audit: ${where(el)} is not inside the hero's root (ref={sectionRef})`)
 }
 
 /** `md:hover:text-white/70` -> [['md', 'hover'], 'text-white/70']. Splits on `:`
@@ -396,6 +449,7 @@ const NON_COLOUR_BG = /^(none|auto|cover|contain|fixed|local|scroll|repeat|no-re
 function classify(util) {
   let m
   if (/^(static|relative|absolute|fixed|sticky)$/.test(util)) return { key: 'position', value: util }
+  if ((m = util.match(/^(-?)z-(.+)$/))) return { key: 'z', value: m[1] + m[2] }
   if ((m = util.match(/^opacity-(.+)$/))) return { key: 'opacity', value: twOpacity(m[1], util) }
   if ((m = util.match(/^font-(\w+)$/)) && m[1] in THEME.fontWeight) return { key: 'weight', value: Number(THEME.fontWeight[m[1]]) }
   if ((m = util.match(/^type-([\w-]+)$/))) return { key: 'size', value: typeScalePx(m[1]) }
@@ -482,6 +536,7 @@ function text(anchor, parent) {
   if (fills.includes('gradient')) throw new Error(`audit: the element anchored by "${anchor}" has a gradient fill; this audit models flat fills only`)
   if (((r.opacity ?? 1) < 1 && r.fill) || ((p.opacity ?? 1) < 1 && fills.length))
     throw new Error(`audit: the element anchored by "${anchor}" has a fill under opacity < 1; this audit does not model group opacity`)
+  if (r.z !== undefined || p.z !== undefined) throw new Error(`audit: the element anchored by "${anchor}"${r.z === undefined ? "'s named parent" : ''} sets a z-index; this audit does not model where that paints it`)
   checkAncestors(chain, par?.el)
   return { file: `HeroSection.tsx:${own.line}`, color: color.rgb, alpha: color.a * (r.opacity ?? 1) * (p.opacity ?? 1), px,
     bold: (r.weight ?? p.weight ?? 400) >= 700, fills, veil: veilUnder(at.el, chain) }
@@ -503,14 +558,17 @@ function stroke(anchor) {
 }
 
 /** What the elements enclosing a surface may do to it without colouring it:
- *  dim it (opacity), paint behind it (a fill), or style it in ways this audit
- *  does not read. Each one up to the hero's <section> is read like the surface,
- *  at rest at this frame, and any of those dies, as does a component (what it
- *  renders is not in this file), an inline style or a spread. The section's own
- *  fill is allowed: it paints under the artwork, which the black and white
- *  frames stand in for. A named parent is read by `text()` instead. Nothing
- *  above the section is read. */
+ *  dim it (opacity), paint behind it (a fill), restack it (a z-index), or
+ *  style it in ways this audit does not read. Each one up to the hero's root is
+ *  read like the surface, at rest at this frame, and any of those dies, as does
+ *  a component (what it renders is not in this file), an inline style or a
+ *  spread. Two exceptions, both pinned elsewhere: the root's own fill paints
+ *  under the artwork, which the black and white frames stand in for; and the
+ *  z-20 on the surface's layer is LAYERS'. A named parent is read by `text()`.
+ *  Nothing above the root is read. */
 function checkAncestors(chain, skip) {
+  const layer = chain[chain.length - 2]
+  if (!SURFACE_LAYERS.has(layer)) throw new Error(`audit: ${where(chain[0])} is not inside a layer LAYERS lists as holding surfaces`)
   for (const a of chain) {
     if (a === skip) continue
     if (!/^[a-z]/.test(tagName(a))) throw new Error(`audit: ${where(a)} encloses a surface and is a component; this audit cannot see what it renders`)
@@ -518,32 +576,43 @@ function checkAncestors(chain, skip) {
     for (const b of classBranches(a)) {
       const r = resting(b.text)
       if ((r.opacity ?? 1) < 1) throw new Error(`audit: ${where(a)} dims the surfaces inside it (opacity ${r.opacity}); this audit does not model a dimmed ancestor`)
-      if (r.fill && tagName(a) !== 'section') throw new Error(`audit: ${where(a)} paints a fill behind the surfaces inside it; model it`)
+      if (r.fill && a !== HERO_ROOT) throw new Error(`audit: ${where(a)} paints a fill behind the surfaces inside it; model it`)
+      if (r.z !== undefined && a !== layer && a !== HERO_ROOT) throw new Error(`audit: ${where(a)} sets a z-index; this audit does not model where that paints the surfaces inside it`)
     }
   }
 }
 
 /** The match veil's alpha when a surface sits over it, else 0. It does when an
  *  enclosing element holds the veil as an earlier child than the branch leading
- *  to the surface, and something on that branch is positioned at rest. The veil
- *  is `position: absolute`, so it paints over a static sibling (CSS 2.1 App. E,
- *  step 6 over step 5): that is the eyebrow's 1.35:1 in the note at
- *  `backdropFor`. A surface the veil would paint over dies, rather than being
- *  measured with the veil on the wrong side. */
+ *  to the surface, and something on that branch is positioned or transformed at
+ *  rest. The veil is `position: absolute`, so it paints over a static sibling
+ *  (CSS 2.1 App. E, step 6 over step 5): that is the eyebrow's 1.35:1 in the
+ *  note at `backdropFor`. A surface the veil would paint over dies, rather than
+ *  being measured with the veil on the wrong side. The veil element itself is
+ *  pinned: its own class and aria-hidden, nothing else (its rule is pinned at
+ *  VEIL), since a `hidden`, an `opacity-20` or a `z-30` on it changed what the
+ *  surfaces sit on while the audit still credited it. A veil inside a {…}
+ *  expression is not seen, and the surface is measured without it, the
+ *  stricter answer. */
 function veilUnder(el, chain) {
   // Read loosely: a sibling's className need not be one this audit can resolve.
   const isVeil = c => (ts.isJsxElement(c) || ts.isJsxSelfClosingElement(c)) && openingOf(c).attributes.properties.some(p =>
     ts.isJsxAttribute(p) && p.name.getText(HERO_SF) === 'className' && p.initializer
     && p.initializer.getText(HERO_SF).split(/[^\w-]+/).includes('stage-hero-match-veil'))
+  const lifted = x => {
+    const bs = classBranches(x)
+    return bs.length > 0 && bs.every(b => /^(relative|absolute|fixed|sticky)$/.test(resting(b.text).position ?? 'static')
+      || b.text.split(/\s+/).some(t => /^-?(translate-[xy]|rotate|scale(-[xy])?)-/.test(t)))
+  }
   for (const [k, a] of chain.entries()) {
     const veil = a.children.find(isVeil)
     if (!veil) continue
+    const attrs = attrsOf(veil)
+    const own = classBranches(veil)
+    if ([...attrs.keys()].some(n => n !== 'className' && n !== 'aria-hidden') || own.length !== 1 || own[0].text.trim() !== 'stage-hero-match-veil' || ts.isJsxElement(veil))
+      throw new Error(`audit: the match veil ${where(veil)} carries more than its class (or children); model it — the audit is out of date, not passing`)
     const branch = [el, ...chain.slice(0, k)]
-    const positioned = branch.some(x => {
-      const bs = classBranches(x)
-      return bs.length > 0 && bs.every(b => /^(relative|absolute|fixed|sticky)$/.test(resting(b.text).position ?? 'static'))
-    })
-    if (branch[branch.length - 1].getStart(HERO_SF) < veil.getStart(HERO_SF) || !positioned)
+    if (branch[branch.length - 1].getStart(HERO_SF) < veil.getStart(HERO_SF) || !branch.some(lifted))
       throw new Error(`audit: .stage-hero-match-veil paints over ${where(el)}; give the surface position, or model the veil above it`)
     return VEIL
   }
@@ -589,14 +658,57 @@ const HERO = {
   // linear-gradient(0deg, ...) → 0% is the BOTTOM edge.
   vert: parseLinearStops(scrim, 1),
 }
-// The third layer is an INLINE style on its own div in HeroSection.tsx — which
-// is why a grep of index.css never found it:
+// ── the hero's layers, pinned ─────────────────────────────────────────────
+// The text sits above the scrim, the glow and the corner vignette because its
+// two layers carry z-20 and those carry none, and those three composite in
+// tree order. All of that is the hero root's children, so it is read from them
+// and pinned: a layer added, removed or reordered, or a z-index on any of them
+// (a class, an inline style, or its index.css rules), dies rather than being
+// painted in an order this model does not know. A review showed each passing
+// unseen before: `z-30` on the scrim, a new `bg-white/40` overlay, `-z-10` on
+// the content row. Each entry names its layer by text its opening tag carries.
+const LAYERS = [
+  { what: 'brand-gradient base (under the artwork; the frames stand in for it)', tag: 'div', has: 'bg-gradient-to-br' },
+  { what: 'settled backdrop (the artwork)', tag: 'img', has: 'className="stage-hero-img' },
+  { what: 'incoming backdrop (the artwork)', tag: 'img', has: 'stage-hero-img is-incoming' },
+  { what: 'scrim and its ::before feather', tag: 'div', has: 'stage-hero-scrim' },
+  { what: 'purple glow', tag: 'div', has: 'mix-blend-screen' },
+  { what: 'top-right corner vignette', tag: 'div', has: 'radial-gradient(ellipse 42%' },
+  { what: 'match cluster', tag: 'div', has: 'flex flex-col items-center', z: '20', surfaces: true },
+  { what: 'content row', tag: 'div', has: 'stage-gutter', z: '20', surfaces: true },
+]
+const LAYER_ELS = (() => {
+  const els = []
+  const collect = n => { if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) els.push(n); else ts.forEachChild(n, collect) }
+  for (const c of HERO_ROOT.children) collect(c)
+  const opening = el => openingOf(el).getText(HERO_SF)
+  const got = els.map(el => `<${tagName(el)}> ${opening(el).replace(/\s+/g, ' ').slice(0, 70)}`)
+  if (els.length !== LAYERS.length || LAYERS.some((l, i) => tagName(els[i]) !== l.tag || !opening(els[i]).includes(l.has)))
+    throw new Error(`audit: the hero's layers are not the ${LAYERS.length} this audit models, in order — re-model them, do not pass. Found:\n  ${got.join('\n  ')}`)
+  els.forEach((el, i) => {
+    if (/zIndex/.test(attrsOf(el).get('style')?.getText(HERO_SF) ?? '')) throw new Error(`audit: ${where(el)} (${LAYERS[i].what}) sets zIndex inline; re-model the paint order`)
+    const tokens = (attrsOf(el).get('className')?.getText(HERO_SF) ?? '').split(/[\s"'`{}$]+/).filter(Boolean)
+    const z = tokens.map(t => splitVariants(t)[1].match(/^(-?)z-(.+)$/)).filter(Boolean)
+    if (LAYERS[i].z) {
+      if (resting(classBranches(el).map(b => b.text).join(' ')).z !== LAYERS[i].z || z.length !== 1)
+        throw new Error(`audit: ${where(el)} (${LAYERS[i].what}) is no longer z-${LAYERS[i].z}; re-model the paint order`)
+    } else if (z.length) throw new Error(`audit: ${where(el)} (${LAYERS[i].what}) now carries ${z[0][0]}; re-model the paint order`)
+    for (const t of tokens) for (const { rule, pseudo } of CSS_RULES.get(t) ?? []) rule.walkDecls(d => {
+      if (!pseudo && d.prop === 'z-index') throw new Error(`audit: ${where(el)} (${LAYERS[i].what}): index.css (${rule.selector}) sets z-index; re-model the paint order`)
+    })
+  })
+  return els
+})()
+const SURFACE_LAYERS = new Set(LAYER_ELS.filter((_, i) => LAYERS[i].surfaces))
+
+// The corner vignette is an INLINE style on its own div — which is why a grep of
+// index.css never found it:
 //   radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)
 // It predates Phase 8 and exists for exactly this widget; its own comment says
 // so ("on a backdrop that's bright in this corner … the white score number +
 // ring vanished"). Radii are 42% of width and 48% of height, centred on the
 // TOP-RIGHT corner, ramping to transparent at 70% along the ray.
-const cornerDecl = hero.match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at 100% 0%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
+const cornerDecl = LAYER_ELS[5].getText(HERO_SF).match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at 100% 0%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
 if (!cornerDecl) throw new Error(`audit: the top-right corner vignette is no longer in ${SRC_HERO} in the expected form`)
 const CORNER = {
   rx: Number(cornerDecl[1]) / 100,
@@ -604,6 +716,29 @@ const CORNER = {
   a0: Number(cornerDecl[3].split(',')[3]),
   end: Number(cornerDecl[4]) / 100,
 }
+// The purple glow between the scrim and the vignette: a radial purple at
+// `opacity-30` under `mix-blend-screen`, which lightens whatever is beneath
+// it. The model left it out until a review composited it and measured the
+// left column's figures up to about 6% high. Read from its own element: the
+// gradient from its inline style, the opacity and the blend from its classes,
+// any other class dies.
+const GLOW = (() => {
+  const el = LAYER_ELS[4]
+  const m = el.getText(HERO_SF).match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at ([\d.]+)% ([\d.]+)%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
+  if (!m) throw new Error(`audit: the hero glow ${where(el)} is no longer a radial-gradient in the expected form`)
+  const branches = classBranches(el)
+  if (branches.length !== 1) throw new Error(`audit: the hero glow ${where(el)} no longer has one className`)
+  let opacity = 1, screen = false
+  for (const t of branches[0].text.split(/\s+/).filter(Boolean)) {
+    if (t === 'mix-blend-screen') screen = true
+    else if (/^opacity-/.test(t)) opacity = twOpacity(t.slice(8), t)
+    else if (!INERT.test(t) && !/^(relative|absolute)$/.test(t)) throw new Error(`audit: the hero glow ${where(el)} carries ${t}; model it`)
+  }
+  if (!screen) throw new Error(`audit: the hero glow ${where(el)} is no longer mix-blend-screen; model its blend`)
+  const c = parseColor(`rgba(${m[5]})`)
+  return { rx: Number(m[1]) / 100, ry: Number(m[2]) / 100, cx: Number(m[3]) / 100, cy: Number(m[4]) / 100,
+    rgb: c.rgb, a0: c.a * opacity, end: Number(m[6]) / 100 }
+})()
 // The fourth layer: .stage-hero-scrim::before, the top feather (Stage refresh
 // H1). A fixed-px band, so its alpha at a fractional y depends on the hero's
 // real height — read from the hero's own height utilities at the 1440x900 frame
@@ -632,17 +767,36 @@ function cornerAlpha(x, yFromBottom) {
   return CORNER.a0 * (1 - d / CORNER.end)
 }
 
-/** Composite all four scrim layers at (x from left, y from bottom) over `frame`,
+/** The glow screened over `bg` at (x from left, y from bottom): screen is
+ *  1 - (1 - glow)(1 - backdrop) per channel, then laid over the backdrop at the
+ *  glow's alpha there (its gradient times the element's opacity). */
+function glowOver(x, yFromBottom, bg) {
+  const d = Math.hypot((x - GLOW.cx) / GLOW.rx, ((1 - yFromBottom) - GLOW.cy) / GLOW.ry)
+  if (d >= GLOW.end) return bg
+  const a = GLOW.a0 * (1 - d / GLOW.end)
+  return bg.map((b, i) => a * (1 - (1 - GLOW.rgb[i]) * (1 - b)) + (1 - a) * b)
+}
+
+/** Composite the hero's layers at (x from left, y from bottom) over `frame`,
  *  in paint order: artwork, vertical ramp, horizontal ramp, top feather (the
- *  scrim's own ::before, so above both of its layers), corner vignette. */
+ *  scrim's own ::before, so above both of its layers), glow, corner vignette. */
 function heroBackdrop(x, yFromBottom, frame) {
   let bg = over(INK, rampA(HERO.vert, yFromBottom), frame)
   bg = over(INK, rampA(HERO.horiz, x), bg)
   bg = over(INK, featherAlpha(yFromBottom), bg)
+  bg = glowOver(x, yFromBottom, bg)
   return over(INK, cornerAlpha(x, yFromBottom), bg)
 }
 
+// The veil's own rule may only place it and paint its background: anything
+// else (a z-index that lifts it over the cluster, an opacity, a display) would
+// change what this models, and dies.
 const VEIL = (() => {
+  for (const { rule, pseudo } of CSS_RULES.get('stage-hero-match-veil') ?? []) rule.walkDecls(d => {
+    const ok = pseudo ? d.prop !== 'content' || /^(none|normal)$/.test(d.value.trim())
+      : /^(inset|top|right|bottom|left|pointer-events|background|border-radius)$/.test(d.prop) || (d.prop === 'position' && d.value.trim() === 'absolute')
+    if (!ok) throw new Error(`audit: index.css (${rule.selector}) sets ${d.prop}: ${d.value} on the match veil; model it — the audit is out of date, not passing`)
+  })
   const v = cssValue('.stage-hero-match-veil', 'background')
   const m = v.match(/rgba\(([^)]*)\)/)
   if (!m) throw new Error('audit: .stage-hero-match-veil no longer uses an rgba plateau')
