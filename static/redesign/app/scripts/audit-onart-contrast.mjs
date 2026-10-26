@@ -221,11 +221,10 @@ const CSS_RULES = cssRulesOf(css)
 /** Dies when index.css gives `cls` a declaration this audit does not model:
  *  one not SAFE and not covered by its classification (`allowed`). Of the
  *  rest, `opacity: 1` and `transform: none` change nothing, and an animation
- *  must neither hold a keyframe (`forwards`, `both`: the last is then the
- *  resting style; `paused`: the one it stopped on) nor run for ever. A rule for its ::before or
+ *  must not leave the element on a keyframe at rest (`holdsKeyframe`). A rule for its ::before or
  *  ::after that sets content paints a box this audit does not model. */
-function checkCssRules(cls, token, allowed = []) {
-  for (const { rule, pseudo } of CSS_RULES.get(cls) ?? []) {
+function checkCssRules(cls, token, allowed = [], rules = CSS_RULES) {
+  for (const { rule, pseudo } of rules.get(cls) ?? []) {
     const refuse = (d, why = 'which this audit does not model') => {
       throw new Error(`audit: ${token}: index.css (${rule.selector}) sets ${d.prop}: ${d.value}, ${why} — the audit is out of date, not passing`)
     }
@@ -238,8 +237,8 @@ function checkCssRules(cls, token, allowed = []) {
         if (/^first-(line|letter)$/.test(pseudo) && !SAFE.test(prop)) refuse(d)
         continue
       }
-      if (/^animation(-fill-mode|-iteration-count|-play-state)?$/.test(prop)) {
-        if (/\b(forwards|both|infinite|paused)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
+      if (/^animation(?:-.+)?$/.test(prop)) {
+        if (holdsKeyframe(prop, v)) refuse(d, 'so it holds or never leaves a keyframe')
         continue
       }
       if (prop === 'text-shadow') { if (v !== 'none' && !darkShadow(v)) refuse(d, 'a light or coloured shadow this audit does not model'); continue }
@@ -247,6 +246,31 @@ function checkCssRules(cls, token, allowed = []) {
       refuse(d)
     }
   }
+}
+
+/** Whether an animation declaration can leave an element on a keyframe at
+ *  rest, the state this audit measures: a fill that keeps one (`forwards`,
+ *  `both`), a pause, a timeline that follows the page rather than the clock,
+ *  or a run that does not end soon (more than three iterations, or a duration
+ *  or delay over 5 s; the hero's entrance runs 460 ms after at most 100 ms).
+ *  A var() is read through its :root token; one that is not exactly one such
+ *  token counts as holding. Timing functions are not read. */
+function holdsKeyframe(prop, value) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  if (!/^animation(?:-.+)?$/.test(p)) return false
+  let v = value.toLowerCase().replace(/var\((--[\w-]+)\)/g, (all, name) => {
+    const defs = [...css.matchAll(new RegExp(String.raw`\n\s*${name.replace(/-/g, '\\-')}\s*:\s*([^;]+);`, 'g'))]
+    return defs.length === 1 ? defs[0][1].trim().toLowerCase() : all
+  })
+  if (v.includes('var(')) return true
+  if (p === 'animation-timeline') return !/^auto(?:\s*,\s*auto)*$/.test(v)
+  if (/\b(?:forwards|both|infinite|paused)\b/.test(v)) return true
+  for (let prev; prev !== v;) { prev = v; v = v.replace(/[a-z][\w-]*\([^()]*\)/g, ' ') } // timing functions
+  const times = [...v.matchAll(/(?<![\w.-])(-?(?:\d+|\d*\.\d+))(m?s)(?![\w.])/g)].map(m => Number(m[1]) / (m[2] === 'ms' ? 1000 : 1))
+  if (/^animation(?:-duration|-delay)?$/.test(p) && times.some(t => t > 5)) return true
+  const counts = p === 'animation-iteration-count' ? v.split(/[\s,]+/).filter(Boolean).map(Number)
+    : p === 'animation' ? [...v.matchAll(/(?<![\w.-])(\d+|\d*\.\d+)(?![\w.%])/g)].map(m => Number(m[1])) : []
+  return counts.some(n => !(n <= 3))
 }
 
 /** Whether a resolved z value restacks anything: `z-auto` is the default. */
@@ -1228,15 +1252,15 @@ function movesDecl(prop, v) {
 /** Whether a declaration on a neighbour paints past its box, or changes where
  *  or how it paints, in a way this audit does not model, prefixed or not: a
  *  filter, a z-index, a text stroke or shadow, an outline, a reflection, a
- *  border image outset, a flex order, a float, a blend mode, or an animation
- *  that holds a keyframe. */
+ *  border image outset, a flex order, a float, a blend mode, a zoom (which
+ *  scales its glow), or an animation that holds a keyframe. */
 function refusedDecl(prop, v) {
   const p = prop.toLowerCase().replace(/^-webkit-/, '')
   return /^(filter|z-index|text-stroke.*|box-reflect)$/.test(p) || (/^(text-shadow|outline)$/.test(p) && !/^(none|0)$/.test(v))
     || /^outline-(width|style|color|offset)$/.test(p)
     || (p === 'order' && v !== '0') || (p === 'float' && v !== 'none') || (p === 'mix-blend-mode' && v !== 'normal')
     || (p === 'border-image-outset' && !/^(?:0+[a-z]*\s*)+$/.test(v)) || (p === 'border-image' && (v.match(/\//g) ?? []).length >= 2)
-    || (/^animation(-fill-mode|-iteration-count|-play-state)?$/.test(p) && /\b(forwards|both|infinite|paused)\b/.test(v))
+    || (p === 'zoom' && !/^(?:normal|1|100%|reset)$/i.test(v)) || holdsKeyframe(p, v)
 }
 
 /** What an element in a text layer that encloses no surface does beyond its
@@ -1325,7 +1349,7 @@ const NEIGHBOURS = (() => {
 // nearest element enclosing both, and A's two children leading to them. Their
 // gap is read from the layout at its smallest: in a flex row, A's column gap
 // (or its row gap when it wraps, if smaller); in a block or a flex column, the
-// earlier child's bottom margin (plus a column gap), as if nothing rendered
+// earlier child's bottom margin (plus the row gap, in a flex column), as if nothing rendered
 // between them and the margins collapsed in the glow's favour. A negative
 // margin there, or a reversed flex direction, dies. Across that gap each
 // shadow layer falls off as a blurred edge does, alpha·½·erfc(d / (σ√2)) with
@@ -1353,7 +1377,9 @@ const NEIGHBOURS = (() => {
 // and its worst figure is asserted with the rest. Two elements cannot render
 // together when they sit in the two branches of one `?:`, or under conditions
 // that contradict each other, such as `{compact && …}` beside
-// `{!compact && …}` (`guardsOf`, `exclusive`).
+// `{!compact && …}` (`guardsOf`, `exclusive`). A glow and a surface that one
+// `.map` callback renders are read once, in the callback's own tree order;
+// how the items of different iterations sit against each other is not.
 const erfc = x => {
   // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7.
   const t = 1 / (1 + 0.3275911 * Math.abs(x))
@@ -1432,6 +1458,23 @@ const NON_LIFTING = new RegExp('^(?:' + [
   'animation(?:-.+)?|transition(?:-.+)?|cursor|pointer-events|user-select|touch-action|overscroll-behavior(?:-.+)?|appearance|caret-color|accent-color|color-scheme',
   '-webkit-(?:line-clamp|box-orient|font-smoothing|tap-highlight-color|text-fill-color|appearance)|-moz-osx-font-smoothing|--.+',
 ].join('|') + ')$')
+/** Whether a value for a lifting property can be valid, so its lift is
+ *  certain: every number carries a unit, except where the function it is in
+ *  (or, for scale and a mask image's slices, the property) takes plain
+ *  numbers. Chromium drops an
+ *  invalid value (`blur(10)`, `perspective: 100`), and the element then does
+ *  not lift, so a value this rejects leaves the side open. */
+function plausible(group, v) {
+  const PLAIN = /^(?:brightness|contrast|grayscale|invert|opacity|saturate|sepia|scale(?:x|y|z|3d)?|matrix(?:3d)?|rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|cubic-bezier|steps)$/
+  const stack = []
+  const text = v.replace(/url\([^)]*\)|"[^"]*"|'[^']*'|#[0-9a-f]+/gi, ' ')
+  for (const m of text.matchAll(/([a-z][\w-]*)\(|\)|(-?(?:\d+|\d*\.\d+))([a-z%]*)/gi)) {
+    if (m[1] !== undefined) stack.push(m[1].toLowerCase())
+    else if (m[0] === ')') { if (!stack.pop()) return false }
+    else if (!m[3] && Number(m[2]) !== 0 && !(stack.length ? PLAIN.test(stack[stack.length - 1]) : /^(?:scale|mask-box-image)$/.test(group))) return false
+  }
+  return stack.length === 0
+}
 function liftDecl(d) {
   const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
   const group = prop.replace(/^-webkit-/, '').replace(/^mask-image$/, 'mask')
@@ -1442,14 +1485,19 @@ function liftDecl(d) {
     case 'opacity': { const m = v.match(/^(\d+|\d*\.\d+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
     case 'isolation': lifts = v === 'isolate' ? true : v === 'auto' ? false : null; break
     case 'will-change': lifts = unread ? null : willChangeLifts(v); break
-    case 'contain': lifts = unread ? null : /paint|layout|strict|content/.test(v); break
+    case 'contain': {
+      const t = v.split(/\s+/)
+      const valid = (t.length === 1 && /^(?:none|strict|content)$/.test(t[0])) || (new Set(t).size === t.length && t.every(x => /^(?:size|inline-size|layout|style|paint)$/.test(x)) && !(t.includes('size') && t.includes('inline-size')))
+      lifts = unread || !valid ? null : t.some(x => /^(?:strict|content|layout|paint)$/.test(x)); break
+    }
     case 'transform-style': lifts = v === 'preserve-3d' ? true : v === 'flat' ? false : null; break
     case 'content-visibility': lifts = /^(?:auto|hidden)$/.test(v) ? true : v === 'visible' ? false : null; break
     case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
     case 'filter': case 'backdrop-filter': case 'transform': case 'translate': case 'scale': case 'rotate': case 'perspective':
-    case 'clip-path': case 'mask': case 'view-transition-name': lifts = unread ? null : v !== 'none'; break
+    case 'clip-path': case 'mask': case 'view-transition-name': lifts = v === 'none' ? false : !unread && plausible(group, v) ? true : null; break
     case 'backface-visibility': lifts = v === 'hidden' ? true : v === 'visible' ? false : null; break
-    case 'mask-box-image': lifts = unread ? null : v !== 'none'; break
+    // Only the -webkit- form exists; Chromium drops the unprefixed one.
+    case 'mask-box-image': lifts = v === 'none' ? false : prop === '-webkit-mask-box-image' && !unread && plausible(group, v) ? true : null; break
     case 'container-type': case 'z-index': case 'mask-border': case 'offset-path': lifts = /^(?:normal|auto|none)$/.test(v) ? false : null; break
     default: return NON_LIFTING.test(prop) ? null : { group, lifts: null }
   }
@@ -1508,12 +1556,13 @@ function sidesFor(g, s, after, allAtOnce) {
 const DISPLAY = /^(?:block|inline-block|inline|flex|inline-flex|table|inline-table|table-.+|flow-root|grid|inline-grid|contents|list-item|hidden)$/
 /** Whether an element's display is certainly one of `kinds` at rest: in every
  *  className branch exactly one display class, or class whose index.css rules
- *  set display, may apply, and it is one of them. */
+ *  set display, may apply, it certainly applies (no variant this audit cannot
+ *  place), and it is one of them. */
 function displays(el, kinds) {
   return /^[a-z]/.test(tagName(el)) && classStrings(el).every(s => {
-    const set = s.split(/\s+/).filter(Boolean).map(splitVariants).filter(([v]) => variantState(v).applies).map(([, u]) => u.replace(/^!/, ''))
-      .filter(u => DISPLAY.test(u) || (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo && declsOf(rule).some(d => d.prop.toLowerCase() === 'display')))
-    return set.length === 1 && kinds.test(set[0])
+    const set = s.split(/\s+/).filter(Boolean).map(splitVariants).map(([v, u]) => [variantState(v), u.replace(/^!/, '')]).filter(([st]) => st.applies)
+      .filter(([, u]) => DISPLAY.test(u) || (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo && declsOf(rule).some(d => d.prop.toLowerCase() === 'display')))
+    return set.length === 1 && !set[0][0].unplaced && kinds.test(set[0][1])
   })
 }
 /** Whether an element certainly paints all at once, at its place in the tree:
@@ -1654,6 +1703,17 @@ function guardModel(sf, root) {
 }
 const exclusive = guardModel(HERO_SF, HERO_ROOT)
 
+/** What a glow's shadow layers put on a surface `reach` found, side by side:
+ *  [{ side, layers }], each layer at its alpha across the gap. A dark layer
+ *  counts only over the text. */
+function sideLayers(glows, r) {
+  return r.sides.map(side => ({ side, layers: glows.filter(L => side === 'over' || !L.dark).map(L => {
+    const off = r.row ? L.x : L.y
+    const d = r.gap - L.spread + (r.after ? off : -off)
+    const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
+    return { rgb: L.rgb, a: Math.min(L.a, a) }
+  }).filter(L => L.a > 1e-4) })).filter(x => x.layers.length)
+}
 /** How a glow on the element `gEl` reaches a surface, given the surface's
  *  elements (its own first, up to the hero's root), the layer both must sit in
  *  and the file's `exclusive`: null when it cannot (another layer, or never
@@ -1702,12 +1762,15 @@ function reach(gEl, sChain, layer, exclusive) {
     ['will-change: z-index', null], ['will-change: scroll-position', false], ['-webkit-transform: none', false], ['-webkit-filter: blur(1px)', true],
     ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false],
     ['mix-blend-mode: multiply', true], ['mask-image: linear-gradient(black, black)', true], ['view-transition-name: x', true], ['-webkit-opacity: .5', true],
-    ['mask-border: url(x.png) 30', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
+    ['mask-border: url(x.png) 30', null], ['mask-border: linear-gradient(black, black)', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
     ['-webkit-backdrop-filter: blur(1px)', null], ['-webkit-backdrop-filter: none', false], ['will-change: backdrop-filter', true],
     ['backface-visibility: hidden', true], ['-webkit-backface-visibility: hidden', true], ['-webkit-mask-box-image: linear-gradient(black,black) 1 / 1px / 40px', true],
     ['mask-box-image: none', false], ['no-such-property: 1', null], ['color: red', undefined], ['--glow: 1', undefined], ['animation: x 1s', undefined],
     ['contain: size', false], ['contain: paint', true], ['transform: var(--t)', null], ['mix-blend-mode: inherit', null], ['position: var(--p)', null],
-    ['position: static', false], ['opacity: 1.', null]])
+    ['position: static', false], ['opacity: 1.', null], ['opacity: 50%', true], ['contain: var(--c)', null], ['contain: paint paint', null],
+    ['perspective: 100', null], ['perspective: 100px', true], ['backdrop-filter: blur(10)', null], ['backdrop-filter: blur(10px)', true],
+    ['filter: drop-shadow(0 0 2px rgba(0, 0, 0, .5))', true], ['transform: rotate(45)', null], ['transform: matrix(1, 0, 0, 1, 0, 0)', true],
+    ['scale: 2', true], ['translate: 10', null], ['clip-path: path("M0 0 H100")', true], ['mask-box-image: url(x.png) 30', null]])
     expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
   const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
   for (const [g, s, after, allAtOnce, want] of [
@@ -1722,10 +1785,28 @@ function reach(gEl, sChain, layer, exclusive) {
     ['inset-inline-start', '4px', true, false], ['-webkit-filter', 'drop-shadow(0 0 12px white)', false, true], ['order', '2', false, true],
     ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false],
     ['border-image-outset', '10px', false, true], ['border-image-outset', '0', false, false], ['border-image', 'url(x.png) 30 / 1 / 8px', false, true],
-    ['animation', 'pz 1s paused', false, true], ['animation-play-state', 'paused', false, true], ['animation', 'pz 1s', false, false]])
+    ['animation', 'pz 1s paused', false, true], ['animation-play-state', 'paused', false, true], ['animation', 'pz 1s', false, false],
+    ['-webkit-box-reflect', 'below', false, true], ['offset-path', 'path("M0 0")', true, false], ['zoom', '2', false, true], ['zoom', '1', false, false]])
     expect(`neighbour ${prop}: ${v}`, [movesDecl(prop, v), refusedDecl(prop, v)], [moves, refused])
   for (const [util, want] of [['start-4', true], ['-end-2', true], ['inset-x-2', true], ['absolute', true], ['-mt-2', true], ['mt-[-4px]', true], ['mt-2', false], ['relative', false]])
     expect(`neighbour class ${util} moves it`, movesClass(util), want)
+  // Animations that leave an element on a keyframe at rest, and some that do not.
+  for (const [prop, v, want] of [['animation', 'x 1s paused', true], ['animation-timeline', 'scroll(root)', true], ['animation-timeline', 'auto', false],
+    ['animation', 'x 1s 1000000000', true], ['animation', 'x 1000000s', true], ['animation-delay', '10s', true], ['animation-iteration-count', '4', true],
+    ['animation-iteration-count', '2', false], ['animation', 'heroTextIn 460ms var(--ease-emphasized) backwards', false],
+    ['animation', 'x 1s cubic-bezier(0.4, 0, 0.2, 1) 2', false], ['animation-duration', 'var(--no-such-token)', true], ['animation-name', 'x', false]])
+    expect(`${prop}: ${v} holds a keyframe`, holdsKeyframe(prop, v), want)
+  // A surface's class whose rule holds a keyframe dies; one that ends passes.
+  const animRules = cssRulesOf('.hold { animation: x 1s paused } .ends { animation: x 460ms ease backwards }')
+  for (const [cls, want] of [['hold', 'dies'], ['ends', 'passes']]) {
+    let got = 'passes'
+    try { checkCssRules(cls, cls, [], animRules) } catch { got = 'dies' }
+    expect(`a surface class .${cls}`, got, want)
+  }
+  // GLOWS takes every side reach() gives, and a dark layer only over the text.
+  const L = (dark, a) => ({ x: 0, y: 0, blur: 8, spread: 0, rgb: dark ? [0, 0, 0] : [1, 1, 1], a, dark })
+  expect('the layers on both sides of an open glow', sideLayers([L(false, 0.5), L(true, 0.5)], { gap: 0, row: true, after: true, sides: ['over', 'under'] })
+    .map(x => [x.side, x.layers.length]), [['over', 2], ['under', 1]])
   // A class's own top-level rule lifts for certain; a rule under another
   // selector, or inside an at-rule, only possibly.
   const probeRules = cssRulesOf('.p1 { position: relative } .x .p2 { position: relative } @media (min-width: 1px) { .p3 { isolation: isolate } }')
@@ -1733,6 +1814,7 @@ function reach(gEl, sChain, layer, exclusive) {
     expect(`lift of .${cls}`, [liftedClasses([cls], true, probeRules), liftedClasses([cls], false, probeRules)], [sure, possible])
   // A glow layer is read strictly, inset ones and `inset` as a word included.
   for (const [value, want] of [['0 0 2px White', [[1, 1, 1, 1]]], ['inset 0 0 4px black, 0 0 2px #fff8', [[1, 1, 1, 0x88 / 255]]], ['0 0 .5px black', [[0, 0, 0, 1]]],
+    ['inset inset 0 0 2px black', 'dies'], ['2px black', 'dies'], ['0 0 1px 1px 1px black', 'dies'],
     ['0 0 -2px black', 'dies'], ['inset nonsense', 'dies'], ['0 0 var(--inset-r) white', 'dies'], ['0 red 0', 'dies'], ['0 black 0', 'dies'], ['0 0 2px inset black', 'dies'],
     ['0 0 2.px black', 'dies'], ['0. 0 2px black', 'dies'], ['0 0 2px rgba(0,0,0,1.)', 'dies']]) {
     let got
@@ -1740,7 +1822,7 @@ function reach(gEl, sChain, layer, exclusive) {
     expect(`the box-shadow ${value}`, got, want)
   }
   for (const [str, want] of [['rgb(0 0 0 / 55%)', [0, 0, 0, 0.55]], ['#0008', [0, 0, 0, 0x88 / 255]], ['Black', [0, 0, 0, 1]], ['rgba(255, 255, 255, .5)', [1, 1, 1, 0.5]],
-    ['rgba(255,255,255 / .9)', 'dies'], ['rgb(100% 0 0)', [1, 0, 0, 1]], ['rgb(100%, 0, 0)', 'dies']]) {
+    ['rgba(255,255,255 / .9)', 'dies'], ['rgb(100% 0 0)', [1, 0, 0, 1]], ['rgb(100%, 0, 0)', 'dies'], ['rgb(0 0 0 / 1 / 1)', 'dies'], ['rgba(0,0,0,1,1)', 'dies']]) {
     let got
     try { const c = parseColor(str); got = [...c.rgb, c.a] } catch { got = 'dies' }
     expect(`the colour ${str}`, got, want)
@@ -1788,11 +1870,13 @@ function reach(gEl, sChain, layer, exclusive) {
     '          <span id="g-may" className="aria-selected:isolate">x</span>',
     '          <span id="g-lift" className="relative">x</span>',
     '          <span id="s-row">text</span>',
+    '          <span id="s-may" className="aria-selected:isolate">text</span>',
     '          <span id="g-flat">x</span>',
     '        </div>',
     '        <p id="s-col" className="mb-2">text</p>',
     '        <div id="g-block">x</div>',
     '        <div id="g-inline" className="inline-block">x</div>',
+    '        <div className="aria-selected:flex"><div id="g-wrapped">x</div></div>',
     '        {on && <span id="g-on">x</span>}',
     '        {!on && <p id="s-off">text</p>}',
     '      </div>',
@@ -1818,6 +1902,8 @@ function reach(gEl, sChain, layer, exclusive) {
     ['g-block', 's-col', { gap: 8, row: false, after: true, sides: ['over', 'under'] }],
     ['g-inline', 's-col', { gap: 8, row: false, after: true, sides: ['over'] }],
     ['g-lift', 's-col', { gap: 0, row: false, after: false, sides: ['over'] }],
+    ['g-lift', 's-may', { gap: 12, row: true, after: false, sides: ['over', 'under'] }],
+    ['g-wrapped', 's-col', { gap: 8, row: false, after: true, sides: ['over', 'under'] }],
     ['g-on', 's-off', null],
   ]) expect(`how ${g} reaches ${sId}`, reach(el.get(g), chain(sId), el.get('layer'), exLayout), want)
   if (wrong.length) throw new Error(`audit: the paint-order and condition readers' known answers changed — the audit is out of date, not passing:\n  ${wrong.join('\n  ')}`)
@@ -1827,16 +1913,7 @@ const GLOWS = []
 for (const s of SURFACES) {
   for (const g of NEIGHBOURS) {
     const r = reach(g.el, s.nodes, s.nodes[s.nodes.length - 2], exclusive)
-    if (!r) continue
-    for (const side of r.sides) {
-      const layers = g.glows.filter(L => side === 'over' || !L.dark).map(L => {
-        const off = r.row ? L.x : L.y
-        const d = r.gap - L.spread + (r.after ? off : -off)
-        const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
-        return { rgb: L.rgb, a: Math.min(L.a, a) }
-      }).filter(L => L.a > 1e-4)
-      if (layers.length) GLOWS.push({ s, g: g.el, side, gap: r.gap, layers })
-    }
+    if (r) for (const { side, layers } of sideLayers(g.glows, r)) GLOWS.push({ s, g: g.el, side, gap: r.gap, layers })
   }
 }
 
