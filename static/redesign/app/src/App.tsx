@@ -2911,12 +2911,15 @@ export default function App() {
   const [convoLoading, setConvoLoading] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
   // 2026-06-05 (Home net-new #1) — real total library size for the greeting's
-  // "picked from X titles" clause. Fetched count-only on Home mount via a
+  // "picked from X titles" clause. Fetched count-only (see its effect) via a
   // per_page=1 /api/media call (no type filter → counts movies+shows
   // together). null until it lands / on error, so the greeting omits the
   // clause rather than fabricating a number. The browse-tab counts
   // (moviesTotal+showsTotal) remain a fallback (see the libraryTotal prop).
-  const [homeLibraryTotal, setHomeLibraryTotal] = useState<number | null>(null)
+  // The server counts what the session's profile may see, so the count is
+  // kept with the user and profile it was asked for (homeLibraryKey) and
+  // shown only while the app acts as that profile.
+  const [homeLibraryCount, setHomeLibraryCount] = useState<{ key: string; total: number } | null>(null)
 
   const navigate = useNavigate()
   useEffect(() => {
@@ -5685,17 +5688,42 @@ export default function App() {
   // greeting's "picked from X titles" clause. One count-only call
   // (per_page=1, no type filter → movies+shows counted together) using the
   // server's total_items. Non-blocking, abortable, and non-fatal: on error
-  // we leave homeLibraryTotal null and the greeting simply omits the clause
+  // we leave homeLibraryCount null and the greeting simply omits the clause
   // (it already gates on a non-null total). The browse-tab counts remain a
-  // fallback. Gated on `user` so we don't fire pre-auth.
+  // fallback. Gated on the user's id so we don't fire pre-auth.
+  //
+  // The server counts the catalog the session's profile may see, so this
+  // waits for the startup binding like the catalog does
+  // (catalogProfileSettled) and asks again for each profile the session acts
+  // as: one request once the startup load settles, and one per switch. It
+  // used to run once per sign-in, before the binding was read, so a fresh
+  // sign-in that bound the default and then re-selected the profile this
+  // browser last showed counted the default's catalog, and a switch kept the
+  // previous profile's count. Keyed on the user's id rather than the user
+  // object, which is replaced (the cached user, then /me; another tab's auth
+  // signal) without the session changing. Only the latest request lands, and
+  // an answer is shown only for the user and profile it was asked for, so
+  // the commit that switches profile shows no count rather than the previous
+  // profile's. The stored answer is dropped whenever the user's id, the
+  // profile or the startup settle changes, so it is only ever the current
+  // request's: a key alone came back after a sign-out and sign-in in the same
+  // tab (the same user and, once the startup load settles, the same
+  // profile), and after a switch away and back before the other profile's
+  // count landed, showing an answer from before.
+  const homeLibraryUserId = user ? user.id : null
+  const homeLibraryKey = `${homeLibraryUserId}:${activeProfileId}`
   useEffect(() => {
-    if (!user) return
+    setHomeLibraryCount(null)
+    if (homeLibraryUserId === null || !catalogProfileSettled) return
+    const key = `${homeLibraryUserId}:${activeProfileId}`
     const ac = new AbortController()
+    let cancelled = false
     listMediaWithTotal({ perPage: 1, signal: ac.signal })
-      .then(({ total }) => setHomeLibraryTotal(total))
+      .then(({ total }) => { if (!cancelled) setHomeLibraryCount({ key, total }) })
       .catch(() => { /* non-fatal — greeting omits the clause when null */ })
-    return () => ac.abort()
-  }, [user])
+    return () => { cancelled = true; ac.abort() }
+  }, [homeLibraryUserId, catalogProfileSettled, activeProfileId])
+  const homeLibraryTotal = homeLibraryCount && homeLibraryCount.key === homeLibraryKey ? homeLibraryCount.total : null
 
   // Keep heroIndexRef in sync with heroIndex across every change path
   // (auto-rotation, manual "Not tonight" skip, pool resets) so the
@@ -6158,8 +6186,9 @@ export default function App() {
               // Real count of the AI-curated set (hero picks + AI rails,
               // deduped) — varies, vs the old fixed ~5 hero-pool size.
               pickCount={profileSwitchPending ? 0 : aiCuratedCount}
-              // Real library total. Prefer the count-only mount fetch
-              // (homeLibraryTotal — movies+shows in one call); fall back to
+              // Real library total. Prefer the count-only fetch for the
+              // acting profile (homeLibraryTotal — movies+shows in one
+              // call; null until it lands for that profile); fall back to
               // the browse-tab counts (moviesTotal / showsTotal, populated
               // lazily when the user visits those tabs). Pass null when none
               // has loaded so HomeView OMITS the "picked from X titles"

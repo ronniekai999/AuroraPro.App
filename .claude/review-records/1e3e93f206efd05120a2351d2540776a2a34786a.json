@@ -1,0 +1,10 @@
+{
+  "sha": "1e3e93f206efd05120a2351d2540776a2a34786a",
+  "verdict": "lows-only",
+  "summary": "Home greeting library count follows the acting profile (key on user id + profile, settle wait, clear on input change, latest-request guard) with commit-sampling tests. Four review rounds; final at 1e3e93f: two lows (the rails clause should say core rails, since the Discover rail keeps pre-change picks; one narrow extra re-ask path) and two nits. No high/critical/medium.",
+  "reviewer": "independent-review-agent",
+  "findings": "4",
+  "diff_digest": "4ba928f94d7a587c062f3ea5aa11e62ca8c14f67715053e25edc0862e868feda",
+  "branch": "claude/sweet-brown-36veir-library-count",
+  "recorded_at": "2026-10-25T21:10:50Z"
+}

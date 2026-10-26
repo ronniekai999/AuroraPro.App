@@ -1,0 +1,10 @@
+{
+  "sha": "bfbc7cf8d1d21d283b19e45da2a85a5c4e3610f9",
+  "verdict": "clean",
+  "summary": "Merge of the reviewed Ubuntu 26.04 library-path fix (ronniekai999/AuroraPro.App#549, defeef7) into this PR's reviewed head: verified an exact union of the two reviewed diffs (per-file blobs and modes; CLAUDE.md 3-way merge byte-identical), tree rebuilt from a fresh merge matches, gates pass (go build, check-library-paths-test 194/194, plus the PR's own fast checks).",
+  "reviewer": "independent-review-agent",
+  "findings": "0",
+  "diff_digest": "0c1cd42c081ceb0a77b25464b4ad61180049a4ce8d1ac5dcc3d6e7fa05e53268",
+  "branch": "claude/sweet-brown-36veir-library-count",
+  "recorded_at": "2026-10-26T02:48:45Z"
+}
