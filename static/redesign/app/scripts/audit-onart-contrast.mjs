@@ -261,9 +261,10 @@ function declsOf(rule) {
 /** The colours this audit reads in a shadow: rgb()/rgba(), #hex and the three
  *  keywords, in any case, as CSS reads them. */
 const COLOUR = () => /rgba?\([^)]*\)|#[0-9a-f]{3,8}\b|\b(?:white|black|transparent)\b/gi
-/** A shadow's length: a number with a unit (or none, for 0), or a calc(),
- *  min(), max() or clamp() of those. Not var(): it can expand to a colour. */
-const SHADOW_LENGTH = new RegExp(String.raw`^(?:-?[\d.]+(?:px|r?em|ch|ex|vw|vh|vmin|vmax|%)?|(?:calc|min|max|clamp)\((?:[\d.\s+\-*/,()]|px|r?em|ch|ex|vw|vh|vmin|vmax|%|calc|min|max|clamp)*\))$`, 'i')
+/** A shadow's length: a number with a unit, or 0, or a calc(), min(), max()
+ *  or clamp() over lengths and numbers. Not var(): it can expand to a colour.
+ *  Not a percentage, which a shadow does not take. */
+const SHADOW_LENGTH = new RegExp(String.raw`^(?:-?(?:\d+\.?\d*|\.\d+)(?:px|r?em|ch|ex|vw|vh|vmin|vmax)|-?(?:0+\.?0*|\.0+)|(?:calc|min|max|clamp)\((?:[\d.\s+\-*/,()]|px|r?em|ch|ex|vw|vh|vmin|vmax|calc|min|max|clamp)*\))$`, 'i')
 
 /** Whether every colour in a shadow value is black at some alpha. A dark
  *  shadow cast UNDER the text only darkens its backdrop. A light or coloured
@@ -312,8 +313,13 @@ if (HERO_SF.parseDiagnostics?.length) {
 }
 const lineOf = pos => HERO_SF.getLineAndCharacterOfPosition(pos).line + 1
 const openingOf = el => (ts.isJsxElement(el) ? el.openingElement : el)
-const tagName = el => openingOf(el).tagName.getText(HERO_SF)
-const where = el => `<${tagName(el)}> at ${SRC_HERO}:${lineOf(openingOf(el).getStart(HERO_SF))}`
+// Node-relative, not tied to the hero's file: the known answers run them on a
+// probe component of their own.
+const tagName = el => openingOf(el).tagName.getText()
+const where = el => {
+  const sf = el.getSourceFile()
+  return `<${tagName(el)}> at ${sf.fileName}:${sf.getLineAndCharacterOfPosition(openingOf(el).getStart()).line + 1}`
+}
 
 /** The JSX element `anchor` names — the one whose opening tag holds it, or
  *  whose direct text or {expression} child does — and the anchor's position.
@@ -337,7 +343,7 @@ function attrsOf(el) {
   const out = new Map()
   for (const a of openingOf(el).attributes.properties) {
     if (ts.isJsxSpreadAttribute(a)) throw new Error(`audit: ${where(el)} spreads props; this audit cannot read them`)
-    out.set(a.name.getText(HERO_SF), a.initializer)
+    out.set(a.name.getText(), a.initializer)
   }
   return out
 }
@@ -464,7 +470,7 @@ function parseColor(str, ctx) {
   if (inner.includes(',')) {
     // legacy: three numbers or three percentages, then an alpha, by commas
     parts = inner.split(',').map(p => p.trim())
-    if (inner.includes('/') || parts.length < 3 || parts.length > 4 || new Set(parts.slice(0, 3).map(p => p.endsWith('%'))).size > 1) fail()
+    if (parts.length < 3 || parts.length > 4 || new Set(parts.slice(0, 3).map(p => p.endsWith('%'))).size > 1) fail()
   } else {
     // modern: three channels by spaces, then `/` and an alpha
     const [chan, alpha, extra] = inner.split('/').map(p => p.trim())
@@ -1026,7 +1032,8 @@ const VEIL = (() => {
     'text-[color:var(--no-such-token)]', '[color:rgba(255,255,255,0.3)]', '[opacity:0.3]', 'brightness-50',
     'mix-blend-screen', 'shadow-inner', 'no-such-class', '[text-shadow:0_0_20px_white]', 'drop-shadow-[0_0_20px_rgba(255,255,255,0.8)]',
     'order-first', 'ring-2', '[text-shadow:0_0_4px_black,0_0_10px]', '[text-shadow:0_0_4px_black,0_0_12px_purple]',
-    '[text-shadow:0_0_2px_rgb(255_255_255_/_55%)]', 'drop-shadow-[0_0_2px_#fff8]', '[text-shadow:0_0_var(--x)_black]']
+    '[text-shadow:0_0_2px_rgb(255_255_255_/_55%)]', 'drop-shadow-[0_0_2px_#fff8]', '[text-shadow:0_0_var(--x)_black]',
+    '[text-shadow:0_0_2_black]', '[text-shadow:0_0_2%_black]']
   const wrong = []
   for (const [classes, ok] of PROBE) {
     let r
@@ -1170,20 +1177,30 @@ function glowLayers(value, where_) {
   let v = value.trim()
   const tok = v.match(/^var\((--[\w-]+)\)$/)
   if (tok) v = rootToken(tok[1])
-  if (v === 'none') return []
+  if (v.toLowerCase() === 'none') return []
+  // Every layer is read and must be valid, inset ones included: a browser drops
+  // a declaration with one invalid layer, and an earlier declaration then
+  // paints (`boxShadowOf` takes the later, so an invalid one must not pass).
+  // Tokens are split outside parentheses, so `inset` is a word, not part of a
+  // name inside a function.
   return bgLayers(v).flatMap(layer => {
-    if (/\binset\b/i.test(layer)) return []
-    const colours = layer.match(COLOUR()) ?? []
-    const lens = layer.replace(COLOUR(), ' ').trim().split(/\s+/).filter(Boolean)
-      .map(l => (l === '0' ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
-    if (colours.length !== 1 || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN)) throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
-    const c = parseColor(colours[0], `${where_}: the box-shadow layer "${layer}"`)
-    return [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a, dark: darkShadow(layer) }]
+    const toks = splitTop(layer)
+    const insets = toks.flatMap((t, i) => (/^inset$/i.test(t) ? [i] : []))
+    const rest = toks.filter(t => !/^inset$/i.test(t))
+    const ci = rest.flatMap((t, i) => (/^(?:rgba?\(.*\)|#[0-9a-f]{3,8}|white|black|transparent)$/i.test(t) ? [i] : []))
+    const lens = rest.filter((_, i) => !ci.includes(i)).map(l => (/^-?0+\.?0*$/.test(l) ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
+    if (insets.length > 1 || (insets.length && insets[0] !== 0 && insets[0] !== toks.length - 1) || ci.length !== 1 || (ci[0] !== 0 && ci[0] !== rest.length - 1)
+      || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN) || (lens[2] ?? 0) < 0)
+      throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
+    const c = parseColor(rest[ci[0]], `${where_}: the box-shadow layer "${layer}"`)
+    return insets.length ? [] : [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a, dark: darkShadow(layer) }]
   })
 }
 
 /** The box-shadow a rule's declarations paint. -webkit-box-shadow is its
- *  alias, so the later of the two wins, an !important one first. */
+ *  alias, so the later of the two wins, an !important one first. The one
+ *  chosen is read strictly (`glowLayers`), so an invalid one, which a browser
+ *  would drop for the one before it, dies rather than hiding it. */
 function boxShadowOf(decls) {
   const shadows = decls.filter(d => /^(-webkit-)?box-shadow$/i.test(d.prop))
   return shadows.filter(d => d.important).pop() ?? shadows.pop() ?? null
@@ -1200,12 +1217,14 @@ function movesDecl(prop, v) {
 /** Whether a declaration on a neighbour paints past its box, or changes where
  *  or how it paints, in a way this audit does not model, prefixed or not: a
  *  filter, a z-index, a text stroke or shadow, an outline, a reflection, a
- *  flex order, a float, a blend mode, or an animation that holds a keyframe. */
+ *  border image outset, a flex order, a float, a blend mode, or an animation
+ *  that holds a keyframe. */
 function refusedDecl(prop, v) {
   const p = prop.toLowerCase().replace(/^-webkit-/, '')
   return /^(filter|z-index|text-stroke.*|box-reflect)$/.test(p) || (/^(text-shadow|outline)$/.test(p) && !/^(none|0)$/.test(v))
     || /^outline-(width|style|color|offset)$/.test(p)
     || (p === 'order' && v !== '0') || (p === 'float' && v !== 'none') || (p === 'mix-blend-mode' && v !== 'normal')
+    || (p === 'border-image-outset' && !/^(?:0+[a-z]*\s*)+$/.test(v)) || (p === 'border-image' && (v.match(/\//g) ?? []).length >= 2)
     || (/^animation(-fill-mode|-iteration-count)?$/.test(p) && /\b(forwards|both|infinite)\b/.test(v))
 }
 
@@ -1354,10 +1373,13 @@ function spacing(el, re) {
 // What paints an element with the positioned ones, by the property it sets, so
 // that a class setting that property back (`relative lg:static`,
 // `opacity-50 md:opacity-100`) is seen. A class or declaration reads as
-// { group, lifts }: lifts true or false where this audit knows how Chromium
-// paints it, null where it does not (a value it cannot read, or a property it
-// is unsure of, as `container-type`), which leaves the side open. A property
-// not listed is read as not lifting.
+// { group, lifts }: lifts true or false where it was checked in Chromium 153
+// (an earlier block's shadow painted over or under later text), null where it
+// was not, or where engines disagree, or the value cannot be read, which leaves
+// the side open. Measured as not lifting there: `container-type`, `contain:
+// size`, `will-change: z-index`, `mask-border` (unsupported), and a z-index on
+// an element that is not a flex item. A property not listed is read as not
+// lifting.
 const LIFT_CLASSES = [
   ['position', /^(?:relative|absolute|fixed|sticky|static)$/, u => u !== 'static'],
   ['opacity', /^opacity-/, u => twOpacity(u.slice(8), u) < 1],
@@ -1373,14 +1395,18 @@ function liftClass(u) {
   const g = LIFT_CLASSES.find(([, re]) => re.test(u))
   return g ? { group: g[0], lifts: g[2](u) } : null
 }
-/** What a will-change list says: a lift for opacity, transform or filter, none
- *  for auto, scroll-position or contents alone, and null for the rest, which
- *  this audit has not checked Chromium for. */
+/** What a will-change list says: a lift for the properties it was checked to
+ *  lift for, none for auto, scroll-position or contents alone, and null for
+ *  the rest (z-index was checked not to lift, but only on a static block). */
 function willChangeLifts(v) {
   const names = v.toLowerCase().split(/[\s,]+/).filter(Boolean)
-  if (names.some(n => /^(?:opacity|transform|filter)$/.test(n))) return true
+  if (names.some(n => /^(?:opacity|transform|translate|filter|backdrop-filter)$/.test(n))) return true
   return names.every(n => /^(?:auto|scroll-position|contents)$/.test(n)) ? false : null
 }
+// The -webkit- forms Chromium 153 supports and paints as their own property.
+// Any other prefixed form is left open: Chromium ignores it (so it does not
+// lift there), and another engine may not.
+const WEBKIT_ALIASES = /^-webkit-(?:opacity|transform|transform-style|perspective|filter|clip-path|mask|mask-image)$/
 function liftDecl(d) {
   const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
   const group = prop.replace(/^-webkit-/, '').replace(/^mask-image$/, 'mask')
@@ -1390,19 +1416,17 @@ function liftDecl(d) {
     case 'position': lifts = /^(?:relative|absolute|fixed|sticky)$/.test(v) ? true : v === 'static' ? false : null; break
     case 'opacity': { const m = v.match(/^([\d.]+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
     case 'isolation': lifts = v === 'isolate' ? true : v === 'auto' ? false : null; break
-    case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
     case 'will-change': lifts = unread ? null : willChangeLifts(v); break
     case 'contain': lifts = unread ? null : /paint|layout|strict|content/.test(v); break
     case 'transform-style': lifts = v === 'preserve-3d' ? true : v === 'flat' ? false : null; break
     case 'content-visibility': lifts = /^(?:auto|hidden)$/.test(v) ? true : v === 'visible' ? false : null; break
-    // Chromium paints an earlier container's shadow under later text, as if
-    // it were not lifted (a review checked); left open rather than guessed.
-    case 'container-type': lifts = v === 'normal' ? false : null; break
-    case 'z-index': lifts = unread ? null : v !== 'auto'; break
+    case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
     case 'filter': case 'backdrop-filter': case 'transform': case 'translate': case 'scale': case 'rotate': case 'perspective':
-    case 'clip-path': case 'mask': case 'mask-border': case 'offset-path': case 'view-transition-name': lifts = unread ? null : v !== 'none'; break
+    case 'clip-path': case 'mask': case 'view-transition-name': lifts = unread ? null : v !== 'none'; break
+    case 'container-type': case 'z-index': case 'mask-border': case 'offset-path': lifts = /^(?:normal|auto|none)$/.test(v) ? false : null; break
     default: return null
   }
+  if (prop.startsWith('-webkit-') && !WEBKIT_ALIASES.test(prop)) lifts = null
   return { group, lifts }
 }
 /** Whether class strings lift an element at rest: for certain in every string
@@ -1601,9 +1625,39 @@ function guardModel(sf, root) {
 }
 const exclusive = guardModel(HERO_SF, HERO_ROOT)
 
-// Known answers for the paint-order and condition readers, run every time. A
-// review undid each of these fixes in turn and the hero's figures did not
-// move, since nothing in the hero today exercises them; these do.
+/** How a glow on the element `gEl` reaches a surface, given the surface's
+ *  elements (its own first, up to the hero's root), the layer both must sit in
+ *  and the file's `exclusive`: null when it cannot (another layer, or never
+ *  rendered with it), else { gap, row, after, sides }. */
+function reach(gEl, sChain, layer, exclusive) {
+  const gChain = [gEl]
+  for (let n = gEl.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
+  if (!gChain.includes(layer) || exclusive(gEl, sChain[0])) return null
+  const A = gChain.find(n => sChain.includes(n))
+  if (sChain.indexOf(A) < 1) throw new Error(`audit: ${where(gEl)} casts a glow from inside ${where(sChain[0])}, a measured surface; this audit does not model a glow among the text's own glyphs`)
+  const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
+  const after = cG.getStart() > cS.getStart()
+  const aTok = restingTokens(A)
+  if (aTok.some(u => /^flex-(row|col)-reverse$/.test(u))) throw new Error(`audit: ${where(A)} reverses its flex direction; this audit does not model which side its glows reach`)
+  const row = aTok.some(u => /^(inline-)?flex$/.test(u)) && !aTok.includes('flex-col')
+  let gap
+  const colGap = () => spacing(A, /^gap-(?!y-)(?:x-)?(.+)$/), rowGap = () => spacing(A, /^gap-(?!x-)(?:y-)?(.+)$/)
+  if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
+  else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
+  for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
+  // Each side's lift: certain or possible on any element up to A.
+  const lift = chain => {
+    const below = chain.slice(0, chain.indexOf(A))
+    return { sure: below.some(n => lifted(n, true)), possible: below.some(n => lifted(n, false)) }
+  }
+  return { gap, row, after, sides: [...sidesFor(lift(gChain), lift(sChain), after, gChain.slice(0, gChain.indexOf(A)).some(atomic))].sort() }
+}
+
+// Known answers for the paint-order, shadow and condition readers, and for
+// `reach`, which GLOWS calls with them, run every time. Two reviews undid
+// fixes here one line at a time and the hero's figures did not move, since
+// nothing in the hero today exercises them. Each of those undoings now fails
+// one of these. That is all they pin: an undoing not tried may still pass.
 {
   const wrong = []
   const expect = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`) }
@@ -1617,7 +1671,10 @@ const exclusive = guardModel(HERO_SF, HERO_ROOT)
   const decl = text => postcss.parse(`.x{${text}}`).first.nodes[0]
   for (const [text, want] of [['container-type: inline-size', null], ['container-type: normal', false], ['will-change: opacity', true],
     ['will-change: z-index', null], ['will-change: scroll-position', false], ['-webkit-transform: none', false], ['-webkit-filter: blur(1px)', true],
-    ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false]])
+    ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false],
+    ['mix-blend-mode: multiply', true], ['mask-image: linear-gradient(black, black)', true], ['view-transition-name: x', true], ['-webkit-opacity: .5', true],
+    ['mask-border: url(x.png) 30', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
+    ['-webkit-backdrop-filter: blur(1px)', null], ['will-change: backdrop-filter', true]])
     expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
   const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
   for (const [g, s, after, allAtOnce, want] of [
@@ -1630,8 +1687,16 @@ const exclusive = guardModel(HERO_SF, HERO_ROOT)
   expect('an !important shadow wins over a later alias', boxShadowOf(rule('box-shadow: 0 0 1px red !important; -webkit-box-shadow: 0 0 2px black'))?.value, '0 0 1px red')
   for (const [prop, v, moves, refused] of [['-webkit-transform', 'translateY(-40px)', true, false], ['translate', 'none', false, false], ['scale', '2', true, false],
     ['inset-inline-start', '4px', true, false], ['-webkit-filter', 'drop-shadow(0 0 12px white)', false, true], ['order', '2', false, true],
-    ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false]])
+    ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false],
+    ['border-image-outset', '10px', false, true], ['border-image-outset', '0', false, false], ['border-image', 'url(x.png) 30 / 1 / 8px', false, true]])
     expect(`neighbour ${prop}: ${v}`, [movesDecl(prop, v), refusedDecl(prop, v)], [moves, refused])
+  // A glow layer is read strictly, inset ones and `inset` as a word included.
+  for (const [value, want] of [['0 0 2px White', [[1, 1, 1, 1]]], ['inset 0 0 4px black, 0 0 2px #fff8', [[1, 1, 1, 0x88 / 255]]],
+    ['0 0 -2px black', 'dies'], ['inset nonsense', 'dies'], ['0 0 var(--inset-r) white', 'dies'], ['0 red 0', 'dies'], ['0 0 2px inset black', 'dies']]) {
+    let got
+    try { got = glowLayers(value, 'probe').map(L => [...L.rgb, L.a]) } catch { got = 'dies' }
+    expect(`the box-shadow ${value}`, got, want)
+  }
   for (const [str, want] of [['rgb(0 0 0 / 55%)', [0, 0, 0, 0.55]], ['#0008', [0, 0, 0, 0x88 / 255]], ['Black', [0, 0, 0, 1]], ['rgba(255, 255, 255, .5)', [1, 1, 1, 0.5]],
     ['rgba(255,255,255 / .9)', 'dies'], ['rgb(100% 0 0)', [1, 0, 0, 1]], ['rgb(100%, 0, 0)', 'dies']]) {
     let got
@@ -1669,44 +1734,66 @@ const exclusive = guardModel(HERO_SF, HERO_ROOT)
   find(probe)
   const ex = guardModel(probe, section)
   for (const [a, b, want] of [['a1', 'a2', true], ['t1', 't2', true], ['s1', 'a2', false], ['s1', 'a1', false], ['c1', 'c2', false],
-    ['o1', 'o2', false], ['o1', 'a1', false], ['o3', 'a1', true], ['w1', 'w2', false], ['d1', 'd2', false], ['g1', 'g2', true], ['k1', 'k2', true], ['q1', 'q2', true], ['y1', 'y2', false]])
+    ['o1', 'o2', false], ['o1', 'a1', false], ['o3', 'a1', true], ['w1', 'w2', false], ['d1', 'd2', false], ['g1', 'g2', true], ['k1', 'k2', true], ['q1', 'q2', true], ['y1', 'y2', false], ['a1', 't1', false], ['o3', 'a2', false]])
     expect(`${a} and ${b} exclusive`, ex(byId.get(a), byId.get(b)), want)
+  // The pair logic GLOWS runs, end to end, on a layout of its own.
+  const layout = ts.createSourceFile('reach-probe.tsx', [
+    'export function Q({ on }) {',
+    '  return (',
+    '    <section>',
+    '      <div id="layer">',
+    '        <div className="flex gap-3">',
+    '          <span id="g-may" className="aria-selected:isolate">x</span>',
+    '          <span id="g-lift" className="relative">x</span>',
+    '          <span id="s-row">text</span>',
+    '          <span id="g-flat">x</span>',
+    '        </div>',
+    '        <p id="s-col" className="mb-2">text</p>',
+    '        <div id="g-block">x</div>',
+    '        <div id="g-inline" className="inline-block">x</div>',
+    '        {on && <span id="g-on">x</span>}',
+    '        {!on && <p id="s-off">text</p>}',
+    '      </div>',
+    '    </section>',
+    '  )',
+    '}',
+  ].join('\n'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const el = new Map()
+  let root
+  const collect = n => {
+    if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && openingOf(n).tagName.getText() === 'section') root = n
+    const id = (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && openingOf(n).attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText() === 'id')
+    if (id) el.set(id.initializer.text, n)
+    ts.forEachChild(n, collect)
+  }
+  collect(layout)
+  const exLayout = guardModel(layout, root)
+  const chain = id => { const out = [el.get(id)]; for (let n = el.get(id).parent; n; n = n.parent) if (ts.isJsxElement(n)) out.push(n); return out }
+  for (const [g, sId, want] of [
+    ['g-lift', 's-row', { gap: 12, row: true, after: false, sides: ['over'] }],
+    ['g-may', 's-row', { gap: 12, row: true, after: false, sides: ['over', 'under'] }],
+    ['g-flat', 's-row', { gap: 12, row: true, after: true, sides: ['over'] }],
+    ['g-block', 's-col', { gap: 8, row: false, after: true, sides: ['over', 'under'] }],
+    ['g-inline', 's-col', { gap: 8, row: false, after: true, sides: ['over'] }],
+    ['g-lift', 's-col', { gap: 0, row: false, after: false, sides: ['over'] }],
+    ['g-on', 's-off', null],
+  ]) expect(`how ${g} reaches ${sId}`, reach(el.get(g), chain(sId), el.get('layer'), exLayout), want)
   if (wrong.length) throw new Error(`audit: the paint-order and condition readers' known answers changed — the audit is out of date, not passing:\n  ${wrong.join('\n  ')}`)
 }
 
 const GLOWS = []
 for (const s of SURFACES) {
-  const sChain = s.nodes
-  const layer = sChain[sChain.length - 2]
   for (const g of NEIGHBOURS) {
-    const gChain = [g.el]
-    for (let n = g.el.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
-    if (!gChain.includes(layer) || exclusive(g.el, sChain[0])) continue
-    const A = gChain.find(n => sChain.includes(n))
-    if (sChain.indexOf(A) < 1) throw new Error(`audit: ${where(g.el)} casts a glow from inside ${where(sChain[0])}, a measured surface; this audit does not model a glow among the text's own glyphs`)
-    const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
-    const after = cG.getStart(HERO_SF) > cS.getStart(HERO_SF)
-    const aTok = restingTokens(A)
-    if (aTok.some(u => /^flex-(row|col)-reverse$/.test(u))) throw new Error(`audit: ${where(A)} reverses its flex direction; this audit does not model which side its glows reach`)
-    const row = aTok.some(u => /^(inline-)?flex$/.test(u)) && !aTok.includes('flex-col')
-    let gap
-    const colGap = () => spacing(A, /^gap-(?!y-)(?:x-)?(.+)$/), rowGap = () => spacing(A, /^gap-(?!x-)(?:y-)?(.+)$/)
-    if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
-    else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
-    for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
-    // Each side's lift: certain or possible on any element up to A.
-    const lift = chain => {
-      const below = chain.slice(0, chain.indexOf(A))
-      return { sure: below.some(n => lifted(n, true)), possible: below.some(n => lifted(n, false)) }
-    }
-    for (const side of sidesFor(lift(gChain), lift(sChain), after, gChain.slice(0, gChain.indexOf(A)).some(atomic))) {
+    const r = reach(g.el, s.nodes, s.nodes[s.nodes.length - 2], exclusive)
+    if (!r) continue
+    for (const side of r.sides) {
       const layers = g.glows.filter(L => side === 'over' || !L.dark).map(L => {
-        const off = row ? L.x : L.y
-        const d = gap - L.spread + (after ? off : -off)
+        const off = r.row ? L.x : L.y
+        const d = r.gap - L.spread + (r.after ? off : -off)
         const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
         return { rgb: L.rgb, a: Math.min(L.a, a) }
       }).filter(L => L.a > 1e-4)
-      if (layers.length) GLOWS.push({ s, g: g.el, side, gap, layers })
+      if (layers.length) GLOWS.push({ s, g: g.el, side, gap: r.gap, layers })
     }
   }
 }
