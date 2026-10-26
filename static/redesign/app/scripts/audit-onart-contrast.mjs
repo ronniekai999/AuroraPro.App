@@ -258,8 +258,10 @@ function declsOf(rule) {
 }
 
 /** Whether every colour in a shadow value is black at some alpha. A dark
- *  shadow only darkens what is under it, which cannot lower the contrast of
- *  this hero's light text; a light or coloured one can. */
+ *  shadow cast UNDER this hero's light text only darkens its backdrop, which
+ *  cannot lower its contrast; a light or coloured one can. Painted over the
+ *  text it darkens the glyphs too, and that is measured (GLOWS); a text or drop
+ *  shadow is cast under its own glyphs. */
 function darkShadow(value) {
   const cols = value.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|\b(?:white|black|transparent)\b/g) ?? []
   return cols.length > 0 && cols.every(c => c === 'black' || c === 'transparent' || (c !== 'white' && parseColor(c).rgb.every(v => v === 0)))
@@ -722,7 +724,7 @@ function bgLayers(value) {
 // failing) and added a light radial layer first, both unread.
 {
   const L = bgLayers(scrim)
-  if (L.length !== 2 || !/^linear-gradient\(\s*90deg\s*,/.test(L[0]) || !/^linear-gradient\(\s*0deg\s*,/.test(L[1]))
+  if (L.length !== 2 || !/^linear-gradient\(\s*(?:90deg|to right)\s*,/.test(L[0]) || !/^linear-gradient\(\s*(?:0deg|to top)\s*,/.test(L[1]))
     throw new Error(`audit: .stage-hero-scrim's background is no longer a 90deg linear-gradient over a 0deg one and nothing else; model it — the audit is out of date, not passing`)
 }
 const HERO = {
@@ -870,7 +872,7 @@ const GLOW = (() => {
 // the coordinates below were taken at (VIEWPORT_H), not assumed.
 const FEATHER = (() => {
   const bg = cssValue('.stage-hero-scrim::before', 'background')
-  if (bgLayers(bg).length !== 1 || !/^linear-gradient\(\s*180deg\s*,/.test(bg)) throw new Error('audit: the hero top feather is no longer one top-down (180deg) linear-gradient')
+  if (bgLayers(bg).length !== 1 || !/^linear-gradient\(\s*(?:180deg|to bottom)\s*,/.test(bg)) throw new Error('audit: the hero top feather is no longer one top-down (180deg) linear-gradient')
   const h = cssValue('.stage-hero-scrim::before', 'height').match(/^([\d.]+)px$/)
   if (!h) throw new Error('audit: the hero top feather height is no longer a px length')
   const sizes = hero.match(/'relative w-full h-\[(\d+)vh\] min-h-\[(\d+)px\] max-h-\[(\d+)px\]/)
@@ -1090,21 +1092,22 @@ function classStrings(el) {
   return v
 }
 
-/** A box-shadow value's layers that paint outside the box and could lighten
- *  text: not inset, not dark. Each as { x, y, blur, spread, rgb, a }. */
+/** A box-shadow value's layers that paint outside the box: not inset. Each as
+ *  { x, y, blur, spread, rgb, a, dark }; a dark one counts only where it is
+ *  painted over the text. */
 function glowLayers(value, where_) {
   let v = value.trim()
   const tok = v.match(/^var\((--[\w-]+)\)$/)
   if (tok) v = rootToken(tok[1])
   if (v === 'none') return []
   return bgLayers(v).flatMap(layer => {
-    if (/\binset\b/.test(layer) || darkShadow(layer)) return []
+    if (/\binset\b/.test(layer)) return []
     const colour = layer.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/)
     const lens = layer.replace(colour?.[0] ?? '', '').trim().split(/\s+/).filter(Boolean)
       .map(l => (l === '0' ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
     if (!colour || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN)) throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
     const c = parseColor(colour[0])
-    return [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a }]
+    return [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a, dark: darkShadow(layer) }]
   })
 }
 
@@ -1136,13 +1139,17 @@ function neighbourOf(el) {
     const fail = why => { throw new Error(`audit: ${where(el)}: ${t} ${why} — the audit is out of date, not passing`) }
     if (/^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
       || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)) { res.out ??= `carries ${t}`; continue }
-    if (/^(shadow|ring|blur|brightness|contrast|saturate|hue-rotate|invert|sepia|grayscale|drop-shadow)(-|$)/.test(util)
-      && !/^shadow(-(sm|md|lg|xl|2xl|inner|none))?$/.test(util) && !isInert(util)) fail('paints past its box in a way this audit does not model')
+    // Tailwind's shadows, filters and outlines paint past the box or change
+    // it, and are not read here: a glow belongs in a project class whose
+    // box-shadow GLOWS measures.
+    if ((/^(shadow|drop-shadow|ring|blur|brightness|contrast|saturate|hue-rotate|invert|sepia|grayscale|outline)(-|$)/.test(util)
+      && !/^(shadow-none|drop-shadow-none|outline-none|outline-0)$/.test(util)) || /^\[(text-shadow|box-shadow|filter|outline)[:\]]/.test(util))
+      fail('paints past its box in a way this audit does not model; give it a project class whose box-shadow GLOWS measures')
     if (/^(from|via|to)-/.test(util)) continue // a gradient's stops: its own fill, inside its box
     const prop = classify(util)
     if (prop?.key === 'z' && stacks(prop.value)) fail('sets a z-index; this audit does not model where that paints it')
     if (unplaced && (prop || !isInert(util))) fail(unplaced)
-    if (prop || (isInert(util) && !CSS_RULES.has(util)) || /^shadow(-(sm|md|lg|xl|2xl|inner|none))?$/.test(util)) continue
+    if (prop || (isInert(util) && !CSS_RULES.has(util))) continue
     if (!CSS_RULES.has(util)) fail('is not a class this audit can place')
     for (const { rule, pseudo } of CSS_RULES.get(util)) {
       const decls = declsOf(rule)
@@ -1155,7 +1162,8 @@ function neighbourOf(el) {
         if ((d.prop === 'position' && !/^(relative|static)$/.test(v)) || /^(inset|top|right|bottom|left|translate)$/.test(d.prop)
           || (d.prop === 'transform' && v !== 'none') || (/^margin/.test(d.prop) && v.includes('-'))) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
         else if (d.prop === 'box-shadow') res.glows.push(...glowLayers(v, `${where(el)} (${rule.selector})`))
-        else if (/^(filter|z-index|-webkit-text-stroke.*)$/.test(d.prop) || (d.prop === 'text-shadow' && v !== 'none' && !darkShadow(v))
+        else if (/^(filter|z-index|-webkit-text-stroke.*)$/.test(d.prop) || (/^(text-shadow|outline)$/.test(d.prop) && !/^(none|0)$/.test(v))
+          || (/^outline-(width|style|color|offset)$/.test(d.prop))
           || (/^animation(-fill-mode|-iteration-count)?$/.test(d.prop) && /\b(forwards|both|infinite)\b/.test(v)))
           fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
       }
@@ -1198,13 +1206,23 @@ const NEIGHBOURS = (() => {
 // margin there, or a reversed flex direction, dies. Across that gap each
 // shadow layer falls off as a blurred edge does, alpha·½·erfc(d / (σ√2)) with
 // σ = blur/2 and d the gap less its spread, plus or minus its offset along the
-// axis; its corner, where it is fainter, is not modelled. A glow painted after
-// the text (G later in tree order, or positioned where S is not) lies over the
-// glyphs and their backdrop alike; one painted before lies under them. Each
-// surface is then measured under every set of glows that can render together
-// (the two branches of one condition cannot), and its worst figure is
-// asserted with the rest. A pairing that never renders together (separate
-// `compact` conditions, say) is still counted, the stricter answer.
+// axis; its corner, where it is fainter, is not modelled (in Chromium a
+// review measured glow-purple's straight edge a little fainter than this, at
+// every distance to 40px). A glow painted after the text lies over the glyphs
+// and their backdrop alike, and a dark one then counts too; one painted before
+// lies under them, where only a light one can lower contrast. After means
+// later in tree order between elements in the same paint layer, and otherwise
+// the one that is lifted: positioned, or making a stacking context (opacity
+// below 1, isolation, a filter or backdrop-filter, a transform, will-change,
+// a blend mode, containment), which CSS 2.1 Appendix E paints with the
+// positioned elements. The pill's backdrop-filter does that, and Chromium
+// paints its glow over the genre line beside it. Where the classes or rules
+// leave it open (a rule under some other selector, say), G is taken as lifted
+// and S as not, the side that is stricter here. Each surface is then measured
+// under every set of glows that can render together, and its worst figure is
+// asserted with the rest. Two elements cannot render together when one sits
+// under a condition the other sits under negated: the two branches of a `?:`,
+// or `{compact && …}` beside `{!compact && …}` (`guardsOf`).
 const erfc = x => {
   // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7.
   const t = 1 / (1 + 0.3275911 * Math.abs(x))
@@ -1231,18 +1249,64 @@ function spacing(el, re) {
   }
   return px === Infinity ? 0 : px
 }
-const positioned = el => restingTokens(el).some(u => /^(relative|absolute|fixed|sticky)$/.test(u))
-  || restingTokens(el).some(u => (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo && declsOf(rule).some(d => d.prop === 'position' && d.value.trim() !== 'static')))
-/** The ConditionalExpression whose two branches hold `a` and `b`, if any. */
-function exclusive(a, b) {
-  for (let n = a.parent; n; n = n.parent) {
-    if (ts.isConditionalExpression(n)) {
-      const inT = x => x.pos >= n.whenTrue.pos && x.end <= n.whenTrue.end
-      const inF = x => x.pos >= n.whenFalse.pos && x.end <= n.whenFalse.end
-      if ((inT(a) && inF(b)) || (inF(a) && inT(b))) return true
-    }
+// Classes and declarations that paint an element with the positioned ones.
+const LIFT_CLASS = new RegExp('^(?:' + [
+  'relative|absolute|fixed|sticky|isolate|transform(?:-gpu|-cpu)?',
+  'opacity-(?!100$).+|backdrop-.+|blur(?:-.+)?|brightness-.+|contrast-.+|grayscale(?:-.+)?|hue-rotate-.+|invert(?:-.+)?|saturate-.+|sepia(?:-.+)?|drop-shadow(?:-.+)?',
+  'mix-blend-(?!normal$).+|will-change-(?!auto$).+|contain-(?:paint|layout|strict|content)',
+  String.raw`-?(?:translate-[xy]|rotate|scale(?:-[xy])?|skew-[xy])-.+`,
+].join('|') + ')$')
+function liftDecl(d) {
+  const v = d.value.trim()
+  switch (d.prop) {
+    case 'position': return v !== 'static'
+    case 'opacity': return Number(v) < 1
+    case 'isolation': return v === 'isolate'
+    case 'will-change': return v !== 'auto'
+    case 'mix-blend-mode': return v !== 'normal'
+    case 'contain': return /paint|layout|strict|content/.test(v)
+    case 'z-index': return v !== 'auto'
+    case 'filter': case 'backdrop-filter': case '-webkit-backdrop-filter': case 'transform': case 'clip-path':
+    case 'mask': case 'mask-image': case '-webkit-mask-image': return v !== 'none'
+    default: return false
   }
-  return false
+}
+/** Whether an element paints with the positioned ones at rest. `strict` counts
+ *  only what certainly applies, every className branch and only the class's own
+ *  top-level rule; otherwise any branch and any rule counts. */
+function lifted(el, strict) {
+  const byRule = u => (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo
+    && (!strict || (rule.parent.type === 'root' && rule.selector === `.${u}`)) && declsOf(rule).some(liftDecl))
+  const lifts = s => s.split(/\s+/).filter(Boolean).map(splitVariants).filter(([v]) => variantState(v).applies)
+    .map(([, u]) => u.replace(/^!/, '')).some(u => LIFT_CLASS.test(u) || byRule(u))
+  const strs = classStrings(el)
+  return strict ? strs.every(lifts) : strs.some(lifts)
+}
+
+/** The conditions a node renders under, as normalised source text: the
+ *  conjuncts left of each `&&` it sits right of, and the test of each `?:`
+ *  branch it sits in (with its conjuncts on the true side, negated whole on the
+ *  false side). */
+function guardsOf(node) {
+  const out = []
+  const norm = e => e.getText(HERO_SF).replace(/\s+/g, '')
+  const conj = e => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression
+    return ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ? [...conj(e.left), ...conj(e.right)] : [norm(e)]
+  }
+  for (let n = node; n.parent; n = n.parent) {
+    const p = n.parent
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) out.push(...conj(p.left))
+    if (ts.isConditionalExpression(p) && p.whenTrue === n) out.push(norm(p.condition), ...conj(p.condition))
+    if (ts.isConditionalExpression(p) && p.whenFalse === n) out.push(`!(${norm(p.condition)})`)
+  }
+  return out
+}
+const negate = g => (/^!\(.*\)$/.test(g) ? g.slice(2, -1) : /^![\w.]+$/.test(g) ? g.slice(1) : `!(${g})`)
+/** Whether two nodes can never render together. */
+function exclusive(a, b) {
+  const ga = new Set(guardsOf(a).flatMap(g => [g, negate(negate(g))]))
+  return guardsOf(b).some(g => ga.has(negate(g)) || (/^![\w.]+$/.test(g) && ga.has(g.slice(1))) || ga.has(`!${g}`))
 }
 const GLOWS = []
 for (const s of SURFACES) {
@@ -1251,8 +1315,9 @@ for (const s of SURFACES) {
   for (const g of NEIGHBOURS) {
     const gChain = [g.el]
     for (let n = g.el.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
-    if (!gChain.includes(layer)) continue
+    if (!gChain.includes(layer) || exclusive(g.el, sChain[0])) continue
     const A = gChain.find(n => sChain.includes(n))
+    if (sChain.indexOf(A) < 1) throw new Error(`audit: ${where(g.el)} casts a glow from inside ${where(sChain[0])}, a measured surface; this audit does not model a glow among the text's own glyphs`)
     const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
     const after = cG.getStart(HERO_SF) > cS.getStart(HERO_SF)
     const aTok = restingTokens(A)
@@ -1263,10 +1328,10 @@ for (const s of SURFACES) {
     if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
     else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
     for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
-    const posG = gChain.slice(0, gChain.indexOf(A)).some(positioned)
-    const posS = sChain.slice(0, sChain.indexOf(A)).some(n => classBranches(n).some(b => /(^|\s)(relative|absolute|fixed|sticky)(\s|$)/.test(b.text)))
-    const side = posG !== posS ? (posG ? 'over' : 'under') : (after ? 'over' : 'under')
-    const layers = g.glows.map(L => {
+    const liftG = gChain.slice(0, gChain.indexOf(A)).some(n => lifted(n, false))
+    const liftS = sChain.slice(0, sChain.indexOf(A)).some(n => lifted(n, true))
+    const side = liftG !== liftS ? (liftG ? 'over' : 'under') : (after ? 'over' : 'under')
+    const layers = g.glows.filter(L => side === 'over' || !L.dark).map(L => {
       const off = row ? L.x : L.y
       const d = gap - L.spread + (after ? off : -off)
       const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
@@ -1314,6 +1379,7 @@ console.log('-'.repeat(LABEL_W + 54))
   console.log(`\nunder neighbour glows (GLOWS): each surface's worst frame under every set of glows that can render together`)
   for (const [s, rs] of bySurface) {
     let worst = Infinity, worstSet = []
+    if (rs.length > 12) throw new Error(`audit: ${rs.length} glows reach ${s.what}; this audit enumerates their combinations and stops at 12 — model them another way`)
     for (let mask = 1; mask < 1 << rs.length; mask++) {
       const set = rs.filter((_, i) => mask & (1 << i))
       if (set.some((a, i) => set.some((b, j) => j > i && exclusive(a.g, b.g)))) continue
