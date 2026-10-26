@@ -234,7 +234,11 @@ deployment, not continuous service-health monitoring. A slow box whose builds,
 viewer drain (up to five minutes) and two verifications exceed the unit's
 10-minute `TimeoutStartSec` is stopped by systemd; mid-install that triggers the
 rollback above. `install.sh` and `redeploy.sh` still use their own
-`localhost:8484` health checks.
+`localhost:8484` health checks, but now share the updater's viewer drain: a
+re-run of `install.sh` (`AURORA_SKIP_DRAIN=1` skips it) and `redeploy.sh`
+(`--no-drain`) wait up to five minutes for active streams before replacing any
+live file. Neither waited before; both restarted under anyone watching.
+`scripts/drain-gate-test.sh` keeps the three copies identical and checks them.
 
 Run the network-free regression suite on Linux:
 
@@ -242,6 +246,7 @@ Run the network-free regression suite on Linux:
 bash -n scripts/aurora-update.sh
 python3 scripts/aurora-update-test.py -v
 sudo python3 scripts/aurora-update-test.py -v
+bash scripts/drain-gate-test.sh
 ```
 
 The suite uses real temporary Git repositories, file operations, and locks with

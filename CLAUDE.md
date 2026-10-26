@@ -1130,7 +1130,15 @@ count restarts).
   than the window can never deploy; the Node gate reads the checkout before the
   merge; drain, builds and two verifications can approach the unit's 10-minute
   `TimeoutStartSec`; `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
-  (`--skip-npm`, `:8484` health check) are unchanged.
+  (`--skip-npm`) can still install a bundle not built from the code beside it,
+  and both keep their `:8484` health checks.
+- The viewer drain is one `AURORA-DRAIN` block, identical in
+  `aurora-update.sh`, `install.sh` and `redeploy.sh`
+  (`scripts/drain-gate-test.sh` checks the copies, the hostile-file cases, that
+  it reads the path `DefaultStreamStateFile` writes, and that each script waits
+  before its first live change). `install.sh` re-runs and `redeploy.sh` used not
+  to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
+  the service is not running.
 
 ### Node build floor
 

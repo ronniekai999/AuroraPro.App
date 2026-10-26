@@ -98,7 +98,7 @@ SPA_OUTPUT_DIR=static/v2
 # Written by the server once it has bound its listener (cmd/aurora/
 # serving_record.go): which pid listens where, over which scheme. It lives in
 # the aurora user's cache dir (the server cannot write /var/lib/aurora), so it
-# is read as untrusted input; see read_untrusted.
+# is read as untrusted input; see service_endpoint.
 SERVING_FILE=/var/cache/aurora/serving.json
 PROC_ROOT=/proc
 # A restarted service gets VERIFY_TIMEOUT seconds (and at most that many probe
@@ -673,26 +673,6 @@ with open(sys.argv[1], "rb") as stream:
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
         digest.update(chunk)
 print(digest.hexdigest())' "$1"
-}
-
-# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
-# or anything large. For files in directories the aurora user can write (the
-# serving record, the drain snapshot): they must not steer root into reading
-# some other file, or hang it on a pipe nobody writes.
-read_untrusted() {
-    python3 -c '
-import os, stat, sys
-try:
-    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-except OSError:
-    sys.exit(1)
-with os.fdopen(fd, "rb") as stream:
-    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-        sys.exit(1)
-    data = stream.read(65537)
-if len(data) > 65536:
-    sys.exit(1)
-sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
 }
 
 # main_pid — aurora.service's main process, or failure when it has none
@@ -1270,56 +1250,67 @@ ensure_llm_models
 # them; the client then POSTed keepalive against a dead session for the next
 # hour. Observed twice in production on 2026-08-02.
 #
-# The server now publishes the honest count — sessions a client is still
-# holding, playing or paused — to $STREAM_STATE_FILE every 30 s. It used to be
-# /var/lib/aurora/stream-state.json, which the server (the aurora user) cannot
-# create there, so on a standard install this was the ffmpeg check alone. The
-# aurora user can write this directory, so it is read with read_untrusted.
-STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
-_STREAM_STATE_MAX_AGE=90   # snapshot older than this is "unknown", not "zero"
-
-# viewers_held echoes the number of sessions a client is still holding, or the
-# empty string when the server's snapshot is missing/stale/unparseable — the
-# caller then falls back to the pgrep heuristic.
+# The server now publishes the honest count (sessions a client is still
+# holding, playing or paused) every 30 s; streams_busy reads it. Old servers
+# that predate the file, or write it where it cannot be created, leave only the
+# pgrep half, which is what makes the script safe to deploy before the binary
+# that writes it: the drain reads the OLD, still-running server.
+# AURORA-DRAIN-BEGIN — identical in aurora-update.sh, install.sh and redeploy.sh;
+# scripts/drain-gate-test.sh checks the copies and how they behave. Duplicated
+# rather than sourced for the reason node_vite_verdict is.
 #
-# Staleness matters: a wedged or freshly-restarted server leaves a snapshot
-# that looks exactly like an idle one, and believing a stale zero is precisely
-# the bug being fixed. Old servers that predate this file always fall back,
-# which is what makes the script safe to deploy before the binary that writes
-# it (the drain reads the OLD, still-running server).
+# streams_busy is true while restarting aurora.service would interrupt a viewer.
+# It is the UNION of two signals, each covering the other's gap: the server's
+# snapshot of the sessions a client is still holding, playing or paused
+# (refreshed every 30 s; a paused viewer's encoder is reaped, so pgrep cannot
+# see them), and `pgrep -u aurora ffmpeg` (which sees a stream started since
+# the last snapshot). Either alone reintroduces one of the two bugs, and the
+# union still converges: an abandoned session's encoder exits after 75 s and it
+# leaves the 120 s viewer window.
+#
+# The server writes the snapshot to /var/cache/aurora because it cannot create
+# files in /var/lib/aurora (root:root 0755: the root-owned source mirror lives
+# there). The aurora user owns /var/cache/aurora, so the snapshot is read as
+# untrusted input. A missing, stale or unreadable snapshot is "unknown", never
+# "zero viewers": a crashed or wedged server's last snapshot looks exactly like
+# an idle one.
+STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
+_STREAM_STATE_MAX_AGE=90
+
+# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
+# or anything large, so a file the aurora user controls can neither point root
+# at another file nor hang it on a pipe nobody writes.
+read_untrusted() {
+    python3 -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        sys.exit(1)
+    data = stream.read(65537)
+if len(data) > 65536:
+    sys.exit(1)
+sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
+}
+
+# viewers_held — how many sessions the snapshot says a client is holding, or
+# nothing when that is unknown.
 viewers_held() {
     local state
     state="$(read_untrusted "$STREAM_STATE_FILE" 2>/dev/null)" || return 0
-
     _vh_now=$(date +%s)
     _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
     _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
-    # Validate each field independently. A partially-written or renamed-key
-    # file must land on "unknown" (fall back to pgrep), never on a bare 0
-    # that would wave a deploy through while someone is watching.
+    # Each field on its own: a half-written or renamed-key snapshot is unknown.
     case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
     case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
     [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
-
     printf '%s' "$_vh_held"
 }
 
-# streams_busy is the drain predicate: true while a restart would interrupt
-# someone.
-#
-# The UNION of both signals, not a preference between them — each covers a
-# gap the other has:
-#
-#   - The snapshot refreshes every 30s, so a stream started seconds ago still
-#     reports held_by_viewer=0. pgrep sees its encoder immediately.
-#   - A paused viewer's encoder is reaped, so pgrep sees nothing. The
-#     snapshot still counts them, which is the whole point of this change.
-#
-# Taking either signal alone reintroduces one of the two bugs. The union is
-# never less conservative than the pgrep-only gate it replaces, and it still
-# converges: an abandoned session's variants are reaped after 75s (ffmpeg
-# exits) and it drops out of the 120s viewer window, so both signals go
-# quiet and the drain completes.
 streams_busy() {
     _sb_held=$(viewers_held)
     if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
@@ -1327,6 +1318,20 @@ streams_busy() {
     fi
     pgrep -u aurora ffmpeg >/dev/null 2>&1
 }
+
+# drain_wait MAX — wait in 10 s steps, up to MAX seconds, while streams_busy.
+# Sets DRAIN_WAITED. Fails when the streams are still going at MAX: a viewer who
+# fell asleep mid-film must not block a deploy forever, and the player rebuilds
+# its session at the same position when its keepalive is refused.
+drain_wait() {
+    DRAIN_WAITED=0
+    while streams_busy; do
+        [ "$DRAIN_WAITED" -lt "$1" ] || return 1
+        sleep 10
+        DRAIN_WAITED=$((DRAIN_WAITED + 10))
+    done
+}
+# AURORA-DRAIN-END
 
 _DRAIN_MAX=300
 _DRAIN_WAITED=0

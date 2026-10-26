@@ -115,6 +115,7 @@ Non-TTY runs (CI, `ssh` without `-t`) prompt for nothing — no env vars are req
 | `AURORA_RADARR_4K_URL/_API_KEY=`, `AURORA_SONARR_4K_URL/_API_KEY=` | Separate 4K Radarr/Sonarr instances |
 | `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | Override the bundled TVDB key / add your subscriber PIN (the fallback works out of the box without either) |
 | `AURORA_GIT_TOKEN=<PAT>` | **For private repos** — writes `/root/.git-credentials` (mode 600) so the auto-updater can `git fetch` non-interactively. Use a fine-grained PAT scoped to `Contents: Read-only` on just this repo. |
+| `AURORA_SKIP_DRAIN=1` | On a re-run, restart without first waiting (up to 5 minutes) for anyone watching to finish |
 
 ### 📂 Media folder permissions
 
@@ -238,7 +239,7 @@ git pull
 ./scripts/redeploy.sh        # build SPA + Go binary, atomic-swap, restart
 ```
 
-Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service.
+Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service. Before it swaps anything, a redeploy (like the auto-updater and an `install.sh` re-run) waits up to 5 minutes for anyone watching to finish; `--no-drain` restarts at once.
 
 **Reinstall** when an update touches `scripts/install.sh` itself (new state dirs, systemd unit changes):
 

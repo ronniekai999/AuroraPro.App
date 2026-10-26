@@ -37,9 +37,13 @@
 #                                              /root/.git-credentials so
 #                                              the auto-updater can fetch
 #                                              without prompting
+#   AURORA_SKIP_DRAIN=1                     — on a re-run, restart without
+#                                              waiting for viewers to finish
 #
 # Re-running this script after editing source code rebuilds + restarts
-# the service while keeping the existing JWT secret and database.
+# the service while keeping the existing JWT secret and database. A re-run
+# first waits (up to 5 minutes) for anyone watching to finish, as the
+# auto-updater does.
 
 set -euo pipefail
 
@@ -64,6 +68,84 @@ warn()  { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
 ok()    { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$1"; exit 1; }
 step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
+
+# AURORA-DRAIN-BEGIN — identical in aurora-update.sh, install.sh and redeploy.sh;
+# scripts/drain-gate-test.sh checks the copies and how they behave. Duplicated
+# rather than sourced for the reason node_vite_verdict is.
+#
+# streams_busy is true while restarting aurora.service would interrupt a viewer.
+# It is the UNION of two signals, each covering the other's gap: the server's
+# snapshot of the sessions a client is still holding, playing or paused
+# (refreshed every 30 s; a paused viewer's encoder is reaped, so pgrep cannot
+# see them), and `pgrep -u aurora ffmpeg` (which sees a stream started since
+# the last snapshot). Either alone reintroduces one of the two bugs, and the
+# union still converges: an abandoned session's encoder exits after 75 s and it
+# leaves the 120 s viewer window.
+#
+# The server writes the snapshot to /var/cache/aurora because it cannot create
+# files in /var/lib/aurora (root:root 0755: the root-owned source mirror lives
+# there). The aurora user owns /var/cache/aurora, so the snapshot is read as
+# untrusted input. A missing, stale or unreadable snapshot is "unknown", never
+# "zero viewers": a crashed or wedged server's last snapshot looks exactly like
+# an idle one.
+STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
+_STREAM_STATE_MAX_AGE=90
+
+# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
+# or anything large, so a file the aurora user controls can neither point root
+# at another file nor hang it on a pipe nobody writes.
+read_untrusted() {
+    python3 -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        sys.exit(1)
+    data = stream.read(65537)
+if len(data) > 65536:
+    sys.exit(1)
+sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
+}
+
+# viewers_held — how many sessions the snapshot says a client is holding, or
+# nothing when that is unknown.
+viewers_held() {
+    local state
+    state="$(read_untrusted "$STREAM_STATE_FILE" 2>/dev/null)" || return 0
+    _vh_now=$(date +%s)
+    _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    # Each field on its own: a half-written or renamed-key snapshot is unknown.
+    case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
+    case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
+    [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$_vh_held"
+}
+
+streams_busy() {
+    _sb_held=$(viewers_held)
+    if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
+        return 0
+    fi
+    pgrep -u aurora ffmpeg >/dev/null 2>&1
+}
+
+# drain_wait MAX — wait in 10 s steps, up to MAX seconds, while streams_busy.
+# Sets DRAIN_WAITED. Fails when the streams are still going at MAX: a viewer who
+# fell asleep mid-film must not block a deploy forever, and the player rebuilds
+# its session at the same position when its keepalive is refused.
+drain_wait() {
+    DRAIN_WAITED=0
+    while streams_busy; do
+        [ "$DRAIN_WAITED" -lt "$1" ] || return 1
+        sleep 10
+        DRAIN_WAITED=$((DRAIN_WAITED + 10))
+    done
+}
+# AURORA-DRAIN-END
 
 cleanup_on_interrupt() {
     echo ""
@@ -1106,6 +1188,25 @@ ok "Frontend bundle built"
 info "Building (version: $VERSION)..."
 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o aurora ./cmd/aurora
 ok "Build complete"
+
+# On a re-run, wait for viewers BEFORE anything live changes, as the
+# auto-updater does. The binary and the frontend are replaced here but the
+# service restarts only at the end of this step, so waiting just before the
+# restart would leave the old backend serving the new frontend meanwhile. A
+# re-run used not to wait at all and restarted under anyone watching.
+drain_viewers_before_install() {
+    if [ "${AURORA_SKIP_DRAIN:-}" = 1 ] || ! systemctl is-active --quiet aurora 2>/dev/null; then
+        return 0
+    fi
+    streams_busy || return 0
+    info "Waiting up to 300s for active streams to finish before replacing Aurora (AURORA_SKIP_DRAIN=1 skips this)..."
+    if drain_wait 300; then
+        ok "Active streams finished after ${DRAIN_WAITED}s"
+    else
+        warn "Streams still active after 300s; continuing"
+    fi
+}
+drain_viewers_before_install
 
 install -m 755 aurora "$INSTALL_BIN"
 rm -f aurora

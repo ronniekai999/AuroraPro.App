@@ -199,6 +199,15 @@ jobs:
       - name: Node version gate tests
         run: bash scripts/node-version-test.sh
 
+      # The viewer drain. The same three scripts carry one AURORA-DRAIN block;
+      # this asserts the copies match, that it reads where the server writes
+      # (it did not: the server cannot create files in /var/lib/aurora), that
+      # it refuses the hostile files the aurora user could leave there, and
+      # that each script waits before changing anything live. install.sh and
+      # redeploy.sh used not to wait at all.
+      - name: Viewer drain tests
+        run: bash scripts/drain-gate-test.sh
+
       # The pre-flight check an operator runs before starting Aurora on moved
       # media. It shipped untested, and nine review rounds then found fourteen
       # states where it printed "nothing would be pruned" while the scan would
