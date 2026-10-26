@@ -988,6 +988,37 @@ cr_is "$DD/lib/movies/films" blocked "a target that crosses an untraversable dir
 chmod 755 "$DD/wall"
 # Control: once `wall` can be entered, the same root resolves (to q/media).
 cr_is "$DD/lib/movies/films" resolved "…and once the directory can be entered, it resolves where the kernel says"
+# ── 33f. A lookup that fails for a reason other than absence ──────
+# `-e` and `-L` fail alike on EVERY lstat error, and a searchable parent
+# does not make the error ENOENT. A FUSE mount without allow_other answers
+# EACCES to anyone but its owner — root included — under a parent anyone can
+# search, and read as `absent`: "the scan will skip its prune", exit 0, while
+# the service user (the mount's owner) walked the root and pruned. The fix
+# asks the kernel why, and only ENOENT and ENOTDIR are absence.
+# FUSE cannot be mounted here, so this pins the same branch with another
+# error the kernel gives under a searchable parent: ENAMETOOLONG, from a
+# path longer than PATH_MAX made of `.` components — which this walk now
+# meets for real when it follows a link target as written (case 54).
+LONGP="$CR/real"; i=0; while [ "$i" -lt 2100 ]; do LONGP="$LONGP/."; i=$((i + 1)); done
+cr_is "$LONGP/deep"          blocked  "a path the kernel refuses as too long is blocked, not absent" "File name too long"
+# The controls, on the same branch: a genuinely missing name is still
+# absent, and so is a name under an executable regular file (ENOTDIR) — the
+# scanner's EvalSymlinks fails there too, which is walkFailed for a root.
+cr_is "$CR/real/./deep/nope" absent   "…and a genuinely missing one is still absent"
+: > "$CR/execfile"; chmod 755 "$CR/execfile"
+cr_is "$CR/execfile/x"       absent   "…and so is a name under an executable non-directory (ENOTDIR)"
+# The kernel's words are read in the C locale, so the match does not depend
+# on the operator's language. STRUCTURAL, as case 25 is, and for the same
+# reason: only C locales exist on this kind of runner, so a behavioural case
+# would pass whether or not the locale is forced.
+# Captured, then matched — not `sed | grep -q`, which under pipefail fails
+# whenever grep's early exit hands sed a SIGPIPE (it did, under load).
+CRFN="$(sed -n '/^classify_root() {/,/^}/p' "$SCRIPT")"
+case "$CRFN" in
+    *'why="$(LC_ALL=C; cd -P -- "$acc" 2>&1)"'*)
+        ok "classify_root asks the kernel why in the C locale, without opening the path (cd -P)" ;;
+    *)  bad "classify_root's errno probe no longer forces LC_ALL=C or no longer uses cd -P — the absence match depends on the locale, or it opens what it probes" ;;
+esac
 # Search permission, not read, is what makes an absence conclusive. 0711 is the
 # ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
 # absent root under a home directory into an exit 2 nobody could clear.
@@ -1753,6 +1784,77 @@ for shape in linkfail linksilent; do
     expect_rc 2 "an all-symlink library under a realpath -e that $( [ "$shape" = linkfail ] && echo fails || echo 'answers nothing' ) on links → exit 2, not 'no media found'"
     expect_out "found no media it could confirm" "…through the unresolved-links refusal ($shape)"
 done
+# …but only for VIDEO names: a non-video link the scanner can never discover
+# is not "unresolved", whatever realpath says about it.
+fixture arrnonvideo
+R="$TMP/arrnonvideo"; mkdir -p "$R/real"; : > "$R/real/a.data"
+ln -s "$R/real/a.data" "$R/poster.jpg" || bad "non-video link under a failing realpath: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n' "$R/GONE.mkv" > "$FIX/recorded"
+for shape in linkfail linksilent; do
+    OUT="$(PATH="$TMP/fakerp-$shape:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 0 "a non-video link under the $shape realpath does not make an empty library refuse → exit 0"
+done
+
+# ── 54. A link target longer than PATH_MAX as written ─────────────
+# The walk follows a link's target as written, and a relative target joined
+# to the link's directory can be longer than PATH_MAX while the real path is
+# short: here the 41st link of a chain points at `./` x 2040 + `c40`. The
+# kernel's lstat of that string fails with ENAMETOOLONG under a parent this
+# user can search, which read as `absent`; Go's EvalSymlinks has no such
+# limit (it walks component by component), follows the chain, and discovers
+# the link. With nothing else under the root: "no media found", exit 0, over
+# a prune — and the root-side twin read as "missing root", exit 0, where the
+# scanner shields that root and prunes the other one (main exited 2 there;
+# its realpath -m collapsed the `./`). Both checked against collectVideoFiles.
+# Unprivileged, so it also pins the not-ENOENT-means-blocked rule (case 33f)
+# end to end on a runner that cannot mount FUSE.
+mklong() {  # mklong <dir> <final target> — prints the 41st link
+    local d="$1" prev="$2" i dots=""
+    mkdir -p "$d" || return 1
+    for i in $(seq 1 40); do ln -s "$prev" "$d/c$i" || return 1; prev="$d/c$i"; done
+    for i in $(seq 1 2040); do dots="$dots./"; done
+    ln -s "${dots}c40" "$d/c41" || return 1
+    printf '%s' "$d/c41"
+}
+fixture longlink
+LG="$TMP/longlink"; mkdir -p "$LG/lib/data" "$LG/dir/sub" "$LG/other"
+: > "$LG/lib/data/a.bin"; : > "$LG/dir/sub/A.mkv"; : > "$LG/other/B.mkv"
+if CF="$(mklong "$LG/chainF" "$LG/lib/data/a.bin")" && CD="$(mklong "$LG/chainD" "$LG/dir")" \
+   && ln -s "$CF" "$LG/lib/link.mkv"; then
+    echo "$LG/lib" > "$FIX/roots"
+    printf '%s\n%s\n' "$LG/lib/link.mkv" "$LG/lib/gone.mkv" > "$FIX/recorded"
+    run
+    expect_rc 2 "the only media behind a link target longer than PATH_MAX as written → exit 2, never 'no media found'"
+    expect_out "found no media it could confirm" "…through the unresolved-links refusal"
+    # ── 55. …and the same chain inside a ROOT ─────────────────────
+    printf '%s\n%s\n' "$CD/sub" "$LG/other" > "$FIX/roots"
+    printf '%s\n%s\n' "$LG/other/B.mkv" "$LG/other/GONE.mkv" > "$FIX/recorded"
+    run
+    expect_rc 2 "a root reached through a target longer than PATH_MAX → exit 2, not 'missing root'"
+    expect_out "File name too long" "…blocked in the kernel's words"
+    case "$OUT" in
+        *"missing root"*) bad "…but it was still labelled a missing root"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+        *) ok "…and it is not labelled a missing root" ;;
+    esac
+else
+    bad "a link target longer than PATH_MAX: could not build the fixture — cases 54 and 55 would go unrun"
+fi
+
+# ── 56. grep failing inside is_video ──────────────────────────────
+# Whether a link is a video decides whether an unresolved one is recorded.
+# A grep that FAILS (status 2) used to read as "not a video" and drop the
+# record, so a library whose only media was such a link came back "no media
+# found". Now anything above 1 is the recording guard's `exit 9`. The fake
+# fails only the `-qEi` form is_video uses; the startup probe (`-Ei`) still
+# passes, so the run reaches the walk.
+fixture grepfail
+R="$TMP/grepfail"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/link.mkv" || bad "grep failing in is_video: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
+guard_case '#!/bin/sh
+[ "$1" = -qEi ] && exit 2
+exec /usr/bin/grep "$@"' \
+  "could not record what find discovered" "a grep that fails while sorting out link names → exit 2, not 'not a video'" grep
 
 echo
 echo "passed: $PASS   failed: $FAIL"

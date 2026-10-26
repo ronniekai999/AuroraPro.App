@@ -54,20 +54,20 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Nine independent adversarial reviews
-# of this file found FOURTEEN states where it reported "nothing would be pruned"
-# while the scan would have deleted rows. Five were one class — a permission
-# failure it could not tell apart from "the path is gone", which is the one
-# state it treats as safe — and five were something failing quietly (comm,
-# sort, find, the pipeline that RECORDS what find found, sed and wc), each
-# leaving a variable empty, which reads the same way — and the eleventh was
-# inside the fix for the tenth: the recording guard read the loop's exit
-# status, which is whatever its LAST body command returned, so a run where
-# every write failed but the final entry was a dangling symlink reported
-# success. All are fixed and each is pinned by a test that fails if the fix
-# is reverted. That record is why
-# the wording here is what it is: exit 0 is evidence, not permission. Take the
-# backup regardless.
+# THIS IS A SECOND OPINION, NOT A GATE. Round after round of independent
+# adversarial review has found states where it reported "nothing would be
+# pruned" while the scan would have deleted rows — more than once inside the
+# fix for the round before, and the counts this comment used to give went
+# stale each time. The recurring classes: a permission or filesystem
+# refusal it could not tell apart from "the path is gone", which is the one
+# state it treats as safe; a tool failing quietly (comm, sort, find, the
+# pipeline that RECORDS what find found, sed, wc, realpath), leaving a
+# variable empty, which reads the same way; a path answer the shell or a
+# lexical normaliser changed on the way in; and the kernel refusing a link
+# the scanner follows. All found so far are fixed, and each is pinned by a
+# test that fails if the fix is reverted. That record is why the wording
+# here is what it is: exit 0 is evidence, not permission. Take the backup
+# regardless.
 set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
@@ -125,8 +125,9 @@ die()  {
 # over every pairing of a file, directory, missing name, dangling link,
 # loop, link into an unreadable directory, or link to a file or directory
 # with the suffixes `/`, `/.`, `/..`, `//`, `/./`, `/x`, `/./x`, `/../x`,
-# written directly or reached through a link's target. Two forms differ,
-# and nothing else did:
+# written directly or reached through a link's target. Three forms differ
+# (the third found by review after this note claimed two), and nothing else
+# measured did:
 #   - `realpath -m` through a symlink loop: uutils fails (ELOOP), GNU
 #     carries on lexically. classify_root no longer calls realpath -m at
 #     all — it walks a link's target itself — so a loop meets its depth
@@ -140,8 +141,19 @@ die()  {
 #     about paths the kernel resolves, where the two agree; what happens to
 #     a path the kernel refuses — a root reported blocked, a link
 #     classified rather than skipped — involves neither build's realpath.
-# The first version of this note named only the first; the second was
-# found by review, with a hand-picked list of shapes that missed it.
+#   - `comm` on byte-sorted input where one path is another followed by a
+#     byte below newline (0x01-0x09, TAB included): `lib/a.mkv` beside
+#     `lib/a.mkv<TAB>.mkv`. uutils 0.10.0 calls that input unsorted and
+#     exits 1 (as if it compared lines with their newline: 0x0b and up are
+#     fine); GNU accepts it. Safe as it stands: comm's status is checked,
+#     so uutils stops with exit 2 ("comm failed while comparing") rather
+#     than an answer, as main did.
+#     Deliberately NOT papered over with --nocheck-order: an order check
+#     that fails is a refusal, and one switched off is an assumption.
+# The first version of this note named only the first; the second and
+# third were found by review — the second with a hand-picked list of
+# shapes that missed it, the third because the line tools were probed with
+# awkward bytes but never with one path as another's prefix.
 # Re-measure before relying on a new flag of any of these.
 for tool in realpath psql comm sort find grep sed wc readlink mktemp tr; do
     command -v "$tool" >/dev/null 2>&1 \
@@ -191,10 +203,13 @@ canon() { realpath -ms -- "$1"; }
 # So this never asks "did it fail". It requires POSITIVE PROOF of absence and
 # treats everything else as blocked:
 #
-#   - A component is proven absent only when we can read AND traverse its
-#     lexical parent (so we would have seen the entry had it existed) and
-#     lstat finds no entry there. `-e || -L` is the lstat test: a dangling
-#     symlink is an entry that exists, and `-e` alone says it does not.
+#   - A component is proven absent only when we can search its lexical
+#     parent, lstat finds no entry there, AND the kernel says why: ENOENT,
+#     or ENOTDIR (a non-directory with more path after it). Any other error
+#     — EACCES from a filesystem that refuses this user, ENAMETOOLONG,
+#     ELOOP — is not proof of anything. `-e || -L` is the lstat test: a
+#     dangling symlink is an entry that exists, and `-e` alone says it does
+#     not.
 #   - A symlink whose target will not resolve is NOT decided here. Its target
 #     is read one level and classified recursively, because "dangling" (absent)
 #     and "target behind a wall" (blocked) are the two states `-e` conflates.
@@ -305,9 +320,41 @@ classify_root() {
                 return
             fi
         else
-            # No entry. That is proof of absence only if the lookup itself was
-            # conclusive, which needs SEARCH permission on the parent — `x`,
-            # not `r`. `r` grants enumeration, and we are not enumerating: we
+            # No entry — or none THIS user can see. `-e` and `-L` fail alike
+            # on every lstat error, and a searchable parent does not make the
+            # error ENOENT. A FUSE mount without allow_other (rclone, sshfs;
+            # likely krb5 NFS and CIFS multiuser too) answers EACCES from the
+            # filesystem itself to everyone but its owner, root included,
+            # under a parent anyone may search; a path made longer than
+            # PATH_MAX by walking a link target as written answers
+            # ENAMETOOLONG. Both read as `absent` here — "the scan will SKIP
+            # its prune", exit 0 — while the service user, the mount's owner,
+            # walked the root and pruned. Reproduced on a FUSE loopback
+            # mount, on main and this branch alike.
+            #
+            # So the kernel is asked WHY, before anything is concluded.
+            # `cd -P` in a subshell: chdir opens nothing — no FIFO to block
+            # on, no device to touch — and resolves `..` physically, as this
+            # walk does; its message ends in strerror's text, read in the C
+            # locale so the match does not depend on the operator's
+            # language. Only ENOENT and ENOTDIR are absence. ENOTDIR is a
+            # non-directory with more path after it, which the scanner's
+            # EvalSymlinks fails on too: walkFailed for a root, shielded for
+            # a file, discovered never. Anything else — EACCES, ENAMETOOLONG,
+            # ELOOP, EIO, or a lookup that now succeeds because the entry
+            # appeared meanwhile — is blocked, in the kernel's words.
+            local why reason
+            why="$(LC_ALL=C; cd -P -- "$acc" 2>&1)"
+            case "$why" in
+                *": No such file or directory"|*": Not a directory") ;;
+                *)  reason="${why##*: }"
+                    [ -n "$why" ] || reason="it appeared while this looked"
+                    printf 'blocked %s (%s, as %s)\n' "$acc" "$reason" "$(id -un)"
+                    return ;;
+            esac
+            # And even then only if the lookup was conclusive, which needs
+            # SEARCH permission on the parent — `x`, not `r`. `r` grants
+            # enumeration, and we are not enumerating: we
             # asked for one named path, and with `x` the kernel answers ENOENT
             # authoritatively. Requiring `r` here looked more careful and was
             # simply wrong: 0711 is the ordinary mode of /home/<user> on Debian
@@ -340,19 +387,30 @@ classify_root() {
     printf 'resolved\n'
 }
 
+# is_video NAME — would the scanner's IsVideoFile take NAME? grep's answer,
+# on the same pattern the disk list is filtered with below. 0 yes, 1 no;
+# any other status is grep FAILING, and reading that as "not a video" would
+# quietly drop a link the scanner may discover — so it is `exit 9`, the
+# recording guard's status, from inside the find pipeline's reader. A
+# here-string, not a pipe: under pipefail a `printf | grep -q` that lost a
+# race to SIGPIPE would answer "no" too. (The walk diverts newline names
+# before this is reached, so the one line grep sees is the whole name.)
+is_video() {
+    grep -qEi "$VIDEO_RE" <<< "$1"
+    case $? in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) exit 9 ;;
+    esac
+}
+
 # unsure PATH — record a video-named link this check could not resolve the
-# way the scanner would ($WORK/unsure, read after the walk). Called from
-# inside the find pipeline's reader, so a failed write is `exit 9`, the
-# recording guard's status, exactly as for the disk list itself.
-#
-# Video names only, because the scanner's IsVideoFile comes BEFORE its
-# EvalSymlinks: a link with any other name can never be discovered, so not
-# being able to resolve it changes nothing. A here-string, not a pipe: under
-# pipefail a `printf | grep -q` that lost a race to SIGPIPE would read as
-# "not a video" and drop the record. (The walk diverts newline names before
-# this is reached, so the one line grep sees is the whole name.)
+# way the scanner would ($WORK/unsure, read after the walk). Callers test
+# the name first: the scanner's IsVideoFile comes BEFORE its EvalSymlinks, so
+# a link with any other name can never be discovered, and not being able to
+# resolve it changes nothing. A failed write is `exit 9`, as for the disk
+# list itself.
 unsure() {
-    grep -qEi "$VIDEO_RE" <<< "$1" || return 0
     printf '%s\n' "$1" >> "$WORK/unsure" || exit 9
 }
 
@@ -683,23 +741,30 @@ while IFS= read -r LIB; do
                 # 45-link chain and nothing else under the root it was exit
                 # 0 over a prune. Reproduced.
                 #
-                # So only a link classify_root proves ABSENT is skipped
-                # silently: a dangling one, which the scanner reads as
-                # not-exist too and prunes, or one whose target runs on past
-                # an executable non-directory into a name (`x.mkv/.`), which
-                # the scanner cannot resolve either (it shields it). Neither
-                # can be discovered, so neither can be the scan's only find.
+                # So only a link classify_root calls ABSENT is skipped
+                # silently — absent meaning the kernel answered ENOENT or
+                # ENOTDIR for a lookup under a parent this user may search,
+                # never just "the lookup failed": a dangling link, which the
+                # scanner reads as not-exist too and prunes, or one whose
+                # target runs on past an executable non-directory into a name
+                # (`x.mkv/.`), which the scanner cannot resolve either (it
+                # shields it). Neither can be discovered, so neither can be
+                # the scan's only find.
                 # Anything else is recorded as unresolved (unsure), still
                 # not counted as found, and a library whose walk finds
                 # nothing BUT such links refuses to answer below rather than
-                # calling itself empty. A dangling link costs a classify_root
-                # walk here rather than one stat — the price of telling the
-                # two apart.
+                # calling itself empty. The NAME is tested first, because a
+                # dangling link with any other name can never be discovered
+                # and is filtered out below regardless: only a video-named
+                # one costs a classify_root walk rather than the one test
+                # main paid.
                 if ! [ -e "$f" ]; then
-                    case "$(classify_root "$f")" in
-                        absent) ;;
-                        *) unsure "$f" ;;
-                    esac
+                    if is_video "$f"; then
+                        case "$(classify_root "$f")" in
+                            absent) ;;
+                            *) unsure "$f" ;;
+                        esac
+                    fi
                     continue
                 fi
                 # Captured exactly. `$(...)` strips trailing newlines, and a
@@ -717,13 +782,13 @@ while IFS= read -r LIB; do
                 # Skipped, an all-symlink library (the usual *arr layout)
                 # under such a realpath came back empty: exit 0 over a prune.
                 if ! t="$(realpath -e -- "$f" 2>/dev/null && printf x)"; then
-                    unsure "$f"
+                    is_video "$f" && unsure "$f"
                     continue
                 fi
                 t="${t%x}"; t="${t%$'\n'}"
                 case "$t" in
                     /*) ;;
-                    *)  unsure "$f"
+                    *)  is_video "$f" && unsure "$f"
                         continue ;;
                 esac
                 case "$t/" in "$rr"/*) ;; *) [ "$t" = "$rr" ] || continue ;; esac
@@ -758,7 +823,7 @@ while IFS= read -r LIB; do
         # no legitimate non-zero: it is 0 on every case in the suite, including
         # the four where find itself exits 1 on permission errors.
         if [ "${fs[1]}" -ne 0 ]; then
-            findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem"
+            findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem, or grep failed while sorting out which links are video files"
         fi
     done <<< "$roots"
 
@@ -1000,7 +1065,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Nine reviews found fourteen states
+# the file header they will never open. Review after review has found states
 # where this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
