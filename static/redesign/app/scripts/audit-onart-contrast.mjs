@@ -1404,8 +1404,8 @@ function willChangeLifts(v) {
   return names.every(n => /^(?:auto|scroll-position|contents)$/.test(n)) ? false : null
 }
 // The -webkit- forms Chromium 153 supports and paints as their own property.
-// Any other prefixed form is left open: Chromium ignores it (so it does not
-// lift there), and another engine may not.
+// Any other prefixed form that would lift is left open: Chromium ignores it
+// (so it does not lift there), and another engine may not.
 const WEBKIT_ALIASES = /^-webkit-(?:opacity|transform|transform-style|perspective|filter|clip-path|mask|mask-image)$/
 function liftDecl(d) {
   const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
@@ -1426,7 +1426,8 @@ function liftDecl(d) {
     case 'container-type': case 'z-index': case 'mask-border': case 'offset-path': lifts = /^(?:normal|auto|none)$/.test(v) ? false : null; break
     default: return null
   }
-  if (prop.startsWith('-webkit-') && !WEBKIT_ALIASES.test(prop)) lifts = null
+  // A prefixed form that cannot lift where it is honoured (`none`) stays false.
+  if (prop.startsWith('-webkit-') && !WEBKIT_ALIASES.test(prop) && lifts !== false) lifts = null
   return { group, lifts }
 }
 /** Whether class strings lift an element at rest: for certain in every string
@@ -1674,7 +1675,7 @@ function reach(gEl, sChain, layer, exclusive) {
     ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false],
     ['mix-blend-mode: multiply', true], ['mask-image: linear-gradient(black, black)', true], ['view-transition-name: x', true], ['-webkit-opacity: .5', true],
     ['mask-border: url(x.png) 30', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
-    ['-webkit-backdrop-filter: blur(1px)', null], ['will-change: backdrop-filter', true]])
+    ['-webkit-backdrop-filter: blur(1px)', null], ['-webkit-backdrop-filter: none', false], ['will-change: backdrop-filter', true]])
     expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
   const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
   for (const [g, s, after, allAtOnce, want] of [
