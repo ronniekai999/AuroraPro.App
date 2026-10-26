@@ -223,7 +223,7 @@ systemctl restart aurora          # restart after a config change
 
 ## 🔄 Updating
 
-**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → rebuild → atomic swap → restart → health check, with automatic rollback to the previous binary if the new one fails its health check. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
+**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → build the frontend and binary from that exact commit → wait for viewers → atomic swap → restart → verification. A deploy counts only when the running service is the binary just built, reports healthy with its database connected, and serves the frontend just installed; any failure once installation starts (including a failed restart) restores the previous binary, frontend and migration files. Browser tabs left open across an update show a **Reload** prompt. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
 
 ```bash
 systemctl status aurora-update.timer

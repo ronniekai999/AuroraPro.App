@@ -11,6 +11,12 @@
 // (worker-src losing 'self'), a renamed sw.js, a manifest that 404s into the
 // SPA fallback. Each makes THIS fail while everything else stays green.
 //
+// It also checks the other half of "no service worker cache": a tab left open
+// across a deploy must notice. The built index.html has to carry its build id
+// (vite-build-id.ts), and when the served index.html names another build, the
+// page has to fetch it under this CSP and show the update notice
+// (lib/buildUpdate.ts). The deploy is simulated by rewriting the id served.
+//
 // Run after a build (the audit chain does): node scripts/verify-pwa.mjs
 
 import { chromium } from 'playwright'
@@ -82,6 +88,11 @@ try {
 
 const CSP = await productionCSP()
 
+// What a deploy changes, as far as an open tab can see: the id in the served
+// index.html. null serves the build as it is.
+let deployedBuildId = null
+const BUILD_META = /(<meta name="aurora-build" content=")([^"]*)(")/
+
 // Minimal mirror of the Go v2Handler: real file or index.html fallback.
 const server = createServer(async (req, res) => {
   const rel = decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/^\/v2\/?/, '')
@@ -93,6 +104,9 @@ const server = createServer(async (req, res) => {
   } catch {
     file = path.join(DIST, 'index.html')
     body = await readFile(file)
+  }
+  if (deployedBuildId !== null && path.basename(file) === 'index.html') {
+    body = Buffer.from(body.toString('utf8').replace(BUILD_META, `$1${deployedBuildId}$3`))
   }
   res.writeHead(200, {
     'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream',
@@ -173,6 +187,27 @@ try {
   else if (manifest.json.scope !== '/v2/' || manifest.json.start_url !== '/v2/') {
     fail(`manifest scope/start_url = ${manifest.json.scope}/${manifest.json.start_url}, want /v2/ for both`)
   } else console.log(`✓ manifest ok (${manifest.type}), scope /v2/`)
+
+  // 4. A deploy reaches an open tab. The page must carry the id it was built
+  //    with, fetch /v2/ under the production CSP, and say so when it differs.
+  const own = await page.evaluate(() => document.querySelector('meta[name="aurora-build"]')?.getAttribute('content') ?? '')
+  if (!/^[0-9a-f]{20}$/.test(own)) {
+    fail(`built index.html has no aurora-build id (got "${own}") — is auroraBuildId() still in vite.config.ts?`)
+  } else {
+    const notice = page.getByText('Aurora was updated', { exact: false })
+    // The same build deployed: a check must stay quiet.
+    await page.evaluate(() => window.dispatchEvent(new Event('aurora:stale-bundle')))
+    await page.waitForTimeout(1500)
+    if (await notice.count()) fail('update notice shown while the deployed build is the one this tab runs')
+    deployedBuildId = 'f'.repeat(20) === own ? 'e'.repeat(20) : 'f'.repeat(20)
+    await page.evaluate(() => window.dispatchEvent(new Event('aurora:stale-bundle')))
+    try {
+      await notice.waitFor({ state: 'visible', timeout: 10_000 })
+      console.log(`✓ open tab notices a newer deployed build (${own} → ${deployedBuildId})`)
+    } catch {
+      fail('a tab running an older build never showed the update notice (fetch blocked by the CSP, or the check broke)')
+    }
+  }
 } finally {
   await browser.close()
   server.close()

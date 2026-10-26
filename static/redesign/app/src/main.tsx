@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.tsx'
 import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { UpdateAvailableNotice } from './components/UpdateAvailableNotice'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 import { installSyncDebug } from './lib/syncDebug'
 import { initPWA } from './lib/pwa'
@@ -121,9 +122,13 @@ try {
 //                          URL space to it exactly as before).
 // Splitting here (rather than inside App) keeps the heavy desktop tree
 // — and its watch-party/player hooks — entirely unmounted on the phone.
+//
+// <UpdateAvailableNotice/> sits above both branches: a tab left open across a
+// deploy is running a build the server no longer has, wherever it is.
 const rootEl = document.getElementById('root')!
 createRoot(rootEl).render(
   <ErrorBoundary>
+    <UpdateAvailableNotice />
     <BrowserRouter basename={BASENAME}>
       <Routes>
         <Route path="join" element={<CompanionApp />} />

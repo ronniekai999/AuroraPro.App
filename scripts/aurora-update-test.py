@@ -4,6 +4,13 @@
 Only build/service commands are stubbed. No network, root, npm, Go, database,
 or systemd is used. Absolute deployment paths are rewritten in a temporary
 COPY; a restricted PATH makes missing-tool cases independent of the host.
+
+The service is modelled, not just counted. The fake systemctl keeps a main pid
+and, at each restart, copies the installed binary to <proc>/<pid>/exe, as an
+exec would; it writes the serving record a real binary writes. The fake curl
+answers as that process: only on the address it listens on, with the health
+and frontend it would serve. So verification is exercised against what RUNS,
+and a test can make the running process differ from what was installed.
 """
 from __future__ import annotations
 
@@ -29,6 +36,82 @@ if not BASH or not GIT:
     raise SystemExit("These tests require bash and git.")
 
 
+# The service the updater restarts. MainPID and <proc>/<pid>/exe model what
+# systemd runs; a restart execs whatever the installed file holds at that
+# moment, unless exec-elsewhere models a drop-in ExecStart pointing elsewhere.
+SYSTEMCTL_STUB = r"""
+case "$*" in
+  'show -p MainPID --value aurora') cat "$TEST_CONTROL/mainpid"; exit 0 ;;
+  'restart aurora') ;;
+  *) exit 91 ;;
+esac
+echo 'service:restart' >> "$TEST_EVENTS"
+if [ -f "$TEST_CONTROL/restart-fail" ]; then echo 0 > "$TEST_CONTROL/mainpid"; exit 1; fi
+if [ -f "$TEST_CONTROL/restart-fail-once" ]; then
+  rm -f "$TEST_CONTROL/restart-fail-once"; echo 0 > "$TEST_CONTROL/mainpid"; exit 1
+fi
+pid=$(cat "$TEST_CONTROL/nextpid")
+echo $((pid + 1)) > "$TEST_CONTROL/nextpid"
+mkdir -p "$TEST_PROC/$pid"
+if [ -f "$TEST_CONTROL/exec-elsewhere" ] && grep -q new "$TEST_INSTALL_BIN"; then
+  echo 'binary from elsewhere' > "$TEST_PROC/$pid/exe"
+else
+  cp "$TEST_INSTALL_BIN" "$TEST_PROC/$pid/exe"
+fi
+echo "$pid" > "$TEST_CONTROL/mainpid"
+if [ ! -f "$TEST_CONTROL/no-serving-record" ]; then
+  printf '{"pid": %s, "addr": "%s", "scheme": "%s", "server_name": "%s", "unix_time": 1}\n' \
+    "$pid" "${TEST_LISTEN:-[::]:8484}" "${TEST_SCHEME:-http}" "${TEST_TLS_NAME:-}" > "$TEST_SERVING"
+fi
+"""
+
+# Answers as the running process would: only where it listens (TEST_URL_PREFIX),
+# a TLS listener only to a client that skips verification with the expected
+# --resolve, and with the health and /v2/ that process serves.
+CURL_STUB = r"""
+url="" insecure=0 resolve="" prev=""
+for a in "$@"; do
+  case "$a" in http://*|https://*) url="$a" ;; --insecure) insecure=1 ;; esac
+  [ "$prev" != --resolve ] || resolve="$a"
+  prev="$a"
+done
+echo "curl:$url" >> "$TEST_EVENTS"
+pid=$(cat "$TEST_CONTROL/mainpid")
+[ "$pid" != 0 ] || exit 7
+exe="$TEST_PROC/$pid/exe"
+case "$url" in "${TEST_URL_PREFIX:-http://127.0.0.1:8484}"/*) ;; *) exit 7 ;; esac
+case "$url" in https://*) [ "$insecure" = 1 ] || exit 60 ;; esac
+[ "$resolve" = "${TEST_RESOLVE:-}" ] || exit 6
+pattern=new
+[ ! -s "$TEST_CONTROL/health-fail" ] || pattern=$(cat "$TEST_CONTROL/health-fail")
+case "$url" in
+  */api/health)
+    if [ -f "$TEST_CONTROL/health-fail" ] && grep -q "$pattern" "$exe"; then exit 22; fi
+    if [ -f "$TEST_CONTROL/db-down" ] && grep -q new "$exe"; then
+      if [ "$(cat "$TEST_CONTROL/db-down")" = inconsistent ]; then
+        echo '{"status":"ok","db_connected":false}'
+      else
+        echo '{"status":"degraded","db_connected":false}'
+      fi
+      exit 0
+    fi
+    if [ -f "$TEST_CONTROL/unstable" ] && grep -q new "$exe"; then
+      # Restart=on-failure: it answers, exits, and systemd starts another.
+      next=$(cat "$TEST_CONTROL/nextpid"); echo $((next + 1)) > "$TEST_CONTROL/nextpid"
+      mkdir -p "$TEST_PROC/$next"; cp "$exe" "$TEST_PROC/$next/exe"
+      echo "$next" > "$TEST_CONTROL/mainpid"
+    fi
+    echo '{"status":"ok","db_connected":true}' ;;
+  */v2/)
+    if [ -f "$TEST_CONTROL/stale-frontend" ] && grep -q new "$exe"; then
+      echo 'some other frontend'; exit 0
+    fi
+    cat "$TEST_LIVE/static/v2/index.html" ;;
+  *) exit 22 ;;
+esac
+"""
+
+
 class UpdaterTest(unittest.TestCase):
     def setUp(self) -> None:
         work = tempfile.TemporaryDirectory(prefix="aurora-updater-test-")
@@ -44,6 +127,8 @@ class UpdaterTest(unittest.TestCase):
         self.rollback_dir = self.state_dir / "rollback"
         self.status = self.root / "ui-state/update-status.json"
         self.events, self.lock = self.root / "events", self.root / "deploy.lock"
+        self.proc = self.root / "proc"
+        self.serving = self.status.parent / "serving.json"
         self.env = {
             **os.environ, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
@@ -51,6 +136,8 @@ class UpdaterTest(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Updater fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
             "TEST_CONTROL": str(self.control), "TEST_EVENTS": str(self.events),
             "TEST_INSTALL_BIN": str(self.live_binary), "TEST_NODE_VERSION": "v22.22.2",
+            "TEST_PROC": str(self.proc), "TEST_SERVING": str(self.serving),
+            "TEST_LIVE": str(self.live),
         }
         for key in list(self.env):
             if key.startswith(("AURORA_", "LLM_")) or key in {
@@ -59,7 +146,7 @@ class UpdaterTest(unittest.TestCase):
                 self.env.pop(key)
         for name in ("bash", "python3", "git", "dirname", "mkdir", "date", "mv", "chmod",
                      "rm", "tee", "mktemp", "install", "cp", "find", "seq", "sed", "tr",
-                     "grep", "flock", "cat", "touch"):
+                     "grep", "flock", "cat", "touch", "cmp", "tar"):
             executable = shutil.which(name)
             if not executable:
                 self.fail(f"Required fixture tool missing: {name}")
@@ -86,7 +173,8 @@ case "${1:-}" in
     done
     [ -n "$out" ] || exit 4
     mkdir -p "$out/assets"
-    cat "$AURORA_SOURCE_DIR/revision" > "$out/index.html"
+    # cwd is <export>/static/redesign/app: read the EXPORTED revision.
+    cat ../../../revision > "$out/index.html"
     echo 'frontend module' > "$out/assets/app.js"
     exit 0 ;;
 esac
@@ -103,18 +191,12 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$out" ] || exit 6
 printf 'binary ' > "$out"
-cat "$AURORA_SOURCE_DIR/revision" >> "$out"
+# cwd is the exported tree. A file only the checkout has must never get here.
+[ ! -e checkout-only ] || printf 'TAINTED ' >> "$out"
+cat ./revision >> "$out"
 ''')
-        self.stub("curl", '''
-echo 'health:check' >> "$TEST_EVENTS"
-if [ -f "$TEST_CONTROL/health-fail" ] && grep -q new "$TEST_INSTALL_BIN"; then exit 22; fi
-echo '{"status":"ok"}'
-''')
-        self.stub("systemctl", '''
-[ "$*" = 'restart aurora' ] || exit 91
-echo 'service:restart' >> "$TEST_EVENTS"
-[ ! -f "$TEST_CONTROL/restart-fail" ]
-''')
+        self.stub("curl", CURL_STUB)
+        self.stub("systemctl", SYSTEMCTL_STUB)
         self.stub("chown", "exit 0\n")
         self.stub("pgrep", "exit 1\n")
         self.stub("sleep", "exit 0\n")
@@ -144,10 +226,15 @@ echo 'service:restart' >> "$TEST_EVENTS"
         (self.live / "static").chmod(0o755)
         (self.live / "migrations").mkdir()
         self.live_binary.write_text("old binary\n")
+        (self.control / "nextpid").write_text("101\n")
+        (self.control / "mainpid").write_text("100\n")
+        (self.proc / "100").mkdir(parents=True)
+        (self.proc / "100/exe").write_text("old binary\n")
         self.live_updater.write_text("old updater\n")
         (self.live / "static/v2/index.html").write_text("old frontend\n")
         (self.live / "migrations/001.sql").write_text("-- old migration\n")
         self.status.parent.mkdir()
+        self.serving.write_text('{"pid": 100, "addr": "[::]:8484", "scheme": "http"}\n')
         self.status.write_text('{"state":"sentinel"}\n')
         self.config = self.root / "aurora.env"
         self.config.write_text(
@@ -161,12 +248,16 @@ echo 'service:restart' >> "$TEST_EVENTS"
             "/var/lib/aurora/": str(self.status.parent) + "/",
             "/var/log/aurora/": str(self.root / "logs") + "/",
             "/var/lock/aurora-deploy.lock": str(self.lock), "/opt/aurora": str(self.live),
+            "/proc": str(self.proc),
+            # Rounds, not seconds (sleep is a no-op here): keep failing
+            # verifications short without changing what they check.
+            "VERIFY_TIMEOUT=60": "VERIFY_TIMEOUT=4", "VERIFY_SETTLE=5": "VERIFY_SETTLE=2",
         }
         runner = UPDATER
         for old, new in rewrites.items():
             runner = runner.replace(old, new)
         for forbidden in ("=/opt/aurora", "=/usr/local/bin/aurora", "=/var/lib/aurora",
-                          "=/var/lock/aurora", "-f /etc/aurora"):
+                          "=/var/lock/aurora", "-f /etc/aurora", "=/proc", "VERIFY_TIMEOUT=60"):
             self.assertNotIn(forbidden, runner)
         self.runner = self.root / "runner.sh"
         self.runner.write_text(runner)
@@ -202,11 +293,35 @@ echo 'service:restart' >> "$TEST_EVENTS"
         (self.control / name).touch()
 
     def fail_migration_copy(self) -> None:
+        # The install's copy only (`cp -f FILES... <live>/migrations/`), not the
+        # snapshot's or the rollback's.
         real_cp = shutil.which("cp")
         self.stub("cp", f'''
-case "$*" in *migrations*) exit 28 ;; esac
+case "$1:$*" in -f:*/migrations/) exit 28 ;; esac
 exec {shlex.quote(real_cp)} "$@"
 ''')
+
+    def kill_during_migration_copy(self) -> None:
+        # SIGKILL runs no trap: the one way to leave a half-installed tree.
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$1:$*" in -f:*/migrations/) kill -KILL "$PPID"; exit 0 ;; esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+
+    def running(self) -> str:
+        pid = (self.control / "mainpid").read_text().strip()
+        return (self.proc / pid / "exe").read_text() if pid != "0" else ""
+
+    def assert_rolled_back(self, status: dict) -> None:
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("restored the previous installed snapshot", status["message"])
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertEqual((self.live / "migrations/001.sql").read_text(), "-- old migration\n")
+        self.assertEqual(self.running(), "old binary\n")
+        self.assertFalse((self.state_dir / "deployed").exists())
+        self.assertEqual((self.state_dir / "pending").read_text().strip(), self.head())
 
     def restore_cp(self) -> None:
         (self.bin / "cp").unlink()
@@ -365,12 +480,18 @@ exec {shlex.quote(real_cp)} "$@"
         self.assert_old_assets()
 
     def test_health_failure_rolls_back_and_does_not_loop(self) -> None:
+        (self.seed / "migrations/002.up.sql").write_text("-- new release migration\n")
+        self.git("-C", str(self.seed), "add", ".")
+        self.git("-C", str(self.seed), "commit", "--quiet", "-m", "with migration")
+        self.git("-C", str(self.seed), "push", "--quiet", str(self.remote), "main")
         self.flag("health-fail")
-        self.assertEqual(self.run_update(expected=1)["state"], "failed")
-        self.assertEqual(self.live_binary.read_text(), "old binary\n")
-        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
-        self.assertFalse((self.state_dir / "deployed").exists())
-        self.assertEqual((self.state_dir / "pending").read_text().strip(), self.target)
+        status = self.run_update(expected=1)
+        self.assertIn("/api/health", status["message"])
+        self.assert_rolled_back(status)
+        # The restored binary must not find, and apply, the failed release's
+        # migrations at its next start.
+        self.assertFalse((self.live / "migrations/002.up.sql").exists())
+        self.assertEqual((self.live / "aurora.failed").read_text(), "binary new\n")
         before = self.events.read_text()
         self.run_update(expected=1)
         self.assertEqual(self.events.read_text(), before)
@@ -378,14 +499,28 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertEqual(self.run_update("--retry")["state"], "success")
         self.assertFalse((self.state_dir / "pending").exists())
 
-    def test_restart_failure_is_not_marked_deployed(self) -> None:
-        self.flag("restart-fail")
-        self.run_update(expected=1)
-        self.assertFalse((self.state_dir / "deployed").exists())
-        self.assertTrue((self.state_dir / "pending").exists())
+    def test_restart_failure_rolls_back(self) -> None:
+        # A failed `systemctl restart` used to trip set -e: new files installed,
+        # nothing running them, and no rollback.
+        self.flag("restart-fail-once")
+        status = self.run_update(expected=1)
+        self.assertIn("'systemctl restart aurora' failed", status["message"])
+        self.assert_rolled_back(status)
         before = self.events.read_text()
         self.run_update(expected=1)
         self.assertEqual(self.events.read_text(), before)
+
+    def test_restart_failure_with_a_dead_rollback_says_so(self) -> None:
+        self.flag("restart-fail")
+        status = self.run_update(expected=1)
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("ALSO failed verification", status["message"])
+        self.assertIn("no running main process", status["message"])
+        # The files are put back even though nothing could be started on them.
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertFalse((self.state_dir / "deployed").exists())
+        self.assertTrue((self.state_dir / "pending").exists())
 
     def test_explicit_retry_rebuilds_current_revision(self) -> None:
         self.run_update()
@@ -411,10 +546,10 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertEqual(self.live_binary.read_text(), "binary new fixed\n")
 
     def check_partial_install_then_failed_recovery(self, newer_target: bool) -> None:
-        # B promotes its binary, then fails before the static swap. The next
+        # B promotes its binary, then dies before the static swap. The next
         # attempt must retain A as the rollback source rather than snapshot B.
-        self.fail_migration_copy()
-        self.run_update(expected=1)
+        self.kill_during_migration_copy()
+        self.run_update(expected=-9)
         self.assertEqual(self.live_binary.read_text(), "binary new\n")
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
         self.assertEqual((self.rollback_dir / "rollback-binary").read_text(), "old binary\n")
@@ -513,11 +648,7 @@ exec {shlex.quote(real_rm)} "$@"
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "new\n")
         healthy_static_mode = stat.S_IMODE((self.live / "static").stat().st_mode)
         self.publish_release("newer broken")
-        self.stub("curl", '''
-echo 'health:check' >> "$TEST_EVENTS"
-if grep -q newer "$TEST_INSTALL_BIN"; then exit 22; fi
-echo '{"status":"ok"}'
-''')
+        (self.control / "health-fail").write_text("newer")
         status = self.run_update(expected=1)
         self.assertIn("restored the previous installed snapshot", status["message"])
         self.assertEqual(self.live_binary.read_text(), "binary new\n")
@@ -555,30 +686,130 @@ exec {shlex.quote(real_mv)} "$@"
         self.assertEqual(self.count("npm:build"), 0)
         self.assert_old_assets()
 
-    def test_bundle_fallback_does_not_require_node_or_npm(self) -> None:
+    def test_target_without_spa_source_is_refused(self) -> None:
+        # The updater used to install whatever static/v2 sat in the checkout
+        # (gitignored, so some EARLIER build's) beside the new binary.
         shutil.rmtree(self.seed / "static/redesign")
         bundle = self.seed / "static/v2"
         bundle.mkdir()
         (bundle / "index.html").write_text("committed bundle\n")
-        self.git("-C", str(self.seed), "add", "-A")
+        self.git("-C", str(self.seed), "add", "-A", "-f")
         self.git("-C", str(self.seed), "commit", "--quiet", "-m", "bundle only")
         self.git("-C", str(self.seed), "push", "--quiet", str(self.remote), "main")
         self.git("-C", str(self.source), "pull", "--quiet", "--ff-only")
         (self.bin / "node").unlink()
         (self.bin / "npm").unlink()
+        status = self.run_update(expected=1)
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("frontend build failed", status["message"])
+        self.assertEqual(self.count("go:build"), 0)
+        self.assert_old_assets()
+        self.assertFalse((self.state_dir / "pending").exists())
+
+    def test_checkout_only_files_never_reach_the_install(self) -> None:
+        # The tree check sees tracked changes only. An untracked file the
+        # compiler or the static copy would pick up, and an ignored leftover
+        # bundle, must not make it into what is installed.
+        (self.source / "checkout-only").write_text("untracked\n")
+        (self.source / "static/stray.js").write_text("untracked asset\n")
+        (self.source / "static/v2").mkdir()
+        (self.source / "static/v2/index.html").write_text("leftover bundle\n")
+        (self.source / ".git/info/exclude").write_text("static/v2/\n")
         self.assertEqual(self.run_update()["state"], "success")
-        self.assertEqual(self.count("npm:build"), 0)
-        self.assertEqual((self.live / "static/v2/index.html").read_text(), "committed bundle\n")
+        self.assertEqual(self.live_binary.read_text(), "binary new\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "new\n")
+        self.assertFalse((self.live / "static/stray.js").exists())
+        self.assertFalse((self.state_dir / "build").exists())
 
     def test_incomplete_install_is_blocked_not_reported_idle(self) -> None:
         self.fail_migration_copy()
-        self.run_update(expected=1)
-        self.assertTrue((self.state_dir / "pending").exists())
-        self.assertFalse((self.state_dir / "deployed").exists())
+        status = self.run_update(expected=1)
+        self.assertIn("copying the migration files failed", status["message"])
+        self.assert_rolled_back(status)
+        # Nothing had restarted, and the old process already runs what was
+        # restored, so the rollback must not interrupt it either.
         self.assertEqual(self.count("service:restart"), 0)
         before = self.events.read_text()
         self.run_update(expected=1)
         self.assertEqual(self.events.read_text(), before)
+
+    def test_running_process_must_be_the_installed_binary(self) -> None:
+        # e.g. a drop-in ExecStart running some other file: the old check
+        # passed on any answer from :8484.
+        self.flag("exec-elsewhere")
+        status = self.run_update(expected=1)
+        self.assertIn("is not running the binary just installed", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_stale_frontend_fails_verification(self) -> None:
+        self.flag("stale-frontend")
+        status = self.run_update(expected=1)
+        self.assertIn("is not serving the index.html just installed", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_degraded_database_fails_verification(self) -> None:
+        # /api/health answers 200 "degraded" with the database down.
+        self.flag("db-down")
+        status = self.run_update(expected=1)
+        self.assertIn("status ok with the database connected", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_health_must_say_the_database_is_connected(self) -> None:
+        (self.control / "db-down").write_text("inconsistent")
+        status = self.run_update(expected=1)
+        self.assertIn("status ok with the database connected", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_crash_after_first_answer_fails_verification(self) -> None:
+        self.flag("unstable")
+        status = self.run_update(expected=1)
+        self.assertIn("main process changed", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_custom_port_is_read_from_the_serving_record(self) -> None:
+        self.env["TEST_LISTEN"] = "0.0.0.0:9999"
+        self.env["TEST_URL_PREFIX"] = "http://127.0.0.1:9999"
+        self.assertEqual(self.run_update()["state"], "success")
+        self.assertIn("curl:http://127.0.0.1:9999/api/health", self.events.read_text())
+
+    def test_configured_port_is_the_fallback_without_a_record(self) -> None:
+        # A binary that writes no record (or cannot): the stale record left by
+        # pid 100 names port 8484 and must not be believed.
+        self.flag("no-serving-record")
+        with self.config.open("a") as config:
+            config.write("AURORA_PORT=9999\n")
+        self.env["TEST_URL_PREFIX"] = "http://127.0.0.1:9999"
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_tls_listener_is_verified_over_tls(self) -> None:
+        self.env.update({
+            "TEST_LISTEN": "[::]:8443", "TEST_SCHEME": "https", "TEST_TLS_NAME": "media.example",
+            "TEST_URL_PREFIX": "https://media.example:8443",
+            "TEST_RESOLVE": "media.example:8443:127.0.0.1",
+        })
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_signal_during_install_rolls_back(self) -> None:
+        # SIGTERM (systemd's TimeoutStartSec) or Ctrl-C mid-install used to
+        # exit through the EXIT trap with half the files swapped.
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$1:$*" in -f:*/migrations/) kill -TERM "$PPID" ;; esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+        status = self.run_update(expected=143)
+        self.assertIn("stopped unexpectedly while installing files", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_frontend_and_backend_change_together(self) -> None:
+        # The drain used to wait AFTER the install: the old backend served the
+        # new frontend for up to five minutes.
+        self.stub("pgrep", '''
+echo "drain-saw:$(cat "$TEST_LIVE/static/v2/index.html")" >> "$TEST_EVENTS"
+exit 1
+''')
+        self.assertEqual(self.run_update()["state"], "success")
+        self.assertIn("drain-saw:old frontend", self.events.read_text())
 
     def test_failed_success_record_write_never_reports_success(self) -> None:
         real_mv = shutil.which("mv")

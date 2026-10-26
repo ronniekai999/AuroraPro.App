@@ -85,7 +85,11 @@ previous `state`. (If you'd rather test a branch without merging, point the box'
 The updater also **refuses** to deploy when the box's working tree is dirty or
 its branch has diverged, and — if `AURORA_UPDATE_REQUIRE_SIGNED=true` — when the
 new commit isn't signed by a trusted key. Those surface as `state: failed` with a
-message in the status payload.
+message in the status payload. So does a deploy that installed but failed
+verification after its restart (the running process is not the new binary,
+`/api/health` is not `ok` with the database connected, or `/v2/` is not the new
+frontend); the message names the check, and the previous release is restored.
+See `docs/updater-recovery.md`.
 
 ## Quick start
 

@@ -1078,12 +1078,50 @@ capability declarations.
   the current absolute source position and no cross-rendition produced-edge
   contract exists.
 
+### Auto-updater: what a deploy must prove
+
+`scripts/aurora-update.sh`; runbook `docs/updater-recovery.md`; tests
+`scripts/aurora-update-test.py` (they model the running process, not just
+count restarts).
+
+- Both halves are built from `git archive` of the target into
+  `/var/lib/aurora-updater/build`, never from the checkout, whose tracked-only
+  cleanliness check lets untracked or ignored files through. A target without
+  the SPA source fails; there is no fallback to a leftover `static/v2`.
+- The drain and the model pull run before any live file changes, so the old
+  backend never serves the new frontend while it waits.
+- A deploy counts only when `MainPID`'s `/proc/<pid>/exe` hashes to the binary
+  just built, `/api/health` says `status: ok` with `db_connected: true`, `/v2/`
+  is byte-identical to the installed `index.html`, and the same pid passes again
+  `VERIFY_SETTLE` rounds later. The anonymous health route still names no
+  version.
+- Where to connect comes from `/var/lib/aurora/serving.json`
+  (`cmd/aurora/serving_record.go`, written after migrations and the bind), and
+  only when its pid is `MainPID`; otherwise `AURORA_HOST`/`AURORA_PORT`, else
+  `127.0.0.1:8484`, plain HTTP. `TestServingRecordContractMatchesUpdater` pins
+  the path and keys on both sides.
+- Leaving in phase `files` or `restarted` for any reason rolls back the binary,
+  static tree and migration files and verifies the restored service; it hangs
+  off the EXIT trap because the ERR trap does not run inside functions. The
+  database is not rolled back. Past `verified`, failures keep the new release.
+- The SPA stamps a bundle hash as `<meta name="aurora-build">`
+  (`vite-build-id.ts`); `lib/buildUpdate.ts` re-reads `/v2/` and shows a Reload
+  notice, never reloading by itself. `verify-pwa.mjs` checks it end to end.
+- Known gaps: idle ticks check installed files, not the running process; TLS is
+  probed with `--insecure` (identity comes from the pid and exe); a SIGKILL
+  mid-install still leaves a partial tree (the pending record blocks automatic
+  retry); a rollback generation kept from an older updater has no migration
+  snapshot; drain, builds and two verifications can approach the unit's
+  10-minute `TimeoutStartSec`; `install.sh` and `redeploy.sh` keep the old
+  `:8484` liveness check.
+
 ### Node build floor
 
 - Install/update scripts distinguish an impossible build from an unsupported
   but potentially working Node release and report failures before fetching.
-- The gate applies only when building the SPA from source; committed fallback
-  assets need no Node runtime.
+- The gate applies only when building the SPA from source. install.sh still
+  reuses a prebuilt `static/v2` when the source tree is absent (it is gitignored,
+  so never committed); the auto-updater has no such fallback.
 - `scripts/node-version-test.sh` executes call sites against a fake Node and
   verifies duplicated `node_vite_verdict` implementations remain identical.
   Duplication is intentional because the root updater may run from a source

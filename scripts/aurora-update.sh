@@ -27,12 +27,24 @@
 #                                                       → failed
 #
 # Safety:
-#   - Refuses to update if the working tree is dirty (would lose work).
+#   - Refuses to update if the working tree has tracked changes (would lose work).
 #   - Refuses non-fast-forward merges (would require conflict
 #     resolution we can't automate).
+#   - Builds the frontend AND the binary from an export of the exact target
+#     commit, never from the working tree, so untracked or ignored files in the
+#     checkout cannot reach an installed artifact; a target without the SPA
+#     source is refused rather than paired with some other build's bundle.
 #   - On build failure, leaves the running binary untouched.
-#   - On health-check failure, attempts binary/static rollback, NOT DB rollback.
-#   - Marks a revision deployed only after restart and health check succeed.
+#   - After the restart, the deploy counts only when aurora.service's main
+#     process is running exactly the binary just installed, /api/health reports
+#     status ok with the database connected, and /v2/ serves the index.html just
+#     installed, and the same process still does a few seconds later.
+#   - ANY failure once installation has begun (a failed copy, a failed
+#     `systemctl restart`, failed verification, an unexpected abort or a
+#     signal) restores the snapshot of the previous binary, static tree and
+#     migration files and verifies the restored service the same way. The
+#     database is NOT rolled back.
+#   - Marks a revision deployed only after that verification succeeds.
 #
 # Concurrency: systemd's Type=oneshot serializes invocations, so
 # even if the timer fires while a manual button-click is running,
@@ -75,8 +87,28 @@ PENDING_FILE="$DEPLOY_STATE_DIR/pending"
 ROLLBACK_DIR="$DEPLOY_STATE_DIR/rollback"
 ROLLBACK_BIN="$ROLLBACK_DIR/rollback-binary"
 ROLLBACK_STATIC="$ROLLBACK_DIR/rollback-static"
+ROLLBACK_MIGRATIONS="$ROLLBACK_DIR/rollback-migrations"
+# The target commit is exported here and built in place. A stable path, not
+# mktemp: Go's build cache keys main-module packages by directory, so a fresh
+# path each run would recompile the whole module on every update.
+BUILD_TREE="$DEPLOY_STATE_DIR/build"
+VERIFY_INDEX="$DEPLOY_STATE_DIR/.verify-index.html"
 SPA_SRC_DIR=static/redesign/app
 SPA_OUTPUT_DIR=static/v2
+# Written by the server once it has bound its listener (cmd/aurora/
+# serving_record.go): which pid listens where, over which scheme.
+SERVING_FILE=/var/lib/aurora/serving.json
+PROC_ROOT=/proc
+# How long a restarted service gets to pass verification, and how long it must
+# then stay up as the same process. Both count probe rounds (one second each),
+# not wall-clock time.
+VERIFY_TIMEOUT=60
+VERIFY_SETTLE=5
+# none → files (live files are being replaced) → restarted → verified, or
+# rolling_back. The EXIT trap rolls back whenever the script leaves in `files`
+# or `restarted`, whatever the reason.
+INSTALL_PHASE=none
+ABORT_LINE=""
 
 mkdir -p "$(dirname "$STATUS_FILE")"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -163,18 +195,18 @@ log() {
     printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$1" | tee -a "$LOG_FILE"
 }
 
+# build_frontend_bundle SRC OUT — build the SPA in SRC (inside the exported
+# target tree) into OUT.
+#
+# There is deliberately no fallback for a missing SRC. This used to reuse
+# static/v2 from the checkout, which is gitignored: whatever an earlier build
+# had left there, installed beside a binary built from this revision. A target
+# without the SPA source is a broken release, and fails like any other build.
 build_frontend_bundle() {
-    local out_dir="$1"
-    if [ ! -d "$SPA_SRC_DIR" ]; then
-        log "WARN: $SPA_SRC_DIR missing; reusing committed $SPA_OUTPUT_DIR"
-        if [ ! -d "$SPA_OUTPUT_DIR" ]; then
-            log "No SPA source or committed $SPA_OUTPUT_DIR bundle found"
-            return 1
-        fi
-        rm -rf "$out_dir" || return 1
-        mkdir -p "$(dirname "$out_dir")" || return 1
-        cp -R "$SPA_OUTPUT_DIR" "$out_dir" || return 1
-        return 0
+    local src="$1" out_dir="$2"
+    if [ ! -d "$src" ]; then
+        log "$NEW_SHA has no $SPA_SRC_DIR; refusing to install a frontend that was not built from this revision"
+        return 1
     fi
     if ! command -v npm >/dev/null 2>&1; then
         log "npm not found; install Node.js/npm or re-run install.sh"
@@ -183,39 +215,66 @@ build_frontend_bundle() {
 
     rm -rf "$out_dir" || return 1
     mkdir -p "$(dirname "$out_dir")" || return 1
-    if [ -f "$SPA_SRC_DIR/package-lock.json" ]; then
+    if [ -f "$src/package-lock.json" ]; then
         log "npm ci..."
-        if ! (cd "$SPA_SRC_DIR" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
+        if ! (cd "$src" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
             log "npm ci failed; refusing to build with incomplete dependencies"
             return 1
         fi
     else
         log "npm install..."
-        if ! (cd "$SPA_SRC_DIR" && npm install --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
+        if ! (cd "$src" && npm install --no-audit --no-fund >>"$LOG_FILE" 2>&1); then
             log "npm install failed; refusing to build with incomplete dependencies"
             return 1
         fi
     fi
     log "vite build..."
-    (cd "$SPA_SRC_DIR" && npm run build -- --outDir "$out_dir" >>"$LOG_FILE" 2>&1)
-}
-
-stage_static_bundle() {
-    local built_v2_dir="$1"
-    rm -rf "$INSTALL_DIR/static.new"
-    mkdir -p "$INSTALL_DIR/static.new"
-    if [ -d static ]; then
-        find static -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
-            -exec cp -R {} "$INSTALL_DIR/static.new/" \;
+    (cd "$src" && npm run build -- --outDir "$out_dir" >>"$LOG_FILE" 2>&1) || return 1
+    # Verification compares the served /v2/ with this file, and the server will
+    # not serve a static dir without it (findStaticDir).
+    if [ ! -f "$out_dir/index.html" ]; then
+        log "the frontend build reported success but produced no index.html"
+        return 1
     fi
-    cp -R "$built_v2_dir" "$INSTALL_DIR/static.new/v2"
 }
 
-# ERR trap — when set -e trips, capture the line and report.
+# stage_static_bundle STATIC_SRC BUILT_V2 — assemble $INSTALL_DIR/static.new from
+# the exported tree's static/ (minus the SPA source and any v2) plus the build.
+# Every step reports failure: called from a condition, set -e does not apply
+# inside, and `find -exec ... \;` would swallow a failed copy.
+stage_static_bundle() {
+    local static_src="$1" built_v2_dir="$2"
+    rm -rf -- "$INSTALL_DIR/static.new" || return 1
+    mkdir -p -- "$INSTALL_DIR/static.new" || return 1
+    if [ -d "$static_src" ]; then
+        find "$static_src" -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
+            -exec cp -R -t "$INSTALL_DIR/static.new/" -- {} + || return 1
+    fi
+    cp -R -- "$built_v2_dir" "$INSTALL_DIR/static.new/v2"
+}
+
+# export_target_tree — a clean copy of exactly NEW_SHA's tracked files in
+# BUILD_TREE. The working-tree check below sees tracked changes only; an
+# untracked .go file in a package directory would otherwise be compiled in,
+# and untracked or ignored files under static/ copied into the install.
+export_target_tree() {
+    rm -rf -- "$BUILD_TREE" || return 1
+    mkdir -p -- "$BUILD_TREE" || return 1
+    git archive --format=tar "$NEW_SHA" | tar -xf - -C "$BUILD_TREE"
+}
+
+# ERR trap — when set -e trips, capture the line and report. Once live files
+# are being replaced, reporting is the EXIT trap's job (cleanup), which rolls
+# back first. Note the ERR trap does not run for a command failing INSIDE a
+# function (no errtrace), which is one reason the rollback hangs off EXIT.
 on_error() {
     local lineno="$1"
+    ABORT_LINE="$lineno"
     log "ABORT at line $lineno (set -e tripped)"
-    write_status failed "Update script aborted at line $lineno — see /var/log/aurora/update.log"
+    case "$INSTALL_PHASE" in
+        files|restarted) ;;
+        *) write_status failed "Update script aborted at line $lineno — see /var/log/aurora/update.log" ;;
+    esac
     exit 1
 }
 trap 'on_error $LINENO' ERR
@@ -238,9 +297,26 @@ if ! flock -n 9; then
     echo "Another deploy holds $LOCK_FILE; skipping without changing its status."
     exit 0
 fi
+# EXIT trap. Every deliberate exit after installation begins goes through
+# fail_install or reaches `verified` first, so leaving in `files` or
+# `restarted` means an unplanned stop: set -e (including inside a function,
+# where the ERR trap never runs), SIGTERM from systemd's TimeoutStartSec, or
+# Ctrl-C. Any of those used to leave a half-installed tree with no rollback.
 cleanup() {
+    local rc=$? where
+    trap - ERR
+    case "$INSTALL_PHASE" in
+        files|restarted)
+            if [ "$INSTALL_PHASE" = files ]; then where="while installing files"; else where="after restarting the service"; fi
+            report_rollback "the update stopped unexpectedly $where${ABORT_LINE:+ (line $ABORT_LINE)}, exit status $rc"
+            [ "$rc" -ne 0 ] || rc=1
+            ;;
+    esac
     if [ -n "${FRONTEND_TMP:-}" ]; then rm -rf -- "$FRONTEND_TMP"; fi
+    # Staged-but-unused install files; after a swap these no longer exist.
+    rm -rf -- "$BUILD_TREE" "$VERIFY_INDEX" "$INSTALL_BIN.new" "$INSTALL_DIR/static.new" || true
     exec 9>&- || true
+    exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -476,6 +552,15 @@ prepare_rollback_snapshots() {
         rm -rf -- "$tmp"
         return 1
     fi
+    # Migration FILES, not the database. db.RunMigrations applies every .up.sql
+    # in the directory that schema_migrations lacks and ignores versions it has
+    # no file for, so restoring the old files keeps a restored binary from
+    # applying the failed release's migrations at its next start, and is
+    # harmless when the failed release already applied them.
+    if [ -d "$INSTALL_DIR/migrations" ] && ! cp -a -- "$INSTALL_DIR/migrations" "$tmp/rollback-migrations"; then
+        rm -rf -- "$tmp"
+        return 1
+    fi
     if ! mv -- "$tmp" "$ROLLBACK_DIR"; then
         rm -rf -- "$tmp"
         return 1
@@ -564,6 +649,278 @@ refresh_installed_updater() {
         rm -f -- "$tmp"
         return 1
     fi
+}
+
+# ── Verifying the running service ─────────────────────────────────
+#
+# The old check was `curl -sf http://localhost:8484/api/health`. It hard-coded
+# the port (an AURORA_PORT install failed every update), assumed plain HTTP (a
+# server terminating its own TLS failed every update), passed with the
+# database down (the route answers 200 "degraded"), never asked which binary
+# was running, and never looked at the frontend. Each helper below checks one
+# of those things on the process systemd is actually running.
+
+file_sha256() {
+    python3 -c '
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())' "$1"
+}
+
+# main_pid — aurora.service's main process, or failure when it has none
+# (stopped, crashed, or between automatic restarts).
+main_pid() {
+    local pid
+    pid="$(systemctl show -p MainPID --value aurora 2>/dev/null)" || return 1
+    case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$pid"
+}
+
+# runs_binary PID SHA256 — is that process executing exactly this content?
+# /proc/<pid>/exe opens the inode the process was started from even after the
+# path is replaced, so this compares what RUNS, not what is on disk. It also
+# catches a unit whose ExecStart (say, a drop-in) runs some other file.
+runs_binary() {
+    local actual
+    actual="$(file_sha256 "$PROC_ROOT/$1/exe" 2>/dev/null)" || return 1
+    [ "$actual" = "$2" ]
+}
+
+# service_endpoint PID — "scheme|host|port|tls-name|source" for reaching that
+# process. The serving record is believed only when it names PID; otherwise
+# (no record yet, or a binary that predates it) the configured AURORA_HOST /
+# AURORA_PORT from aurora.env, else the default 8484, over plain HTTP.
+service_endpoint() {
+    SERVING_FILE_ENV="$SERVING_FILE" PID_ENV="$1" \
+    FALLBACK_HOST_ENV="${AURORA_HOST:-}" FALLBACK_PORT_ENV="${AURORA_PORT:-}" \
+    python3 <<'PY'
+import ipaddress, json, os
+
+def url_host(host):
+    host = host.strip().strip("[]")
+    if host in ("", "localhost"):
+        return "127.0.0.1"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.is_unspecified:
+        # A wildcard bind, including Go's dual-stack "[::]", accepts loopback.
+        return "127.0.0.1"
+    return "[%s]" % host if ip.version == 6 else host
+
+try:
+    with open(os.environ["SERVING_FILE_ENV"]) as stream:
+        rec = json.load(stream)
+except (OSError, ValueError):
+    rec = None
+if isinstance(rec, dict) and rec.get("pid") == int(os.environ["PID_ENV"]):
+    host, _, port = str(rec.get("addr") or "").rpartition(":")
+    scheme = rec.get("scheme")
+    if port.isdigit() and scheme in ("http", "https"):
+        name = str(rec.get("server_name") or "") if scheme == "https" else ""
+        print("|".join((scheme, url_host(host), port, name, "serving record")))
+        raise SystemExit(0)
+port = os.environ["FALLBACK_PORT_ENV"].strip()
+if not port.isdigit():
+    port = "8484"
+print("|".join(("http", url_host(os.environ["FALLBACK_HOST_ENV"]), port, "",
+                "configured address; no serving record names this process")))
+PY
+}
+
+# curl_service PATH — GET PATH from the endpoint probe_service resolved.
+curl_service() {
+    local url="$SVC_SCHEME://$SVC_HOST:$SVC_PORT$1"
+    local args=(-sf --max-time 5 --proto '=http,https')
+    if [ "$SVC_SCHEME" = https ]; then
+        # Which process answers is proved by its pid and /proc/<pid>/exe, not
+        # by the certificate, which names the public domain, not loopback.
+        args+=(--insecure)
+        if [ -n "$SVC_TLS_NAME" ]; then
+            # autocert refuses a handshake without the configured name (SNI).
+            args+=(--resolve "$SVC_TLS_NAME:$SVC_PORT:$SVC_HOST")
+            url="https://$SVC_TLS_NAME:$SVC_PORT$1"
+        fi
+    fi
+    curl "${args[@]}" "$url"
+}
+
+# probe_service SHA256 INDEX — one round of checks against the running service.
+# Sets PROBED_PID, and VERIFY_REASON when a check fails.
+probe_service() {
+    local expected="$1" index="$2" pid endpoint body where
+    PROBED_PID=""
+    if ! pid="$(main_pid)"; then
+        VERIFY_REASON="aurora.service has no running main process"
+        return 1
+    fi
+    PROBED_PID="$pid"
+    if ! runs_binary "$pid" "$expected"; then
+        VERIFY_REASON="aurora.service's main process (pid $pid) is not running the binary just installed at $INSTALL_BIN"
+        return 1
+    fi
+    if ! endpoint="$(service_endpoint "$pid")"; then
+        VERIFY_REASON="could not work out where pid $pid listens"
+        return 1
+    fi
+    IFS='|' read -r SVC_SCHEME SVC_HOST SVC_PORT SVC_TLS_NAME SVC_SOURCE <<< "$endpoint"
+    where="$SVC_SCHEME://$SVC_HOST:$SVC_PORT (from the $SVC_SOURCE)"
+    if ! body="$(curl_service /api/health)"; then
+        VERIFY_REASON="GET /api/health at $where did not answer"
+        return 1
+    fi
+    if ! printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+ok = isinstance(doc, dict) and doc.get("status") == "ok" and doc.get("db_connected") is True
+sys.exit(0 if ok else 1)'; then
+        VERIFY_REASON="/api/health at $where did not report status ok with the database connected (it said: ${body:0:200})"
+        return 1
+    fi
+    if ! curl_service /v2/ > "$VERIFY_INDEX"; then
+        VERIFY_REASON="GET /v2/ at $where did not answer"
+        return 1
+    fi
+    if ! cmp -s -- "$VERIFY_INDEX" "$index"; then
+        VERIFY_REASON="/v2/ at $where is not serving the index.html just installed in $INSTALL_DIR/static (a stale or different frontend)"
+        return 1
+    fi
+}
+
+# verify_service SHA256 INDEX — the service must pass probe_service within
+# VERIFY_TIMEOUT rounds, then pass again VERIFY_SETTLE seconds later as the SAME
+# process. Without the second look, Restart=on-failure lets a binary that
+# crashes just after its first answer count as healthy.
+verify_service() {
+    local expected="$1" index="$2" waited=0 first
+    VERIFY_REASON="no check ran"
+    while [ "$waited" -le "$VERIFY_TIMEOUT" ]; do
+        if probe_service "$expected" "$index"; then
+            first="$PROBED_PID"
+            sleep "$VERIFY_SETTLE"
+            waited=$((waited + VERIFY_SETTLE))
+            if probe_service "$expected" "$index"; then
+                if [ "$PROBED_PID" = "$first" ]; then
+                    log "verified: pid $first runs the expected binary, reports healthy at $SVC_SCHEME://$SVC_HOST:$SVC_PORT ($SVC_SOURCE) and serves the installed frontend"
+                    return 0
+                fi
+                VERIFY_REASON="aurora.service's main process changed from pid $first to $PROBED_PID within ${VERIFY_SETTLE}s (it exited and was restarted)"
+            fi
+            continue
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    log "verification failed: $VERIFY_REASON"
+    return 1
+}
+
+# ── Rolling back ──────────────────────────────────────────────────
+
+# restore_dir SNAPSHOT LIVE — replace LIVE with a copy of SNAPSHOT, staged
+# beside it so the swap itself is two renames.
+restore_dir() {
+    local snapshot="$1" live="$2"
+    rm -rf -- "$live.rollback" "$live.failed" || return 1
+    cp -a -- "$snapshot" "$live.rollback" || return 1
+    if [ -e "$live" ]; then
+        mv -- "$live" "$live.failed" || return 1
+    fi
+    mv -- "$live.rollback" "$live" || return 1
+    rm -rf -- "$live.failed"
+}
+
+# roll_back_install REASON — put the snapshot generation back and verify it.
+# Sets ROLLBACK_RESULT to restored, unhealthy or unavailable. Never exits, and
+# runs with errexit and the ERR trap off: a rollback must try every step.
+roll_back_install() {
+    local reason="$1" expected="" pid problems=""
+    INSTALL_PHASE=rolling_back
+    trap - ERR
+    set +e
+    log "rolling back: $reason"
+    write_status restarting "Update to $NEW_SHA failed ($reason) — restoring the previous installed snapshot" "$OLD_SHA" "$NEW_SHA"
+    if [ ! -f "$ROLLBACK_BIN" ]; then
+        log "no $ROLLBACK_BIN snapshot found — cannot roll back"
+        ROLLBACK_RESULT=unavailable
+        return 0
+    fi
+    # Keep the failing binary for post-mortem, unless the failure came before
+    # it was installed and the live file is still the snapshot's binary.
+    if [ -f "$INSTALL_BIN" ] && ! cmp -s -- "$INSTALL_BIN" "$ROLLBACK_BIN"; then
+        cp -p -- "$INSTALL_BIN" "$INSTALL_BIN.failed" || log "could not keep $INSTALL_BIN.failed for post-mortem"
+    fi
+    if ! cp -p -- "$ROLLBACK_BIN" "$INSTALL_BIN.rollback" || ! mv -f -- "$INSTALL_BIN.rollback" "$INSTALL_BIN"; then
+        problems="$problems the binary;"
+    fi
+    if [ -d "$ROLLBACK_STATIC" ]; then
+        restore_dir "$ROLLBACK_STATIC" "$INSTALL_DIR/static" || problems="$problems the static tree;"
+    else
+        problems="$problems the static tree (no snapshot of it);"
+    fi
+    if [ -d "$ROLLBACK_MIGRATIONS" ]; then
+        restore_dir "$ROLLBACK_MIGRATIONS" "$INSTALL_DIR/migrations" || problems="$problems the migration files;"
+    else
+        # A generation kept from an attempt by an older updater has none.
+        log "no $ROLLBACK_MIGRATIONS snapshot; the new migration files stay in place"
+    fi
+    chown -R aurora:aurora "$INSTALL_DIR" || problems="$problems ownership of $INSTALL_DIR;"
+    if [ -n "$problems" ]; then
+        log "rollback could not restore:$problems"
+    fi
+
+    expected="$(file_sha256 "$INSTALL_BIN")"
+    # Before the restart, the previous process is still running the binary
+    # just put back; restarting it would interrupt viewers for nothing.
+    if pid="$(main_pid)" && runs_binary "$pid" "$expected"; then
+        log "pid $pid already runs the restored binary; not restarting it"
+    else
+        log "restarting aurora.service on the restored snapshot"
+        systemctl restart aurora >>"$LOG_FILE" 2>&1 || log "systemctl restart failed during rollback"
+    fi
+    if [ -n "$problems" ]; then
+        VERIFY_REASON="the rollback could not restore:$problems"
+        ROLLBACK_RESULT=unhealthy
+    elif verify_service "$expected" "$INSTALL_DIR/static/v2/index.html"; then
+        ROLLBACK_RESULT=restored
+    else
+        ROLLBACK_RESULT=unhealthy
+    fi
+}
+
+# report_rollback REASON — roll back, then record the outcome as the status.
+# The pending record stays, so the failed revision is not retried
+# automatically.
+report_rollback() {
+    local reason="$1"
+    roll_back_install "$reason"
+    case "$ROLLBACK_RESULT" in
+        restored)
+            write_status failed "Update to $NEW_SHA failed ($reason) — restored the previous installed snapshot, which passed verification. Automatic retry of this revision is paused; inspect the failure before using --retry. A failed binary that was installed is kept at $INSTALL_BIN.failed; 'journalctl -u aurora -n 80' shows how it behaved." "$OLD_SHA" "$NEW_SHA"
+            log "rolled back to the previous snapshot; failed revision $NEW_SHA remains pending manual retry"
+            ;;
+        unhealthy)
+            write_status failed "Update to $NEW_SHA failed ($reason), and the restored previous snapshot ALSO failed verification: $VERIFY_REASON. Manual recovery required: ssh in, inspect 'journalctl -u aurora -n 80' and /var/log/aurora/update.log, and restore service." "$OLD_SHA" "$NEW_SHA"
+            log "rollback did not verify — manual recovery required"
+            ;;
+        *)
+            write_status failed "Update to $NEW_SHA failed ($reason) and no rollback snapshot was available. $INSTALL_BIN may be the broken build; restore from a known-good backup." "$OLD_SHA" "$NEW_SHA"
+            log "no rollback snapshot — manual recovery required"
+            ;;
+    esac
+}
+
+# fail_install REASON — the one way to stop once installation has begun.
+fail_install() {
+    report_rollback "$1"
+    exit 1
 }
 
 # ── Fetch + check ─────────────────────────────────────────────────
@@ -664,93 +1021,63 @@ if ! git merge --ff-only "$NEW_SHA" >>"$LOG_FILE" 2>&1; then
 fi
 
 # ── Build ─────────────────────────────────────────────────────────
+# Both halves are built from an export of NEW_SHA, never from $SOURCE_DIR: see
+# export_target_tree. The merge above still moves the checkout, so it keeps
+# matching what is deployed.
 write_status building "Building Aurora frontend and binary" "$OLD_SHA" "$NEW_SHA"
+log "exporting $NEW_SHA..."
+if ! export_target_tree 2>>"$LOG_FILE"; then
+    write_status failed "Could not export $NEW_SHA from $SOURCE_DIR to build it — see /var/log/aurora/update.log. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
+    log "export of $NEW_SHA failed"
+    exit 1
+fi
 FRONTEND_TMP="$(mktemp -d)"
 log "frontend build..."
-if ! build_frontend_bundle "$FRONTEND_TMP/v2"; then
+if ! build_frontend_bundle "$BUILD_TREE/$SPA_SRC_DIR" "$FRONTEND_TMP/v2"; then
     write_status failed "frontend build failed — see /var/log/aurora/update.log. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
     log "frontend build failed"
-    rm -rf "$FRONTEND_TMP"
     exit 1
 fi
 
 log "go build..."
 
-VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
-if ! CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o "$FRONTEND_TMP/aurora" ./cmd/aurora >>"$LOG_FILE" 2>&1; then
+# --dirty no longer applies: what is built is the commit itself.
+VERSION="$(git describe --tags --always "$NEW_SHA" 2>/dev/null || echo "$NEW_SHA")"
+# GOWORK=off: a go.work above the build tree must not redirect modules.
+# -buildvcs=false: the export has no .git to stamp from.
+if ! (cd "$BUILD_TREE" && CGO_ENABLED=0 GOWORK=off go build -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o "$FRONTEND_TMP/aurora" ./cmd/aurora) >>"$LOG_FILE" 2>&1; then
     write_status failed "go build failed — see /var/log/aurora/update.log. Old binary is still running." "$OLD_SHA" "$NEW_SHA"
     log "go build failed"
-    rm -rf "$FRONTEND_TMP"
     exit 1
 fi
+# What verification will require the restarted service to be running.
+NEW_BIN_SHA="$(file_sha256 "$FRONTEND_TMP/aurora")"
 
-# Record installation intent before the first live-file mutation. Retain it
-# after interrupted installs, restart failures, or rollback; only confirmed
-# success clears it. Pre-install build failures do not poison future retries.
-write_deploy_state "$PENDING_FILE" "$NEW_SHA"
-
-# ── Install ───────────────────────────────────────────────────────
-write_status installing "Installing new binary, migrations, and static assets" "$OLD_SHA" "$NEW_SHA"
-log "installing..."
-
-# Audit H3 — snapshot the last known-good binary + static dir BEFORE the
-# swap so we can roll back if the new build fails its health
-# check. Migrations are intentionally NOT snapshotted: forward
-# migrations are usually irreversible (DROP COLUMN, type changes),
-# and a binary that panics on startup typically does so BEFORE the
-# migration runs — so a binary rollback alone restores service.
-# Operators with reversible migrations can `pg_dump` separately
-# before tagging a release.
-
-# Snapshot publication is atomic.  In particular, a failed copy cannot turn a
-# partially prepared tree into a valid snapshot or destroy one retained from a
-# prior failed attempt.
-if ! prepare_rollback_snapshots; then
-    write_status failed "Could not prepare a complete rollback snapshot; live files were not changed. Correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
-    log "rollback snapshot preparation failed"
-    rm -rf "$FRONTEND_TMP"
-    exit 1
-fi
-
-# Binary swap. install + rename = atomic on POSIX — there's never
-# a moment when /usr/local/bin/aurora doesn't exist or is
-# half-written. (systemd keeps using the OLD inode for the running
-# process until we restart; the new binary is what fires on next exec.)
-install -m 755 "$FRONTEND_TMP/aurora" "$INSTALL_BIN.new"
-mv "$INSTALL_BIN.new" "$INSTALL_BIN"
-
-# Migrations
-mkdir -p "$INSTALL_DIR/migrations"
+# ── Stage ─────────────────────────────────────────────────────────
+# Everything that can be prepared without touching a live file is, so a
+# failure here costs nothing and stays automatically retryable.
 SQL_FILES=()
 shopt -s nullglob
-for f in migrations/*.sql; do
+for f in "$BUILD_TREE"/migrations/*.sql; do
     SQL_FILES+=("$f")
 done
 shopt -u nullglob
 if [ "${#SQL_FILES[@]}" -eq 0 ]; then
-    write_status failed "No migration files found in source checkout; refusing to install a partial release." "$OLD_SHA" "$NEW_SHA"
-    log "no migration files found"
-    rm -rf "$FRONTEND_TMP"
+    write_status failed "$NEW_SHA has no migration files; refusing to install a partial release. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
+    log "no migration files in $NEW_SHA"
     exit 1
 fi
-if ! cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/" 2>>"$LOG_FILE"; then
-    write_status failed "migration copy failed — see /var/log/aurora/update.log. New binary was installed but service was not restarted." "$OLD_SHA" "$NEW_SHA"
-    log "migration copy failed"
-    rm -rf "$FRONTEND_TMP"
+rm -rf -- "$INSTALL_DIR/static.old"
+if ! stage_static_bundle "$BUILD_TREE/static" "$FRONTEND_TMP/v2" 2>>"$LOG_FILE" \
+    || ! install -m 755 "$FRONTEND_TMP/aurora" "$INSTALL_BIN.new" 2>>"$LOG_FILE"; then
+    write_status failed "Could not stage the new release beside the live one — see /var/log/aurora/update.log. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
+    log "staging failed"
     exit 1
 fi
 
-# Static SPA bundle. The root-owned rollback snapshot above remains untouched
-# while any install is pending; static.old is only a transient swap name.
-rm -rf "$INSTALL_DIR/static.old"
-stage_static_bundle "$FRONTEND_TMP/v2"
-if [ -d "$INSTALL_DIR/static" ]; then
-    mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
-fi
-mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
-rm -rf "$FRONTEND_TMP"
-
-chown -R aurora:aurora "$INSTALL_DIR"
+# Both waits below happen BEFORE anything live changes. They used to run after
+# the install, so for up to the drain's five minutes (plus any model pull) the
+# old backend served the new frontend to every browser that loaded a page.
 
 # ── Ensure LLM models (best-effort) ───────────────────────────────
 # A rebuilt binary may default to Ollama models this box has never pulled
@@ -796,7 +1123,7 @@ ensure_llm_models() {
 }
 ensure_llm_models
 
-# ── Restart + health check ────────────────────────────────────────
+# ── Drain ─────────────────────────────────────────────────────────
 
 # Drain active HLS stream sessions before restarting: systemctl restart
 # sends SIGTERM to the entire cgroup (KillMode=control-group default), which
@@ -906,94 +1233,86 @@ if streams_busy; then
     fi
 fi
 
+# Record installation intent before the first live-file mutation. Retain it
+# after interrupted installs, restart failures, or rollback; only confirmed
+# success clears it. Pre-install build failures do not poison future retries.
+write_deploy_state "$PENDING_FILE" "$NEW_SHA"
+
+# ── Install ───────────────────────────────────────────────────────
+write_status installing "Installing new binary, migrations, and static assets" "$OLD_SHA" "$NEW_SHA"
+log "installing..."
+
+# Audit H3 — snapshot the last known-good binary, static dir and migration
+# files BEFORE the swap, so any failure from here on can put them back. The
+# database is not snapshotted: forward migrations are usually irreversible
+# (DROP COLUMN, type changes). Operators with reversible migrations can
+# `pg_dump` separately before tagging a release.
+#
+# Snapshot publication is atomic.  In particular, a failed copy cannot turn a
+# partially prepared tree into a valid snapshot or destroy one retained from a
+# prior failed attempt.
+if ! prepare_rollback_snapshots; then
+    write_status failed "Could not prepare a complete rollback snapshot; live files were not changed. Correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+    log "rollback snapshot preparation failed"
+    exit 1
+fi
+
+# From here until verification, every way out restores the snapshot: each step
+# below names its failure to fail_install, and anything else is caught by the
+# EXIT trap.
+INSTALL_PHASE=files
+
+# Binary swap: a rename, so /usr/local/bin/aurora is never missing or
+# half-written. (systemd keeps using the OLD inode for the running process
+# until we restart; the new binary is what fires on next exec.)
+mv -f -- "$INSTALL_BIN.new" "$INSTALL_BIN" 2>>"$LOG_FILE" || fail_install "installing the new binary failed"
+
+{ mkdir -p "$INSTALL_DIR/migrations" && cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/"; } 2>>"$LOG_FILE" \
+    || fail_install "copying the migration files failed"
+
+# Static SPA bundle. The root-owned rollback snapshot above remains untouched
+# while any install is pending; static.old is only a transient swap name.
+if [ -d "$INSTALL_DIR/static" ]; then
+    mv -- "$INSTALL_DIR/static" "$INSTALL_DIR/static.old" 2>>"$LOG_FILE" \
+        || fail_install "moving the previous static bundle aside failed"
+fi
+mv -- "$INSTALL_DIR/static.new" "$INSTALL_DIR/static" 2>>"$LOG_FILE" \
+    || fail_install "installing the new static bundle failed"
+
+chown -R aurora:aurora "$INSTALL_DIR" 2>>"$LOG_FILE" || fail_install "chown of $INSTALL_DIR failed"
+
 write_status restarting "Restarting aurora.service" "$OLD_SHA" "$NEW_SHA"
 log "restarting service..."
 
-systemctl restart aurora
+INSTALL_PHASE=restarted
+# A failed restart used to trip set -e and exit with the new files installed
+# and nothing running them, no rollback attempted.
+systemctl restart aurora >>"$LOG_FILE" 2>&1 || fail_install "'systemctl restart aurora' failed"
 
-# Health-check loop: wait up to 30s for /api/health to respond. If
-# the new binary fails to migrate / fails to bind / panics on
-# startup, this is where we catch it.
-SVC_OK=false
-for _ in $(seq 1 30); do
-    if curl -sf http://localhost:8484/api/health &>/dev/null; then
-        SVC_OK=true
-        break
-    fi
-    sleep 1
-done
-
-if $SVC_OK; then
-    if ! refresh_installed_updater; then
-        write_status failed "Aurora passed its health check, but installing the updated updater script failed. See update.log; correct permissions/storage and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
-        log "updater refresh failed after healthy application restart"
-        exit 1
-    fi
-    DEPLOYED_FINGERPRINT="$(deployment_fingerprint)"
-    write_deploy_state "$DEPLOYED_FILE" "$NEW_SHA $DEPLOYED_FINGERPRINT"
-    if ! retire_rollback_snapshots; then
-        write_status failed "Aurora passed its health check, but rollback snapshot cleanup failed. Pending state is retained; correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
-        log "rollback snapshot retirement failed after healthy deployment"
-        exit 1
-    fi
-    rm -rf -- "$INSTALL_DIR/static.old"
-    rm -f -- "$PENDING_FILE"
-    COMMIT_SUBJECT="$(git log -1 --format=%s "$NEW_SHA" 2>/dev/null || echo "$NEW_SHA")"
-    write_status success "Updated to $NEW_SHA ($COMMIT_SUBJECT)" "$OLD_SHA" "$NEW_SHA"
-    log "SUCCESS: now running $NEW_SHA"
-    exit 0
+write_status restarting "Verifying the restarted service" "$OLD_SHA" "$NEW_SHA"
+if ! verify_service "$NEW_BIN_SHA" "$INSTALL_DIR/static/v2/index.html"; then
+    fail_install "the restarted service failed verification: $VERIFY_REASON"
 fi
+# The new release is verified and serving. Failures past this point leave it in
+# place (rolling a verified release back would be the wrong repair) and keep
+# the pending record, so they need --retry.
+INSTALL_PHASE=verified
 
-# Audit H3 — health check failed. Attempt automatic rollback to
-# the prior binary + static dir snapshots. Migrations stay in
-# place (see snapshot rationale above). If rollback also fails,
-# we leave the box in the broken state but report it loudly so
-# the operator knows what they're walking into.
-log "service unhealthy — attempting rollback to the previous installed snapshot (not inferred from checkout HEAD)"
-write_status restarting "New version failed health check — rolling back to previous binary" "$OLD_SHA" "$NEW_SHA"
-
-ROLLBACK_OK=true
-if [ -f "$ROLLBACK_BIN" ]; then
-    # The failing binary stays as /usr/local/bin/aurora.failed for
-    # post-mortem; the retained snapshot becomes the live binary again.
-    mv "$INSTALL_BIN" "$INSTALL_BIN.failed"
-    cp -p -- "$ROLLBACK_BIN" "$INSTALL_BIN"
-else
-    log "no $ROLLBACK_BIN snapshot found — cannot rollback binary"
-    ROLLBACK_OK=false
+if ! refresh_installed_updater; then
+    write_status failed "Aurora passed verification, but installing the updated updater script failed. See update.log; correct permissions/storage and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+    log "updater refresh failed after verified application restart"
+    exit 1
 fi
-if [ -d "$ROLLBACK_STATIC" ]; then
-    # Move the broken static dir aside (for inspection) and
-    # restore the snapshot.
-    mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.failed"
-    cp -a -- "$ROLLBACK_STATIC/." "$INSTALL_DIR/static/"
-    rm -rf "$INSTALL_DIR/static.failed"
-else
-    log "no $ROLLBACK_STATIC snapshot found — cannot rollback static"
+DEPLOYED_FINGERPRINT="$(deployment_fingerprint)"
+write_deploy_state "$DEPLOYED_FILE" "$NEW_SHA $DEPLOYED_FINGERPRINT"
+if ! retire_rollback_snapshots; then
+    write_status failed "Aurora passed verification, but rollback snapshot cleanup failed. Pending state is retained; correct storage/permissions and run 'sudo aurora-update --retry'." "$OLD_SHA" "$NEW_SHA"
+    log "rollback snapshot retirement failed after verified deployment"
+    exit 1
 fi
-
-systemctl restart aurora
-
-# Health-check the rolled-back binary. If even the rollback can't
-# come up, something else is wrong (port conflict, DB down) and
-# the operator needs to intervene.
-ROLLBACK_HEALTHY=false
-for _ in $(seq 1 30); do
-    if curl -sf http://localhost:8484/api/health &>/dev/null; then
-        ROLLBACK_HEALTHY=true
-        break
-    fi
-    sleep 1
-done
-
-if $ROLLBACK_HEALTHY; then
-    write_status failed "Update to $NEW_SHA failed its health check — restored the previous installed snapshot. Automatic retry of this revision is paused; inspect the failure before using --retry. The bad binary is at $INSTALL_BIN.failed for post-mortem; check 'journalctl -u aurora -n 80' to see why it crashed." "$OLD_SHA" "$NEW_SHA"
-    log "rollback health check passed; failed revision $NEW_SHA remains pending manual retry"
-elif $ROLLBACK_OK; then
-    write_status failed "Update FAILED and rollback ALSO failed health check. Manual recovery required: ssh in, inspect 'journalctl -u aurora -n 80', and restore service." "$OLD_SHA" "$NEW_SHA"
-    log "rollback restart also unhealthy — manual recovery required"
-else
-    write_status failed "Update FAILED and no rollback snapshot was available. /usr/local/bin/aurora is the broken build; restore from a known-good backup." "$OLD_SHA" "$NEW_SHA"
-    log "no rollback snapshot — manual recovery required"
-fi
-exit 1
+rm -rf -- "$INSTALL_DIR/static.old"
+rm -f -- "$PENDING_FILE"
+COMMIT_SUBJECT="$(git log -1 --format=%s "$NEW_SHA" 2>/dev/null || echo "$NEW_SHA")"
+write_status success "Updated to $NEW_SHA ($COMMIT_SUBJECT)" "$OLD_SHA" "$NEW_SHA"
+log "SUCCESS: now running $NEW_SHA"
+exit 0
