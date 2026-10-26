@@ -986,12 +986,16 @@ capability declarations.
   client's choice, so it is built in memory per request and never written to
   the subtitle cache (`ShiftedVTT`, `ServeShiftedSubtitle`, with the file
   path's headers): only once a response needs the body (a revalidation is a
-  304 that rewrites nothing), at most four at once (a request waits for a
-  slot until its context ends), and for sources up to 8 MB
-  (`MaxInMemoryShiftSourceBytes`; above it the prediction is used, through
-  the cache, logged once per track). The server-derived shifts keep one
-  cached file per (track, offset), and the extracted track is cached either
-  way. The player sends the measured start whether its clock adopted or
+  304 that rewrites nothing), at most four rewrites at once (a request waits
+  for a slot until its context ends; the slot is not held while the body is
+  sent, so a slow reader cannot stall the others), and for sources up to
+  8 MB, at the stat and at the read (`MaxInMemoryShiftSourceBytes`; above it
+  the prediction is used, through the cache, logged once per track). A
+  measured start at or before 0 is no shift: the source is served as is.
+  The server-derived shifts keep one cached file per (track, offset), and
+  the extracted track is cached either way. The native path gives its
+  variant fetch 8 s (`NATIVE_MEDIA_WINDOW_TIMEOUT_MS`), then fails safe as
+  for a failed fetch. The player sends the measured start whether its clock adopted or
   refused it (`measuredStartSec`: cues are timed on the element). Until a
   boot knows its delivery (stream info, the session create, and for direct
   play on WebKit the AirPlay token mint) a pick is only recorded; the boot's
@@ -1012,9 +1016,14 @@ capability declarations.
   arrives late; a held pick waits for local loading, which a boot while
   casting does not start and a cast that connects during the hold stops
   (`stopLoad`); a `media_start=` shift is paid on every non-304 request
-  (about 4x its source in allocations and ~25 ms of CPU per MB, measured,
-  `BenchmarkShiftedVTT`), where a cached shift was paid once per track and
-  offset, and above 8 MB its source gets the GOP-off prediction again;
+  (about 4x its source in allocations, and typically ~20-25 ms of CPU per
+  MB, ~70 ms per MB in the worst shape measured, one timing line as long as
+  the cap; `BenchmarkShiftedVTT`), where a cached shift was paid once per
+  track and offset, each built body (up to ~8 MB) stays in memory until its
+  response is sent, so slow readers can each hold one, and above 8 MB its
+  source gets the GOP-off prediction again; a native-HLS server slower than
+  8 s to its first variant playlist leaves that session's clock and
+  subtitles on start_sec and the prediction;
   after the unreadable-playlist resume fallback the
   cached start describes segment 0 of a playlist that no longer lists it; a
   measurement that lands after the first request's budget reaches only
