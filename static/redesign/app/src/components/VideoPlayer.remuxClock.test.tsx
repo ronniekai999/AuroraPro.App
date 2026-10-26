@@ -9,6 +9,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createCastToken, createSession, getStreamInfo, keepalive } from '@/lib/streaming'
+import { NATIVE_MEDIA_WINDOW_TIMEOUT_MS } from '@/lib/mediaStart'
 import { reportProgress } from '@/lib/api'
 import { getSyncSamples } from '@/lib/syncDebug'
 
@@ -1125,6 +1126,17 @@ describe('remux clock M1: native HLS (Safari/iOS path; unverified on WebKit)', (
     fireEvent(video(), new Event('canplay')); await settle()
     expect(tracks().map(trackQuery)).toEqual([MEASURED_QUERY])
     expect(shownTrack()).toMatchObject({ mode: 'showing' })
+  })
+
+  it('applies a held subtitle pick with the server prediction once a stalled fetch times out', async () => {
+    serve(new Promise<string>(() => {}))
+    const tracks = watchTracks()
+    await bootNative()
+    await pickSubtitle()
+    await act(async () => { vi.advanceTimersByTime(NATIVE_MEDIA_WINDOW_TIMEOUT_MS - 1) }); await settle()
+    expect(tracks()).toEqual([])
+    await act(async () => { vi.advanceTimersByTime(1) }); await settle(); await settle()
+    expect(tracks().map(trackQuery)).toEqual([REMUX_QUERY])
   })
 
   it('applies a held subtitle pick with the server prediction once the fetch fails', async () => {

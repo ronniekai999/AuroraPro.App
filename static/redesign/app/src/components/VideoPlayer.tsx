@@ -661,9 +661,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const consumedPauseOnBootTokenRef = useRef<number | undefined>(undefined)
   // Issue #141 — true when the active HLS session is REMUXING (-c:v
   // copy), false when full-transcoding. Drives the subtitle cue-shift
-  // offset: remux can't accurate-seek so the stream's t=0 is the
-  // keyframe BEFORE startSec; transcode accurate-seeks so t=0 ≈
-  // startSec. The server needs to know which to align cues correctly.
+  // offset: remux can't accurate-seek so the stream's t=0 is a key
+  // frame before startSec, which the request names as the measured
+  // media start (media_start=) once the playlist has reported it, else
+  // the server predicts; transcode accurate-seeks so t=0 ≈ startSec.
   // Stays false for direct-play (startSecRef is 0 there, so no shift
   // is requested at all). Also the gate on refining startSecRef from the
   // playlist's measured media start: a transcode's clock never moves.
@@ -3575,8 +3576,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         startSecRef.current = sessionStartSecRef.current
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
         // already folds in forceTranscode). The subtitle endpoint uses
-        // this to pick the cue-shift offset: keyframe for remux, raw
-        // startSec for transcode. (remux is optional on the request type;
+        // this to pick the cue-shift offset: the measured media start for a
+        // remux (its key-frame prediction without one), raw startSec for
+        // transcode. (remux is optional on the request type;
         // buildSessionRequest always sets a concrete boolean.)
         sessionRemuxRef.current = !!sessionReq.remux
         // Cast follows the local session: now that the new session exists,

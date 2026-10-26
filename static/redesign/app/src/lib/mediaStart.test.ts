@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   MEDIA_START_ALIGN_EDGE_SEC,
   MEDIA_START_MAX_LAG_SEC,
   MEDIA_START_MAX_LEAD_SEC,
   MEDIA_START_PARTY_HOLD_MS,
   MEDIA_START_TAG,
+  NATIVE_MEDIA_WINDOW_TIMEOUT_MS,
   RemuxClock,
   alignmentWithRunwaySec,
   fetchNativeMediaWindow,
@@ -202,6 +203,36 @@ describe('fetchNativeMediaWindow', () => {
     ['network error', async () => { throw new TypeError('Failed to fetch') }],
   ])('is null, never a throw, when the %s', async (_name, impl) => {
     await expect(fetchNativeMediaWindow('/m/master.m3u8', undefined, vi.fn(impl) as unknown as typeof fetch)).resolves.toBeNull()
+  })
+
+  describe('a stalled fetch', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+    // The variant never answers, and ignores its signal (the race must end
+    // the wait anyway); the master answers at once.
+    const stalled = () => vi.fn((url: string, _init?: RequestInit) => url.endsWith('master.m3u8')
+      ? Promise.resolve(response('#EXTM3U\nsource/stream.m3u8\n'))
+      : new Promise<Response>(() => {}))
+
+    it(`is null after ${NATIVE_MEDIA_WINDOW_TIMEOUT_MS} ms, and aborts the fetch`, async () => {
+      const fetchImpl = stalled()
+      let settled: MediaWindow | null | undefined
+      void fetchNativeMediaWindow('/m/master.m3u8', undefined, fetchImpl as unknown as typeof fetch).then(w => { settled = w })
+      await vi.advanceTimersByTimeAsync(NATIVE_MEDIA_WINDOW_TIMEOUT_MS - 1)
+      expect(settled).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBeNull()
+      expect((fetchImpl.mock.calls[1][1]?.signal as AbortSignal).aborted).toBe(true)
+    })
+
+    it("still follows the caller's signal", async () => {
+      const fetchImpl = stalled()
+      const caller = new AbortController()
+      void fetchNativeMediaWindow('/m/master.m3u8', caller.signal, fetchImpl as unknown as typeof fetch)
+      await vi.advanceTimersByTimeAsync(10)
+      caller.abort()
+      expect((fetchImpl.mock.calls[1][1]?.signal as AbortSignal).aborted).toBe(true)
+    })
   })
 })
 

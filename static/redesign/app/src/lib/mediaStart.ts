@@ -273,29 +273,61 @@ export function firstVariantUri(masterText: string): string | null {
 }
 
 /**
+ * How long the native path's look at the variant playlist may take. The
+ * server answers a remux's first variant request once its first segment
+ * exists, plus at most ~2.75 s for the measurement; much past that the fetch
+ * has stalled, and WebKit's own timeout is about a minute, which a subtitle
+ * pick held for the measurement would wait out. On the timeout the result is
+ * null, as for a failed fetch: the clock stays on start_sec and a held pick is
+ * applied with the server's prediction.
+ */
+export const NATIVE_MEDIA_WINDOW_TIMEOUT_MS = 8000
+
+/**
  * The native-HLS path's one look at the variant playlist: fetch the master,
  * then its first variant (a remux has one), and parse the window. Never
- * throws: any failure is null, and the caller then behaves exactly as before
- * this existed. Nothing here touches the media element or how Safari loads
- * the stream.
+ * throws: any failure, or no answer within `timeoutMs`, is null, and the
+ * caller then behaves exactly as before this existed. Nothing here touches the
+ * media element or how Safari loads the stream.
  */
 export async function fetchNativeMediaWindow(
   masterUrl: string,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = NATIVE_MEDIA_WINDOW_TIMEOUT_MS,
 ): Promise<MediaWindow | null> {
+  // The caller's signal or the timeout aborts the fetches. A timer and a
+  // controller rather than AbortSignal.any, which needs Safari 17.4 (the build
+  // targets Safari 16); the race ends the wait even for a fetch that ignores
+  // its signal.
+  const limit = new AbortController()
+  const abort = () => limit.abort()
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<null>(resolve => {
+    timer = setTimeout(() => { abort(); resolve(null) }, timeoutMs)
+  })
+  const read = async (): Promise<MediaWindow | null> => {
+    try {
+      const base = typeof window !== 'undefined' ? window.location.href : undefined
+      const masterAbs = new URL(masterUrl, base)
+      const master = await fetchImpl(masterAbs.toString(), { credentials: 'include', signal: limit.signal })
+      if (!master.ok) return null
+      const uri = firstVariantUri(await master.text())
+      if (!uri) return null
+      const variant = await fetchImpl(new URL(uri, masterAbs).toString(), { credentials: 'include', signal: limit.signal })
+      if (!variant.ok) return null
+      return parseMediaPlaylistWindow(await variant.text())
+    } catch {
+      return null
+    }
+  }
   try {
-    const base = typeof window !== 'undefined' ? window.location.href : undefined
-    const masterAbs = new URL(masterUrl, base)
-    const master = await fetchImpl(masterAbs.toString(), { credentials: 'include', signal })
-    if (!master.ok) return null
-    const uri = firstVariantUri(await master.text())
-    if (!uri) return null
-    const variant = await fetchImpl(new URL(uri, masterAbs).toString(), { credentials: 'include', signal })
-    if (!variant.ok) return null
-    return parseMediaPlaylistWindow(await variant.text())
-  } catch {
-    return null
+    return await Promise.race([read(), timedOut])
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
 }
 
