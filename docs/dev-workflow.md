@@ -33,19 +33,31 @@ flowchart TD
    would have caught the bug.
 4. **Build & test gate** — `go build ./...` and `go test ./...` must be green.
    For frontend work also run `npm run audit` in `static/redesign/app/`: it builds,
-   then runs six checks (focus indicators, on-art contrast, on-glass contrast,
-   reduced motion, breakpoints, cascade) and a browser-driven page-alignment check.
+   then runs `npm run audit:checks` — six static checks (focus indicators, on-art
+   contrast, on-glass contrast, reduced motion, breakpoints, cascade) and three
+   browser-driven ones (page alignment, mobile layout, PWA). CI's SPA job runs
+   the same `audit:checks` after its own build, so a new check belongs in
+   `audit:checks`, not appended to `audit`. Run on its own, `audit:checks` tests
+   whatever build is in `static/v2`, which after a branch switch is stale: use
+   `npm run audit` unless you have just built.
 
-   **That last one needs Chromium, and `npm ci` does not install it** — modern
-   Playwright has no postinstall step. On a fresh machine, once:
+   **The browser checks need Chromium, and `npm ci` does not install it** — modern
+   Playwright has no postinstall step. On a fresh machine, and again after a
+   Playwright upgrade (each release expects its own browser build):
 
    ```bash
    cd static/redesign/app && npx playwright install chromium
    ```
 
-   Without it the gate fails at the final step with Playwright's own message
-   telling you to run exactly that. Set `CHROMIUM_PATH` to override the binary
-   before review. Loop back on failure.
+   On Debian or Ubuntu without the browser's system libraries, add
+   `--with-deps` (it runs apt-get as root: directly, through sudo, or through
+   su when sudo is missing), as CI does. Without a browser the gate fails at the first browser check (page
+   alignment), with Playwright's own message suggesting `npx playwright
+   install`; the `chromium` form above is enough. `CHROMIUM_PATH` set to an
+   existing binary uses that one; an empty value, or a path that does not
+   exist, means Playwright's own browser (the pinned `/opt/pw-browsers` build
+   is tried only when the variable is unset), which is how CI runs. Loop back
+   on failure.
 5. **Independent deep-debug agent review** — dispatch a separate, fresh-context
    agent to adversarially review *the complete current diff*. The implementing
    agent's self-review does not satisfy this gate. The reviewer is read-only and
