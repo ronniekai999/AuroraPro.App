@@ -1901,10 +1901,26 @@ fixture grepfail
 R="$TMP/grepfail"; mkdir -p "$R"
 ln -s "$TMP/chain41/links/c41" "$R/link.mkv" || bad "is_video without grep: could not build the fixture"
 echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
-guard_case '#!/bin/sh
-[ "$1" = -qEi ] && exit 2
-exec /usr/bin/grep "$@"' \
+# The real grep, found before guardbin goes on PATH (not /usr/bin/grep:
+# hosts without merged /usr have only /bin/grep).
+REALGREP="$(command -v grep)"
+FAILQEI="#!/bin/sh
+[ \"\$1\" = -qEi ] && exit 2
+exec \"$REALGREP\" \"\$@\""
+guard_case "$FAILQEI" \
   "found no media it could confirm" "a grep that fails its -qEi form changes nothing: is_video is bash's own match" grep
+# The same failing grep on the walk's newline branch, which used grep too: a
+# library whose only media has a newline in its name read as "no media
+# found", exit 0, while the scanner discovered it and pruned gone.mkv.
+fixture grepfailnl
+R="$TMP/grepfailnl"; mkdir -p "$R"
+if touch "$R/$(printf 'weird\nname.mkv')" 2>/dev/null && [ -e "$R/$(printf 'weird\nname.mkv')" ]; then
+    echo "$R" > "$FIX/roots"; printf '%s\n' "$R/gone.mkv" > "$FIX/recorded"
+    guard_case "$FAILQEI" \
+      "has a newline in its name" "a grep that fails on a newline-named video changes nothing: is_video decides" grep
+else
+    ok "a grep that fails on a newline-named video: SKIPPED (filesystem refused the name)"
+fi
 # And it folds case, as grep -i did and as the scanner's IsVideoFile does
 # (it lowercases the extension): `LINK.MKV` is a video, so the link is
 # recorded as unresolved and the library exits 2. Read as "not a video",

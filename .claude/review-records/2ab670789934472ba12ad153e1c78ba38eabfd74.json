@@ -1,0 +1,10 @@
+{
+  "sha": "2ab670789934472ba12ad153e1c78ba38eabfd74",
+  "verdict": "clean",
+  "summary": "Merge of main (#546 squash, which carried this branch's reviewed defeef7) into #549: main's library-path files are byte-identical to defeef7, conflicts resolved to this branch's reviewed versions, tree rebuilt independently matches, nothing from #546 lost, effective diff vs e4d74c6 is exactly defeef7..6de2f49 plus its record; check-library-paths-test 195/195, go build ok.",
+  "reviewer": "independent-review-agent",
+  "findings": "0",
+  "diff_digest": "0739071b1bc98258c6556af96a13847049430457657533aea60708c65eee04c0",
+  "branch": "claude/sweet-brown-36veir-runner-2604",
+  "recorded_at": "2026-10-26T16:26:42Z"
+}

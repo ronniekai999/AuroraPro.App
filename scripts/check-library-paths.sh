@@ -433,8 +433,10 @@ classify_root() {
 # `printf | grep -q` either: under pipefail a SIGPIPE answers "no" too.
 # `${1,,}` and grep -i fold the same letters under LC_ALL=C (ASCII only, no
 # Unicode case rules): measured identical on 20,495 names, mixed case,
-# non-ASCII and invalid bytes included. (The walk diverts newline names
-# before this is reached, so `$` is the end of the whole name.)
+# non-ASCII and invalid bytes included. Newline names reach it too (the
+# walk's newline branch): bash's `$` matches only at the end of the whole
+# string, measured on `name.mkv<NL>` (no match) and `weird<NL>name.mkv`
+# (a match), which is what the scanner's filepath.Ext reads as well.
 is_video() {
     [[ ${1,,} =~ $VIDEO_RE ]]
     case $? in
@@ -793,9 +795,17 @@ for LIB in "${ids[@]}"; do
             case "$f" in
                 *"$NL"*)
                     # Only a video-extension name can affect the comparison;
-                    # anything else is filtered out below regardless.
-                    printf '%s' "$f" | grep -qEi "$VIDEO_RE" \
-                        && { printf '%s\n' "$f" >> "$WORK/badnames" || exit 9; }
+                    # anything else is filtered out below regardless. Through
+                    # is_video, not `printf | grep -qEi`: grep read a failure
+                    # (status 2) as "not a video", so a library whose only
+                    # media had a newline in its name said "no media found",
+                    # exit 0, while the scanner discovered it and pruned. And
+                    # grep matched any LINE of the name, where the scanner
+                    # (and `$` in bash's match, measured) takes the extension
+                    # at the end of the whole name.
+                    if is_video "$f"; then
+                        printf '%s\n' "$f" >> "$WORK/badnames" || exit 9
+                    fi
                     continue ;;
             esac
             if [ -L "$f" ]; then
@@ -1166,7 +1176,7 @@ done
 # first, or die() would blame the last library.
 LIB=""
 if [ "$CHECKED" -ne "$n_ids" ] || [ "$CHECKED" -eq 0 ]; then
-    die "examined $CHECKED of $n_ids librarie(s) — the list of libraries was not read whole, so no summary is given"
+    die "examined $CHECKED of $n_ids library(ies) — the list of libraries was not read whole, so no summary is given"
 fi
 
 printf '\n'
@@ -1174,7 +1184,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
     # Exit 1, not 2: this is a successful check with a bad answer, which is
     # different from being unable to check at all.
     printf '\033[1;31m[FAIL]\033[0m %s\n' \
-        "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING librarie(s) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
+        "$TOTAL_MISSING recorded file(s) across $LIBS_MISSING library(ies) would be PRUNED by the next scan. Do not start Aurora until this is 0." >&2
     exit 1
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
@@ -1192,5 +1202,5 @@ if [ "$CHECKED_FULLY" -ne "$CHECKED" ]; then
     # discovers nothing). But "nothing would be pruned" and "I compared every
     # recorded row against the disk" are different statements, and the runbook
     # tells the operator to act on exit 0. Say which one they got.
-    warn "$CHECKED_FULLY of $CHECKED librarie(s) were compared row by row. The rest were skipped above, each because the scan will not prune them either — read those warnings before starting Aurora."
+    warn "$CHECKED_FULLY of $CHECKED library(ies) were compared row by row. The rest were skipped above, each because the scan will not prune them either — read those warnings before starting Aurora."
 fi
