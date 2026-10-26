@@ -868,11 +868,14 @@ cat > "$TMP/probe.sh" <<'PROBE'
 source /dev/stdin <<< "$(sed -n '/^classify_root() {/,/^}/p' "$1")"
 classify_root "$2"
 PROBE
-cr_is() {  # $1 = path, $2 = expected first word, $3 = label
+# $4, when given, must appear in the verdict too: it names the guard a case is
+# meant to reach, so one guard cannot pass a case written for another.
+# CR_FAKEBIN, when set, goes first on PATH (the fake-realpath cases below).
+cr_is() {  # $1 = path, $2 = expected first word, $3 = label, [$4 = substring]
     local got
-    got="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$1" 2>&1)"
+    got="$(PATH="${CR_FAKEBIN:+$CR_FAKEBIN:}$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp bash "$TMP/probe.sh" "$SCRIPT" "$1" 2>&1)"
     case "$got" in
-        "$2"*) ok "$3" ;;
+        "$2"*"${4:-}"*) ok "$3" ;;
         *) bad "$3 (got: $got)" ;;
     esac
 }
@@ -888,6 +891,159 @@ cr_is "$CR/dangling/child"  absent   "a path under a dangling symlink is absent"
 cr_is "$CR/via-blocked"     blocked  "a symlink INTO an untraversable directory is blocked"
 cr_is "$CR/blocked/inner"   blocked  "a direct path into an untraversable directory is blocked"
 cr_is "$CR/loopa"           blocked  "a symlink loop is blocked, never absent"
+# ── 33b. …whatever realpath -m does on the loop ───────────────────
+# On a symlink loop `realpath -m` parts company with itself: GNU coreutils
+# carries on lexically and succeeds; uutils — the default `coreutils` on
+# Ubuntu 26.04 — fails with ELOOP and prints nothing. classify_root used to
+# recurse on that answer, printed `resolved` for the uutils nothing, and the
+# case above went red on the 26.04 runner. It no longer calls realpath -m
+# at all: it walks a link's target itself, and a loop meets the depth cap.
+#
+# These fakes put the bad answers back on PATH anyway — only `-m` is faked,
+# every other form passes through — so a GNU runner would see one return if
+# a later change routed the walk through realpath -m again: the uutils
+# failure, and an answer that would read as ABSENT if it were believed. The
+# loop must come back blocked under both. (They are verdict-only: which
+# guard blocks is the implementation's business; that it is blocked is not.)
+REALRP="$(command -v realpath)"
+fake_rp() {  # $1 = name, $2 = what `realpath -m -- <target>` does instead
+    mkdir -p "$TMP/fakerp-$1"
+    printf '#!/bin/sh\n[ "$1" = -m ] && { %s; }\nexec "%s" "$@"\n' "$2" "$REALRP" > "$TMP/fakerp-$1/realpath"
+    chmod a+rx "$TMP/fakerp-$1" "$TMP/fakerp-$1/realpath"
+}
+# Exactly what uutils 0.8.0 and 0.10.0 do: an error on stderr, nothing on
+# stdout, status 1.
+fake_rp eloop 'echo "realpath: $3: Too many levels of symbolic links" >&2; exit 1'
+# Prints a path that would read as absent if believed, and fails.
+fake_rp liar 'printf "%s\n" "$3-gone"; exit 1'
+CR_FAKEBIN="$TMP/fakerp-eloop"
+cr_is "$CR/loopa"           blocked  "…and with a realpath on PATH that FAILS on loops, as uutils does"
+CR_FAKEBIN="$TMP/fakerp-liar"
+cr_is "$CR/loopa"           blocked  "…and with one that answers a path it would be fatal to believe"
+CR_FAKEBIN=""
+# The absolute-path guard. Every caller hands classify_root an absolute
+# path, so only a tool that failed quietly — an empty canon(), say — can
+# hand it anything else. Unguarded, the walk never runs and the function
+# falls through to `resolved`.
+cr_is ""                    blocked  "an empty path is blocked, never resolved" "not an absolute path"
+cr_is "relative/path"       blocked  "…and so is a relative one" "not an absolute path"
+# ── 33c. A symlink target ending in a newline ─────────────────────
+# `$(...)` strips trailing newlines. A target spelled "hop<newline>" came back
+# from readlink as "hop" — another name, absent here — while the real next
+# hop is a symlink into the untraversable directory: `absent`, i.e. exit 0,
+# where the kernel answers EACCES. GNU and uutils readlink print the target
+# alike; the loss was the shell's, so this was wrong on every runner.
+# The second case is the same name met one hop further in: a link whose
+# target is a link to "f<newline>" (itself a loop). It used to reach the
+# walk through realpath -m's answer, where GNU handed the loop back as
+# itself and the stripped "f" read as absent; the walk now follows the
+# target itself, so it is readlink's capture that meets the newline, on
+# either build.
+#
+# NLFS: does this filesystem take a newline in a name at all? Refusal is the
+# one reason to skip, as in cases 19 and 44. Any OTHER setup failure is a
+# `bad`: an `ln` that failed part way used to drop both cases with an "ok".
+NLFS=0
+{ : > "$TMP/nl-probe"$'\n'; } 2>/dev/null && [ -e "$TMP/nl-probe"$'\n' ] && NLFS=1
+if [ "$NLFS" -eq 0 ]; then
+    ok "newline-terminated symlink targets: SKIPPED (filesystem refused a newline in a name)"
+elif ! { ln -s "$CR/blocked/inner" "$CR/hop"$'\n' \
+         && ln -s "$CR/hop"$'\n' "$CR/nl-target" \
+         && ln -s "$CR/f"$'\n' "$CR/f"$'\n' \
+         && ln -s "$CR/f"$'\n' "$CR/to-nl-loop" \
+         && ln -s "$CR/to-nl-loop" "$CR/via-nl-loop"; }; then
+    bad "newline-terminated symlink targets: could not build the fixture — both cases would go unrun"
+else
+    cr_is "$CR/nl-target"   blocked  "a symlink target ending in a newline is not shortened into an absent name" "contains a newline"
+    cr_is "$CR/via-nl-loop" blocked  "…nor is one met a hop further in" "contains a newline"
+fi
+# ── 33d. A readlink that exits 0 and prints nothing ───────────────
+# Linux cannot create a symlink with an empty target, so only a quietly
+# broken readlink reaches the empty-target arm. Unguarded, the empty target
+# is "relative", is joined to the link's directory, and that directory comes
+# back `resolved`. Faked, as realpath is in 33b.
+mkdir -p "$TMP/fakerl-silent"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/fakerl-silent/readlink"
+chmod a+rx "$TMP/fakerl-silent" "$TMP/fakerl-silent/readlink"
+CR_FAKEBIN="$TMP/fakerl-silent"
+cr_is "$CR/dangling"        blocked  "a readlink that exits 0 and prints nothing is not followed" "empty or contains a newline"
+CR_FAKEBIN=""
+# ── 33e. `..` after a component this user cannot enter ────────────
+# realpath -m resolves what it can and treats the rest LEXICALLY, so after a
+# component it could not enter, a `..` stepped back over the NAME rather than
+# over where the name leads. Here `movies -> wall/in/../../media` with `wall`
+# untraversable and `in` a link to q/r/s: the kernel (and the service user,
+# who can enter `wall`) lands on q/media, which exists; realpath -m, as a
+# user who cannot, landed on <dd>/media, which does not — and the root read
+# as `absent`, exit 0, over a prune. The walk now takes the target as
+# written, so the kernel meets `wall` and the answer is blocked.
+DD="$CR/dd"
+mkdir -p "$DD/lib" "$DD/wall" "$DD/q/r/s" "$DD/q/media/films"
+ln -s "$DD/q/r/s" "$DD/wall/in"
+ln -s "$DD/wall/in/../../media" "$DD/lib/movies"
+chmod 000 "$DD/wall"
+[ "$(id -u)" -eq 0 ] && chmod a+rx "$DD" "$DD/lib" "$DD/q" "$DD/q/media" "$DD/q/media/films"
+assert_denied "$DD/wall" "dotdot after a wall"
+cr_is "$DD/lib/movies/films" blocked "a target that crosses an untraversable directory and then '..' is blocked, not absent" "cannot traverse"
+chmod 755 "$DD/wall"
+# Control: once `wall` can be entered, the same root resolves (to q/media).
+cr_is "$DD/lib/movies/films" resolved "…and once the directory can be entered, it resolves where the kernel says"
+# ── 33f. A lookup that fails for a reason other than absence ──────
+# `-e` and `-L` fail alike on EVERY lstat error, and a searchable parent
+# does not make the error ENOENT. A FUSE mount without allow_other answers
+# EACCES to anyone but its owner — root included — under a parent anyone can
+# search, and read as `absent`: "the scan will skip its prune", exit 0, while
+# the service user (the mount's owner) walked the root and pruned. The fix
+# asks the kernel why, and only ENOENT and ENOTDIR are absence.
+# FUSE cannot be mounted here, so this pins the same branch with another
+# error the kernel gives under a searchable parent: ENAMETOOLONG, from a
+# path longer than PATH_MAX made of `.` components — which this walk now
+# meets for real when it follows a link target as written (case 54).
+LONGP="$CR/real"; i=0; while [ "$i" -lt 2100 ]; do LONGP="$LONGP/."; i=$((i + 1)); done
+cr_is "$LONGP/deep"          blocked  "a path the kernel refuses as too long is blocked, not absent" "File name too long"
+# The controls, on the same branch: a genuinely missing name is still
+# absent, and so is a name under an executable regular file (ENOTDIR) — the
+# scanner's EvalSymlinks fails there too, which is walkFailed for a root.
+cr_is "$CR/real/./deep/nope" absent   "…and a genuinely missing one is still absent"
+: > "$CR/execfile"; chmod 755 "$CR/execfile"
+cr_is "$CR/execfile/x"       absent   "…and so is a name under an executable non-directory (ENOTDIR)"
+# A TRAILING slash after it is the same ENOTDIR to the kernel, and the walk
+# used to drop the slash and answer `resolved` — so a link to `x.mkv/` was
+# recorded as unresolved and, alone, made its library exit 2, while
+# `x.mkv/.` and `x.mkv//` read absent (exit 0, which is exact: the scanner
+# shields all three). A directory with a trailing slash still resolves.
+cr_is "$CR/execfile/"        absent   "an executable file with a trailing slash is ENOTDIR, absent, not resolved"
+cr_is "$CR/real/deep/"       resolved "…and a directory with one still resolves"
+# `/` itself ends in a slash, and the walk never runs for it, so the
+# trailing-slash test once saw an empty path and read `/` as blocked.
+# Only `/` pins that; `//` and `/.` are controls (they resolved either way).
+for p in / // /.; do
+    cr_is "$p"               resolved "…and so does the root directory, spelled $p"
+done
+# `builtin cd`, so an exported function named cd cannot answer for the
+# kernel. The fake would turn these genuinely absent names into `blocked`
+# (and one answering "No such file or directory" could turn a refusal into
+# `absent`). Both probes: the missing name, and the trailing slash.
+for p in "$CR/real/deep/nope" "$CR/execfile/"; do
+    got="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env HOME=/tmp 'BASH_FUNC_cd%%=() { echo "fake: Permission denied" >&2; return 1; }' \
+           bash "$TMP/probe.sh" "$SCRIPT" "$p" 2>&1)"
+    case "$got" in
+        absent) ok "an exported function named cd does not answer in the probe's place (${p#"$CR/"})" ;;
+        *) bad "an exported function named cd answered in the probe's place for ${p#"$CR/"} (got: $got)" ;;
+    esac
+done
+# The kernel's words are read in the C locale, so the match does not depend
+# on the operator's language. STRUCTURAL, as case 25 is, and for the same
+# reason: only C locales exist on this kind of runner, so a behavioural case
+# would pass whether or not the locale is forced.
+# Captured, then matched — not `sed | grep -q`, which under pipefail fails
+# whenever grep's early exit hands sed a SIGPIPE (it did, under load).
+CRFN="$(sed -n '/^classify_root() {/,/^}/p' "$SCRIPT")"
+case "$CRFN" in
+    *'why="$(LC_ALL=C; builtin cd -P -- "$acc" 2>&1)"'*'why2="$(LC_ALL=C; builtin cd -P -- "$path" 2>&1)"'*)
+        ok "classify_root asks the kernel why in the C locale, without opening the path (builtin cd -P, both probes)" ;;
+    *)  bad "classify_root's errno probes no longer force LC_ALL=C or no longer use builtin cd -P — the absence match depends on the locale, or it opens what it probes" ;;
+esac
 # Search permission, not read, is what makes an absence conclusive. 0711 is the
 # ordinary mode of /home/<user>, and requiring `r` here turned every genuinely
 # absent root under a home directory into an exit 2 nobody could clear.
@@ -1149,8 +1305,9 @@ expect_out "could not record what find discovered" "…through the recording gua
 
 # ── 40. The writer failing when the LAST entry takes `continue` ───
 # A while loop's exit status is whatever its LAST body command returned, and
-# three paths in that body end in `continue` (a newline name, an unresolvable
-# symlink, an escaping symlink) — all of which return 0. So a run where every
+# every path in that body that ends in `continue` (a newline name, a link that
+# does not resolve, a link realpath gave no answer for, a link that escapes
+# the root) returns 0. So a run where every
 # write failed but the final entry was one of those reported PIPESTATUS[1]=0,
 # left the disk list empty, and answered "no media found, so the scan will
 # prune nothing". Case 39 could not see it: bare `ulimit -f 0` KILLS the
@@ -1164,22 +1321,38 @@ expect_out "could not record what find discovered" "…through the recording gua
 # one, not the exotic one.
 fixture writerorder
 R="$TMP/writerorder"; mkdir -p "$R"
-: > "$R/keep.mkv"
-# MANY dangling symlinks, and then an ASSERTED precondition. The defect needs
-# find's LAST emitted entry to take a `continue` path, and find emits in
-# readdir order — which is a hash order, not creation or name order, so it
-# cannot be arranged by naming. One symlink and one file put the FILE last on
-# every pair I tried, which would have made this case vacuous. Twenty makes it
-# overwhelmingly likely, and the check below makes it impossible for the case
-# to pass without it: a fixture that does not reproduce the ordering fails
+# MANY dangling symlinks around ONE plain file, and then an ASSERTED
+# precondition. The defect needs find's LAST emitted entry to take a
+# `continue` path, and find emits in readdir order, which is the
+# FILESYSTEM's, not find's: ext4 hands back a hash order, and tmpfs — which
+# Ubuntu 26.04's systemd mounts on /tmp by default — hands back NEWEST FIRST
+# (measured on Linux 6.18). The first version created the file first and
+# twenty symlinks after it, which put the file mid-way through an ext4 hash
+# order and LAST on tmpfs. Reproduced on tmpfs with GNU find; the likely
+# reason this case went red on the 26.04 runner with no change to either
+# script.
+# So the file sits in the MIDDLE of both creation order and name order
+# (a01…a10, then m-keep, then z01…z10): it cannot come last whether the
+# directory is read oldest first, newest first, or sorted either way. A hash
+# order can still put it last, so a few other names are tried — each one is
+# hashed afresh — and the check below then makes it impossible for the case
+# to pass without the ordering: a fixture that does not reproduce it fails
 # loudly instead of quietly asserting nothing.
-i=1; while [ "$i" -le 20 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/d$i.mkv"; i=$((i + 1)); done
+i=1; while [ "$i" -le 10 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/a$(printf %02d "$i").mkv"; i=$((i + 1)); done
+keep="$R/m-keep.mkv"; : > "$keep"
+i=1; while [ "$i" -le 10 ]; do ln -s "$TMP/writerorder-no-target.mkv" "$R/z$(printf %02d "$i").mkv"; i=$((i + 1)); done
 lastentry="$(find "$R" ! -type d -print0 | tr '\0' '\n' | grep -v '^$' | tail -1)"
+try=1
+while [ ! -L "$lastentry" ] && [ "$try" -le 5 ]; do
+    rm -f "$keep"; keep="$R/m-keep$try.mkv"; : > "$keep"
+    lastentry="$(find "$R" ! -type d -print0 | tr '\0' '\n' | grep -v '^$' | tail -1)"
+    try=$((try + 1))
+done
 if [ ! -L "$lastentry" ]; then
     bad "writer-ordering: find emitted a plain file last ($lastentry), so the continue-path ordering this case needs was not built — it would pass without testing anything"
 fi
 echo "$R" > "$FIX/roots"
-printf '%s\n%s\n' "$R/keep.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+printf '%s\n%s\n' "$keep" "$R/DELETED.mkv" > "$FIX/recorded"
 OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
        bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
 RC=$?
@@ -1242,7 +1415,14 @@ R="$TMP/wcempty"; mkdir -p "$R"
 : > "$R/A.mkv"
 echo "$R" > "$FIX/roots"
 printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+# The stub READS its input before exiting. wc sits at the end of
+# `printf | wc -l`, and a stub that exits without reading races the printf:
+# when it wins, printf takes SIGPIPE, pipefail turns that into the STATUS
+# guard ("wc failed"), and this case — which asserts the VALUE guard — fails
+# with the right exit code and the wrong message. Seen once in about thirty
+# runs, under eight suites in parallel. Draining stdin removes the race.
 guard_case '#!/bin/sh
+cat > /dev/null
 exit 0' \
   "is not a number" "a wc that exits 0 and prints nothing → exit 2" wc
 
@@ -1356,6 +1536,507 @@ exit 0' \
 guard_case '#!/bin/sh
 exit 0' \
   "did not report a directory that exists" "a find that outputs nothing at all → caught at startup" find
+
+# ── 47. A looping root, end to end ────────────────────────────────
+# Case 33b pins classify_root itself. End to end, the uutils failure did NOT
+# reach exit 0: classify_root said `resolved`, and the `realpath -e` behind
+# it — there for exactly this — failed on the loop and refused instead. So
+# the exit code alone cannot tell the fix from the bug; the reason can. The
+# verdict must come from classify_root's own depth cap, under whichever
+# realpath is installed and under the uutils-shaped fake (classify_root no
+# longer calls realpath -m, so neither can change it).
+fixture e2eloop
+L="$TMP/e2eloop"; mkdir -p "$L"
+ln -s "$L/loopb" "$L/loopa"; ln -s "$L/loopa" "$L/loopb"
+echo "$L/loopa" > "$FIX/roots"
+printf '%s\n' "$L/loopa/A.mkv" > "$FIX/recorded"
+for rpbin in "" "$TMP/fakerp-eloop"; do
+    what="the installed realpath"; [ -n "$rpbin" ] && what="a realpath that fails on loops"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"
+    RC=$?
+    expect_rc 2 "a looping root under $what → exit 2"
+    case "$OUT" in
+        *"resolves component by component but not as a whole"*)
+            bad "…but only through the realpath -e backstop: classify_root called the loop resolved ($what)"
+            printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+        *"symlink chain too deep"*)
+            ok "…and classify_root itself blocked it ($what)" ;;
+        *)  bad "…for no reason this case knows ($what)"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+    esac
+done
+
+# ── 48. A link's resolved target, compared byte for byte ──────────
+# The scanner's escape test is strings.HasPrefix on the EXACT resolved path.
+# `t="$(realpath -e …)"` stripped trailing newlines, so a link to a FILE named
+# "<root><newline>" — beside the root, not under it — resolved to exactly the
+# root and passed the containment test: "all 2 recorded file(s) will be
+# found", exit 0, while the scanner logs "symlink escapes library root" and
+# prunes the row. The same on GNU and uutils.
+if [ "$NLFS" -eq 0 ]; then
+    ok "a target named <root><newline>: SKIPPED (filesystem refused a newline in a name)"
+else
+    fixture nlescape
+    R="$TMP/nlescape/media"; mkdir -p "$R"
+    : > "$R/real.mkv"
+    if { : > "$R"$'\n'; } 2>/dev/null && ln -s "$R"$'\n' "$R/x.mkv"; then
+        echo "$R" > "$FIX/roots"
+        printf '%s\n%s\n' "$R/real.mkv" "$R/x.mkv" > "$FIX/recorded"
+        run
+        expect_rc 1 "a link to a file named <root><newline> is an escape, not the root → exit 1"
+        expect_out "$R/x.mkv" "…and its row is the one named"
+    else
+        bad "a target named <root><newline>: could not build the fixture — the case would go unrun"
+    fi
+fi
+
+# ── 49. realpath -e past a non-directory: one answer on either build ─
+# A link to `a.mkv/.` is where GNU and uutils realpath -e part: GNU fails with
+# ENOTDIR, uutils resolves it to a.mkv. So one tree gave exit 1 on GNU and
+# exit 0 on uutils. Not a false all-clear — the scanner's EvalSymlinks fails
+# with ENOTDIR, which it counts as unreadable and SHIELDS — but an answer that
+# depended on the coreutils build. Both call sites now ask the kernel
+# (`[ -e ]`) first, and a link the kernel refuses is classified, not skipped.
+# Every shape runs under the installed realpath and under a fake that
+# resolves it as uutils does, so a GNU runner pins the uutils side too.
+#   1. Beside a plain file: the link is not counted as found (exit 1), and
+#      the report says unresolved links are among the rows it lists.
+#   2. ALONE under its root: the scanner discovers nothing here (it shields
+#      the link), so exit 0 would be right — but this check cannot tell that
+#      link from one the scanner DOES resolve (case 51), so it refuses:
+#      exit 2, an over-report on purpose.
+#   3. A root linked to `file.mkv/.`: blocked inside classify_root, which
+#      cannot pass a non-directory, on either build.
+#   3b. A root linked to an EXECUTABLE file with a trailing slash: the walk
+#      used to drop the slash and call it resolved; it is now put to the
+#      kernel, which says ENOTDIR, so it reads absent — the scan's
+#      EvalSymlinks fails there too and skips the prune: exit 0, exact, on
+#      either build.
+#   3c. A root `a/b` where `a` is 20 links deep and `b` 25: each component
+#      resolves on its own, the whole fails (the kernel's 40 is per lookup),
+#      so it gets past classify_root and stops at the root's own `[ -e ]`,
+#      with the same reason on either build; without that check realpath -e
+#      (which follows 45 links in user space) answers and the run stops at
+#      "not a directory" instead.
+# The fake resolves a link whose target ends in `/.` or `/` the way uutils
+# does, by resolving the target without that suffix.
+mkdir -p "$TMP/fakerp-enotdir"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -L "$3" ] && { t="$(readlink -- "$3")"; case "$t" in */.) exec "%s" -e -- "${t%%/.}" ;; */) exec "%s" -e -- "${t%%/}" ;; esac; }\nexec "%s" "$@"\n' \
+    "$REALRP" "$REALRP" "$REALRP" > "$TMP/fakerp-enotdir/realpath"
+chmod a+rx "$TMP/fakerp-enotdir" "$TMP/fakerp-enotdir/realpath"
+fixture enotdir
+E="$TMP/enotdir"
+R="$E/media"; Z="$E/zero"
+mkdir -p "$R" "$Z/data"; : > "$R/a.mkv"; : > "$Z/data/a.bin"; : > "$E/file.mkv"
+: > "$E/exec.mkv"; chmod 755 "$E/exec.mkv"
+mkdir -p "$E/xD1" "$E/xD2" "$E/xca" "$E/xcb"; : > "$E/xD2/A.mkv"
+xbuilt=1
+prev="$E/xD1"; i=1; while [ "$i" -le 20 ]; do ln -s "$prev" "$E/xca/c$i" || xbuilt=0; prev="$E/xca/c$i"; i=$((i + 1)); done
+ln -s "$prev" "$E/xa" || xbuilt=0
+prev="$E/xD2"; i=1; while [ "$i" -le 25 ]; do ln -s "$prev" "$E/xcb/c$i" || xbuilt=0; prev="$E/xcb/c$i"; i=$((i + 1)); done
+ln -s "$prev" "$E/xD1/b" || xbuilt=0
+[ "$xbuilt" -eq 1 ] || bad "a root past 40 links across components: could not build the fixture — shape 3c would go unrun"
+if ! { ln -s "$R/a.mkv/." "$R/link.mkv" \
+       && ln -s "$Z/data/a.bin/." "$Z/link.mkv" \
+       && ln -s "$E/file.mkv/." "$E/rootlink" \
+       && ln -s "$E/exec.mkv/" "$E/rootlink-x"; }; then
+    bad "realpath -e past a non-directory: could not build the fixture — every shape would go unrun"
+fi
+for rpbin in "" "$TMP/fakerp-enotdir"; do
+    what="the installed realpath"; [ -n "$rpbin" ] && what="a realpath -e that resolves it, as uutils does"
+    echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/a.mkv" "$R/link.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 1 "a link to a.mkv/. is not discovered, under $what → exit 1"
+    expect_out "$R/link.mkv" "…and its row is the one named ($what)"
+    expect_out "could not be resolved here" "…with the note that unresolved links are among them ($what)"
+    echo "$Z" > "$FIX/roots"; printf '%s\n%s\n' "$Z/link.mkv" "$Z/other.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 2 "…and alone under its root, it is not called empty, under $what → exit 2 (an over-report)"
+    expect_out "found no media it could confirm" "…through the unresolved-links refusal ($what)"
+    echo "$E/rootlink" > "$FIX/roots"; printf '%s\n' "$E/rootlink/x.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 2 "a root linked to file.mkv/., under $what → exit 2"
+    expect_out "$E/file.mkv (cannot traverse" "…blocked at the file, inside classify_root ($what)"
+    echo "$E/rootlink-x" > "$FIX/roots"; printf '%s\n' "$E/rootlink-x/x.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 0 "a root linked to an executable file with a trailing slash reads absent, under $what → exit 0"
+    expect_out "does not exist" "…as the scan's own ENOTDIR does ($what)"
+    echo "$E/xa/b" > "$FIX/roots"; printf '%s\n' "$E/xa/b/A.mkv" > "$FIX/recorded"
+    OUT="$(PATH="${rpbin:+$rpbin:}$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 2 "a root whose components' links add up past 40, under $what → exit 2"
+    expect_out "resolves component by component but not as a whole" "…stopped at the root's own kernel check ($what)"
+done
+
+# ── 50. A realpath -e that answers nothing for the root ───────────
+# The escape test is `"$t/" in "$rr"/*`. With rr empty that is "/"*, which
+# every target passes, so a link escaping the root read as found: exit 0.
+# Only a quietly broken realpath -e produces it, hence the fake: it answers
+# nothing, status 0, for a directory (the root) and passes the rest through.
+mkdir -p "$TMP/fakerp-emptyroot"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -d "$3" ] && exit 0\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-emptyroot/realpath"
+chmod a+rx "$TMP/fakerp-emptyroot" "$TMP/fakerp-emptyroot/realpath"
+fixture emptyrr
+R="$TMP/emptyrr"; mkdir -p "$R"; : > "$R/A.mkv"
+: > "$TMP/emptyrr-outside.mkv"; ln -s "$TMP/emptyrr-outside.mkv" "$R/E.mkv"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/A.mkv" "$R/E.mkv" > "$FIX/recorded"
+run
+expect_rc 1 "control: a link escaping the root is not discovered → exit 1"
+OUT="$(PATH="$TMP/fakerp-emptyroot:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+expect_rc 2 "a realpath -e that answers nothing for the root → exit 2, not every link 'inside'"
+expect_out "gave no usable answer" "…through the root-answer check"
+
+# ── 51. A link the kernel refuses and the scanner follows ─────────
+# The kernel gives up after 40 links; EvalSymlinks follows 255, and GNU and
+# uutils realpath -e both follow such a chain too. A link at the end of a
+# 41-link chain that lands inside the root is therefore DISCOVERED by the
+# scanner, while `[ -e ]` here says it does not resolve. This branch's
+# intermediate commit b35afe3 skipped it as "not found"; as the library's
+# only media, the walk came back empty and the zero-discovered branch said
+# "the scan will prune nothing" — exit 0, on both builds, while the scanner
+# discovered one file and pruned gone.mkv. Reproduced against
+# collectVideoFiles itself. main had no such hole (its realpath -e followed
+# the chain) and gave the exact exit 1; this answers exit 2 — the price,
+# against main, of not believing realpath -e over the kernel. The chain lives outside the
+# root, and the link's final target is not a video, so the link is the only
+# thing the scanner can discover.
+# The control is the same with 39 links, which the kernel follows: found,
+# and gone.mkv is reported.
+for n in 41 39; do
+    fixture "chain$n"
+    C="$TMP/chain$n"; R="$C/lib"; mkdir -p "$R/data" "$C/links"; : > "$R/data/a.bin"
+    prev="$R/data/a.bin"; i=1; built=1
+    while [ "$i" -le "$n" ]; do
+        ln -s "$prev" "$C/links/c$i" || { built=0; break; }
+        prev="$C/links/c$i"; i=$((i + 1))
+    done
+    ln -s "$prev" "$R/link.mkv" || built=0
+    [ "$built" -eq 1 ] || bad "a $n-link chain: could not build the fixture — the case would go unrun"
+    echo "$R" > "$FIX/roots"
+    printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
+    run
+    if [ "$n" -eq 41 ]; then
+        expect_rc 2 "the only media behind a 41-link chain (kernel refuses, scanner follows) → exit 2, never 'no media found'"
+        expect_out "found no media it could confirm" "…through the unresolved-links refusal"
+    else
+        expect_rc 1 "control: behind a 39-link chain, which the kernel follows, it is found → exit 1"
+        expect_out "$R/gone.mkv" "…and the missing row is the one named"
+    fi
+done
+# Two controls on what the refusal must NOT cover, both the over-report
+# side. A library whose only video is a DANGLING link — the most ordinary
+# state mid-move — is proven absent by classify_root, the scanner reads it
+# as not-exist too, and the walk is genuinely empty: exit 0, as before. And
+# a link the kernel refuses whose NAME is not a video can never be
+# discovered (IsVideoFile comes before EvalSymlinks), so it must not make
+# an otherwise empty library refuse.
+fixture danglingonly
+R="$TMP/danglingonly"; mkdir -p "$R"
+ln -s "$TMP/danglingonly-nothing.mkv" "$R/x.mkv" || bad "dangling-only library: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/x.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "a library whose only video is a dangling link is empty, not unresolved → exit 0"
+expect_out "no media found" "…through the zero-discovered branch"
+fixture nonvideochain
+R="$TMP/nonvideochain"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/poster.jpg" || bad "non-video chained link: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n' "$R/GONE.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "a non-video link behind a 41-link chain does not make an empty library refuse → exit 0"
+# The record of unresolved links is written from inside the find pipeline,
+# so a failed write there must be the recording guard's `exit 9`, as it is
+# for the disk list: lost silently, the record reads as empty and the walk
+# as "no media found". The same XFSZ trick as cases 40 and 44, with the
+# chained link as the only entry, so the record is the only write.
+fixture unsurewrite
+R="$TMP/unsurewrite"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/link.mkv" || bad "unresolved-record write: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
+OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb \
+       bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
+RC=$?
+expect_rc 2 "a failed write of the unresolved-link record → exit 2, not 'no media found'"
+expect_out "could not record what find discovered" "…through the recording guard"
+# Per library, like every other latch (cases 30 and 35). Library 1 has an
+# unresolved link beside a file it finds; library 2 is genuinely empty. A
+# record that leaked from 1 into 2 would make 2 refuse instead of saying it
+# found nothing.
+fixture unsurereset
+printf '1\n2\n' > "$FIX/lib_ids"
+L1="$TMP/unsurereset1"; L2="$TMP/unsurereset2"; mkdir -p "$L1" "$L2"
+: > "$L1/a.mkv"
+ln -s "$TMP/chain41/links/c41" "$L1/link.mkv" || bad "unresolved-record reset: could not build the fixture"
+echo "$L1" > "$FIX/roots.1"; printf '%s\n' "$L1/a.mkv" > "$FIX/recorded.1"
+echo "$L2" > "$FIX/roots.2"; printf '%s\n' "$L2/X.mkv" > "$FIX/recorded.2"
+run
+expect_rc 0 "an unresolved link in library 1 does not make an empty library 2 refuse → exit 0"
+case "$OUT" in
+    *"library 2"*"no media found"*) ok "…and library 2 says it found no media" ;;
+    *) bad "library 2 did not report itself empty — the unresolved-link record leaked across libraries"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+esac
+
+# ── 52. A link through a directory this user cannot enter ─────────
+# The other thing the kernel refuses and the SERVICE user may not: a link
+# whose path runs through a directory the checking user cannot search, and
+# back inside the root. As the operator `[ -e ]` fails with EACCES; as
+# Aurora the scanner resolves it and discovers it. Skipped, it was the
+# zero-discovered all-clear again (on main too, through realpath -e). The
+# script's comment called skipping "an error other than not-exist" the safe
+# side; that holds for ENOTDIR, which the scanner cannot resolve either, and
+# not for EACCES, which only this user hits.
+if [ "$(id -u)" -eq 0 ] && [ "${#DROP[@]}" -eq 0 ]; then
+    bad "link through an unenterable directory: running as root and setpriv is unavailable — cannot test"
+else
+    fixture throughwall
+    T52="$TMP/throughwall"; R="$T52/lib"; mkdir -p "$R/data" "$T52/w"; : > "$R/data/a.bin"
+    if ln -s "$R/data/a.bin" "$T52/w/hop" && ln -s "$T52/w/hop" "$R/link.mkv"; then
+        echo "$R" > "$FIX/roots"
+        printf '%s\n%s\n' "$R/link.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+        chmod 000 "$T52/w"
+        assert_denied "$T52/w" "link through an unenterable directory"
+        [ "$(id -u)" -eq 0 ] && { chmod -R a+rX "$TMP/bin" "$FIX" 2>/dev/null; chmod a+rx "$TMP" "$T52" "$R" "$R/data"; }
+        OUT="$(PATH="$TMP/bin:$PATH" "${DROP[@]}" env PATH="$TMP/bin:$PATH" \
+               FIX="$FIX" AURORA_DB=testdb HOME=/tmp bash "$SCRIPT" 2>&1)"
+        RC=$?
+        chmod 755 "$T52/w"
+        expect_rc 2 "the only media behind a directory this user cannot enter → exit 2, never 'no media found'"
+        expect_out "found no media it could confirm" "…through the unresolved-links refusal"
+        # Control: the same tree, enterable — the link is found, GONE.mkv named.
+        run
+        expect_rc 1 "…and once the directory can be entered, it is found → exit 1"
+    else
+        bad "link through an unenterable directory: could not build the fixture — the case would go unrun"
+    fi
+fi
+
+# ── 53. A realpath -e that fails quietly on a link ────────────────
+# The kernel says the link resolves, then realpath -e fails — or exits 0 and
+# prints nothing. That is the tool failing, not a fact about the link, and
+# skipping the link as "not found" turned an all-symlink library (the usual
+# *arr layout, every video a link) into an empty walk: exit 0 while the
+# scanner pruned GONE.mkv. Each fake misbehaves for links only (the root is a
+# directory and passes through), so it is the link's call that is tested.
+mkdir -p "$TMP/fakerp-linkfail" "$TMP/fakerp-linksilent"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -L "$3" ] && exit 1\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-linkfail/realpath"
+printf '#!/bin/sh\n[ "$1" = -e ] && [ -L "$3" ] && exit 0\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-linksilent/realpath"
+chmod a+rx "$TMP/fakerp-linkfail" "$TMP/fakerp-linkfail/realpath" "$TMP/fakerp-linksilent" "$TMP/fakerp-linksilent/realpath"
+fixture arrlinks
+R="$TMP/arrlinks"; mkdir -p "$R/real"; : > "$R/real/a.data"
+ln -s "$R/real/a.data" "$R/A.mkv" || bad "all-symlink library: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/A.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+run
+expect_rc 1 "control: an all-symlink library under the installed realpath → exit 1"
+for shape in linkfail linksilent; do
+    OUT="$(PATH="$TMP/fakerp-$shape:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 2 "an all-symlink library under a realpath -e that $( [ "$shape" = linkfail ] && echo fails || echo 'answers nothing' ) on links → exit 2, not 'no media found'"
+    expect_out "found no media it could confirm" "…through the unresolved-links refusal ($shape)"
+done
+# …but only for VIDEO names: a non-video link the scanner can never discover
+# is not "unresolved", whatever realpath says about it.
+fixture arrnonvideo
+R="$TMP/arrnonvideo"; mkdir -p "$R/real"; : > "$R/real/a.data"
+ln -s "$R/real/a.data" "$R/poster.jpg" || bad "non-video link under a failing realpath: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n' "$R/GONE.mkv" > "$FIX/recorded"
+for shape in linkfail linksilent; do
+    OUT="$(PATH="$TMP/fakerp-$shape:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+    expect_rc 0 "a non-video link under the $shape realpath does not make an empty library refuse → exit 0"
+done
+
+# ── 54. A link target longer than PATH_MAX as written ─────────────
+# The walk follows a link's target as written, and a relative target joined
+# to the link's directory can be longer than PATH_MAX while the real path is
+# short: here the 41st link of a chain points at `./` x 2040 + `c40`. The
+# kernel's lstat of that string fails with ENAMETOOLONG under a parent this
+# user can search, which read as `absent`; Go's EvalSymlinks has no such
+# limit (it walks component by component), follows the chain, and discovers
+# the link. At this branch's 3a7e30d, which began walking targets as
+# written, that gave "no media found", exit 0, over a prune, and the
+# root-side twin read as "missing root", exit 0, where the scanner shields
+# that root and prunes the other one. main had neither hole — its realpath
+# -m collapsed the `./` — and gave exit 1 (the link) and exit 2 (the root).
+# Now: exit 2 both, which against main costs precision on the link side.
+# Both checked against collectVideoFiles.
+# Unprivileged, so it also pins the not-ENOENT-means-blocked rule (case 33f)
+# end to end on a runner that cannot mount FUSE.
+mklong() {  # mklong <dir> <final target> — prints the 41st link
+    local d="$1" prev="$2" i dots=""
+    mkdir -p "$d" || return 1
+    for i in $(seq 1 40); do ln -s "$prev" "$d/c$i" || return 1; prev="$d/c$i"; done
+    for i in $(seq 1 2040); do dots="$dots./"; done
+    ln -s "${dots}c40" "$d/c41" || return 1
+    printf '%s' "$d/c41"
+}
+fixture longlink
+LG="$TMP/longlink"; mkdir -p "$LG/lib/data" "$LG/dir/sub" "$LG/other"
+: > "$LG/lib/data/a.bin"; : > "$LG/dir/sub/A.mkv"; : > "$LG/other/B.mkv"
+if CF="$(mklong "$LG/chainF" "$LG/lib/data/a.bin")" && CD="$(mklong "$LG/chainD" "$LG/dir")" \
+   && ln -s "$CF" "$LG/lib/link.mkv"; then
+    echo "$LG/lib" > "$FIX/roots"
+    printf '%s\n%s\n' "$LG/lib/link.mkv" "$LG/lib/gone.mkv" > "$FIX/recorded"
+    run
+    expect_rc 2 "the only media behind a link target longer than PATH_MAX as written → exit 2, never 'no media found'"
+    expect_out "found no media it could confirm" "…through the unresolved-links refusal"
+    # ── 55. …and the same chain inside a ROOT ─────────────────────
+    printf '%s\n%s\n' "$CD/sub" "$LG/other" > "$FIX/roots"
+    printf '%s\n%s\n' "$LG/other/B.mkv" "$LG/other/GONE.mkv" > "$FIX/recorded"
+    run
+    expect_rc 2 "a root reached through a target longer than PATH_MAX → exit 2, not 'missing root'"
+    expect_out "File name too long" "…blocked in the kernel's words"
+    case "$OUT" in
+        *"missing root"*) bad "…but it was still labelled a missing root"; printf '%s\n' "$OUT" | sed 's/^/       | /' ;;
+        *) ok "…and it is not labelled a missing root" ;;
+    esac
+else
+    bad "a link target longer than PATH_MAX: could not build the fixture — cases 54 and 55 would go unrun"
+fi
+
+# ── 56. is_video does not depend on grep ──────────────────────────
+# is_video used grep on a here-string: a grep that failed (status 2) read as
+# "not a video" and dropped the record, and a here-string in a full TMPDIR
+# never reached grep at all (case 57). It is now bash's own match. So a grep
+# that FAILS its -qEi form must change nothing here: the link is still a
+# video, still unresolved, and the library still refuses (exit 2, through
+# the unresolved-links refusal — not "could not record", which a grep-based
+# is_video would give, nor exit 0, which the old one did). The startup probe
+# uses `-Ei`, so the run gets as far as the walk.
+fixture grepfail
+R="$TMP/grepfail"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/link.mkv" || bad "is_video without grep: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
+guard_case '#!/bin/sh
+[ "$1" = -qEi ] && exit 2
+exec /usr/bin/grep "$@"' \
+  "found no media it could confirm" "a grep that fails its -qEi form changes nothing: is_video is bash's own match" grep
+# And it folds case, as grep -i did and as the scanner's IsVideoFile does
+# (it lowercases the extension): `LINK.MKV` is a video, so the link is
+# recorded as unresolved and the library exits 2. Read as "not a video",
+# the link was skipped and the run said "no media found", exit 0. This
+# pins the folding only: the chain ends outside this root, so here the
+# scanner rejects the link as escaping and that exit 0 would happen to be
+# true. Case 51's chain, which ends inside its root, is the prune case.
+fixture upperlink
+R="$TMP/upperlink"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/LINK.MKV" || bad "is_video folds case: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/LINK.MKV" "$R/gone.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "the only media an unresolved link named LINK.MKV → exit 2: an upper-case extension is still a video"
+expect_out "found no media it could confirm" "…through the unresolved-links refusal"
+
+# ── 57. The write-failure cases again, under BASH_COMPAT=50 ───────
+# Bash before 5.1 — Ubuntu 20.04's 5.0, RHEL 8's 4.4 — and any bash under
+# BASH_COMPAT=50 writes every here-string to a file in TMPDIR (5.1 and
+# later, one larger than the 64 KiB pipe buffer). Where TMPDIR
+# takes the create but not the write (a full tmpfs), the redirection failed
+# and the loop it fed never ran: the library loop examined nothing and the
+# summary said "nothing would be pruned", exit 0 (main too); the roots loop
+# walked nothing and said "no media found"; is_video's grep answered "not a
+# video". The script now has no here-string. The XFSZ trick of cases 40 and
+# 44 makes every write fail, a here-string's file included, so under
+# BASH_COMPAT=50 it reproduces the full TMPDIR on any bash: each fixture
+# that writes must stop at the recording guard, never at an all-clear, and
+# the one that writes nothing (a missing root) must still be reported.
+compat50() {  # run the script with every write failing, under BASH_COMPAT=50
+    OUT="$(PATH="$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb BASH_COMPAT=50 \
+           bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; exec bash "$1"' _ "$SCRIPT" 2>&1)"
+    RC=$?
+}
+# Is the mechanism real on this bash? If BASH_COMPAT=50 still fed a
+# here-string through a pipe, these cases would pass without showing the
+# hazard, so say which it is.
+hs="$(BASH_COMPAT=50 bash -c 'trap "" XFSZ; ulimit -f 0 2>/dev/null; while read -r x; do echo ran; done <<< probe' 2>/dev/null)"
+if [ "$hs" = ran ]; then
+    ok "BASH_COMPAT=50: NOTE — this bash ($BASH_VERSION) still feeds a here-string through a pipe, so the cases below cannot show the old failure, only that none is left"
+else
+    ok "BASH_COMPAT=50: a here-string fails under a failing write on this bash ($BASH_VERSION), as on bash 5.0 in a full TMPDIR"
+fi
+fixture compat_plain
+R="$TMP/compat_plain"; mkdir -p "$R"; : > "$R/A.mkv"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/A.mkv" "$R/DELETED.mkv" > "$FIX/recorded"
+compat50
+expect_rc 2 "BASH_COMPAT=50, writes failing: a library with a missing row → exit 2, never 'nothing would be pruned'"
+expect_out "could not record what find discovered" "…through the recording guard"
+fixture compat_unsure
+R="$TMP/compat_unsure"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/link.mkv" || bad "BASH_COMPAT=50 unresolved link: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/gone.mkv" > "$FIX/recorded"
+compat50
+expect_rc 2 "BASH_COMPAT=50, writes failing: the only media an unresolved link → exit 2, not 'not a video'"
+expect_out "could not record what find discovered" "…through the recording guard"
+if [ "$NLFS" -eq 1 ]; then
+    fixture compat_badname
+    R="$TMP/compat_badname"; mkdir -p "$R"
+    : > "$R/$(printf 'weird\nname.mkv')"
+    echo "$R" > "$FIX/roots"; printf '%s\n' "$R/DELETED.mkv" > "$FIX/recorded"
+    compat50
+    expect_rc 2 "BASH_COMPAT=50, writes failing: a newline-named video → exit 2"
+    expect_out "could not record what find discovered" "…through the recording guard"
+fi
+# A missing root writes nothing, so it reaches its report, whose loop over
+# the roots was the third here-string: the skip is still exit 0 (case 8),
+# and the report must still name the root it skips.
+fixture compat_missing
+echo "$TMP/compat_missing-absent" > "$FIX/roots"
+printf '%s\n' "$TMP/compat_missing-absent/A.mkv" > "$FIX/recorded"
+compat50
+expect_rc 0 "BASH_COMPAT=50, writes failing: a missing root → exit 0, as in case 8 (the scan skips its prune)"
+expect_out "missing root: $TMP/compat_missing-absent" "…and its report still names the root"
+
+# ── 58. A link to an executable file with a trailing slash ────────
+# `x.mkv/` is ENOTDIR to the kernel and to the scanner's EvalSymlinks, which
+# shields such a link. The walk used to drop the slash and answer
+# `resolved`, so the link was recorded as unresolved and, as the library's
+# only media, made it exit 2; it now reads absent, as `x.mkv/.` and
+# `x.mkv//` did, and the empty library says so: exit 0, exact.
+fixture execslash
+R="$TMP/execslash"; mkdir -p "$R/data"; : > "$R/data/x.bin"; chmod 755 "$R/data/x.bin"
+ln -s "$R/data/x.bin/" "$R/link.mkv" || bad "link to an executable file with a trailing slash: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/GONE.mkv" > "$FIX/recorded"
+run
+expect_rc 0 "the only media a link to an executable x.mkv/ → exit 0, as the scanner (which shields it) prunes nothing"
+expect_out "no media found" "…through the zero-discovered branch"
+
+# ── 59. Every root is read, or the library says so ────────────────
+# The roots loop reads a process substitution, and a command in the loop
+# that reads its stdin swallows the roots after the current one. Here a
+# realpath that drains stdin (and then answers correctly) leaves the walk
+# with the first, empty root only: without the count, "no media found",
+# exit 0, while the scanner walks the second root and prunes GONE.mkv.
+# (The same guard catches a process substitution that fails outright,
+# as it does without /proc; measured, not cased.) Run with stdin from
+# /dev/null, so outside the loop the fake drains nothing.
+fixture tworoots
+R1="$TMP/tworoots/r1"; R2="$TMP/tworoots/r2"; mkdir -p "$R1" "$R2"; : > "$R2/A.mkv"
+printf '%s\n%s\n' "$R1" "$R2" > "$FIX/roots"
+printf '%s\n%s\n' "$R2/A.mkv" "$R2/GONE.mkv" > "$FIX/recorded"
+mkdir -p "$TMP/fakerp-drain"
+printf '#!/bin/sh\ncat > /dev/null\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-drain/realpath"
+chmod a+rx "$TMP/fakerp-drain" "$TMP/fakerp-drain/realpath"
+OUT="$(PATH="$TMP/fakerp-drain:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1 < /dev/null)"; RC=$?
+expect_rc 2 "a realpath that drains the roots loop's stdin → exit 2, never 'no media found'"
+expect_out "read 1 of its 2 root(s)" "…through the roots count"
+
+# ── 60. The library ids: blank, not numeric, or a pattern ─────────
+# The ids are split on whitespace by an unquoted expansion. A list of
+# nothing but whitespace passed the emptiness test and split into no ids,
+# so the loop ran zero times; the final count's `-eq 0` arm was all that
+# stopped "nothing would be pruned". A non-numeric id goes into SQL (the
+# stub answers any query, so only the check stops it). And the split runs
+# with globbing off: a `*` in a directory holding a file named 7 would
+# otherwise have become library 7, an id nobody asked for.
+fixture blankids
+printf ' \n' > "$FIX/lib_ids"
+run
+expect_rc 2 "a library list of only whitespace → exit 2, never 'nothing would be pruned'"
+expect_out "holds no ids, only whitespace" "…refused right after the split"
+fixture badid
+printf '2a\n' > "$FIX/lib_ids"
+run
+expect_rc 2 "a library id that is not a number → exit 2"
+expect_out "library id '2a' is not a number" "…refused before any query names it"
+fixture globid
+printf '*\n' > "$FIX/lib_ids"
+mkdir -p "$TMP/globcwd"; : > "$TMP/globcwd/7"
+OUT="$(cd "$TMP/globcwd" && PATH="$TMP/bin:$PATH" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+expect_rc 2 "a library id of '*' beside a file named 7 → exit 2"
+expect_out "library id '*' is not a number" "…refused as written, not expanded to library 7"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

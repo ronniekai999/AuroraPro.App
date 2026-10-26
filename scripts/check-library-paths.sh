@@ -54,20 +54,20 @@
 #
 # Exit: 0 = nothing would be pruned. 1 = something would. 2 = could not check.
 #
-# THIS IS A SECOND OPINION, NOT A GATE. Nine independent adversarial reviews
-# of this file found FOURTEEN states where it reported "nothing would be pruned"
-# while the scan would have deleted rows. Five were one class — a permission
-# failure it could not tell apart from "the path is gone", which is the one
-# state it treats as safe — and five were something failing quietly (comm,
-# sort, find, the pipeline that RECORDS what find found, sed and wc), each
-# leaving a variable empty, which reads the same way — and the eleventh was
-# inside the fix for the tenth: the recording guard read the loop's exit
-# status, which is whatever its LAST body command returned, so a run where
-# every write failed but the final entry was a dangling symlink reported
-# success. All are fixed and each is pinned by a test that fails if the fix
-# is reverted. That record is why
-# the wording here is what it is: exit 0 is evidence, not permission. Take the
-# backup regardless.
+# THIS IS A SECOND OPINION, NOT A GATE. Round after round of independent
+# adversarial review has found states where it reported "nothing would be
+# pruned" while the scan would have deleted rows — more than once inside the
+# fix for the round before, and the counts this comment used to give went
+# stale each time. The recurring classes: a permission or filesystem
+# refusal it could not tell apart from "the path is gone", which is the one
+# state it treats as safe; a tool failing quietly (comm, sort, find, the
+# pipeline that RECORDS what find found, sed, wc, realpath), leaving a
+# variable empty, which reads the same way; a path answer the shell or a
+# lexical normaliser changed on the way in; and the kernel refusing a link
+# the scanner follows. All found so far are fixed, and each is pinned by a
+# test that fails if the fix is reverted. That record is why the wording
+# here is what it is: exit 0 is evidence, not permission. Take the backup
+# regardless.
 set -uo pipefail
 
 DB_NAME="${AURORA_DB:-aurora}"
@@ -116,6 +116,46 @@ die()  {
 # states they cover (a stripped container, a shadowed binary on PATH) are real
 # and produce the all-clear rather than an error. Recorded so the next review
 # does not spend a round rediscovering that they survive mutation.
+#
+# GNU coreutils OR uutils. Ubuntu 26.04's default `coreutils` package is
+# uutils (find, grep and sed stay GNU there), and every coreutils
+# invocation in this file was measured against GNU 9.4 and uutils 0.8.0
+# and 0.10.0, as root and unprivileged: the line tools on awkward input
+# (newlines, invalid UTF-8, byte-distinct lookalikes), and the path tools
+# over every pairing of a file, directory, missing name, dangling link,
+# loop, link into an unreadable directory, or link to a file or directory
+# with the suffixes `/`, `/.`, `/..`, `//`, `/./`, `/x`, `/./x`, `/../x`,
+# written directly or reached through a link's target. Three forms differ
+# (the third found by review after this note claimed two), and nothing else
+# measured did:
+#   - `realpath -m` through a symlink loop: uutils fails (ELOOP), GNU
+#     carries on lexically. classify_root no longer calls realpath -m at
+#     all — it walks a link's target itself — so a loop meets its depth
+#     cap, blocked, on either build.
+#   - `realpath -e` on a path that goes on past a NON-DIRECTORY with only
+#     `.`, `..` or empty components (`a.mkv/.`, `a.mkv/..`; also `a.mkv/`
+#     and `a.mkv//` when they come from a link's target; a FIFO, checked
+#     for `/.`, `/..` and `/` through a link, the same as a file): GNU
+#     fails (ENOTDIR), uutils resolves it. Both call sites ask the kernel
+#     (`[ -e ]`) first, which fails there, so realpath -e is asked only
+#     about paths the kernel resolves, where the two agree; what happens to
+#     a path the kernel refuses — a root reported blocked, a link
+#     classified rather than skipped — involves neither build's realpath.
+#   - `comm` on byte-sorted input where one path is another followed by a
+#     byte below newline (0x01-0x09, TAB included): `lib/a.mkv` beside
+#     `lib/a.mkv<TAB>.mkv`. uutils 0.8.0 and 0.10.0 (every byte 0x01-0x09
+#     measured on both) call that input unsorted and exit 1 (as if they
+#     compared lines with their newline: 0x0b and up are fine); GNU
+#     accepts it. Safe as it stands: comm's status is checked,
+#     so uutils stops with exit 2 ("comm failed while comparing") rather
+#     than an answer, as main did.
+#     Deliberately NOT papered over with --nocheck-order: an order check
+#     that fails is a refusal, and one switched off is an assumption.
+# The first version of this note named only the first; the second and
+# third were found by review — the second with a hand-picked list of
+# shapes that missed it, the third because the line tools were probed with
+# awkward bytes but never with one path as another's prefix.
+# Re-measure before relying on a new flag of any of these.
 for tool in realpath psql comm sort find grep sed wc readlink mktemp tr; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool not found — this check cannot run, and a missing one of these does not fail loudly: an empty result from it reads as 'nothing would be pruned'"
@@ -136,7 +176,12 @@ q() { "${PSQL[@]}" -c "$1"; }
 
 # canon: lexical normalisation only — no symlink resolution. This is what
 # filepath.Clean does, and resolving symlinks here would hide the very case
-# this script exists to catch.
+# this script exists to catch. GNU coreutils and uutils agree on -ms
+# (measured, loops and unreadable components included; under strace neither
+# makes a filesystem call on its operand). Its callers do not check its
+# status: both hand the answer straight to classify_root, which reports
+# anything that is not an absolute path — the empty string a failing
+# realpath leaves — as blocked.
 canon() { realpath -ms -- "$1"; }
 
 # classify_root PATH — decides why a path could not be resolved, and is the
@@ -159,10 +204,13 @@ canon() { realpath -ms -- "$1"; }
 # So this never asks "did it fail". It requires POSITIVE PROOF of absence and
 # treats everything else as blocked:
 #
-#   - A component is proven absent only when we can read AND traverse its
-#     lexical parent (so we would have seen the entry had it existed) and
-#     lstat finds no entry there. `-e || -L` is the lstat test: a dangling
-#     symlink is an entry that exists, and `-e` alone says it does not.
+#   - A component is proven absent only when we can search its lexical
+#     parent, lstat finds no entry there, AND the kernel says why: ENOENT,
+#     or ENOTDIR (a non-directory with more path after it). Any other error
+#     — EACCES from a filesystem that refuses this user, ENAMETOOLONG,
+#     ELOOP — is not proof of anything. `-e || -L` is the lstat test: a
+#     dangling symlink is an entry that exists, and `-e` alone says it does
+#     not.
 #   - A symlink whose target will not resolve is NOT decided here. Its target
 #     is read one level and classified recursively, because "dangling" (absent)
 #     and "target behind a wall" (blocked) are the two states `-e` conflates.
@@ -170,6 +218,21 @@ canon() { realpath -ms -- "$1"; }
 #     than the cap — is blocked. Unknown is never absent.
 classify_root() {
     local path="$1" depth="${2:-0}" parentdir
+    # Absolute paths only. Every caller hands this one — canon() of a root
+    # already refused unless it starts with `/`, a path find printed under
+    # such a root, or a link target below, made absolute against the link's
+    # directory — so a path that is not absolute means a tool failed QUIETLY
+    # and handed over an empty string. Without this the walk below never
+    # runs and the function falls through to `resolved`: that is how a
+    # symlink loop read as `resolved` on Ubuntu 26.04, when this recursed on
+    # the output of a `realpath` (uutils) that fails on a loop where GNU's
+    # does not. Checked first, before anything can be concluded about a
+    # path that is not one.
+    case "$path" in
+        /*) ;;
+        *)  printf 'blocked %s (not an absolute path: a path tool failed or printed nothing)\n' "${path:-(empty)}"
+            return ;;
+    esac
     # ELOOP guard. Linux gives up at 40; well under that is fine, and a chain
     # this deep is not something to answer confidently about anyway.
     if [ "$depth" -gt 16 ]; then
@@ -186,9 +249,26 @@ classify_root() {
             # The entry exists. A symlink that does not resolve is the one
             # case `-e` cannot decide; hand its target to a fresh walk.
             if [ -L "$acc" ] && [ ! -e "$acc" ]; then
+                # Captured EXACTLY. `$(...)` strips trailing newlines, so a
+                # target spelled "hop<newline>" came back as "hop": another
+                # name, which can be absent while the real next hop is a
+                # symlink into a directory this user cannot search. That read
+                # as `absent` — exit 0 — where the kernel answers EACCES;
+                # reproduced. GNU and uutils readlink print such a target
+                # identically; the loss is the shell's. The sentinel keeps
+                # every byte, readlink's own newline is then removed, and a
+                # newline anywhere in a target is refused rather than walked,
+                # as this file refuses one in a recorded path, a root or a
+                # filename.
                 local tgt
-                tgt="$(readlink -- "$acc" 2>/dev/null)" \
+                tgt="$(readlink -- "$acc" 2>/dev/null && printf x)" \
                     || { printf 'blocked %s (symlink unreadable)\n' "$acc"; return; }
+                tgt="${tgt%x}"; tgt="${tgt%$'\n'}"
+                case "$tgt" in
+                    ''|*$'\n'*)
+                        printf 'blocked %s (symlink target is empty or contains a newline)\n' "$acc"
+                        return ;;
+                esac
                 case "$tgt" in
                     /*) ;;
                     # Parameter expansion, not `dirname`. A dirname that is
@@ -202,9 +282,37 @@ classify_root() {
                     *)  parentdir="${acc%/*}"
                         tgt="${parentdir:-}/$tgt" ;;
                 esac
-                # realpath -m is lexical and never fails, so it cannot
-                # reintroduce the conflation this function exists to avoid.
-                classify_root "$(realpath -m -- "$tgt")" "$((depth + 1))"
+                # The target AS WRITTEN goes to a fresh walk — not a
+                # normalised form of it. This walk asks the kernel about each
+                # prefix in turn, so every `..` is resolved the way the kernel
+                # and the scanner's EvalSymlinks resolve it: physically,
+                # against what the components before it really are.
+                #
+                # It used to recurse on `realpath -m` of the target, and that
+                # was wrong twice. realpath -m resolves what it can and treats
+                # the rest LEXICALLY, so after a component it could not enter
+                # (EACCES) a `..` stepped back over the NAME, not over where
+                # that name leads: `wall/in/../../media`, with `in` a link the
+                # checking user cannot reach, became `<parent of wall>/media`
+                # — a visible, nonexistent name — and the root read as
+                # `absent`, exit 0, while the service user resolved it
+                # elsewhere and pruned (reproduced, GNU and uutils alike). And
+                # on a symlink loop GNU's realpath -m carried on lexically
+                # while uutils' (Ubuntu 26.04's default) failed and printed
+                # nothing, which recursed as `resolved`; the status check
+                # added for that, and the exact capture of its answer, went
+                # with the call. A loop now runs into the depth cap above, on
+                # either build.
+                #
+                # Each hop through a link that does not resolve costs one
+                # level of depth; links that DO resolve are followed by the
+                # kernel inside the walk and cost nothing. The verdict is for
+                # the TARGET, not for anything after $acc in $path: `absent`
+                # carries over (nothing under a dangling link exists), and
+                # `resolved` here never means the whole path resolves — the
+                # kernel said $acc itself does not — which is why both callers
+                # treat `resolved` as unproven.
+                classify_root "$tgt" "$((depth + 1))"
                 return
             fi
             # Resolvable. Every component but the last must be traversable.
@@ -213,9 +321,43 @@ classify_root() {
                 return
             fi
         else
-            # No entry. That is proof of absence only if the lookup itself was
-            # conclusive, which needs SEARCH permission on the parent — `x`,
-            # not `r`. `r` grants enumeration, and we are not enumerating: we
+            # No entry — or none THIS user can see. `-e` and `-L` fail alike
+            # on every lstat error, and a searchable parent does not make the
+            # error ENOENT. A FUSE mount without allow_other (rclone, sshfs;
+            # likely krb5 NFS and CIFS multiuser too) answers EACCES from the
+            # filesystem itself to everyone but its owner, root included,
+            # under a parent anyone may search; a path made longer than
+            # PATH_MAX by walking a link target as written answers
+            # ENAMETOOLONG. Both read as `absent` here — "the scan will SKIP
+            # its prune", exit 0 — while the service user, the mount's owner,
+            # walked the root and pruned. Reproduced on a FUSE loopback
+            # mount, on main and this branch alike.
+            #
+            # So the kernel is asked WHY, before anything is concluded.
+            # `builtin cd -P` in a subshell (`builtin`, so an exported
+            # function named cd cannot answer instead): chdir opens nothing —
+            # no FIFO to block on, no device to touch — and resolves `..`
+            # physically, as this
+            # walk does; its message ends in strerror's text, read in the C
+            # locale so the match does not depend on the operator's
+            # language. Only ENOENT and ENOTDIR are absence. ENOTDIR is a
+            # non-directory with more path after it, which the scanner's
+            # EvalSymlinks fails on too: walkFailed for a root, shielded for
+            # a file, discovered never. Anything else — EACCES, ENAMETOOLONG,
+            # ELOOP, EIO, or a lookup that now succeeds because the entry
+            # appeared meanwhile — is blocked, in the kernel's words.
+            local why reason
+            why="$(LC_ALL=C; builtin cd -P -- "$acc" 2>&1)"
+            case "$why" in
+                *": No such file or directory"|*": Not a directory") ;;
+                *)  reason="${why##*: }"
+                    [ -n "$why" ] || reason="it appeared while this looked"
+                    printf 'blocked %s (%s, as %s)\n' "$acc" "$reason" "$(id -un)"
+                    return ;;
+            esac
+            # And even then only if the lookup was conclusive, which needs
+            # SEARCH permission on the parent — `x`, not `r`. `r` grants
+            # enumeration, and we are not enumerating: we
             # asked for one named path, and with `x` the kernel answers ENOENT
             # authoritatively. Requiring `r` here looked more careful and was
             # simply wrong: 0711 is the ordinary mode of /home/<user> on Debian
@@ -242,10 +384,74 @@ classify_root() {
     done
     # Every component resolved and was traversable.
     #
+    # Except that the walk drops a TRAILING slash, and the kernel does not:
+    # an executable file passes the -x test above as a component, and then
+    # `x.mkv/` (as a link target spells it) ended the walk `resolved` where
+    # the kernel says ENOTDIR — while `x.mkv/.` and `x.mkv//` meet the
+    # kernel in the no-entry branch and read absent. So a path that ends in
+    # a slash after something that is not a directory is put to the kernel,
+    # under the same rule: ENOTDIR is absence (the scanner's EvalSymlinks
+    # fails there too), anything else is blocked. (The walk has just seen
+    # every component of `$acc` resolve, so the kernel's other answers need
+    # a race or a name that the slash takes past PATH_MAX: reading them as
+    # absent is an equivalent mutant to this suite, recorded, not chased.)
+    # `${acc:-/}`: for the root `/` itself the walk never ran and `$acc` is
+    # empty, and `[ -d "" ]` is false — `/` read as blocked.
+    case "$path" in
+        */) if [ ! -d "${acc:-/}" ]; then
+                local why2 reason2
+                why2="$(LC_ALL=C; builtin cd -P -- "$path" 2>&1)"
+                case "$why2" in
+                    *": Not a directory") printf 'absent\n' ;;
+                    *)  reason2="${why2##*: }"
+                        [ -n "$why2" ] || reason2="it became a directory while this looked"
+                        printf 'blocked %s (%s, as %s)\n' "$path" "$reason2" "$(id -un)" ;;
+                esac
+                return
+            fi ;;
+    esac
     # Note the caller's `case` lists absent) and blocked*) BEFORE resolved), so
     # widening the resolved) arm to also match absent is an equivalent mutant —
     # unreachable, and no test can kill it. Recorded rather than chased.
     printf 'resolved\n'
+}
+
+# is_video NAME — would the scanner's IsVideoFile take NAME? The same
+# pattern the disk list is filtered with below, matched by bash itself: no
+# fork, no pipe, no file. 0 yes, 1 no; anything else (2: the pattern did not
+# compile) is not "no", because reading a failure as "not a video" quietly
+# drops a link the scanner may discover — so it is `exit 9`, the recording
+# guard's status, from inside the find pipeline's reader. While VIDEO_RE is
+# the constant above that arm cannot fire (an equivalent mutant, recorded
+# rather than chased); it is there for the day the pattern changes.
+#
+# Not grep on a here-string, as it was: bash before 5.1, and any bash under
+# BASH_COMPAT=50, writes every here-string to a temporary file in TMPDIR
+# (5.1 and later, one larger than the pipe buffer, 64 KiB on Linux), and
+# where TMPDIR takes the create but not the write (a full tmpfs) the
+# redirection fails, grep never runs, and the answer is "no". Not
+# `printf | grep -q` either: under pipefail a SIGPIPE answers "no" too.
+# `${1,,}` and grep -i fold the same letters under LC_ALL=C (ASCII only, no
+# Unicode case rules): measured identical on 20,495 names, mixed case,
+# non-ASCII and invalid bytes included. (The walk diverts newline names
+# before this is reached, so `$` is the end of the whole name.)
+is_video() {
+    [[ ${1,,} =~ $VIDEO_RE ]]
+    case $? in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) exit 9 ;;
+    esac
+}
+
+# unsure PATH — record a video-named link this check could not resolve the
+# way the scanner would ($WORK/unsure, read after the walk). Callers test
+# the name first: the scanner's IsVideoFile comes BEFORE its EvalSymlinks, so
+# a link with any other name can never be discovered, and not being able to
+# resolve it changes nothing. A failed write is `exit 9`, as for the disk
+# list itself.
+unsure() {
+    printf '%s\n' "$1" >> "$WORK/unsure" || exit 9
 }
 
 # ── Which libraries ───────────────────────────────────────────────
@@ -300,7 +506,33 @@ CHECKED=0
 CHECKED_FULLY=0
 LIBS_MISSING=0
 
-while IFS= read -r LIB; do
+# A `for` over the ids, not `while read … done <<< "$LIB_IDS"`. Bash before
+# 5.1, and any bash under BASH_COMPAT=50, writes every here-string to a
+# temporary file in TMPDIR (5.1 and later, one larger than the pipe
+# buffer, 64 KiB on Linux); where TMPDIR takes the create but not the
+# write (a full tmpfs) the redirection failed, the loop body never ran, and
+# the run printed "nothing would be pruned", exit 0, having examined
+# nothing. Reproduced on main (by review, on real bash 5.0 and 4.4.18
+# against a full 64 KiB tmpfs; here, under BASH_COMPAT=50). Ubuntu 20.04
+# (bash 5.0) and RHEL 8 (bash 4.4) run bashes like that. The ids are
+# digits — arguments are refused otherwise above, the database's are
+# `libraries.id` — so splitting on whitespace is exact, and the check
+# below keeps it so if either source ever changes. The split is done once,
+# with globbing off, so an id is never expanded as a pattern against the
+# working directory (a `*` would have become the names of the files there);
+# nothing else in this script turns globbing on or off. A list of nothing
+# but whitespace passes the `-n` test above and splits into no ids at all:
+# the loop would run zero times and the summary say "nothing would be
+# pruned", so that is refused here.
+set -f
+ids=( $LIB_IDS )
+set +f
+n_ids=${#ids[@]}
+[ "$n_ids" -gt 0 ] || die "the list of libraries holds no ids, only whitespace — nothing to examine, so no summary is given"
+for id in "${ids[@]}"; do
+    case "$id" in ''|*[!0-9]*) die "library id '$id' is not a number" ;; esac
+done
+for LIB in "${ids[@]}"; do
     [ -n "$LIB" ] || continue
     # Every query is checked. A psql that starts failing mid-run — the cluster
     # going away, a permission change — must not leave this reporting a green
@@ -414,8 +646,22 @@ while IFS= read -r LIB; do
     unreadable=0
     : > "$WORK/disk"
     : > "$WORK/badnames"
+    : > "$WORK/unsure"
+    # The roots arrive through a process substitution, not a here-string:
+    # see the `for` over the library ids for what a here-string did in a
+    # full TMPDIR under bash 5.0 or BASH_COMPAT=50 — this loop never ran,
+    # the disk list stayed empty, and "no media found" was exit 0. A
+    # process substitution is a pipe (/dev/fd), no file — though it can
+    # fail too (below). And the roots read are COUNTED against the roots
+    # there are (pure bash: one more than the newlines; n_badroot has
+    # refused empty entries), so a walk that read fewer cannot report on
+    # the ones it never saw.
+    nl_roots="${roots//[!$'\n']/}"
+    n_roots=$(( ${#nl_roots} + 1 ))
+    roots_read=0
     while IFS= read -r r; do
         [ -n "$r" ] || continue
+        roots_read=$((roots_read + 1))
         # A `..` component after a symlinked one resolves differently in the
         # three places that matter: `realpath -ms` collapses `..` lexically
         # BEFORE resolving symlinks, EvalSymlinks resolves it against the
@@ -460,13 +706,50 @@ while IFS= read -r LIB; do
         $r (could not be classified: $verdict)"
                 continue ;;
         esac
-        if ! rr="$(realpath -e -- "$rc" 2>/dev/null)"; then
-            # classify_root said resolved, so this should be unreachable. If it
-            # ever fires, the two disagree and we do not know which is right.
+        # The kernel first, then realpath -e, and the answer captured exactly.
+        #
+        # This was commented "should be unreachable", and is not. classify_root
+        # asks the kernel about each prefix on its own, and the kernel's
+        # limit of 40 links is per lookup: a root `a/b` where `a` is 20 links
+        # deep and `b` 25 resolves component by component and fails whole
+        # (ELOOP). (The scan's EvalSymlinks follows 45; its WalkDir then
+        # lstats the root, sees a link, does not descend, and discovers
+        # nothing, so it prunes nothing and the exit 2 below over-reports —
+        # checked against collectVideoFiles.)
+        # A root linked to an executable `x.mkv/` reached it too, until the
+        # walk began putting a trailing slash to the kernel. realpath -e is
+        # where GNU coreutils and uutils part on a path past a non-directory
+        # — GNU fails with ENOTDIR, uutils resolves it — so `[ -e ]` asks the
+        # kernel before either is consulted, and both stop here with the
+        # same reason.
+        #
+        # Exact because the escape test below compares bytes, as the
+        # scanner's HasPrefix does, and `$(...)` would strip a trailing
+        # newline from the resolved root. That half is an EQUIVALENT MUTANT,
+        # recorded rather than chased: the resolved root ends in a newline
+        # only when the root's last component is a link (the stored name
+        # cannot hold one — n_badroot), and neither `find` nor the scanner's
+        # WalkDir descends into a root that is a link, so nothing but the
+        # root entry itself is ever tested against it. It is exact for
+        # consistency with $t.
+        #
+        # Absolute because an empty answer — a realpath that exits 0 and
+        # prints nothing — makes the escape test `"$t/" in "/"*`, which every
+        # target passes: each escaping symlink would read as found.
+        if ! [ -e "$rc" ] || ! rr="$(realpath -e -- "$rc" 2>/dev/null && printf x)"; then
+            # classify_root said resolved and this disagrees; we do not know
+            # which is right, so this cannot answer.
             rootopaque="$rootopaque
         $r (resolves component by component but not as a whole)"
             continue
         fi
+        rr="${rr%x}"; rr="${rr%$'\n'}"
+        case "$rr" in
+            /*) ;;
+            *)  rootopaque="$rootopaque
+        $r (realpath -e gave no usable answer for it)"
+                continue ;;
+        esac
         if [ ! -d "$rc" ]; then
             # A root that resolves to something other than a directory. WalkDir
             # visits it as a single entry, so if it happens to carry a video
@@ -518,19 +801,100 @@ while IFS= read -r LIB; do
             if [ -L "$f" ]; then
                 # The scanner's symlink-escape guard, on ITS roots: resolve the
                 # link and require the result at or under the RESOLVED root.
-                t="$(realpath -e -- "$f" 2>/dev/null)" || continue
+                #
+                # The kernel first. A link whose target goes on past a
+                # non-directory — `a.mkv/.`, `a.mkv/..`, `a.mkv/`, a FIFO
+                # likewise — is where GNU and uutils realpath -e part: GNU
+                # fails with ENOTDIR, uutils resolves it anyway. `[ -e ]`
+                # asks the kernel, which fails as the scanner's EvalSymlinks
+                # does, so realpath never sees those shapes on either build.
+                #
+                # A link the kernel cannot resolve is NOT simply skipped.
+                # Skipping means "not discovered", and that is right only
+                # when the scanner cannot discover it either; when the
+                # skipped link was the library's only media, the walk comes
+                # back empty and the zero-discovered branch answers "the
+                # scan will prune nothing" while the scanner, which does
+                # discover it, prunes every other row. The kernel refuses
+                # more than the scanner does: a chain of more than 40 links
+                # (EvalSymlinks follows 255), and any target behind a
+                # directory THIS user cannot enter but the service user can.
+                # An intermediate commit on this branch (b35afe3) skipped
+                # both and called it an over-report; with a 45-link chain and
+                # nothing else under the root it was exit 0 over a prune.
+                # Reproduced. main had no such hole there — it asked realpath
+                # -e, which follows long chains in user space — and gave the
+                # exact exit 1. What this costs against main, then: where
+                # main answered exit 1 from realpath -e's resolution of a
+                # chain the kernel refuses, this answers exit 2 (nothing else
+                # found) or exit 1 with a note (other media found), because
+                # realpath -e is no longer believed over the kernel.
+                #
+                # So only a link classify_root calls ABSENT is skipped
+                # silently — absent meaning the kernel answered ENOENT or
+                # ENOTDIR for a lookup under a parent this user may search,
+                # never just "the lookup failed": a dangling link, which the
+                # scanner reads as not-exist too and prunes, or one whose
+                # target runs on past an executable non-directory into a name
+                # (`x.mkv/.`), which the scanner cannot resolve either (it
+                # shields it). Neither can be discovered, so neither can be
+                # the scan's only find.
+                # Anything else is recorded as unresolved (unsure), still
+                # not counted as found, and a library whose walk finds
+                # nothing BUT such links refuses to answer below rather than
+                # calling itself empty. The NAME is tested first, because a
+                # dangling link with any other name can never be discovered
+                # and is filtered out below regardless: only a video-named
+                # one costs a classify_root walk rather than the one test
+                # main paid.
+                if ! [ -e "$f" ]; then
+                    if is_video "$f"; then
+                        case "$(classify_root "$f")" in
+                            absent) ;;
+                            *) unsure "$f" ;;
+                        esac
+                    fi
+                    continue
+                fi
+                # Captured exactly. `$(...)` strips trailing newlines, and a
+                # link to a file named "<root><newline>" BESIDE the root then
+                # resolved to exactly the root and passed the test below,
+                # while the scanner's HasPrefix compares the real bytes,
+                # calls it an escape and prunes the row: "all recorded files
+                # will be found", exit 0. Reproduced. Only realpath's own
+                # trailing newline is removed.
+                #
+                # The kernel has just said it resolves, so a realpath -e that
+                # fails here, or answers with something that is not an
+                # absolute path, is a tool failing quietly, not a fact about
+                # the link: unresolved, like the above, never just skipped.
+                # Skipped, an all-symlink library (the usual *arr layout)
+                # under such a realpath came back empty: exit 0 over a prune.
+                if ! t="$(realpath -e -- "$f" 2>/dev/null && printf x)"; then
+                    is_video "$f" && unsure "$f"
+                    continue
+                fi
+                t="${t%x}"; t="${t%$'\n'}"
+                case "$t" in
+                    /*) ;;
+                    *)  is_video "$f" && unsure "$f"
+                        continue ;;
+                esac
                 case "$t/" in "$rr"/*) ;; *) [ "$t" = "$rr" ] || continue ;; esac
             fi
             # `|| exit 9`, not a status check after the loop. A while loop's
-            # exit status is whatever its LAST body command returned, and three
-            # paths in this body end in `continue`, which returns 0 — so a run
-            # where every write failed but the final entry was a dangling
-            # symlink (or a newline name, or an escaping symlink) reported
-            # ${fs[1]} = 0, left the disk list empty, and answered "no media
-            # found, so the scan will prune nothing". A dangling symlink under
-            # a library root is the most ordinary artefact of the half-finished
-            # move this script exists for, so the ordering was not exotic.
-            # Failing HERE removes the ordering from the question entirely.
+            # exit status is whatever its LAST body command returned, and the
+            # paths in this body that end in `continue` — a newline name, a
+            # link that does not resolve, a link realpath gave no answer for,
+            # a link that escapes the root — all return 0. So a run where
+            # every write failed but the final entry was a dangling symlink
+            # reported ${fs[1]} = 0, left the disk list empty, and answered
+            # "no media found, so the scan will prune nothing". (A failed
+            # write of the unresolved record inside `unsure` is the same
+            # `exit 9`.) A dangling symlink under a library root is the most
+            # ordinary artefact of the half-finished move this script exists
+            # for, so the ordering was not exotic. Failing HERE removes the
+            # ordering from the question entirely.
             printf '%s\n' "$f" || exit 9
           done >> "$WORK/disk"
         fs=("${PIPESTATUS[@]}")
@@ -548,9 +912,20 @@ while IFS= read -r LIB; do
         # no legitimate non-zero: it is 0 on every case in the suite, including
         # the four where find itself exits 1 on permission errors.
         if [ "${fs[1]}" -ne 0 ]; then
-            findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem"
+            findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem, or the video-name pattern failed to compile"
         fi
-    done <<< "$roots"
+    done < <(printf '%s\n' "$roots")
+    # This does fire. A process substitution needs /dev/fd, which is /proc's:
+    # without /proc mounted it does not resolve, the redirection fails, and
+    # the loop never runs. And a command in the loop that reads its stdin —
+    # a realpath that does, say — swallows every root after the current
+    # one. Either way, without this, the library reads as "no media found",
+    # exit 0, over roots the scanner walks and prunes (case 59 pins the
+    # second). Not deferred behind rootmissing: a root never read may be the
+    # one that decides that.
+    if [ "$roots_read" -ne "$n_roots" ]; then
+        die "library $LIB ($name): read $roots_read of its $n_roots root(s) — the list of roots was not read whole, so nothing about this library would be meaningful"
+    fi
 
     # rootmissing DOMINATES rootopaque, and is therefore tested first (below,
     # after the disk list is built). In Go, ANY root failing EvalSymlinks makes
@@ -632,7 +1007,7 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
             case "$(classify_root "$(canon "$r")")" in
                 absent) printf '        missing root: %s\n' "$r" ;;
             esac
-        done <<< "$roots"
+        done < <(printf '%s\n' "$roots")
         continue
     fi
     if [ -z "$disk_list" ]; then
@@ -653,6 +1028,19 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
         # and swept its title.
         if [ "$unreadable" -eq 1 ]; then
             die "library $LIB ($name): found no media, but part of this library was unreadable by $(id -un) — so 'no media' may be this check's blindness rather than the truth. If Aurora can read what this could not, the next scan WILL discover files and prune every recorded row it does not find. Re-run as the user Aurora runs as."
+        fi
+        # The same blindness, one link at a time: video-named links this
+        # check could not resolve the way the scanner does (see the walk).
+        # If the scanner resolves even one, it discovers it, the
+        # zero-discovered guard does not fire, and the prune runs against
+        # every recorded row. Only HERE is that a false all-clear. When
+        # anything else was discovered the scan prunes either way, and an
+        # unresolved link's own recorded row is already counted missing
+        # below — an over-report, said in the NOTE there — so refusing then
+        # would add an exit nobody can clear and no safety.
+        if [ -s "$WORK/unsure" ]; then
+            die "library $LIB ($name): found no media it could confirm, but these video-named link(s) could not be resolved here the way the scanner resolves them — a chain of more than 40 links, a target behind a directory $(id -un) cannot enter, a filesystem that refuses $(id -un) (a FUSE mount without allow_other), a target too long as written, a non-directory followed by more path, or a realpath that gave no answer. If the scanner resolves even one, the next scan discovers it and prunes every recorded row it does not find, so this check cannot call the library empty. Fix the links, or re-run as the user Aurora runs as:
+$(head -10 "$WORK/unsure" | sed 's/^/        /')"
         fi
         # pruneDeletedFiles' zero-discovered guard: a walk that finds nothing
         # is treated as suspect (the classic present-but-empty NFS mount) and
@@ -748,6 +1136,12 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
             # false all-clear here is a deleted catalog.
             warn "NOTE: part of this library was unreadable by $(id -un). Rows under an unreadable subtree are SHIELDED from the prune, not deleted — so some of the paths below may be counted here and left alone by the scan. Re-run as the user Aurora runs as (or root) to get an exact count."
         fi
+        if [ -s "$WORK/unsure" ]; then
+            # Counted missing because they could not be resolved here; the
+            # scanner may resolve (find) or shield them instead, so this is
+            # the over-report direction, and it says so.
+            warn "NOTE: some video-named links under this library could not be resolved here the way the scanner resolves them, and are counted as not found. The scanner may find them, or shield them, so their rows below may be left alone."
+        fi
         printf '%s\n' "$missing" | head -20 | sed 's/^/        /'
         [ "$n_missing" -gt 20 ] && printf '        … and %d more\n' "$((n_missing - 20))"
     else
@@ -759,7 +1153,21 @@ $(sed 's/^/        /' "$WORK/badnames" | head -10)"
         TOTAL_UNKNOWN=$((TOTAL_UNKNOWN + n_unknown))
         info "library $LIB ($name): $n_unknown file(s) on disk are not in the catalog yet — the next scan will add them (this is not a problem)"
     fi
-done <<< "$LIB_IDS"
+done
+
+# Every library examined, or no summary. The summary below is the
+# all-clear, and a loop that ran fewer times than there are ids — the
+# here-string failure above was exactly that, with zero — reads as one.
+# Until the split above refused a list of nothing but whitespace, the
+# `-eq 0` arm here was all that stopped that list giving exit 0 (case 60).
+# Now each pass over the ids either dies or counts, so this cannot
+# currently fire (an equivalent mutant, recorded rather than chased); it
+# stays because the loop's form is what changed last time. LIB is cleared
+# first, or die() would blame the last library.
+LIB=""
+if [ "$CHECKED" -ne "$n_ids" ] || [ "$CHECKED" -eq 0 ]; then
+    die "examined $CHECKED of $n_ids librarie(s) — the list of libraries was not read whole, so no summary is given"
+fi
 
 printf '\n'
 if [ "$TOTAL_MISSING" -gt 0 ]; then
@@ -771,7 +1179,7 @@ if [ "$TOTAL_MISSING" -gt 0 ]; then
 fi
 ok "nothing would be pruned by this check's reckoning. $TOTAL_UNKNOWN new file(s) would be added."
 # The hedge goes HERE, on the line the operator actually reads, not only in
-# the file header they will never open. Nine reviews found fourteen states
+# the file header they will never open. Review after review has found states
 # where this line appeared while the scan would have deleted rows.
 info "This is a second opinion, not a gate: exit 0 is evidence, not permission. Take the backup in step 1 regardless."
 # Said on the all-clear, not only in the header, because the exit code is what
