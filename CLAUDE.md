@@ -1031,10 +1031,14 @@ operator runbook must keep saying so.
   those rows explicitly. Quietly failing tools need status checks, contradiction
   checks, or known-answer probes, as appropriate. The script uses no
   here-strings or heredocs: bash before 5.1, and any bash under
-  `BASH_COMPAT=50`, writes them to a file in TMPDIR, and a full TMPDIR made
-  a loop silently run zero times (exit 0). Loops take a `for` over ids or a
-  process substitution, and the suite runs its write-failure cases under
-  `BASH_COMPAT=50` too.
+  `BASH_COMPAT=50`, writes every one to a file in TMPDIR (5.1 and later,
+  one larger than the 64 KiB pipe buffer), and a full TMPDIR made a loop
+  silently run zero times (exit 0). Loops take a `for` over ids (split
+  once, with globbing off) or a process substitution, and both are counted
+  against what there is to read, since a process substitution fails
+  without `/proc` and a stdin-reading command in the loop swallows the
+  rest. Case 57 reruns four fixtures under `BASH_COMPAT=50` with every
+  write failing.
 - Answers must not depend on GNU coreutils versus uutils (Ubuntu 26.04's
   default `coreutils`). Three forms were measured to differ. `realpath -m`
   through a symlink loop fails under uutils; `classify_root` no longer calls
@@ -1050,7 +1054,8 @@ operator runbook must keep saying so.
   The suite pins the first two with fakes on `PATH`.
 - `classify_root` calls a missing component absent only when the kernel
   says why and the answer is ENOENT or ENOTDIR (asked with `builtin cd -P`
-  in the C locale; a trailing slash after a non-directory too). EACCES
+  in the C locale; a trailing slash after an executable non-directory too,
+  while a non-executable one is blocked by the walk's `-x` test). EACCES
   from a filesystem that refuses this user under a searchable parent
   (FUSE without `allow_other`), ENAMETOOLONG and every other error are
   blocked. A video-named link the kernel refuses is skipped

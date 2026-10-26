@@ -1014,6 +1014,11 @@ cr_is "$CR/execfile/x"       absent   "…and so is a name under an executable n
 # shields all three). A directory with a trailing slash still resolves.
 cr_is "$CR/execfile/"        absent   "an executable file with a trailing slash is ENOTDIR, absent, not resolved"
 cr_is "$CR/real/deep/"       resolved "…and a directory with one still resolves"
+# `/` itself ends in a slash, and the walk never runs for it, so the
+# trailing-slash test once saw an empty path and read `/` as blocked.
+for p in / // /.; do
+    cr_is "$p"               resolved "…and so does the root directory, spelled $p"
+done
 # `builtin cd`, so an exported function named cd cannot answer for the
 # kernel. The fake would turn these genuinely absent names into `blocked`
 # (and one answering "No such file or directory" could turn a refusal into
@@ -1899,10 +1904,23 @@ guard_case '#!/bin/sh
 [ "$1" = -qEi ] && exit 2
 exec /usr/bin/grep "$@"' \
   "found no media it could confirm" "a grep that fails its -qEi form changes nothing: is_video is bash's own match" grep
+# And it folds case, as grep -i did and as the scanner's IsVideoFile does
+# (it lowercases the extension): `LINK.MKV` is a video. Read as "not a
+# video", the library's only media was skipped and the run said "no media
+# found", exit 0, while the scanner, which follows 41 links, discovered it
+# and pruned gone.mkv.
+fixture upperlink
+R="$TMP/upperlink"; mkdir -p "$R"
+ln -s "$TMP/chain41/links/c41" "$R/LINK.MKV" || bad "is_video folds case: could not build the fixture"
+echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/LINK.MKV" "$R/gone.mkv" > "$FIX/recorded"
+run
+expect_rc 2 "the only media an unresolved link named LINK.MKV → exit 2: an upper-case extension is still a video"
+expect_out "found no media it could confirm" "…through the unresolved-links refusal"
 
 # ── 57. The write-failure cases again, under BASH_COMPAT=50 ───────
 # Bash before 5.1 — Ubuntu 20.04's 5.0, RHEL 8's 4.4 — and any bash under
-# BASH_COMPAT=50 writes a here-string to a file in TMPDIR. Where TMPDIR
+# BASH_COMPAT=50 writes every here-string to a file in TMPDIR (5.1 and
+# later, one larger than the 64 KiB pipe buffer). Where TMPDIR
 # takes the create but not the write (a full tmpfs), the redirection failed
 # and the loop it fed never ran: the library loop examined nothing and the
 # summary said "nothing would be pruned", exit 0 (main too); the roots loop
@@ -1971,6 +1989,51 @@ echo "$R" > "$FIX/roots"; printf '%s\n%s\n' "$R/link.mkv" "$R/GONE.mkv" > "$FIX/
 run
 expect_rc 0 "the only media a link to an executable x.mkv/ → exit 0, as the scanner (which shields it) prunes nothing"
 expect_out "no media found" "…through the zero-discovered branch"
+
+# ── 59. Every root is read, or the library says so ────────────────
+# The roots loop reads a process substitution, and a command in the loop
+# that reads its stdin swallows the roots after the current one. Here a
+# realpath that drains stdin (and then answers correctly) leaves the walk
+# with the first, empty root only: without the count, "no media found",
+# exit 0, while the scanner walks the second root and prunes GONE.mkv.
+# (The same guard catches a process substitution that fails outright,
+# as it does without /proc; measured, not cased.) Run with stdin from
+# /dev/null, so outside the loop the fake drains nothing.
+fixture tworoots
+R1="$TMP/tworoots/r1"; R2="$TMP/tworoots/r2"; mkdir -p "$R1" "$R2"; : > "$R2/A.mkv"
+printf '%s\n%s\n' "$R1" "$R2" > "$FIX/roots"
+printf '%s\n%s\n' "$R2/A.mkv" "$R2/GONE.mkv" > "$FIX/recorded"
+mkdir -p "$TMP/fakerp-drain"
+printf '#!/bin/sh\ncat > /dev/null\nexec "%s" "$@"\n' "$REALRP" > "$TMP/fakerp-drain/realpath"
+chmod a+rx "$TMP/fakerp-drain" "$TMP/fakerp-drain/realpath"
+OUT="$(PATH="$TMP/fakerp-drain:$TMP/bin:$PATH" FIX="$FIX" AURORA_DB=testdb bash "$SCRIPT" 2>&1 < /dev/null)"; RC=$?
+expect_rc 2 "a realpath that drains the roots loop's stdin → exit 2, never 'no media found'"
+expect_out "read 1 of its 2 root(s)" "…through the roots count"
+
+# ── 60. The library ids: blank, not numeric, or a pattern ─────────
+# The ids are split on whitespace by an unquoted expansion. A list of
+# nothing but whitespace passed the emptiness test and split into no ids,
+# so the loop ran zero times; the final count's `-eq 0` arm was all that
+# stopped "nothing would be pruned". A non-numeric id goes into SQL (the
+# stub answers any query, so only the check stops it). And the split runs
+# with globbing off: a `*` in a directory holding a file named 7 would
+# otherwise have become library 7, an id nobody asked for.
+fixture blankids
+printf ' \n' > "$FIX/lib_ids"
+run
+expect_rc 2 "a library list of only whitespace → exit 2, never 'nothing would be pruned'"
+expect_out "holds no ids, only whitespace" "…refused right after the split"
+fixture badid
+printf '2a\n' > "$FIX/lib_ids"
+run
+expect_rc 2 "a library id that is not a number → exit 2"
+expect_out "library id '2a' is not a number" "…refused before any query names it"
+fixture globid
+printf '*\n' > "$FIX/lib_ids"
+mkdir -p "$TMP/globcwd"; : > "$TMP/globcwd/7"
+OUT="$(cd "$TMP/globcwd" && PATH="$TMP/bin:$PATH" AURORA_DB=testdb bash "$SCRIPT" 2>&1)"; RC=$?
+expect_rc 2 "a library id of '*' beside a file named 7 → exit 2"
+expect_out "library id '*' is not a number" "…refused as written, not expanded to library 7"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

@@ -395,8 +395,10 @@ classify_root() {
     # every component of `$acc` resolve, so the kernel's other answers need
     # a race or a name that the slash takes past PATH_MAX: reading them as
     # absent is an equivalent mutant to this suite, recorded, not chased.)
+    # `${acc:-/}`: for the root `/` itself the walk never ran and `$acc` is
+    # empty, and `[ -d "" ]` is false — `/` read as blocked.
     case "$path" in
-        */) if [ ! -d "$acc" ]; then
+        */) if [ ! -d "${acc:-/}" ]; then
                 local why2 reason2
                 why2="$(LC_ALL=C; builtin cd -P -- "$path" 2>&1)"
                 case "$why2" in
@@ -424,7 +426,8 @@ classify_root() {
 # rather than chased); it is there for the day the pattern changes.
 #
 # Not grep on a here-string, as it was: bash before 5.1, and any bash under
-# BASH_COMPAT=50, writes a here-string to a temporary file in TMPDIR, and
+# BASH_COMPAT=50, writes every here-string to a temporary file in TMPDIR
+# (5.1 and later, one larger than the pipe buffer, 64 KiB on Linux), and
 # where TMPDIR takes the create but not the write (a full tmpfs) the
 # redirection fails, grep never runs, and the answer is "no". Not
 # `printf | grep -q` either: under pipefail a SIGPIPE answers "no" too.
@@ -504,20 +507,32 @@ CHECKED_FULLY=0
 LIBS_MISSING=0
 
 # A `for` over the ids, not `while read … done <<< "$LIB_IDS"`. Bash before
-# 5.1, and any bash under BASH_COMPAT=50, writes a here-string to a
-# temporary file in TMPDIR; where TMPDIR takes the create but not the write
-# (a full tmpfs) the redirection failed, the loop body never ran, and the
-# run printed "nothing would be pruned", exit 0, having examined nothing.
-# Reproduced on main. Ubuntu 20.04 (bash 5.0) and RHEL 8 (bash 4.4) run
-# bashes like that. The ids are digits — arguments are refused otherwise
-# above, the database's are `libraries.id` — so word splitting is exact,
-# and the check below keeps it so if either source ever changes.
-n_ids=0
-for id in $LIB_IDS; do
+# 5.1, and any bash under BASH_COMPAT=50, writes every here-string to a
+# temporary file in TMPDIR (5.1 and later, one larger than the pipe
+# buffer, 64 KiB on Linux); where TMPDIR takes the create but not the
+# write (a full tmpfs) the redirection failed, the loop body never ran, and
+# the run printed "nothing would be pruned", exit 0, having examined
+# nothing. Reproduced on main (by review, on real bash 5.0 and 4.4.18
+# against a full 64 KiB tmpfs; here, under BASH_COMPAT=50). Ubuntu 20.04
+# (bash 5.0) and RHEL 8 (bash 4.4) run bashes like that. The ids are
+# digits — arguments are refused otherwise above, the database's are
+# `libraries.id` — so splitting on whitespace is exact, and the check
+# below keeps it so if either source ever changes. The split is done once,
+# with globbing off, so an id is never expanded as a pattern against the
+# working directory (a `*` would have become the names of the files there);
+# nothing else in this script turns globbing on or off. A list of nothing
+# but whitespace passes the `-n` test above and splits into no ids at all:
+# the loop would run zero times and the summary say "nothing would be
+# pruned", so that is refused here.
+set -f
+ids=( $LIB_IDS )
+set +f
+n_ids=${#ids[@]}
+[ "$n_ids" -gt 0 ] || die "the list of libraries holds no ids, only whitespace — nothing to examine, so no summary is given"
+for id in "${ids[@]}"; do
     case "$id" in ''|*[!0-9]*) die "library id '$id' is not a number" ;; esac
-    n_ids=$((n_ids + 1))
 done
-for LIB in $LIB_IDS; do
+for LIB in "${ids[@]}"; do
     [ -n "$LIB" ] || continue
     # Every query is checked. A psql that starts failing mid-run — the cluster
     # going away, a permission change — must not leave this reporting a green
@@ -636,10 +651,11 @@ for LIB in $LIB_IDS; do
     # see the `for` over the library ids for what a here-string did in a
     # full TMPDIR under bash 5.0 or BASH_COMPAT=50 — this loop never ran,
     # the disk list stayed empty, and "no media found" was exit 0. A
-    # process substitution is a pipe (/dev/fd), no file. And the roots read
-    # are COUNTED against the roots there are (pure bash: one more than the
-    # newlines; n_badroot has refused empty entries), so a walk that read
-    # fewer cannot report on the ones it never saw.
+    # process substitution is a pipe (/dev/fd), no file — though it can
+    # fail too (below). And the roots read are COUNTED against the roots
+    # there are (pure bash: one more than the newlines; n_badroot has
+    # refused empty entries), so a walk that read fewer cannot report on
+    # the ones it never saw.
     nl_roots="${roots//[!$'\n']/}"
     n_roots=$(( ${#nl_roots} + 1 ))
     roots_read=0
@@ -899,10 +915,14 @@ for LIB in $LIB_IDS; do
             findfail="could not record what find discovered under $r (status ${fs[1]}) — a write to $WORK failed, most likely a full filesystem, or the video-name pattern failed to compile"
         fi
     done < <(printf '%s\n' "$roots")
-    # BELT AND BRACES: a pipe from printf does not come up short in any way
-    # this has been seen to, so this cannot currently fire (an equivalent
-    # mutant, recorded rather than chased). Not deferred behind rootmissing:
-    # a root never read may be the one that decides that.
+    # This does fire. A process substitution needs /dev/fd, which is /proc's:
+    # without /proc mounted it does not resolve, the redirection fails, and
+    # the loop never runs. And a command in the loop that reads its stdin —
+    # a realpath that does, say — swallows every root after the current
+    # one. Either way, without this, the library reads as "no media found",
+    # exit 0, over roots the scanner walks and prunes (case 59 pins the
+    # second). Not deferred behind rootmissing: a root never read may be the
+    # one that decides that.
     if [ "$roots_read" -ne "$n_roots" ]; then
         die "library $LIB ($name): read $roots_read of its $n_roots root(s) — the list of roots was not read whole, so nothing about this library would be meaningful"
     fi
@@ -1138,10 +1158,12 @@ done
 # Every library examined, or no summary. The summary below is the
 # all-clear, and a loop that ran fewer times than there are ids — the
 # here-string failure above was exactly that, with zero — reads as one.
-# BELT AND BRACES with the `for`: each pass either dies or counts, so this
-# cannot currently fire (an equivalent mutant, recorded rather than
-# chased); it stays because the loop's form is what changed last time.
-# LIB is cleared first, or die() would blame the last library.
+# Until the split above refused a list of nothing but whitespace, the
+# `-eq 0` arm here was all that stopped that list giving exit 0 (case 60).
+# Now each pass over the ids either dies or counts, so this cannot
+# currently fire (an equivalent mutant, recorded rather than chased); it
+# stays because the loop's form is what changed last time. LIB is cleared
+# first, or die() would blame the last library.
 LIB=""
 if [ "$CHECKED" -ne "$n_ids" ] || [ "$CHECKED" -eq 0 ]; then
     die "examined $CHECKED of $n_ids librarie(s) — the list of libraries was not read whole, so no summary is given"
