@@ -50,7 +50,8 @@ import { createRequire } from 'node:module'
 // the 1440x900 frame its classes are resolved at, and the list of surfaces
 // itself, so text HeroSection gains is measured only once it is listed. Not
 // read at all: anything above the hero's root, rules in index.css that select
-// by element rather than class, what a component renders, SVG geometry, other
+// by element rather than class, what a component renders, an element built
+// elsewhere and rendered from a variable (`{extra}`), SVG geometry, other
 // widths, and interaction states (hover, focus, active).
 
 const require = createRequire(import.meta.url)
@@ -455,8 +456,22 @@ function parseColor(str, ctx) {
   if (s.startsWith('#')) return hexColor(s, ctx)
   const named = { white: [[1, 1, 1], 1], black: [[0, 0, 0], 1], transparent: [[0, 0, 0], 0] }[s]
   if (named) return { rgb: named[0], a: named[1] }
-  const parts = s.match(/^rgba?\(([^)]*)\)$/)?.[1].split(/[\s,/]+/).filter(Boolean)
-  if (!parts || parts.length < 3 || parts.length > 4) fail()
+  // The two grammars CSS allows, and no mix of them: a browser drops an
+  // invalid colour, and the text then takes its parent's.
+  const inner = s.match(/^rgba?\(([^)]*)\)$/)?.[1].trim()
+  if (inner === undefined) fail()
+  let parts
+  if (inner.includes(',')) {
+    // legacy: three numbers or three percentages, then an alpha, by commas
+    parts = inner.split(',').map(p => p.trim())
+    if (inner.includes('/') || parts.length < 3 || parts.length > 4 || new Set(parts.slice(0, 3).map(p => p.endsWith('%'))).size > 1) fail()
+  } else {
+    // modern: three channels by spaces, then `/` and an alpha
+    const [chan, alpha, extra] = inner.split('/').map(p => p.trim())
+    parts = chan.split(/\s+/).filter(Boolean)
+    if (parts.length !== 3 || extra !== undefined || alpha === '') fail()
+    if (alpha !== undefined) parts.push(alpha)
+  }
   const num = (p, full) => {
     const m = p.match(/^(-?(?:\d+\.?\d*|\.\d+))(%?)$/)
     if (!m) fail()
@@ -1167,6 +1182,33 @@ function glowLayers(value, where_) {
   })
 }
 
+/** The box-shadow a rule's declarations paint. -webkit-box-shadow is its
+ *  alias, so the later of the two wins, an !important one first. */
+function boxShadowOf(decls) {
+  const shadows = decls.filter(d => /^(-webkit-)?box-shadow$/i.test(d.prop))
+  return shadows.filter(d => d.important).pop() ?? shadows.pop() ?? null
+}
+/** Whether a declaration on a neighbour takes it out of the flow, prefixed or
+ *  not: positioned other than relative or static, offset (physically or
+ *  logically), transformed (or translated, scaled or rotated by those
+ *  properties), moved along an offset path, or pulled by a negative margin. */
+function movesDecl(prop, v) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  return (p === 'position' && !/^(relative|static)$/i.test(v)) || /^(inset(-.+)?|top|right|bottom|left)$/.test(p)
+    || (/^(transform|translate|scale|rotate|offset|offset-path)$/.test(p) && v !== 'none') || (/^margin/.test(p) && v.includes('-'))
+}
+/** Whether a declaration on a neighbour paints past its box, or changes where
+ *  or how it paints, in a way this audit does not model, prefixed or not: a
+ *  filter, a z-index, a text stroke or shadow, an outline, a reflection, a
+ *  flex order, a float, a blend mode, or an animation that holds a keyframe. */
+function refusedDecl(prop, v) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  return /^(filter|z-index|text-stroke.*|box-reflect)$/.test(p) || (/^(text-shadow|outline)$/.test(p) && !/^(none|0)$/.test(v))
+    || /^outline-(width|style|color|offset)$/.test(p)
+    || (p === 'order' && v !== '0') || (p === 'float' && v !== 'none') || (p === 'mix-blend-mode' && v !== 'normal')
+    || (/^animation(-fill-mode|-iteration-count)?$/.test(p) && /\b(forwards|both|infinite)\b/.test(v))
+}
+
 /** What an element in a text layer that encloses no surface does beyond its
  *  own box: { out } when it leaves the flow (why), and { glows } for the
  *  box-shadow layers it casts. Dies on anything it cannot read. */
@@ -1213,19 +1255,12 @@ function neighbourOf(el) {
         if (/^(before|after)$/.test(pseudo) && decls.some(d => d.prop === 'content' && !/^(none|normal)$/.test(d.value.trim()))) res.out ??= `draws a ::${pseudo} box through ${rule.selector}`
         continue
       }
-      // -webkit-box-shadow is box-shadow's alias: within a rule the last of
-      // them wins (an !important one first), and its glow is measured.
-      const shadows = decls.filter(d => /^(-webkit-)?box-shadow$/i.test(d.prop))
-      const shadow = shadows.filter(d => d.important).pop() ?? shadows.pop()
+      const shadow = boxShadowOf(decls)
       if (shadow) res.glows.push(...glowLayers(shadow.value.trim(), `${where(el)} (${rule.selector})`))
       for (const d of decls) {
-        const v = d.value.trim(), prop = d.prop.toLowerCase()
-        if ((prop === 'position' && !/^(relative|static)$/i.test(v)) || /^(inset(-.+)?|top|right|bottom|left)$/.test(prop)
-          || (/^(transform|translate|scale|rotate|offset|offset-path)$/.test(prop) && v !== 'none') || (/^margin/.test(prop) && v.includes('-'))) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
-        else if (/^(filter|z-index|-webkit-text-stroke.*|-webkit-box-reflect)$/.test(prop) || (/^(text-shadow|outline)$/.test(prop) && !/^(none|0)$/.test(v))
-          || (/^outline-(width|style|color|offset)$/.test(prop))
-          || (/^animation(-fill-mode|-iteration-count)?$/.test(prop) && /\b(forwards|both|infinite)\b/.test(v)))
-          fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
+        const v = d.value.trim()
+        if (movesDecl(d.prop, v)) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
+        else if (refusedDecl(d.prop, v)) fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
       }
     }
   }
@@ -1319,8 +1354,10 @@ function spacing(el, re) {
 // What paints an element with the positioned ones, by the property it sets, so
 // that a class setting that property back (`relative lg:static`,
 // `opacity-50 md:opacity-100`) is seen. A class or declaration reads as
-// { group, lifts }, with lifts null when its value cannot be read.
-const STACKING_PROPS = /\b(?:opacity|transform|translate|scale|rotate|perspective|filter|backdrop-filter|clip-path|mask|mask-image|mask-border|isolation|mix-blend-mode|contain|position|z-index|offset-path|view-transition-name)\b/
+// { group, lifts }: lifts true or false where this audit knows how Chromium
+// paints it, null where it does not (a value it cannot read, or a property it
+// is unsure of, as `container-type`), which leaves the side open. A property
+// not listed is read as not lifting.
 const LIFT_CLASSES = [
   ['position', /^(?:relative|absolute|fixed|sticky|static)$/, u => u !== 'static'],
   ['opacity', /^opacity-/, u => twOpacity(u.slice(8), u) < 1],
@@ -1329,12 +1366,20 @@ const LIFT_CLASSES = [
   ['filter', /^(?:filter(?:-none)?|blur(?:-.+)?|brightness-.+|contrast-.+|grayscale(?:-.+)?|-?hue-rotate-.+|invert(?:-.+)?|saturate-.+|sepia(?:-.+)?|drop-shadow(?:-.+)?)$/, u => u !== 'filter-none'],
   ['backdrop-filter', /^backdrop-/, u => u !== 'backdrop-filter-none'],
   ['mix-blend-mode', /^mix-blend-/, u => u !== 'mix-blend-normal'],
-  ['will-change', /^will-change-/, u => u === 'will-change-transform' || (u.startsWith('will-change-[') && STACKING_PROPS.test(u))],
+  ['will-change', /^will-change-/, u => willChangeLifts({ auto: 'auto', scroll: 'scroll-position', contents: 'contents', transform: 'transform' }[u.slice(12)] ?? u.slice(12).replace(/^\[(.*)\]$/, '$1').replace(/_/g, ' '))],
   ['contain', /^contain-/, u => /^contain-(?:paint|layout|strict|content)$/.test(u)],
 ]
 function liftClass(u) {
   const g = LIFT_CLASSES.find(([, re]) => re.test(u))
   return g ? { group: g[0], lifts: g[2](u) } : null
+}
+/** What a will-change list says: a lift for opacity, transform or filter, none
+ *  for auto, scroll-position or contents alone, and null for the rest, which
+ *  this audit has not checked Chromium for. */
+function willChangeLifts(v) {
+  const names = v.toLowerCase().split(/[\s,]+/).filter(Boolean)
+  if (names.some(n => /^(?:opacity|transform|filter)$/.test(n))) return true
+  return names.every(n => /^(?:auto|scroll-position|contents)$/.test(n)) ? false : null
 }
 function liftDecl(d) {
   const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
@@ -1346,9 +1391,13 @@ function liftDecl(d) {
     case 'opacity': { const m = v.match(/^([\d.]+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
     case 'isolation': lifts = v === 'isolate' ? true : v === 'auto' ? false : null; break
     case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
-    case 'will-change': lifts = unread ? null : STACKING_PROPS.test(v); break
+    case 'will-change': lifts = unread ? null : willChangeLifts(v); break
     case 'contain': lifts = unread ? null : /paint|layout|strict|content/.test(v); break
-    case 'container-type': lifts = unread ? null : /size/.test(v); break
+    case 'transform-style': lifts = v === 'preserve-3d' ? true : v === 'flat' ? false : null; break
+    case 'content-visibility': lifts = /^(?:auto|hidden)$/.test(v) ? true : v === 'visible' ? false : null; break
+    // Chromium paints an earlier container's shadow under later text, as if
+    // it were not lifted (a review checked); left open rather than guessed.
+    case 'container-type': lifts = v === 'normal' ? false : null; break
     case 'z-index': lifts = unread ? null : v !== 'auto'; break
     case 'filter': case 'backdrop-filter': case 'transform': case 'translate': case 'scale': case 'rotate': case 'perspective':
     case 'clip-path': case 'mask': case 'mask-border': case 'offset-path': case 'view-transition-name': lifts = unread ? null : v !== 'none'; break
@@ -1356,13 +1405,13 @@ function liftDecl(d) {
   }
   return { group, lifts }
 }
-/** Whether an element paints with the positioned ones at rest: for certain in
- *  every className branch (`strict`), or possibly in some. A property lifts it
- *  for certain when a class that certainly applies lifts it, or that class's
- *  own top-level rule does, and nothing else that may apply sets the property
- *  otherwise. A class under a variant this audit cannot place, and a rule under
- *  another selector, may apply; one of those lifting makes a lift possible. */
-function lifted(el, strict) {
+/** Whether class strings lift an element at rest: for certain in every string
+ *  (`strict`), or possibly in some. A property lifts it for certain when a
+ *  class that certainly applies lifts it, or that class's own top-level rule
+ *  does, and nothing else that may apply sets the property otherwise. A class
+ *  under a variant this audit cannot place, and a rule under another selector,
+ *  may apply; one of those lifting makes a lift possible. */
+function liftedClasses(strs, strict) {
   const one = s => {
     const groups = new Map()
     const add = (m, certain) => {
@@ -1387,8 +1436,21 @@ function lifted(el, strict) {
     }
     return [...groups.values()].some(g => (strict ? g.sure && g.all : g.any))
   }
-  const strs = classStrings(el)
   return strict ? strs.every(one) : strs.some(one)
+}
+const lifted = (el, strict) => liftedClasses(classStrings(el), strict)
+/** Which side of S's text G's glow can paint on, given each one's lift
+ *  ({ sure, possible }), whether G comes later in the tree, and whether G
+ *  certainly paints all at once. Every reading the lifts allow is taken. */
+function sidesFor(g, s, after, allAtOnce) {
+  const readings = l => (l.sure ? [true] : l.possible ? [false, true] : [false])
+  const sides = new Set()
+  for (const liftG of readings(g)) for (const liftS of readings(s)) {
+    if (liftG !== liftS) sides.add(liftG ? 'over' : 'under')
+    else if (!after) sides.add('under')
+    else { sides.add('over'); if (!liftG && !allAtOnce) sides.add('under') }
+  }
+  return sides
 }
 
 const DISPLAY = /^(?:block|inline-block|inline|flex|inline-flex|table|inline-table|table-.+|flow-root|grid|inline-grid|contents|list-item|hidden)$/
@@ -1411,35 +1473,35 @@ function atomic(el) {
   return (!!p && displays(p, /^(?:inline-)?(?:flex|grid)$/)) || displays(el, /^inline-(?:block|flex|grid)$/)
 }
 
-// The hero's names, resolved by TypeScript's checker over the hero alone, so a
-// condition is compared by what its names are, not by their text: as text, a
-// callback's parameter named like a prop (`.map(reason => reason && …)`) read
-// as that prop, and the glow it guarded was dropped.
-const CHECKER = (() => {
-  const host = {
-    getSourceFile: n => (n === SRC_HERO ? HERO_SF : undefined), fileExists: n => n === SRC_HERO, readFile: () => undefined,
-    getDefaultLibFileName: () => 'lib.d.ts', writeFile: () => {}, getCurrentDirectory: () => '', getCanonicalFileName: n => n,
-    useCaseSensitiveFileNames: () => true, getNewLine: () => '\n',
-  }
-  return ts.createProgram({ rootNames: [SRC_HERO], options: { noLib: true, noResolve: true, types: [], jsx: ts.JsxEmit.Preserve }, host }).getTypeChecker()
-})()
-/** The function or loop a node runs in, or the file. */
-function scopeOf(node) {
-  for (let p = node.parent; p; p = p.parent) if (ts.isFunctionLike(p) || ts.isIterationStatement(p, false)) return p
-  return HERO_SF
-}
-const COMPONENT = scopeOf(HERO_ROOT)
-if (!ts.isFunctionLike(COMPONENT)) throw new Error(`audit: the hero's root (ref={sectionRef}) is not returned straight from its component; this audit reads conditions against the component's own names`)
+// Conditions are compared by what their names resolve to, through TypeScript's
+// checker over one file: compared as text, a callback's parameter named like a
+// prop (`.map(reason => reason && …)`) read as that prop, and the glow it
+// guarded was dropped. `guardModel` takes the file and the root its component
+// returns, so the known answers below can run it on a file of their own.
 const bare = e => {
   while (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) e = e.expression
   return e
 }
-/** Every name the hero writes: an assignment's target (destructuring
- *  included), an increment, a delete, a for…in/of target. A write into a
- *  property counts against the whole object. A call that mutates one is not
- *  seen. */
-const WRITTEN = (() => {
-  const out = new Set()
+/** The function or loop a node runs in, or its file. */
+function scopeOf(node) {
+  for (let p = node.parent; p; p = p.parent) if (ts.isFunctionLike(p) || ts.isIterationStatement(p, false) || ts.isSourceFile(p)) return p
+  return node
+}
+/** `exclusive(a, b)` for the file `sf`, whose component returns `root`. */
+function guardModel(sf, root) {
+  const host = {
+    getSourceFile: n => (n === sf.fileName ? sf : undefined), fileExists: n => n === sf.fileName, readFile: () => undefined,
+    getDefaultLibFileName: () => 'lib.d.ts', writeFile: () => {}, getCurrentDirectory: () => '', getCanonicalFileName: n => n,
+    useCaseSensitiveFileNames: () => true, getNewLine: () => '\n',
+  }
+  const checker = ts.createProgram({ rootNames: [sf.fileName], options: { noLib: true, noResolve: true, types: [], jsx: ts.JsxEmit.Preserve }, host }).getTypeChecker()
+  const component = scopeOf(root)
+  if (!ts.isFunctionLike(component)) throw new Error(`audit: ${sf.fileName}: the root is not returned straight from its component; this audit reads conditions against the component's own names`)
+  // Every name the file writes: an assignment's target (destructuring
+  // included), an increment, a delete, a for…in/of target. A write into a
+  // property counts against the whole object. A call that mutates one is not
+  // seen.
+  const written = new Set()
   const mark = t => {
     t = bare(t)
     if (ts.isObjectLiteralExpression(t)) return t.properties.forEach(p => mark(ts.isShorthandPropertyAssignment(p) ? p.name : ts.isPropertyAssignment(p) ? p.initializer : ts.isSpreadAssignment(p) ? p.expression : p))
@@ -1447,8 +1509,8 @@ const WRITTEN = (() => {
     if (ts.isBinaryExpression(t) && t.operatorToken.kind === ts.SyntaxKind.EqualsToken) return mark(t.left)
     while (ts.isPropertyAccessExpression(t) || ts.isElementAccessExpression(t)) t = bare(t.expression)
     if (!ts.isIdentifier(t)) return
-    const s = ts.isShorthandPropertyAssignment(t.parent) && t.parent.name === t ? CHECKER.getShorthandAssignmentValueSymbol(t.parent) : CHECKER.getSymbolAtLocation(t)
-    if (s) out.add(s)
+    const s = ts.isShorthandPropertyAssignment(t.parent) && t.parent.name === t ? checker.getShorthandAssignmentValueSymbol(t.parent) : checker.getSymbolAtLocation(t)
+    if (s) written.add(s)
   }
   const visit = n => {
     if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) mark(n.left)
@@ -1457,85 +1519,161 @@ const WRITTEN = (() => {
     else if ((ts.isForInStatement(n) || ts.isForOfStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) mark(n.initializer)
     ts.forEachChild(n, visit)
   }
-  visit(HERO_SF)
-  return out
-})()
-/** Whether a name holds one value for a whole render: a parameter of the
- *  component, or a name destructured from one, or a const declared in the
- *  component or at the top of the file, outside any nested function or loop,
- *  and never written. A callback's parameter is not one: it changes from call
- *  to call. */
-function stable(sym) {
-  if (!sym || sym.declarations?.length !== 1 || WRITTEN.has(sym)) return false
-  const d = sym.declarations[0]
-  if (scopeOf(d) !== COMPONENT && scopeOf(d) !== HERO_SF) return false
-  for (let n = d; n; n = n.parent) {
-    if (ts.isParameter(n)) return n.parent === COMPONENT
-    if (ts.isVariableDeclarationList(n)) return (n.flags & ts.NodeFlags.Const) !== 0
-    if (!ts.isBindingElement(n) && !ts.isObjectBindingPattern(n) && !ts.isArrayBindingPattern(n) && !ts.isVariableDeclaration(n)) return false
+  visit(sf)
+  /** Whether a name holds one value for a whole render: a parameter of the
+   *  component, or a name destructured from one, or a const declared in the
+   *  component or at the top of the file, outside any nested function or loop,
+   *  and never written. A callback's parameter is not one: it changes from call
+   *  to call. */
+  const stable = sym => {
+    if (!sym || sym.declarations?.length !== 1 || written.has(sym)) return false
+    const d = sym.declarations[0]
+    if (scopeOf(d) !== component && scopeOf(d) !== sf) return false
+    for (let n = d; n; n = n.parent) {
+      if (ts.isParameter(n)) return n.parent === component
+      if (ts.isVariableDeclarationList(n)) return (n.flags & ts.NodeFlags.Const) !== 0
+      if (!ts.isBindingElement(n) && !ts.isObjectBindingPattern(n) && !ts.isArrayBindingPattern(n) && !ts.isVariableDeclaration(n)) return false
+    }
+    return false
   }
-  return false
-}
-const SYMBOL_IDS = new Map()
-/** A condition's operand as a key when it is one value for the whole render:
- *  a stable name, or a property read from one (`personalization?.coldStart`).
- *  Anything else, a call included, has no key. */
-function atomKey(e) {
-  e = bare(e)
-  if (ts.isIdentifier(e)) {
-    const s = CHECKER.getSymbolAtLocation(e)
-    if (!stable(s)) return null
-    if (!SYMBOL_IDS.has(s)) SYMBOL_IDS.set(s, SYMBOL_IDS.size)
-    return `#${SYMBOL_IDS.get(s)}`
+  const ids = new Map()
+  /** A condition's operand as a key when it is one value for the whole render:
+   *  a stable name, or a property read from one (`personalization?.coldStart`).
+   *  Anything else, a call included, has no key. */
+  const atomKey = e => {
+    e = bare(e)
+    if (ts.isIdentifier(e)) {
+      const s = checker.getSymbolAtLocation(e)
+      if (!stable(s)) return null
+      if (!ids.has(s)) ids.set(s, ids.size)
+      return `#${ids.get(s)}`
+    }
+    if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
+      const base = atomKey(e.expression)
+      return base && `${base}${e.questionDotToken ? '?.' : '.'}${e.name.text}`
+    }
+    return null
   }
-  if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
-    const base = atomKey(e.expression)
-    return base && `${base}${e.questionDotToken ? '?.' : '.'}${e.name.text}`
-  }
-  return null
-}
-/** What `e` being truthy (or falsy) says, as { key, truth } literals: through
- *  `!`, into both sides of a truthy `&&` or a falsy `||`. An either-or (a
- *  falsy `&&`, a truthy `||`), a comparison or a call says nothing. */
-function literals(e, truth, out) {
-  e = bare(e)
-  if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) return literals(e.operand, !truth, out)
-  if (ts.isBinaryExpression(e)) {
-    const op = e.operatorToken.kind
-    if ((op === ts.SyntaxKind.AmpersandAmpersandToken && truth) || (op === ts.SyntaxKind.BarBarToken && !truth)) { literals(e.left, truth, out); literals(e.right, truth, out) }
+  /** What `e` being truthy (or falsy) says, as { key, truth } literals:
+   *  through `!`, into both sides of a truthy `&&` or a falsy `||`. An
+   *  either-or (a falsy `&&`, a truthy `||`), a comparison or a call says
+   *  nothing. */
+  const literals = (e, truth, out) => {
+    e = bare(e)
+    if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) return literals(e.operand, !truth, out)
+    if (ts.isBinaryExpression(e)) {
+      const op = e.operatorToken.kind
+      if ((op === ts.SyntaxKind.AmpersandAmpersandToken && truth) || (op === ts.SyntaxKind.BarBarToken && !truth)) { literals(e.left, truth, out); literals(e.right, truth, out) }
+      return out
+    }
+    const key = atomKey(e)
+    if (key) out.push({ key, truth })
     return out
   }
-  const key = atomKey(e)
-  if (key) out.push({ key, truth })
-  return out
-}
-/** The literals a node renders under: the left of each `&&` it sits right of,
- *  truthy, and the test of each `?:` branch it sits in, truthy or falsy. */
-function guardsOf(node) {
-  const out = []
-  for (let n = node; n.parent; n = n.parent) {
-    const p = n.parent
-    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) literals(p.left, true, out)
-    if (ts.isConditionalExpression(p) && p.whenTrue === n) literals(p.condition, true, out)
-    if (ts.isConditionalExpression(p) && p.whenFalse === n) literals(p.condition, false, out)
+  /** The literals a node renders under: the left of each `&&` it sits right
+   *  of, truthy, and the test of each `?:` branch it sits in, truthy or
+   *  falsy. */
+  const guardsOf = node => {
+    const out = []
+    for (let n = node; n.parent; n = n.parent) {
+      const p = n.parent
+      if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) literals(p.left, true, out)
+      if (ts.isConditionalExpression(p) && p.whenTrue === n) literals(p.condition, true, out)
+      if (ts.isConditionalExpression(p) && p.whenFalse === n) literals(p.condition, false, out)
+    }
+    return out
   }
-  return out
+  /** Whether two nodes can never render together: they sit in the two
+   *  branches of one `?:` that runs once per render (not in a callback or a
+   *  loop, where each run can take the other branch), or one renders only
+   *  when a stable value is truthy and the other only when it is falsy. */
+  return (a, b) => {
+    const up = []
+    for (let n = a; n; n = n.parent) up.push(n)
+    let c = b, cb = null
+    while (!up.includes(c)) { cb = c; c = c.parent }
+    const ca = up[up.indexOf(c) - 1]
+    if (ts.isConditionalExpression(c) && scopeOf(c) === component
+      && ((ca === c.whenTrue && cb === c.whenFalse) || (ca === c.whenFalse && cb === c.whenTrue))) return true
+    const ga = guardsOf(a)
+    return guardsOf(b).some(g => ga.some(h => h.key === g.key && h.truth !== g.truth))
+  }
 }
-/** Whether two nodes can never render together: they sit in the two branches
- *  of one `?:` that runs once per render (not in a callback or a loop, where
- *  each run can take the other branch), or one renders only when a stable value
- *  is truthy and the other only when it is falsy. */
-function exclusive(a, b) {
-  const up = []
-  for (let n = a; n; n = n.parent) up.push(n)
-  let c = b, cb = null
-  while (!up.includes(c)) { cb = c; c = c.parent }
-  const ca = up[up.indexOf(c) - 1]
-  if (ts.isConditionalExpression(c) && scopeOf(c) === COMPONENT
-    && ((ca === c.whenTrue && cb === c.whenFalse) || (ca === c.whenFalse && cb === c.whenTrue))) return true
-  const ga = guardsOf(a)
-  return guardsOf(b).some(g => ga.some(h => h.key === g.key && h.truth !== g.truth))
+const exclusive = guardModel(HERO_SF, HERO_ROOT)
+
+// Known answers for the paint-order and condition readers, run every time. A
+// review undid each of these fixes in turn and the hero's figures did not
+// move, since nothing in the hero today exercises them; these do.
+{
+  const wrong = []
+  const expect = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`) }
+  // [classes, certainly lifted, possibly lifted]
+  for (const [cls, sure, possible] of [
+    ['relative', true, true], ['opacity-50', true, true], ['opacity-[1]', false, false], ['opacity-[100%]', false, false],
+    ['opacity-50 md:opacity-100', false, true], ['relative lg:static', false, true], ['aria-selected:isolate', false, true],
+    ['isolate md:isolation-auto', false, true], ['transform-none', false, false], ['will-change-transform', true, true],
+    ['will-change-scroll', false, false], ['will-change-[z-index]', false, true], ['hover:relative', false, false], ['max-sm:relative', false, false],
+  ]) expect(`lift of "${cls}"`, [liftedClasses([cls], true), liftedClasses([cls], false)], [sure, possible])
+  const decl = text => postcss.parse(`.x{${text}}`).first.nodes[0]
+  for (const [text, want] of [['container-type: inline-size', null], ['container-type: normal', false], ['will-change: opacity', true],
+    ['will-change: z-index', null], ['will-change: scroll-position', false], ['-webkit-transform: none', false], ['-webkit-filter: blur(1px)', true],
+    ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false]])
+    expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
+  const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
+  for (const [g, s, after, allAtOnce, want] of [
+    [Y, N, false, true, 'over'], [N, Y, true, true, 'under'], [Y, Y, false, true, 'under'], [Y, Y, true, false, 'over'],
+    [N, N, true, true, 'over'], [N, N, true, false, 'over under'], [N, N, false, false, 'under'],
+    [MAY, N, false, true, 'over under'], [N, MAY, true, true, 'over under'],
+  ]) expect(`sides of ${JSON.stringify({ g, s, after, allAtOnce })}`, [...sidesFor(g, s, after, allAtOnce)].sort().join(' '), want)
+  const rule = text => postcss.parse(`.x{${text}}`).first.nodes
+  expect('the -webkit- alias wins as the later shadow', boxShadowOf(rule('box-shadow: 0 0 1px red; -webkit-box-shadow: 0 0 2px black'))?.value, '0 0 2px black')
+  expect('an !important shadow wins over a later alias', boxShadowOf(rule('box-shadow: 0 0 1px red !important; -webkit-box-shadow: 0 0 2px black'))?.value, '0 0 1px red')
+  for (const [prop, v, moves, refused] of [['-webkit-transform', 'translateY(-40px)', true, false], ['translate', 'none', false, false], ['scale', '2', true, false],
+    ['inset-inline-start', '4px', true, false], ['-webkit-filter', 'drop-shadow(0 0 12px white)', false, true], ['order', '2', false, true],
+    ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false]])
+    expect(`neighbour ${prop}: ${v}`, [movesDecl(prop, v), refusedDecl(prop, v)], [moves, refused])
+  for (const [str, want] of [['rgb(0 0 0 / 55%)', [0, 0, 0, 0.55]], ['#0008', [0, 0, 0, 0x88 / 255]], ['Black', [0, 0, 0, 1]], ['rgba(255, 255, 255, .5)', [1, 1, 1, 0.5]],
+    ['rgba(255,255,255 / .9)', 'dies'], ['rgb(100% 0 0)', [1, 0, 0, 1]], ['rgb(100%, 0, 0)', 'dies']]) {
+    let got
+    try { const c = parseColor(str); got = [...c.rgb, c.a] } catch { got = 'dies' }
+    expect(`the colour ${str}`, got, want)
+  }
+  // Conditions, on a component of their own.
+  const probe = ts.createSourceFile('guard-probe.tsx', [
+    'const TOP = true',
+    'export function P({ a, b, c, d, items }) {',
+    '  const k = a && b',
+    '  let m = c',
+    '  if (TOP) { m = !c; d = 0 }',
+    '  return (',
+    '    <section>',
+    '      {a && <i id="a1" />}{!a && <i id="a2" />}{a ? <i id="t1" /> : <i id="t2" />}',
+    '      {items.map(a => a && <i id="s1" />)}{items.map(x => x ? <i id="c1" /> : <i id="c2" />)}',
+    '      {(!a || b) && <i id="o1" />}{(a || b) && <i id="o2" />}{!(a || b) && <i id="o3" />}',
+    '      {m && <i id="w1" />}{!m && <i id="w2" />}{d && <i id="d1" />}{!d && <i id="d2" />}',
+    '      {TOP && <i id="g1" />}{!TOP && <i id="g2" />}{k && <i id="k1" />}{!k && <i id="k2" />}',
+    '      {c?.x && <i id="q1" />}{!c?.x && <i id="q2" />}',
+    '      {items.map(x => { const y = x.ok; return <b>{y && <i id="y1" />}{!y && <i id="y2" />}</b> })}',
+    '    </section>',
+    '  )',
+    '}',
+  ].join('\n'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const byId = new Map()
+  let section
+  const find = n => {
+    if (ts.isJsxElement(n) && n.openingElement.tagName.getText(probe) === 'section') section = n
+    const id = ts.isJsxSelfClosingElement(n) && n.attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText(probe) === 'id')
+    if (id) byId.set(id.initializer.text, n)
+    ts.forEachChild(n, find)
+  }
+  find(probe)
+  const ex = guardModel(probe, section)
+  for (const [a, b, want] of [['a1', 'a2', true], ['t1', 't2', true], ['s1', 'a2', false], ['s1', 'a1', false], ['c1', 'c2', false],
+    ['o1', 'o2', false], ['o1', 'a1', false], ['o3', 'a1', true], ['w1', 'w2', false], ['d1', 'd2', false], ['g1', 'g2', true], ['k1', 'k2', true], ['q1', 'q2', true], ['y1', 'y2', false]])
+    expect(`${a} and ${b} exclusive`, ex(byId.get(a), byId.get(b)), want)
+  if (wrong.length) throw new Error(`audit: the paint-order and condition readers' known answers changed — the audit is out of date, not passing:\n  ${wrong.join('\n  ')}`)
 }
+
 const GLOWS = []
 for (const s of SURFACES) {
   const sChain = s.nodes
@@ -1556,19 +1694,12 @@ for (const s of SURFACES) {
     if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
     else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
     for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
-    // Each side's lift as the readings it can take: certainly, possibly, or not.
-    const lifts = chain => {
+    // Each side's lift: certain or possible on any element up to A.
+    const lift = chain => {
       const below = chain.slice(0, chain.indexOf(A))
-      return below.some(n => lifted(n, true)) ? [true] : below.some(n => lifted(n, false)) ? [false, true] : [false]
+      return { sure: below.some(n => lifted(n, true)), possible: below.some(n => lifted(n, false)) }
     }
-    const allAtOnce = gChain.slice(0, gChain.indexOf(A)).some(atomic)
-    const sides = new Set()
-    for (const liftG of lifts(gChain)) for (const liftS of lifts(sChain)) {
-      if (liftG !== liftS) sides.add(liftG ? 'over' : 'under')
-      else if (!after) sides.add('under')
-      else { sides.add('over'); if (!liftG && !allAtOnce) sides.add('under') }
-    }
-    for (const side of sides) {
+    for (const side of sidesFor(lift(gChain), lift(sChain), after, gChain.slice(0, gChain.indexOf(A)).some(atomic))) {
       const layers = g.glows.filter(L => side === 'over' || !L.dark).map(L => {
         const off = row ? L.x : L.y
         const d = gap - L.spread + (after ? off : -off)
