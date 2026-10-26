@@ -263,8 +263,19 @@ function declsOf(rule) {
  *  text it darkens the glyphs too, and that is measured (GLOWS); a text or drop
  *  shadow is cast under its own glyphs. */
 function darkShadow(value) {
-  const cols = value.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|\b(?:white|black|transparent)\b/g) ?? []
-  return cols.length > 0 && cols.every(c => c === 'black' || c === 'transparent' || (c !== 'white' && parseColor(c).rgb.every(v => v === 0)))
+  // Layer by layer: a layer with no colour paints in currentColor (the text's
+  // own, light here), and one in a colour this cannot read (`purple`, hsl())
+  // may be light, so either makes the whole shadow not dark. Checked across the
+  // value instead, `0 0 4px black, 0 0 10px` read as dark.
+  const COLOUR = /rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|\b(?:white|black|transparent)\b/g
+  const layers = bgLayers(value)
+  return layers.length > 0 && layers.every(layer => {
+    const cols = layer.match(COLOUR) ?? []
+    const rest = layer.replace(COLOUR, ' ').trim().split(/\s+/).filter(Boolean)
+    if (cols.length !== 1 || rest.some(t => !/^-?[\d.]+(?:px|rem|em)?$/.test(t))) return false
+    const c = cols[0]
+    return c === 'black' || c === 'transparent' || (c !== 'white' && parseColor(c).rgb.every(v => v === 0))
+  })
 }
 
 // The hero, parsed. Elements are found in the tree rather than by scanning the
@@ -957,7 +968,7 @@ const VEIL = (() => {
     'aria-selected:text-white/40', 'disabled:text-white/20', 'visited:text-white/20', 'text-current',
     'text-[color:var(--no-such-token)]', '[color:rgba(255,255,255,0.3)]', '[opacity:0.3]', 'brightness-50',
     'mix-blend-screen', 'shadow-inner', 'no-such-class', '[text-shadow:0_0_20px_white]', 'drop-shadow-[0_0_20px_rgba(255,255,255,0.8)]',
-    'order-first', 'ring-2']
+    'order-first', 'ring-2', '[text-shadow:0_0_4px_black,0_0_10px]', '[text-shadow:0_0_4px_black,0_0_12px_purple]']
   const wrong = []
   for (const [classes, ok] of PROBE) {
     let r
