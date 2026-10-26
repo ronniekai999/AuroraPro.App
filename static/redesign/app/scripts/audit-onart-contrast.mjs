@@ -34,14 +34,24 @@ import { createRequire } from 'node:module'
 // The rewrite derived the scrims, but ten of its eleven text surfaces still
 // carried a typed-in alpha, so reverting the "Not tonight" contrast fix
 // (`text-white/75` back to `/60`) again left the output byte-identical and exit 0.
-// Now each surface's colour, alpha, size, weight and fill are read from its own
-// element's classes (`text()` below), and the run fails if a value it depends on
-// has moved. NOT derived: each surface's sample point (x, y), measured by hand
-// at the 1440x900 frame its classes are resolved at.
+// Now each surface's colour, alpha, size, weight and fill are read from the
+// classes of its element, or of the element it inherits them from (`text()`
+// below); whether it sits over the match veil is read from the tree; and every
+// element enclosing it up to the hero's <section> is checked for opacity, fills
+// and anything else this audit does not model. The run fails if a value it
+// depends on has moved or cannot be read. NOT derived: each surface's sample
+// point (x, y), measured by hand at the 1440x900 frame its classes are resolved
+// at, and the list of surfaces itself, so text HeroSection gains is measured
+// only once it is listed. Not read at all: anything above the <section>, rules
+// in index.css that select by element rather than class, other widths, and
+// hover states.
 
 const require = createRequire(import.meta.url)
 const APP_DIR = path.resolve(import.meta.dirname, '..')
 const THEME = require('tailwindcss/resolveConfig')(require('tailwindcss/loadConfig')(path.join(APP_DIR, 'tailwind.config.js'))).theme
+const ts = require('typescript')
+const postcss = require('postcss')
+const selparser = require('postcss-selector-parser')
 
 const SRC_CSS = 'src/index.css'
 const SRC_HERO = 'src/components/HeroSection.tsx'
@@ -69,7 +79,8 @@ function codeOnly(raw) {
 }
 
 const css = fs.readFileSync(SRC_CSS, 'utf8')
-const hero = codeOnly(fs.readFileSync(SRC_HERO, 'utf8'))
+const heroRaw = fs.readFileSync(SRC_HERO, 'utf8')
+const hero = codeOnly(heroRaw)
 
 /** Pull a declaration's value out of a named rule, or die loudly. */
 function cssValue(selector, prop) {
@@ -113,69 +124,150 @@ const SCREENS = Object.fromEntries(Object.entries(THEME.screens).map(([k, v]) =>
   if (typeof v !== 'string' || !/^\d+px$/.test(v)) throw new Error(`audit: screen ${k} is ${JSON.stringify(v)}, not a px min-width this audit can place`)
   return [k, parseFloat(v)]
 }))
-// Variants that hold only while someone interacts, so never at rest.
-const INTERACTION = new Set(['hover', 'focus', 'focus-visible', 'focus-within', 'active', 'visited', 'disabled',
+// Variants that hold only while someone interacts, so never at rest. Not
+// `disabled:` or `visited:`: those states persist, so a class under them can be
+// what shows at rest, and they die below like any other variant.
+const INTERACTION = new Set(['hover', 'focus', 'focus-visible', 'focus-within', 'active',
   'group-hover', 'group-focus', 'group-focus-within', 'peer-hover', 'peer-focus'])
 
-/** The JSX opening tag holding `anchor` (in it, or in the element's direct
- *  text), and the line it starts on. The anchor must occur exactly once: one
- *  that occurs twice silently measures whichever comes first. Walk back to this
- *  element's `<`, forward to the tag's own `>`, skipping quotes and braces so an
- *  arrow function's `>` does not end it — audit-glass-contrast.mjs's `tagOf`. */
-function tagAt(anchor) {
+// Utilities that cannot change a text's colour, alpha, size or weight, or paint
+// behind it: layout, spacing, borders, transitions, transforms, and shadows,
+// which this audit never credits. A class neither classified below nor matched
+// here dies unless index.css defines it, and then its rules are checked
+// (`checkCssRules`). Skipped instead, `[color:…]` beside `text-white/75` painted
+// 0.3 while the audit read 0.75.
+const INERT = new RegExp('^(?:' + [
+  String.raw`-?(?:m[xytrblse]?|p[xytrblse]?|gap(?:-[xy])?|space-[xy]|w|h|size|min-w|min-h|max-w|max-h|inset(?:-[xy])?|top|right|bottom|left|start|end|z|basis|order|translate-[xy]|rotate|scale(?:-[xy])?)-.+`,
+  'block|inline|inline-block|flex|inline-flex|grid|inline-grid|contents|hidden|isolate',
+  'flex-.+|grow(?:-.+)?|shrink(?:-.+)?|items-.+|justify-.+|content-.+|self-.+|place-.+',
+  'overflow-.+|whitespace-.+|break-.+|truncate|line-clamp-.+|sr-only|not-sr-only',
+  'italic|not-italic|uppercase|lowercase|capitalize|normal-case|tracking-.+|leading-.+|underline|no-underline',
+  'rounded(?:-.+)?|border(?:-.+)?|outline(?:-.+)?|ring(?:-.+)?',
+  'transition(?:-.+)?|duration-.+|ease-.+|delay-.+|cursor-.+|pointer-events-.+|select-.+|align-.+|aspect-.+|object-.+',
+  String.raw`drop-shadow(?:-.+)?|font-(?:sans|serif|mono)|\[text-shadow:.+\]`,
+].join('|') + ')$')
+
+// Declarations that can change what a surface is measured on: its colour,
+// alpha, size or weight, or what paints behind it.
+const RISKY = /^(color|opacity|font|font-size|font-weight|background|background-color|background-image|filter|backdrop-filter|mix-blend-mode|box-shadow|visibility|-webkit-text-fill-color|-webkit-text-stroke(-color|-width)?)$/
+// What each classified property already accounts for.
+const MODELS = { color: ['color'], size: ['font-size'], weight: ['font-weight'], opacity: ['opacity'],
+  fill: ['background', 'background-color', 'background-image'], position: [] }
+
+/** index.css rules that can style an element carrying a class, by class name:
+ *  every rule naming `.cls` in a selector, unless that compound styles a
+ *  pseudo-element (`::before`) or holds only under interaction (`:hover`). A
+ *  class used as an ancestor (`.cls p`) counts too, failing closed. */
+const CSS_RULES = (() => {
+  const map = new Map()
+  const away = /^(::.*|:before|:after|:hover|:focus|:focus-visible|:focus-within|:active)$/
+  postcss.parse(css).walkRules(rule => {
+    for (const sel of rule.selectors) {
+      selparser(root => root.each(s => {
+        let compound = []
+        const flush = () => {
+          if (!compound.some(n => n.type === 'pseudo' && away.test(n.value))) {
+            for (const n of compound) if (n.type === 'class') map.set(n.value, [...(map.get(n.value) ?? []), rule])
+          }
+          compound = []
+        }
+        s.each(n => { if (n.type === 'combinator') flush(); else compound.push(n) })
+        flush()
+      })).processSync(sel)
+    }
+  })
+  return map
+})()
+
+/** Dies when index.css gives `cls` a declaration this audit does not model:
+ *  a RISKY one beyond what its classification covers (`allowed`), or an
+ *  animation that holds its end state, since the last keyframe is then the
+ *  resting style. `opacity: 1` dims nothing. */
+function checkCssRules(cls, token, allowed = []) {
+  for (const rule of CSS_RULES.get(cls) ?? []) {
+    rule.walkDecls(d => {
+      const prop = d.prop.toLowerCase()
+      if (allowed.includes(prop) || (prop === 'opacity' && Number(d.value) === 1)) return
+      if (RISKY.test(prop) || (/^animation(-fill-mode)?$/.test(prop) && /\b(forwards|both)\b/.test(d.value)))
+        throw new Error(`audit: ${token}: index.css (${rule.selector}) sets ${prop}: ${d.value}, which this audit does not model — the audit is out of date, not passing`)
+    })
+  }
+}
+
+// The hero, parsed. Elements are found in the tree rather than by scanning the
+// text back to a `<`, which a comparison inside an expression also satisfies.
+const HERO_SF = ts.createSourceFile(SRC_HERO, heroRaw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const lineOf = pos => HERO_SF.getLineAndCharacterOfPosition(pos).line + 1
+const openingOf = el => (ts.isJsxElement(el) ? el.openingElement : el)
+const tagName = el => openingOf(el).tagName.getText(HERO_SF)
+const where = el => `<${tagName(el)}> at ${SRC_HERO}:${lineOf(openingOf(el).getStart(HERO_SF))}`
+
+/** The JSX element `anchor` names — the one whose opening tag holds it, or
+ *  whose direct text or {expression} child does — and the anchor's position.
+ *  The anchor must occur exactly once in the hero's code: one that occurs
+ *  twice silently measures whichever comes first. */
+function elementAt(anchor) {
   const i = hero.indexOf(anchor)
   if (i < 0) throw new Error(`audit: anchor not found in ${SRC_HERO}: ${anchor} — the audit is out of date, not passing`)
   if (hero.indexOf(anchor, i + 1) >= 0) throw new Error(`audit: anchor "${anchor}" is not unique in ${SRC_HERO} — it cannot identify one element`)
-  const start = hero.lastIndexOf('<', i)
-  if (start < 0 || hero[start + 1] === '/') throw new Error(`audit: anchor "${anchor}" is not in an opening tag or its direct text in ${SRC_HERO}`)
-  let end = -1, depth = 0, quote = null
-  for (let k = start; k < hero.length; k++) {
-    const c = hero[k]
-    if (quote) { if (c === '\\') { k++; continue } if (c === quote) quote = null; continue }
-    if (c === '"' || c === "'" || c === '`') { quote = c; continue }
-    if (c === '{') depth++
-    else if (c === '}') depth--
-    else if (c === '>' && depth === 0) { end = k; break }
+  let node = HERO_SF
+  for (let next; (next = node.getChildren(HERO_SF).find(c => c.getStart(HERO_SF) <= i && i < c.end));) node = next
+  for (let n = node; n; n = n.parent) {
+    if (ts.isJsxOpeningElement(n)) return { el: n.parent, pos: i }
+    if (ts.isJsxSelfClosingElement(n) || ts.isJsxElement(n)) return { el: n, pos: i }
   }
-  if (end < 0) throw new Error(`audit: could not find the end of the tag holding "${anchor}" in ${SRC_HERO}`)
-  const lineAt = k => hero.slice(0, start + k).split('\n').length
-  return { tag: hero.slice(start, end + 1), at: i - start, line: lineAt(0), lineAt }
+  throw new Error(`audit: anchor "${anchor}" is not in a JSX element in ${SRC_HERO}`)
 }
 
-/** The class list the element holding `anchor` paints with. A className that
- *  is one string is that string. One that is `cond ? 'A' : 'B'` (the two hero
- *  titles) is the branch the anchor sits in, so anchor those inside the
- *  literal. Anything else — a template with `${…}`, a cn() call — dies: classes
- *  built at runtime cannot be read here. */
-function classesOf(anchor) {
-  const { tag, at, line, lineAt } = tagAt(anchor)
-  const attr = tag.match(/\sclassName=/)
-  if (!attr) throw new Error(`audit: the element anchored by "${anchor}" has no className — the audit is out of date, not passing`)
-  const from = attr.index + attr[0].length
-  let to
-  if (tag[from] === '"') to = tag.indexOf('"', from + 1) + 1
-  else if (tag[from] === '{') {
-    let depth = 0, quote = null
-    for (let k = from; k < tag.length; k++) {
-      const c = tag[k]
-      if (quote) { if (c === quote) quote = null; continue }
-      if (c === '"' || c === "'" || c === '`') { quote = c; continue }
-      if (c === '{') depth++
-      else if (c === '}' && --depth === 0) { to = k + 1; break }
-    }
+/** An element's attributes by name. A spread could set anything, so it dies. */
+function attrsOf(el) {
+  const out = new Map()
+  for (const a of openingOf(el).attributes.properties) {
+    if (ts.isJsxSpreadAttribute(a)) throw new Error(`audit: ${where(el)} spreads props; this audit cannot read them`)
+    out.set(a.name.getText(HERO_SF), a.initializer)
   }
-  if (!to) throw new Error(`audit: cannot read the className of the element anchored by "${anchor}"`)
-  const value = tag.slice(from, to)
-  const lits = [...value.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)]
-    .map(m => ({ text: m[1] ?? m[2] ?? m[3], from: from + m.index, to: from + m.index + m[0].length }))
-  if (lits.some(l => l.text.includes('${'))) throw new Error(`audit: the className anchored by "${anchor}" is built at runtime; this audit cannot read it`)
-  if (lits.length === 1 && value === `"${lits[0].text}"`) return { classes: lits[0].text, line }
-  if (lits.length === 2 && /^\{\s*!?[\w.]+\s*\?\s*(["'`])[^"'`]*\1\s*:\s*(["'`])[^"'`]*\2\s*\}$/.test(value)) {
-    const hit = lits.find(l => at >= l.from && at < l.to)
-    if (hit) return { classes: hit.text, line: lineAt(hit.from) }
-    throw new Error(`audit: "${anchor}" is on an element whose className has two branches; anchor it inside the one measured`)
+  return out
+}
+
+/** The className literals of `el`, each { text, from, to }: one for a string,
+ *  two for `cond ? 'A' : 'B'` (the hero titles, the <section>), none without a
+ *  className. Anything else — a template with `${…}`, a cn() call — dies:
+ *  classes built at runtime cannot be read here. */
+function classBranches(el) {
+  const init = attrsOf(el).get('className')
+  if (init === undefined) return []
+  const bare = n => { while (n && ts.isParenthesizedExpression(n)) n = n.expression; return n }
+  const lit = n => (n && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))
+    ? { text: n.text, from: n.getStart(HERO_SF), to: n.end } : null)
+  const e = bare(ts.isJsxExpression(init) ? init.expression : init)
+  if (lit(e)) return [lit(e)]
+  if (e && ts.isConditionalExpression(e) && lit(bare(e.whenTrue)) && lit(bare(e.whenFalse))) return [lit(bare(e.whenTrue)), lit(bare(e.whenFalse))]
+  throw new Error(`audit: the className of ${where(el)} is built at runtime; this audit cannot read it`)
+}
+
+/** The class list a surface's own element paints with, and the line to report:
+ *  for a two-branch className (the hero titles) the branch the anchor sits in,
+ *  so anchor those inside the literal. An inline style dies: this audit reads
+ *  classes, and a `style={{ opacity: 0.3 }}` would otherwise pass unseen. */
+function classesOf({ el, pos }) {
+  if (attrsOf(el).has('style')) throw new Error(`audit: ${where(el)} carries an inline style; this audit reads classes only — model it`)
+  const branches = classBranches(el)
+  if (branches.length <= 1) return { classes: branches[0]?.text ?? '', line: lineOf(openingOf(el).getStart(HERO_SF)) }
+  const hit = branches.find(b => pos >= b.from && pos < b.to)
+  if (!hit) throw new Error(`audit: ${where(el)} has a two-branch className; anchor it inside the branch measured`)
+  return { classes: hit.text, line: lineOf(hit.from) }
+}
+
+/** The JSX elements enclosing `el`, nearest first, up to and including the
+ *  hero's <section>. */
+function ancestorsOf(el) {
+  const out = []
+  for (let n = el.parent; n; n = n.parent) {
+    if (!ts.isJsxElement(n)) continue
+    out.push(n)
+    if (tagName(n) === 'section') return out
   }
-  throw new Error(`audit: the className anchored by "${anchor}" is not a string or a two-branch condition; this audit cannot read it`)
+  throw new Error(`audit: ${where(el)} is not inside the hero's <section>`)
 }
 
 /** `md:hover:text-white/70` -> [['md', 'hover'], 'text-white/70']. Splits on `:`
@@ -303,6 +395,7 @@ const NON_COLOUR_BG = /^(none|auto|cover|contain|fixed|local|scroll|repeat|no-re
  *  skipped: skipped, a colour would silently fall back to an inherited one. */
 function classify(util) {
   let m
+  if (/^(static|relative|absolute|fixed|sticky)$/.test(util)) return { key: 'position', value: util }
   if ((m = util.match(/^opacity-(.+)$/))) return { key: 'opacity', value: twOpacity(m[1], util) }
   if ((m = util.match(/^font-(\w+)$/)) && m[1] in THEME.fontWeight) return { key: 'weight', value: Number(THEME.fontWeight[m[1]]) }
   if ((m = util.match(/^type-([\w-]+)$/))) return { key: 'size', value: typeScalePx(m[1]) }
@@ -326,32 +419,37 @@ function classify(util) {
 }
 
 /** What `classes` set at rest at VIEWPORT_W: { color, size, weight, opacity,
- *  fill }, each from the one class that wins. An interaction variant (hover:,
- *  focus: …) is not at rest. A breakpoint applies once VIEWPORT_W reaches it, and
- *  the widest that applies wins, as Tailwind orders its media queries. Anything
- *  else this cannot place dies: a `max-*` breakpoint that applies, any other
- *  variant, an `!important` class, or two classes for one property at one
- *  breakpoint (CSS order decides those, not class order). */
+ *  fill, position }, each from the one class that wins. An interaction variant
+ *  (hover:, focus: …) is not at rest. A breakpoint applies once VIEWPORT_W
+ *  reaches it, and the widest that applies wins, as Tailwind orders its media
+ *  queries. Every class that applies must be one this audit can place: classified
+ *  above, INERT, or defined in index.css with nothing it does not model. Anything
+ *  else dies: an unknown class, a `max-*` breakpoint that applies, any other
+ *  variant on a class that matters, an `!important` one, or two classes for one
+ *  property at one breakpoint (CSS order decides those, not class order). */
 function resting(classes) {
   const won = {}
   for (const token of classes.split(/\s+/).filter(Boolean)) {
     const [variants, raw] = splitVariants(token)
     const important = raw.startsWith('!')
-    const prop = classify(important ? raw.slice(1) : raw)
-    if (!prop) continue
-    if (important) throw new Error(`audit: ${token} is !important; this audit does not model it`)
-    let rank = 0, atRest = true
+    const util = important ? raw.slice(1) : raw
+    let rank = 0, applies = true, unplaced = null
     for (const v of variants) {
-      if (INTERACTION.has(v)) { atRest = false; continue }
-      if (v in SCREENS) { if (VIEWPORT_W >= SCREENS[v]) rank = Math.max(rank, SCREENS[v]); else atRest = false; continue }
       const max = v.match(/^max-(\w+)$/)
-      if (max && max[1] in SCREENS) {
-        if (VIEWPORT_W < SCREENS[max[1]]) throw new Error(`audit: ${token} applies at ${VIEWPORT_W}px; this audit does not model max-* breakpoints`)
-        atRest = false; continue
-      }
-      throw new Error(`audit: ${token}: this audit cannot tell whether the ${v}: variant applies at rest`)
+      if (INTERACTION.has(v)) applies = false
+      else if (v in SCREENS) { if (VIEWPORT_W >= SCREENS[v]) rank = Math.max(rank, SCREENS[v]); else applies = false }
+      else if (max && max[1] in SCREENS) { if (VIEWPORT_W < SCREENS[max[1]]) unplaced = `applies at ${VIEWPORT_W}px; this audit does not model max-* breakpoints`; else applies = false }
+      else unplaced = `this audit cannot tell whether the ${v}: variant applies at rest`
     }
-    if (!atRest) continue
+    if (!applies) continue
+    const prop = classify(util)
+    const inert = INERT.test(util) || /^text-/.test(util) && NON_COLOUR_TEXT.test(util.slice(5)) || /^bg-/.test(util) && NON_COLOUR_BG.test(util.slice(3))
+    if (!prop && inert && !CSS_RULES.has(util)) continue
+    if (unplaced) throw new Error(`audit: ${token}: ${unplaced}`)
+    if (important) throw new Error(`audit: ${token} is !important; this audit does not model it`)
+    if (!prop && !CSS_RULES.has(util)) throw new Error(`audit: ${token} is not a class this audit can place (not a colour, size, weight, opacity, fill or position, not INERT, not in index.css) — the audit is out of date, not passing`)
+    checkCssRules(util, token, prop ? MODELS[prop.key] : [])
+    if (!prop) continue
     const prev = won[prop.key]
     if (prev && prev.rank === rank) throw new Error(`audit: ${prev.token} and ${token} both set ${prop.key} at one breakpoint; CSS order decides which wins, not class order`)
     if (!prev || rank > prev.rank) won[prop.key] = { ...prop, rank, token }
@@ -360,35 +458,96 @@ function resting(classes) {
 }
 
 /** A text surface: colour, alpha, size, weight and fill from the element
- *  holding `anchor`, with `parent` (an anchor for the element it inherits from)
- *  filling in what it does not set itself. One parent at most: an element that
- *  sets no colour or size, and names no parent that does, dies rather than
- *  being given a default. An unset weight is read as normal, the stricter
- *  threshold. Opacity composes down the tree, so both elements' multiply. */
+ *  holding `anchor`, with `parent` (an anchor for the element directly
+ *  enclosing it) filling in what it does not set itself. One parent at most: an
+ *  element that sets no colour or size, and names no parent that does, dies
+ *  rather than being given a default. An unset weight is read as normal, the
+ *  stricter threshold. Opacity composes down the tree, so both elements'
+ *  multiply; under a fill it would dim the fill too, which is not modelled.
+ *  Every other enclosing element is checked by `checkAncestors`, and the match
+ *  veil is found by `veilUnder`. */
 function text(anchor, parent) {
-  const own = classesOf(anchor)
+  const at = elementAt(anchor)
+  const own = classesOf(at)
+  const chain = ancestorsOf(at.el)
+  const par = parent ? elementAt(parent) : null
+  if (par && chain[0] !== par.el) throw new Error(`audit: "${parent}" is not the element directly enclosing "${anchor}" — the audit is out of date, not passing`)
   const r = resting(own.classes)
-  const p = parent ? resting(classesOf(parent).classes) : {}
+  const p = par ? resting(classesOf(par).classes) : {}
   const color = r.color ?? p.color
   const px = r.size ?? p.size
   if (!color) throw new Error(`audit: the element anchored by "${anchor}" sets no text colour${parent ? ', nor does its named parent' : ''} — the audit is out of date, not passing`)
   if (px === undefined) throw new Error(`audit: the element anchored by "${anchor}" sets no font size${parent ? ', nor does its named parent' : ''} — the audit is out of date, not passing`)
   const fills = [p.fill, r.fill].filter(Boolean)
   if (fills.includes('gradient')) throw new Error(`audit: the element anchored by "${anchor}" has a gradient fill; this audit models flat fills only`)
-  const opacity = (r.opacity ?? 1) * (p.opacity ?? 1)
-  if (opacity < 1 && fills.length) throw new Error(`audit: the element anchored by "${anchor}" has a fill under opacity < 1; this audit does not model group opacity`)
-  return { file: `HeroSection.tsx:${own.line}`, color: color.rgb, alpha: color.a * opacity, px,
-    bold: (r.weight ?? p.weight ?? 400) >= 700, fills }
+  if (((r.opacity ?? 1) < 1 && r.fill) || ((p.opacity ?? 1) < 1 && fills.length))
+    throw new Error(`audit: the element anchored by "${anchor}" has a fill under opacity < 1; this audit does not model group opacity`)
+  checkAncestors(chain, par?.el)
+  return { file: `HeroSection.tsx:${own.line}`, color: color.rgb, alpha: color.a * (r.opacity ?? 1) * (p.opacity ?? 1), px,
+    bold: (r.weight ?? p.weight ?? 400) >= 700, fills, veil: veilUnder(at.el, chain) }
 }
 
 /** A non-text stroke, from an SVG element's own `stroke="…"`. */
 function stroke(anchor) {
-  const { tag, line } = tagAt(anchor)
-  if (/\s(?:opacity|strokeOpacity|className|style)=/.test(tag)) throw new Error(`audit: the element anchored by "${anchor}" now carries opacity or classes; model them`)
-  const m = tag.match(/\sstroke="([^"]+)"/)
-  if (!m) throw new Error(`audit: the element anchored by "${anchor}" has no literal stroke`)
-  const c = parseColor(m[1])
-  return { file: `HeroSection.tsx:${line}`, color: c.rgb, alpha: c.a, px: 0, nonText: true }
+  const { el } = elementAt(anchor)
+  const attrs = attrsOf(el)
+  for (const a of ['opacity', 'strokeOpacity', 'className', 'style'])
+    if (attrs.has(a)) throw new Error(`audit: ${where(el)} now carries ${a}; model it`)
+  const s = attrs.get('stroke')
+  if (!s || !ts.isStringLiteral(s)) throw new Error(`audit: ${where(el)} has no literal stroke`)
+  const c = parseColor(s.text)
+  const chain = ancestorsOf(el)
+  checkAncestors(chain)
+  return { file: `HeroSection.tsx:${lineOf(openingOf(el).getStart(HERO_SF))}`, color: c.rgb, alpha: c.a, px: 0, nonText: true,
+    veil: veilUnder(el, chain) }
+}
+
+/** What the elements enclosing a surface may do to it without colouring it:
+ *  dim it (opacity), paint behind it (a fill), or style it in ways this audit
+ *  does not read. Each one up to the hero's <section> is read like the surface,
+ *  at rest at this frame, and any of those dies, as does a component (what it
+ *  renders is not in this file), an inline style or a spread. The section's own
+ *  fill is allowed: it paints under the artwork, which the black and white
+ *  frames stand in for. A named parent is read by `text()` instead. Nothing
+ *  above the section is read. */
+function checkAncestors(chain, skip) {
+  for (const a of chain) {
+    if (a === skip) continue
+    if (!/^[a-z]/.test(tagName(a))) throw new Error(`audit: ${where(a)} encloses a surface and is a component; this audit cannot see what it renders`)
+    if (attrsOf(a).has('style')) throw new Error(`audit: ${where(a)} encloses a surface and carries an inline style; model it`)
+    for (const b of classBranches(a)) {
+      const r = resting(b.text)
+      if ((r.opacity ?? 1) < 1) throw new Error(`audit: ${where(a)} dims the surfaces inside it (opacity ${r.opacity}); this audit does not model a dimmed ancestor`)
+      if (r.fill && tagName(a) !== 'section') throw new Error(`audit: ${where(a)} paints a fill behind the surfaces inside it; model it`)
+    }
+  }
+}
+
+/** The match veil's alpha when a surface sits over it, else 0. It does when an
+ *  enclosing element holds the veil as an earlier child than the branch leading
+ *  to the surface, and something on that branch is positioned at rest. The veil
+ *  is `position: absolute`, so it paints over a static sibling (CSS 2.1 App. E,
+ *  step 6 over step 5): that is the eyebrow's 1.35:1 in the note at
+ *  `backdropFor`. A surface the veil would paint over dies, rather than being
+ *  measured with the veil on the wrong side. */
+function veilUnder(el, chain) {
+  // Read loosely: a sibling's className need not be one this audit can resolve.
+  const isVeil = c => (ts.isJsxElement(c) || ts.isJsxSelfClosingElement(c)) && openingOf(c).attributes.properties.some(p =>
+    ts.isJsxAttribute(p) && p.name.getText(HERO_SF) === 'className' && p.initializer
+    && p.initializer.getText(HERO_SF).split(/[^\w-]+/).includes('stage-hero-match-veil'))
+  for (const [k, a] of chain.entries()) {
+    const veil = a.children.find(isVeil)
+    if (!veil) continue
+    const branch = [el, ...chain.slice(0, k)]
+    const positioned = branch.some(x => {
+      const bs = classBranches(x)
+      return bs.length > 0 && bs.every(b => /^(relative|absolute|fixed|sticky)$/.test(resting(b.text).position ?? 'static'))
+    })
+    if (branch[branch.length - 1].getStart(HERO_SF) < veil.getStart(HERO_SF) || !positioned)
+      throw new Error(`audit: .stage-hero-match-veil paints over ${where(el)}; give the surface position, or model the veil above it`)
+    return VEIL
+  }
+  return 0
 }
 
 const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
@@ -506,8 +665,12 @@ const VEIL = (() => {
     ['font-semibold', r => r.weight === 600],
     ['opacity-60 bg-white/[0.04] hover:bg-purple-500/10', r => near(r.opacity, 0.6) && near(r.fill.a, 0.04)],
   ]
+  PROBE.push(['relative drop-shadow-lg [text-shadow:0_1px_3px_rgba(0,0,0,0.5)] line-clamp-2 max-sm:sr-only aria-selected:px-4',
+    r => r.position === 'relative' && Object.keys(r).length === 1])
   const DIES = ['text-white/97', 'text-white/70 text-white/50', 'md:!text-white', 'max-2xl:text-white/40',
-    'aria-selected:text-white/40', 'text-current', 'text-[color:var(--no-such-token)]']
+    'aria-selected:text-white/40', 'disabled:text-white/20', 'visited:text-white/20', 'text-current',
+    'text-[color:var(--no-such-token)]', '[color:rgba(255,255,255,0.3)]', '[opacity:0.3]', 'brightness-50',
+    'mix-blend-screen', 'shadow-inner', 'no-such-class']
   const wrong = []
   for (const [classes, ok] of PROBE) {
     let r
@@ -521,14 +684,13 @@ const VEIL = (() => {
 }
 
 // ── the surfaces, with where they actually sit ────────────────────────────
-// Each surface's colour, alpha, size, weight and fill come from its own element
+// Each surface's colour, alpha, size, weight and fill come from its element
 // (`text()`), found by an anchor that must occur exactly once in the hero's code;
 // the line reported is that element's, or for a title its className branch's.
-// x/y are fractions (x from
-// the left edge, y from the BOTTOM edge), read off the hero's own layout: the
-// text column starts at --page-gutter (~3% at 1440px) and the stack runs title →
-// meta → description → buttons up from the lower third. They are the one part
-// typed in, and moving an element does not move them.
+// x/y are fractions (x from the left edge, y from the BOTTOM edge), read off the
+// hero's own layout: the text column starts at --page-gutter (~3% at 1440px)
+// and the stack runs title → meta → description → buttons up from the lower
+// third. They are typed in, and moving an element does not move them.
 const SURFACES = [
   // lg:type-hero extrabold → large text, 3:1
   { what: 'hero title', ...text('lg:type-hero'), x: 0.03, y: 0.40 },
@@ -556,14 +718,16 @@ const SURFACES = [
   // (0.15 at 72%, 0.35 at 100%). Both sit over .stage-hero-match-veil, the local
   // backing Phase 8 added precisely because this corner has no scrim worth the
   // name — without it the eyebrow measured 1.22:1 and the numeral 2.16:1.
-  // Geometry derived from `absolute top-11 right-[52px]` + an 84px ring + a
-  // gap-1.5 + a 10px caption at 1440x900, not estimated: the earlier x:0.95,
+  // `veilUnder` finds the veil from the tree; it is not listed here.
+  // Geometry derived from the cluster's `md:top-11` and its 52px right inset at
+  // this width + an 84px ring + a gap-1.5 + a 10px caption at 1440x900, not
+  // estimated: the earlier x:0.95,
   // y:0.72 was off by 0.12-0.18 on y. It happened not to change any verdict
   // (the vertical ramp is already 0 above y=0.55) but a sample point that is
   // wrong for a reason you have not checked is a coin flip, not a measurement.
-  { what: 'MATCH/SCORE eyebrow', ...text("{showingPersonal ? 'Match' : 'Score'}"), x: 0.935, y: 0.844, veil: VEIL },
-  { what: 'match numeral "NN%"', ...text('{matchScore}%'), x: 0.935, y: 0.904, veil: VEIL },
-  { what: 'ring track vs backdrop', ...stroke('stroke="rgba('), x: 0.935, y: 0.904, veil: VEIL,
+  { what: 'MATCH/SCORE eyebrow', ...text("{showingPersonal ? 'Match' : 'Score'}"), x: 0.935, y: 0.844 },
+  { what: 'match numeral "NN%"', ...text('{matchScore}%'), x: 0.935, y: 0.904 },
+  { what: 'ring track vs backdrop', ...stroke('stroke="rgba('), x: 0.935, y: 0.904,
     // Redundant encoding — see the note at the call site. The arc's purple end
     // cannot clear 3:1 against any track that itself clears 3:1 above the
     // backdrop; the value is carried by the numeral above and by the wrapper's
