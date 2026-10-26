@@ -984,14 +984,21 @@ capability declarations.
   publication window (`ParseClientMediaStart`); otherwise by the
   `ProbeSeekKeyframe` prediction, as before. A `media_start=` shift is the
   client's choice, so it is built in memory per request and never written to
-  the subtitle cache (`ShiftedVTT`, `ServeShiftedSubtitle`, with the file
-  path's headers): only once a response needs the body (a revalidation is a
-  304 that rewrites nothing), at most four rewrites at once (a request waits
-  for a slot until its context ends; the slot is not held while the body is
-  sent, so a slow reader cannot stall the others), and for sources up to
-  8 MB, at the stat and at the read (`MaxInMemoryShiftSourceBytes`; above it
-  the prediction is used, through the cache, logged once per track). A
-  measured start at or before 0 is no shift: the source is served as is.
+  the subtitle cache (`ServeShiftedSubtitle`, with the file path's headers).
+  A revalidation is a 304 that builds nothing and takes no budget
+  (`http.ServeContent`'s own precondition check, run first). Any other request
+  is charged its body's worst case, 1.5x its source plus 64 bytes
+  (`InMemoryShiftBodyBound`, also the buffer it is built in), against a 64 MB
+  budget from before the build until its send ends (`InMemoryShiftBudgetBytes`),
+  and is sent under a two-minute write deadline. At most four rewrites run at
+  once: a request waits for a slot until its context ends, holding its charge,
+  and the slot is freed once the body is built. Sources are capped at 8 MB
+  (`MaxInMemoryShiftSourceBytes`), and the read takes no more than the stat
+  said. Whatever stops the shift (the cap, a full budget, an unreadable source)
+  does so before anything is written, and the prediction is used, through the
+  cache: logged once per track for the cap, once a minute for the budget. A
+  client that leaves while waiting for a slot gets a 503. A measured start at
+  or before 0 is no shift: the source is served as is.
   The server-derived shifts keep one cached file per (track, offset), and
   the extracted track is cached either way. The native path gives its
   variant fetch 8 s (`NATIVE_MEDIA_WINDOW_TIMEOUT_MS`), then fails safe as
@@ -1016,15 +1023,17 @@ capability declarations.
   arrives late; a held pick waits for local loading, which a boot while
   casting does not start and a cast that connects during the hold stops
   (`stopLoad`); a `media_start=` shift is paid on every non-304 request
-  (about 4x its source in allocations, and typically ~20-25 ms of CPU per
-  MB, ~70 ms per MB in the worst shape measured, one timing line as long as
-  the cap; `BenchmarkShiftedVTT`), where a cached shift was paid once per
-  track and offset, each built body (up to ~8 MB) stays in memory until its
-  response is sent, so slow readers can each hold one, and above 8 MB its
-  source gets the GOP-off prediction again; a native-HLS server slower than
-  8 s to its first variant playlist leaves that session's clock and
-  subtitles on start_sec and the prediction;
-  after the unreadable-playlist resume fallback the
+  (about 2 µs of CPU per cue: per MB ~20 ms for ordinary cues, ~50 ms for
+  one-syllable karaoke cues and ~100 ms for timing lines alone, allocating 4
+  to 15 times the source, mostly short-lived; up to ~0.85 s a request at the
+  cap; `BenchmarkShiftedVTT`), where a cached shift was paid once per track
+  and offset; a full budget (five clients not reading tracks at the cap, or
+  forty-odd not reading ordinary ones, each for up to the two-minute send
+  deadline) sends every other `media_start=` request to the GOP-off
+  prediction until they finish, and so does a source above 8 MB; a
+  native-HLS server slower than 8 s to its first variant playlist leaves that
+  session's clock and subtitles on start_sec and the prediction; after the
+  unreadable-playlist resume fallback the
   cached start describes segment 0 of a playlist that no longer lists it; a
   measurement that lands after the first request's budget reaches only
   players that have not started.
