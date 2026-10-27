@@ -1192,7 +1192,7 @@ VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 FRONTEND_TMP="$(mktemp -d)"
 # The build now lives here until install_release_files, near the end; an abort
 # anywhere in between must not leave it in /tmp.
-trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}"' EXIT
+trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}"; rm -f -- "$PROJECT_DIR/aurora"' EXIT
 build_frontend_bundle "$FRONTEND_TMP/v2"
 ok "Frontend bundle built"
 
@@ -1232,7 +1232,10 @@ install_release_files() {
     install -m 755 aurora "$INSTALL_BIN.new"
     mv -f "$INSTALL_BIN.new" "$INSTALL_BIN"
     rm -f aurora
-    ok "Binary installed at $INSTALL_BIN"
+    # `|| true`: with the terminal gone (a dropped SSH session; HUP is ignored
+    # here) every write fails with EIO, and under set -e a failed `ok` would
+    # stop the swap half done.
+    ok "Binary installed at $INSTALL_BIN" || true
     cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
     # Audit C1 — clear any leftover static.old from a previously-crashed
     # run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
@@ -1247,7 +1250,7 @@ install_release_files() {
     mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
     rm -rf "$INSTALL_DIR/static.old"
     chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR"
-    ok "Static assets + migrations installed"
+    ok "Static assets + migrations installed" || true
 }
 
 # take_deploy_lock — the lock aurora-update.sh and redeploy.sh take
@@ -1260,7 +1263,9 @@ install_release_files() {
 # between staging and the swap, or swap its own release into the middle of
 # this one.
 DEPLOY_LOCK=/var/lock/aurora-deploy.lock
-DEPLOY_LOCK_WAIT=900
+# Longer than an updater run can take (its unit's TimeoutStartSec, 20 min, plus
+# TimeoutStopSec, 5 min).
+DEPLOY_LOCK_WAIT=1800
 take_deploy_lock() {
     if ! command -v flock >/dev/null 2>&1 || ! exec 9>"$DEPLOY_LOCK"; then
         warn "Could not take $DEPLOY_LOCK; an auto-update could run in the middle of this install. Stop it first: systemctl stop aurora-update.timer aurora-update.path"
@@ -1995,8 +2000,11 @@ fi
 # The deploy lock from here on. Before the chown, which an updater run deleting
 # its own static.old under it could fail; before the timer start, because a
 # timer whose OnBootSec is long past fires the moment it starts, and that first
-# run would otherwise take the lock and deploy, with this script then waiting
-# for it and restarting Aurora again behind it.
+# run would otherwise take the lock and deploy in the middle of this install.
+# It now skips. The next run, five minutes later, still rebuilds and restarts
+# once more: this script does not write the updater's deployed ledger, so its
+# fingerprint check cannot recognise what was installed here (see
+# docs/updater-recovery.md).
 take_deploy_lock
 
 # Ownership of the installed tree.
@@ -2032,9 +2040,11 @@ if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
 fi
 
 drain_viewers_before_install
-# From the first live rename to the restart, an interrupt would leave the tree
-# half swapped (no static/, or the new binary beside the old frontend), and the
-# handler now exits. The window is milliseconds; the handler comes back after.
+# From staging to the restart, an interrupt would leave the tree half swapped
+# (no static/, or the new binary beside the old frontend), and the handler now
+# exits. The window is seconds (staging, the renames, the restart); the
+# handler comes back after it. Output in it must not be fatal either: see the
+# `|| true` in install_release_files.
 trap '' INT TERM HUP
 install_release_files
 
@@ -2091,7 +2101,9 @@ for _ in $(seq 1 30); do
         SERVICE_FAILED=true
         break
     fi
-    if curl -sf http://localhost:8484/api/health &>/dev/null; then
+    # --max-time: this loop runs under the deploy lock, and a server that
+    # accepts connections and never answers must not hold it indefinitely.
+    if curl -sf --max-time 5 http://localhost:8484/api/health &>/dev/null; then
         HEALTHY=true
         break
     fi

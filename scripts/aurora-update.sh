@@ -907,7 +907,9 @@ sys.exit(0 if ok else 1)'; then
         VERIFY_REASON="GET /v2/ at $where did not answer"
         return 1
     fi
-    if ! cmp -s -- "$VERIFY_INDEX" "$index"; then
+    # Hashes, not cmp: diffutils is no prerequisite, and without it every probe
+    # would read as a stale frontend.
+    if [ "$(file_sha256 "$VERIFY_INDEX" 2>/dev/null)" != "$(file_sha256 "$index" 2>/dev/null || echo unreadable)" ]; then
         VERIFY_REASON="/v2/ at $where is not serving the index.html just installed in $INSTALL_DIR/static (a stale or different frontend)"
         return 1
     fi
@@ -986,7 +988,7 @@ roll_back_install() {
     fi
     # Keep the failing binary for post-mortem, unless the failure came before
     # it was installed and the live file is still the snapshot's binary.
-    if [ -f "$INSTALL_BIN" ] && ! cmp -s -- "$INSTALL_BIN" "$ROLLBACK_BIN"; then
+    if [ -f "$INSTALL_BIN" ] && [ "$(file_sha256 "$INSTALL_BIN")" != "$(file_sha256 "$ROLLBACK_BIN")" ]; then
         cp -p -- "$INSTALL_BIN" "$INSTALL_BIN.failed" || log "could not keep $INSTALL_BIN.failed for post-mortem"
     fi
     if ! cp -p -- "$ROLLBACK_BIN" "$INSTALL_BIN.rollback" || ! mv -f -- "$INSTALL_BIN.rollback" "$INSTALL_BIN"; then
@@ -1023,6 +1025,17 @@ roll_back_install() {
     if pid="$(main_pid)" && runs_binary "$pid" "$expected"; then
         log "pid $pid already runs the restored binary; not restarting it"
         baseline="$pid"
+    elif [ "$(systemctl show -p ActiveState --value aurora-update.service 2>/dev/null)" = deactivating ]; then
+        # This run is being stopped (`systemctl stop`, or TimeoutStartSec).
+        # aurora-update.service is ordered After=aurora.service, so a restart
+        # job for aurora waits until this unit's stop finishes, and that waits
+        # for this script: a blocking restart would hang until SIGKILL with the
+        # new binary still serving the restored frontend. Queue it; it runs as
+        # this unit goes down, on the files just restored, unverified.
+        log "this updater run is being stopped; queueing aurora.service's restart on the restored snapshot"
+        systemctl restart --no-block aurora >>"$LOG_FILE" 2>&1 || log "could not queue aurora.service's restart"
+        ROLLBACK_RESULT=queued
+        return 0
     else
         log "restarting aurora.service on the restored snapshot"
         systemctl restart aurora >>"$LOG_FILE" 2>&1 || log "systemctl restart failed during rollback"
@@ -1049,6 +1062,10 @@ report_rollback() {
         restored)
             write_status failed "Update to $NEW_SHA failed ($reason) — restored the previous installed snapshot, which passed verification. Automatic retry of this revision is paused; inspect the failure before using --retry. A failed binary that was installed is kept at $INSTALL_BIN.failed; 'journalctl -u aurora -n 80' shows how it behaved." "$OLD_SHA" "$NEW_SHA"
             log "rolled back to the previous snapshot; failed revision $NEW_SHA remains pending manual retry"
+            ;;
+        queued)
+            write_status failed "Update to $NEW_SHA failed ($reason) — restored the previous installed snapshot (see update.log for anything it could not restore); this updater run was being stopped, so aurora.service's restart onto it was queued and not verified. Check 'systemctl status aurora' and 'journalctl -u aurora -n 80'. Automatic retry of this revision is paused." "$OLD_SHA" "$NEW_SHA"
+            log "rolled back while being stopped; restart queued, not verified"
             ;;
         unhealthy)
             write_status failed "Update to $NEW_SHA failed ($reason), and the restored previous snapshot ALSO failed verification: $VERIFY_REASON. Manual recovery required: ssh in, inspect 'journalctl -u aurora -n 80' and /var/log/aurora/update.log, and restore service." "$OLD_SHA" "$NEW_SHA"

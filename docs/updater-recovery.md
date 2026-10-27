@@ -194,7 +194,12 @@ conditional requests from Last-Modified alone, so a browser that loaded the
 failed release's `index.html` would otherwise keep it, pointing at deleted
 chunks. The status message names the check that failed, and whether the
 restored release verified. Only `SIGKILL` (or power loss) can still leave a
-half-installed tree; the `pending` record then blocks automatic retries.
+half-installed tree; the `pending` record then blocks automatic retries. When
+the failure is the updater's own unit being stopped (`systemctl stop
+aurora-update`, or its start timeout), the files are restored but aurora's
+restart onto them is queued rather than waited for (the updater unit is ordered
+after aurora, so a blocking restart would wait on its own stop), and the status
+says the restored release was not verified: check `systemctl status aurora`.
 
 The viewer drain and any Ollama model pull now run before the first live file
 changes. They used to run after the swap, so for up to five minutes the old

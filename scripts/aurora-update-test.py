@@ -80,6 +80,14 @@ case "$*" in
     fi
     echo 'service:show' >> "$TEST_EVENTS"
     echo "$pid"; exit 0 ;;
+  'show -p ActiveState --value aurora-update.service')
+    # The updater's own unit: "deactivating" while `systemctl stop` (or a
+    # TimeoutStartSec) is stopping it.
+    if [ -f "$TEST_CONTROL/unit-stopping" ]; then echo deactivating; else echo active; fi
+    exit 0 ;;
+  'restart --no-block aurora')
+    # Queued behind the updater unit's own stop: nothing changes while it runs.
+    echo 'service:restart-queued' >> "$TEST_EVENTS"; exit 0 ;;
   'restart aurora') ;;
   *) exit 91 ;;
 esac
@@ -226,7 +234,7 @@ class UpdaterTest(unittest.TestCase):
                 self.env.pop(key)
         for name in ("bash", "python3", "git", "dirname", "mkdir", "date", "mv", "chmod",
                      "rm", "tee", "mktemp", "install", "cp", "find", "seq", "sed", "tr",
-                     "grep", "flock", "cat", "touch", "cmp", "tar", "ln"):
+                     "grep", "flock", "cat", "touch", "tar", "ln"):
             executable = shutil.which(name)
             if not executable:
                 self.fail(f"Required fixture tool missing: {name}")
@@ -1001,6 +1009,31 @@ exec {shlex.quote(real_cp)} "$@"
                     self.assertNotIn(node.attr, newer, body)
                 if isinstance(node, ast.keyword):
                     self.assertNotIn(node.arg, {"capture_output", "text"}, body)
+
+    def test_a_hangup_during_install_rolls_back(self) -> None:
+        # An interactive run (`aurora-update --retry`) whose SSH session drops.
+        real_cp = shutil.which("cp")
+        self.stub("cp", f'''
+case "$1:$*" in -f:*/migrations/) kill -HUP "$PPID" ;; esac
+exec {shlex.quote(real_cp)} "$@"
+''')
+        status = self.run_update(expected=129)
+        self.assertIn("stopped unexpectedly while installing files", status["message"])
+        self.assert_rolled_back(status)
+
+    def test_a_rollback_while_the_unit_is_being_stopped_queues_its_restart(self) -> None:
+        # `systemctl stop aurora-update` mid-verification. A blocking restart
+        # of aurora.service would wait for this unit's stop, which waits for
+        # the script: a hang until SIGKILL, the new binary serving the restored
+        # frontend. The restart is queued instead, and said to be unverified.
+        self.flag("term-during-verify")
+        self.flag("unit-stopping")
+        status = self.run_update(expected=143)
+        self.assertIn("queued and not verified", status["message"])
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
+        self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
+        self.assertIn("service:restart-queued", self.events.read_text().splitlines())
+        self.assertTrue((self.state_dir / "pending").exists())
 
     def test_a_hangup_during_the_rollback_does_not_cut_it_short(self) -> None:
         self.flag("health-fail")

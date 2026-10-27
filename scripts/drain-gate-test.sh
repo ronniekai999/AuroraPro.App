@@ -211,7 +211,9 @@ fi
 g="$(line_of "$f" "^trap '' INT TERM HUP$")"; s="$(line_of "$f" '^    systemctl restart aurora$')"
 # The last such trap: the one after the restart.
 back="$(grep -nE "^trap 'cleanup_on_interrupt; exit 130' INT$" "$f" | tail -1 | cut -d: -f1)"
-if [ -n "$g" ] && [ -n "$s" ] && [ -n "$back" ] && [ "$g" -lt "$r" ] && [ "$s" -lt "$back" ]; then
+# ... and only then: guarding the drain too would make a five-minute wait that
+# Ctrl-C could not end, which the exiting handler is there to allow.
+if [ -n "$g" ] && [ -n "$s" ] && [ -n "$back" ] && [ "$w" -lt "$g" ] && [ "$g" -lt "$r" ] && [ "$s" -lt "$back" ]; then
     ok "scripts/install.sh ignores interrupts from the swap (line $g) to the restart, then restores them (line $back)"
 else
     bad "scripts/install.sh does not guard the swap and restart against interrupts (guard $g, install $r, restart $s, restore $back)"

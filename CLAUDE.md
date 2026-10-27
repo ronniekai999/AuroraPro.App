@@ -1156,7 +1156,17 @@ count restarts).
   timeout while viewers are always present never deploys (the status stays at
   "Waiting…"); the drain counts any ffmpeg the aurora user runs (the
   skip-marker worker too); tabs opened on a build from before the build id
-  carry none, so they are not told about the first deploy of it; `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
+  carry none, so they are not told about the first deploy of it; a rollback
+  generation kept from a failed updater run can be older than what
+  `install.sh` or `redeploy.sh` installed since (neither touches `pending` or
+  `rollback/`), so a later failed run can roll back past them; a rollback while
+  the updater's own unit is being stopped queues aurora's restart
+  (`--no-block`: a blocking one waits on that stop, ordered
+  `After=aurora.service`) and reports it unverified; `git archive` would honour
+  an `export-ignore` a target's `.gitattributes` added (there is none); between
+  the static swap and the restart, seconds in every script, the old backend
+  serves the new `index.html`, so a tab checking then is told of the update
+  early; diffutils is not needed (verification hashes, it does not `cmp`); `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
   (`--skip-npm`) can still install a bundle not built from the code beside it,
   and both keep their `:8484` health checks.
 - The viewer drain is one `AURORA-DRAIN` block, identical in
