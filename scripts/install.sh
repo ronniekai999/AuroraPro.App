@@ -1190,6 +1190,9 @@ step "Step 4/5: Building Aurora and installing the service"
 cd "$PROJECT_DIR"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 FRONTEND_TMP="$(mktemp -d)"
+# The build now lives here until install_release_files, near the end; an abort
+# anywhere in between must not leave it in /tmp.
+trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}"' EXIT
 build_frontend_bundle "$FRONTEND_TMP/v2"
 ok "Frontend bundle built"
 
@@ -1248,20 +1251,24 @@ install_release_files() {
 }
 
 # take_deploy_lock — the lock aurora-update.sh and redeploy.sh take
-# (/var/lock/aurora-deploy.lock), held from just before the drain until the
-# restarted service has answered, then released (release_deploy_lock). Not for
-# the whole install: a long-lived child (an installer that starts a daemon)
-# would inherit the descriptor and hold the lock after this script exits,
-# stopping every auto-update. Without it an updater tick could land between
-# staging and the swap, or swap its own release into the middle of this one.
+# (DEPLOY_LOCK), held from the final chown and timer start until the restart's
+# health loop ends (it polls localhost:8484 for up to 30 s, so on a custom-port
+# or TLS install it ends at that limit), then released (release_deploy_lock).
+# Not for the whole install: a long-lived child (an installer that starts a
+# daemon) would inherit the descriptor and hold the lock after this script
+# exits, stopping every auto-update. Without it an updater tick could land
+# between staging and the swap, or swap its own release into the middle of
+# this one.
+DEPLOY_LOCK=/var/lock/aurora-deploy.lock
+DEPLOY_LOCK_WAIT=900
 take_deploy_lock() {
-    if ! command -v flock >/dev/null 2>&1 || ! exec 9>/var/lock/aurora-deploy.lock; then
-        warn "Could not take /var/lock/aurora-deploy.lock; an auto-update could run in the middle of this install. Stop it first: systemctl stop aurora-update.timer aurora-update.path"
+    if ! command -v flock >/dev/null 2>&1 || ! exec 9>"$DEPLOY_LOCK"; then
+        warn "Could not take $DEPLOY_LOCK; an auto-update could run in the middle of this install. Stop it first: systemctl stop aurora-update.timer aurora-update.path"
         return 0
     fi
     if ! flock -n 9; then
-        info "Another deploy (probably the auto-updater) is running; waiting up to 15 minutes for it to finish..."
-        flock -w 900 9 || error "Another deploy still holds /var/lock/aurora-deploy.lock after 15 minutes. Let it finish (journalctl -u aurora-update -f) and re-run."
+        info "Another deploy (probably the auto-updater) is running; waiting up to $((DEPLOY_LOCK_WAIT / 60)) minutes for it to finish..."
+        flock -w "$DEPLOY_LOCK_WAIT" 9 || error "Another deploy still holds $DEPLOY_LOCK after $((DEPLOY_LOCK_WAIT / 60)) minutes. Let it finish (journalctl -u aurora-update -f) and re-run."
     fi
 }
 release_deploy_lock() {
@@ -1985,6 +1992,13 @@ if [ -n "$MEDIA_DIR" ]; then
     IFS="$OLD_IFS"
 fi
 
+# The deploy lock from here on. Before the chown, which an updater run deleting
+# its own static.old under it could fail; before the timer start, because a
+# timer whose OnBootSec is long past fires the moment it starts, and that first
+# run would otherwise take the lock and deploy, with this script then waiting
+# for it and restarting Aurora again behind it.
+take_deploy_lock
+
 # Ownership of the installed tree.
 chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR" "$CACHE_DIR"
 ok "File ownership set"
@@ -1998,7 +2012,7 @@ systemctl enable aurora &>/dev/null
 if [ -f /etc/systemd/system/aurora-update.timer ]; then
     systemctl enable aurora-update.timer &>/dev/null
     systemctl start aurora-update.timer &>/dev/null || warn "Failed to start aurora-update.timer — check 'systemctl status aurora-update.timer'"
-    ok "Auto-update timer armed (next check in ~2 min, every 5 min after)"
+    ok "Auto-update timer armed (checks every 5 min; its first run skips while this install holds the lock)"
 fi
 
 # Enable + start the .path watcher that backs the in-app "Update
@@ -2017,8 +2031,11 @@ if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
     fi
 fi
 
-take_deploy_lock
 drain_viewers_before_install
+# From the first live rename to the restart, an interrupt would leave the tree
+# half swapped (no static/, or the new binary beside the old frontend), and the
+# handler now exits. The window is milliseconds; the handler comes back after.
+trap '' INT TERM HUP
 install_release_files
 
 # Restart (handles re-runs cleanly) — falls back to start.
@@ -2027,6 +2044,9 @@ if systemctl is-active aurora &>/dev/null; then
 else
     systemctl start aurora
 fi
+trap 'cleanup_on_interrupt; exit 130' INT
+trap 'cleanup_on_interrupt; exit 143' TERM
+trap - HUP
 sleep 2
 
 # Health-check loop with crash detection. Critical for production

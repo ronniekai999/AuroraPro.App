@@ -252,8 +252,11 @@ that writes no serving record is verified with the `aurora.env` TLS settings. `o
 a claimed previous running revision. The ledger is a record of successful
 deployment, not continuous service-health monitoring. A slow box whose builds,
 viewer drain (up to five minutes) and two verifications exceed the unit's
-10-minute `TimeoutStartSec` is stopped by systemd; mid-install that triggers the
-rollback above. `install.sh` and `redeploy.sh` still use their own
+`TimeoutStartSec` is stopped by systemd; mid-install that triggers the rollback
+above, which ignores TERM, INT and HUP until it is done. The unit now allows 20
+minutes, and gives a rollback 5 minutes (`TimeoutStopSec`) before SIGKILL; a
+box keeps its old unit (10 minutes, and the 90-second default) until
+`install.sh` or `redeploy.sh` reinstalls the units. `install.sh` and `redeploy.sh` still use their own
 `localhost:8484` health checks, but now share the updater's viewer drain: a
 re-run of `install.sh` (`AURORA_SKIP_DRAIN=1` skips it) and `redeploy.sh`
 (`--no-drain`) wait up to five minutes for active streams before replacing any

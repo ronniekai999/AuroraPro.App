@@ -332,6 +332,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# An interactive run (`sudo aurora-update --retry`, the bootstrap) whose SSH
+# session drops gets HUP: exit through the EXIT trap, which rolls back.
+trap 'exit 129' HUP
 install -d -m 700 "$DEPLOY_STATE_DIR"
 
 # ── Preflight ─────────────────────────────────────────────────────
@@ -833,7 +836,9 @@ curl_service() {
     local url="$SVC_SCHEME://$SVC_HOST:$SVC_PORT$1"
     # --noproxy: aurora.env is sourced, and an http_proxy there would otherwise
     # carry this loopback request off to the proxy.
-    local args=(-sf --max-time 5 --max-filesize 1048576 --noproxy '*' --proto '=http,https')
+    # -q first, or curl reads root's ~/.curlrc (the unit sets HOME=/root): a -w,
+    # -i or -o there changes the bytes compared below and fails every release.
+    local args=(-q -sf --max-time 5 --max-filesize 1048576 --noproxy '*' --proto '=http,https')
     if [ "$SVC_SCHEME" = https ]; then
         # The certificate names the public domain, not loopback. Which process
         # answers is already settled: the port is one the verified pid listens on.
@@ -964,11 +969,11 @@ restore_dir() {
 # runs with errexit and the ERR trap off: a rollback must try every step.
 roll_back_install() {
     local reason="$1" expected="" pid baseline="" problems=""
-    # A TERM (systemd's TimeoutStartSec, again) between two renames would leave
-    # no static tree at all. Only SIGKILL can stop a rollback now. Ignored
-    # first: a TERM after the phase changed but before this would exit with
-    # nothing rolled back.
-    trap '' TERM INT
+    # A TERM (systemd's TimeoutStartSec, again), or a HUP from a dropped SSH
+    # session, between two renames would leave no static tree at all. Only
+    # SIGKILL can stop a rollback now. Ignored first: a signal after the phase
+    # changed but before this would exit with nothing rolled back.
+    trap '' TERM INT HUP
     INSTALL_PHASE=rolling_back
     trap - ERR
     set +e

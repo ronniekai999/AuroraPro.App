@@ -37,6 +37,14 @@ line_of() {  # $1 = script, $2 = ERE; first matching line number
 
 # ── The copies ────────────────────────────────────────────────────
 echo "drain block: copies"
+# CI checks only the updater's syntax elsewhere; everything below reads these.
+for s in "${SCRIPTS[@]}"; do
+    if bash -n "$REPO_ROOT/scripts/$s" 2>"$WORK/syntax"; then
+        ok "scripts/$s parses"
+    else
+        bad "scripts/$s does not parse: $(cat "$WORK/syntax")"
+    fi
+done
 for s in "${SCRIPTS[@]}"; do
     f="$REPO_ROOT/scripts/$s"
     n="$(grep -c '^# AURORA-DRAIN-BEGIN' "$f")"
@@ -191,11 +199,51 @@ for change in 'stage_static_bundle "$FRONTEND_TMP/v2"' 'install -m 755 aurora "$
     fi
 done
 w="$(line_of "$f" '^drain_viewers_before_install$')"; r="$(line_of "$f" '^install_release_files$')"
-if [ -n "$w" ] && [ -n "$r" ] && [ $((r - w)) -eq 1 ]; then
-    ok "scripts/install.sh installs the release on the line after the wait"
+# Between the wait and the install: comments, and the signal guard, only.
+between="$(sed -n "$((w + 1)),$((r - 1))p" "$f" | grep -vE '^[[:space:]]*(#|$)' | grep -vxF "trap '' INT TERM HUP")"
+if [ -n "$w" ] && [ -n "$r" ] && [ "$w" -lt "$r" ] && [ -z "$between" ]; then
+    ok "scripts/install.sh installs the release straight after the wait"
 else
-    bad "scripts/install.sh lets something run between the wait (line $w) and the install (line $r)"
+    bad "scripts/install.sh runs something between the wait (line $w) and the install (line $r): $between"
 fi
+# The swap and the restart run with interrupts ignored, and the handler is put
+# back after the restart: an interrupt mid-swap would leave no static/.
+g="$(line_of "$f" "^trap '' INT TERM HUP$")"; s="$(line_of "$f" '^    systemctl restart aurora$')"
+# The last such trap: the one after the restart.
+back="$(grep -nE "^trap 'cleanup_on_interrupt; exit 130' INT$" "$f" | tail -1 | cut -d: -f1)"
+if [ -n "$g" ] && [ -n "$s" ] && [ -n "$back" ] && [ "$g" -lt "$r" ] && [ "$s" -lt "$back" ]; then
+    ok "scripts/install.sh ignores interrupts from the swap (line $g) to the restart, then restores them (line $back)"
+else
+    bad "scripts/install.sh does not guard the swap and restart against interrupts (guard $g, install $r, restart $s, restore $back)"
+fi
+check_before install.sh       '^take_deploy_lock$'              '^chown -R "\$AURORA_USER'             'the final chown' 'takes the deploy lock'
+check_before install.sh       '^take_deploy_lock$'              'systemctl start aurora-update.timer'  'starting the update timer' 'takes the deploy lock'
+
+# take_deploy_lock really locks: it takes a free lock, waits for a held one,
+# and gives up on one held past its limit. Only its position was checked.
+lockfn="$(awk '/^take_deploy_lock\(\) \{$/ {grab=1} grab {print} grab && /^\}$/ {exit}' "$f")"
+take_lock() {  # $1 = how long another process holds the lock (0 = free); prints the outcome
+    local lock="$WORK/deploy.lock" holder=""
+    rm -f "$lock"
+    if [ "$1" != 0 ]; then
+        flock "$lock" sleep "$1" & holder=$!
+        sleep 0.3
+    fi
+    timeout 20 bash -c "
+        set -euo pipefail
+        info() { :; }; warn() { echo \"WARN \$1\"; }; error() { echo FAILED; exit 1; }
+        DEPLOY_LOCK='$lock'; DEPLOY_LOCK_WAIT=2
+        $lockfn
+        take_deploy_lock
+        if flock -n '$lock' true; then echo free; else echo held; fi
+    " 2>&1
+    [ -z "$holder" ] || wait "$holder" 2>/dev/null
+}
+for case in "0 held a free lock is taken" "1 held a lock held for 1 s is waited for, then taken" "6 FAILED a lock held past the limit gives up"; do
+    set -- $case; hold="$1"; want="$2"; shift 2
+    got="$(take_lock "$hold")"
+    [ "$got" = "$want" ] && ok "take_deploy_lock: $*" || bad "take_deploy_lock: $* → want '$want', got '$got'"
+done
 check_before redeploy.sh      '^drain_viewers_before_install$'  'sudo cp -f "\$\{SQL_FILES\[@\]\}"'    'the migrations'
 check_before redeploy.sh      '^drain_viewers_before_install$'  '^if ! sudo systemctl restart aurora'  'the restart'
 for s in "${SCRIPTS[@]}"; do

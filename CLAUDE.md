@@ -1102,7 +1102,12 @@ count restarts).
   route still names no version. Root's Python runs with `-I` (the working
   directory is the checkout) and must run on 3.6 (RHEL 8, SLES 15): one
   `str.isascii()` failed every probe there. `test_embedded_python_runs_on_python_3_6`
-  parses each embedded program as 3.6 and rejects a list of newer APIs. The
+  is a partial guard: it parses each embedded program with the oldest grammar
+  `ast` still offers (3.7 on current Pythons, so 3.8 forms like `f"{x=}"` pass)
+  and rejects a list of newer APIs; nothing in CI runs them on a real 3.6. A
+  review ran the suite with PyPy 3.6 as the embedded `python3`; it passed. Root's
+  curl runs with `-q` first (no `~/.curlrc`: a `-w` there changed the compared
+  bytes). The
   served `/v2/` is compared with root's copies (the build output; the rollback
   snapshot), not the aurora-owned live file. A verification that fails takes
   up to about 100 s (the deadline is checked between probes of up to ~11 s).
@@ -1144,8 +1149,14 @@ count restarts).
   from an older updater has no migration snapshot, and a rollback to a binary
   that writes no record falls back to `aurora.env` for TLS; a migration longer
   than the window can never deploy; the Node gate reads the checkout before the
-  merge; drain, builds and two verifications can approach the unit's 10-minute
-  `TimeoutStartSec`; `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
+  merge; the unit's `TimeoutStartSec` is now 20 min and `TimeoutStopSec` 5 min
+  (a rollback ignores TERM/INT/HUP and can need ~2 min), but units change only
+  when `install.sh` or `redeploy.sh` reinstalls them, so an existing box keeps
+  10 min and the 90 s default until then; a box whose build always outlasts the
+  timeout while viewers are always present never deploys (the status stays at
+  "Waiting…"); the drain counts any ffmpeg the aurora user runs (the
+  skip-marker worker too); tabs opened on a build from before the build id
+  carry none, so they are not told about the first deploy of it; `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
   (`--skip-npm`) can still install a bundle not built from the code beside it,
   and both keep their `:8484` health checks.
 - The viewer drain is one `AURORA-DRAIN` block, identical in
@@ -1158,9 +1169,13 @@ count restarts).
   (binary, migrations, frontend) in `install_release_files`, on the line after
   the wait and right before the restart, nothing slow (prompts, Ollama) between
   them; config, units and the updater script still change earlier. It holds
-  the deploy lock from just before the drain until the restarted service has
-  answered, and not longer: a daemon a child starts would inherit the
-  descriptor. The updater removes only staging it created (`STAGED_RELEASE`);
+  the deploy lock from the final `chown` and the timer start (a timer whose
+  `OnBootSec` has passed fires the moment it starts, and that run would
+  otherwise take the lock first and deploy) until the restart's health loop
+  ends (30 s at most; it polls `:8484`), and not longer: a daemon a child
+  starts would inherit the descriptor. The source-mirror fetch earlier in
+  install.sh still runs unlocked. Interrupts are ignored from the first live
+  rename to the restart, and exit the script otherwise. The updater removes only staging it created (`STAGED_RELEASE`);
   an idle tick used to delete an install.sh re-run's staged frontend. The block reads
   numbers with `10#` and a length cap: the aurora user writes the snapshot, and
   an invalid-octal timestamp used to abort the updater under `set -e`.

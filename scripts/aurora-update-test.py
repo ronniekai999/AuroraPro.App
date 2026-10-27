@@ -104,6 +104,10 @@ else
 fi
 proc_sockets "$pid" "${TEST_LISTEN:-[::]:8484}"
 echo "$pid" > "$TEST_CONTROL/mainpid"
+if [ -f "$TEST_CONTROL/tamper-live-index" ]; then
+  # The aurora user owns /opt/aurora: what it serves and what is on disk agree.
+  echo 'rewritten by the aurora user' > "$TEST_LIVE/static/v2/index.html"
+fi
 if [ ! -f "$TEST_CONTROL/no-serving-record" ]; then
   printf '{"pid": %s, "addr": "%s", "scheme": "%s", "server_name": "%s", "unix_time": 1}\n' \
     "$pid" "${TEST_RECORD_ADDR:-${TEST_LISTEN:-[::]:8484}}" "${TEST_SCHEME:-http}" "${TEST_TLS_NAME:-}" > "$TEST_SERVING"
@@ -114,6 +118,9 @@ fi
 # a TLS listener only to a client that skips verification with the expected
 # --resolve, and with the health and /v2/ that process serves.
 CURL_STUB = r"""
+# -q must come first, or real curl reads root's ~/.curlrc, which can change
+# the bytes verification compares (-w, -i, -o).
+[ "${1:-}" = -q ] || exit 2
 url="" insecure=0 resolve="" noproxy="" prev=""
 for a in "$@"; do
   case "$a" in http://*|https://*) url="$a" ;; --insecure) insecure=1 ;; esac
@@ -168,6 +175,11 @@ case "$url" in
       # The restored release being verified: systemd's TimeoutStartSec again.
       rm -f "$TEST_CONTROL/term-during-rollback"
       kill -TERM "$PPID"
+    fi
+    if [ -f "$TEST_CONTROL/hup-during-rollback" ] && ! grep -q new "$exe"; then
+      # ... or the operator's SSH session dropping under `aurora-update --retry`.
+      rm -f "$TEST_CONTROL/hup-during-rollback"
+      kill -HUP "$PPID"
     fi
     if [ -f "$TEST_CONTROL/stale-frontend" ] && grep -q new "$exe"; then
       echo 'some other frontend'; exit 0
@@ -989,6 +1001,22 @@ exec {shlex.quote(real_cp)} "$@"
                     self.assertNotIn(node.attr, newer, body)
                 if isinstance(node, ast.keyword):
                     self.assertNotIn(node.arg, {"capture_output", "text"}, body)
+
+    def test_a_hangup_during_the_rollback_does_not_cut_it_short(self) -> None:
+        self.flag("health-fail")
+        self.flag("hup-during-rollback")
+        self.assert_rolled_back(self.run_update(expected=1))
+
+    def test_the_frontend_is_compared_with_root_s_copy(self) -> None:
+        # Not with the live index.html, which the aurora user can rewrite (or
+        # replace with a symlink or FIFO) and would then serve unchanged: the
+        # served page must be the one that was BUILT. The rollback compares
+        # with its snapshot the same way, so with the live file rewritten again
+        # after its restart, it fails too.
+        self.flag("tamper-live-index")
+        status = self.run_update(expected=1)
+        self.assertIn("is not serving the index.html just installed", status["message"])
+        self.assertIn("ALSO failed verification", status["message"])
 
     def test_a_process_that_has_not_exec_d_yet_is_waited_for(self) -> None:
         # Type=simple: `systemctl restart` returns once systemd has forked, and
