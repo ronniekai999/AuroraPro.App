@@ -1026,15 +1026,27 @@ roll_back_install() {
         log "pid $pid already runs the restored binary; not restarting it"
         baseline="$pid"
     elif [ "$(systemctl show -p ActiveState --value aurora-update.service 2>/dev/null)" = deactivating ]; then
-        # This run is being stopped (`systemctl stop`, or TimeoutStartSec).
-        # aurora-update.service is ordered After=aurora.service, so a restart
-        # job for aurora waits until this unit's stop finishes, and that waits
+        # This run is being stopped. Under `systemctl stop` or `restart` of this
+        # unit, a restart job for aurora waits for that stop job
+        # (aurora-update.service is ordered After=aurora.service), which waits
         # for this script: a blocking restart would hang until SIGKILL with the
-        # new binary still serving the restored frontend. Queue it; it runs as
-        # this unit goes down, on the files just restored, unverified.
+        # new binary still serving the restored frontend. After a start timeout
+        # there is no stop job and a blocking restart would work, but the unit
+        # is going down regardless, so it is queued the same way. Either way it
+        # runs on the files just restored, unverified. During a shutdown the
+        # queue is refused (its stop jobs cannot be replaced), and so reported.
         log "this updater run is being stopped; queueing aurora.service's restart on the restored snapshot"
-        systemctl restart --no-block aurora >>"$LOG_FILE" 2>&1 || log "could not queue aurora.service's restart"
-        ROLLBACK_RESULT=queued
+        local queued=true
+        systemctl restart --no-block aurora >>"$LOG_FILE" 2>&1 || queued=false
+        if [ -n "$problems" ]; then
+            VERIFY_REASON="the rollback could not restore:$problems"
+            ROLLBACK_RESULT=unhealthy
+        elif ! "$queued"; then
+            VERIFY_REASON="this updater run was being stopped and aurora.service's restart could not be queued (is the system shutting down?)"
+            ROLLBACK_RESULT=unhealthy
+        else
+            ROLLBACK_RESULT=queued
+        fi
         return 0
     else
         log "restarting aurora.service on the restored snapshot"

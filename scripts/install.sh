@@ -1192,7 +1192,9 @@ VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 FRONTEND_TMP="$(mktemp -d)"
 # The build now lives here until install_release_files, near the end; an abort
 # anywhere in between must not leave it in /tmp.
-trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}"; rm -f -- "$PROJECT_DIR/aurora"' EXIT
+# `|| true`: under set -e a failing cleanup would turn a finished install's
+# exit status into a failure.
+trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}" || true; rm -f -- "$PROJECT_DIR/aurora" || true' EXIT
 build_frontend_bundle "$FRONTEND_TMP/v2"
 ok "Frontend bundle built"
 
@@ -1255,8 +1257,10 @@ install_release_files() {
 
 # take_deploy_lock — the lock aurora-update.sh and redeploy.sh take
 # (DEPLOY_LOCK), held from the final chown and timer start until the restart's
-# health loop ends (it polls localhost:8484 for up to 30 s, so on a custom-port
-# or TLS install it ends at that limit), then released (release_deploy_lock).
+# health loop ends (30 tries at localhost:8484, a second apart, each up to 5 s:
+# about 30 s normally, up to ~3 min against a server that accepts and never
+# answers; on a custom-port or TLS install it always runs to its limit), then
+# released (release_deploy_lock).
 # Not for the whole install: a long-lived child (an installer that starts a
 # daemon) would inherit the descriptor and hold the lock after this script
 # exits, stopping every auto-update. Without it an updater tick could land
@@ -2044,8 +2048,9 @@ drain_viewers_before_install
 # (no static/, or the new binary beside the old frontend), and the handler now
 # exits. The window is seconds (staging, the renames, the restart); the
 # handler comes back after it. Output in it must not be fatal either: see the
-# `|| true` in install_release_files.
-trap '' INT TERM HUP
+# `|| true` in install_release_files, and PIPE, which a dead `| tee` raises on
+# the next write, would kill the script outright.
+trap '' INT TERM HUP PIPE
 install_release_files
 
 # Restart (handles re-runs cleanly) — falls back to start.
@@ -2056,7 +2061,7 @@ else
 fi
 trap 'cleanup_on_interrupt; exit 130' INT
 trap 'cleanup_on_interrupt; exit 143' TERM
-trap - HUP
+trap - HUP PIPE
 sleep 2
 
 # Health-check loop with crash detection. Critical for production

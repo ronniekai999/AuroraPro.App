@@ -186,8 +186,9 @@ blocking on a FIFO, and only small regular files.
 
 Any failure once installation has begun, including a failed `systemctl restart`,
 a failed copy, a failed verification, an unexpected abort, `SIGTERM` from the
-unit's `TimeoutStartSec`, or Ctrl-C, restores the rollback generation and
-verifies the restored service the same way. When the failure came before the
+unit's `TimeoutStartSec`, Ctrl-C, or a dropped SSH session, restores the
+rollback generation and verifies the restored service the same way (except
+while the updater's own unit is going down; see below). When the failure came before the
 restart and the running process already runs the restored binary, it is not
 restarted. Restored static files get a fresh mtime: the server answers
 conditional requests from Last-Modified alone, so a browser that loaded the
@@ -195,11 +196,15 @@ failed release's `index.html` would otherwise keep it, pointing at deleted
 chunks. The status message names the check that failed, and whether the
 restored release verified. Only `SIGKILL` (or power loss) can still leave a
 half-installed tree; the `pending` record then blocks automatic retries. When
-the failure is the updater's own unit being stopped (`systemctl stop
+the updater's own unit is going down (`systemctl stop` or `restart
 aurora-update`, or its start timeout), the files are restored but aurora's
-restart onto them is queued rather than waited for (the updater unit is ordered
-after aurora, so a blocking restart would wait on its own stop), and the status
-says the restored release was not verified: check `systemctl status aurora`.
+restart onto them is queued rather than waited for (under a stop, the updater
+unit being ordered after aurora, a blocking restart would wait on its own stop;
+after a start timeout it would not, but the run is ending anyway), and the
+status says the restored release was not verified: check `systemctl status
+aurora`. During a shutdown the queue is refused and the status says so. Shortly
+after, the next run's "an earlier install did not finish" status replaces this
+one; `update.log` keeps both.
 
 The viewer drain and any Ollama model pull now run before the first live file
 changes. They used to run after the swap, so for up to five minutes the old

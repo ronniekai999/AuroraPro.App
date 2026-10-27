@@ -1160,9 +1160,14 @@ count restarts).
   generation kept from a failed updater run can be older than what
   `install.sh` or `redeploy.sh` installed since (neither touches `pending` or
   `rollback/`), so a later failed run can roll back past them; a rollback while
-  the updater's own unit is being stopped queues aurora's restart
-  (`--no-block`: a blocking one waits on that stop, ordered
-  `After=aurora.service`) and reports it unverified; `git archive` would honour
+  the updater's own unit is deactivating queues aurora's restart (`--no-block`:
+  under `systemctl stop`/`restart` a blocking one waits on that stop job,
+  ordered `After=aurora.service`; after a start timeout it would not, but is
+  queued too) and reports it unverified, or a failure when the queue is refused
+  (a shutdown) or the restore had problems; a stop that arrives while the
+  rollback's blocking restart is already running still waits until SIGKILL
+  (`TimeoutStopSec`, 5 min), aurora down meanwhile; the next tick's "earlier
+  install did not finish" status replaces whatever the rollback reported; `git archive` would honour
   an `export-ignore` a target's `.gitattributes` added (there is none); between
   the static swap and the restart, seconds in every script, the old backend
   serves the new `index.html`, so a tab checking then is told of the update
@@ -1182,10 +1187,12 @@ count restarts).
   the deploy lock from the final `chown` and the timer start (a timer whose
   `OnBootSec` has passed fires the moment it starts, and that run would
   otherwise take the lock first and deploy) until the restart's health loop
-  ends (30 s at most; it polls `:8484`), and not longer: a daemon a child
+  ends (30 tries at `:8484` of up to 5 s each: ~30 s normally, ~3 min at
+  worst), and not longer: a daemon a child
   starts would inherit the descriptor. The source-mirror fetch earlier in
-  install.sh still runs unlocked. Interrupts are ignored from the first live
-  rename to the restart, and exit the script otherwise. The updater removes only staging it created (`STAGED_RELEASE`);
+  install.sh still runs unlocked. Interrupts (and HUP, PIPE) are ignored from
+  staging to the restart, and exit the script otherwise; output there is
+  non-fatal. The updater removes only staging it created (`STAGED_RELEASE`);
   an idle tick used to delete an install.sh re-run's staged frontend. The block reads
   numbers with `10#` and a length cap: the aurora user writes the snapshot, and
   an invalid-octal timestamp used to abort the updater under `set -e`.

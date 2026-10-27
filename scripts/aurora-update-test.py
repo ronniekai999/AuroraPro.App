@@ -87,6 +87,8 @@ case "$*" in
     exit 0 ;;
   'restart --no-block aurora')
     # Queued behind the updater unit's own stop: nothing changes while it runs.
+    # queue-refused: a shutdown, whose stop jobs cannot be replaced.
+    [ ! -f "$TEST_CONTROL/queue-refused" ] || exit 1
     echo 'service:restart-queued' >> "$TEST_EVENTS"; exit 0 ;;
   'restart aurora') ;;
   *) exit 91 ;;
@@ -175,12 +177,13 @@ case "$url" in
     echo '{"status":"ok","db_connected":true}' ;;
   */v2/)
     if [ -f "$TEST_CONTROL/term-during-verify" ] && grep -q new "$exe"; then
-      # systemd's TimeoutStartSec, after the restart. curl_service runs in the
+      # A TERM after the restart (a kill; with unit-stopping also set, a
+      # `systemctl stop` or start timeout). curl_service runs in the
       # updater's own shell here, so PPID is the updater.
       kill -TERM "$PPID"
     fi
     if [ -f "$TEST_CONTROL/term-during-rollback" ] && ! grep -q new "$exe"; then
-      # The restored release being verified: systemd's TimeoutStartSec again.
+      # The restored release being verified: another TERM.
       rm -f "$TEST_CONTROL/term-during-rollback"
       kill -TERM "$PPID"
     fi
@@ -950,8 +953,9 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertEqual(self.run_update()["state"], "success")
 
     def test_signal_after_the_restart_rolls_back(self) -> None:
-        # systemd's TimeoutStartSec is most likely to land here, while waiting
-        # on a slow verification.
+        # A TERM while waiting on a slow verification, with the unit still
+        # active (a kill, Ctrl-C): roll back and verify. (A stopping unit
+        # queues instead; see the unit-stopping tests.)
         self.flag("term-during-verify")
         status = self.run_update(expected=143)
         self.assertIn("stopped unexpectedly after restarting the service", status["message"])
@@ -1034,6 +1038,17 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertEqual((self.live / "static/v2/index.html").read_text(), "old frontend\n")
         self.assertIn("service:restart-queued", self.events.read_text().splitlines())
         self.assertTrue((self.state_dir / "pending").exists())
+
+    def test_a_refused_queue_is_not_reported_as_queued(self) -> None:
+        # During a reboot systemd refuses the restart job; saying it was queued
+        # would tell the operator all is in hand.
+        self.flag("term-during-verify")
+        self.flag("unit-stopping")
+        self.flag("queue-refused")
+        status = self.run_update(expected=143)
+        self.assertIn("ALSO failed verification", status["message"])
+        self.assertIn("could not be queued", status["message"])
+        self.assertEqual(self.live_binary.read_text(), "old binary\n")
 
     def test_a_hangup_during_the_rollback_does_not_cut_it_short(self) -> None:
         self.flag("health-fail")

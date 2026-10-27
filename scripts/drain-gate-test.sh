@@ -200,7 +200,7 @@ for change in 'stage_static_bundle "$FRONTEND_TMP/v2"' 'install -m 755 aurora "$
 done
 w="$(line_of "$f" '^drain_viewers_before_install$')"; r="$(line_of "$f" '^install_release_files$')"
 # Between the wait and the install: comments, and the signal guard, only.
-between="$(sed -n "$((w + 1)),$((r - 1))p" "$f" | grep -vE '^[[:space:]]*(#|$)' | grep -vxF "trap '' INT TERM HUP")"
+between="$(sed -n "$((w + 1)),$((r - 1))p" "$f" | grep -vE '^[[:space:]]*(#|$)' | grep -vxF "trap '' INT TERM HUP PIPE")"
 if [ -n "$w" ] && [ -n "$r" ] && [ "$w" -lt "$r" ] && [ -z "$between" ]; then
     ok "scripts/install.sh installs the release straight after the wait"
 else
@@ -208,7 +208,7 @@ else
 fi
 # The swap and the restart run with interrupts ignored, and the handler is put
 # back after the restart: an interrupt mid-swap would leave no static/.
-g="$(line_of "$f" "^trap '' INT TERM HUP$")"; s="$(line_of "$f" '^    systemctl restart aurora$')"
+g="$(line_of "$f" "^trap '' INT TERM HUP PIPE$")"; s="$(line_of "$f" '^    systemctl restart aurora$')"
 # The last such trap: the one after the restart.
 back="$(grep -nE "^trap 'cleanup_on_interrupt; exit 130' INT$" "$f" | tail -1 | cut -d: -f1)"
 # ... and only then: guarding the drain too would make a five-minute wait that
