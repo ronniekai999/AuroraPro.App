@@ -47,8 +47,10 @@ proc_sockets() {
   mkdir -p "$TEST_PROC/$1/fd" "$TEST_PROC/$1/net"
   ln -sf "socket:[$_inode]" "$TEST_PROC/$1/fd/3"
   ln -sf "socket:[$(( _inode + 1 ))]" "$TEST_PROC/$1/fd/4"
+  # Each 32-bit word as the kernel prints it on a little-endian host.
   case "$_host" in
     '[::]') _table=tcp6 _addr=00000000000000000000000000000000 ;;
+    '[::1]') _table=tcp6 _addr=00000000000000000000000001000000 ;;
     0.0.0.0) _table=tcp _addr=00000000 ;;
     127.0.0.1) _table=tcp _addr=0100007F ;;
   esac
@@ -59,12 +61,22 @@ proc_sockets() {
   # ESTABLISHED (01) from local port 40000 to PostgreSQL: not a listener.
   printf '   1: 0100007F:9C40 0100007F:1538 01 00000000:00000000 00:00000000 00000000   997        0 %s 1 0000000000000000 20 4 0 10 -1\n' \
     "$(( _inode + 1 ))" >> "$TEST_PROC/$1/net/tcp"
+  # Other processes' listeners: PostgreSQL on 5432, nginx on 80.
+  printf '   2: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000   114        0 9001 1 0000000000000000 100 0 0 10 0\n' >> "$TEST_PROC/$1/net/tcp"
+  printf '   1: 00000000000000000000000000000000:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 9002 1 0000000000000000 100 0 0 10 0\n' >> "$TEST_PROC/$1/net/tcp6"
 }
 """
 
 SYSTEMCTL_STUB = PROC_SOCKETS + r"""
 case "$*" in
-  'show -p MainPID --value aurora') cat "$TEST_CONTROL/mainpid"; exit 0 ;;
+  'show -p MainPID --value aurora')
+    pid=$(cat "$TEST_CONTROL/mainpid")
+    if [ -f "$TEST_PROC/$pid/exe.pending" ]; then
+      left=$(cat "$TEST_PROC/$pid/exe.left")
+      if [ "$left" -le 0 ]; then mv "$TEST_PROC/$pid/exe.pending" "$TEST_PROC/$pid/exe"
+      else echo $((left - 1)) > "$TEST_PROC/$pid/exe.left"; fi
+    fi
+    echo "$pid"; exit 0 ;;
   'restart aurora') ;;
   *) exit 91 ;;
 esac
@@ -78,6 +90,12 @@ echo $((pid + 1)) > "$TEST_CONTROL/nextpid"
 mkdir -p "$TEST_PROC/$pid"
 if [ -f "$TEST_CONTROL/exec-elsewhere" ] && grep -q new "$TEST_INSTALL_BIN"; then
   echo 'binary from elsewhere' > "$TEST_PROC/$pid/exe"
+elif [ -f "$TEST_CONTROL/exec-delay" ]; then
+  echo 'systemd-executor' > "$TEST_PROC/$pid/exe"
+  cp "$TEST_INSTALL_BIN" "$TEST_PROC/$pid/exe.pending"
+  # Two MainPID lookups see the executor: the one right after the restart,
+  # and the first probe's.
+  echo 2 > "$TEST_PROC/$pid/exe.left"
 else
   cp "$TEST_INSTALL_BIN" "$TEST_PROC/$pid/exe"
 fi
@@ -114,6 +132,14 @@ pattern=new
 case "$url" in
   */api/health)
     if [ -f "$TEST_CONTROL/health-fail" ] && grep -q "$pattern" "$exe"; then exit 22; fi
+    if [ -f "$TEST_CONTROL/slow-health" ] && grep -q new "$exe"; then realsleep 3; exit 28; fi
+    if [ -f "$TEST_CONTROL/blip-after-first-pass" ] && grep -q new "$exe"; then
+      # Fail the second health check only: the first look passed, the next one
+      # times out once (a startup task hogging the pool), then all is well.
+      n=$(( $(cat "$TEST_CONTROL/blip-count" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$TEST_CONTROL/blip-count"
+      [ "$n" != 2 ] || exit 28
+    fi
     if [ -f "$TEST_CONTROL/db-down" ] && grep -q new "$exe"; then
       if [ "$(cat "$TEST_CONTROL/db-down")" = inconsistent ]; then
         echo '{"status":"ok","db_connected":false}'
@@ -133,6 +159,11 @@ case "$url" in
     if [ -f "$TEST_CONTROL/term-during-verify" ] && grep -q new "$exe"; then
       # systemd's TimeoutStartSec, after the restart. curl_service runs in the
       # updater's own shell here, so PPID is the updater.
+      kill -TERM "$PPID"
+    fi
+    if [ -f "$TEST_CONTROL/term-during-rollback" ] && ! grep -q new "$exe"; then
+      # The restored release being verified: systemd's TimeoutStartSec again.
+      rm -f "$TEST_CONTROL/term-during-rollback"
       kill -TERM "$PPID"
     fi
     if [ -f "$TEST_CONTROL/stale-frontend" ] && grep -q new "$exe"; then
@@ -234,6 +265,7 @@ cat ./revision >> "$out"
         self.stub("chown", "exit 0\n")
         self.stub("pgrep", "exit 1\n")
         self.stub("sleep", "exit 0\n")
+        (self.bin / "realsleep").symlink_to(shutil.which("sleep"))
         self.env["PATH"] = str(self.bin)
         self.git("init", "--quiet", "--initial-branch=main", str(self.seed))
         for name, text in {
@@ -901,6 +933,53 @@ exec {shlex.quote(real_cp)} "$@"
         status = self.run_update(expected=143)
         self.assertIn("stopped unexpectedly after restarting the service", status["message"])
         self.assert_rolled_back(status)
+
+    def test_a_signal_during_the_rollback_does_not_cut_it_short(self) -> None:
+        # Stopped between restore_dir's two renames, there would be no static
+        # tree at all.
+        self.flag("health-fail")
+        self.flag("term-during-rollback")
+        self.assert_rolled_back(self.run_update(expected=1))
+
+    def test_a_process_that_has_not_exec_d_yet_is_waited_for(self) -> None:
+        # Type=simple: `systemctl restart` returns once systemd has forked, and
+        # until the child execs, /proc/<pid>/exe is systemd's executor. That
+        # must not roll back a healthy release.
+        self.flag("exec-delay")
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_one_slow_answer_after_the_first_pass_is_retried(self) -> None:
+        self.flag("blip-after-first-pass")
+        self.assertEqual(self.run_update()["state"], "success")
+        self.assertGreaterEqual(int((self.control / "blip-count").read_text()), 3)
+
+    def test_the_deadline_is_wall_clock_time_too(self) -> None:
+        # Each health check takes 3 s. Round-counting alone (VERIFY_TIMEOUT is
+        # 4 here) would keep trying past the 6 s the deadline allows.
+        self.flag("slow-health")
+        started = time.monotonic()
+        self.assert_rolled_back(self.run_update(expected=1))
+        tries = [line for line in self.events.read_text().splitlines()
+                 if line.endswith("/api/health")]
+        # The new release's tries; the restored one answers at once.
+        self.assertLessEqual(len(tries) - 2, 3, tries)
+        self.assertLess(time.monotonic() - started, 25)
+
+    def test_a_loopback_bind_is_decoded(self) -> None:
+        self.flag("no-serving-record")
+        self.env["TEST_LISTEN"] = "127.0.0.1:8484"
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_an_ipv6_loopback_bind_is_decoded(self) -> None:
+        self.flag("no-serving-record")
+        self.env.update({"TEST_LISTEN": "[::1]:8484", "TEST_URL_PREFIX": "http://[::1]:8484"})
+        self.assertEqual(self.run_update()["state"], "success")
+
+    def test_a_tls_name_with_a_trailing_newline_is_refused(self) -> None:
+        # A record the aurora user wrote: a name that is not exactly a host
+        # name means the whole record is ignored, and plain HTTP is used.
+        self.env.update({"TEST_SCHEME": "https", "TEST_TLS_NAME": "media.example\\n"})
+        self.assertEqual(self.run_update()["state"], "success")
 
     def test_frontend_and_backend_change_together(self) -> None:
         # The drain used to wait AFTER the install: the old backend served the

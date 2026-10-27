@@ -1093,10 +1093,14 @@ count restarts).
 - A deploy counts only when the main pid right after the restart is still the
   main pid throughout (any change fails at once), its `/proc/<pid>/exe` hashes
   to the binary just built, `/api/health` says `status: ok` with
-  `db_connected: true`, `/v2/` is byte-identical to the installed `index.html`
-  (`TestV2IndexIsServedByteForByte`), all within `VERIFY_TIMEOUT` seconds and
-  again `VERIFY_SETTLE` seconds later. The anonymous health route still names no
-  version.
+  `db_connected: true`, and `/v2/` is byte-identical to the installed
+  `index.html` (`TestV2IndexIsServedByteForByte`), on two probes at least
+  `VERIFY_SETTLE` seconds apart, within `VERIFY_TIMEOUT + VERIFY_SETTLE`
+  seconds. Everything but a pid change is retried until then, including an exe
+  mismatch: `Type=simple` reports the unit started before the child execs, and
+  `/proc/<pid>/exe` is systemd's executor until it does. The anonymous health
+  route still names no version. Root's Python runs with `-I` (the working
+  directory is the checkout).
 - The port is always one that pid listens on, read from `/proc/<pid>/fd` and its
   TCP tables, so the answer comes from that process. How to speak to it comes
   from `/var/cache/aurora/serving.json` (`cmd/aurora/serving_record.go`, written
@@ -1121,8 +1125,12 @@ count restarts).
   re-reads `/v2/` and shows a Reload notice (withdrawn when this tab's build is
   served again), never reloading by itself. `verify-pwa.mjs` checks it end to
   end under the production CSP.
-- Known gaps: idle ticks check installed files, not the running process; TLS is
-  probed with `--insecure`; a crash more than `VERIFY_SETTLE` seconds after the
+- Known gaps: an install on a non-default port or terminating its own TLS gets
+  this updater only through the manual bootstrap in `docs/updater-recovery.md`
+  (the old one on the box never passes its own check, so never replaces
+  itself); idle ticks check installed files, not the running process; TLS is
+  probed with `--insecure`; bash before 5.1 writes heredocs to TMPDIR, so a full
+  TMPDIR fails `service_endpoint` (and every status write); a crash more than `VERIFY_SETTLE` seconds after the
   first good answer is not seen; a SIGKILL mid-install still leaves a partial
   tree (the pending record blocks automatic retry); a rollback generation kept
   from an older updater has no migration snapshot, and a rollback to a binary
@@ -1138,7 +1146,11 @@ count restarts).
   it reads the path `DefaultStreamStateFile` writes, and that each script waits
   before its first live change). `install.sh` re-runs and `redeploy.sh` used not
   to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
-  the service is not running.
+  the service is not running. `install.sh` makes its live changes in
+  `install_release_files`, on the line after the wait and right before the
+  restart; nothing slow (prompts, Ollama) may sit between them. The block reads
+  numbers with `10#` and a length cap: the aurora user writes the snapshot, and
+  an invalid-octal timestamp used to abort the updater under `set -e`.
 
 ### Node build floor
 

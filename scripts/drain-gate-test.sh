@@ -112,6 +112,27 @@ reset; snapshot "$now" 2 > "$WORK/elsewhere.json"; ln -s "$WORK/elsewhere.json" 
                                                    busy idle "a symlink is not followed"
 reset; { snapshot "$now" 2; head -c 70000 /dev/zero | tr '\0' ' '; } > "$STATE"
                                                    busy idle "an oversized file is not read"
+reset; snapshot "0$now" 2 > "$STATE";              busy busy "a leading zero is decimal, not invalid octal"
+reset; snapshot 99999999999999999999 2 > "$STATE"; busy idle "an absurd timestamp is unknown"
+reset; printf '{"unix_time":%s,"held_by_viewer":99999999999999999999}\n' "$now" > "$STATE"
+                                                   busy idle "an absurd count is unknown"
+
+# The updater calls viewers_held at top level, under set -e: an arithmetic
+# error there (a number bash cannot read) aborted every update.
+for ts in "0793$now" 99999999999999999999 08; do
+    printf '{"unix_time":%s,"held_by_viewer":1}\n' "$ts" > "$STATE"
+    got="$(timeout 10 bash -c "
+        set -euo pipefail
+        trap 'echo TRAPPED' ERR
+        . '$WORK/block.sh'
+        held=\$(viewers_held)
+        echo \"held=\$held\"
+    " 2>&1)"
+    case "$got" in
+        held=*) ok "viewers_held survives unix_time=$ts at top level under set -e ($got)" ;;
+        *) bad "viewers_held aborts a set -e caller on unix_time=$ts: $got" ;;
+    esac
+done
 
 # drain_wait: waits while busy, gives up at its limit, and says how long.
 dw() {  # $1 = expected exit, $2 = expected DRAIN_WAITED, $3 = busy rounds, $4 = max, $5 = description
@@ -149,9 +170,28 @@ check_before() {  # $1 = script, $2 = the wait (ERE), $3 = the change (ERE), $4 
     fi
 }
 check_before aurora-update.sh '^if streams_busy; then'          '^INSTALL_PHASE=files'                 'the first live file'
-check_before install.sh       '^drain_viewers_before_install$'  '^install -m 755 aurora "\$INSTALL_BIN"' 'the binary'
-check_before install.sh       '^drain_viewers_before_install$'  '^stage_static_bundle '                'the frontend'
-check_before install.sh       '^drain_viewers_before_install$'  '^    systemctl restart aurora$'       'the restart'
+# install.sh does its live changes in one function, called right after the
+# wait and right before the restart: everything between used to take minutes
+# (a prompt, an Ollama pull) with the new frontend live and nobody checking.
+check_before install.sh       '^drain_viewers_before_install$'  '^install_release_files$'              'the release files'
+check_before install.sh       '^install_release_files$'         '^# Restart \(handles re-runs'          'the restart'
+f="$REPO_ROOT/scripts/install.sh"
+release="$(awk '/^install_release_files\(\) \{$/ {grab=1} grab {print} grab && /^\}$/ {exit}' "$f")"
+for change in 'install -m 755 aurora "$INSTALL_BIN.new"' 'mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"' 'cp -f "$PROJECT_DIR"/migrations/*.sql'; do
+    case "$release" in
+        *"$change"*) ok "scripts/install.sh changes '$change' inside install_release_files" ;;
+        *) bad "scripts/install.sh's install_release_files no longer does '$change'" ;;
+    esac
+    if grep -nF "$change" "$f" | grep -vq '^[0-9]*:    '; then
+        bad "scripts/install.sh does '$change' outside install_release_files"
+    fi
+done
+w="$(line_of "$f" '^drain_viewers_before_install$')"; r="$(line_of "$f" '^install_release_files$')"
+if [ -n "$w" ] && [ -n "$r" ] && [ $((r - w)) -eq 1 ]; then
+    ok "scripts/install.sh installs the release on the line after the wait"
+else
+    bad "scripts/install.sh lets something run between the wait (line $w) and the install (line $r)"
+fi
 check_before redeploy.sh      '^drain_viewers_before_install$'  'sudo cp -f "\$\{SQL_FILES\[@\]\}"'    'the migrations'
 check_before redeploy.sh      '^drain_viewers_before_install$'  '^if ! sudo systemctl restart aurora'  'the restart'
 for s in "${SCRIPTS[@]}"; do

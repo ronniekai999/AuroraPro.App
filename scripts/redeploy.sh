@@ -90,7 +90,7 @@ _STREAM_STATE_MAX_AGE=90
 # or anything large, so a file the aurora user controls can neither point root
 # at another file nor hang it on a pipe nobody writes.
 read_untrusted() {
-    python3 -c '
+    python3 -I -c '
 import os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -113,11 +113,15 @@ viewers_held() {
     _vh_now=$(date +%s)
     _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
     _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
-    # Each field on its own: a half-written or renamed-key snapshot is unknown.
+    # Each field on its own: a half-written or renamed-key snapshot is unknown,
+    # and so is a number bash would choke on. The aurora user can write this
+    # file: "0793" is an invalid octal to $(( )) and aborts a set -e caller,
+    # and a twenty-digit one overflows; 10# reads what is left as decimal.
     case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
     case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
-    [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
-    printf '%s' "$_vh_held"
+    [ "${#_vh_ts}" -le 12 ] && [ "${#_vh_held}" -le 6 ] || return 0
+    [ $((_vh_now - 10#$_vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$((10#$_vh_held))"
 }
 
 streams_busy() {

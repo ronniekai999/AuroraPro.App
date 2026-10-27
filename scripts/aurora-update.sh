@@ -178,7 +178,7 @@ write_status() {
     MESSAGE="$message" \
     OLD_SHA_ENV="$old" \
     NEW_SHA_ENV="$new" \
-    python3 <<'PY' > "$STATUS_FILE.tmp"
+    python3 -I <<'PY' > "$STATUS_FILE.tmp"
 import json, os
 print(json.dumps({
     "state":   os.environ["STATE"],
@@ -591,7 +591,7 @@ retire_rollback_snapshots() {
 # Never follow symlinks, and fail on unreadable/missing artifacts rather than
 # treating an incomplete tree as successfully deployed.
 deployment_fingerprint() {
-    python3 - "$INSTALL_BIN" "$INSTALL_UPDATER" "$INSTALL_DIR/static" "$INSTALL_DIR/migrations" <<'DEPLOY_PY'
+    python3 -I - "$INSTALL_BIN" "$INSTALL_UPDATER" "$INSTALL_DIR/static" "$INSTALL_DIR/migrations" <<'DEPLOY_PY'
 import hashlib
 import os
 from pathlib import Path
@@ -666,7 +666,7 @@ refresh_installed_updater() {
 # actually running.
 
 file_sha256() {
-    python3 -c '
+    python3 -I -c '
 import hashlib, sys
 digest = hashlib.sha256()
 with open(sys.argv[1], "rb") as stream:
@@ -707,11 +707,16 @@ runs_binary() {
 # the only one PID listens on, else 8484.
 service_endpoint() {
     PROC_ROOT_ENV="$PROC_ROOT" SERVING_FILE_ENV="$SERVING_FILE" PID_ENV="$1" \
-    python3 <<'PY'
+    python3 -I <<'PY'
 import ipaddress, json, os, re, socket, stat, sys
 
 proc, pid = os.environ["PROC_ROOT_ENV"], os.environ["PID_ENV"]
-NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+# fullmatch, not match with $: "$" also matches before a trailing newline.
+NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
+
+def port_number(text):
+    # str.isdigit() accepts non-ASCII digits; only 1-65535 in ASCII will do.
+    return int(text) if text.isascii() and text.isdigit() and 0 < int(text) < 65536 else None
 
 def listening():
     inodes = set()
@@ -777,19 +782,20 @@ if not ports:
 
 rec = serving_record()
 if rec is not None and rec.get("pid") == int(pid):
-    _, _, port = str(rec.get("addr") or "").rpartition(":")
+    _, _, port_text = str(rec.get("addr") or "").rpartition(":")
+    port = port_number(port_text)
     scheme = rec.get("scheme")
     name = str(rec.get("server_name") or "") if scheme == "https" else ""
-    if port.isdigit() and int(port) in ports and scheme in ("http", "https") and (not name or NAME.match(name)):
-        print("|".join((scheme, connect_host(ports[int(port)]), port, name, "serving record")))
+    if port in ports and scheme in ("http", "https") and (not name or NAME.fullmatch(name)):
+        print("|".join((scheme, connect_host(ports[port]), str(port), name, "serving record")))
         sys.exit(0)
 
 def setting(key):
     return os.environ.get(key, "").strip()
 
-want = setting("AURORA_PORT")
-if want.isdigit() and int(want) in ports:
-    port = int(want)
+want = port_number(setting("AURORA_PORT"))
+if want in ports:
+    port = want
 elif len(ports) == 1:
     port = next(iter(ports))
 elif 8484 in ports:
@@ -800,7 +806,7 @@ else:
     sys.exit(1)
 # The same choice the server makes (cmd/aurora/main.go): autocert needs a domain,
 # a manual certificate needs both files.
-domain = setting("TLS_DOMAIN") if NAME.match(setting("TLS_DOMAIN")) else ""
+domain = setting("TLS_DOMAIN") if NAME.fullmatch(setting("TLS_DOMAIN")) else ""
 if setting("TLS_AUTO_CERT").lower() in ("true", "1", "yes") and domain:
     scheme, name = "https", domain
 elif setting("TLS_CERT_FILE") and setting("TLS_KEY_FILE"):
@@ -817,7 +823,7 @@ curl_service() {
     local url="$SVC_SCHEME://$SVC_HOST:$SVC_PORT$1"
     # --noproxy: aurora.env is sourced, and an http_proxy there would otherwise
     # carry this loopback request off to the proxy.
-    local args=(-sf --max-time 5 --noproxy '*' --proto '=http,https')
+    local args=(-sf --max-time 5 --max-filesize 1048576 --noproxy '*' --proto '=http,https')
     if [ "$SVC_SCHEME" = https ]; then
         # The certificate names the public domain, not loopback. Which process
         # answers is already settled: the port is one the verified pid listens on.
@@ -833,8 +839,8 @@ curl_service() {
 
 # probe_service SHA256 INDEX BASELINE_PID — one round of checks against the
 # running service. Sets PROBED_PID, and VERIFY_REASON when a check fails;
-# VERIFY_FATAL=true when waiting cannot help (the process is gone, was
-# replaced, or runs some other binary).
+# VERIFY_FATAL=true when waiting cannot help (the process is gone or was
+# replaced).
 probe_service() {
     local expected="$1" index="$2" baseline="$3" pid endpoint body where
     PROBED_PID=""
@@ -850,9 +856,12 @@ probe_service() {
         VERIFY_FATAL=true
         return 1
     fi
+    # Not fatal: aurora.service is Type=simple, so systemd reports it started
+    # once it has forked, before the child has exec'd the binary, and until
+    # then /proc/<pid>/exe is systemd's own executor. A unit that really runs
+    # some other file fails here at the deadline instead.
     if ! runs_binary "$pid" "$expected"; then
         VERIFY_REASON="aurora.service's main process (pid $pid) is not running the binary just installed at $INSTALL_BIN"
-        VERIFY_FATAL=true
         return 1
     fi
     if ! endpoint="$(service_endpoint "$pid")"; then
@@ -868,7 +877,7 @@ probe_service() {
         VERIFY_REASON="GET /api/health at $where did not answer"
         return 1
     fi
-    if ! printf '%s' "$body" | python3 -c '
+    if ! printf '%s' "$body" | python3 -I -c '
 import json, sys
 try:
     doc = json.load(sys.stdin)
@@ -890,25 +899,28 @@ sys.exit(0 if ok else 1)'; then
 }
 
 # verify_service SHA256 INDEX BASELINE_PID — BASELINE_PID (the main process
-# right after the restart) must pass probe_service within VERIFY_TIMEOUT
-# seconds, then pass again VERIFY_SETTLE seconds later. Any change of main
-# process fails at once: under Restart=on-failure a binary that crashes and
-# comes back must not count as healthy, nor one that answers once and then
-# dies. A pass followed by a failed second look fails too, without waiting.
+# right after the restart) must pass probe_service, and pass again at least
+# VERIFY_SETTLE seconds later, within VERIFY_TIMEOUT + VERIFY_SETTLE seconds.
+# Any change of main process fails at once: under Restart=on-failure a binary
+# that crashes and comes back must not count as healthy, nor one that answers
+# once and then dies. Anything else (not exec'd yet, still migrating, one slow
+# answer) is retried until the deadline.
 verify_service() {
-    local expected="$1" index="$2" baseline="$3" rounds=0 deadline=$((SECONDS + VERIFY_TIMEOUT))
+    local expected="$1" index="$2" baseline="$3" rounds=0 passed=false
+    local deadline=$((SECONDS + VERIFY_TIMEOUT + VERIFY_SETTLE))
     VERIFY_REASON="no check ran"
     if [ -z "$baseline" ]; then
         VERIFY_REASON="aurora.service had no running main process right after it was started"
     else
         while :; do
             if probe_service "$expected" "$index" "$baseline"; then
-                sleep "$VERIFY_SETTLE"
-                if probe_service "$expected" "$index" "$baseline"; then
+                if "$passed"; then
                     log "verified: pid $baseline runs the expected binary, reports healthy at $SVC_SCHEME://$SVC_HOST:$SVC_PORT ($SVC_SOURCE) and serves the installed frontend"
                     return 0
                 fi
-                break
+                passed=true
+                sleep "$VERIFY_SETTLE"
+                continue
             fi
             "$VERIFY_FATAL" && break
             rounds=$((rounds + 1))
@@ -944,6 +956,9 @@ roll_back_install() {
     local reason="$1" expected="" pid baseline="" problems=""
     INSTALL_PHASE=rolling_back
     trap - ERR
+    # A TERM (systemd's TimeoutStartSec, again) between two renames would leave
+    # no static tree at all. Only SIGKILL can stop a rollback now.
+    trap '' TERM INT
     set +e
     log "rolling back: $reason"
     write_status restarting "Update to $NEW_SHA failed ($reason) — restoring the previous installed snapshot" "$OLD_SHA" "$NEW_SHA"
@@ -966,7 +981,7 @@ roll_back_install() {
             # conditional requests from Last-Modified alone. A browser that
             # loaded the failed release's index.html (newer) would get 304 and
             # keep it, pointing at chunks that no longer exist: a blank page.
-            find "$INSTALL_DIR/static" -type f -exec touch -- {} + \
+            find "$INSTALL_DIR/static" -type f -exec touch -h -- {} + \
                 || log "could not refresh mtimes under $INSTALL_DIR/static; browsers that loaded the failed release may need a hard reload"
         else
             problems="$problems the static tree;"
@@ -1281,7 +1296,7 @@ _STREAM_STATE_MAX_AGE=90
 # or anything large, so a file the aurora user controls can neither point root
 # at another file nor hang it on a pipe nobody writes.
 read_untrusted() {
-    python3 -c '
+    python3 -I -c '
 import os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1304,11 +1319,15 @@ viewers_held() {
     _vh_now=$(date +%s)
     _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
     _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
-    # Each field on its own: a half-written or renamed-key snapshot is unknown.
+    # Each field on its own: a half-written or renamed-key snapshot is unknown,
+    # and so is a number bash would choke on. The aurora user can write this
+    # file: "0793" is an invalid octal to $(( )) and aborts a set -e caller,
+    # and a twenty-digit one overflows; 10# reads what is left as decimal.
     case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
     case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
-    [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
-    printf '%s' "$_vh_held"
+    [ "${#_vh_ts}" -le 12 ] && [ "${#_vh_held}" -le 6 ] || return 0
+    [ $((_vh_now - 10#$_vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$((10#$_vh_held))"
 }
 
 streams_busy() {

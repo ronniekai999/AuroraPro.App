@@ -95,7 +95,7 @@ _STREAM_STATE_MAX_AGE=90
 # or anything large, so a file the aurora user controls can neither point root
 # at another file nor hang it on a pipe nobody writes.
 read_untrusted() {
-    python3 -c '
+    python3 -I -c '
 import os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -118,11 +118,15 @@ viewers_held() {
     _vh_now=$(date +%s)
     _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
     _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
-    # Each field on its own: a half-written or renamed-key snapshot is unknown.
+    # Each field on its own: a half-written or renamed-key snapshot is unknown,
+    # and so is a number bash would choke on. The aurora user can write this
+    # file: "0793" is an invalid octal to $(( )) and aborts a set -e caller,
+    # and a twenty-digit one overflows; 10# reads what is left as decimal.
     case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
     case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
-    [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
-    printf '%s' "$_vh_held"
+    [ "${#_vh_ts}" -le 12 ] && [ "${#_vh_held}" -le 6 ] || return 0
+    [ $((_vh_now - 10#$_vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$((10#$_vh_held))"
 }
 
 streams_busy() {
@@ -1189,29 +1193,6 @@ info "Building (version: $VERSION)..."
 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o aurora ./cmd/aurora
 ok "Build complete"
 
-# On a re-run, wait for viewers BEFORE anything live changes, as the
-# auto-updater does. The binary and the frontend are replaced here but the
-# service restarts only at the end of this step, so waiting just before the
-# restart would leave the old backend serving the new frontend meanwhile. A
-# re-run used not to wait at all and restarted under anyone watching.
-drain_viewers_before_install() {
-    if [ "${AURORA_SKIP_DRAIN:-}" = 1 ] || ! systemctl is-active --quiet aurora 2>/dev/null; then
-        return 0
-    fi
-    streams_busy || return 0
-    info "Waiting up to 300s for active streams to finish before replacing Aurora (AURORA_SKIP_DRAIN=1 skips this)..."
-    if drain_wait 300; then
-        ok "Active streams finished after ${DRAIN_WAITED}s"
-    else
-        warn "Streams still active after 300s; continuing"
-    fi
-}
-drain_viewers_before_install
-
-install -m 755 aurora "$INSTALL_BIN"
-rm -f aurora
-ok "Binary installed at $INSTALL_BIN"
-
 # Layout directories.
 mkdir -p "$INSTALL_DIR/migrations"
 mkdir -p "$CONFIG_DIR"
@@ -1226,23 +1207,59 @@ install -d -m 0750 -o "$AURORA_USER" -g "$AURORA_GROUP" "$LOG_DIR"
 # aurora.service startable.
 install -d -m 0755 -o root -g root /var/lib/aurora
 
-# Migrations + static files (atomic swap for the bundle).
-cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
+# Stage the frontend now; nothing live changes until install_release_files,
+# just before the restart at the end of this step.
 stage_static_bundle "$FRONTEND_TMP/v2"
-# Audit C1 — clear any leftover static.old from a previously-crashed
-# run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
-# directory, so without this an interrupted earlier run would brick
-# every subsequent install attempt (the rename below would fail and
-# `set -e` would abort). BSD mv on macOS hides this — Linux exposes
-# it on the first re-run.
-rm -rf "$INSTALL_DIR/static.old"
-if [ -d "$INSTALL_DIR/static" ]; then
-    mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
-fi
-mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
-rm -rf "$INSTALL_DIR/static.old"
 rm -rf "$FRONTEND_TMP"
-ok "Static assets + migrations copied"
+ok "Static assets staged"
+
+# install_release_files — put the new binary, migrations and frontend live.
+#
+# Called right before the restart, after the viewer drain. On a re-run the
+# service is still running the previous release until then, and everything
+# between here and there can take minutes (the media-directory prompt waits on
+# the operator; an Ollama install pulls gigabytes). Swapped up here, as it
+# used to be, the old backend served the new frontend all that time, and
+# anyone who started watching meanwhile was cut off by a restart nothing had
+# checked for.
+install_release_files() {
+    install -m 755 aurora "$INSTALL_BIN.new"
+    mv -f "$INSTALL_BIN.new" "$INSTALL_BIN"
+    rm -f aurora
+    ok "Binary installed at $INSTALL_BIN"
+    cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
+    # Audit C1 — clear any leftover static.old from a previously-crashed
+    # run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
+    # directory, so without this an interrupted earlier run would brick
+    # every subsequent install attempt (the rename below would fail and
+    # `set -e` would abort). BSD mv on macOS hides this — Linux exposes
+    # it on the first re-run.
+    rm -rf "$INSTALL_DIR/static.old"
+    if [ -d "$INSTALL_DIR/static" ]; then
+        mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
+    fi
+    mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
+    rm -rf "$INSTALL_DIR/static.old"
+    chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR"
+    ok "Static assets + migrations installed"
+}
+
+# On a re-run, wait for viewers first, as the auto-updater does. A re-run used
+# not to wait at all and restarted under anyone watching. Runs immediately
+# before install_release_files, so nothing that takes time sits between the
+# wait and the restart.
+drain_viewers_before_install() {
+    if [ "${AURORA_SKIP_DRAIN:-}" = 1 ] || ! systemctl is-active --quiet aurora 2>/dev/null; then
+        return 0
+    fi
+    streams_busy || return 0
+    info "Waiting up to 300s for active streams to finish before replacing Aurora (AURORA_SKIP_DRAIN=1 skips this)..."
+    if drain_wait 300; then
+        ok "Active streams finished after ${DRAIN_WAITED}s"
+    else
+        warn "Streams still active after 300s; continuing"
+    fi
+}
 
 # systemd unit. Patch the After= line to the actual detected PG
 # service name (it's "postgresql-17" on Fedora-17 etc).
@@ -1975,6 +1992,9 @@ if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
         warn "Port 8484 already in use. Aurora may fail to bind. Check: ss -tlnp | grep 8484"
     fi
 fi
+
+drain_viewers_before_install
+install_release_files
 
 # Restart (handles re-runs cleanly) — falls back to start.
 if systemctl is-active aurora &>/dev/null; then

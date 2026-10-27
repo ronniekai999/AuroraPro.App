@@ -35,6 +35,14 @@ failure with the fixed updater.
 
 ## One-time bootstrap for an already-stalled older installation
 
+**Installs on a non-default port, or where Aurora terminates TLS itself, need
+this once.** The first update to this release is carried out by the updater
+already on the box, which checks only `http://localhost:8484` and replaces
+itself only after that check passes. On those installs it never passes, so every
+update rolls back (as it always has there) and the fixed updater never arrives
+on its own. Install it with the recipe below; the next update verifies the
+running process where it actually listens.
+
 Merging this fix alone cannot repair a missing npm installation or replace an
 already-installed old workhorse that exits before installing anything. First
 repair Node/npm. Then install the fixed workhorse from a trusted, reviewed
@@ -129,14 +137,18 @@ application-owned UI status and installation directories:
 
 ## What a deploy has to prove
 
-After the restart, the updater accepts the new release only when, within 60
-seconds, all of these hold, and still hold ten seconds later. The process is
-the main pid right after the restart; if the main pid changes at any point (a
-crash and `Restart=on-failure`), verification fails at once rather than giving
-the next incarnation a chance:
+After the restart, the updater accepts the new release only when all of these
+hold, and hold again at least ten seconds later, within 70 seconds in all. The
+process is the main pid right after the restart; if the main pid changes at any
+point (a crash and `Restart=on-failure`), verification fails at once rather than
+giving the next incarnation a chance. Anything else is retried until the
+deadline: a process that has not exec'd yet (`Type=simple` reports the unit
+started once systemd has forked), one still running its migrations, one slow
+answer:
 
 - That process is running exactly the binary just built: `/proc/<pid>/exe`
-  hashes to it. A drop-in `ExecStart` pointing at some other file fails here.
+  hashes to it. A drop-in `ExecStart` pointing at some other file never does,
+  and fails at the deadline.
 - `GET /api/health` answers `status: "ok"` with `db_connected: true`. The route
   answers 200 `"degraded"` with the database down; that no longer passes.
 - `GET /v2/` is byte-identical to the `index.html` just installed, so the
@@ -237,8 +249,13 @@ rollback above. `install.sh` and `redeploy.sh` still use their own
 `localhost:8484` health checks, but now share the updater's viewer drain: a
 re-run of `install.sh` (`AURORA_SKIP_DRAIN=1` skips it) and `redeploy.sh`
 (`--no-drain`) wait up to five minutes for active streams before replacing any
-live file. Neither waited before; both restarted under anyone watching.
-`scripts/drain-gate-test.sh` keeps the three copies identical and checks them.
+live file, when they are going to restart (`redeploy.sh --no-restart` swaps the
+files at once and leaves the restart to you). Neither waited before; both
+restarted under anyone watching. `install.sh` now also replaces its live files
+only at the end, immediately after that wait and before the restart: it used to
+swap them early, then spend minutes on prompts and Ollama with the new frontend
+served by the old backend. `scripts/drain-gate-test.sh` keeps the three copies
+identical and checks them.
 
 Run the network-free regression suite on Linux:
 

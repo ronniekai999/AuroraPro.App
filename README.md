@@ -239,7 +239,7 @@ git pull
 ./scripts/redeploy.sh        # build SPA + Go binary, atomic-swap, restart
 ```
 
-Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service. Before it swaps anything, a redeploy (like the auto-updater and an `install.sh` re-run) waits up to 5 minutes for anyone watching to finish; `--no-drain` restarts at once.
+Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service. When it is going to restart, a redeploy (like the auto-updater and an `install.sh` re-run) first waits up to 5 minutes for anyone watching to finish, before it swaps anything; `--no-drain` restarts at once.
 
 **Reinstall** when an update touches `scripts/install.sh` itself (new state dirs, systemd unit changes):
 
