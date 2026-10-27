@@ -291,7 +291,10 @@ cat ./revision >> "$out"
         self.stub("chown", "exit 0\n")
         self.stub("pgrep", "exit 1\n")
         self.stub("sleep", "exit 0\n")
-        (self.bin / "realsleep").symlink_to(shutil.which("sleep"))
+        # A wrapper, not a symlink: uutils coreutils (Ubuntu 26.04) is one
+        # multicall binary that picks the tool from argv[0], and "realsleep"
+        # names none, so a symlink fails at once instead of sleeping.
+        self.stub("realsleep", f'exec {shlex.quote(shutil.which("sleep"))} "$@"\n')
         self.env["PATH"] = str(self.bin)
         self.git("init", "--quiet", "--initial-branch=main", str(self.seed))
         for name, text in {
@@ -1084,11 +1087,15 @@ exec {shlex.quote(real_cp)} "$@"
         self.flag("slow-health")
         started = time.monotonic()
         self.assert_rolled_back(self.run_update(expected=1))
+        elapsed = time.monotonic() - started
+        # At least two 3 s answers, or the fixture never slowed anything down
+        # and the count below would be the round cap's.
+        self.assertGreaterEqual(elapsed, 5, "the slow health checks did not sleep")
+        self.assertLess(elapsed, 25)
         tries = [line for line in self.events.read_text().splitlines()
                  if line.endswith("/api/health")]
         # The new release's tries; the restored one answers at once.
         self.assertLessEqual(len(tries) - 2, 3, tries)
-        self.assertLess(time.monotonic() - started, 25)
 
     def test_a_loopback_bind_is_decoded(self) -> None:
         self.flag("no-serving-record")
