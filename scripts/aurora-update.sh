@@ -112,6 +112,11 @@ VERIFY_SETTLE=10
 # or `restarted`, whatever the reason.
 INSTALL_PHASE=none
 ABORT_LINE=""
+# Set once this run has staged into $INSTALL_BIN.new / $INSTALL_DIR/static.new.
+# Only then may cleanup remove them: install.sh and redeploy.sh stage into the
+# same names (under the same lock), and an idle tick deleting them unasked left
+# an install.sh re-run with no frontend at all.
+STAGED_RELEASE=false
 
 mkdir -p "$(dirname "$STATUS_FILE")"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -316,8 +321,11 @@ cleanup() {
             ;;
     esac
     if [ -n "${FRONTEND_TMP:-}" ]; then rm -rf -- "$FRONTEND_TMP"; fi
-    # Staged-but-unused install files; after a swap these no longer exist.
-    rm -rf -- "$BUILD_TREE" "$VERIFY_INDEX" "$INSTALL_BIN.new" "$INSTALL_DIR/static.new" || true
+    rm -rf -- "$BUILD_TREE" "$VERIFY_INDEX" || true
+    # This run's staged-but-unused install files; after a swap they are gone.
+    if "$STAGED_RELEASE"; then
+        rm -rf -- "$INSTALL_BIN.new" "$INSTALL_DIR/static.new" || true
+    fi
     exec 9>&- || true
     exit "$rc"
 }
@@ -715,8 +723,10 @@ proc, pid = os.environ["PROC_ROOT_ENV"], os.environ["PID_ENV"]
 NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
 
 def port_number(text):
-    # str.isdigit() accepts non-ASCII digits; only 1-65535 in ASCII will do.
-    return int(text) if text.isascii() and text.isdigit() and 0 < int(text) < 65536 else None
+    # ASCII digits only (str.isdigit() takes others too), 1-65535. Nothing
+    # newer than Python 3.6 in here: RHEL 8's python3 is 3.6, and an
+    # AttributeError on every probe would roll back every update.
+    return int(text) if re.fullmatch(r"[0-9]{1,5}", text) and 0 < int(text) < 65536 else None
 
 def listening():
     inodes = set()
@@ -954,11 +964,13 @@ restore_dir() {
 # runs with errexit and the ERR trap off: a rollback must try every step.
 roll_back_install() {
     local reason="$1" expected="" pid baseline="" problems=""
+    # A TERM (systemd's TimeoutStartSec, again) between two renames would leave
+    # no static tree at all. Only SIGKILL can stop a rollback now. Ignored
+    # first: a TERM after the phase changed but before this would exit with
+    # nothing rolled back.
+    trap '' TERM INT
     INSTALL_PHASE=rolling_back
     trap - ERR
-    # A TERM (systemd's TimeoutStartSec, again) between two renames would leave
-    # no static tree at all. Only SIGKILL can stop a rollback now.
-    trap '' TERM INT
     set +e
     log "rolling back: $reason"
     write_status restarting "Update to $NEW_SHA failed ($reason) — restoring the previous installed snapshot" "$OLD_SHA" "$NEW_SHA"
@@ -1014,7 +1026,8 @@ roll_back_install() {
     if [ -n "$problems" ]; then
         VERIFY_REASON="the rollback could not restore:$problems"
         ROLLBACK_RESULT=unhealthy
-    elif verify_service "$expected" "$INSTALL_DIR/static/v2/index.html" "$baseline"; then
+    # The snapshot's index.html (root's), not the restored aurora-owned copy.
+    elif verify_service "$expected" "$ROLLBACK_STATIC/v2/index.html" "$baseline"; then
         ROLLBACK_RESULT=restored
     else
         ROLLBACK_RESULT=unhealthy
@@ -1194,6 +1207,7 @@ if [ "${#SQL_FILES[@]}" -eq 0 ]; then
     exit 1
 fi
 rm -rf -- "$INSTALL_DIR/static.old"
+STAGED_RELEASE=true
 if ! stage_static_bundle "$BUILD_TREE/static" "$FRONTEND_TMP/v2" 2>>"$LOG_FILE" \
     || ! install -m 755 "$FRONTEND_TMP/aurora" "$INSTALL_BIN.new" 2>>"$LOG_FILE"; then
     write_status failed "Could not stage the new release beside the live one — see /var/log/aurora/update.log. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
@@ -1451,7 +1465,9 @@ systemctl restart aurora >>"$LOG_FILE" 2>&1 || fail_install "'systemctl restart 
 RESTART_PID="$(main_pid)" || RESTART_PID=""
 
 write_status restarting "Verifying the restarted service" "$OLD_SHA" "$NEW_SHA"
-if ! verify_service "$NEW_BIN_SHA" "$INSTALL_DIR/static/v2/index.html" "$RESTART_PID"; then
+# Compared with the build output (root's), not the live copy under the aurora
+# user's /opt/aurora, which root would read through a planted symlink or FIFO.
+if ! verify_service "$NEW_BIN_SHA" "$FRONTEND_TMP/v2/index.html" "$RESTART_PID"; then
     fail_install "the restarted service failed verification: $VERIFY_REASON"
 fi
 # The new release is verified and serving. Failures past this point leave it in

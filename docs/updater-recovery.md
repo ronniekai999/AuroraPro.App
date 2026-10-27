@@ -40,8 +40,11 @@ this once.** The first update to this release is carried out by the updater
 already on the box, which checks only `http://localhost:8484` and replaces
 itself only after that check passes. On those installs it never passes, so every
 update rolls back (as it always has there) and the fixed updater never arrives
-on its own. Install it with the recipe below; the next update verifies the
-running process where it actually listens.
+on its own. Install it with the recipe below. Its last step will report that
+automatic retry is paused, because the old updater already tried this revision
+and rolled it back; run `sudo /usr/local/bin/aurora-update --retry` instead of
+the final `systemctl start`. That run verifies the process where it actually
+listens.
 
 Merging this fix alone cannot repair a missing npm installation or replace an
 already-installed old workhorse that exits before installing anything. First
@@ -104,7 +107,9 @@ sudo journalctl -u aurora-update.service -n 80 --no-pager
 ```
 
 The final service start rebuilds and deploys, including Aurora's existing
-viewer-drain and restart behavior. Schedule it for an acceptable interruption
+viewer-drain and restart behavior. (The first deploy of this release drains on
+`pgrep ffmpeg` alone: the server still running wrote its viewer snapshot where
+it could not be created. From the next deploy on, the snapshot is read too.) Schedule it for an acceptable interruption
 window. `origin/<branch>` in the bootstrap recipe is the already-fetched local
 tracking ref, not a new remote freshness check.
 
@@ -138,7 +143,10 @@ application-owned UI status and installation directories:
 ## What a deploy has to prove
 
 After the restart, the updater accepts the new release only when all of these
-hold, and hold again at least ten seconds later, within 70 seconds in all. The
+hold, and hold again at least ten seconds later. The deadline is 70 seconds; it
+is checked after each failed probe, and a probe makes two requests of up to five
+seconds each, so a verification that fails takes at most about 100 seconds (a
+rollback's own verification as long again). The
 process is the main pid right after the restart; if the main pid changes at any
 point (a crash and `Restart=on-failure`), verification fails at once rather than
 giving the next incarnation a chance. Anything else is retried until the

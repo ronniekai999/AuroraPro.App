@@ -1100,7 +1100,12 @@ count restarts).
   mismatch: `Type=simple` reports the unit started before the child execs, and
   `/proc/<pid>/exe` is systemd's executor until it does. The anonymous health
   route still names no version. Root's Python runs with `-I` (the working
-  directory is the checkout).
+  directory is the checkout) and must run on 3.6 (RHEL 8, SLES 15): one
+  `str.isascii()` failed every probe there. `test_embedded_python_runs_on_python_3_6`
+  parses each embedded program as 3.6 and rejects a list of newer APIs. The
+  served `/v2/` is compared with root's copies (the build output; the rollback
+  snapshot), not the aurora-owned live file. A verification that fails takes
+  up to about 100 s (the deadline is checked between probes of up to ~11 s).
 - The port is always one that pid listens on, read from `/proc/<pid>/fd` and its
   TCP tables, so the answer comes from that process. How to speak to it comes
   from `/var/cache/aurora/serving.json` (`cmd/aurora/serving_record.go`, written
@@ -1124,7 +1129,10 @@ count restarts).
   `<meta name="aurora-build">` (`vite-build-id.ts`); `lib/buildUpdate.ts`
   re-reads `/v2/` and shows a Reload notice (withdrawn when this tab's build is
   served again), never reloading by itself. `verify-pwa.mjs` checks it end to
-  end under the production CSP.
+  end under the production CSP. The notice lives outside the app's error
+  boundary (`AppRoot.tsx`, pinned by `AppRoot.test.tsx`): when a deleted chunk
+  takes the app down, the boundary asks for a check that only a still-mounted
+  notice can answer.
 - Known gaps: an install on a non-default port or terminating its own TLS gets
   this updater only through the manual bootstrap in `docs/updater-recovery.md`
   (the old one on the box never passes its own check, so never replaces
@@ -1146,9 +1154,14 @@ count restarts).
   it reads the path `DefaultStreamStateFile` writes, and that each script waits
   before its first live change). `install.sh` re-runs and `redeploy.sh` used not
   to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
-  the service is not running. `install.sh` makes its live changes in
-  `install_release_files`, on the line after the wait and right before the
-  restart; nothing slow (prompts, Ollama) may sit between them. The block reads
+  the service is not running. `install.sh` stages and swaps its release files
+  (binary, migrations, frontend) in `install_release_files`, on the line after
+  the wait and right before the restart, nothing slow (prompts, Ollama) between
+  them; config, units and the updater script still change earlier. It holds
+  the deploy lock from just before the drain until the restarted service has
+  answered, and not longer: a daemon a child starts would inherit the
+  descriptor. The updater removes only staging it created (`STAGED_RELEASE`);
+  an idle tick used to delete an install.sh re-run's staged frontend. The block reads
   numbers with `10#` and a length cap: the aurora user writes the snapshot, and
   an invalid-octal timestamp used to abort the updater under `set -e`.
 

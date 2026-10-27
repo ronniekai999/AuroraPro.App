@@ -161,7 +161,11 @@ cleanup_on_interrupt() {
     # world-readable, but still dead state worth removing.
     rm -f /etc/aurora/aurora.env.tmp /root/.git-credentials.tmp 2>/dev/null || true
 }
-trap cleanup_on_interrupt INT TERM
+# The exit is load-bearing: a handler that returns lets the script carry on
+# from where it was interrupted, which during the viewer drain meant going on
+# to install and restart under the viewers the operator had stopped it for.
+trap 'cleanup_on_interrupt; exit 130' INT
+trap 'cleanup_on_interrupt; exit 143' TERM
 
 # Yes/no helper with a default. Used for the FEW remaining yes/no
 # choices that genuinely matter (mostly: "the DB already exists, do
@@ -1207,22 +1211,21 @@ install -d -m 0750 -o "$AURORA_USER" -g "$AURORA_GROUP" "$LOG_DIR"
 # aurora.service startable.
 install -d -m 0755 -o root -g root /var/lib/aurora
 
-# Stage the frontend now; nothing live changes until install_release_files,
-# just before the restart at the end of this step.
-stage_static_bundle "$FRONTEND_TMP/v2"
-rm -rf "$FRONTEND_TMP"
-ok "Static assets staged"
-
-# install_release_files — put the new binary, migrations and frontend live.
+# install_release_files — stage, then put live, the new binary, migrations and
+# frontend. The build sits in ./aurora and $FRONTEND_TMP until then.
 #
-# Called right before the restart, after the viewer drain. On a re-run the
-# service is still running the previous release until then, and everything
-# between here and there can take minutes (the media-directory prompt waits on
-# the operator; an Ollama install pulls gigabytes). Swapped up here, as it
-# used to be, the old backend served the new frontend all that time, and
-# anyone who started watching meanwhile was cut off by a restart nothing had
-# checked for.
+# Called right before the restart, after the viewer drain and under the deploy
+# lock. On a re-run the service is still running the previous release until
+# then, and everything between the build and here can take minutes (the
+# media-directory prompt waits on the operator; an Ollama install pulls
+# gigabytes). Swapped early, as it used to be, the old backend served the new
+# frontend all that time, and anyone who started watching meanwhile was cut off
+# by a restart nothing had checked for. (Other files do change earlier: the
+# config, the units, the updater script. Not the release.) Staging happens here
+# too, under the lock: the auto-updater stages into the same static.new.
 install_release_files() {
+    stage_static_bundle "$FRONTEND_TMP/v2"
+    rm -rf "$FRONTEND_TMP"
     install -m 755 aurora "$INSTALL_BIN.new"
     mv -f "$INSTALL_BIN.new" "$INSTALL_BIN"
     rm -f aurora
@@ -1242,6 +1245,27 @@ install_release_files() {
     rm -rf "$INSTALL_DIR/static.old"
     chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR"
     ok "Static assets + migrations installed"
+}
+
+# take_deploy_lock — the lock aurora-update.sh and redeploy.sh take
+# (/var/lock/aurora-deploy.lock), held from just before the drain until the
+# restarted service has answered, then released (release_deploy_lock). Not for
+# the whole install: a long-lived child (an installer that starts a daemon)
+# would inherit the descriptor and hold the lock after this script exits,
+# stopping every auto-update. Without it an updater tick could land between
+# staging and the swap, or swap its own release into the middle of this one.
+take_deploy_lock() {
+    if ! command -v flock >/dev/null 2>&1 || ! exec 9>/var/lock/aurora-deploy.lock; then
+        warn "Could not take /var/lock/aurora-deploy.lock; an auto-update could run in the middle of this install. Stop it first: systemctl stop aurora-update.timer aurora-update.path"
+        return 0
+    fi
+    if ! flock -n 9; then
+        info "Another deploy (probably the auto-updater) is running; waiting up to 15 minutes for it to finish..."
+        flock -w 900 9 || error "Another deploy still holds /var/lock/aurora-deploy.lock after 15 minutes. Let it finish (journalctl -u aurora-update -f) and re-run."
+    fi
+}
+release_deploy_lock() {
+    exec 9>&- || true
 }
 
 # On a re-run, wait for viewers first, as the auto-updater does. A re-run used
@@ -1993,6 +2017,7 @@ if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
     fi
 fi
 
+take_deploy_lock
 drain_viewers_before_install
 install_release_files
 
@@ -2052,6 +2077,7 @@ for _ in $(seq 1 30); do
     fi
     sleep 1
 done
+release_deploy_lock
 
 if $SERVICE_FAILED; then
     echo ""

@@ -192,9 +192,12 @@ func TestPWASourceContract(t *testing.T) {
 
 // TestV2IndexIsServedByteForByte pins what scripts/aurora-update.sh's deploy
 // verification relies on: GET /v2/ returns the installed index.html exactly,
-// through the same middleware the router mounts it behind. Anything that
-// rewrote it on the way out (a CSP nonce, an injected tag, compression without
-// being asked) would make every update fail verification and roll back.
+// behind frontendHeaders, the static routes' own middleware. (The router-wide
+// ones, request id, token scoping, in-flight tracking, logging, recovery and
+// CORS, touch only headers and context; this test does not mount them.)
+// Anything that rewrote the page on the way out (a CSP nonce, an injected tag,
+// compression without being asked) would make every update fail verification
+// and roll back.
 func TestV2IndexIsServedByteForByte(t *testing.T) {
 	staticDir := t.TempDir()
 	v2 := filepath.Join(staticDir, "v2")

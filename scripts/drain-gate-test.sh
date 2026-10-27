@@ -158,26 +158,30 @@ dw 1 300 99 300 "gives up at its limit"
 # would serve the new frontend, which is what the updater used to do.
 echo
 echo "drain block: call sites"
-check_before() {  # $1 = script, $2 = the wait (ERE), $3 = the change (ERE), $4 = what the change is
-    local f="$REPO_ROOT/scripts/$1" w c
+check_before() {  # $1 = script, $2 = first (ERE), $3 = second (ERE), $4 = what second is, [$5 = what first is]
+    local f="$REPO_ROOT/scripts/$1" w c first="${5:-waits for viewers}"
     w="$(line_of "$f" "$2")"; c="$(line_of "$f" "$3")"
     if [ -z "$w" ] || [ -z "$c" ]; then
-        bad "scripts/$1: could not find the wait ($w) or $4 ($c); this check is inert"
+        bad "scripts/$1: could not find where it $first ($w) or $4 ($c); this check is inert"
     elif [ "$w" -lt "$c" ]; then
-        ok "scripts/$1 waits for viewers (line $w) before $4 (line $c)"
+        ok "scripts/$1 $first (line $w) before $4 (line $c)"
     else
-        bad "scripts/$1 changes $4 (line $c) BEFORE waiting for viewers (line $w)"
+        bad "scripts/$1 reaches $4 (line $c) BEFORE it $first (line $w)"
     fi
 }
 check_before aurora-update.sh '^if streams_busy; then'          '^INSTALL_PHASE=files'                 'the first live file'
 # install.sh does its live changes in one function, called right after the
 # wait and right before the restart: everything between used to take minutes
 # (a prompt, an Ollama pull) with the new frontend live and nobody checking.
+check_before install.sh       '^take_deploy_lock$'              '^drain_viewers_before_install$'       'the drain' 'takes the deploy lock'
 check_before install.sh       '^drain_viewers_before_install$'  '^install_release_files$'              'the release files'
+check_before install.sh       '^    systemctl restart aurora$'  '^release_deploy_lock$'                'releasing the deploy lock' 'restarts'
 check_before install.sh       '^install_release_files$'         '^# Restart \(handles re-runs'          'the restart'
 f="$REPO_ROOT/scripts/install.sh"
 release="$(awk '/^install_release_files\(\) \{$/ {grab=1} grab {print} grab && /^\}$/ {exit}' "$f")"
-for change in 'install -m 755 aurora "$INSTALL_BIN.new"' 'mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"' 'cp -f "$PROJECT_DIR"/migrations/*.sql'; do
+# Staging too: the updater stages into the same static.new, so it happens under
+# the lock, and an updater tick can no longer fall between staging and the swap.
+for change in 'stage_static_bundle "$FRONTEND_TMP/v2"' 'install -m 755 aurora "$INSTALL_BIN.new"' 'mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"' 'cp -f "$PROJECT_DIR"/migrations/*.sql'; do
     case "$release" in
         *"$change"*) ok "scripts/install.sh changes '$change' inside install_release_files" ;;
         *) bad "scripts/install.sh's install_release_files no longer does '$change'" ;;
@@ -211,6 +215,15 @@ for s in "${SCRIPTS[@]}"; do
         ok "scripts/$s's drain block is at top level"
     fi
 done
+
+# Ctrl-C during the drain must stop install.sh. Its handler used to return,
+# and the script went on to install and restart under the viewers it was
+# interrupted for.
+if grep -nE "^trap .*cleanup_on_interrupt" "$REPO_ROOT/scripts/install.sh" | grep -vqE 'exit [0-9]+'; then
+    bad "scripts/install.sh traps an interrupt without exiting"
+else
+    ok "scripts/install.sh exits when interrupted"
+fi
 
 # The skips: each script's own way out, and nothing else, turns the wait off.
 echo

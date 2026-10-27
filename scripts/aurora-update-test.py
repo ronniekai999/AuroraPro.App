@@ -15,10 +15,12 @@ and a test can make the running process differ from what was installed.
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -76,6 +78,7 @@ case "$*" in
       if [ "$left" -le 0 ]; then mv "$TEST_PROC/$pid/exe.pending" "$TEST_PROC/$pid/exe"
       else echo $((left - 1)) > "$TEST_PROC/$pid/exe.left"; fi
     fi
+    echo 'service:show' >> "$TEST_EVENTS"
     echo "$pid"; exit 0 ;;
   'restart aurora') ;;
   *) exit 91 ;;
@@ -940,6 +943,52 @@ exec {shlex.quote(real_cp)} "$@"
         self.flag("health-fail")
         self.flag("term-during-rollback")
         self.assert_rolled_back(self.run_update(expected=1))
+
+    def test_an_idle_tick_leaves_another_scripts_staging_alone(self) -> None:
+        # install.sh and redeploy.sh stage into the same names. An idle tick
+        # used to delete them on exit, and an install.sh re-run then swapped
+        # the live frontend away with nothing to put in its place.
+        self.run_update()
+        (self.live / "static.new/v2").mkdir(parents=True)
+        (self.live / "static.new/v2/index.html").write_text("install.sh staging\n")
+        (self.live / "aurora.new").write_text("install.sh binary\n")
+        self.assertEqual(self.run_update()["state"], "idle")
+        self.assertEqual((self.live / "static.new/v2/index.html").read_text(), "install.sh staging\n")
+        self.assertTrue((self.live / "aurora.new").exists())
+
+    def test_a_changed_main_process_fails_at_once(self) -> None:
+        # Not at the deadline: once the process verification is about has
+        # exited, nothing later can pass for it.
+        self.flag("unstable")
+        self.assert_rolled_back(self.run_update(expected=1))
+        events = self.events.read_text().splitlines()
+        first, second = [i for i, e in enumerate(events) if e == "service:restart"][:2]
+        # The look right after the restart, the pass, the look that sees the
+        # new pid, and the rollback's own "is it already running?". Retrying
+        # until the deadline would add one per remaining round.
+        self.assertLessEqual(events[first:second].count("service:show"), 4, events[first:second])
+
+    def test_embedded_python_runs_on_python_3_6(self) -> None:
+        # RHEL 8's and SLES 15's python3 is 3.6. One str.isascii() (3.7) in
+        # service_endpoint failed every probe there, so every update, and its
+        # rollback, failed verification. CI runs a newer Python, so the
+        # programs are checked here: syntax as 3.6 parses it, and no call to
+        # an API added later. A partial list, of the likely ones.
+        programs = re.findall(r"<<'(\w+)'[^\n]*\n(.*?)\n\1\n", UPDATER, re.S)
+        programs = [body for _, body in programs]
+        programs += re.findall(r"python3 -I -c '\n(.*?)'", UPDATER, re.S)
+        # write_status, the fingerprint, service_endpoint; file_sha256, the
+        # health check, read_untrusted.
+        self.assertGreaterEqual(len(programs), 6)
+        newer = {"isascii", "removeprefix", "removesuffix", "fromisoformat", "isqrt",
+                 "is_relative_to", "with_stem", "readlink_relative"}
+        for body in programs:
+            tree = ast.parse(body, feature_version=(3, 6))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, newer, body)
+                if isinstance(node, ast.keyword):
+                    self.assertNotIn(node.arg, {"capture_output", "text"}, body)
 
     def test_a_process_that_has_not_exec_d_yet_is_waited_for(self) -> None:
         # Type=simple: `systemctl restart` returns once systemd has forked, and
