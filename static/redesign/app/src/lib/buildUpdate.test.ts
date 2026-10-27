@@ -128,6 +128,19 @@ describe('useNewBuildAvailable', () => {
     expect(view.result.current.available).toBe(true)
   })
 
+  it("uses the caller's latest function after a rerender", async () => {
+    const first = vi.fn(async () => 'old')
+    const second = vi.fn(async () => 'new')
+    const view = renderHook(
+      ({ fetchDeployed }) => useNewBuildAvailable({ ownBuildId: 'old', fetchDeployed, now: () => 1_000_000 }),
+      { initialProps: { fetchDeployed: first } })
+    view.rerender({ fetchDeployed: second })
+    await fire(STALE_BUNDLE_EVENT)
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledTimes(1)
+    expect(view.result.current.available).toBe(true)
+  })
+
   // An update that was rolled back: the server is serving this tab's build again.
   it('withdraws the notice when this build is served again', async () => {
     let answer = 'new'

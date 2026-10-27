@@ -9,7 +9,7 @@
 // the user when they differ. It never reloads by itself: that would lose what
 // they were doing (a video, a form), which is the ErrorBoundary's reasoning too.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 // Must match BUILD_ID_META_NAME in vite-build-id.ts.
 export const BUILD_ID_META_NAME = 'aurora-build'
@@ -85,11 +85,16 @@ interface Options {
 export function useNewBuildAvailable(options: Options = {}): { available: boolean; dismiss: () => void } {
   const own = useRef(options.ownBuildId !== undefined ? options.ownBuildId : readBuildId(document))
   // Held in refs so a caller passing fresh functions each render does not
-  // re-subscribe the listeners or restart the timer.
-  const fetchDeployed = useRef(options.fetchDeployed ?? fetchDeployedBuildId)
-  fetchDeployed.current = options.fetchDeployed ?? fetchDeployedBuildId
-  const now = useRef(options.now ?? Date.now)
-  now.current = options.now ?? Date.now
+  // re-subscribe the listeners or restart the timer. Updated once a render
+  // commits, so one React discards changes nothing.
+  const fetchDeployedFn = options.fetchDeployed ?? fetchDeployedBuildId
+  const nowFn = options.now ?? Date.now
+  const fetchDeployed = useRef(fetchDeployedFn)
+  const now = useRef(nowFn)
+  useLayoutEffect(() => {
+    fetchDeployed.current = fetchDeployedFn
+    now.current = nowFn
+  }, [fetchDeployedFn, nowFn])
   const [newer, setNewer] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState<string | null>(null)
   const lastCheck = useRef(Number.NEGATIVE_INFINITY)
