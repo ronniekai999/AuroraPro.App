@@ -291,9 +291,10 @@ cat ./revision >> "$out"
         self.stub("chown", "exit 0\n")
         self.stub("pgrep", "exit 1\n")
         self.stub("sleep", "exit 0\n")
-        # A wrapper, not a symlink: uutils coreutils (Ubuntu 26.04) is one
-        # multicall binary that picks the tool from argv[0], and "realsleep"
-        # names none, so a symlink fails at once instead of sleeping.
+        # A wrapper that runs sleep by its own path, not a symlink under
+        # another name: Ubuntu 26.04's uutils coreutils refuses to run when
+        # argv[0]'s name differs from its own file name, so such a link exits
+        # at once instead of sleeping.
         self.stub("realsleep", f'exec {shlex.quote(shutil.which("sleep"))} "$@"\n')
         self.env["PATH"] = str(self.bin)
         self.git("init", "--quiet", "--initial-branch=main", str(self.seed))
@@ -1094,8 +1095,9 @@ exec {shlex.quote(real_cp)} "$@"
         self.assertLess(elapsed, 25)
         tries = [line for line in self.events.read_text().splitlines()
                  if line.endswith("/api/health")]
-        # The new release's tries; the restored one answers at once.
-        self.assertLessEqual(len(tries) - 2, 3, tries)
+        # The new release's tries (the restored one's two answer at once): the
+        # 6 s deadline admits two 3 s answers, and a third means it ran late.
+        self.assertLessEqual(len(tries) - 2, 2, tries)
 
     def test_a_loopback_bind_is_decoded(self) -> None:
         self.flag("no-serving-record")
