@@ -50,8 +50,11 @@ import { createRequire } from 'node:module'
 // the 1440x900 frame its classes are resolved at, and the list of surfaces
 // itself, so text HeroSection gains is measured only once it is listed. Not
 // read at all: anything above the hero's root, rules in index.css that select
-// by element rather than class, what a component renders, SVG geometry, other
-// widths, and interaction states (hover, focus, active).
+// by element rather than class, what a component renders, an element built
+// elsewhere and rendered from a variable (`{extra}`), SVG geometry, other
+// widths, and interaction states (hover, focus, active). Not modelled: a box
+// that overflows a parent of fixed height in the flow (an `h-12` fill inside
+// an `h-0` div) spills over the text beside it unseen.
 
 const require = createRequire(import.meta.url)
 const APP_DIR = path.resolve(import.meta.dirname, '..')
@@ -152,7 +155,7 @@ const INTERACTION = new Set(['hover', 'focus', 'focus-visible', 'focus-within', 
 // 0.75.
 const INERT = new RegExp('^(?:' + [
   String.raw`-?(?:m[xytrblse]?|p[xytrblse]?|gap(?:-[xy])?|space-[xy]|w|h|size|min-w|min-h|max-w|max-h|inset(?:-[xy])?|top|right|bottom|left|start|end|basis|translate-[xy]|rotate|scale(?:-[xy])?)-.+`,
-  'block|inline|inline-block|flex|inline-flex|grid|inline-grid|contents|hidden|isolate|group|peer|antialiased|subpixel-antialiased',
+  'block|inline|inline-block|flex|inline-flex|grid|inline-grid|contents|hidden|isolate|isolation-auto|group|peer|antialiased|subpixel-antialiased',
   'flex-.+|grow(?:-.+)?|shrink(?:-.+)?|items-.+|justify-.+|content-.+|self-.+|place-.+',
   'overflow-.+|whitespace-.+|break-.+|truncate|line-clamp-.+|sr-only|not-sr-only',
   'italic|not-italic|uppercase|lowercase|capitalize|normal-case|tracking-.+|leading-.+|underline|no-underline',
@@ -194,10 +197,10 @@ const MODELS = { color: ['color'], size: ['font-size'], weight: ['font-weight'],
  *  interaction (`:hover`). A rule for a pseudo-element of the class carries its
  *  name (`before`), since one with content paints a box of its own. A class used
  *  as an ancestor (`.cls p`) or inside :not() counts too, failing closed. */
-const CSS_RULES = (() => {
+function cssRulesOf(text) {
   const map = new Map()
   const interaction = /^:(hover|focus|focus-visible|focus-within|active)$/
-  postcss.parse(css).walkRules(rule => {
+  postcss.parse(text).walkRules(rule => {
     for (const sel of rule.selectors) {
       selparser(root => root.walkClasses(c => {
         const nodes = c.parent.nodes
@@ -212,16 +215,16 @@ const CSS_RULES = (() => {
     }
   })
   return map
-})()
+}
+const CSS_RULES = cssRulesOf(css)
 
 /** Dies when index.css gives `cls` a declaration this audit does not model:
  *  one not SAFE and not covered by its classification (`allowed`). Of the
  *  rest, `opacity: 1` and `transform: none` change nothing, and an animation
- *  must neither hold its end state (`forwards`, `both`: the last keyframe is
- *  then the resting style) nor run for ever. A rule for its ::before or
+ *  must not leave the element on a keyframe at rest (`holdsKeyframe`). A rule for its ::before or
  *  ::after that sets content paints a box this audit does not model. */
-function checkCssRules(cls, token, allowed = []) {
-  for (const { rule, pseudo } of CSS_RULES.get(cls) ?? []) {
+function checkCssRules(cls, token, allowed = [], rules = CSS_RULES) {
+  for (const { rule, pseudo } of rules.get(cls) ?? []) {
     const refuse = (d, why = 'which this audit does not model') => {
       throw new Error(`audit: ${token}: index.css (${rule.selector}) sets ${d.prop}: ${d.value}, ${why} — the audit is out of date, not passing`)
     }
@@ -234,15 +237,40 @@ function checkCssRules(cls, token, allowed = []) {
         if (/^first-(line|letter)$/.test(pseudo) && !SAFE.test(prop)) refuse(d)
         continue
       }
-      if (prop === 'animation' || prop === 'animation-fill-mode' || prop === 'animation-iteration-count') {
-        if (/\b(forwards|both|infinite)\b/.test(v)) refuse(d, 'so it holds or never leaves a keyframe')
+      if (/^animation(?:-.+)?$/.test(prop)) {
+        if (holdsKeyframe(prop, v)) refuse(d, 'so it holds or never leaves a keyframe')
         continue
       }
       if (prop === 'text-shadow') { if (v !== 'none' && !darkShadow(v)) refuse(d, 'a light or coloured shadow this audit does not model'); continue }
-      if (allowed.includes(prop) || SAFE.test(prop) || (prop === 'opacity' && Number(v) === 1) || (prop === 'transform' && v === 'none')) continue
+      if (allowed.includes(prop) || SAFE.test(prop) || (prop === 'opacity' && Number(v) === 1) || (/^(transform|translate|scale|rotate)$/.test(prop) && v === 'none')) continue
       refuse(d)
     }
   }
+}
+
+/** Whether an animation declaration can leave an element on a keyframe at
+ *  rest, the state this audit measures: a fill that keeps one (`forwards`,
+ *  `both`), a pause, a timeline that follows the page rather than the clock,
+ *  or a run that does not end soon (more than three iterations, or a duration
+ *  or delay over 5 s; the hero's entrance runs 460 ms after at most 100 ms).
+ *  A var() is read through its :root token; one that is not exactly one such
+ *  token counts as holding. Timing functions are not read. */
+function holdsKeyframe(prop, value) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  if (!/^animation(?:-.+)?$/.test(p)) return false
+  let v = value.toLowerCase().replace(/var\((--[\w-]+)\)/g, (all, name) => {
+    const defs = [...css.matchAll(new RegExp(String.raw`\n\s*${name.replace(/-/g, '\\-')}\s*:\s*([^;]+);`, 'g'))]
+    return defs.length === 1 ? defs[0][1].trim().toLowerCase() : all
+  })
+  if (v.includes('var(')) return true
+  if (p === 'animation-timeline') return !/^auto(?:\s*,\s*auto)*$/.test(v)
+  if (/\b(?:forwards|both|infinite|paused)\b/.test(v)) return true
+  for (let prev; prev !== v;) { prev = v; v = v.replace(/[a-z][\w-]*\([^()]*\)/g, ' ') } // timing functions
+  const times = [...v.matchAll(/(?<![\w.-])(-?(?:\d+|\d*\.\d+))(m?s)(?![\w.])/g)].map(m => Number(m[1]) / (m[2] === 'ms' ? 1000 : 1))
+  if (/^animation(?:-duration|-delay)?$/.test(p) && times.some(t => t > 5)) return true
+  const counts = p === 'animation-iteration-count' ? v.split(/[\s,]+/).filter(Boolean).map(Number)
+    : p === 'animation' ? [...v.matchAll(/(?<![\w.-])(\d+|\d*\.\d+)(?![\w.%])/g)].map(m => Number(m[1])) : []
+  return counts.some(n => !(n <= 3))
 }
 
 /** Whether a resolved z value restacks anything: `z-auto` is the default. */
@@ -257,25 +285,49 @@ function declsOf(rule) {
   return (rule.nodes ?? []).filter(n => n.type === 'decl')
 }
 
+/** The colours this audit reads in a shadow: rgb()/rgba(), #hex and the three
+ *  keywords, in any case, as CSS reads them. */
+const COLOUR = () => /rgba?\([^)]*\)|#[0-9a-f]{3,8}\b|\b(?:white|black|transparent)\b/gi
+/** A shadow's length as CSS writes one: a number (`2`, `2.5`, `.5`, not `2.`)
+ *  with a unit (px, rem, em, ch, ex, vw, vh, vmin or vmax), or 0, or a calc(),
+ *  min(), max() or clamp() over lengths and numbers. Not var(): it can expand
+ *  to a colour. Not a percentage, which a shadow does not take. */
+const SHADOW_LENGTH = new RegExp(String.raw`^(?:-?(?:\d+|\d*\.\d+)(?:px|r?em|ch|ex|vw|vh|vmin|vmax)|-?(?:0+|0*\.0+)|(?:calc|min|max|clamp)\((?:[\d.\s+\-*/,()]|px|r?em|ch|ex|vw|vh|vmin|vmax|calc|min|max|clamp)*\))$`, 'i')
+
 /** Whether every colour in a shadow value is black at some alpha. A dark
- *  shadow cast UNDER this hero's light text only darkens its backdrop, which
- *  cannot lower its contrast; a light or coloured one can. Painted over the
- *  text it darkens the glyphs too, and that is measured (GLOWS); a text or drop
- *  shadow is cast under its own glyphs. */
+ *  shadow cast UNDER the text only darkens its backdrop. A light or coloured
+ *  one can lower the text's contrast a lot, so it is refused or measured. A
+ *  dark one usually raises it, but not always: under translucent light text
+ *  over a near-black backdrop it lowers it a little (45% white goes from 4.48
+ *  to 4.41 as the backdrop goes from 3% grey to black), and this audit does not
+ *  measure that, since it credits no shadow and models none under the glyphs.
+ *  Painted over the text it darkens the glyphs too, and that is measured
+ *  (GLOWS); a text or drop shadow is cast under its own glyphs. */
 function darkShadow(value) {
   // Layer by layer: a layer with no colour paints in currentColor (the text's
   // own, light here), and one in a colour this cannot read (`purple`, hsl())
   // may be light, so either makes the whole shadow not dark. Checked across the
   // value instead, `0 0 4px black, 0 0 10px` read as dark.
-  const COLOUR = /rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|\b(?:white|black|transparent)\b/g
   const layers = bgLayers(value)
   return layers.length > 0 && layers.every(layer => {
-    const cols = layer.match(COLOUR) ?? []
-    const rest = layer.replace(COLOUR, ' ').trim().split(/\s+/).filter(Boolean)
-    if (cols.length !== 1 || rest.some(t => !/^-?[\d.]+(?:px|rem|em)?$/.test(t))) return false
-    const c = cols[0]
-    return c === 'black' || c === 'transparent' || (c !== 'white' && parseColor(c).rgb.every(v => v === 0))
+    const cols = layer.match(COLOUR()) ?? []
+    const rest = splitTop(layer.replace(COLOUR(), ' '))
+    if (cols.length !== 1 || rest.some(t => !SHADOW_LENGTH.test(t))) return false
+    try { const c = parseColor(cols[0]); return c.a === 0 || c.rgb.every(v => v === 0) } catch { return false }
   })
+}
+
+/** `value` split on whitespace outside parentheses, so `calc(1px + 2px)` stays
+ *  one token. */
+function splitTop(value) {
+  const out = []
+  let depth = 0, cur = ''
+  for (const ch of value) {
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    if (/\s/.test(ch) && depth === 0) { if (cur) out.push(cur); cur = '' } else cur += ch
+  }
+  return cur ? [...out, cur] : out
 }
 
 // The hero, parsed. Elements are found in the tree rather than by scanning the
@@ -289,8 +341,13 @@ if (HERO_SF.parseDiagnostics?.length) {
 }
 const lineOf = pos => HERO_SF.getLineAndCharacterOfPosition(pos).line + 1
 const openingOf = el => (ts.isJsxElement(el) ? el.openingElement : el)
-const tagName = el => openingOf(el).tagName.getText(HERO_SF)
-const where = el => `<${tagName(el)}> at ${SRC_HERO}:${lineOf(openingOf(el).getStart(HERO_SF))}`
+// Node-relative, not tied to the hero's file: the known answers run them on a
+// probe component of their own.
+const tagName = el => openingOf(el).tagName.getText()
+const where = el => {
+  const sf = el.getSourceFile()
+  return `<${tagName(el)}> at ${sf.fileName}:${sf.getLineAndCharacterOfPosition(openingOf(el).getStart()).line + 1}`
+}
 
 /** The JSX element `anchor` names — the one whose opening tag holds it, or
  *  whose direct text or {expression} child does — and the anchor's position.
@@ -314,7 +371,7 @@ function attrsOf(el) {
   const out = new Map()
   for (const a of openingOf(el).attributes.properties) {
     if (ts.isJsxSpreadAttribute(a)) throw new Error(`audit: ${where(el)} spreads props; this audit cannot read them`)
-    out.set(a.name.getText(HERO_SF), a.initializer)
+    out.set(a.name.getText(), a.initializer)
   }
   return out
 }
@@ -424,16 +481,37 @@ function rootToken(name) {
   return all[0][1].trim()
 }
 
-/** rgb()/rgba()/#hex -> { rgb: [0..1 x3], a }. */
-function parseColor(str) {
-  const s = str.trim()
-  if (s.startsWith('#')) {
-    const h = s.slice(1)
-    return { rgb: hex(s), a: h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1 }
+/** rgb()/rgba() (channels and alpha as numbers or percentages), #hex (3, 4, 6
+ *  or 8 digits) or white, black, transparent, in any case -> { rgb: [0..1 x3],
+ *  a }. `ctx` names what the colour came from in the error. */
+function parseColor(str, ctx) {
+  const s = str.trim().toLowerCase()
+  const fail = () => { throw new Error(`audit: ${ctx ? `${ctx}: ` : ''}cannot parse the colour ${str}`) }
+  if (s.startsWith('#')) return hexColor(s, ctx)
+  const named = { white: [[1, 1, 1], 1], black: [[0, 0, 0], 1], transparent: [[0, 0, 0], 0] }[s]
+  if (named) return { rgb: named[0], a: named[1] }
+  // The two grammars CSS allows, and no mix of them: a browser drops an
+  // invalid colour, and the text then takes its parent's.
+  const inner = s.match(/^rgba?\(([^)]*)\)$/)?.[1].trim()
+  if (inner === undefined) fail()
+  let parts
+  if (inner.includes(',')) {
+    // legacy: three numbers or three percentages, then an alpha, by commas
+    parts = inner.split(',').map(p => p.trim())
+    if (parts.length < 3 || parts.length > 4 || new Set(parts.slice(0, 3).map(p => p.endsWith('%'))).size > 1) fail()
+  } else {
+    // modern: three channels by spaces, then `/` and an alpha
+    const [chan, alpha, extra] = inner.split('/').map(p => p.trim())
+    parts = chan.split(/\s+/).filter(Boolean)
+    if (parts.length !== 3 || extra !== undefined || alpha === '') fail()
+    if (alpha !== undefined) parts.push(alpha)
   }
-  const n = s.match(/^rgba?\(([^)]*)\)$/)?.[1].split(/[\s,/]+/).filter(Boolean).map(Number)
-  if (!n || n.length < 3 || n.some(Number.isNaN)) throw new Error(`audit: cannot parse the colour ${str}`)
-  return { rgb: n.slice(0, 3).map(v => v / 255), a: n[3] ?? 1 }
+  const num = (p, full) => {
+    const m = p.match(/^(-?(?:\d+|\d*\.\d+))(%?)$/)
+    if (!m) fail()
+    return Math.min(1, Math.max(0, (m[2] ? Number(m[1]) / 100 : Number(m[1]) / full)))
+  }
+  return { rgb: parts.slice(0, 3).map(p => num(p, 255)), a: parts[3] === undefined ? 1 : num(parts[3], 1) }
 }
 
 /** A colour utility's value (`white/75`, `purple-100/85`, `[#0a0a0f]/95`,
@@ -450,12 +528,12 @@ function twColor(value, token) {
   const mod = cut < 0 ? 1 : twOpacity(value.slice(cut + 1), token)
   let col
   const tok = name.match(/^\[color:var\((--[\w-]+)\)\]$/)
-  if (tok) col = parseColor(rootToken(tok[1]))
-  else if (/^\[(#[0-9a-fA-F]{3,8}|rgba?\([^\]]*\))\]$/.test(name)) col = parseColor(name.slice(1, -1).replace(/_/g, ' '))
+  if (tok) col = parseColor(rootToken(tok[1]), token)
+  else if (/^\[(#[0-9a-fA-F]{3,8}|rgba?\([^\]]*\))\]$/.test(name)) col = parseColor(name.slice(1, -1).replace(/_/g, ' '), token)
   else {
     const t = themeColor(name)
     if (!t || !/^#[0-9a-fA-F]{3,8}$/.test(t)) throw new Error(`audit: ${token} is not a colour this audit can resolve${t ? ` (${t})` : ''}`)
-    col = parseColor(t)
+    col = parseColor(t, token)
   }
   return { rgb: col.rgb, a: col.a * mod }
 }
@@ -564,6 +642,8 @@ function resting(classes) {
     if (!prop && isInert(util) && !CSS_RULES.has(util)) continue
     if (unplaced) throw new Error(`audit: ${token}: ${unplaced}`)
     if (important) throw new Error(`audit: ${token} is !important; this audit does not model it`)
+    if (!prop && !CSS_RULES.has(util) && /^(?:\[text-shadow:|drop-shadow-\[)/.test(util))
+      throw new Error(`audit: ${token} casts a shadow this audit cannot read as black (a light or coloured layer, one with no colour, or a colour or length it cannot read); it credits no shadow and does not model a light one`)
     if (!prop && !CSS_RULES.has(util)) throw new Error(`audit: ${token} is not a class this audit can place (not a colour, size, weight, opacity, fill or position, not INERT, not in index.css) — the audit is out of date, not passing`)
     checkCssRules(util, token, prop ? MODELS[prop.key] : [])
     if (!prop) continue
@@ -613,7 +693,7 @@ function stroke(anchor) {
     if (attrs.has(a)) throw new Error(`audit: ${where(el)} now carries ${a}; model it`)
   const s = attrs.get('stroke')
   if (!s || !ts.isStringLiteral(s)) throw new Error(`audit: ${where(el)} has no literal stroke`)
-  const c = parseColor(s.text)
+  const c = parseColor(s.text, where(el))
   const chain = ancestorsOf(el)
   checkAncestors(chain)
   return { file: `HeroSection.tsx:${lineOf(openingOf(el).getStart(HERO_SF))}`, color: c.rgb, alpha: c.a, px: 0, nonText: true,
@@ -693,13 +773,20 @@ const ratio = (a, b) => {
   const [l1, l2] = [Y(a), Y(b)].sort((x, y) => y - x)
   return (l1 + 0.05) / (l2 + 0.05)
 }
-/** #rgb, #rrggbb and #rrggbbaa (theme white is `#fff`). */
-function hex(h) {
+/** #rgb, #rgba, #rrggbb and #rrggbbaa (theme white is `#fff`) -> { rgb, a }. */
+function hexColor(h, ctx) {
   const s = h.replace('#', '')
-  if (s.length === 3) return [...s].map(c => parseInt(c + c, 16) / 255)
-  if (s.length === 6 || s.length === 8) return [0, 2, 4].map(i => parseInt(s.slice(i, i + 2), 16) / 255)
-  throw new Error(`audit: cannot parse hex colour #${s}`)
+  if (/^[0-9a-f]+$/i.test(s) && (s.length === 3 || s.length === 4)) {
+    const v = [...s].map(c => parseInt(c + c, 16) / 255)
+    return { rgb: v.slice(0, 3), a: v[3] ?? 1 }
+  }
+  if (/^[0-9a-f]+$/i.test(s) && (s.length === 6 || s.length === 8)) {
+    const v = [0, 2, 4, 6].slice(0, s.length / 2).map(i => parseInt(s.slice(i, i + 2), 16) / 255)
+    return { rgb: v.slice(0, 3), a: v[3] ?? 1 }
+  }
+  throw new Error(`audit: ${ctx ? `${ctx}: ` : ''}cannot parse the hex colour #${s}`)
 }
+const hex = h => hexColor(h).rgb
 const W = [1, 1, 1], K = [0, 0, 0]
 const INK = hex('#050505')
 
@@ -873,7 +960,7 @@ const GLOW = (() => {
   const ops = classBranches(el)[0].text.split(/\s+/).filter(t => /^opacity-/.test(t))
   if (ops.length !== 1) throw new Error(`audit: the hero glow ${where(el)} needs exactly one opacity-* class, not ${ops.length}`)
   const opacity = twOpacity(ops[0].slice(8), ops[0])
-  const c = parseColor(`rgba(${m[5]})`)
+  const c = parseColor(`rgba(${m[5]})`, where(el))
   return { rx: Number(m[1]) / 100, ry: Number(m[2]) / 100, cx: Number(m[3]) / 100, cy: Number(m[4]) / 100,
     rgb: c.rgb, a0: c.a * opacity, end: Number(m[6]) / 100 }
 })()
@@ -964,11 +1051,17 @@ const VEIL = (() => {
   PROBE.push(['relative drop-shadow-lg [text-shadow:0_1px_3px_rgba(0,0,0,0.5)] line-clamp-2 max-sm:sr-only aria-selected:px-4',
     r => r.position === 'relative' && Object.keys(r).length === 1])
   PROBE.push(['z-auto', r => r.z === 'auto' && !stacks(r.z)])
+  // Dark shadows in the forms CSS allows: a percentage alpha, #rgba, a
+  // capitalised keyword, ch and calc() lengths.
+  PROBE.push(['[text-shadow:0_1px_3px_rgb(0_0_0_/_55%)] drop-shadow-[0_0_2px_#0008] [text-shadow:0_0_2px_Black] [text-shadow:0_0_calc(1ch_+_1px)_black]',
+    r => Object.keys(r).length === 0])
   const DIES = ['text-white/97', 'text-white/70 text-white/50', 'md:!text-white', 'max-2xl:text-white/40',
     'aria-selected:text-white/40', 'disabled:text-white/20', 'visited:text-white/20', 'text-current',
     'text-[color:var(--no-such-token)]', '[color:rgba(255,255,255,0.3)]', '[opacity:0.3]', 'brightness-50',
     'mix-blend-screen', 'shadow-inner', 'no-such-class', '[text-shadow:0_0_20px_white]', 'drop-shadow-[0_0_20px_rgba(255,255,255,0.8)]',
-    'order-first', 'ring-2', '[text-shadow:0_0_4px_black,0_0_10px]', '[text-shadow:0_0_4px_black,0_0_12px_purple]']
+    'order-first', 'ring-2', '[text-shadow:0_0_4px_black,0_0_10px]', '[text-shadow:0_0_4px_black,0_0_12px_purple]',
+    '[text-shadow:0_0_2px_rgb(255_255_255_/_55%)]', 'drop-shadow-[0_0_2px_#fff8]', '[text-shadow:0_0_var(--x)_black]',
+    '[text-shadow:0_0_2_black]', '[text-shadow:0_0_2%_black]']
   const wrong = []
   for (const [classes, ok] of PROBE) {
     let r
@@ -1048,9 +1141,11 @@ const SURFACES = [
 // icons, the ring's arc) is read too, because it can reach measured text
 // without enclosing it, in two ways.
 //
-// Out of the flow: positioned absolute, fixed or sticky, offset, transformed,
-// pulled by a negative margin, or drawing a ::before or ::after box, through a
-// class, an inline style or its index.css rules. Such an element can sit over
+// Out of the flow: positioned absolute, fixed or sticky, offset (an inset,
+// physical or logical), transformed (a transform, or its own translate, scale
+// or rotate), moved along an offset path, pulled by a negative margin, or
+// drawing a ::before or ::after box, through a class, an inline style or its
+// index.css rules. Such an element can sit over
 // or under any text, so it dies unless it is the veil (modelled) or listed in
 // OVERLAP_OK, matched by its tag and exact classes, with the reason it covers
 // no measured text; an entry that no longer matches dies as unneeded. A review
@@ -1058,10 +1153,10 @@ const SURFACES = [
 // bg-purple-400/40`): the eyebrow measured 4.22:1 with it while the audit
 // passed unchanged.
 //
-// Past its own box, in the flow: a box-shadow glow. Those are measured (GLOWS
-// below). A dark shadow only darkens what it reaches, which cannot lower the
-// contrast of this hero's light text, so it passes; filters and Tailwind's
-// coloured shadow and ring utilities die.
+// Past its own box, in the flow: a box-shadow glow, from index.css's
+// box-shadow or its -webkit- alias. Those are measured (GLOWS below), a dark
+// one only where it is painted over the text; filters and Tailwind's shadow
+// and ring utilities die.
 //
 // So every class such an element can carry must be readable: its className is
 // a literal, or literals chosen by conditions and template slots, enumerated
@@ -1110,16 +1205,62 @@ function glowLayers(value, where_) {
   let v = value.trim()
   const tok = v.match(/^var\((--[\w-]+)\)$/)
   if (tok) v = rootToken(tok[1])
-  if (v === 'none') return []
+  if (v.toLowerCase() === 'none') return []
+  // Every layer is read and must be valid, inset ones included: a browser drops
+  // a declaration with one invalid layer, and an earlier declaration then
+  // paints (`boxShadowOf` takes the later, so an invalid one must not pass).
+  // Tokens are split outside parentheses, so `inset` is a word, not part of a
+  // name inside a function.
   return bgLayers(v).flatMap(layer => {
-    if (/\binset\b/.test(layer)) return []
-    const colour = layer.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/)
-    const lens = layer.replace(colour?.[0] ?? '', '').trim().split(/\s+/).filter(Boolean)
-      .map(l => (l === '0' ? 0 : Number(l.match(/^(-?[\d.]+)px$/)?.[1] ?? NaN)))
-    if (!colour || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN)) throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
-    const c = parseColor(colour[0])
-    return [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a, dark: darkShadow(layer) }]
+    const toks = splitTop(layer)
+    const insets = toks.flatMap((t, i) => (/^inset$/i.test(t) ? [i] : []))
+    const rest = toks.filter(t => !/^inset$/i.test(t))
+    const ci = rest.flatMap((t, i) => (/^(?:rgba?\(.*\)|#[0-9a-f]{3,8}|white|black|transparent)$/i.test(t) ? [i] : []))
+    const lens = rest.filter((_, i) => !ci.includes(i)).map(l => (/^-?(?:0+|0*\.0+)$/.test(l) ? 0 : Number(l.match(/^(-?(?:\d+|\d*\.\d+))px$/)?.[1] ?? NaN)))
+    if (insets.length > 1 || (insets.length && insets[0] !== 0 && insets[0] !== toks.length - 1) || ci.length !== 1 || (ci[0] !== 0 && ci[0] !== rest.length - 1)
+      || lens.length < 2 || lens.length > 4 || lens.some(Number.isNaN) || (lens[2] ?? 0) < 0)
+      throw new Error(`audit: ${where_}: cannot read the box-shadow layer "${layer}" — the audit is out of date, not passing`)
+    const c = parseColor(rest[ci[0]], `${where_}: the box-shadow layer "${layer}"`)
+    return insets.length ? [] : [{ x: lens[0], y: lens[1], blur: lens[2] ?? 0, spread: lens[3] ?? 0, rgb: c.rgb, a: c.a, dark: darkShadow(layer) }]
   })
+}
+
+/** The box-shadow a rule's declarations paint. -webkit-box-shadow is its
+ *  alias, so the later of the two wins, an !important one first. The one
+ *  chosen is read strictly (`glowLayers`), so an invalid one, which a browser
+ *  would drop for the one before it, dies rather than hiding it. */
+function boxShadowOf(decls) {
+  const shadows = decls.filter(d => /^(-webkit-)?box-shadow$/i.test(d.prop))
+  return shadows.filter(d => d.important).pop() ?? shadows.pop() ?? null
+}
+/** Whether a utility takes a neighbour out of the flow: positioned out of it,
+ *  offset (physically or logically), transformed, or pulled by a negative
+ *  margin. */
+function movesClass(util) {
+  return /^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|start|end|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
+    || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)
+}
+/** Whether a declaration on a neighbour takes it out of the flow, prefixed or
+ *  not: positioned other than relative or static, offset (physically or
+ *  logically), transformed (or translated, scaled or rotated by those
+ *  properties), moved along an offset path, or pulled by a negative margin. */
+function movesDecl(prop, v) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  return (p === 'position' && !/^(relative|static)$/i.test(v)) || /^(inset(-.+)?|top|right|bottom|left)$/.test(p)
+    || (/^(transform|translate|scale|rotate|offset|offset-path)$/.test(p) && v !== 'none') || (/^margin/.test(p) && v.includes('-'))
+}
+/** Whether a declaration on a neighbour paints past its box, or changes where
+ *  or how it paints, in a way this audit does not model, prefixed or not: a
+ *  filter, a z-index, a text stroke or shadow, an outline, a reflection, a
+ *  border image outset, a flex order, a float, a blend mode, a zoom (which
+ *  scales its glow), or an animation that holds a keyframe. */
+function refusedDecl(prop, v) {
+  const p = prop.toLowerCase().replace(/^-webkit-/, '')
+  return /^(filter|z-index|text-stroke.*|box-reflect)$/.test(p) || (/^(text-shadow|outline)$/.test(p) && !/^(none|0)$/.test(v))
+    || /^outline-(width|style|color|offset)$/.test(p)
+    || (p === 'order' && v !== '0') || (p === 'float' && v !== 'none') || (p === 'mix-blend-mode' && v !== 'normal')
+    || (p === 'border-image-outset' && !/^(?:0+[a-z]*\s*)+$/.test(v)) || (p === 'border-image' && (v.match(/\//g) ?? []).length >= 2)
+    || (p === 'zoom' && !/^(?:normal|1|100%|reset)$/i.test(v)) || holdsKeyframe(p, v)
 }
 
 /** What an element in a text layer that encloses no surface does beyond its
@@ -1135,7 +1276,7 @@ function neighbourOf(el) {
     if (!e || !ts.isObjectLiteralExpression(e)) throw new Error(`audit: ${where(el)} has an inline style this audit cannot read`)
     for (const p of e.properties) {
       const name = ts.isPropertyAssignment(p) ? p.name.getText(HERO_SF) : null
-      if (name && /^(position|inset|top|right|bottom|left|transform|translate|margin.*)$/.test(name)) res.out ??= `sets ${name} inline`
+      if (name && /^(position|inset.*|top|right|bottom|left|transform|translate|scale|rotate|offset.*|margin.*)$/.test(name)) res.out ??= `sets ${name} inline`
       else if (!name || !/^((min|max)?(width|height|Width|Height)|strokeDash(array|offset))$/.test(name))
         throw new Error(`audit: ${where(el)} sets ${name ?? 'a spread'} inline; this audit reads only sizes and stroke dashes there — model it`)
     }
@@ -1148,8 +1289,7 @@ function neighbourOf(el) {
     const { applies, unplaced } = variantState(variants)
     if (!applies) continue
     const fail = why => { throw new Error(`audit: ${where(el)}: ${t} ${why} — the audit is out of date, not passing`) }
-    if (/^(absolute|fixed|sticky)$/.test(util) || /^-?(top|right|bottom|left|inset(-[xy])?|translate-[xy]|rotate|scale(-[xy])?|skew-[xy])-/.test(util)
-      || /^-m[xytrblse]?-/.test(util) || /^m[xytrblse]?-\[-/.test(util)) { res.out ??= `carries ${t}`; continue }
+    if (movesClass(util)) { res.out ??= `carries ${t}`; continue }
     // Tailwind's shadows, filters and outlines paint past the box or change
     // it, and are not read here: a glow belongs in a project class whose
     // box-shadow GLOWS measures.
@@ -1168,15 +1308,12 @@ function neighbourOf(el) {
         if (/^(before|after)$/.test(pseudo) && decls.some(d => d.prop === 'content' && !/^(none|normal)$/.test(d.value.trim()))) res.out ??= `draws a ::${pseudo} box through ${rule.selector}`
         continue
       }
+      const shadow = boxShadowOf(decls)
+      if (shadow) res.glows.push(...glowLayers(shadow.value.trim(), `${where(el)} (${rule.selector})`))
       for (const d of decls) {
         const v = d.value.trim()
-        if ((d.prop === 'position' && !/^(relative|static)$/.test(v)) || /^(inset|top|right|bottom|left|translate)$/.test(d.prop)
-          || (d.prop === 'transform' && v !== 'none') || (/^margin/.test(d.prop) && v.includes('-'))) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
-        else if (d.prop === 'box-shadow') res.glows.push(...glowLayers(v, `${where(el)} (${rule.selector})`))
-        else if (/^(filter|z-index|-webkit-text-stroke.*)$/.test(d.prop) || (/^(text-shadow|outline)$/.test(d.prop) && !/^(none|0)$/.test(v))
-          || (/^outline-(width|style|color|offset)$/.test(d.prop))
-          || (/^animation(-fill-mode|-iteration-count)?$/.test(d.prop) && /\b(forwards|both|infinite)\b/.test(v)))
-          fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
+        if (movesDecl(d.prop, v)) res.out ??= `is ${d.prop}: ${v} through ${rule.selector}`
+        else if (refusedDecl(d.prop, v)) fail(`gets ${d.prop}: ${v} from ${rule.selector}, which this audit does not model`)
       }
     }
   }
@@ -1212,7 +1349,7 @@ const NEIGHBOURS = (() => {
 // nearest element enclosing both, and A's two children leading to them. Their
 // gap is read from the layout at its smallest: in a flex row, A's column gap
 // (or its row gap when it wraps, if smaller); in a block or a flex column, the
-// earlier child's bottom margin (plus a column gap), as if nothing rendered
+// earlier child's bottom margin (plus the row gap, in a flex column), as if nothing rendered
 // between them and the margins collapsed in the glow's favour. A negative
 // margin there, or a reversed flex direction, dies. Across that gap each
 // shadow layer falls off as a blurred edge does, alpha·½·erfc(d / (σ√2)) with
@@ -1221,19 +1358,28 @@ const NEIGHBOURS = (() => {
 // review measured glow-purple's straight edge a little fainter than this, at
 // every distance to 40px). A glow painted after the text lies over the glyphs
 // and their backdrop alike, and a dark one then counts too; one painted before
-// lies under them, where only a light one can lower contrast. After means
-// later in tree order between elements in the same paint layer, and otherwise
-// the one that is lifted: positioned, or making a stacking context (opacity
-// below 1, isolation, a filter or backdrop-filter, a transform, will-change,
-// a blend mode, containment), which CSS 2.1 Appendix E paints with the
-// positioned elements. The pill's backdrop-filter does that, and Chromium
-// paints its glow over the genre line beside it. Where the classes or rules
-// leave it open (a rule under some other selector, say), G is taken as lifted
-// and S as not, the side that is stricter here. Each surface is then measured
-// under every set of glows that can render together, and its worst figure is
-// asserted with the rest. Two elements cannot render together when one sits
-// under a condition the other sits under negated: the two branches of a `?:`,
-// or `{compact && …}` beside `{!compact && …}` (`guardsOf`).
+// lies under them, where only a light one is counted (see `darkShadow`). Which
+// side it paints on is read from CSS 2.1 Appendix E. An element is lifted when
+// it is positioned or makes a stacking context (opacity below 1, isolation, a
+// filter or backdrop-filter, a transform, will-change, a blend mode,
+// containment), and lifted elements paint after the rest, in tree order among
+// themselves: the pill's backdrop-filter lifts it, and Chromium paints its
+// glow over the genre line beside it. Between two elements that are not
+// lifted, G paints after S's text when G comes later in the tree and sits in
+// something painted all at once (a flex or grid item, or an inline-block, as
+// every glow here does); otherwise a later G may paint in the background phase,
+// under all of S's text. Where the classes or rules leave a side open (a rule
+// under another selector, a class under a variant this audit cannot place, a
+// later G that is not certainly painted all at once), both sides are measured
+// and the worse counts. Neither is the stricter in general: over is for white
+// text, but under can be for tinted text beside a glow lighter than it. Each
+// surface is then measured under every set of glows that can render together,
+// and its worst figure is asserted with the rest. Two elements cannot render
+// together when they sit in the two branches of one `?:`, or under conditions
+// that contradict each other, such as `{compact && …}` beside
+// `{!compact && …}` (`guardsOf`, `exclusive`). A glow and a surface that one
+// `.map` callback renders are read once, in the callback's own tree order;
+// how the items of different iterations sit against each other is not.
 const erfc = x => {
   // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7.
   const t = 1 / (1 + 0.3275911 * Math.abs(x))
@@ -1260,95 +1406,514 @@ function spacing(el, re) {
   }
   return px === Infinity ? 0 : px
 }
-// Classes and declarations that paint an element with the positioned ones.
-const LIFT_CLASS = new RegExp('^(?:' + [
-  'relative|absolute|fixed|sticky|isolate|transform(?:-gpu|-cpu)?',
-  'opacity-(?!100$).+|backdrop-.+|blur(?:-.+)?|brightness-.+|contrast-.+|grayscale(?:-.+)?|hue-rotate-.+|invert(?:-.+)?|saturate-.+|sepia(?:-.+)?|drop-shadow(?:-.+)?',
-  'mix-blend-(?!normal$).+|will-change-(?!auto$).+|contain-(?:paint|layout|strict|content)',
-  String.raw`-?(?:translate-[xy]|rotate|scale(?:-[xy])?|skew-[xy])-.+`,
-].join('|') + ')$')
-function liftDecl(d) {
-  const v = d.value.trim()
-  switch (d.prop) {
-    case 'position': return v !== 'static'
-    case 'opacity': return Number(v) < 1
-    case 'isolation': return v === 'isolate'
-    case 'will-change': return v !== 'auto'
-    case 'mix-blend-mode': return v !== 'normal'
-    case 'contain': return /paint|layout|strict|content/.test(v)
-    case 'z-index': return v !== 'auto'
-    case 'filter': case 'backdrop-filter': case '-webkit-backdrop-filter': case 'transform': case 'clip-path':
-    case 'mask': case 'mask-image': case '-webkit-mask-image': return v !== 'none'
-    default: return false
-  }
+// What paints an element with the positioned ones, by the property it sets, so
+// that a class setting that property back (`relative lg:static`,
+// `opacity-50 md:opacity-100`) is seen. A class or declaration reads as
+// { group, lifts }: lifts true or false where it was checked in Chromium 153
+// (an earlier block's shadow painted over or under later text), null where it
+// was not, or where engines disagree, or the value cannot be read, which leaves
+// the side open. Measured as not lifting there: `container-type`, `contain:
+// size`, `will-change: z-index`, `mask-border` (unsupported), a z-index on an
+// element that is not a flex item, and every property NON_LIFTING lists. A
+// property in neither list is left open too: a review found three that lift
+// (`backface-visibility: hidden`, its -webkit- form, `-webkit-mask-box-image`)
+// read as not lifting while the default was "not listed, not lifting".
+const LIFT_CLASSES = [
+  ['position', /^(?:relative|absolute|fixed|sticky|static)$/, u => u !== 'static'],
+  ['opacity', /^opacity-/, u => twOpacity(u.slice(8), u) < 1],
+  ['isolation', /^(?:isolate|isolation-auto)$/, u => u === 'isolate'],
+  ['transform', /^(?:transform(?:-gpu|-cpu|-none)?|-?(?:translate-[xy]|rotate|scale(?:-[xy])?|skew-[xy])-.+)$/, u => u !== 'transform-none'],
+  ['filter', /^(?:filter(?:-none)?|blur(?:-.+)?|brightness-.+|contrast-.+|grayscale(?:-.+)?|-?hue-rotate-.+|invert(?:-.+)?|saturate-.+|sepia(?:-.+)?|drop-shadow(?:-.+)?)$/, u => u !== 'filter-none'],
+  ['backdrop-filter', /^backdrop-/, u => u !== 'backdrop-filter-none'],
+  ['mix-blend-mode', /^mix-blend-/, u => u !== 'mix-blend-normal'],
+  ['will-change', /^will-change-/, u => willChangeLifts({ auto: 'auto', scroll: 'scroll-position', contents: 'contents', transform: 'transform' }[u.slice(12)] ?? u.slice(12).replace(/^\[(.*)\]$/, '$1').replace(/_/g, ' '))],
+  ['contain', /^contain-/, u => /^contain-(?:paint|layout|strict|content)$/.test(u)],
+]
+function liftClass(u) {
+  const g = LIFT_CLASSES.find(([, re]) => re.test(u))
+  return g ? { group: g[0], lifts: g[2](u) } : null
 }
-/** Whether an element paints with the positioned ones at rest. `strict` counts
- *  only what certainly applies, every className branch and only the class's own
- *  top-level rule; otherwise any branch and any rule counts. */
-function lifted(el, strict) {
-  const byRule = u => (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo
-    && (!strict || (rule.parent.type === 'root' && rule.selector === `.${u}`)) && declsOf(rule).some(liftDecl))
-  const lifts = s => s.split(/\s+/).filter(Boolean).map(splitVariants).filter(([v]) => variantState(v).applies)
-    .map(([, u]) => u.replace(/^!/, '')).some(u => LIFT_CLASS.test(u) || byRule(u))
-  const strs = classStrings(el)
-  return strict ? strs.every(lifts) : strs.some(lifts)
+/** What a will-change list says: a lift for the properties it was checked to
+ *  lift for, none for auto, scroll-position or contents alone, and null for
+ *  the rest (z-index was checked not to lift, but only on a static block). */
+function willChangeLifts(v) {
+  const names = v.toLowerCase().split(/[\s,]+/).filter(Boolean)
+  if (names.some(n => /^(?:opacity|transform|translate|filter|backdrop-filter)$/.test(n))) return true
+  return names.every(n => /^(?:auto|scroll-position|contents)$/.test(n)) ? false : null
+}
+// The -webkit- forms Chromium 153 supports and paints as their own property.
+// Any other prefixed form that would lift is left open: Chromium ignores it
+// (so it does not lift there), and another engine may not.
+const WEBKIT_ALIASES = /^-webkit-(?:opacity|transform|transform-style|perspective|filter|clip-path|mask|mask-image|mask-box-image|backface-visibility)$/
+// Properties measured in Chromium 153 as not lifting an element (78 checked,
+// with values that do something). An animation is here because one that
+// holds a keyframe or never ends dies before this is read (`checkCssRules`,
+// `refusedDecl`), and one that has ended leaves the element as it was.
+const NON_LIFTING = new RegExp('^(?:' + [
+  'color|background(?:-.+)?|(?:-webkit-)?box-shadow|text-shadow|font(?:-.+)?|text-(?:decoration|underline|transform|align|overflow|rendering|indent|wrap)(?:-.+)?',
+  'letter-spacing|word-spacing|line-height|white-space|word-break|overflow-wrap|hyphens|vertical-align|direction|writing-mode|image-rendering|quotes',
+  'display|visibility|overflow(?:-[xy])?|box-sizing|(?:min-|max-)?(?:width|height|block-size|inline-size)|aspect-ratio|contain-intrinsic-.+',
+  '(?:padding|margin|scroll-margin|scroll-padding|border|outline|inset)(?:-.+)?|top|right|bottom|left|gap|row-gap|column-gap',
+  'flex(?:-.+)?|grid(?:-.+)?|order|align-.+|justify-.+|place-.+|float|clear|object-.+|list-style(?:-.+)?|resize|content',
+  'animation(?:-.+)?|transition(?:-.+)?|cursor|pointer-events|user-select|touch-action|overscroll-behavior(?:-.+)?|appearance|caret-color|accent-color|color-scheme',
+  '-webkit-(?:line-clamp|box-orient|font-smoothing|tap-highlight-color|text-fill-color|appearance)|-moz-osx-font-smoothing|--.+',
+].join('|') + ')$')
+/** Whether a value for a lifting property can be valid, so its lift is
+ *  certain: every number carries a unit, except where the function it is in
+ *  (or, for scale and a mask image's slices, the property) takes plain
+ *  numbers. Chromium drops an
+ *  invalid value (`blur(10)`, `perspective: 100`), and the element then does
+ *  not lift, so a value this rejects leaves the side open. */
+function plausible(group, v) {
+  const PLAIN = /^(?:brightness|contrast|grayscale|invert|opacity|saturate|sepia|scale(?:x|y|z|3d)?|matrix(?:3d)?|rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|cubic-bezier|steps)$/
+  const stack = []
+  const text = v.replace(/url\([^)]*\)|"[^"]*"|'[^']*'|#[0-9a-f]+/gi, ' ')
+  for (const m of text.matchAll(/([a-z][\w-]*)\(|\)|(-?(?:\d+|\d*\.\d+))([a-z%]*)/gi)) {
+    if (m[1] !== undefined) stack.push(m[1].toLowerCase())
+    else if (m[0] === ')') { if (!stack.pop()) return false }
+    else if (!m[3] && Number(m[2]) !== 0 && !(stack.length ? PLAIN.test(stack[stack.length - 1]) : /^(?:scale|mask-box-image)$/.test(group))) return false
+  }
+  return stack.length === 0
+}
+function liftDecl(d) {
+  const prop = d.prop.toLowerCase(), v = d.value.trim().toLowerCase()
+  const group = prop.replace(/^-webkit-/, '').replace(/^mask-image$/, 'mask')
+  const unread = /var\(|^(?:inherit|initial|unset|revert(?:-layer)?)$/.test(v)
+  let lifts
+  switch (group) {
+    case 'position': lifts = /^(?:relative|absolute|fixed|sticky)$/.test(v) ? true : v === 'static' ? false : null; break
+    case 'opacity': { const m = v.match(/^(\d+|\d*\.\d+)(%?)$/); lifts = m ? Number(m[1]) / (m[2] ? 100 : 1) < 1 : null; break }
+    case 'isolation': lifts = v === 'isolate' ? true : v === 'auto' ? false : null; break
+    case 'will-change': lifts = unread ? null : willChangeLifts(v); break
+    case 'contain': {
+      const t = v.split(/\s+/)
+      const valid = (t.length === 1 && /^(?:none|strict|content)$/.test(t[0])) || (new Set(t).size === t.length && t.every(x => /^(?:size|inline-size|layout|style|paint)$/.test(x)) && !(t.includes('size') && t.includes('inline-size')))
+      lifts = unread || !valid ? null : t.some(x => /^(?:strict|content|layout|paint)$/.test(x)); break
+    }
+    case 'transform-style': lifts = v === 'preserve-3d' ? true : v === 'flat' ? false : null; break
+    case 'content-visibility': lifts = /^(?:auto|hidden)$/.test(v) ? true : v === 'visible' ? false : null; break
+    case 'mix-blend-mode': lifts = unread ? null : v !== 'normal'; break
+    case 'filter': case 'backdrop-filter': case 'transform': case 'translate': case 'scale': case 'rotate': case 'perspective':
+    case 'clip-path': case 'mask': case 'view-transition-name': lifts = v === 'none' ? false : !unread && plausible(group, v) ? true : null; break
+    case 'backface-visibility': lifts = v === 'hidden' ? true : v === 'visible' ? false : null; break
+    // Only the -webkit- form exists; Chromium drops the unprefixed one.
+    case 'mask-box-image': lifts = v === 'none' ? false : prop === '-webkit-mask-box-image' && !unread && plausible(group, v) ? true : null; break
+    case 'container-type': case 'z-index': case 'mask-border': case 'offset-path': lifts = /^(?:normal|auto|none)$/.test(v) ? false : null; break
+    default: return NON_LIFTING.test(prop) ? null : { group, lifts: null }
+  }
+  // A prefixed form that cannot lift where it is honoured (`none`) stays false.
+  if (prop.startsWith('-webkit-') && !WEBKIT_ALIASES.test(prop) && lifts !== false) lifts = null
+  return { group, lifts }
+}
+/** Whether class strings lift an element at rest: for certain in every string
+ *  (`strict`), or possibly in some. A property lifts it for certain when a
+ *  class that certainly applies lifts it, or that class's own top-level rule
+ *  does, and nothing else that may apply sets the property otherwise. A class
+ *  under a variant this audit cannot place, and a rule under another selector,
+ *  may apply; one of those lifting makes a lift possible. */
+function liftedClasses(strs, strict, rules = CSS_RULES) {
+  const one = s => {
+    const groups = new Map()
+    const add = (m, certain) => {
+      if (!m) return
+      const g = groups.get(m.group) ?? { sure: false, all: true, any: false }
+      g.sure ||= certain && m.lifts === true
+      g.all &&= m.lifts === true
+      g.any ||= m.lifts !== false
+      groups.set(m.group, g)
+    }
+    for (const t of s.split(/\s+/).filter(Boolean)) {
+      const [variants, raw] = splitVariants(t)
+      const st = variantState(variants)
+      if (!st.applies) continue
+      const u = raw.replace(/^!/, '')
+      add(liftClass(u), !st.unplaced)
+      for (const { rule, pseudo } of rules.get(u) ?? []) {
+        if (pseudo) continue
+        const own = !st.unplaced && rule.parent.type === 'root' && rule.selector === `.${u}`
+        for (const d of declsOf(rule)) add(liftDecl(d), own)
+      }
+    }
+    return [...groups.values()].some(g => (strict ? g.sure && g.all : g.any))
+  }
+  return strict ? strs.every(one) : strs.some(one)
+}
+const lifted = (el, strict) => liftedClasses(classStrings(el), strict)
+/** Which side of S's text G's glow can paint on, given each one's lift
+ *  ({ sure, possible }), whether G comes later in the tree, and whether G
+ *  certainly paints all at once. Every reading the lifts allow is taken. */
+function sidesFor(g, s, after, allAtOnce) {
+  const readings = l => (l.sure ? [true] : l.possible ? [false, true] : [false])
+  const sides = new Set()
+  for (const liftG of readings(g)) for (const liftS of readings(s)) {
+    if (liftG !== liftS) sides.add(liftG ? 'over' : 'under')
+    else if (!after) sides.add('under')
+    else { sides.add('over'); if (!liftG && !allAtOnce) sides.add('under') }
+  }
+  return sides
 }
 
-/** The conditions a node renders under, as normalised source text: the
- *  conjuncts left of each `&&` it sits right of, and the test of each `?:`
- *  branch it sits in (with its conjuncts on the true side, negated whole on the
- *  false side). */
-function guardsOf(node) {
-  const out = []
-  const norm = e => e.getText(HERO_SF).replace(/\s+/g, '')
-  const conj = e => {
-    while (ts.isParenthesizedExpression(e)) e = e.expression
-    return ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ? [...conj(e.left), ...conj(e.right)] : [norm(e)]
-  }
-  for (let n = node; n.parent; n = n.parent) {
-    const p = n.parent
-    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) out.push(...conj(p.left))
-    if (ts.isConditionalExpression(p) && p.whenTrue === n) out.push(norm(p.condition), ...conj(p.condition))
-    if (ts.isConditionalExpression(p) && p.whenFalse === n) out.push(`!(${norm(p.condition)})`)
-  }
-  return out
+const DISPLAY = /^(?:block|inline-block|inline|flex|inline-flex|table|inline-table|table-.+|flow-root|grid|inline-grid|contents|list-item|hidden)$/
+/** Whether an element's display is certainly one of `kinds` at rest: in every
+ *  className branch exactly one display class, or class whose index.css rules
+ *  set display, may apply, it certainly applies (no variant this audit cannot
+ *  place), and it is one of them. */
+function displays(el, kinds) {
+  return /^[a-z]/.test(tagName(el)) && classStrings(el).every(s => {
+    const set = s.split(/\s+/).filter(Boolean).map(splitVariants).map(([v, u]) => [variantState(v), u.replace(/^!/, '')]).filter(([st]) => st.applies)
+      .filter(([, u]) => DISPLAY.test(u) || (CSS_RULES.get(u) ?? []).some(({ rule, pseudo }) => !pseudo && declsOf(rule).some(d => d.prop.toLowerCase() === 'display')))
+    return set.length === 1 && !set[0][0].unplaced && kinds.test(set[0][1])
+  })
 }
-const negate = g => (/^!\(.*\)$/.test(g) ? g.slice(2, -1) : /^![\w.]+$/.test(g) ? g.slice(1) : `!(${g})`)
-/** Whether two nodes can never render together. */
-function exclusive(a, b) {
-  const ga = new Set(guardsOf(a).flatMap(g => [g, negate(negate(g))]))
-  return guardsOf(b).some(g => ga.has(negate(g)) || (/^![\w.]+$/.test(g) && ga.has(g.slice(1))) || ga.has(`!${g}`))
+/** Whether an element certainly paints all at once, at its place in the tree:
+ *  a flex or grid item, or an inline-block. A block's own shadow paints in
+ *  the background phase instead, before every text in its stacking context. */
+function atomic(el) {
+  let p = el.parent
+  while (p && !ts.isJsxElement(p)) p = p.parent
+  return (!!p && displays(p, /^(?:inline-)?(?:flex|grid)$/)) || displays(el, /^inline-(?:block|flex|grid)$/)
 }
+
+// Conditions are compared by what their names resolve to, through TypeScript's
+// checker over one file: compared as text, a callback's parameter named like a
+// prop (`.map(reason => reason && …)`) read as that prop, and the glow it
+// guarded was dropped. `guardModel` takes the file and the root its component
+// returns, so the known answers below can run it on a file of their own.
+const bare = e => {
+  while (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) e = e.expression
+  return e
+}
+/** The function or loop a node runs in, or its file. */
+function scopeOf(node) {
+  for (let p = node.parent; p; p = p.parent) if (ts.isFunctionLike(p) || ts.isIterationStatement(p, false) || ts.isSourceFile(p)) return p
+  return node
+}
+/** `exclusive(a, b)` for the file `sf`, whose component returns `root`. */
+function guardModel(sf, root) {
+  const host = {
+    getSourceFile: n => (n === sf.fileName ? sf : undefined), fileExists: n => n === sf.fileName, readFile: () => undefined,
+    getDefaultLibFileName: () => 'lib.d.ts', writeFile: () => {}, getCurrentDirectory: () => '', getCanonicalFileName: n => n,
+    useCaseSensitiveFileNames: () => true, getNewLine: () => '\n',
+  }
+  const checker = ts.createProgram({ rootNames: [sf.fileName], options: { noLib: true, noResolve: true, types: [], jsx: ts.JsxEmit.Preserve }, host }).getTypeChecker()
+  const component = scopeOf(root)
+  if (!ts.isFunctionLike(component)) throw new Error(`audit: ${sf.fileName}: the root is not returned straight from its component; this audit reads conditions against the component's own names`)
+  // Every name the file writes: an assignment's target (destructuring
+  // included), an increment, a delete, a for…in/of target. A write into a
+  // property counts against the whole object. A call that mutates one, or a
+  // write through another name for it (`const t = s; t.on = …`), is not
+  // seen.
+  const written = new Set()
+  const mark = t => {
+    t = bare(t)
+    if (ts.isObjectLiteralExpression(t)) return t.properties.forEach(p => mark(ts.isShorthandPropertyAssignment(p) ? p.name : ts.isPropertyAssignment(p) ? p.initializer : ts.isSpreadAssignment(p) ? p.expression : p))
+    if (ts.isArrayLiteralExpression(t)) return t.elements.forEach(e => mark(ts.isSpreadElement(e) ? e.expression : e))
+    if (ts.isBinaryExpression(t) && t.operatorToken.kind === ts.SyntaxKind.EqualsToken) return mark(t.left)
+    while (ts.isPropertyAccessExpression(t) || ts.isElementAccessExpression(t)) t = bare(t.expression)
+    if (!ts.isIdentifier(t)) return
+    const s = ts.isShorthandPropertyAssignment(t.parent) && t.parent.name === t ? checker.getShorthandAssignmentValueSymbol(t.parent) : checker.getSymbolAtLocation(t)
+    if (s) written.add(s)
+  }
+  const visit = n => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) mark(n.left)
+    else if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)) mark(n.operand)
+    else if (ts.isDeleteExpression(n)) mark(n.expression)
+    else if ((ts.isForInStatement(n) || ts.isForOfStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) mark(n.initializer)
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  /** Whether a name holds one value for a whole render: a parameter of the
+   *  component, or a name destructured from one, or a const declared in the
+   *  component or at the top of the file, outside any nested function or loop,
+   *  and never written. A callback's parameter is not one: it changes from call
+   *  to call. */
+  const stable = sym => {
+    if (!sym || sym.declarations?.length !== 1 || written.has(sym)) return false
+    const d = sym.declarations[0]
+    if (scopeOf(d) !== component && scopeOf(d) !== sf) return false
+    for (let n = d; n; n = n.parent) {
+      if (ts.isParameter(n)) return n.parent === component
+      if (ts.isVariableDeclarationList(n)) return (n.flags & ts.NodeFlags.Const) !== 0
+      if (!ts.isBindingElement(n) && !ts.isObjectBindingPattern(n) && !ts.isArrayBindingPattern(n) && !ts.isVariableDeclaration(n)) return false
+    }
+    return false
+  }
+  const ids = new Map()
+  /** A condition's operand as a key when it is one value for the whole render:
+   *  a stable name, or a property read from one (`personalization?.coldStart`).
+   *  Anything else, a call included, has no key. */
+  const atomKey = e => {
+    e = bare(e)
+    if (ts.isIdentifier(e)) {
+      const s = checker.getSymbolAtLocation(e)
+      if (!stable(s)) return null
+      if (!ids.has(s)) ids.set(s, ids.size)
+      return `#${ids.get(s)}`
+    }
+    if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
+      const base = atomKey(e.expression)
+      return base && `${base}${e.questionDotToken ? '?.' : '.'}${e.name.text}`
+    }
+    return null
+  }
+  /** What `e` being truthy (or falsy) says, as { key, truth } literals:
+   *  through `!`, into both sides of a truthy `&&` or a falsy `||`. An
+   *  either-or (a falsy `&&`, a truthy `||`), a comparison or a call says
+   *  nothing. */
+  const literals = (e, truth, out) => {
+    e = bare(e)
+    if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) return literals(e.operand, !truth, out)
+    if (ts.isBinaryExpression(e)) {
+      const op = e.operatorToken.kind
+      if ((op === ts.SyntaxKind.AmpersandAmpersandToken && truth) || (op === ts.SyntaxKind.BarBarToken && !truth)) { literals(e.left, truth, out); literals(e.right, truth, out) }
+      return out
+    }
+    const key = atomKey(e)
+    if (key) out.push({ key, truth })
+    return out
+  }
+  /** The literals a node renders under: the left of each `&&` it sits right
+   *  of, truthy, and the test of each `?:` branch it sits in, truthy or
+   *  falsy. */
+  const guardsOf = node => {
+    const out = []
+    for (let n = node; n.parent; n = n.parent) {
+      const p = n.parent
+      if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && p.right === n) literals(p.left, true, out)
+      if (ts.isConditionalExpression(p) && p.whenTrue === n) literals(p.condition, true, out)
+      if (ts.isConditionalExpression(p) && p.whenFalse === n) literals(p.condition, false, out)
+    }
+    return out
+  }
+  /** Whether two nodes can never render together: they sit in the two
+   *  branches of one `?:` that runs once per render (not in a callback or a
+   *  loop, where each run can take the other branch), or one renders only
+   *  when a stable value is truthy and the other only when it is falsy. */
+  return (a, b) => {
+    const up = []
+    for (let n = a; n; n = n.parent) up.push(n)
+    let c = b, cb = null
+    while (!up.includes(c)) { cb = c; c = c.parent }
+    const ca = up[up.indexOf(c) - 1]
+    if (ts.isConditionalExpression(c) && scopeOf(c) === component
+      && ((ca === c.whenTrue && cb === c.whenFalse) || (ca === c.whenFalse && cb === c.whenTrue))) return true
+    const ga = guardsOf(a)
+    return guardsOf(b).some(g => ga.some(h => h.key === g.key && h.truth !== g.truth))
+  }
+}
+const exclusive = guardModel(HERO_SF, HERO_ROOT)
+
+/** What a glow's shadow layers put on a surface `reach` found, side by side:
+ *  [{ side, layers }], each layer at its alpha across the gap. A dark layer
+ *  counts only over the text. */
+function sideLayers(glows, r) {
+  return r.sides.map(side => ({ side, layers: glows.filter(L => side === 'over' || !L.dark).map(L => {
+    const off = r.row ? L.x : L.y
+    const d = r.gap - L.spread + (r.after ? off : -off)
+    const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
+    return { rgb: L.rgb, a: Math.min(L.a, a) }
+  }).filter(L => L.a > 1e-4) })).filter(x => x.layers.length)
+}
+/** How a glow on the element `gEl` reaches a surface, given the surface's
+ *  elements (its own first, up to the hero's root), the layer both must sit in
+ *  and the file's `exclusive`: null when it cannot (another layer, or never
+ *  rendered with it), else { gap, row, after, sides }. */
+function reach(gEl, sChain, layer, exclusive) {
+  const gChain = [gEl]
+  for (let n = gEl.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
+  if (!gChain.includes(layer) || exclusive(gEl, sChain[0])) return null
+  const A = gChain.find(n => sChain.includes(n))
+  if (sChain.indexOf(A) < 1) throw new Error(`audit: ${where(gEl)} casts a glow from inside ${where(sChain[0])}, a measured surface; this audit does not model a glow among the text's own glyphs`)
+  const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
+  const after = cG.getStart() > cS.getStart()
+  const aTok = restingTokens(A)
+  if (aTok.some(u => /^flex-(row|col)-reverse$/.test(u))) throw new Error(`audit: ${where(A)} reverses its flex direction; this audit does not model which side its glows reach`)
+  const row = aTok.some(u => /^(inline-)?flex$/.test(u)) && !aTok.includes('flex-col')
+  let gap
+  const colGap = () => spacing(A, /^gap-(?!y-)(?:x-)?(.+)$/), rowGap = () => spacing(A, /^gap-(?!x-)(?:y-)?(.+)$/)
+  if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
+  else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
+  for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
+  // Each side's lift: certain or possible on any element up to A.
+  const lift = chain => {
+    const below = chain.slice(0, chain.indexOf(A))
+    return { sure: below.some(n => lifted(n, true)), possible: below.some(n => lifted(n, false)) }
+  }
+  return { gap, row, after, sides: [...sidesFor(lift(gChain), lift(sChain), after, gChain.slice(0, gChain.indexOf(A)).some(atomic))].sort() }
+}
+
+// Known answers for the paint-order, shadow and condition readers, and for
+// `reach`, which GLOWS calls with them, run every time. Two reviews undid
+// fixes here one line at a time and the hero's figures did not move, since
+// nothing in the hero today exercises them. Each of those undoings now fails
+// one of these. That is all they pin: an undoing not tried may still pass.
+{
+  const wrong = []
+  const expect = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`) }
+  // [classes, certainly lifted, possibly lifted]
+  for (const [cls, sure, possible] of [
+    ['relative', true, true], ['opacity-50', true, true], ['opacity-[1]', false, false], ['opacity-[100%]', false, false],
+    ['opacity-50 md:opacity-100', false, true], ['relative lg:static', false, true], ['aria-selected:isolate', false, true],
+    ['isolate md:isolation-auto', false, true], ['transform-none', false, false], ['will-change-transform', true, true],
+    ['will-change-scroll', false, false], ['will-change-[z-index]', false, true], ['hover:relative', false, false], ['max-sm:relative', false, false],
+  ]) expect(`lift of "${cls}"`, [liftedClasses([cls], true), liftedClasses([cls], false)], [sure, possible])
+  const decl = text => postcss.parse(`.x{${text}}`).first.nodes[0]
+  for (const [text, want] of [['container-type: inline-size', null], ['container-type: normal', false], ['will-change: opacity', true],
+    ['will-change: z-index', null], ['will-change: scroll-position', false], ['-webkit-transform: none', false], ['-webkit-filter: blur(1px)', true],
+    ['transform-style: preserve-3d', true], ['content-visibility: auto', true], ['opacity: var(--o)', null], ['opacity: 100%', false],
+    ['mix-blend-mode: multiply', true], ['mask-image: linear-gradient(black, black)', true], ['view-transition-name: x', true], ['-webkit-opacity: .5', true],
+    ['mask-border: url(x.png) 30', null], ['mask-border: linear-gradient(black, black)', null], ['offset-path: path("M0 0")', null], ['z-index: 1', null], ['-webkit-position: relative', null],
+    ['-webkit-backdrop-filter: blur(1px)', null], ['-webkit-backdrop-filter: none', false], ['will-change: backdrop-filter', true],
+    ['backface-visibility: hidden', true], ['-webkit-backface-visibility: hidden', true], ['-webkit-mask-box-image: linear-gradient(black,black) 1 / 1px / 40px', true],
+    ['mask-box-image: none', false], ['no-such-property: 1', null], ['color: red', undefined], ['--glow: 1', undefined], ['animation: x 1s', undefined],
+    ['contain: size', false], ['contain: paint', true], ['transform: var(--t)', null], ['mix-blend-mode: inherit', null], ['position: var(--p)', null],
+    ['position: static', false], ['opacity: 1.', null], ['opacity: 50%', true], ['contain: var(--c)', null], ['contain: paint paint', null],
+    ['perspective: 100', null], ['perspective: 100px', true], ['backdrop-filter: blur(10)', null], ['backdrop-filter: blur(10px)', true],
+    ['filter: drop-shadow(0 0 2px rgba(0, 0, 0, .5))', true], ['transform: rotate(45)', null], ['transform: matrix(1, 0, 0, 1, 0, 0)', true],
+    ['scale: 2', true], ['translate: 10', null], ['clip-path: path("M0 0 H100")', true], ['mask-box-image: url(x.png) 30', null]])
+    expect(`lift of "${text}"`, liftDecl(decl(text))?.lifts, want)
+  const N = { sure: false, possible: false }, MAY = { sure: false, possible: true }, Y = { sure: true, possible: true }
+  for (const [g, s, after, allAtOnce, want] of [
+    [Y, N, false, true, 'over'], [N, Y, true, true, 'under'], [Y, Y, false, true, 'under'], [Y, Y, true, false, 'over'],
+    [N, N, true, true, 'over'], [N, N, true, false, 'over under'], [N, N, false, false, 'under'],
+    [MAY, N, false, true, 'over under'], [N, MAY, true, true, 'over under'],
+  ]) expect(`sides of ${JSON.stringify({ g, s, after, allAtOnce })}`, [...sidesFor(g, s, after, allAtOnce)].sort().join(' '), want)
+  const rule = text => postcss.parse(`.x{${text}}`).first.nodes
+  expect('the -webkit- alias wins as the later shadow', boxShadowOf(rule('box-shadow: 0 0 1px red; -webkit-box-shadow: 0 0 2px black'))?.value, '0 0 2px black')
+  expect('an !important shadow wins over a later alias', boxShadowOf(rule('box-shadow: 0 0 1px red !important; -webkit-box-shadow: 0 0 2px black'))?.value, '0 0 1px red')
+  for (const [prop, v, moves, refused] of [['-webkit-transform', 'translateY(-40px)', true, false], ['translate', 'none', false, false], ['scale', '2', true, false],
+    ['inset-inline-start', '4px', true, false], ['-webkit-filter', 'drop-shadow(0 0 12px white)', false, true], ['order', '2', false, true],
+    ['float', 'left', false, true], ['mix-blend-mode', 'screen', false, true], ['mix-blend-mode', 'normal', false, false], ['color', 'red', false, false],
+    ['border-image-outset', '10px', false, true], ['border-image-outset', '0', false, false], ['border-image', 'url(x.png) 30 / 1 / 8px', false, true],
+    ['animation', 'pz 1s paused', false, true], ['animation-play-state', 'paused', false, true], ['animation', 'pz 1s', false, false],
+    ['-webkit-box-reflect', 'below', false, true], ['offset-path', 'path("M0 0")', true, false], ['zoom', '2', false, true], ['zoom', '1', false, false]])
+    expect(`neighbour ${prop}: ${v}`, [movesDecl(prop, v), refusedDecl(prop, v)], [moves, refused])
+  for (const [util, want] of [['start-4', true], ['-end-2', true], ['inset-x-2', true], ['absolute', true], ['-mt-2', true], ['mt-[-4px]', true], ['mt-2', false], ['relative', false]])
+    expect(`neighbour class ${util} moves it`, movesClass(util), want)
+  // Animations that leave an element on a keyframe at rest, and some that do not.
+  for (const [prop, v, want] of [['animation', 'x 1s paused', true], ['animation-timeline', 'scroll(root)', true], ['animation-timeline', 'auto', false],
+    ['animation', 'x 1s 1000000000', true], ['animation', 'x 1000000s', true], ['animation-delay', '10s', true], ['animation-iteration-count', '4', true],
+    ['animation-iteration-count', '2', false], ['animation', 'heroTextIn 460ms var(--ease-emphasized) backwards', false],
+    ['animation', 'x 1s cubic-bezier(0.4, 0, 0.2, 1) 2', false], ['animation-duration', 'var(--no-such-token)', true], ['animation-name', 'x', false]])
+    expect(`${prop}: ${v} holds a keyframe`, holdsKeyframe(prop, v), want)
+  // A surface's class whose rule holds a keyframe dies; one that ends passes.
+  const animRules = cssRulesOf('.hold { animation: x 1s paused } .ends { animation: x 460ms ease backwards }')
+  for (const [cls, want] of [['hold', 'dies'], ['ends', 'passes']]) {
+    let got = 'passes'
+    try { checkCssRules(cls, cls, [], animRules) } catch { got = 'dies' }
+    expect(`a surface class .${cls}`, got, want)
+  }
+  // GLOWS takes every side reach() gives, and a dark layer only over the text.
+  const L = (dark, a) => ({ x: 0, y: 0, blur: 8, spread: 0, rgb: dark ? [0, 0, 0] : [1, 1, 1], a, dark })
+  expect('the layers on both sides of an open glow', sideLayers([L(false, 0.5), L(true, 0.5)], { gap: 0, row: true, after: true, sides: ['over', 'under'] })
+    .map(x => [x.side, x.layers.length]), [['over', 2], ['under', 1]])
+  // A class's own top-level rule lifts for certain; a rule under another
+  // selector, or inside an at-rule, only possibly.
+  const probeRules = cssRulesOf('.p1 { position: relative } .x .p2 { position: relative } @media (min-width: 1px) { .p3 { isolation: isolate } }')
+  for (const [cls, sure, possible] of [['p1', true, true], ['p2', false, true], ['p3', false, true]])
+    expect(`lift of .${cls}`, [liftedClasses([cls], true, probeRules), liftedClasses([cls], false, probeRules)], [sure, possible])
+  // A glow layer is read strictly, inset ones and `inset` as a word included.
+  for (const [value, want] of [['0 0 2px White', [[1, 1, 1, 1]]], ['inset 0 0 4px black, 0 0 2px #fff8', [[1, 1, 1, 0x88 / 255]]], ['0 0 .5px black', [[0, 0, 0, 1]]],
+    ['inset inset 0 0 2px black', 'dies'], ['2px black', 'dies'], ['0 0 1px 1px 1px black', 'dies'],
+    ['0 0 -2px black', 'dies'], ['inset nonsense', 'dies'], ['0 0 var(--inset-r) white', 'dies'], ['0 red 0', 'dies'], ['0 black 0', 'dies'], ['0 0 2px inset black', 'dies'],
+    ['0 0 2.px black', 'dies'], ['0. 0 2px black', 'dies'], ['0 0 2px rgba(0,0,0,1.)', 'dies']]) {
+    let got
+    try { got = glowLayers(value, 'probe').map(L => [...L.rgb, L.a]) } catch { got = 'dies' }
+    expect(`the box-shadow ${value}`, got, want)
+  }
+  for (const [str, want] of [['rgb(0 0 0 / 55%)', [0, 0, 0, 0.55]], ['#0008', [0, 0, 0, 0x88 / 255]], ['Black', [0, 0, 0, 1]], ['rgba(255, 255, 255, .5)', [1, 1, 1, 0.5]],
+    ['rgba(255,255,255 / .9)', 'dies'], ['rgb(100% 0 0)', [1, 0, 0, 1]], ['rgb(100%, 0, 0)', 'dies'], ['rgb(0 0 0 / 1 / 1)', 'dies'], ['rgba(0,0,0,1,1)', 'dies']]) {
+    let got
+    try { const c = parseColor(str); got = [...c.rgb, c.a] } catch { got = 'dies' }
+    expect(`the colour ${str}`, got, want)
+  }
+  // Conditions, on a component of their own.
+  const probe = ts.createSourceFile('guard-probe.tsx', [
+    'const TOP = true',
+    'export function P({ a, b, c, d, items }) {',
+    '  const k = a && b',
+    '  let m = c',
+    '  if (TOP) { m = !c; d = 0 }',
+    '  return (',
+    '    <section>',
+    '      {a && <i id="a1" />}{!a && <i id="a2" />}{a ? <i id="t1" /> : <i id="t2" />}',
+    '      {items.map(a => a && <i id="s1" />)}{items.map(x => x ? <i id="c1" /> : <i id="c2" />)}',
+    '      {(!a || b) && <i id="o1" />}{(a || b) && <i id="o2" />}{!(a || b) && <i id="o3" />}',
+    '      {m && <i id="w1" />}{!m && <i id="w2" />}{d && <i id="d1" />}{!d && <i id="d2" />}',
+    '      {TOP && <i id="g1" />}{!TOP && <i id="g2" />}{k && <i id="k1" />}{!k && <i id="k2" />}',
+    '      {c?.x && <i id="q1" />}{!c?.x && <i id="q2" />}',
+    '      {items.map(x => { const y = x.ok; return <b>{y && <i id="y1" />}{!y && <i id="y2" />}</b> })}',
+    '    </section>',
+    '  )',
+    '}',
+  ].join('\n'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const byId = new Map()
+  let section
+  const find = n => {
+    if (ts.isJsxElement(n) && n.openingElement.tagName.getText(probe) === 'section') section = n
+    const id = ts.isJsxSelfClosingElement(n) && n.attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText(probe) === 'id')
+    if (id) byId.set(id.initializer.text, n)
+    ts.forEachChild(n, find)
+  }
+  find(probe)
+  const ex = guardModel(probe, section)
+  for (const [a, b, want] of [['a1', 'a2', true], ['t1', 't2', true], ['s1', 'a2', false], ['s1', 'a1', false], ['c1', 'c2', false],
+    ['o1', 'o2', false], ['o1', 'a1', false], ['o3', 'a1', true], ['w1', 'w2', false], ['d1', 'd2', false], ['g1', 'g2', true], ['k1', 'k2', true], ['q1', 'q2', true], ['y1', 'y2', false], ['a1', 't1', false], ['o3', 'a2', false]])
+    expect(`${a} and ${b} exclusive`, ex(byId.get(a), byId.get(b)), want)
+  // The pair logic GLOWS runs, end to end, on a layout of its own.
+  const layout = ts.createSourceFile('reach-probe.tsx', [
+    'export function Q({ on }) {',
+    '  return (',
+    '    <section>',
+    '      <div id="layer">',
+    '        <div className="flex gap-3">',
+    '          <span id="g-may" className="aria-selected:isolate">x</span>',
+    '          <span id="g-lift" className="relative">x</span>',
+    '          <span id="s-row">text</span>',
+    '          <span id="s-may" className="aria-selected:isolate">text</span>',
+    '          <span id="g-flat">x</span>',
+    '        </div>',
+    '        <p id="s-col" className="mb-2">text</p>',
+    '        <div id="g-block">x</div>',
+    '        <div id="g-inline" className="inline-block">x</div>',
+    '        <div className="aria-selected:flex"><div id="g-wrapped">x</div></div>',
+    '        {on && <span id="g-on">x</span>}',
+    '        {!on && <p id="s-off">text</p>}',
+    '      </div>',
+    '    </section>',
+    '  )',
+    '}',
+  ].join('\n'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const el = new Map()
+  let root
+  const collect = n => {
+    if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && openingOf(n).tagName.getText() === 'section') root = n
+    const id = (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && openingOf(n).attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText() === 'id')
+    if (id) el.set(id.initializer.text, n)
+    ts.forEachChild(n, collect)
+  }
+  collect(layout)
+  const exLayout = guardModel(layout, root)
+  const chain = id => { const out = [el.get(id)]; for (let n = el.get(id).parent; n; n = n.parent) if (ts.isJsxElement(n)) out.push(n); return out }
+  for (const [g, sId, want] of [
+    ['g-lift', 's-row', { gap: 12, row: true, after: false, sides: ['over'] }],
+    ['g-may', 's-row', { gap: 12, row: true, after: false, sides: ['over', 'under'] }],
+    ['g-flat', 's-row', { gap: 12, row: true, after: true, sides: ['over'] }],
+    ['g-block', 's-col', { gap: 8, row: false, after: true, sides: ['over', 'under'] }],
+    ['g-inline', 's-col', { gap: 8, row: false, after: true, sides: ['over'] }],
+    ['g-lift', 's-col', { gap: 0, row: false, after: false, sides: ['over'] }],
+    ['g-lift', 's-may', { gap: 12, row: true, after: false, sides: ['over', 'under'] }],
+    ['g-wrapped', 's-col', { gap: 8, row: false, after: true, sides: ['over', 'under'] }],
+    ['g-on', 's-off', null],
+  ]) expect(`how ${g} reaches ${sId}`, reach(el.get(g), chain(sId), el.get('layer'), exLayout), want)
+  if (wrong.length) throw new Error(`audit: the paint-order and condition readers' known answers changed — the audit is out of date, not passing:\n  ${wrong.join('\n  ')}`)
+}
+
 const GLOWS = []
 for (const s of SURFACES) {
-  const sChain = s.nodes
-  const layer = sChain[sChain.length - 2]
   for (const g of NEIGHBOURS) {
-    const gChain = [g.el]
-    for (let n = g.el.parent; n; n = n.parent) if (ts.isJsxElement(n)) gChain.push(n)
-    if (!gChain.includes(layer) || exclusive(g.el, sChain[0])) continue
-    const A = gChain.find(n => sChain.includes(n))
-    if (sChain.indexOf(A) < 1) throw new Error(`audit: ${where(g.el)} casts a glow from inside ${where(sChain[0])}, a measured surface; this audit does not model a glow among the text's own glyphs`)
-    const cG = gChain[gChain.indexOf(A) - 1], cS = sChain[sChain.indexOf(A) - 1]
-    const after = cG.getStart(HERO_SF) > cS.getStart(HERO_SF)
-    const aTok = restingTokens(A)
-    if (aTok.some(u => /^flex-(row|col)-reverse$/.test(u))) throw new Error(`audit: ${where(A)} reverses its flex direction; this audit does not model which side its glows reach`)
-    const row = aTok.some(u => /^(inline-)?flex$/.test(u)) && !aTok.includes('flex-col')
-    let gap
-    const colGap = () => spacing(A, /^gap-(?!y-)(?:x-)?(.+)$/), rowGap = () => spacing(A, /^gap-(?!x-)(?:y-)?(.+)$/)
-    if (row) gap = aTok.includes('flex-wrap') ? Math.min(colGap(), rowGap()) : colGap()
-    else gap = spacing(after ? cS : cG, /^m[by]?-(.+)$/) + (aTok.includes('flex-col') ? rowGap() : 0)
-    for (const c of [cG, cS]) spacing(c, /^-?m[xytrblse]?-(.+)$/) // dies on a negative margin
-    const liftG = gChain.slice(0, gChain.indexOf(A)).some(n => lifted(n, false))
-    const liftS = sChain.slice(0, sChain.indexOf(A)).some(n => lifted(n, true))
-    const side = liftG !== liftS ? (liftG ? 'over' : 'under') : (after ? 'over' : 'under')
-    const layers = g.glows.filter(L => side === 'over' || !L.dark).map(L => {
-      const off = row ? L.x : L.y
-      const d = gap - L.spread + (after ? off : -off)
-      const a = L.blur === 0 ? (d < 0 ? L.a : 0) : L.a * 0.5 * erfc(d / ((L.blur / 2) * Math.SQRT2))
-      return { rgb: L.rgb, a: Math.min(L.a, a) }
-    }).filter(L => L.a > 1e-4)
-    if (layers.length) GLOWS.push({ s, g: g.el, side, gap, layers })
+    const r = reach(g.el, s.nodes, s.nodes[s.nodes.length - 2], exclusive)
+    if (r) for (const { side, layers } of sideLayers(g.glows, r)) GLOWS.push({ s, g: g.el, side, gap: r.gap, layers })
   }
 }
 
@@ -1393,7 +1958,8 @@ console.log('-'.repeat(LABEL_W + 54))
     if (rs.length > 12) throw new Error(`audit: ${rs.length} glows reach ${s.what}; this audit enumerates their combinations and stops at 12 — model them another way`)
     for (let mask = 1; mask < 1 << rs.length; mask++) {
       const set = rs.filter((_, i) => mask & (1 << i))
-      if (set.some((a, i) => set.some((b, j) => j > i && exclusive(a.g, b.g)))) continue
+      // A glow measured on both sides is one glow: never both at once.
+      if (set.some((a, i) => set.some((b, j) => j > i && (a.g === b.g || exclusive(a.g, b.g))))) continue
       for (const frame of [K, W]) {
         let bg = backdropFor(s, frame)
         for (const r of set) if (r.side === 'under') for (const L of r.layers) bg = over(L.rgb, L.a, bg)
