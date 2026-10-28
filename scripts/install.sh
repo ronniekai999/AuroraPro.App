@@ -37,9 +37,13 @@
 #                                              /root/.git-credentials so
 #                                              the auto-updater can fetch
 #                                              without prompting
+#   AURORA_SKIP_DRAIN=1                     — on a re-run, restart without
+#                                              waiting for viewers to finish
 #
 # Re-running this script after editing source code rebuilds + restarts
-# the service while keeping the existing JWT secret and database.
+# the service while keeping the existing JWT secret and database. A re-run
+# first waits (up to 5 minutes) for anyone watching to finish, as the
+# auto-updater does.
 
 set -euo pipefail
 
@@ -65,6 +69,88 @@ ok()    { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$1"; exit 1; }
 step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
 
+# AURORA-DRAIN-BEGIN — identical in aurora-update.sh, install.sh and redeploy.sh;
+# scripts/drain-gate-test.sh checks the copies and how they behave. Duplicated
+# rather than sourced for the reason node_vite_verdict is.
+#
+# streams_busy is true while restarting aurora.service would interrupt a viewer.
+# It is the UNION of two signals, each covering the other's gap: the server's
+# snapshot of the sessions a client is still holding, playing or paused
+# (refreshed every 30 s; a paused viewer's encoder is reaped, so pgrep cannot
+# see them), and `pgrep -u aurora ffmpeg` (which sees a stream started since
+# the last snapshot). Either alone reintroduces one of the two bugs, and the
+# union still converges: an abandoned session's encoder exits after 75 s and it
+# leaves the 120 s viewer window.
+#
+# The server writes the snapshot to /var/cache/aurora because it cannot create
+# files in /var/lib/aurora (root:root 0755: the root-owned source mirror lives
+# there). The aurora user owns /var/cache/aurora, so the snapshot is read as
+# untrusted input. A missing, stale or unreadable snapshot is "unknown", never
+# "zero viewers": a crashed or wedged server's last snapshot looks exactly like
+# an idle one.
+STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
+_STREAM_STATE_MAX_AGE=90
+
+# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
+# or anything large, so a file the aurora user controls can neither point root
+# at another file nor hang it on a pipe nobody writes.
+read_untrusted() {
+    python3 -I -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        sys.exit(1)
+    data = stream.read(65537)
+if len(data) > 65536:
+    sys.exit(1)
+sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
+}
+
+# viewers_held — how many sessions the snapshot says a client is holding, or
+# nothing when that is unknown.
+viewers_held() {
+    local state
+    state="$(read_untrusted "$STREAM_STATE_FILE" 2>/dev/null)" || return 0
+    _vh_now=$(date +%s)
+    _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    # Each field on its own: a half-written or renamed-key snapshot is unknown,
+    # and so is a number bash would choke on. The aurora user can write this
+    # file: "0793" is an invalid octal to $(( )) and aborts a set -e caller,
+    # and a twenty-digit one overflows; 10# reads what is left as decimal.
+    case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
+    case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#_vh_ts}" -le 12 ] && [ "${#_vh_held}" -le 6 ] || return 0
+    [ $((_vh_now - 10#$_vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$((10#$_vh_held))"
+}
+
+streams_busy() {
+    _sb_held=$(viewers_held)
+    if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
+        return 0
+    fi
+    pgrep -u aurora ffmpeg >/dev/null 2>&1
+}
+
+# drain_wait MAX — wait in 10 s steps, up to MAX seconds, while streams_busy.
+# Sets DRAIN_WAITED. Fails when the streams are still going at MAX: a viewer who
+# fell asleep mid-film must not block a deploy forever, and the player rebuilds
+# its session at the same position when its keepalive is refused.
+drain_wait() {
+    DRAIN_WAITED=0
+    while streams_busy; do
+        [ "$DRAIN_WAITED" -lt "$1" ] || return 1
+        sleep 10
+        DRAIN_WAITED=$((DRAIN_WAITED + 10))
+    done
+}
+# AURORA-DRAIN-END
+
 cleanup_on_interrupt() {
     echo ""
     warn "Installation interrupted. Re-run this script to resume — partial state is safe."
@@ -75,7 +161,11 @@ cleanup_on_interrupt() {
     # world-readable, but still dead state worth removing.
     rm -f /etc/aurora/aurora.env.tmp /root/.git-credentials.tmp 2>/dev/null || true
 }
-trap cleanup_on_interrupt INT TERM
+# The exit is load-bearing: a handler that returns lets the script carry on
+# from where it was interrupted, which during the viewer drain meant going on
+# to install and restart under the viewers the operator had stopped it for.
+trap 'cleanup_on_interrupt; exit 130' INT
+trap 'cleanup_on_interrupt; exit 143' TERM
 
 # Yes/no helper with a default. Used for the FEW remaining yes/no
 # choices that genuinely matter (mostly: "the DB already exists, do
@@ -1100,16 +1190,17 @@ step "Step 4/5: Building Aurora and installing the service"
 cd "$PROJECT_DIR"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 FRONTEND_TMP="$(mktemp -d)"
+# The build now lives here until install_release_files, near the end; an abort
+# anywhere in between must not leave it in /tmp.
+# `|| true`: under set -e a failing cleanup would turn a finished install's
+# exit status into a failure.
+trap 'rm -rf -- "${FRONTEND_TMP:-/nonexistent}" || true; rm -f -- "$PROJECT_DIR/aurora" || true' EXIT
 build_frontend_bundle "$FRONTEND_TMP/v2"
 ok "Frontend bundle built"
 
 info "Building (version: $VERSION)..."
 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o aurora ./cmd/aurora
 ok "Build complete"
-
-install -m 755 aurora "$INSTALL_BIN"
-rm -f aurora
-ok "Binary installed at $INSTALL_BIN"
 
 # Layout directories.
 mkdir -p "$INSTALL_DIR/migrations"
@@ -1125,23 +1216,90 @@ install -d -m 0750 -o "$AURORA_USER" -g "$AURORA_GROUP" "$LOG_DIR"
 # aurora.service startable.
 install -d -m 0755 -o root -g root /var/lib/aurora
 
-# Migrations + static files (atomic swap for the bundle).
-cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
-stage_static_bundle "$FRONTEND_TMP/v2"
-# Audit C1 — clear any leftover static.old from a previously-crashed
-# run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
-# directory, so without this an interrupted earlier run would brick
-# every subsequent install attempt (the rename below would fail and
-# `set -e` would abort). BSD mv on macOS hides this — Linux exposes
-# it on the first re-run.
-rm -rf "$INSTALL_DIR/static.old"
-if [ -d "$INSTALL_DIR/static" ]; then
-    mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
-fi
-mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
-rm -rf "$INSTALL_DIR/static.old"
-rm -rf "$FRONTEND_TMP"
-ok "Static assets + migrations copied"
+# install_release_files — stage, then put live, the new binary, migrations and
+# frontend. The build sits in ./aurora and $FRONTEND_TMP until then.
+#
+# Called right before the restart, after the viewer drain and under the deploy
+# lock. On a re-run the service is still running the previous release until
+# then, and everything between the build and here can take minutes (the
+# media-directory prompt waits on the operator; an Ollama install pulls
+# gigabytes). Swapped early, as it used to be, the old backend served the new
+# frontend all that time, and anyone who started watching meanwhile was cut off
+# by a restart nothing had checked for. (Other files do change earlier: the
+# config, the units, the updater script. Not the release.) Staging happens here
+# too, under the lock: the auto-updater stages into the same static.new.
+install_release_files() {
+    stage_static_bundle "$FRONTEND_TMP/v2"
+    rm -rf "$FRONTEND_TMP"
+    install -m 755 aurora "$INSTALL_BIN.new"
+    mv -f "$INSTALL_BIN.new" "$INSTALL_BIN"
+    rm -f aurora
+    # `|| true`: with the terminal gone (a dropped SSH session; HUP is ignored
+    # here) every write fails with EIO, and under set -e a failed `ok` would
+    # stop the swap half done.
+    ok "Binary installed at $INSTALL_BIN" || true
+    cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
+    # Audit C1 — clear any leftover static.old from a previously-crashed
+    # run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
+    # directory, so without this an interrupted earlier run would brick
+    # every subsequent install attempt (the rename below would fail and
+    # `set -e` would abort). BSD mv on macOS hides this — Linux exposes
+    # it on the first re-run.
+    rm -rf "$INSTALL_DIR/static.old"
+    if [ -d "$INSTALL_DIR/static" ]; then
+        mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
+    fi
+    mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
+    rm -rf "$INSTALL_DIR/static.old"
+    chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR"
+    ok "Static assets + migrations installed" || true
+}
+
+# take_deploy_lock — the lock aurora-update.sh and redeploy.sh take
+# (DEPLOY_LOCK), held from the final chown and timer start until the restart's
+# health loop ends (30 tries at localhost:8484, a second apart, each up to 5 s:
+# about 30 s normally, up to ~3 min against a server that accepts and never
+# answers; on a custom-port or TLS install it always runs to its limit), then
+# released (release_deploy_lock).
+# Not for the whole install: a long-lived child (an installer that starts a
+# daemon) would inherit the descriptor and hold the lock after this script
+# exits, stopping every auto-update. Without it an updater tick could land
+# between staging and the swap, or swap its own release into the middle of
+# this one.
+DEPLOY_LOCK=/var/lock/aurora-deploy.lock
+# Longer than an updater run can take (its unit's TimeoutStartSec, 20 min, plus
+# TimeoutStopSec, 5 min).
+DEPLOY_LOCK_WAIT=1800
+take_deploy_lock() {
+    if ! command -v flock >/dev/null 2>&1 || ! exec 9>"$DEPLOY_LOCK"; then
+        warn "Could not take $DEPLOY_LOCK; an auto-update could run in the middle of this install. Stop it first: systemctl stop aurora-update.timer aurora-update.path"
+        return 0
+    fi
+    if ! flock -n 9; then
+        info "Another deploy (probably the auto-updater) is running; waiting up to $((DEPLOY_LOCK_WAIT / 60)) minutes for it to finish..."
+        flock -w "$DEPLOY_LOCK_WAIT" 9 || error "Another deploy still holds $DEPLOY_LOCK after $((DEPLOY_LOCK_WAIT / 60)) minutes. Let it finish (journalctl -u aurora-update -f) and re-run."
+    fi
+}
+release_deploy_lock() {
+    exec 9>&- || true
+}
+
+# On a re-run, wait for viewers first, as the auto-updater does. A re-run used
+# not to wait at all and restarted under anyone watching. Runs immediately
+# before install_release_files, so nothing that takes time sits between the
+# wait and the restart.
+drain_viewers_before_install() {
+    if [ "${AURORA_SKIP_DRAIN:-}" = 1 ] || ! systemctl is-active --quiet aurora 2>/dev/null; then
+        return 0
+    fi
+    streams_busy || return 0
+    info "Waiting up to 300s for active streams to finish before replacing Aurora (AURORA_SKIP_DRAIN=1 skips this)..."
+    if drain_wait 300; then
+        ok "Active streams finished after ${DRAIN_WAITED}s"
+    else
+        warn "Streams still active after 300s; continuing"
+    fi
+}
 
 # systemd unit. Patch the After= line to the actual detected PG
 # service name (it's "postgresql-17" on Fedora-17 etc).
@@ -1843,6 +2001,16 @@ if [ -n "$MEDIA_DIR" ]; then
     IFS="$OLD_IFS"
 fi
 
+# The deploy lock from here on. Before the chown, which an updater run deleting
+# its own static.old under it could fail; before the timer start, because a
+# timer whose OnBootSec is long past fires the moment it starts, and that first
+# run would otherwise take the lock and deploy in the middle of this install.
+# It now skips. The next run, five minutes later, still rebuilds and restarts
+# once more: this script does not write the updater's deployed ledger, so its
+# fingerprint check cannot recognise what was installed here (see
+# docs/updater-recovery.md).
+take_deploy_lock
+
 # Ownership of the installed tree.
 chown -R "$AURORA_USER:$AURORA_GROUP" "$INSTALL_DIR" "$CACHE_DIR"
 ok "File ownership set"
@@ -1856,7 +2024,7 @@ systemctl enable aurora &>/dev/null
 if [ -f /etc/systemd/system/aurora-update.timer ]; then
     systemctl enable aurora-update.timer &>/dev/null
     systemctl start aurora-update.timer &>/dev/null || warn "Failed to start aurora-update.timer — check 'systemctl status aurora-update.timer'"
-    ok "Auto-update timer armed (next check in ~2 min, every 5 min after)"
+    ok "Auto-update timer armed (checks every 5 min; its first run skips while this install holds the lock)"
 fi
 
 # Enable + start the .path watcher that backs the in-app "Update
@@ -1875,12 +2043,25 @@ if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
     fi
 fi
 
+drain_viewers_before_install
+# From staging to the restart, an interrupt would leave the tree half swapped
+# (no static/, or the new binary beside the old frontend), and the handler now
+# exits. The window is seconds (staging, the renames, the restart); the
+# handler comes back after it. Output in it must not be fatal either: see the
+# `|| true` in install_release_files, and PIPE, which a dead `| tee` raises on
+# the next write, would kill the script outright.
+trap '' INT TERM HUP PIPE
+install_release_files
+
 # Restart (handles re-runs cleanly) — falls back to start.
 if systemctl is-active aurora &>/dev/null; then
     systemctl restart aurora
 else
     systemctl start aurora
 fi
+trap 'cleanup_on_interrupt; exit 130' INT
+trap 'cleanup_on_interrupt; exit 143' TERM
+trap - HUP PIPE
 sleep 2
 
 # Health-check loop with crash detection. Critical for production
@@ -1925,12 +2106,15 @@ for _ in $(seq 1 30); do
         SERVICE_FAILED=true
         break
     fi
-    if curl -sf http://localhost:8484/api/health &>/dev/null; then
+    # --max-time: this loop runs under the deploy lock, and a server that
+    # accepts connections and never answers must not hold it indefinitely.
+    if curl -sf --max-time 5 http://localhost:8484/api/health &>/dev/null; then
         HEALTHY=true
         break
     fi
     sleep 1
 done
+release_deploy_lock
 
 if $SERVICE_FAILED; then
     echo ""

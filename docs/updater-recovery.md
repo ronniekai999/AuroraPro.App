@@ -35,6 +35,17 @@ failure with the fixed updater.
 
 ## One-time bootstrap for an already-stalled older installation
 
+**Installs on a non-default port, or where Aurora terminates TLS itself, need
+this once.** The first update to this release is carried out by the updater
+already on the box, which checks only `http://localhost:8484` and replaces
+itself only after that check passes. On those installs it never passes, so every
+update rolls back (as it always has there) and the fixed updater never arrives
+on its own. Install it with the recipe below. Its last step will report that
+automatic retry is paused, because the old updater already tried this revision
+and rolled it back; run `sudo /usr/local/bin/aurora-update --retry` instead of
+the final `systemctl start`. That run verifies the process where it actually
+listens.
+
 Merging this fix alone cannot repair a missing npm installation or replace an
 already-installed old workhorse that exits before installing anything. First
 repair Node/npm. Then install the fixed workhorse from a trusted, reviewed
@@ -96,7 +107,9 @@ sudo journalctl -u aurora-update.service -n 80 --no-pager
 ```
 
 The final service start rebuilds and deploys, including Aurora's existing
-viewer-drain and restart behavior. Schedule it for an acceptable interruption
+viewer-drain and restart behavior. (The first deploy of this release drains on
+`pgrep ffmpeg` alone: the server still running wrote its viewer snapshot where
+it could not be created. From the next deploy on, the snapshot is read too.) Schedule it for an acceptable interruption
 window. `origin/<branch>` in the bootstrap recipe is the already-fetched local
 tracking ref, not a new remote freshness check.
 
@@ -106,12 +119,19 @@ The root updater owns `/var/lib/aurora-updater` (mode 0700), separate from the
 application-owned UI status and installation directories:
 
 - `deployed` holds the last successful target SHA plus an artifact fingerprint.
-  It is written only after restart, the health check, and updater refresh succeed.
+  It is written only after restart, verification (below), and updater refresh
+  succeed.
 - `pending` records installation intent after both builds pass and before the
   first live-file mutation. A failure, crash, or rollback during installation
-  leaves it present. It is cleared only after health, updater refresh, and
+  leaves it present. It is cleared only after verification, updater refresh, and
   rollback snapshot retirement succeed.
-- `rollback/` holds the prior binary and static tree as a single generation.
+- `build/` is an export of the target commit (`git archive`), where both the
+  frontend and the binary are built. It is removed when the run ends. Nothing is
+  built from the checkout itself, so untracked or ignored files there (a stray
+  `.go` file, a leftover `static/v2`) can never reach an installed artifact, and
+  a target without the SPA source fails instead of reusing an older bundle.
+- `rollback/` holds the prior binary, static tree and migration files as a
+  single generation.
   Both are copied into a private staging directory before one rename publishes
   the generation. Retries and newer targets preserve it intact while an install
   is pending. After health succeeds, one rename detaches the whole generation
@@ -119,6 +139,84 @@ application-owned UI status and installation directories:
   old component active alongside a new component; the next install captures
   the healthy live pair together. Abandoned staging and retired directories
   are cleaned under the shared lock before preparing another snapshot.
+
+## What a deploy has to prove
+
+After the restart, the updater accepts the new release only when all of these
+hold, and hold again at least ten seconds later. The deadline is 70 seconds; it
+is checked after each failed probe, and a probe makes two requests of up to five
+seconds each, so a verification that fails takes at most about 100 seconds (a
+rollback's own verification as long again). The
+process is the main pid right after the restart; if the main pid changes at any
+point (a crash and `Restart=on-failure`), verification fails at once rather than
+giving the next incarnation a chance. Anything else is retried until the
+deadline: a process that has not exec'd yet (`Type=simple` reports the unit
+started once systemd has forked), one still running its migrations, one slow
+answer:
+
+- That process is running exactly the binary just built: `/proc/<pid>/exe`
+  hashes to it. A drop-in `ExecStart` pointing at some other file never does,
+  and fails at the deadline.
+- `GET /api/health` answers `status: "ok"` with `db_connected: true`. The route
+  answers 200 `"degraded"` with the database down; that no longer passes.
+- `GET /v2/` is byte-identical to the `index.html` just installed, so the
+  server is serving the new frontend and not some other static directory.
+
+The port is always one that process listens on, read from `/proc/<pid>/fd` and
+its TCP tables, so the answer comes from it and not from whatever else might be
+on 8484. How to speak to it comes from `/var/cache/aurora/serving.json`, which the
+server writes once it has run its migrations and bound its listener (its pid,
+the bound address, and whether it terminates TLS itself, for which name), when
+the record names that pid and one of its ports. Otherwise the scheme follows the
+`TLS_*` settings in `aurora.env`, and the port is `AURORA_PORT`, else the
+process's only listening port, else 8484. A port or TLS set only in the config
+file is therefore covered by the record, and a port alone even without it. A
+TLS listener is probed with certificate checks off (the certificate names the
+public domain, not loopback), and every probe bypasses any proxy `aurora.env`
+sets.
+
+`/var/lib/aurora` is `root:root 0755` on purpose (the root-owned source mirror
+lives there), so the server cannot write files in it. That is why the record,
+and the viewer-drain snapshot `stream-state.json`, now live in
+`/var/cache/aurora`. The drain snapshot used to be written to `/var/lib/aurora`,
+failed silently, and left the drain on its `pgrep ffmpeg` fallback on standard
+installs, so paused viewers were restarted on. The aurora user can write
+`/var/cache/aurora`, so root reads both files without following symlinks or
+blocking on a FIFO, and only small regular files.
+
+Any failure once installation has begun, including a failed `systemctl restart`,
+a failed copy, a failed verification, an unexpected abort, `SIGTERM` from the
+unit's `TimeoutStartSec`, Ctrl-C, or a dropped SSH session, restores the
+rollback generation and verifies the restored service the same way (except
+while the updater's own unit is going down; see below). When the failure came before the
+restart and the running process already runs the restored binary, it is not
+restarted. Restored static files get a fresh mtime: the server answers
+conditional requests from Last-Modified alone, so a browser that loaded the
+failed release's `index.html` would otherwise keep it, pointing at deleted
+chunks. The status message names the check that failed, and whether the
+restored release verified. Only `SIGKILL` (or power loss) can still leave a
+half-installed tree; the `pending` record then blocks automatic retries. When
+the updater's own unit is going down (`systemctl stop` or `restart
+aurora-update`, or its start timeout), the files are restored but aurora's
+restart onto them is queued rather than waited for (under a stop, the updater
+unit being ordered after aurora, a blocking restart would wait on its own stop;
+after a start timeout it would not, but the run is ending anyway), and the
+status says the restored release was not verified: check `systemctl status
+aurora`. During a shutdown the queue is refused and the status says so. Shortly
+after, the next run's "an earlier install did not finish" status replaces this
+one; `update.log` keeps both.
+
+The viewer drain and any Ollama model pull now run before the first live file
+changes. They used to run after the swap, so for up to five minutes the old
+backend served the new frontend.
+
+Browser tabs left open across a deploy run the build they loaded, and the
+previous build's chunks are deleted. The SPA compares the build id it was loaded
+with (`<meta name="aurora-build">`, a hash of the bundle, `public/` and the page)
+with the one `/v2/` serves, on focus, on becoming visible, every five minutes,
+and at once when a chunk fails to load, and shows a **Reload** notice when they
+differ; the notice goes away again if this tab's build is served once more (a
+rolled-back update). It never reloads by itself.
 
 A failed frontend/dependency/Go build has not started installation, so the
 same revision is retried normally. A failed or interrupted **installation** is
@@ -150,12 +248,35 @@ these artifacts; it is not the old constant-time HEAD comparison. Symlinks and
 other non-regular artifacts are rejected rather than followed. Custom layouts
 using them need deliberate integration before adopting this updater.
 
-This is not a transactional deployment redesign. The existing install order,
-HTTP health check, stream drain, and binary/static rollback remain; database
-migrations are **not** rolled back. The HTTP check does not independently attest
-the running binary's Git SHA. `old_sha` in the UI status remains the source
-checkout at the start, not a claimed previous running revision. The ledger is a
-record of successful deployment, not continuous service-health monitoring.
+This is not a transactional deployment redesign. Database migrations are **not**
+rolled back; only the migration files are, so a restored binary does not apply
+the failed release's migrations at its next start (`db.RunMigrations` ignores
+applied versions that have no file). A rollback generation kept from an attempt
+by an older updater has no migration snapshot, and leaves the new files in
+place. Verification attests the running binary by content, not by Git SHA, and
+runs only after a deploy: idle ticks check the installed files, not the running
+process. A binary that crashes more than ten seconds after its first good answer
+passes. A migration that runs longer than the verification window can never
+deploy (it always could not; the window was 30 seconds). A rollback to a binary
+that writes no serving record is verified with the `aurora.env` TLS settings. `old_sha` in the UI status remains the source checkout at the start, not
+a claimed previous running revision. The ledger is a record of successful
+deployment, not continuous service-health monitoring. A slow box whose builds,
+viewer drain (up to five minutes) and two verifications exceed the unit's
+`TimeoutStartSec` is stopped by systemd; mid-install that triggers the rollback
+above, which ignores TERM, INT and HUP until it is done. The unit now allows 20
+minutes, and gives a rollback 5 minutes (`TimeoutStopSec`) before SIGKILL; a
+box keeps its old unit (10 minutes, and the 90-second default) until
+`install.sh` or `redeploy.sh` reinstalls the units. `install.sh` and `redeploy.sh` still use their own
+`localhost:8484` health checks, but now share the updater's viewer drain: a
+re-run of `install.sh` (`AURORA_SKIP_DRAIN=1` skips it) and `redeploy.sh`
+(`--no-drain`) wait up to five minutes for active streams before replacing any
+live file, when they are going to restart (`redeploy.sh --no-restart` swaps the
+files at once and leaves the restart to you). Neither waited before; both
+restarted under anyone watching. `install.sh` now also replaces its live files
+only at the end, immediately after that wait and before the restart: it used to
+swap them early, then spend minutes on prompts and Ollama with the new frontend
+served by the old backend. `scripts/drain-gate-test.sh` keeps the three copies
+identical and checks them.
 
 Run the network-free regression suite on Linux:
 
@@ -163,10 +284,14 @@ Run the network-free regression suite on Linux:
 bash -n scripts/aurora-update.sh
 python3 scripts/aurora-update-test.py -v
 sudo python3 scripts/aurora-update-test.py -v
+bash scripts/drain-gate-test.sh
 ```
 
 The suite uses real temporary Git repositories, file operations, and locks with
-stubbed build/service/health commands. It includes process kills during snapshot
+stubbed build/service/health commands. The stubbed service keeps a main pid and
+an executable per pid, and the stubbed curl answers only where that process
+listens, so verification is tested against what runs rather than against a
+restart count. It includes process kills during snapshot
 preparation and retirement, plus a newer failed deployment that must restore a
 matching binary/frontend pair. These checks do not model filesystem durability
 after power loss or exhaustively cover storage failures. It validates updater

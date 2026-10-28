@@ -44,9 +44,17 @@ import (
 // session itself lingers a little longer in case the user comes back.
 const viewerHeldWindow = 120 * time.Second
 
-// DefaultStreamStateFile is where the drain state is published. Matches the
-// state dir already granted in aurora.service's ReadWritePaths.
-const DefaultStreamStateFile = "/var/lib/aurora/stream-state.json"
+// DefaultStreamStateFile is where the drain state is published.
+//
+// It used to be /var/lib/aurora/stream-state.json, which this process (the
+// aurora user) cannot create: install.sh makes /var/lib/aurora root:root 0755
+// because the root-owned source mirror lives there, and ReadWritePaths only
+// lifts the read-only mount. The write failed at Debug on every tick, so on a
+// standard install the updater's drain only ever had its ffmpeg heuristic, and
+// restarted under paused viewers, the bug this file exists to fix.
+// /var/cache/aurora is aurora's own and is in ReadWritePaths on every unit
+// install.sh has written. scripts/aurora-update.sh reads the same path.
+const DefaultStreamStateFile = "/var/cache/aurora/stream-state.json"
 
 // StreamState is the on-disk shape consumed by scripts/aurora-update.sh.
 type StreamState struct {
@@ -124,7 +132,7 @@ func (tm *TranscodeManager) DrainState() StreamState {
 // reports whether publishing was actually enabled. Passing "" disables it.
 //
 // A missing parent directory disables publishing rather than failing: a source
-// checkout or dev box has no /var/lib/aurora, and we would otherwise log a
+// checkout or dev box has no /var/cache/aurora, and we would otherwise log a
 // failed write every 30s forever. Returning the decision lets the caller say
 // so once at startup.
 //
@@ -146,9 +154,11 @@ func (tm *TranscodeManager) SetStreamStateFile(path string) bool {
 
 // publishDrainState writes the current snapshot to the configured file.
 // Best-effort: a failure to publish must never disturb streaming, so errors
-// log at Debug and are otherwise swallowed. The consumer's staleness check is
-// what makes that safe — an un-refreshed file is treated as unknown, not as
-// "zero viewers".
+// are otherwise swallowed. The consumer's staleness check is what makes that
+// safe — an un-refreshed file is treated as unknown, not as "zero viewers".
+// The first write failure logs at Warn, the rest at Debug: logged only at
+// Debug, a directory this process could not write hid for months that the
+// drain had been running on its ffmpeg fallback alone.
 //
 // Written via temp file + rename so a reader never observes a half-written
 // snapshot and parses it as zero sessions. publishMu serializes publishers so
@@ -180,15 +190,25 @@ func (tm *TranscodeManager) publishDrainState() {
 	// tooling (a monitoring exporter) from needing privileges.
 	tmp := path + ".tmp"
 	if werr := os.WriteFile(tmp, blob, 0o644); werr != nil {
-		// Most likely cause is the state dir not existing on an install that
-		// predates it — Debug, because this is entirely optional telemetry.
-		slog.Debug("drain state: write failed", "path", tmp, "error", werr)
+		tm.logDrainWriteFailure("drain state: write failed", tmp, werr)
 		return
 	}
 	if rerr := os.Rename(tmp, path); rerr != nil {
-		slog.Debug("drain state: rename failed", "path", path, "error", rerr)
+		tm.logDrainWriteFailure("drain state: rename failed", path, rerr)
 		_ = os.Remove(tmp)
 	}
+}
+
+// logDrainWriteFailure reports a failed publish: once at Warn, since the deploy
+// drain then falls back to its ffmpeg heuristic, and at Debug after that so a
+// persistent failure does not log every 30 seconds. Called with publishMu held.
+func (tm *TranscodeManager) logDrainWriteFailure(msg, path string, err error) {
+	if tm.drainWriteWarned {
+		slog.Debug(msg, "path", path, "error", err)
+		return
+	}
+	tm.drainWriteWarned = true
+	slog.Warn(msg+"; the updater's viewer drain will rely on its ffmpeg check", "path", path, "error", err)
 }
 
 // clearDrainState removes the published file on shutdown. Without this, a

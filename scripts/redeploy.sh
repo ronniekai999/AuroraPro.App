@@ -31,6 +31,8 @@
 #   ./scripts/redeploy.sh --skip-npm       # reuse existing static/v2/ build
 #   ./scripts/redeploy.sh --skip-frontend  # alias for --skip-npm
 #   ./scripts/redeploy.sh --no-restart     # build + install but don't restart aurora
+#   ./scripts/redeploy.sh --no-drain       # restart without waiting for viewers
+#                                           # (by default it waits up to 5 min)
 #   ./scripts/redeploy.sh --allow-stale    # deploy even if HEAD is behind origin
 #                                           # (skips the safety check — rarely needed)
 #   ./scripts/redeploy.sh -h               # this help text
@@ -62,14 +64,98 @@ ok()    { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$1"; exit "${2:-1}"; }
 step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
 
+# AURORA-DRAIN-BEGIN — identical in aurora-update.sh, install.sh and redeploy.sh;
+# scripts/drain-gate-test.sh checks the copies and how they behave. Duplicated
+# rather than sourced for the reason node_vite_verdict is.
+#
+# streams_busy is true while restarting aurora.service would interrupt a viewer.
+# It is the UNION of two signals, each covering the other's gap: the server's
+# snapshot of the sessions a client is still holding, playing or paused
+# (refreshed every 30 s; a paused viewer's encoder is reaped, so pgrep cannot
+# see them), and `pgrep -u aurora ffmpeg` (which sees a stream started since
+# the last snapshot). Either alone reintroduces one of the two bugs, and the
+# union still converges: an abandoned session's encoder exits after 75 s and it
+# leaves the 120 s viewer window.
+#
+# The server writes the snapshot to /var/cache/aurora because it cannot create
+# files in /var/lib/aurora (root:root 0755: the root-owned source mirror lives
+# there). The aurora user owns /var/cache/aurora, so the snapshot is read as
+# untrusted input. A missing, stale or unreadable snapshot is "unknown", never
+# "zero viewers": a crashed or wedged server's last snapshot looks exactly like
+# an idle one.
+STREAM_STATE_FILE=/var/cache/aurora/stream-state.json
+_STREAM_STATE_MAX_AGE=90
+
+# read_untrusted PATH — print a small regular file, refusing a symlink, a FIFO
+# or anything large, so a file the aurora user controls can neither point root
+# at another file nor hang it on a pipe nobody writes.
+read_untrusted() {
+    python3 -I -c '
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        sys.exit(1)
+    data = stream.read(65537)
+if len(data) > 65536:
+    sys.exit(1)
+sys.stdout.write(data.decode("utf-8", "replace"))' "$1"
+}
+
+# viewers_held — how many sessions the snapshot says a client is holding, or
+# nothing when that is unknown.
+viewers_held() {
+    local state
+    state="$(read_untrusted "$STREAM_STATE_FILE" 2>/dev/null)" || return 0
+    _vh_now=$(date +%s)
+    _vh_ts=$(printf '%s\n' "$state" | sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    _vh_held=$(printf '%s\n' "$state" | sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+    # Each field on its own: a half-written or renamed-key snapshot is unknown,
+    # and so is a number bash would choke on. The aurora user can write this
+    # file: "0793" is an invalid octal to $(( )) and aborts a set -e caller,
+    # and a twenty-digit one overflows; 10# reads what is left as decimal.
+    case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
+    case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#_vh_ts}" -le 12 ] && [ "${#_vh_held}" -le 6 ] || return 0
+    [ $((_vh_now - 10#$_vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+    printf '%s' "$((10#$_vh_held))"
+}
+
+streams_busy() {
+    _sb_held=$(viewers_held)
+    if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
+        return 0
+    fi
+    pgrep -u aurora ffmpeg >/dev/null 2>&1
+}
+
+# drain_wait MAX — wait in 10 s steps, up to MAX seconds, while streams_busy.
+# Sets DRAIN_WAITED. Fails when the streams are still going at MAX: a viewer who
+# fell asleep mid-film must not block a deploy forever, and the player rebuilds
+# its session at the same position when its keepalive is refused.
+drain_wait() {
+    DRAIN_WAITED=0
+    while streams_busy; do
+        [ "$DRAIN_WAITED" -lt "$1" ] || return 1
+        sleep 10
+        DRAIN_WAITED=$((DRAIN_WAITED + 10))
+    done
+}
+# AURORA-DRAIN-END
+
 # ── Argument parsing ─────────────────────────────────────────────
 SKIP_FRONTEND=false
 RESTART=true
+DRAIN=true
 ALLOW_STALE=false
 for arg in "$@"; do
     case "$arg" in
         --skip-npm|--skip-frontend) SKIP_FRONTEND=true ;;
         --no-restart) RESTART=false ;;
+        --no-drain) DRAIN=false ;;
         --allow-stale) ALLOW_STALE=true ;;
         -h|--help)
             # Print the header comment up to (but not including) the
@@ -440,6 +526,25 @@ ok "Binary staged → $INSTALL_BIN.new"
 # ══════════════════════════════════════════════════════════════════
 step "Step 4/5: Updating static assets + migrations, promoting binary"
 
+# Wait for viewers BEFORE anything live changes, as the auto-updater does:
+# the restart in step 5 kills every transcode session, and the static swap
+# below would otherwise leave the old backend serving the new frontend while
+# it waited. This used not to wait at all. Only when this run will restart.
+drain_viewers_before_install() {
+    if ! $RESTART || ! $DRAIN || ! command -v systemctl &>/dev/null \
+        || ! systemctl is-active --quiet aurora 2>/dev/null; then
+        return 0
+    fi
+    streams_busy || return 0
+    info "Waiting up to 300s for active streams to finish (--no-drain skips this)..."
+    if drain_wait 300; then
+        ok "Active streams finished after ${DRAIN_WAITED}s"
+    else
+        warn "Streams still active after 300s; deploying anyway"
+    fi
+}
+drain_viewers_before_install
+
 # Migrations: small SQL files, just overwrite. Aurora's migration
 # runner reads them at startup and applies only those not in the
 # schema_migrations table.
@@ -581,6 +686,14 @@ fi
 # perms; the brief touch only fires on missing files. We don't ship
 # any data in the trigger file (the actual content is just a
 # timestamp written by the Go handler).
+# The drain snapshot and the serving record are written to /var/cache/aurora
+# (the server cannot create files in /var/lib/aurora). install.sh makes it the
+# aurora user's; heal a box where it is missing or root-owned, or the drain
+# above falls back to its ffmpeg check and the updater to aurora.env for TLS.
+if ! sudo install -d -m 0755 -o "$INSTALL_USER" -g "$INSTALL_GROUP" /var/cache/aurora; then
+    warn "Could not ensure /var/cache/aurora is $INSTALL_USER-owned; the viewer drain will rely on its ffmpeg check"
+fi
+
 if [ -d "$PROJECT_DIR/scripts" ] && [ -f "$PROJECT_DIR/scripts/aurora-update.path" ]; then
     sudo install -d -m 0755 -o root -g root /var/lib/aurora
     if [ ! -f /var/lib/aurora/trigger-update ]; then

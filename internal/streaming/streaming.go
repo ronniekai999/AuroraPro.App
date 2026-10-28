@@ -1528,6 +1528,9 @@ type TranscodeManager struct {
 	// purpose: publishing does file I/O and must never sit on the lock that
 	// session create/get/keepalive contend for.
 	publishMu sync.Mutex
+	// drainWriteWarned: a failed publish has been logged at Warn. Guarded by
+	// publishMu.
+	drainWriteWarned bool
 	// drainExtraViewers counts viewers that hold no transcode session
 	// (direct play). Guarded by tm.mu; invoked unlocked. See drainstate.go.
 	drainExtraViewers func() int

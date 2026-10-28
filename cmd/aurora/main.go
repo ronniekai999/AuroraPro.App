@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1019,42 +1020,64 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in goroutine with optional TLS
-	go func() {
-		switch {
-		case cfg.TLS.AutoCert && cfg.TLS.Domain != "":
-			// Automatic HTTPS via Let's Encrypt (autocert)
-			cacheDir := cfg.TLS.CacheDir
-			if cacheDir == "" {
-				cacheDir = "/var/cache/aurora/autocert"
+	// Bind here rather than inside ListenAndServe so the serving record can
+	// name the address the kernel actually gave us, and so a bind failure is
+	// never published as a listening server. A failed bind keeps the previous
+	// behaviour (log, then shut down through ctx).
+	autoCertTLS := cfg.TLS.AutoCert && cfg.TLS.Domain != ""
+	manualTLS := !autoCertTLS && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != ""
+	ln, listenErr := net.Listen("tcp", server.Addr)
+	if listenErr != nil {
+		slog.Error("server failed", "error", listenErr)
+		cancel()
+	} else {
+		// Start server in goroutine with optional TLS
+		go func() {
+			switch {
+			case autoCertTLS:
+				// Automatic HTTPS via Let's Encrypt (autocert)
+				cacheDir := cfg.TLS.CacheDir
+				if cacheDir == "" {
+					cacheDir = "/var/cache/aurora/autocert"
+				}
+				m := &autocert.Manager{
+					Cache:      autocert.DirCache(cacheDir),
+					Prompt:     autocert.AcceptTOS,
+					HostPolicy: autocert.HostWhitelist(cfg.TLS.Domain),
+				}
+				server.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
+				slog.Info("server listening with autocert TLS", "addr", cfg.ServerAddr(), "domain", cfg.TLS.Domain)
+				if err := server.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
+					slog.Error("server failed", "error", err)
+					cancel()
+				}
+			case manualTLS:
+				// Manual TLS certificate
+				slog.Info("server listening with TLS", "addr", cfg.ServerAddr())
+				if err := server.ServeTLS(ln, cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+					slog.Error("server failed", "error", err)
+					cancel()
+				}
+			default:
+				// Plain HTTP
+				slog.Info("server listening", "addr", cfg.ServerAddr())
+				if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+					slog.Error("server failed", "error", err)
+					cancel()
+				}
 			}
-			m := &autocert.Manager{
-				Cache:      autocert.DirCache(cacheDir),
-				Prompt:     autocert.AcceptTOS,
-				HostPolicy: autocert.HostWhitelist(cfg.TLS.Domain),
-			}
-			server.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
-			slog.Info("server listening with autocert TLS", "addr", cfg.ServerAddr(), "domain", cfg.TLS.Domain)
-			if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				slog.Error("server failed", "error", err)
-				cancel()
-			}
-		case cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "":
-			// Manual TLS certificate
-			slog.Info("server listening with TLS", "addr", cfg.ServerAddr())
-			if err := server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
-				slog.Error("server failed", "error", err)
-				cancel()
-			}
-		default:
-			// Plain HTTP
-			slog.Info("server listening", "addr", cfg.ServerAddr())
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("server failed", "error", err)
-				cancel()
-			}
+		}()
+
+		// Tell scripts/aurora-update.sh where this process listens; see
+		// serving_record.go. Written after migrations and the bind, so a
+		// record naming this pid means the boot got that far.
+		rec := newServingRecord(ln, autoCertTLS || manualTLS, cfg.TLS.Domain)
+		if err := writeServingRecord(defaultServingRecordFile, rec); err != nil {
+			slog.Warn("serving record: write failed; the updater will take the scheme from aurora.env",
+				"path", defaultServingRecordFile, "error", err)
 		}
-	}()
+		defer clearServingRecord(defaultServingRecordFile)
+	}
 
 	// Print startup info. URLs printed here are intended to be
 	// clickable / pastable into a browser, so we use DisplayAddr

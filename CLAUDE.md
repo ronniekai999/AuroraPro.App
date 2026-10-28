@@ -1078,12 +1078,132 @@ capability declarations.
   the current absolute source position and no cross-rendition produced-edge
   contract exists.
 
+### Auto-updater: what a deploy must prove
+
+`scripts/aurora-update.sh`; runbook `docs/updater-recovery.md`; tests
+`scripts/aurora-update-test.py` (they model the running process, not just
+count restarts).
+
+- Both halves are built from `git archive` of the target into
+  `/var/lib/aurora-updater/build`, never from the checkout, whose tracked-only
+  cleanliness check lets untracked or ignored files through. A target without
+  the SPA source fails; there is no fallback to a leftover `static/v2`.
+- The drain and the model pull run before any live file changes, so the old
+  backend never serves the new frontend while it waits.
+- A deploy counts only when the main pid right after the restart is still the
+  main pid throughout (any change fails at once), its `/proc/<pid>/exe` hashes
+  to the binary just built, `/api/health` says `status: ok` with
+  `db_connected: true`, and `/v2/` is byte-identical to the installed
+  `index.html` (`TestV2IndexIsServedByteForByte`), on two probes at least
+  `VERIFY_SETTLE` seconds apart, within `VERIFY_TIMEOUT + VERIFY_SETTLE`
+  seconds. Everything but a pid change is retried until then, including an exe
+  mismatch: `Type=simple` reports the unit started before the child execs, and
+  `/proc/<pid>/exe` is systemd's executor until it does. The anonymous health
+  route still names no version. Root's Python runs with `-I` (the working
+  directory is the checkout) and must run on 3.6 (RHEL 8, SLES 15): one
+  `str.isascii()` failed every probe there. `test_embedded_python_runs_on_python_3_6`
+  is a partial guard: it parses each embedded program with the oldest grammar
+  `ast` still offers (3.7 on current Pythons, so 3.8 forms like `f"{x=}"` pass)
+  and rejects a list of newer APIs; nothing in CI runs them on a real 3.6. A
+  review ran the suite with PyPy 3.6 as the embedded `python3`; it passed. Root's
+  curl runs with `-q` first (no `~/.curlrc`: a `-w` there changed the compared
+  bytes). The
+  served `/v2/` is compared with root's copies (the build output; the rollback
+  snapshot), not the aurora-owned live file. A verification that fails takes
+  up to about 100 s (the deadline is checked between probes of up to ~11 s).
+- The port is always one that pid listens on, read from `/proc/<pid>/fd` and its
+  TCP tables, so the answer comes from that process. How to speak to it comes
+  from `/var/cache/aurora/serving.json` (`cmd/aurora/serving_record.go`, written
+  after migrations and the bind) when the record names that pid and port, else
+  from `TLS_*` in `aurora.env`; the port is then `AURORA_PORT`, else the pid's
+  only listener, else 8484. `TestServingRecordContractMatchesUpdater` pins the
+  path and keys on both sides.
+- `/var/lib/aurora` is `root:root 0755` (the source mirror lives there): the
+  server cannot write it, which is why the record and the drain snapshot
+  (`stream-state.json`, which silently never existed there) are in
+  `/var/cache/aurora`. That directory is the aurora user's, so root reads both
+  with `read_untrusted` / `O_NOFOLLOW|O_NONBLOCK`, regular files only, capped.
+- Leaving in phase `files` or `restarted` for any reason rolls back the binary,
+  static tree and migration files and verifies the restored service; it hangs
+  off the EXIT trap because the ERR trap does not run inside functions. The
+  database is not rolled back. Past `verified`, failures keep the new release.
+  Restored static files are touched: the server answers conditional requests
+  from Last-Modified alone, and the snapshot's old mtimes would let a browser
+  keep the failed release's `index.html` (a blank page).
+- The SPA stamps a hash of the bundle, `public/` and the page as
+  `<meta name="aurora-build">` (`vite-build-id.ts`); `lib/buildUpdate.ts`
+  re-reads `/v2/` and shows a Reload notice (withdrawn when this tab's build is
+  served again), never reloading by itself. `verify-pwa.mjs` checks it end to
+  end under the production CSP. The notice lives outside the app's error
+  boundary (`AppRoot.tsx`, pinned by `AppRoot.test.tsx`): when a deleted chunk
+  takes the app down, the boundary asks for a check that only a still-mounted
+  notice can answer.
+- Known gaps: an install on a non-default port or terminating its own TLS gets
+  this updater only through the manual bootstrap in `docs/updater-recovery.md`
+  (the old one on the box never passes its own check, so never replaces
+  itself); idle ticks check installed files, not the running process; TLS is
+  probed with `--insecure`; bash before 5.1 writes heredocs to TMPDIR, so a full
+  TMPDIR fails `service_endpoint` (and every status write); a crash more than `VERIFY_SETTLE` seconds after the
+  first good answer is not seen; a SIGKILL mid-install still leaves a partial
+  tree (the pending record blocks automatic retry); a rollback generation kept
+  from an older updater has no migration snapshot, and a rollback to a binary
+  that writes no record falls back to `aurora.env` for TLS; a migration longer
+  than the window can never deploy; the Node gate reads the checkout before the
+  merge; the unit's `TimeoutStartSec` is now 20 min and `TimeoutStopSec` 5 min
+  (a rollback ignores TERM/INT/HUP and can need ~2 min), but units change only
+  when `install.sh` or `redeploy.sh` reinstalls them, so an existing box keeps
+  10 min and the 90 s default until then; a box whose build always outlasts the
+  timeout while viewers are always present never deploys (the status stays at
+  "Waiting…"); the drain counts any ffmpeg the aurora user runs (the
+  skip-marker worker too); tabs opened on a build from before the build id
+  carry none, so they are not told about the first deploy of it; a rollback
+  generation kept from a failed updater run can be older than what
+  `install.sh` or `redeploy.sh` installed since (neither touches `pending` or
+  `rollback/`), so a later failed run can roll back past them; a rollback while
+  the updater's own unit is deactivating queues aurora's restart (`--no-block`:
+  under `systemctl stop`/`restart` a blocking one waits on that stop job,
+  ordered `After=aurora.service`; after a start timeout it would not, but is
+  queued too) and reports it unverified, or a failure when the queue is refused
+  (a shutdown) or the restore had problems; a stop that arrives while the
+  rollback's blocking restart is already running still waits until SIGKILL
+  (`TimeoutStopSec`, 5 min), aurora down meanwhile; the next tick's "earlier
+  install did not finish" status replaces whatever the rollback reported; `git archive` would honour
+  an `export-ignore` a target's `.gitattributes` added (there is none); between
+  the static swap and the restart, seconds in every script, the old backend
+  serves the new `index.html`, so a tab checking then is told of the update
+  early; diffutils is not needed (verification hashes, it does not `cmp`); `install.sh` (prebuilt-bundle fallback) and `redeploy.sh`
+  (`--skip-npm`) can still install a bundle not built from the code beside it,
+  and both keep their `:8484` health checks.
+- The viewer drain is one `AURORA-DRAIN` block, identical in
+  `aurora-update.sh`, `install.sh` and `redeploy.sh`
+  (`scripts/drain-gate-test.sh` checks the copies, the hostile-file cases, that
+  it reads the path `DefaultStreamStateFile` writes, and that each script waits
+  before its first live change). `install.sh` re-runs and `redeploy.sh` used not
+  to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
+  the service is not running. `install.sh` stages and swaps its release files
+  (binary, migrations, frontend) in `install_release_files`, on the line after
+  the wait and right before the restart, nothing slow (prompts, Ollama) between
+  them; config, units and the updater script still change earlier. It holds
+  the deploy lock from the final `chown` and the timer start (a timer whose
+  `OnBootSec` has passed fires the moment it starts, and that run would
+  otherwise take the lock first and deploy) until the restart's health loop
+  ends (30 tries at `:8484` of up to 5 s each: ~30 s normally, ~3 min at
+  worst), and not longer: a daemon a child
+  starts would inherit the descriptor. The source-mirror fetch earlier in
+  install.sh still runs unlocked. Interrupts (and HUP, PIPE) are ignored from
+  staging to the restart, and exit the script otherwise; output there is
+  non-fatal. The updater removes only staging it created (`STAGED_RELEASE`);
+  an idle tick used to delete an install.sh re-run's staged frontend. The block reads
+  numbers with `10#` and a length cap: the aurora user writes the snapshot, and
+  an invalid-octal timestamp used to abort the updater under `set -e`.
+
 ### Node build floor
 
 - Install/update scripts distinguish an impossible build from an unsupported
   but potentially working Node release and report failures before fetching.
-- The gate applies only when building the SPA from source; committed fallback
-  assets need no Node runtime.
+- The gate applies only when building the SPA from source. install.sh still
+  reuses a prebuilt `static/v2` when the source tree is absent (it is gitignored,
+  so never committed); the auto-updater has no such fallback.
 - `scripts/node-version-test.sh` executes call sites against a fake Node and
   verifies duplicated `node_vite_verdict` implementations remain identical.
   Duplication is intentional because the root updater may run from a source

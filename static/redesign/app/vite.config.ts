@@ -2,6 +2,7 @@ import path from "path"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 import { inspectAttr } from 'kimi-plugin-inspect-react'
+import { auroraBuildId } from './vite-build-id'
 
 // Aurora V2 build configuration.
 //
@@ -20,7 +21,9 @@ import { inspectAttr } from 'kimi-plugin-inspect-react'
 // this explicitly.
 export default defineConfig({
   base: '/v2/',
-  plugins: [inspectAttr(), react()],
+  // auroraBuildId: the <meta name="aurora-build"> an open tab compares with the
+  // deployed index.html to notice a newer build (vite-build-id.ts).
+  plugins: [inspectAttr(), react(), auroraBuildId()],
   server: {
     port: 3000,
     proxy: {

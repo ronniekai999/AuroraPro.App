@@ -21,11 +21,17 @@ Type=oneshot
 # setting HOME here covers any future git config lookups too.
 Environment=HOME=/root
 ExecStart=/usr/local/bin/aurora-update
-# 10-minute cap. A clean build on modest hardware is ~30s; even a
-# slow VM with the entire Go module cache cold should finish well
-# under this. The cap exists so a hung git fetch or runaway build
-# can't camp on the system.
-TimeoutStartSec=10min
+# 20-minute cap (was 10). A clean build on modest hardware is ~30s,
+# a cold one a few minutes, but a run also waits up to 5 minutes for
+# viewers to finish and then verifies the restarted service (up to
+# ~100 s, and as long again for a rollback). The cap exists so a hung
+# git fetch or runaway build can't camp on the system.
+TimeoutStartSec=20min
+# After that SIGTERM, how long a rollback in progress may take before systemd
+# sends SIGKILL: the updater ignores TERM while it rolls back, and a rollback's
+# restart and verification can need about two minutes. The default (90 s)
+# could cut it off between two renames.
+TimeoutStopSec=5min
 
 # Logging: stdout/stderr go to journalctl (per-invocation), and
 # the script also tees to /var/log/aurora/update.log for the

@@ -163,8 +163,9 @@ extract_callsite() {  # $1 = script, prints the guarded block
 # return $2, and report what happened as "<exit code>|<output>".
 #
 # $3 selects the environment: "src" (the normal case), "nodir" (no SPA source
-# tree — install.sh and aurora-update.sh fall back to the committed bundle),
-# or "skipfe" (--skip-npm, redeploy.sh's equivalent).
+# tree — install.sh falls back to a prebuilt static/v2; aurora-update.sh has no
+# fallback, and its build of the target then refuses, so its gate has nothing
+# to protect), or "skipfe" (--skip-npm, redeploy.sh's equivalent).
 #
 # nodir and skipfe are kept SEPARATE, and each sets only its own variable. An
 # earlier version set both at once, which made the two conditions

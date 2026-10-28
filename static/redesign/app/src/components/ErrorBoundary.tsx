@@ -19,6 +19,7 @@
 
 import { Component } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
+import { announceStaleBundle, isStaleBundleError } from '@/lib/buildUpdate'
 
 interface Props {
   children: ReactNode
@@ -51,6 +52,9 @@ export class ErrorBoundary extends Component<Props, State> {
     } else {
       console.error('[ErrorBoundary] caught', error.message)
     }
+    // A lazy view whose chunk a deploy deleted: let the update notice check
+    // now rather than at its next timer tick.
+    if (isStaleBundleError(error)) announceStaleBundle()
   }
 
   retry = () => {
@@ -64,6 +68,14 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.props.fallback) {
       return this.props.fallback(error, this.retry)
     }
+
+    // A chunk this page needs did not load. Usually Aurora was updated while
+    // the page was open (each deploy deletes the previous build's files), but
+    // a dropped connection reads the same, so the wording claims neither.
+    // Retrying cannot help either way, since the browser keeps the failed
+    // import, so the only way forward offered is a reload; the update notice
+    // is asked to check, and says so separately when it was a deploy.
+    const stale = isStaleBundleError(error)
 
     // Default fallback. Kept inline + minimal so it doesn't depend
     // on Tailwind classes, fonts, or other app chrome — it has to
@@ -84,11 +96,12 @@ export class ErrorBoundary extends Component<Props, State> {
       >
         <div style={{ maxWidth: 480, textAlign: 'center' }}>
           <h1 style={{ fontSize: 22, marginBottom: 12, fontWeight: 600 }}>
-            Aurora hit an unexpected error
+            {stale ? "Part of Aurora couldn't load" : 'Aurora hit an unexpected error'}
           </h1>
           <p style={{ fontSize: 14, opacity: 0.7, marginBottom: 24, lineHeight: 1.5 }}>
-            Something went wrong rendering this page. Your data is safe — only
-            the in-memory view is affected.
+            {stale
+              ? 'This usually means Aurora was updated while this page was open, or the connection dropped. Reload to continue. Your data is safe.'
+              : 'Something went wrong rendering this page. Your data is safe — only the in-memory view is affected.'}
           </p>
           {import.meta.env.DEV && (
             <pre
@@ -124,7 +137,7 @@ export class ErrorBoundary extends Component<Props, State> {
           >
             Reload page
           </button>
-          <button
+          {!stale && <button
             type="button"
             onClick={this.retry}
             style={{
@@ -138,7 +151,7 @@ export class ErrorBoundary extends Component<Props, State> {
             }}
           >
             Try again
-          </button>
+          </button>}
         </div>
       </div>
     )

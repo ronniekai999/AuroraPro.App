@@ -115,6 +115,7 @@ Non-TTY runs (CI, `ssh` without `-t`) prompt for nothing — no env vars are req
 | `AURORA_RADARR_4K_URL/_API_KEY=`, `AURORA_SONARR_4K_URL/_API_KEY=` | Separate 4K Radarr/Sonarr instances |
 | `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | Override the bundled TVDB key / add your subscriber PIN (the fallback works out of the box without either) |
 | `AURORA_GIT_TOKEN=<PAT>` | **For private repos** — writes `/root/.git-credentials` (mode 600) so the auto-updater can `git fetch` non-interactively. Use a fine-grained PAT scoped to `Contents: Read-only` on just this repo. |
+| `AURORA_SKIP_DRAIN=1` | On a re-run, restart without first waiting (up to 5 minutes) for anyone watching to finish |
 
 ### 📂 Media folder permissions
 
@@ -223,7 +224,7 @@ systemctl restart aurora          # restart after a config change
 
 ## 🔄 Updating
 
-**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → rebuild → atomic swap → restart → health check, with automatic rollback to the previous binary if the new one fails its health check. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
+**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → build the frontend and binary from that exact commit → wait for viewers → atomic swap → restart → verification. A deploy counts only when the running service is the binary just built, reports healthy with its database connected, and serves the frontend just installed; any failure once installation starts (including a failed restart) restores the previous binary, frontend and migration files. Browser tabs left open across an update show a **Reload** prompt. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
 
 ```bash
 systemctl status aurora-update.timer
@@ -238,7 +239,7 @@ git pull
 ./scripts/redeploy.sh        # build SPA + Go binary, atomic-swap, restart
 ```
 
-Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service.
+Use `--skip-npm` to reuse an existing frontend build, `--no-restart` to stage without bouncing the service. When it is going to restart, a redeploy (like the auto-updater and an `install.sh` re-run) first waits up to 5 minutes for anyone watching to finish, before it swaps anything; `--no-drain` restarts at once.
 
 **Reinstall** when an update touches `scripts/install.sh` itself (new state dirs, systemd unit changes):
 

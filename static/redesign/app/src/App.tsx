@@ -123,6 +123,7 @@ import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // date formatter (no @/lib/api dep → no cycle).
 import { Icon } from '@/components/Icon'
 import { ToastContainer, type Toast } from '@/components/Toast'
+import { announceStaleBundle, isStaleBundleError } from '@/lib/buildUpdate'
 import { Spinner } from '@/components/ui/spinner'
 import { oauthProviderLabel, OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
@@ -174,8 +175,12 @@ function prefetchView(view: string): void {
   prefetched.add(key)
   // A failed prefetch (offline, stale deploy) is not an error to surface:
   // the real navigation retries the import and ErrorBoundary owns THAT
-  // failure. Forget the attempt so a later hover can try again.
-  void VIEW_LOADERS[key]().catch(() => { prefetched.delete(key) })
+  // failure. Forget the attempt so a later hover can try again. A stale
+  // deploy does get the update notice checked now, before the click fails.
+  void VIEW_LOADERS[key]().catch((error: unknown) => {
+    prefetched.delete(key)
+    if (isStaleBundleError(error)) announceStaleBundle()
+  })
 }
 
 // 2026-06-17 (app split) — Admin is the first lazy-loaded view chunk.
