@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  abortAfter,
   CATALOG_UPDATE_DELAY_MS,
+  CATALOG_UPDATE_JITTER_MS,
   CATALOG_UPDATE_MIN_GAP_MS,
+  LIVE_REFRESH_TIMEOUT_MS,
   createCatalogUpdateScheduler,
   loadedPageCount,
   refetchLoadedPages,
@@ -14,7 +17,7 @@ describe('createCatalogUpdateScheduler', () => {
 
   it('turns a burst of events into one refresh after the delay', () => {
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0 })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS - 1)
     s.notify()
@@ -26,7 +29,7 @@ describe('createCatalogUpdateScheduler', () => {
 
   it('keeps the minimum gap between refreshes, however often events come', () => {
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0 })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
     expect(onFlush).toHaveBeenCalledTimes(1)
@@ -44,7 +47,7 @@ describe('createCatalogUpdateScheduler', () => {
 
   it('flushes an event long after the last refresh after the short delay only', () => {
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0 })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
     vi.advanceTimersByTime(CATALOG_UPDATE_MIN_GAP_MS * 2)
@@ -56,7 +59,7 @@ describe('createCatalogUpdateScheduler', () => {
   it('holds a refresh due while hidden until the tab is visible, once', () => {
     let hidden = true
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden, random: () => 0 })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
     s.notify()
@@ -74,7 +77,7 @@ describe('createCatalogUpdateScheduler', () => {
   it('keeps the minimum gap for a refresh held while hidden', () => {
     let hidden = false
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden, random: () => 0 })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
     expect(onFlush).toHaveBeenCalledTimes(1)
@@ -87,16 +90,42 @@ describe('createCatalogUpdateScheduler', () => {
     expect(onFlush).toHaveBeenCalledTimes(2)
   })
 
+  it('adds up to the jitter to the delay, so tabs do not refetch in step', () => {
+    const onFlush = vi.fn()
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0.999 })
+    s.notify()
+    vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS + 0.99 * CATALOG_UPDATE_JITTER_MS)
+    expect(onFlush).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(0.01 * CATALOG_UPDATE_JITTER_MS)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not flush again for a held refresh a later one covered', () => {
+    let hidden = true
+    const onFlush = vi.fn()
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden, random: () => 0 })
+    s.notify()
+    vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS) // held
+    hidden = false
+    s.notify() // a timer is pending, so a visible() now waits for it
+    s.visible()
+    vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+    s.visible()
+    vi.advanceTimersByTime(CATALOG_UPDATE_MIN_GAP_MS)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+  })
+
   it('does nothing on visible when no refresh was held', () => {
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0 })
     s.visible()
     expect(onFlush).not.toHaveBeenCalled()
   })
 
   it('flushes nothing after dispose', () => {
     const onFlush = vi.fn()
-    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false, random: () => 0 })
     s.notify()
     s.dispose()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS * 2)
@@ -167,5 +196,25 @@ describe('withoutRemoved', () => {
       { title: 'a', items: [{ id: 1 }] }, { title: 'b', items: [{ id: 3 }] },
     ])
     expect(withoutRemoved(rails, new Set())).toBe(rails)
+  })
+})
+
+describe('abortAfter', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('aborts a refresh still out after the timeout, and not one that settled', () => {
+    const slow = new AbortController()
+    abortAfter(slow)
+    vi.advanceTimersByTime(LIVE_REFRESH_TIMEOUT_MS - 1)
+    expect(slow.signal.aborted).toBe(false)
+    vi.advanceTimersByTime(1)
+    expect(slow.signal.aborted).toBe(true)
+
+    const settled = new AbortController()
+    const stop = abortAfter(settled)
+    stop()
+    vi.advanceTimersByTime(LIVE_REFRESH_TIMEOUT_MS * 2)
+    expect(settled.signal.aborted).toBe(false)
   })
 })

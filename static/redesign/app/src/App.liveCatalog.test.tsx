@@ -57,8 +57,8 @@ function scanAdded(newItems: number) {
   })
 }
 
-function stubServer() {
-  const catalog: Item[] = [item(1, 'Old Movie')]
+function stubServer({ empty = false } = {}) {
+  const catalog: Item[] = empty ? [] : [item(1, 'Old Movie')]
   // Each browse-grid request (Home's Top Rated rails ask for 20 a type).
   const gridRequests: string[] = []
   // Requests per path.
@@ -80,6 +80,7 @@ function stubServer() {
     if (p === '/api/profiles') return json(PROFILES)
     if (p === '/api/profiles/active') return json(PROFILES[0])
     if (p === '/api/me/hero') {
+      if (empty) return json({ picks: [] })
       return json({ picks: [item(80, 'Hero One'), item(81, 'Hero Two')].map(it => ({ item: it, reason: 'Picked for you' })), slate_token: 'slate' })
     }
     const newestFirst = [...catalog].reverse()
@@ -126,9 +127,11 @@ describe('a scan’s new titles appear without a reload', () => {
     localStorage.setItem('aurora_user', JSON.stringify(USER))
     localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
     FakeSocket.opened = []
+    // No jitter: an update's refresh comes after the 1.5 s delay alone.
+    vi.spyOn(Math, 'random').mockReturnValue(0)
     server = stubServer()
   })
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
   it('refreshes the Movies grid on screen in place', async () => {
     const page = renderApp('/movies')
@@ -159,6 +162,18 @@ describe('a scan’s new titles appear without a reload', () => {
     goTo('Movies')
     await waitFor(() => expect(server.gridRequests.length).toBeGreaterThan(before), { timeout: 5000 })
     await waitFor(() => expect(document.querySelector('main')?.textContent).toContain('New Movie'), { timeout: 5000 })
+  })
+
+  it('gives an empty library its first hero when a scan adds titles', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ empty: true })
+    renderApp('/')
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0), { timeout: 5000 })
+    await screen.findByText(ANCHOR_RAIL, undefined, { timeout: 5000 })
+    expect(screen.queryByLabelText('More info about First Import')).toBeNull()
+    server.add(item(5, 'First Import'))
+    scanAdded(1)
+    await screen.findByLabelText('More info about First Import', undefined, { timeout: 5000 })
   })
 
   it('refreshes Home with its personalized rails and library count kept on screen', async () => {
@@ -265,8 +280,35 @@ describe('a live refresh out during a profile switch', () => {
     localStorage.setItem('aurora_user', JSON.stringify(USER))
     localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
     FakeSocket.opened = []
+    // No jitter: an update's refresh comes after the 1.5 s delay alone.
+    vi.spyOn(Math, 'random').mockReturnValue(0)
   })
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  it('on Home, before the new profile’s rails have landed', async () => {
+    // The previous profile's refresh answers while the new profile's first
+    // load is still out. Its abort is one guard; the rails' owner, cleared on
+    // the switch, is the other, and this holds with either alone.
+    const server = stubTwoProfiles()
+    const commits = renderSampled('/')
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    const held = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    const kidLoad = server.hold((u, b) => b === 2 && u.pathname === '/api/media/recent', { every: true })
+    server.addForParent(item(3, 'Parentonly New'))
+    scanAdded(1)
+    await waitFor(() => expect(held.sent()).toBe(true), { timeout: 5000 })
+    switchToKid()
+    await waitFor(() => expect(label()).toBe('Kid'), { timeout: 5000 })
+    await waitFor(() => expect(kidLoad.sent()).toBe(true), { timeout: 5000 })
+    held.release()
+    await new Promise(done => setTimeout(done, 200))
+    kidLoad.release()
+    await screen.findAllByText('Kidonly Old', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 200))
+    expect(screen.queryAllByText('Parentonly New')).toEqual([])
+    expect(commits.filter(c => c.label === 'Kid' && c.parent)).toEqual([])
+  })
 
   it.each([
     ['the Movies grid', '/movies', (u: URL, b: number) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
@@ -296,8 +338,10 @@ describe('an update while Home is still loading', () => {
     localStorage.setItem('aurora_user', JSON.stringify(USER))
     localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
     FakeSocket.opened = []
+    // No jitter: an update's refresh comes after the 1.5 s delay alone.
+    vi.spyOn(Math, 'random').mockReturnValue(0)
   })
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
   it('is caught up once the load lands, not dropped', async () => {
     // A cold load whose queries ran before the scan wrote, answering after

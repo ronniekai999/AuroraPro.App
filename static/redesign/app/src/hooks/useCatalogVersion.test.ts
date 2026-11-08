@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
-import { CATALOG_UPDATE_DELAY_MS } from '@/lib/catalogUpdates'
+import { CATALOG_UPDATE_DELAY_MS, CATALOG_UPDATE_JITTER_MS } from '@/lib/catalogUpdates'
 import { useCatalogVersion } from './useCatalogVersion'
 
 beforeEach(() => { vi.useFakeTimers() })
@@ -19,7 +19,7 @@ describe('useCatalogVersion', () => {
       result.current.notifyCatalogChanged()
       result.current.notifyCatalogChanged()
     })
-    act(() => { vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS) })
+    act(() => { vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS + CATALOG_UPDATE_JITTER_MS) })
     expect(result.current.catalogVersion).toBe(1)
     expect(result.current.catalogVersionRef.current).toBe(1)
   })
@@ -29,7 +29,7 @@ describe('useCatalogVersion', () => {
       initialProps: { held: true },
     })
     act(() => { result.current.notifyCatalogChanged() })
-    act(() => { vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS * 10) })
+    act(() => { vi.advanceTimersByTime((CATALOG_UPDATE_DELAY_MS + CATALOG_UPDATE_JITTER_MS) * 10) })
     expect(result.current.catalogVersion).toBe(0)
     rerender({ held: false })
     act(() => { vi.advanceTimersByTime(0) })

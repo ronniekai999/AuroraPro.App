@@ -117,7 +117,7 @@ import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useCatalogVersion } from '@/hooks/useCatalogVersion'
-import { CATALOG_REFRESH_MAX_PAGES, loadedPageCount, refetchLoadedPages, withoutRemoved } from '@/lib/catalogUpdates'
+import { abortAfter, CATALOG_REFRESH_MAX_PAGES, loadedPageCount, refetchLoadedPages, withoutRemoved } from '@/lib/catalogUpdates'
 import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
 // lazy view chunks (AdminView etc.) can import them without reaching
@@ -4330,6 +4330,11 @@ export default function App() {
       if (profileChanged) {
         setHomeRails(undefined)
         removedFromHomeRef.current = new Set()
+        // No owner's rails are on screen until this load's land, so a live
+        // refresh for the previous owner that lands meanwhile fails its owner
+        // check rather than relying on its abort alone.
+        railsProfileRef.current = undefined
+        railsUserRef.current = null
         coreRailsRef.current = []
         discoverRailsRef.current = []
         anchorRailsRef.current = []
@@ -4396,8 +4401,13 @@ export default function App() {
         lastHomeLoadRef.current = Date.now()
         railsProfileRef.current = activeProfileId
         railsUserRef.current = user.id
-        coreRailsRef.current = coreRails
-        homeRailsVersionRef.current = loadVersion
+        // A live refresh that landed while this load was out has newer
+        // catalog rails; a background load keeps them rather than putting the
+        // older ones back (the new titles would vanish for a round trip).
+        if (cold || loadVersion >= homeRailsVersionRef.current) {
+          coreRailsRef.current = coreRails
+          homeRailsVersionRef.current = loadVersion
+        }
         // A cold load (a profile switch included) shows the core rails alone;
         // the personalized ones splice in as they land. A background refresh
         // of the same profile instead puts the fresh core rails under the
@@ -4405,7 +4415,7 @@ export default function App() {
         // every AI rail off the page until its fetch below came back, which a
         // scan in progress now does every ten seconds.
         if (!cold && personalProfileReady) recomposeHomeRails()
-        else setHomeRails(withoutRemoved(coreRails, removedFromHomeRef.current))
+        else setHomeRails(withoutRemoved(coreRailsRef.current, removedFromHomeRef.current))
         // Core rails are visible. Clear the loading state now so the
         // spinner doesn't linger waiting on the personalized rails.
         setHomeLoading(false)
@@ -4519,6 +4529,12 @@ export default function App() {
   // (view) catches up. A failed refresh leaves the rails behind until the
   // next update, showing or recompose.
   const homeRefreshAcRef = useRef<AbortController | null>(null)
+  // Home's library count is asked for by its own effect (per user and
+  // profile) and by this refresh; every request takes a number, and an answer
+  // lands only if no later-asked one has, so an older answer arriving last
+  // cannot put an older count back.
+  const homeCountSeqRef = useRef(0)
+  const homeCountAppliedRef = useRef(0)
   useEffect(() => () => {
     homeRefreshAcRef.current?.abort()
     homeRefreshAcRef.current = null
@@ -4530,8 +4546,10 @@ export default function App() {
       railsUserRef.current !== realtimeUserId) return
     const version = catalogVersion
     const countKey = `${realtimeUserId}:${activeProfileId}`
+    const countSeq = ++homeCountSeqRef.current
     const ac = new AbortController()
     homeRefreshAcRef.current = ac
+    const stopTimeout = abortAfter(ac)
     Promise.all([
       listRecent(12, ac.signal),
       listMedia({ type: 'movie', perPage: 20, sortBy: 'rating', signal: ac.signal }),
@@ -4541,20 +4559,28 @@ export default function App() {
       listMediaWithTotal({ perPage: 1, signal: ac.signal }).catch(() => null),
     ])
       .then(([recent, movies, shows, count]) => {
+        stopTimeout()
         if (homeRefreshAcRef.current !== ac) return
         homeRefreshAcRef.current = null
         if (railsProfileRef.current !== activeProfileId || railsUserRef.current !== realtimeUserId) return
+        // A full load that started later may have landed newer rails first.
+        if (version < homeRailsVersionRef.current) return
         homeRailsVersionRef.current = version
         coreRailsRef.current = coreHomeRails(recent as Media[], movies as Media[], shows as Media[])
         recomposeHomeRails()
-        if (count) setHomeLibraryCount({ key: countKey, total: count.total })
+        if (count && countSeq > homeCountAppliedRef.current) {
+          homeCountAppliedRef.current = countSeq
+          setHomeLibraryCount({ key: countKey, total: count.total })
+        }
         if (heroPoolRef.current.length === 0 && !homeHeroRef.current) {
           const hero = (recent[0] || movies[0] || null) as Media | null
           if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
         }
       })
       .catch(() => {
-        // Background refresh: the rails on screen stay.
+        // Background refresh (or one past LIVE_REFRESH_TIMEOUT_MS): the rails
+        // on screen stay.
+        stopTimeout()
         if (homeRefreshAcRef.current === ac) homeRefreshAcRef.current = null
         ac.abort()
       })
@@ -4735,11 +4761,13 @@ export default function App() {
     const version = catalogVersion
     const ac = new AbortController()
     moviesRefreshAcRef.current = ac
+    const stopTimeout = abortAfter(ac)
     refetchLoadedPages(page => listMediaWithTotal({
       type: 'movie', perPage: BROWSE_PER_PAGE, page, sortBy: moviesSort,
       genre: moviesGenre || undefined, signal: ac.signal,
     }), pages)
       .then(({ items, total, nextPage }) => {
+        stopTimeout()
         if (moviesRefreshAcRef.current !== ac) return
         moviesRefreshAcRef.current = null
         moviesCatalogVersionRef.current = version
@@ -4750,6 +4778,7 @@ export default function App() {
       .catch(() => {
         // Background refresh: keep the list on screen. Pages still out are
         // abandoned with it.
+        stopTimeout()
         if (moviesRefreshAcRef.current === ac) moviesRefreshAcRef.current = null
         ac.abort()
       })
@@ -4763,11 +4792,13 @@ export default function App() {
     const version = catalogVersion
     const ac = new AbortController()
     showsRefreshAcRef.current = ac
+    const stopTimeout = abortAfter(ac)
     refetchLoadedPages(page => listMediaWithTotal({
       type: 'show', perPage: BROWSE_PER_PAGE, page, sortBy: showsSort,
       genre: showsGenre || undefined, signal: ac.signal,
     }), pages)
       .then(({ items, total, nextPage }) => {
+        stopTimeout()
         if (showsRefreshAcRef.current !== ac) return
         showsRefreshAcRef.current = null
         showsCatalogVersionRef.current = version
@@ -4776,6 +4807,7 @@ export default function App() {
         setShowsNextPage(nextPage)
       })
       .catch(() => {
+        stopTimeout()
         if (showsRefreshAcRef.current === ac) showsRefreshAcRef.current = null
         ac.abort()
       })
@@ -5975,10 +6007,15 @@ export default function App() {
     setHomeLibraryCount(null)
     if (homeLibraryUserId === null || !catalogProfileSettled) return
     const key = `${homeLibraryUserId}:${activeProfileId}`
+    const seq = ++homeCountSeqRef.current
     const ac = new AbortController()
     let cancelled = false
     listMediaWithTotal({ perPage: 1, signal: ac.signal })
-      .then(({ total }) => { if (!cancelled) setHomeLibraryCount({ key, total }) })
+      .then(({ total }) => {
+        if (cancelled || seq <= homeCountAppliedRef.current) return
+        homeCountAppliedRef.current = seq
+        setHomeLibraryCount({ key, total })
+      })
       .catch(() => { /* non-fatal — greeting omits the clause when null */ })
     return () => { cancelled = true; ac.abort() }
   }, [homeLibraryUserId, catalogProfileSettled, activeProfileId])
@@ -6327,7 +6364,7 @@ export default function App() {
               it changes the height of this whole sticky stack — which is
               why chromeRef publishes the measured height as --chrome-h
               (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={adminUI} onScanComplete={refreshHomeData} />
+          <ScanProgressBar isAdmin={adminUI} onScanComplete={notifyCatalogChanged} />
           <TopNav
             user={user}
             adminUI={adminUI}

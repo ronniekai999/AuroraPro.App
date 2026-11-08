@@ -19,6 +19,12 @@
 export const CATALOG_UPDATE_DELAY_MS = 1500
 
 /**
+ * Up to this much more is added to the delay at random, so the tabs that all
+ * got the same event do not all refetch in the same millisecond.
+ */
+export const CATALOG_UPDATE_JITTER_MS = 3000
+
+/**
  * The least time between two refreshes. The server holds each scan to one
  * mid-scan event per 10 seconds, but several libraries scanning at once each
  * send their own; this keeps a tab to one refresh per 10 seconds whatever the
@@ -32,10 +38,24 @@ export const CATALOG_UPDATE_MIN_GAP_MS = 10_000
  * reload) rather than refetched, which would be a burst of requests every ten
  * seconds of a scan, or dropped, which would lose the reader's place.
  */
-export const CATALOG_REFRESH_MAX_PAGES = 10
+export const CATALOG_REFRESH_MAX_PAGES = 5
 
 /** Page requests one grid refresh has in flight at once. */
 export const CATALOG_REFRESH_CONCURRENCY = 3
+
+/**
+ * A live refresh still out after this is abandoned. Each view runs one at a
+ * time, so a request that never settles (a half-open connection after a
+ * laptop sleeps) would otherwise stop that view's live updates for the tab's
+ * life.
+ */
+export const LIVE_REFRESH_TIMEOUT_MS = 30_000
+
+/** Aborts `ac` after `ms`; the returned function cancels that. */
+export function abortAfter(ac: AbortController, ms = LIVE_REFRESH_TIMEOUT_MS): () => void {
+  const id = setTimeout(() => ac.abort(), ms)
+  return () => clearTimeout(id)
+}
 
 export interface CatalogUpdateScheduler {
   /** A library_update arrived (or the socket reconnected). */
@@ -48,9 +68,9 @@ export interface CatalogUpdateScheduler {
 /**
  * Coalesces library_update events into refreshes.
  *
- * The first event starts a short timer and later events inside it ride along,
- * so a mid-scan event followed closely by the completion, or two libraries
- * scanning at once, make one refresh; a refresh also waits until
+ * The first event starts a short, jittered timer and later events inside it
+ * ride along, so a mid-scan event followed closely by the completion, or two
+ * libraries scanning at once, make one refresh; a refresh also waits until
  * `minGapMs` after the previous one. A refresh due while `isHidden()` (the tab
  * is hidden, or the app holds refreshes while the player is open) waits until
  * `visible()` is called with it false: a background tab on Home would
@@ -60,12 +80,16 @@ export function createCatalogUpdateScheduler(opts: {
   onFlush: () => void
   isHidden: () => boolean
   delayMs?: number
+  jitterMs?: number
+  random?: () => number
   minGapMs?: number
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearTimer?: (id: ReturnType<typeof setTimeout>) => void
 }): CatalogUpdateScheduler {
   const delayMs = opts.delayMs ?? CATALOG_UPDATE_DELAY_MS
+  const jitterMs = opts.jitterMs ?? CATALOG_UPDATE_JITTER_MS
+  const random = opts.random ?? Math.random
   const minGapMs = opts.minGapMs ?? CATALOG_UPDATE_MIN_GAP_MS
   const now = opts.now ?? (() => Date.now())
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
@@ -94,7 +118,8 @@ export function createCatalogUpdateScheduler(opts: {
   return {
     notify() {
       if (disposed || timer !== null) return
-      timer = setTimer(fire, Math.max(delayMs, lastFlushAt + minGapMs - now()))
+      const delay = delayMs + random() * jitterMs
+      timer = setTimer(fire, Math.max(delay, lastFlushAt + minGapMs - now()))
     },
     visible() {
       if (disposed || !heldWhileHidden || opts.isHidden() || timer !== null) return

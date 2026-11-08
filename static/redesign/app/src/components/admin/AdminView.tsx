@@ -97,6 +97,7 @@ import {
   type UpdateState,
   type UpdateStatus,
 } from '@/lib/api'
+import { abortAfter } from '@/lib/catalogUpdates'
 
 // server_settings keys for the referral prompt (migration 046). Named here so
 // the editor and the Go whitelist can't drift on a string literal.
@@ -2708,6 +2709,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
     const version = catalogVersion
     const ac = new AbortController()
     dashboardRefreshRef.current = ac
+    const stopTimeout = abortAfter(ac)
     // The side cards count files and titles too; each keeps its last value
     // when its own refetch fails.
     Promise.all([
@@ -2716,6 +2718,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       getSkipMarkerStatus(ac.signal).catch(() => null),
     ])
       .then(([s, emb, skip]) => {
+        stopTimeout()
         if (dashboardRefreshRef.current !== ac) return
         dashboardRefreshRef.current = null
         dashboardVersionRef.current = version
@@ -2724,7 +2727,8 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
         if (skip) setSkipStatus(skip)
       })
       .catch(() => {
-        // Keep the numbers on screen.
+        // Keep the numbers on screen (also after LIVE_REFRESH_TIMEOUT_MS).
+        stopTimeout()
         if (dashboardRefreshRef.current === ac) dashboardRefreshRef.current = null
       })
   }, [tab, stats, catalogVersion])
