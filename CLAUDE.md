@@ -1614,7 +1614,7 @@ New titles reach open web apps without a reload. Code:
   refreshes send nothing; genre lists are not refreshed; a title crossing a
   page boundary between a grid's page requests is missed until the next
   refresh, and Load More during an import can append a duplicate; a grid
-  deeper than 10 pages never live-updates; a failed refresh leaves its view
+  deeper than 5 pages never live-updates; a failed refresh leaves its view
   stale until the next update or showing; `onReconnect` does not fire when an
   admin's socket reopens for a new profile, so an event in that gap is missed;
   after a deploy every visible tab refetches its view as it reconnects, and a
