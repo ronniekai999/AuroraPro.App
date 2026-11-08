@@ -4544,7 +4544,8 @@ export default function App() {
   // the rails' owner before it lands. An answer that comes back while a switch
   // is out (isSwitching, or a switch started since: switchGeneration) is
   // dropped, since the server may already have answered it for the next
-  // profile while the old one is still named. Off Home it waits: the next
+  // profile while the old one is still named, and checked again
+  // (homeRefreshRetry) once the switch is over. Off Home it waits: the next
   // showing (view) catches up. A failed refresh leaves the rails behind until
   // the next update, showing or recompose. No refresh starts while a switch
   // or a PIN prompt is out; closing the prompt (pinTarget) runs this again.
@@ -4603,7 +4604,10 @@ export default function App() {
         if (homeRefreshAcRef.current !== ac) return
         homeRefreshAcRef.current = null
         if (railsProfileRef.current !== activeProfileId || railsUserRef.current !== realtimeUserId) return
-        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
+        // Check again once it is over: the start guard above holds a re-run
+        // off while a switch or prompt is out, and a switch that lands
+        // changes the owner, so this cannot loop.
+        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setHomeRefreshRetry(n => n + 1); return }
         if (count && countSeq > homeCountAppliedRef.current) {
           homeCountAppliedRef.current = countSeq
           setHomeLibraryCount({ key: countKey, total: count.total })
@@ -4787,10 +4791,14 @@ export default function App() {
   // failed refresh keeps the list; the next update or visit tries again.
   // No refresh starts while a profile switch or a PIN prompt is out, and an
   // answer that comes back while one is (or after one started) is dropped:
-  // the server may have answered it for the next profile. Closing the prompt
+  // the server may have answered it for the next profile, and checked again
+  // (gridRefreshRetry) once the switch is over. Closing the prompt
   // (pinTarget) runs this again.
   const moviesRefreshAcRef = useRef<AbortController | null>(null)
   const showsRefreshAcRef = useRef<AbortController | null>(null)
+  // Bumped when a grid refresh's answer is dropped for a profile switch, so
+  // the grid checks again once the switch is over (see Home's retry).
+  const [gridRefreshRetry, setGridRefreshRetry] = useState(0)
   useEffect(() => () => {
     moviesRefreshAcRef.current?.abort()
     moviesRefreshAcRef.current = null
@@ -4818,8 +4826,9 @@ export default function App() {
         stopTimeout()
         if (moviesRefreshAcRef.current !== ac) return
         moviesRefreshAcRef.current = null
-        // Possibly answered for the next profile while the old one is named.
-        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
+        // Possibly answered for the next profile while the old one is named;
+        // checked again once the switch is over.
+        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setGridRefreshRetry(n => n + 1); return }
         moviesCatalogVersionRef.current = version
         setMoviesList(items as Media[])
         setMoviesTotal(total)
@@ -4832,7 +4841,7 @@ export default function App() {
         if (moviesRefreshAcRef.current === ac) moviesRefreshAcRef.current = null
         ac.abort()
       })
-  }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget])
+  }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget, gridRefreshRetry])
 
   useEffect(() => {
     if (!user || !catalogProfileSettled || showsList === null || profileSwitchPending) return
@@ -4852,8 +4861,9 @@ export default function App() {
         stopTimeout()
         if (showsRefreshAcRef.current !== ac) return
         showsRefreshAcRef.current = null
-        // Possibly answered for the next profile while the old one is named.
-        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
+        // Possibly answered for the next profile while the old one is named;
+        // checked again once the switch is over.
+        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setGridRefreshRetry(n => n + 1); return }
         showsCatalogVersionRef.current = version
         setShowsList(items as Media[])
         setShowsTotal(total)
@@ -4864,7 +4874,7 @@ export default function App() {
         if (showsRefreshAcRef.current === ac) showsRefreshAcRef.current = null
         ac.abort()
       })
-  }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget])
+  }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget, gridRefreshRetry])
 
   // Load More handlers — append the next page. Page state lives at
   // App level so the math survives navigating away and back mid-

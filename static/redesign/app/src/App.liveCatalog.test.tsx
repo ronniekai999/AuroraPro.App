@@ -206,6 +206,8 @@ describe('a scan’s new titles appear without a reload', () => {
 const PROFILES2 = [
   { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW },
   { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' },
+  // PIN-locked: picking it opens the PIN prompt, which these tests cancel.
+  { id: 3, user_id: 1, name: 'Locked', is_default: false, created_at: NOW, updated_at: NOW, has_pin: true },
 ]
 
 function stubTwoProfiles() {
@@ -490,6 +492,27 @@ describe('a full Home load and a live refresh overlapping', () => {
     await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
     await new Promise(done => setTimeout(done, 1500))
     expect((server.asked['/api/media/recent'] ?? 0) - before).toBe(1)
+  })
+
+  it('checks again after a refresh dropped for a PIN prompt that was cancelled', async () => {
+    // Picking a locked profile is a switch: a refresh out then is dropped
+    // when it lands, in case the server answered it for the next profile.
+    // Cancelling the prompt leaves nothing else to run it again.
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Locked/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull())
+    r.release()
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
   })
 
   it('brings the count up to date when the refresh that carried it was dropped', async () => {
