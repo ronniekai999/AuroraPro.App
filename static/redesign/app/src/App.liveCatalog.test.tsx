@@ -210,6 +210,8 @@ const PROFILES2 = [
 
 function stubTwoProfiles() {
   let bound = 1
+  let failCount = false
+  const asked: Record<string, number> = {}
   const sees: Record<number, Item[]> = { 1: [item(1, 'Parentonly Old')], 2: [item(2, 'Kidonly Old')] }
   const holds: { match: (u: URL, bound: number) => boolean; gate: Promise<void>; captured: number; every: boolean }[] = []
   const json = (body: unknown, status = 200) =>
@@ -217,10 +219,11 @@ function stubTwoProfiles() {
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
-    const asked = bound
+    asked[p] = (asked[p] ?? 0) + 1
+    const askedFor = bound
     // Answered from the catalog as it was when asked, as a query is.
-    const list = [...sees[asked]].reverse()
-    const hold = holds.find(h => (h.every || h.captured === 0) && h.match(url, asked))
+    const list = [...sees[askedFor]].reverse()
+    const hold = holds.find(h => (h.every || h.captured === 0) && h.match(url, askedFor))
     if (hold) { hold.captured++; await hold.gate }
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(USER)
@@ -232,6 +235,7 @@ function stubTwoProfiles() {
     if (p === '/api/me/hero') return json({ picks: [] })
     if (p === '/api/media/recent') return json({ data: list })
     if (p === '/api/media') {
+      if (failCount && !url.searchParams.has('type')) return json({ error: 'unavailable' }, 500)
       const page = Number(url.searchParams.get('page') ?? 1)
       return json({ data: page === 1 ? list : [], page, per_page: 100, total_items: list.length, total_pages: 1 })
     }
@@ -242,6 +246,10 @@ function stubTwoProfiles() {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
   return {
+    /** Requests per path so far. */
+    asked,
+    /** Home's library count (the list asked for with no type) answers 500. */
+    failCount() { failCount = true },
     addForParent(it: Item) { sees[1].push(it) },
     /** Holds the next request `match` accepts (with `every`, each one until
      *  released); returns the release and whether one was sent. */
@@ -464,6 +472,24 @@ describe('a full Home load and a live refresh overlapping', () => {
     await new Promise(done => setTimeout(done, 500))
     expect(page.commits.length).toBeGreaterThan(0)
     expect(page.commits.filter(c => copies(c.text) < before)).toEqual([])
+  })
+
+  it('makes one refresh, not a loop, when only the count request fails', async () => {
+    // The count's version is recorded when it is asked: recorded when an
+    // answer landed, a failing count left it behind, and each recompose ran
+    // another full refresh (a review measured 187 in two seconds).
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const before = server.asked['/api/media/recent'] ?? 0
+    server.failCount()
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 1500))
+    expect((server.asked['/api/media/recent'] ?? 0) - before).toBe(1)
   })
 
   it('brings the count up to date when the refresh that carried it was dropped', async () => {

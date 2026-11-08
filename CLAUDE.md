@@ -1586,19 +1586,26 @@ New titles reach open web apps without a reload. Code:
     caught up once its rails land. A live refresh whose rails are dropped
     that way checks again (`homeRefreshRetry`: a recompose can set the very
     array on screen and re-run nothing), so Home is not left a version
-    behind. The count comes only from the live refresh and is tracked apart
-    (`homeCountVersionRef`), so a refresh also runs when the count alone is
-    behind; its requests are numbered across its own effect and this
-    refresh, so an older answer landing last cannot put an older count back.
+    behind. The count's own effect asks once per user and profile, and only
+    the live refresh keeps it current (a full load does not ask), so it is
+    tracked apart (`homeCountVersionRef`, the version it was last ASKED at,
+    recorded when a request starts) and a refresh also runs when the count
+    alone is behind. Recorded when an answer landed instead, a count request
+    that kept failing ran a full refresh per recompose in a tight loop; a
+    failed count now waits for the next update. Its requests are numbered
+    across its own effect and this refresh, so an older answer landing last
+    cannot put an older count back.
     A full load does not abort a live refresh. The refresh runs only under
     rails the current user and profile already have up, is aborted by a
     user, profile or settle change, stands down on a switch's first commit
     (`profileSwitchPending`), and is checked against the rails' owner when it
     lands; a switch clears that owner until the new profile's rails land, so
-    the check holds on its own. An answer that comes back while a switch is
-    out (`isSwitching`, or one started since: `switchGeneration`) is dropped,
-    since the server may already have answered it for the next profile while
-    the old one is still named; the grids drop theirs the same way.
+    the check holds on its own. No refresh starts while a switch or a PIN
+    prompt is out (`isSwitching`), and an answer that comes back while one is,
+    or after one started (`switchGeneration`), is dropped, since the server
+    may already have answered it for the next profile while the old one is
+    still named; closing the prompt (`pinTarget`) runs the refreshes again.
+    The grids do the same.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1620,8 +1627,9 @@ New titles reach open web apps without a reload. Code:
   land, which fails only when both the abort and the owner clearing are gone,
   an update during Home's first load, a first import's hero, a full load and
   a live refresh landing in either order with commits sampled, a refresh
-  started before a full load landing after it, and the count catching up
-  when the refresh that carried it was dropped),
+  started before a full load landing after it, the count catching up when
+  the refresh that carried it was dropped, and one refresh, not a loop, when
+  only the count fails),
   `AdminView.catalog.test.tsx` and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
   the completion event; files found in a scan's last seconds wait for the
@@ -1636,11 +1644,14 @@ New titles reach open web apps without a reload. Code:
   after a deploy every visible tab refetches its view as it reconnects, and a
   socket the hub drops for a full send buffer refetches on every reconnect;
   the one-at-a-time and Load More interplay, the reset of Home's buffers on
-  sign-out, the count's numbering and the switch-window drop have no test;
-  an answer dropped for a switch is not retried, so a switch that fails, or
-  a PIN prompt left open, leaves the view one update behind until the next
-  update or showing; a first import's fallback hero is picked by the first
-  live refresh and not replaced, so a show picked before its enrichment
+  sign-out, the count's numbering, the switch-window drop and the PIN
+  prompt's re-run have no test, and the full load's guard is pinned against
+  removal but not as a sequence rather than a version check (the
+  equal-version case it adds is not reached by the current triggers); an
+  answer dropped for a switch without a PIN prompt that then fails leaves
+  the view behind until the next update or showing; a first import's
+  fallback hero is picked by the first live refresh and not replaced, so a
+  show picked before its enrichment
   stays bare (no backdrop or overview) until a full Home load (returning or
   refocusing after 30 s) or a reload, and the live refresh does not ask for
   the personalized hero pool again (a full Home load does); the dashboard's

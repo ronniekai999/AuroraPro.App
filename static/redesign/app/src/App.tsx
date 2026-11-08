@@ -4399,7 +4399,9 @@ export default function App() {
         // hasn't supplied one. Read via ref to avoid closure
         // staleness reporting the pool as empty after the hero fetch
         // already populated it.
-        if (heroPoolRef.current.length === 0) {
+        // Not from a background load whose rails a later-started fetch has
+        // already beaten (it would put an older title back as the hero).
+        if (heroPoolRef.current.length === 0 && (cold || railsSeq > homeRailsLandedSeqRef.current)) {
           const hero = (recent[0] || movies[0] || null) as Media | null
           if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
         }
@@ -4544,9 +4546,12 @@ export default function App() {
   // dropped, since the server may already have answered it for the next
   // profile while the old one is still named. Off Home it waits: the next
   // showing (view) catches up. A failed refresh leaves the rails behind until
-  // the next update, showing or recompose. The library count is tracked
-  // apart (homeCountVersionRef): it comes only from this refresh, so a
-  // refresh also runs when the count alone is behind.
+  // the next update, showing or recompose. No refresh starts while a switch
+  // or a PIN prompt is out; closing the prompt (pinTarget) runs this again.
+  // The library count is tracked apart (homeCountVersionRef): its own effect
+  // asks once per user and profile, and only this refresh keeps it current,
+  // so a refresh also runs when the count alone is behind (a full load does
+  // not ask for it).
   const homeRefreshAcRef = useRef<AbortController | null>(null)
   // Home's library count is asked for by its own effect (per user and
   // profile) and by this refresh; every request takes a number, and an answer
@@ -4554,8 +4559,11 @@ export default function App() {
   // cannot put an older count back.
   const homeCountSeqRef = useRef(0)
   const homeCountAppliedRef = useRef(0)
-  // The catalog version the count on screen reflects (recorded when an
-  // answer lands, from the version its request started at).
+  // The catalog version the count was last ASKED at, recorded when the
+  // request starts (by this refresh or the count effect), not when an answer
+  // lands: recorded on landing, a count request that kept failing left it
+  // behind, and every recompose ran another full refresh, in a tight loop. A
+  // failed count waits for the next update.
   const homeCountVersionRef = useRef(0)
   // Bumped when a refresh's rails are dropped because a later-started fetch
   // (a full load) landed first: that sets nothing the effect depends on (a
@@ -4572,9 +4580,11 @@ export default function App() {
     if (homeRailsVersionRef.current === catalogVersion && homeCountVersionRef.current === catalogVersion) return
     if (coreRailsRef.current.length === 0 || railsProfileRef.current !== activeProfileId ||
       railsUserRef.current !== realtimeUserId) return
+    if (isProfileSwitching()) return
     const version = catalogVersion
     const countKey = `${realtimeUserId}:${activeProfileId}`
     const countSeq = ++homeCountSeqRef.current
+    homeCountVersionRef.current = version
     const railsSeq = ++homeRailsSeqRef.current
     const switchGen = profileSwitchGeneration()
     const ac = new AbortController()
@@ -4596,7 +4606,6 @@ export default function App() {
         if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
         if (count && countSeq > homeCountAppliedRef.current) {
           homeCountAppliedRef.current = countSeq
-          homeCountVersionRef.current = version
           setHomeLibraryCount({ key: countKey, total: count.total })
         }
         // A full load that started later landed first: its rails are newer.
@@ -4618,7 +4627,7 @@ export default function App() {
         if (homeRefreshAcRef.current === ac) homeRefreshAcRef.current = null
         ac.abort()
       })
-  }, [view, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, catalogVersion, homeRails, homeRefreshRetry, recomposeHomeRails, isProfileSwitching, profileSwitchGeneration])
+  }, [view, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, catalogVersion, homeRails, homeRefreshRetry, recomposeHomeRails, isProfileSwitching, profileSwitchGeneration, pinTarget])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -4776,6 +4785,10 @@ export default function App() {
   // CATALOG_REFRESH_MAX_PAGES is left as it is: stale until a sort or genre
   // change or a reload, rather than dropped, which lost the reader's place. A
   // failed refresh keeps the list; the next update or visit tries again.
+  // No refresh starts while a profile switch or a PIN prompt is out, and an
+  // answer that comes back while one is (or after one started) is dropped:
+  // the server may have answered it for the next profile. Closing the prompt
+  // (pinTarget) runs this again.
   const moviesRefreshAcRef = useRef<AbortController | null>(null)
   const showsRefreshAcRef = useRef<AbortController | null>(null)
   useEffect(() => () => {
@@ -4791,7 +4804,7 @@ export default function App() {
     if (!user || !catalogProfileSettled || moviesList === null || profileSwitchPending) return
     if (moviesCatalogVersionRef.current === catalogVersion || moviesLoadingMore || moviesRefreshAcRef.current) return
     const pages = loadedPageCount(moviesList.length, BROWSE_PER_PAGE)
-    if (view !== 'movies' || pages > CATALOG_REFRESH_MAX_PAGES) return
+    if (view !== 'movies' || pages > CATALOG_REFRESH_MAX_PAGES || isProfileSwitching()) return
     const version = catalogVersion
     const ac = new AbortController()
     moviesRefreshAcRef.current = ac
@@ -4819,13 +4832,13 @@ export default function App() {
         if (moviesRefreshAcRef.current === ac) moviesRefreshAcRef.current = null
         ac.abort()
       })
-  }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration])
+  }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget])
 
   useEffect(() => {
     if (!user || !catalogProfileSettled || showsList === null || profileSwitchPending) return
     if (showsCatalogVersionRef.current === catalogVersion || showsLoadingMore || showsRefreshAcRef.current) return
     const pages = loadedPageCount(showsList.length, BROWSE_PER_PAGE)
-    if (view !== 'shows' || pages > CATALOG_REFRESH_MAX_PAGES) return
+    if (view !== 'shows' || pages > CATALOG_REFRESH_MAX_PAGES || isProfileSwitching()) return
     const version = catalogVersion
     const ac = new AbortController()
     showsRefreshAcRef.current = ac
@@ -4851,7 +4864,7 @@ export default function App() {
         if (showsRefreshAcRef.current === ac) showsRefreshAcRef.current = null
         ac.abort()
       })
-  }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration])
+  }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, profileSwitchPending, isProfileSwitching, profileSwitchGeneration, pinTarget])
 
   // Load More handlers — append the next page. Page state lives at
   // App level so the math survives navigating away and back mid-
@@ -6048,14 +6061,15 @@ export default function App() {
     if (homeLibraryUserId === null || !catalogProfileSettled) return
     const key = `${homeLibraryUserId}:${activeProfileId}`
     const seq = ++homeCountSeqRef.current
-    const version = catalogVersionRef.current
+    // Asked at this version (see homeCountVersionRef), so the live refresh
+    // does not ask again for the same version, a switch's included.
+    homeCountVersionRef.current = catalogVersionRef.current
     const ac = new AbortController()
     let cancelled = false
     listMediaWithTotal({ perPage: 1, signal: ac.signal })
       .then(({ total }) => {
         if (cancelled || seq <= homeCountAppliedRef.current) return
         homeCountAppliedRef.current = seq
-        homeCountVersionRef.current = version
         setHomeLibraryCount({ key, total })
       })
       .catch(() => { /* non-fatal — greeting omits the clause when null */ })
