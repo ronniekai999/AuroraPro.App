@@ -20,6 +20,18 @@ export interface DiscoverReadyEvent {
   profile_id: number
 }
 
+// library_update WebSocket payload (server: internal/api/library_updates.go,
+// sent to every socket). `items_added` while a scan is still adding files (at
+// most every 10s per scan), `scan_completed` when one that added files ends,
+// `retype_rescan_completed` after a library retype's rescan. new_items counts
+// the scan's new files so far.
+export interface LibraryUpdateEvent {
+  library_id: number
+  library_name?: string
+  new_items?: number
+  action?: string
+}
+
 export interface RealtimeHandlers {
   // Gate: open the socket only while logged in. Flipping false tears it down.
   enabled: boolean
@@ -30,6 +42,7 @@ export interface RealtimeHandlers {
   onRequestStatus?: (ev: RequestStatusEvent) => void
   onNotification?: (n: AppNotification) => void
   onDiscoverReady?: (ev: DiscoverReadyEvent) => void
+  onLibraryUpdate?: (ev: LibraryUpdateEvent) => void
 }
 
 // useRealtime maintains ONE app-lifetime WebSocket to the shared hub (/ws) while
@@ -114,6 +127,11 @@ export function useRealtime(handlers: RealtimeHandlers): void {
           case 'discover_ready':
             if (h.onDiscoverReady && msg.data && typeof msg.data === 'object') {
               h.onDiscoverReady(msg.data as DiscoverReadyEvent)
+            }
+            break
+          case 'library_update':
+            if (h.onLibraryUpdate && msg.data && typeof msg.data === 'object') {
+              h.onLibraryUpdate(msg.data as LibraryUpdateEvent)
             }
             break
           // request_progress / scan_progress / now_playing / party_* are not

@@ -54,3 +54,15 @@ describe('useRealtime connection key', () => {
     expect(FakeSocket.opened).toHaveLength(0)
   })
 })
+
+describe('useRealtime library_update', () => {
+  it('hands library_update payloads to onLibraryUpdate', () => {
+    const onLibraryUpdate = vi.fn()
+    renderHook(() => useRealtime({ enabled: true, connectionKey: 1, onLibraryUpdate }))
+    const payload = { library_id: 3, library_name: 'Movies', new_items: 2, action: 'items_added' }
+    FakeSocket.opened[0].onmessage?.({ data: JSON.stringify({ type: 'library_update', data: payload }) })
+    FakeSocket.opened[0].onmessage?.({ data: JSON.stringify({ type: 'scan_progress', data: { library_id: 3 } }) })
+    expect(onLibraryUpdate).toHaveBeenCalledTimes(1)
+    expect(onLibraryUpdate).toHaveBeenCalledWith(payload)
+  })
+})

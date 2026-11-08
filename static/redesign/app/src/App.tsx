@@ -116,6 +116,8 @@ import { TopNav } from '@/components/TopNav'
 import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
+import { useCatalogVersion } from '@/hooks/useCatalogVersion'
+import { CATALOG_REFRESH_MAX_PAGES, loadedPageCount, refetchLoadedPages } from '@/lib/catalogUpdates'
 import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
 // lazy view chunks (AdminView etc.) can import them without reaching
@@ -2773,6 +2775,11 @@ export default function App() {
   // stale-sort response onto the new list).
   const moviesLoadMoreAcRef = useRef<AbortController | null>(null)
   const showsLoadMoreAcRef = useRef<AbortController | null>(null)
+  // The catalog version (useCatalogVersion) each grid's list was loaded or
+  // last refreshed at. Behind the current version means a scan has added
+  // titles since; the grid refetches in place when it is next on screen.
+  const moviesCatalogVersionRef = useRef(0)
+  const showsCatalogVersionRef = useRef(0)
   // Per-page size constant. Server caps at 100; we ride at the cap
   // to minimize round-trips. Centralized so Load More can compute
   // `nextPage` consistently with the initial fetch.
@@ -3089,6 +3096,12 @@ export default function App() {
     return () => { cancelled = true }
   }, [location.pathname, user, selectedMedia, addToast, navigate, catalogProfileSettled])
 
+  // Live catalog updates (lib/catalogUpdates.ts): library_update events from
+  // the socket below become one version number. Home, the Movies and Shows
+  // grids, Home's library count and the admin dashboard each refetch when on
+  // screen and behind it, and catch up when next shown otherwise.
+  const { catalogVersion, catalogVersionRef, notifyCatalogChanged } = useCatalogVersion()
+
   // App-wide realtime hub: live request-status patches + push notifications.
   // One socket for the whole session, enabled only while logged in.
   const realtimeUserId = user && typeof user === 'object' ? user.id : null
@@ -3157,6 +3170,9 @@ export default function App() {
       // events for a non-active profile (stale tab, profile switched away).
       if (ev.profile_id === activeProfileId) void refetchDiscover(activeProfileId)
     },
+    // A scan added titles (mid-scan or at its end). Every socket gets these,
+    // so this is how a non-admin sees new titles without a reload.
+    onLibraryUpdate: () => notifyCatalogChanged(),
   })
 
   // Seed the notification feed + unread badge on login, and for an admin again
@@ -4092,23 +4108,37 @@ export default function App() {
   const viewRef = useRef(view)
   useEffect(() => { viewRef.current = view }, [view])
   const refreshHomeData = useCallback(() => setHomeReloadNonce(n => n + 1), [])
+  // A library_update arrived (catalogVersion moved) while Home was not on
+  // screen. Cleared when a Home load starts.
+  const homeCatalogStaleRef = useRef(false)
 
-  // Returning to Home refetches only if the data has had time to go stale. A
-  // quick tab bounce costs nothing; coming back later picks up anything a scan
-  // (or another device) added. Deliberately not keyed on `view` alone, which
-  // would re-run every core/CW/anchor/engagement fetch on every visit.
+  // A scan added titles: Home refetches now if it is on screen, else the next
+  // time it is shown (below). The refetch is the scan-completion one: core
+  // rails replaced under the personalized ones, no skeleton.
+  useEffect(() => {
+    if (catalogVersion === 0) return
+    if (viewRef.current === 'home') refreshHomeData()
+    else homeCatalogStaleRef.current = true
+  }, [catalogVersion, refreshHomeData])
+
+  // Returning to Home refetches only if the data has had time to go stale, or
+  // a scan added titles while it was away. A quick tab bounce costs nothing;
+  // coming back later picks up anything another device added. Deliberately
+  // not keyed on `view` alone, which would re-run every core/CW/anchor/
+  // engagement fetch on every visit.
   useEffect(() => {
     if (!user || view !== 'home') return
-    if (shouldRefreshHome({ view, signedIn: true, lastAttemptAt: lastHomeLoadRef.current, now: Date.now() })) {
+    if (homeCatalogStaleRef.current ||
+      shouldRefreshHome({ view, signedIn: true, lastAttemptAt: lastHomeLoadRef.current, now: Date.now() })) {
       refreshHomeData()
     }
   }, [view, user, refreshHomeData])
 
   // The gate above needs a navigation to fire, so someone who leaves the tab
   // open on Home — or closes the lid and comes back — never picks anything up.
-  // Re-checking on tab focus covers that, and is the only path a NON-admin has
-  // to see a scan's results without navigating, since the scan-completion
-  // signal is behind the admin-gated poller.
+  // Re-checking on tab focus covers that. A scan's new titles reach everyone
+  // through the library_update effect above; this is the fallback for a
+  // socket that was down when one was sent.
   useEffect(() => {
     if (!user) return
     const check = () => {
@@ -4250,6 +4280,7 @@ export default function App() {
       // an 8s load completed zero times and left Home silently rail-less, which
       // is worse than the staleness this fixes.
       lastHomeLoadRef.current = Date.now()
+      homeCatalogStaleRef.current = false
       // Only show the skeleton on a COLD load. A stale-gated or scan-triggered
       // refetch happens under rails the user is already looking at, and
       // blanking them to a loading state would be a worse flicker than the
@@ -4318,7 +4349,16 @@ export default function App() {
         // Re-stamp on success so the freshness window runs from when the data
         // actually landed rather than from when we started asking for it.
         lastHomeLoadRef.current = Date.now()
-        setHomeRails(coreRails)
+        railsProfileRef.current = activeProfileId
+        coreRailsRef.current = coreRails
+        // A cold load (a profile switch included) shows the core rails alone;
+        // the personalized ones splice in as they land. A background refresh
+        // of the same profile instead puts the fresh core rails under the
+        // personalized ones already on screen: setting the core set alone took
+        // every AI rail off the page until its fetch below came back, which a
+        // scan in progress now does every ten seconds.
+        if (!cold && personalProfileReady) recomposeHomeRails()
+        else setHomeRails(coreRails)
         // Core rails are visible. Clear the loading state now so the
         // spinner doesn't linger waiting on the personalized rails.
         setHomeLoading(false)
@@ -4338,9 +4378,8 @@ export default function App() {
         // flicker than the one the skeleton suppression above avoids, on the
         // most-visited screen in the app. Keeping them lets recomposeHomeRails
         // splice the fresh core in underneath, and each personalized source
-        // overwrites its own buffer as it re-resolves.
-        railsProfileRef.current = activeProfileId
-        coreRailsRef.current = coreRails
+        // overwrites its own buffer as it re-resolves. (The core set is
+        // stashed above, before the rails are set.)
         if (profileChanged) {
           discoverRailsRef.current = []
           anchorRailsRef.current = []
@@ -4467,6 +4506,8 @@ export default function App() {
     if (!user || view !== 'movies' || moviesList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
+    // The catalog version this page reflects (see the live refresh below).
+    const version = catalogVersionRef.current
     // Server-side sort + genre — single source of truth. Client-side
     // sort can't cope with pagination (items 101+ arrive in server
     // order and concat after a re-sorted page 1). Genre is now also
@@ -4478,6 +4519,7 @@ export default function App() {
     })
       .then(({ items, total, page }) => {
         if (cancelled) return
+        moviesCatalogVersionRef.current = version
         setMoviesList(items as Media[])
         setMoviesTotal(total)
         // Trust the server's returned page number, then advance.
@@ -4495,7 +4537,7 @@ export default function App() {
     // activeProfileId too: a first page still in flight when the profile
     // changes is aborted and fetched again (the reset leaves a null list
     // null, which alone would not re-run this).
-  }, [user, view, moviesList, moviesSort, moviesGenre, nextToastId, activeProfileId, catalogProfileSettled])
+  }, [user, view, moviesList, moviesSort, moviesGenre, nextToastId, activeProfileId, catalogProfileSettled, catalogVersionRef])
 
   // One-time fetch of the canonical genre catalog per browse view.
   // Doesn't need to re-fire on sort/page changes — genre set doesn't
@@ -4515,12 +4557,14 @@ export default function App() {
     if (!user || view !== 'shows' || showsList !== null || !catalogProfileSettled) return
     let cancelled = false
     const ac = new AbortController()
+    const version = catalogVersionRef.current
     listMediaWithTotal({
       type: 'show', perPage: BROWSE_PER_PAGE, sortBy: showsSort,
       genre: showsGenre || undefined, signal: ac.signal,
     })
       .then(({ items, total, page }) => {
         if (cancelled) return
+        showsCatalogVersionRef.current = version
         setShowsList(items as Media[])
         setShowsTotal(total)
         setShowsNextPage(page + 1)
@@ -4531,7 +4575,7 @@ export default function App() {
         setToasts(prev => [...prev, { id, message: 'Failed to load shows', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, showsList, showsSort, showsGenre, nextToastId, activeProfileId, catalogProfileSettled])
+  }, [user, view, showsList, showsSort, showsGenre, nextToastId, activeProfileId, catalogProfileSettled, catalogVersionRef])
 
   useEffect(() => {
     if (!user || view !== 'shows' || showsGenres !== null) return
@@ -4542,6 +4586,83 @@ export default function App() {
       .catch(() => { /* fallback path */ })
     return () => { cancelled = true; ac.abort() }
   }, [user, view, showsGenres])
+
+  // Live refresh: a scan added titles since this grid's list was loaded
+  // (lib/catalogUpdates.ts). On screen, every loaded page is refetched and
+  // swapped in, so new titles take their place in the current sort and the
+  // Load More cursor still matches the server; nothing blanks and the scroll
+  // position holds. Off screen it waits for the next visit, which shows the
+  // cached list and then refreshes it. It waits for a Load More in flight
+  // (starting one aborts the refresh through the effect's cleanup, and it
+  // runs again once the page has landed); a sort, genre or profile change
+  // drops the list to null, which aborts it the same way, and a switch's
+  // first commit (profileSwitchPending, before the reset has run) aborts it
+  // and starts nothing, so a refresh cannot land the previous profile's
+  // titles after the reset, as with the first page above. A list deeper than
+  // CATALOG_REFRESH_MAX_PAGES is not refetched in place but dropped once off
+  // screen, so the next visit starts at page 1. A failed refresh keeps the
+  // list; the next update or visit tries again.
+  useEffect(() => {
+    if (!user || !catalogProfileSettled || moviesList === null || profileSwitchPending) return
+    if (moviesCatalogVersionRef.current === catalogVersion || moviesLoadingMore) return
+    const pages = loadedPageCount(moviesList.length, BROWSE_PER_PAGE)
+    if (pages > CATALOG_REFRESH_MAX_PAGES) {
+      if (view !== 'movies') {
+        setMoviesList(null)
+        setMoviesTotal(null)
+        setMoviesNextPage(1)
+      }
+      return
+    }
+    if (view !== 'movies') return
+    const version = catalogVersion
+    const ac = new AbortController()
+    let cancelled = false
+    refetchLoadedPages(page => listMediaWithTotal({
+      type: 'movie', perPage: BROWSE_PER_PAGE, page, sortBy: moviesSort,
+      genre: moviesGenre || undefined, signal: ac.signal,
+    }), pages)
+      .then(({ items, total, nextPage }) => {
+        if (cancelled) return
+        moviesCatalogVersionRef.current = version
+        setMoviesList(items as Media[])
+        setMoviesTotal(total)
+        setMoviesNextPage(nextPage)
+      })
+      .catch(() => { /* background refresh: keep the list on screen */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, activeProfileId, profileSwitchPending])
+
+  useEffect(() => {
+    if (!user || !catalogProfileSettled || showsList === null || profileSwitchPending) return
+    if (showsCatalogVersionRef.current === catalogVersion || showsLoadingMore) return
+    const pages = loadedPageCount(showsList.length, BROWSE_PER_PAGE)
+    if (pages > CATALOG_REFRESH_MAX_PAGES) {
+      if (view !== 'shows') {
+        setShowsList(null)
+        setShowsTotal(null)
+        setShowsNextPage(1)
+      }
+      return
+    }
+    if (view !== 'shows') return
+    const version = catalogVersion
+    const ac = new AbortController()
+    let cancelled = false
+    refetchLoadedPages(page => listMediaWithTotal({
+      type: 'show', perPage: BROWSE_PER_PAGE, page, sortBy: showsSort,
+      genre: showsGenre || undefined, signal: ac.signal,
+    }), pages)
+      .then(({ items, total, nextPage }) => {
+        if (cancelled) return
+        showsCatalogVersionRef.current = version
+        setShowsList(items as Media[])
+        setShowsTotal(total)
+        setShowsNextPage(nextPage)
+      })
+      .catch(() => { /* background refresh: keep the list on screen */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, activeProfileId, profileSwitchPending])
 
   // Load More handlers — append the next page. Page state lives at
   // App level so the math survives navigating away and back mid-
@@ -5715,10 +5836,19 @@ export default function App() {
   // tab (the same user and, once the startup load settles, the same
   // profile), and after a switch away and back before the other profile's
   // count landed, showing an answer from before.
+  //
+  // A scan adding titles (catalogVersion) asks again too, and only then is
+  // the answer on screen kept until the new one lands: same user, profile and
+  // settle, so it is this session's own count, one scan behind.
   const homeLibraryUserId = user ? user.id : null
   const homeLibraryKey = `${homeLibraryUserId}:${activeProfileId}`
+  const homeLibraryInputsRef = useRef<{ user: number | null; profile: number | null; settled: boolean } | null>(null)
   useEffect(() => {
-    setHomeLibraryCount(null)
+    const prev = homeLibraryInputsRef.current
+    const catalogOnly = prev !== null && prev.user === homeLibraryUserId &&
+      prev.profile === activeProfileId && prev.settled === catalogProfileSettled
+    homeLibraryInputsRef.current = { user: homeLibraryUserId, profile: activeProfileId, settled: catalogProfileSettled }
+    if (!catalogOnly) setHomeLibraryCount(null)
     if (homeLibraryUserId === null || !catalogProfileSettled) return
     const key = `${homeLibraryUserId}:${activeProfileId}`
     const ac = new AbortController()
@@ -5727,7 +5857,7 @@ export default function App() {
       .then(({ total }) => { if (!cancelled) setHomeLibraryCount({ key, total }) })
       .catch(() => { /* non-fatal — greeting omits the clause when null */ })
     return () => { cancelled = true; ac.abort() }
-  }, [homeLibraryUserId, catalogProfileSettled, activeProfileId])
+  }, [homeLibraryUserId, catalogProfileSettled, activeProfileId, catalogVersion])
   const homeLibraryTotal = homeLibraryCount && homeLibraryCount.key === homeLibraryKey ? homeLibraryCount.total : null
 
   // Keep heroIndexRef in sync with heroIndex across every change path
@@ -6594,7 +6724,7 @@ export default function App() {
               as an unrestricted profile, as the server's admin routes do. */}
           {view === 'admin' && adminUI && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <AdminView currentAdminId={user.id} />
+              <AdminView currentAdminId={user.id} catalogVersion={catalogVersion} />
             </ViewSuspense>
           )}
           {/* An admin whose session's profile is not known yet (startup), or

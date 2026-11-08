@@ -1245,15 +1245,11 @@ func (m *RequestMonitor) triggerMatchingLibraryScan(ctx context.Context, req *mo
 			// ctx here descends from Start(ctx) with no timeout — the server
 			// lifecycle. context.Background() detached the scan from shutdown
 			// and let it write into a closed pool.
+			updates := NewLibraryUpdates(m.hub, l)
 			m.scanner.ScanLibrary(ctx, l, func(p *models.ScanProgress) {
 				m.hub.Broadcast(ws.EventScanProgress, p)
+				updates.Observe(p)
 				if p.Status == models.ScanComplete && p.NewFiles > 0 {
-					m.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-						"library_id":   l.ID,
-						"library_name": l.Name,
-						"new_items":    p.NewFiles,
-						"action":       "scan_completed",
-					})
 					if m.dispatcher != nil {
 						m.dispatcher.ScanCompleted(context.Background(), l.Name, p.NewFiles)
 					}

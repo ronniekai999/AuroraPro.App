@@ -1545,6 +1545,38 @@ rescan goroutine is a bare `go` like `Create`'s and `Scan`'s, so shutdown does
 not wait for it and `addDirRecursive` ignores its context; and the report's
 thresholds are reasoned, not calibrated against real installs.
 
+### Live catalog updates
+
+New titles reach open web apps without a reload. Code:
+`internal/api/library_updates.go`, SPA `lib/catalogUpdates.ts` and
+`hooks/useCatalogVersion.ts`.
+
+- `library_update` has one sender, `LibraryUpdates`, made per scan at every
+  scan entry point (`TestLibraryUpdateHasOneSender` fails on another). It
+  sends `items_added` while a scan adds files (the first at once, then at most
+  every 10 s), `scan_completed` when a scan that added files completes (after
+  the deferred TV enrichment), and `retype_rescan_completed` after every
+  retype rescan. Every socket gets it; it names the library and a file count,
+  never a title.
+- The SPA coalesces events (1.5 s) into `catalogVersion` and holds a refresh
+  while the tab is hidden. Home, the Movies and Shows grids, Home's library
+  count and the admin dashboard each refetch when on screen and behind it,
+  and catch up when next shown. A grid refetches every page it has loaded and
+  swaps them in (never blanking); one deeper than 20 pages is dropped once off
+  screen instead. A grid refresh stands down on a switch's first commit
+  (`profileSwitchPending`), as its first page does. A background Home refresh
+  keeps the personalized rails on screen (it used to drop them until they
+  re-resolved), and the library count stays up unless the user, profile or
+  startup settle changed. Pinned by `App.liveCatalog.test.tsx` and
+  `AdminView.catalog.test.tsx`.
+- Known gaps: mid-scan, a new show has its folder title and no artwork until
+  the completion event; a socket that is down when an event is sent misses it
+  (Home's 30 s staleness and focus checks are the only fallback); scans that
+  only remove titles, the recovery sweep, and background metadata refreshes
+  send nothing; a title crossing a page boundary between a grid's parallel
+  page requests is missed until the next refresh; the macOS and TV clients
+  ignore the event.
+
 ### Nullable database columns
 
 Go scalar fields use zero values as unknown sentinels. Queries projecting

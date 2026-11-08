@@ -2563,7 +2563,12 @@ const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
   sessions: 'Transcodes',
 }
 
-export default function AdminView({ currentAdminId }: { currentAdminId: number }) {
+export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
+  currentAdminId: number
+  /** App's live catalog version (hooks/useCatalogVersion); a change means a
+   *  scan added titles, so the dashboard's counts refresh. */
+  catalogVersion?: number
+}) {
   const [tab, setTab] = useState<AdminTab>('dashboard')
   // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
   // MANUAL activation: arrows move focus without switching panels, so the
@@ -2677,6 +2682,35 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       .finally(() => { if (!cancelled) setStatsLoading(false) })
     return () => { cancelled = true }
   }, [stats])
+
+  // A scan added titles (catalogVersion moved) since the dashboard's numbers
+  // were read: refetch them while the dashboard tab is showing, or when it is
+  // next shown. Quiet: the old numbers stay until the new ones land, and a
+  // failure keeps them (the next update tries again). The view mounts fresh
+  // on each visit to /admin, so this only covers changes while it is open.
+  //
+  // Keyed on whether stats exist, not the object: the refetch replaces it,
+  // and re-running on that would abort the side cards' requests still in
+  // flight, the race the comment on the mount-only effect above describes.
+  const dashboardVersionRef = useRef(catalogVersion)
+  const statsLoaded = stats !== null
+  useEffect(() => {
+    if (tab !== 'dashboard' || !statsLoaded) return
+    if (dashboardVersionRef.current === catalogVersion) return
+    const version = catalogVersion
+    const ac = new AbortController()
+    getAdminDashboard(ac.signal)
+      .then(s => {
+        dashboardVersionRef.current = version
+        setStats(s)
+      })
+      .catch(() => { /* keep the numbers on screen */ })
+    // The side cards count files and titles too; each keeps its last value
+    // when its own refetch fails.
+    getEmbeddingStatus(ac.signal).then(setEmbStatus).catch(() => {})
+    getSkipMarkerStatus(ac.signal).then(setSkipStatus).catch(() => {})
+    return () => ac.abort()
+  }, [tab, statsLoaded, catalogVersion])
 
   useEffect(() => {
     if (tab !== 'users' || users !== null) return

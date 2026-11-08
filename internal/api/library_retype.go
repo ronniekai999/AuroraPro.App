@@ -244,18 +244,13 @@ func (h *LibraryHandler) Retype(w http.ResponseWriter, r *http.Request) {
 		if h.onRescanProgressForTest != nil {
 			h.onRescanProgressForTest()
 		}
+		// Mirror Create's fan-out, completion included even when the rescan
+		// added nothing: without it the SPA never learns the rescan
+		// re-populated (or left empty) the library the purge just emptied.
+		updates := newRetypeLibraryUpdates(h.hub, &rescan)
 		_ = h.scanner.ScanLibrary(ctx, &rescan, func(p *models.ScanProgress) {
 			h.hub.Broadcast(ws.EventScanProgress, p)
-			// Mirror Create's completion fan-out: without it the SPA never
-			// learns the rescan re-populated the library it just emptied.
-			if p.Status == models.ScanComplete {
-				h.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-					"library_id":   rescan.ID,
-					"library_name": rescan.Name,
-					"new_items":    p.NewFiles,
-					"action":       "retype_rescan_completed",
-				})
-			}
+			updates.Observe(p)
 		})
 	}()
 
