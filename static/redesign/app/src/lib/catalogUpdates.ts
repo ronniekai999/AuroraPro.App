@@ -77,6 +77,8 @@ export function createCatalogUpdateScheduler(opts: {
 
   const flush = () => {
     lastFlushAt = now()
+    // Whatever was held is covered by this refresh.
+    heldWhileHidden = false
     opts.onFlush()
   }
   const fire = () => {
@@ -124,7 +126,8 @@ export function loadedPageCount(loaded: number, perPage: number): number {
  * across a page boundary between two requests could arrive twice; the first
  * copy is kept. (One that moves the other way is missed until the next
  * refresh, which the scan's completion event brings.) Rejects if any page
- * fails, leaving the caller's list as it was.
+ * fails, leaving the caller's list as it was; no further page is asked for
+ * then, and the caller aborts those in flight.
  */
 export async function refetchLoadedPages<T extends { id: number }>(
   fetchPage: (page: number) => Promise<{ items: T[]; total: number }>,
@@ -134,10 +137,16 @@ export async function refetchLoadedPages<T extends { id: number }>(
   const count = Math.max(1, pages)
   const results: { items: T[]; total: number }[] = new Array(count)
   let next = 0
+  let failed = false
   const worker = async () => {
-    while (next < count) {
+    while (next < count && !failed) {
       const i = next++
-      results[i] = await fetchPage(i + 1)
+      try {
+        results[i] = await fetchPage(i + 1)
+      } catch (err) {
+        failed = true
+        throw err
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), count) }, worker))

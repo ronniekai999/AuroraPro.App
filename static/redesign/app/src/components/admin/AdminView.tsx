@@ -2686,31 +2686,48 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   // A scan added titles (catalogVersion moved) since the dashboard's numbers
   // were read: refetch them while the dashboard tab is showing, or when it is
   // next shown. Quiet: the old numbers stay until the new ones land, and a
-  // failure keeps them (the next update tries again). The view mounts fresh
-  // on each visit to /admin, so this only covers changes while it is open.
+  // failure keeps them (the next update or showing tries again). The view
+  // mounts fresh on each visit to /admin, so this only covers changes while
+  // it is open.
   //
-  // Keyed on whether stats exist, not the object: the refetch replaces it,
-  // and re-running on that would abort the side cards' requests still in
-  // flight, the race the comment on the mount-only effect above describes.
+  // One refresh at a time, not aborted by the next update (on a busy server
+  // that starved every refresh until the scan ended): once it lands the
+  // numbers are still behind if another update came, and this runs again.
+  // Only an unmount aborts it, so re-running on the new stats object cannot
+  // abort the side cards' requests, the race the comment on the mount-only
+  // effect above describes.
   const dashboardVersionRef = useRef(catalogVersion)
-  const statsLoaded = stats !== null
+  const dashboardRefreshRef = useRef<AbortController | null>(null)
+  useEffect(() => () => {
+    dashboardRefreshRef.current?.abort()
+    dashboardRefreshRef.current = null
+  }, [])
   useEffect(() => {
-    if (tab !== 'dashboard' || !statsLoaded) return
-    if (dashboardVersionRef.current === catalogVersion) return
+    if (tab !== 'dashboard' || stats === null) return
+    if (dashboardVersionRef.current === catalogVersion || dashboardRefreshRef.current) return
     const version = catalogVersion
     const ac = new AbortController()
-    getAdminDashboard(ac.signal)
-      .then(s => {
-        dashboardVersionRef.current = version
-        setStats(s)
-      })
-      .catch(() => { /* keep the numbers on screen */ })
+    dashboardRefreshRef.current = ac
     // The side cards count files and titles too; each keeps its last value
     // when its own refetch fails.
-    getEmbeddingStatus(ac.signal).then(setEmbStatus).catch(() => {})
-    getSkipMarkerStatus(ac.signal).then(setSkipStatus).catch(() => {})
-    return () => ac.abort()
-  }, [tab, statsLoaded, catalogVersion])
+    Promise.all([
+      getAdminDashboard(ac.signal),
+      getEmbeddingStatus(ac.signal).catch(() => null),
+      getSkipMarkerStatus(ac.signal).catch(() => null),
+    ])
+      .then(([s, emb, skip]) => {
+        if (dashboardRefreshRef.current !== ac) return
+        dashboardRefreshRef.current = null
+        dashboardVersionRef.current = version
+        setStats(s)
+        if (emb) setEmbStatus(emb)
+        if (skip) setSkipStatus(skip)
+      })
+      .catch(() => {
+        // Keep the numbers on screen.
+        if (dashboardRefreshRef.current === ac) dashboardRefreshRef.current = null
+      })
+  }, [tab, stats, catalogVersion])
 
   useEffect(() => {
     if (tab !== 'users' || users !== null) return

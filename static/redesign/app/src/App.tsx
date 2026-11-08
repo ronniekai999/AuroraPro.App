@@ -2443,14 +2443,18 @@ export default function App() {
       // title from every rec surface. Both invalidate server-side; on 👎 we also
       // optimistically drop the card from the home rails (no costly LLM rebuild).
       { label: '👍 More like this', onClick: () => {
+        const removed = removedFromHomeRef.current
         void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
+          // A 👍 after a 👎 lets the title back onto Home at the next refresh.
+          removed.delete(m.id)
           setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
         }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
       }},
       { label: '👎 Not interested', tone: 'danger', onClick: () => {
+        const removed = removedFromHomeRef.current
         void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
           setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
-          removedFromHomeRef.current.add(m.id)
+          removed.add(m.id)
           setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
           // Also drop it from a pinned conversational rail, if one is showing.
           setConvoResults(prev => prev.filter(it => it.id !== m.id))
@@ -2920,7 +2924,9 @@ export default function App() {
   // Titles taken off Home this session for the profile on screen (a 👎, an
   // admin delete). Home recomposes its rails from buffers on every refresh,
   // so these are filtered there too, or a refresh would put the card back.
-  // Cleared when the rails' owner (user or profile) changes.
+  // Replaced (not cleared) when the rails' owner (user or profile) changes,
+  // so a 👎 answered after a switch, which adds to the set it was clicked
+  // under, cannot hide the title from the next profile's Home.
   const removedFromHomeRef = useRef<Set<number>>(new Set())
   // The hero on screen, for the live catalog refresh, which sets a catalog
   // fallback hero only when there is none.
@@ -4013,10 +4019,12 @@ export default function App() {
     discoverRailsRef.current = []
     anchorRailsRef.current = []
     engagementRailsRef.current = []
-    removedFromHomeRef.current.clear()
+    removedFromHomeRef.current = new Set()
     railsProfileRef.current = undefined
     railsUserRef.current = null
     lastHomeLoadRef.current = 0
+    homeRefreshAcRef.current?.abort()
+    homeRefreshAcRef.current = null
     moviesRefreshAcRef.current?.abort()
     moviesRefreshAcRef.current = null
     showsRefreshAcRef.current?.abort()
@@ -4166,34 +4174,18 @@ export default function App() {
   const viewRef = useRef(view)
   useEffect(() => { viewRef.current = view }, [view])
   const refreshHomeData = useCallback(() => setHomeReloadNonce(n => n + 1), [])
-  // Live catalog updates on Home (lib/catalogUpdates.ts). A scan adding
-  // titles refetches only what the catalog decides: the three catalog rails
-  // and Home's library count, both keyed on this nonce. Not the hero, Continue
-  // Watching or the personalized rails: running the whole Home load per update
-  // reset the hero carousel to its first pick every ten seconds of an import
-  // and sent about ten requests per open Home, some of them uncached vector
-  // and LLM work.
-  const [homeCatalogNonce, setHomeCatalogNonce] = useState(0)
-  // An update arrived while Home was not on screen; consumed when it is next
-  // shown.
-  const homeCatalogStaleRef = useRef(false)
-  useEffect(() => {
-    if (catalogVersion === 0) return
-    if (viewRef.current === 'home') setHomeCatalogNonce(n => n + 1)
-    else homeCatalogStaleRef.current = true
-  }, [catalogVersion])
+  // The catalog version (useCatalogVersion) Home's catalog rails reflect:
+  // recorded by the full load (the version when it started) and by the live
+  // catalog refresh below, which runs while Home shows and the rails are
+  // behind.
+  const homeRailsVersionRef = useRef(0)
 
   // Returning to Home refetches only if the data has had time to go stale. A
-  // quick tab bounce costs nothing; coming back later picks up anything
-  // another device added. Deliberately not keyed on `view` alone, which would
-  // re-run every core/CW/anchor/engagement fetch on every visit. Catalog
-  // updates that arrived while away refresh the catalog rails and count.
+  // quick tab bounce costs nothing; coming back later picks up anything a scan
+  // (or another device) added. Deliberately not keyed on `view` alone, which
+  // would re-run every core/CW/anchor/engagement fetch on every visit.
   useEffect(() => {
     if (!user || view !== 'home') return
-    if (homeCatalogStaleRef.current) {
-      homeCatalogStaleRef.current = false
-      setHomeCatalogNonce(n => n + 1)
-    }
     if (shouldRefreshHome({ view, signedIn: true, lastAttemptAt: lastHomeLoadRef.current, now: Date.now() })) {
       refreshHomeData()
     }
@@ -4323,6 +4315,10 @@ export default function App() {
     let cancelled = false
     ;(async () => {
       // The rails on screen belong to another profile (or none yet).
+      // The catalog version this load's catalog rails reflect at most: an
+      // update arriving while it is out leaves them behind, and the live
+      // refresh catches up once they land.
+      const loadVersion = catalogVersionRef.current
       const profileChanged = shouldResetPersonalizedRails(railsProfileRef.current, activeProfileId) ||
         railsUserRef.current !== user.id
       // Cold = nothing on screen yet. Captured BEFORE the attempt stamp below,
@@ -4333,7 +4329,7 @@ export default function App() {
       const cold = lastHomeLoadRef.current === 0 || profileChanged
       if (profileChanged) {
         setHomeRails(undefined)
-        removedFromHomeRef.current.clear()
+        removedFromHomeRef.current = new Set()
         coreRailsRef.current = []
         discoverRailsRef.current = []
         anchorRailsRef.current = []
@@ -4401,6 +4397,7 @@ export default function App() {
         railsProfileRef.current = activeProfileId
         railsUserRef.current = user.id
         coreRailsRef.current = coreRails
+        homeRailsVersionRef.current = loadVersion
         // A cold load (a profile switch included) shows the core rails alone;
         // the personalized ones splice in as they land. A background refresh
         // of the same profile instead puts the fresh core rails under the
@@ -4499,43 +4496,69 @@ export default function App() {
       cancelled = true
       ac.abort()
     }
-  }, [user, retryNonce, activeProfileId, personalProfileReady, homeReloadNonce, catalogProfileSettled])
+  }, [user, retryNonce, activeProfileId, personalProfileReady, homeReloadNonce, catalogProfileSettled, catalogVersionRef])
 
-  // The live catalog refresh (homeCatalogNonce): the three catalog rails,
-  // fetched again and recomposed under the personalized rails already on
-  // screen. Only under rails this user and profile already have up: a cold,
-  // failed or switching Home is the full load's to fill, and a refresh that
-  // finds one does nothing. Each nonce is handled once (a dependency change
-  // re-runs this effect without a new update). The hero is set only when
-  // there is none, as on a first import into an empty library; otherwise it
-  // stays where the carousel has it.
-  const handledHomeCatalogNonceRef = useRef(0)
+  // The live catalog refresh (lib/catalogUpdates.ts): while Home shows and
+  // its catalog rails are behind catalogVersion, the three catalog rails and
+  // Home's library count are fetched again, and the rails recomposed under
+  // the personalized rails already on screen. Never the hero, Continue
+  // Watching or the personalized rails: running the whole Home load per
+  // update reset the hero carousel to its first pick every ten seconds of an
+  // import and sent about ten requests per open Home, some of them uncached
+  // vector and LLM work. The hero is set only when there is none, as on a
+  // first import into an empty library.
+  //
+  // Only under rails this user and profile already have up: a cold, failed or
+  // switching Home is the full load's to fill, and when its rails land
+  // (homeRails) this runs again if they are behind. One refresh at a time: an
+  // update arriving mid-refresh does not abort it (that starved refreshes on
+  // a busy server); once it lands the rails are still behind, and this runs
+  // again. A change of user, profile or startup settle, or a switch's first
+  // commit, aborts it (the effect below), and each answer is checked against
+  // the rails' owner before it lands. Off Home it waits: the next showing
+  // (view) catches up. A failed refresh leaves the rails behind until the
+  // next update, showing or recompose.
+  const homeRefreshAcRef = useRef<AbortController | null>(null)
+  useEffect(() => () => {
+    homeRefreshAcRef.current?.abort()
+    homeRefreshAcRef.current = null
+  }, [realtimeUserId, catalogProfileSettled, activeProfileId, profileSwitchPending])
   useEffect(() => {
-    if (homeCatalogNonce === handledHomeCatalogNonceRef.current) return
-    if (realtimeUserId === null || !catalogProfileSettled || profileSwitchPending) return
-    handledHomeCatalogNonceRef.current = homeCatalogNonce
+    if (view !== 'home' || realtimeUserId === null || !catalogProfileSettled || profileSwitchPending) return
+    if (homeRailsVersionRef.current === catalogVersion || homeRefreshAcRef.current) return
     if (coreRailsRef.current.length === 0 || railsProfileRef.current !== activeProfileId ||
       railsUserRef.current !== realtimeUserId) return
+    const version = catalogVersion
+    const countKey = `${realtimeUserId}:${activeProfileId}`
     const ac = new AbortController()
-    let cancelled = false
+    homeRefreshAcRef.current = ac
     Promise.all([
       listRecent(12, ac.signal),
       listMedia({ type: 'movie', perPage: 20, sortBy: 'rating', signal: ac.signal }),
       listMedia({ type: 'show', perPage: 20, sortBy: 'rating', signal: ac.signal }),
+      // Home's library count, the greeting's "titles in your library". Its
+      // own effect asks once per user and profile; this keeps it current.
+      listMediaWithTotal({ perPage: 1, signal: ac.signal }).catch(() => null),
     ])
-      .then(([recent, movies, shows]) => {
-        if (cancelled) return
+      .then(([recent, movies, shows, count]) => {
+        if (homeRefreshAcRef.current !== ac) return
+        homeRefreshAcRef.current = null
         if (railsProfileRef.current !== activeProfileId || railsUserRef.current !== realtimeUserId) return
+        homeRailsVersionRef.current = version
         coreRailsRef.current = coreHomeRails(recent as Media[], movies as Media[], shows as Media[])
         recomposeHomeRails()
+        if (count) setHomeLibraryCount({ key: countKey, total: count.total })
         if (heroPoolRef.current.length === 0 && !homeHeroRef.current) {
           const hero = (recent[0] || movies[0] || null) as Media | null
           if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
         }
       })
-      .catch(() => { /* background refresh: the rails on screen stay */ })
-    return () => { cancelled = true; ac.abort() }
-  }, [homeCatalogNonce, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, recomposeHomeRails])
+      .catch(() => {
+        // Background refresh: the rails on screen stay.
+        if (homeRefreshAcRef.current === ac) homeRefreshAcRef.current = null
+        ac.abort()
+      })
+  }, [view, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, catalogVersion, homeRails, recomposeHomeRails])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -4725,8 +4748,10 @@ export default function App() {
         setMoviesNextPage(nextPage)
       })
       .catch(() => {
-        // Background refresh: keep the list on screen.
+        // Background refresh: keep the list on screen. Pages still out are
+        // abandoned with it.
         if (moviesRefreshAcRef.current === ac) moviesRefreshAcRef.current = null
+        ac.abort()
       })
   }, [user, catalogProfileSettled, moviesList, catalogVersion, view, moviesLoadingMore, moviesSort, moviesGenre, BROWSE_PER_PAGE, profileSwitchPending])
 
@@ -4752,6 +4777,7 @@ export default function App() {
       })
       .catch(() => {
         if (showsRefreshAcRef.current === ac) showsRefreshAcRef.current = null
+        ac.abort()
       })
   }, [user, catalogProfileSettled, showsList, catalogVersion, view, showsLoadingMore, showsSort, showsGenre, BROWSE_PER_PAGE, profileSwitchPending])
 
@@ -5477,6 +5503,11 @@ export default function App() {
   // the saved-library list is filtered directly.
   const purgeMediaFromCaches = useCallback((id: number) => {
     removedFromHomeRef.current.add(id)
+    // A live grid refresh still out would land the deleted title back.
+    moviesRefreshAcRef.current?.abort()
+    moviesRefreshAcRef.current = null
+    showsRefreshAcRef.current?.abort()
+    showsRefreshAcRef.current = null
     setHomeRails(prev => prev?.map(r => ({ ...r, items: r.items.filter(i => i.id !== id) })))
     setMoviesList(null)
     setShowsList(null)
@@ -5935,19 +5966,13 @@ export default function App() {
   // profile), and after a switch away and back before the other profile's
   // count landed, showing an answer from before.
   //
-  // A scan adding titles asks again too, while Home shows or when it is next
-  // shown (homeCatalogNonce, the live catalog refresh), and only then is the
-  // answer on screen kept until the new one lands: same user, profile and
-  // settle, so it is this session's own count, one scan behind.
+  // A scan adding titles updates it through Home's live catalog refresh,
+  // which asks for it beside the catalog rails while Home shows and sets it
+  // under the same key, so the answer on screen stays until the new one lands.
   const homeLibraryUserId = user ? user.id : null
   const homeLibraryKey = `${homeLibraryUserId}:${activeProfileId}`
-  const homeLibraryInputsRef = useRef<{ user: number | null; profile: number | null; settled: boolean } | null>(null)
   useEffect(() => {
-    const prev = homeLibraryInputsRef.current
-    const catalogOnly = prev !== null && prev.user === homeLibraryUserId &&
-      prev.profile === activeProfileId && prev.settled === catalogProfileSettled
-    homeLibraryInputsRef.current = { user: homeLibraryUserId, profile: activeProfileId, settled: catalogProfileSettled }
-    if (!catalogOnly) setHomeLibraryCount(null)
+    setHomeLibraryCount(null)
     if (homeLibraryUserId === null || !catalogProfileSettled) return
     const key = `${homeLibraryUserId}:${activeProfileId}`
     const ac = new AbortController()
@@ -5956,7 +5981,7 @@ export default function App() {
       .then(({ total }) => { if (!cancelled) setHomeLibraryCount({ key, total }) })
       .catch(() => { /* non-fatal — greeting omits the clause when null */ })
     return () => { cancelled = true; ac.abort() }
-  }, [homeLibraryUserId, catalogProfileSettled, activeProfileId, homeCatalogNonce])
+  }, [homeLibraryUserId, catalogProfileSettled, activeProfileId])
   const homeLibraryTotal = homeLibraryCount && homeLibraryCount.key === homeLibraryKey ? homeLibraryCount.total : null
 
   // Keep heroIndexRef in sync with heroIndex across every change path

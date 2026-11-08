@@ -185,3 +185,136 @@ describe('a scan’s new titles appear without a reload', () => {
     expect(page.commits.filter(c => !/\b[12] titles in your library/.test(c.text))).toEqual([])
   })
 })
+
+// Two profiles, Parent bound at first and Kid restricted. Every answer is for
+// the profile bound when it was asked, from the catalog as it was then.
+const PROFILES2 = [
+  { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW },
+  { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' },
+]
+
+function stubTwoProfiles() {
+  let bound = 1
+  const sees: Record<number, Item[]> = { 1: [item(1, 'Parentonly Old')], 2: [item(2, 'Kidonly Old')] }
+  const holds: { match: (u: URL, bound: number) => boolean; gate: Promise<void>; captured: number; every: boolean }[] = []
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://localhost')
+    const p = url.pathname
+    const asked = bound
+    // Answered from the catalog as it was when asked, as a query is.
+    const list = [...sees[asked]].reverse()
+    const hold = holds.find(h => (h.every || h.captured === 0) && h.match(url, asked))
+    if (hold) { hold.captured++; await hold.gate }
+    if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+    if (p === '/api/auth/me') return json(USER)
+    if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
+    if (p === '/api/profiles') return json(PROFILES2)
+    if (p === '/api/profiles/active') return json(PROFILES2.find(x => x.id === bound))
+    const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
+    if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
+    if (p === '/api/me/hero') return json({ picks: [] })
+    if (p === '/api/media/recent') return json({ data: list })
+    if (p === '/api/media') {
+      const page = Number(url.searchParams.get('page') ?? 1)
+      return json({ data: page === 1 ? list : [], page, per_page: 100, total_items: list.length, total_pages: 1 })
+    }
+    if (p.startsWith('/api/me/discover')) return json({ rails: [] })
+    return json([])
+  })
+  vi.stubGlobal('WebSocket', FakeSocket)
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  vi.stubGlobal('scrollTo', () => {})
+  return {
+    addForParent(it: Item) { sees[1].push(it) },
+    /** Holds the next request `match` accepts (with `every`, each one until
+     *  released); returns the release and whether one was sent. */
+    hold(match: (u: URL, bound: number) => boolean, { every = false } = {}) {
+      let release!: () => void
+      const h = { match, gate: new Promise<void>(done => { release = done }), captured: 0, every }
+      holds.push(h)
+      return { release, sent: () => h.captured > 0 }
+    },
+  }
+}
+
+
+// A live refresh still out when the profile switches must not land the
+// previous profile's titles under the new profile's name. Each answer here is
+// the one the server gave for the profile bound when it was asked, held until
+// the switch is done. What holds it off is a combination: the refresh's abort
+// on an owner change, its stand-down on a switch's first commit
+// (profileSwitchPending) and, on Home, the owner check when it lands; this
+// fails only when none of them does.
+describe('a live refresh out during a profile switch', () => {
+  const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null
+  function renderSampled(path: string) {
+    const commits: { label: string | null; parent: boolean }[] = []
+    const onRender = () => commits.push({ label: label(), parent: (document.body.textContent ?? '').includes('Parentonly') })
+    render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
+    return commits
+  }
+  function switchToKid() {
+    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Kid/ }))
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aurora_user', JSON.stringify(USER))
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    FakeSocket.opened = []
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it.each([
+    ['the Movies grid', '/movies', (u: URL, b: number) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
+    ['Home', '/', (u: URL, b: number) => b === 1 && u.pathname === '/api/media/recent'],
+  ])('on %s', async (_name, path, match) => {
+    const server = stubTwoProfiles()
+    const commits = renderSampled(path)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    const held = server.hold(match)
+    server.addForParent(item(3, 'Parentonly New'))
+    scanAdded(1)
+    await waitFor(() => expect(held.sent()).toBe(true), { timeout: 5000 })
+    switchToKid()
+    await screen.findAllByText('Kidonly Old', undefined, { timeout: 5000 })
+    held.release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(screen.queryAllByText('Parentonly New')).toEqual([])
+    expect(commits.filter(c => c.label === 'Kid').length).toBeGreaterThan(0)
+    expect(commits.filter(c => c.label === 'Kid' && c.parent)).toEqual([])
+  })
+})
+
+describe('an update while Home is still loading', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aurora_user', JSON.stringify(USER))
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    FakeSocket.opened = []
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('is caught up once the load lands, not dropped', async () => {
+    // A cold load whose queries ran before the scan wrote, answering after
+    // the update: its rails are behind, and the live refresh must follow.
+    const server = stubTwoProfiles()
+    // Every startup load (the profile becoming known re-runs it) is held.
+    const first = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent', { every: true })
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await waitFor(() => expect(first.sent()).toBe(true), { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    // Let the startup loads all be asked before the scan writes.
+    await new Promise(done => setTimeout(done, 300))
+    server.addForParent(item(3, 'Parentonly New'))
+    scanAdded(1)
+    await new Promise(done => setTimeout(done, 2000))
+    first.release()
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await screen.findAllByText('Parentonly New', undefined, { timeout: 5000 })
+  })
+})
