@@ -1578,19 +1578,27 @@ New titles reach open web apps without a reload. Code:
     recomposed under the personalized rails; never Continue Watching or the
     personalized rails, and the hero only when none is showing (a first
     import into an empty library). Running the full Home load per update
-    reset the hero carousel every ten seconds. The full load records the
-    version it started at, so an update during it is caught up once its rails
-    land, and, landing after a newer live refresh, keeps the newer rails. A
-    live refresh landing older than the rails on screen is dropped and checks
-    again (`homeRefreshRetry`, since a recompose can set the very array on
-    screen and re-run nothing), so Home is not left a version behind; a full
-    load does not abort a live refresh, which carries the only count update. The refresh runs only under rails the current user and
-    profile already have up, is aborted by a user, profile or settle change,
-    stands down on a switch's first commit (`profileSwitchPending`), and is
-    checked against the rails' owner when it lands; a switch clears that
-    owner until the new profile's rails land, so the check holds on its own.
-    Home's library count is numbered across its own effect and this refresh,
-    so an older answer landing last cannot put an older count back.
+    reset the hero carousel every ten seconds. Every catalog-rails fetch (the
+    full load's and the live refresh's) takes a number when it starts
+    (`homeRailsSeqRef`), and its rails land only if no later-started fetch's
+    have, so neither puts back rails that missed titles the other saw. The
+    full load records the version it started at, so an update during it is
+    caught up once its rails land. A live refresh whose rails are dropped
+    that way checks again (`homeRefreshRetry`: a recompose can set the very
+    array on screen and re-run nothing), so Home is not left a version
+    behind. The count comes only from the live refresh and is tracked apart
+    (`homeCountVersionRef`), so a refresh also runs when the count alone is
+    behind; its requests are numbered across its own effect and this
+    refresh, so an older answer landing last cannot put an older count back.
+    A full load does not abort a live refresh. The refresh runs only under
+    rails the current user and profile already have up, is aborted by a
+    user, profile or settle change, stands down on a switch's first commit
+    (`profileSwitchPending`), and is checked against the rails' owner when it
+    lands; a switch clears that owner until the new profile's rails land, so
+    the check holds on its own. An answer that comes back while a switch is
+    out (`isSwitching`, or one started since: `switchGeneration`) is dropped,
+    since the server may already have answered it for the next profile while
+    the old one is still named; the grids drop theirs the same way.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1610,8 +1618,10 @@ New titles reach open web apps without a reload. Code:
   Pinned by `App.liveCatalog.test.tsx` (a live refresh held across a profile
   switch on Home and on a grid, one released before the new profile's rails
   land, which fails only when both the abort and the owner clearing are gone,
-  an update during Home's first load, a first import's hero, and a full load
-  and a live refresh landing in either order, the count included),
+  an update during Home's first load, a first import's hero, a full load and
+  a live refresh landing in either order with commits sampled, a refresh
+  started before a full load landing after it, and the count catching up
+  when the refresh that carried it was dropped),
   `AdminView.catalog.test.tsx` and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
   the completion event; files found in a scan's last seconds wait for the
@@ -1626,12 +1636,15 @@ New titles reach open web apps without a reload. Code:
   after a deploy every visible tab refetches its view as it reconnects, and a
   socket the hub drops for a full send buffer refetches on every reconnect;
   the one-at-a-time and Load More interplay, the reset of Home's buffers on
-  sign-out and the count's numbering have no test; a first import's fallback hero is picked by the
-  first live refresh and not replaced, so a show picked before its
-  enrichment stays bare (no backdrop or overview) until a full Home load
-  (returning or refocusing after 30 s) or a reload, and the live refresh does
-  not ask for the personalized hero pool again (a full Home load does); the dashboard's side
-  cards read at mount can land after, and overwrite, a refresh's newer
+  sign-out, the count's numbering and the switch-window drop have no test;
+  an answer dropped for a switch is not retried, so a switch that fails, or
+  a PIN prompt left open, leaves the view one update behind until the next
+  update or showing; a first import's fallback hero is picked by the first
+  live refresh and not replaced, so a show picked before its enrichment
+  stays bare (no backdrop or overview) until a full Home load (returning or
+  refocusing after 30 s) or a reload, and the live refresh does not ask for
+  the personalized hero pool again (a full Home load does); the dashboard's
+  side cards read at mount can land after, and overwrite, a refresh's newer
   numbers; the macOS and TV clients ignore the event.
 
 ### Nullable database columns

@@ -46,11 +46,6 @@ describe('BrowseView featured hero', () => {
 })
 
 describe('BrowseView featured hero under an import', () => {
-  beforeEach(() => {
-    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
-  })
-  afterEach(() => { vi.unstubAllGlobals() })
-
   it('stays on the title showing when five new titles push it out of the pool', () => {
     const old = [m(1, 'Alpha'), m(2, 'Bravo')]
     const { rerender } = render(view(old))

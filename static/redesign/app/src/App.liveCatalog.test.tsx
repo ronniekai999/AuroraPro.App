@@ -409,7 +409,7 @@ describe('a full Home load and a live refresh overlapping', () => {
 
   it('lands a newer live refresh that was out when an older full load landed', async () => {
     const server = stubTwoProfiles()
-    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    const page = renderApp('/')
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     await new Promise(done => setTimeout(done, 500))
@@ -421,6 +421,9 @@ describe('a full Home load and a live refresh overlapping', () => {
     server.addForParent(item(3, 'Alpha New'))
     scanAdded(1)
     await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    // From here the older full load must never put its rails, which lack
+    // Alpha, back over the newer ones.
+    page.on()
     const second = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
     server.addForParent(item(4, 'Bravo New'))
     scanAdded(2)
@@ -429,6 +432,62 @@ describe('a full Home load and a live refresh overlapping', () => {
     await new Promise(done => setTimeout(done, 300))
     second.release()
     await waitFor(() => expect(main()).toContain('Bravo New'), { timeout: 5000 })
+    expect(page.commits.length).toBeGreaterThan(0)
+    expect(page.commits.filter(c => !c.text.includes('Alpha New'))).toEqual([])
+  }, 30000)
+
+  it('does not land a refresh started before a full load that landed first', async () => {
+    // Same version, different moments: the full load asked later and saw a
+    // title written after the refresh asked (one not announced yet). The
+    // refresh's rails, landing last, must not take it away.
+    const server = stubTwoProfiles()
+    const page = renderApp('/')
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    server.addForParent(item(4, 'Unannounced New'))
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(main()).toContain('Unannounced New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    // Counted, not just found: the catalog-fallback hero also shows the
+    // newest title, so presence alone survives the rails losing it.
+    const copies = (text: string) => text.split('Unannounced New').length - 1
+    const before = copies(document.body.textContent ?? '')
+    expect(before).toBeGreaterThan(1)
+    page.on()
+    r.release()
+    await new Promise(done => setTimeout(done, 500))
+    expect(page.commits.length).toBeGreaterThan(0)
+    expect(page.commits.filter(c => copies(c.text) < before)).toEqual([])
+  })
+
+  it('brings the count up to date when the refresh that carried it was dropped', async () => {
+    // R (v1) is out; v2 arrives; a full load at v2 lands first; R's rails are
+    // dropped. The count comes only from a live refresh, so it must ask again.
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    server.addForParent(item(4, 'Bravo New'))
+    scanAdded(2)
+    // The second update waits out the scheduler's 10 s gap.
+    await new Promise(done => setTimeout(done, 11_000))
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(main()).toContain('Bravo New'), { timeout: 5000 })
+    r.release()
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b3 titles in your library/), { timeout: 5000 })
   }, 30000)
 
   it('runs again when a live refresh lands older than a full load and is dropped', async () => {
@@ -454,6 +513,8 @@ describe('a full Home load and a live refresh overlapping', () => {
     staleClock()
     act(() => { window.dispatchEvent(new Event('focus')) })
     await waitFor(() => expect(fullLoad.sent()).toBe(true), { timeout: 5000 })
+    // staleClock's jump also clears the scheduler's 10 s gap (it reads the
+    // same clock), so this third update flushes after the 1.5 s delay alone.
     server.addForParent(item(5, 'Charlie New'))
     scanAdded(3)
     await new Promise(done => setTimeout(done, 2500))
