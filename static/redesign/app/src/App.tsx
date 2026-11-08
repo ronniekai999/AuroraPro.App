@@ -4566,10 +4566,11 @@ export default function App() {
   // behind, and every recompose ran another full refresh, in a tight loop. A
   // failed count waits for the next update.
   const homeCountVersionRef = useRef(0)
-  // Bumped when a refresh's rails are dropped because a later-started fetch
-  // (a full load) landed first: that sets nothing the effect depends on (a
-  // recompose can set the very array already on screen), so without this
-  // Home could stay a version behind.
+  // Bumped when a refresh's answer is dropped: its rails because a
+  // later-started fetch (a full load) landed first, or all of it because a
+  // profile switch is out or started since. Neither sets anything the effect
+  // depends on (a recompose can set the very array already on screen), so
+  // without this Home could stay a version behind.
   const [homeRefreshRetry, setHomeRefreshRetry] = useState(0)
   useEffect(() => () => {
     homeRefreshAcRef.current?.abort()

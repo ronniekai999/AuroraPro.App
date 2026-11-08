@@ -1631,8 +1631,11 @@ New titles reach open web apps without a reload. Code:
   a live refresh landing in either order with commits sampled, a refresh
   started before a full load landing after it, the count catching up when
   the refresh that carried it was dropped, one refresh, not a loop, when only
-  the count fails, and a refresh dropped for a cancelled PIN prompt checked
-  again),
+  the count fails, and, on Home and the Movies grid, a refresh dropped for a
+  PIN prompt: held while the prompt is open, with no request until it is
+  cancelled and exactly one after (without the start guard one dropped
+  refresh ran over a hundred more a second), and checked again when it lands
+  after the prompt was cancelled),
   `AdminView.catalog.test.tsx` and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
   the completion event; files found in a scan's last seconds wait for the
@@ -1648,16 +1651,18 @@ New titles reach open web apps without a reload. Code:
   socket the hub drops for a full send buffer refetches on every reconnect;
   the one-at-a-time and Load More interplay, the reset of Home's buffers on
   sign-out, the count's numbering, the switch-window drop for a switch with
-  no PIN prompt, the prompt's own re-run (`pinTarget`), the full load's
-  fallback-hero gate and the count effect's ask-time version have no test,
+  no PIN prompt, the Shows grid's switch handling (the Movies grid's code,
+  which is pinned, line for line), the full load's fallback-hero gate and
+  the count effect's ask-time version have no test,
   and the full load's guard is pinned against removal but not as a sequence
   rather than a version check (the equal-version case it adds is not
-  reached by the current triggers); a switch with no PIN prompt that fails
-  runs nothing again, so a refresh it held off or dropped leaves the view
-  behind until the next update or showing; a count request that fails is
-  asked again only at the next update, switch, sign-in or reload (neither a
-  Home visit nor the 30 s full load asks for it), and when only the count
-  was behind, a failed rail request discards a count answer that
+  reached by the current triggers); a switch with no PIN prompt that fails,
+  or one whose binding read returns the profile already shown (another tab
+  raced it), runs nothing again, so a refresh it held off or dropped leaves
+  the view behind until the next update or showing; a count request that
+  fails is asked again only at the next update, switch, sign-in or reload
+  (neither a Home visit nor the 30 s full load asks for it), and when only
+  the count was behind, a failed rail request discards a count answer that
   succeeded; a first import's fallback hero is picked by the first live
   refresh and not replaced, so a show picked before its enrichment
   stays bare (no backdrop or overview) until a full Home load (returning or
