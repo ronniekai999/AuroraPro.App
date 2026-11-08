@@ -1580,7 +1580,8 @@ New titles reach open web apps without a reload. Code:
     import into an empty library). Running the full Home load per update
     reset the hero carousel every ten seconds. The full load records the
     version it started at, so an update during it is caught up once its rails
-    land, and a background load landing after a newer live refresh keeps the
+    land, abandons a live refresh still out (which then runs again if the
+    rails are behind), and, landing after a newer live refresh, keeps the
     newer rails. The refresh runs only under rails the current user and
     profile already have up, is aborted by a user, profile or settle change,
     stands down on a switch's first commit (`profileSwitchPending`), and is
@@ -1592,8 +1593,9 @@ New titles reach open web apps without a reload. Code:
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
     grid deeper than 5 pages is left stale rather than refetched or dropped.
-    Its featured hero is held by id while it stays in the pool (the first five
-    titles with a backdrop), so an insertion ahead of it does not swap it.
+    Its featured hero is held by id from its first render while it stays in
+    the pool (the first five titles with a backdrop), so an insertion ahead
+    of it does not swap it (`BrowseView.hero.test.tsx`).
   - The admin dashboard refetches its counts while its tab shows.
   - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
     and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or
@@ -1621,7 +1623,11 @@ New titles reach open web apps without a reload. Code:
   socket the hub drops for a full send buffer refetches on every reconnect;
   the one-at-a-time and Load More interplay, the reset of Home's buffers on
   sign-out, the full load's and live refresh's ordering, the count's
-  numbering and the grid hero held by id have no test; the dashboard's side
+  numbering have no test; a first import's fallback hero is picked by the
+  first live refresh and not replaced, so a show picked before its
+  enrichment stays bare (no backdrop or overview) until a full Home load
+  (returning or refocusing after 30 s) or a reload, and the personalized hero
+  pool is not asked for again; the dashboard's side
   cards read at mount can land after, and overwrite, a refresh's newer
   numbers; the macOS and TV clients ignore the event.
 

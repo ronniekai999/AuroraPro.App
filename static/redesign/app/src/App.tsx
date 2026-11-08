@@ -4152,10 +4152,10 @@ export default function App() {
   // [user, retryNonce, activeProfileId], none of which change when you navigate
   // away and back, and this component never unmounts. So a library scan that
   // adds titles was invisible until a hard refresh — the refresh worked only
-  // because it remounted everything. These two make it re-run: a staleness gate
-  // on returning to Home (every user), and a scan-completion signal (whoever is
-  // watching a scan). Both bump the same nonce so a scan finishing while you
-  // are already on Home doesn't need you to navigate at all.
+  // because it remounted everything. This nonce re-runs the whole load on the
+  // staleness gate (returning to Home or refocusing it after 30 s). A scan's
+  // new titles take the lighter live catalog refresh below instead
+  // (catalogVersion), which reloads only the catalog rails and the count.
   const [homeReloadNonce, setHomeReloadNonce] = useState(0)
   const lastHomeLoadRef = useRef(0)
   // Which profile the rails currently on screen belong to. Distinguishes a
@@ -4401,6 +4401,12 @@ export default function App() {
         lastHomeLoadRef.current = Date.now()
         railsProfileRef.current = activeProfileId
         railsUserRef.current = user.id
+        // This load supersedes a live refresh still out. Abandoning it lets
+        // the live refresh run again on the rails set below if they are
+        // behind; dropped on landing instead (older than these rails), it set
+        // nothing and left them a version behind.
+        homeRefreshAcRef.current?.abort()
+        homeRefreshAcRef.current = null
         // A live refresh that landed while this load was out has newer
         // catalog rails; a background load keeps them rather than putting the
         // older ones back (the new titles would vanish for a round trip).

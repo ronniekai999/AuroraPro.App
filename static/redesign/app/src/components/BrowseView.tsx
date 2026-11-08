@@ -132,6 +132,12 @@ export default function BrowseView({
   const [heroPaused, setHeroPaused] = useState(false)
   const heroAt = heroPool.findIndex(m => m.id === heroId)
   const heroMedia = heroPool[heroAt >= 0 ? heroAt : 0]
+  // Hold whatever is showing from the start, not from the first rotation:
+  // a reduced-motion reader never rotates, and anyone reads for 9 s before
+  // it, so an insertion in that time swapped the hero too.
+  useEffect(() => {
+    if (heroAt < 0 && heroPool.length > 0) setHeroId(heroPool[0].id)
+  }, [heroAt, heroPool])
   // Read by the rotation's interval, which is not re-created when the pool's
   // contents change at the same length.
   const heroPoolRef = useRef(heroPool)
