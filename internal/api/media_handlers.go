@@ -189,18 +189,14 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 				h.watcher.NoteExternalScan(lib.ID)
 			}
 			scanCtx := h.scanContext()
+			updates := NewLibraryUpdates(h.hub, lib)
 			h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
 				h.hub.Broadcast(ws.EventScanProgress, p)
+				updates.Observe(p)
 				if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
 					h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
 				}
 				if p.Status == models.ScanComplete && p.NewFiles > 0 {
-					h.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-						"library_id":   lib.ID,
-						"library_name": lib.Name,
-						"new_items":    p.NewFiles,
-						"action":       "scan_completed",
-					})
 					if h.dispatcher != nil {
 						h.dispatcher.ScanCompleted(scanCtx, lib.Name, p.NewFiles)
 					}
@@ -321,19 +317,16 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	// context detaches from the request while still ending at shutdown.
 	go func() {
 		scanCtx := context.Background()
+		updates := NewLibraryUpdates(h.hub, lib)
 		h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
 			h.hub.Broadcast(ws.EventScanProgress, p)
+			// Tells every client about new library content, while the scan
+			// runs and when it ends.
+			updates.Observe(p)
 			if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
 				h.activity.LogScanCompleted(scanCtx, lib.ID, lib.Name, p.TotalFiles)
 			}
-			// Notify all users about new library content
 			if p.Status == models.ScanComplete && p.NewFiles > 0 {
-				h.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-					"library_id":   lib.ID,
-					"library_name": lib.Name,
-					"new_items":    p.NewFiles,
-					"action":       "scan_completed",
-				})
 				if h.dispatcher != nil {
 					h.dispatcher.ScanCompleted(scanCtx, lib.Name, p.NewFiles)
 				}

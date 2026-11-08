@@ -1,0 +1,10 @@
+{
+  "sha": "79328904aab961e22d6fcc506cce44f80aef26ff",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only adversarial reviews of the full diff main...HEAD (live catalog updates: server LibraryUpdates sender at every scan entry point; SPA catalogVersion with coalescing, jitter, min gap, hidden/player hold; live refresh of Home catalog rails and count, Movies/Shows grids and admin dashboard). Eight rounds: fix-first twice (full Home reload per update reset the hero carousel; a failing count request looped the live refresh without bound) and several lows-only rounds whose findings were fixed and re-reviewed; each fix mutation-tested. Final rounds: 566c734 lows-only (code: retry cannot loop, no cross-profile landing; 4 partial-failure setups made exactly one refresh each); 7932890 (tests/comments/docs only, confirmed no behaviour change) lows-only, 3 findings: 1 low (CLAUDE.md overstates test coverage of the switchGeneration half of the switch-drop check, which no test pins), 2 nits (PIN tests sit in the full-load describe with a shadowed shared server variable; ambiguous 'pinned, line for line' phrase). Left as documented follow-ups. go build/test, 1586 SPA tests, tsc, eslint (no new warnings) and npm run audit green.",
+  "reviewer": "independent-subagent-general-purpose-round8",
+  "findings": "3",
+  "diff_digest": "6809cd5e66d03370ed492def51af9432922ae054f7b31c2541fb62441872fcca",
+  "branch": "claude/eager-wright-v7isc2",
+  "recorded_at": "2026-11-08T20:53:19Z"
+}

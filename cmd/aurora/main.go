@@ -278,15 +278,11 @@ func main() {
 		// clear context.Canceled instead of scribbling at a dead pool, and
 		// scans are idempotent so the next one recovers the work.
 		bgWorker(func() {
+			updates := api.NewLibraryUpdates(hub, lib)
 			scanner.ScanLibrary(ctx, lib, func(p *models.ScanProgress) {
 				hub.Broadcast(ws.EventScanProgress, p)
+				updates.Observe(p)
 				if p.Status == models.ScanComplete && p.NewFiles > 0 {
-					hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-						"library_id":   lib.ID,
-						"library_name": lib.Name,
-						"new_items":    p.NewFiles,
-						"action":       "scan_completed",
-					})
 					dispatcher.ScanCompleted(ctx, lib.Name, p.NewFiles)
 				}
 			})

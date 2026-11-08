@@ -97,6 +97,7 @@ import {
   type UpdateState,
   type UpdateStatus,
 } from '@/lib/api'
+import { abortAfter } from '@/lib/catalogUpdates'
 
 // server_settings keys for the referral prompt (migration 046). Named here so
 // the editor and the Go whitelist can't drift on a string literal.
@@ -2563,7 +2564,12 @@ const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
   sessions: 'Transcodes',
 }
 
-export default function AdminView({ currentAdminId }: { currentAdminId: number }) {
+export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
+  currentAdminId: number
+  /** App's live catalog version (hooks/useCatalogVersion); a change means a
+   *  scan added titles, so the dashboard's counts refresh. */
+  catalogVersion?: number
+}) {
   const [tab, setTab] = useState<AdminTab>('dashboard')
   // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
   // MANUAL activation: arrows move focus without switching panels, so the
@@ -2677,6 +2683,55 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       .finally(() => { if (!cancelled) setStatsLoading(false) })
     return () => { cancelled = true }
   }, [stats])
+
+  // A scan added titles (catalogVersion moved) since the dashboard's numbers
+  // were read: refetch them while the dashboard tab is showing, or when it is
+  // next shown. Quiet: the old numbers stay until the new ones land, and a
+  // failure keeps them (the next update or showing tries again). The view
+  // mounts fresh on each visit to /admin, so this only covers changes while
+  // it is open.
+  //
+  // One refresh at a time, not aborted by the next update (on a busy server
+  // that starved every refresh until the scan ended): once it lands the
+  // numbers are still behind if another update came, and this runs again.
+  // Only an unmount aborts it, so re-running on the new stats object cannot
+  // abort the side cards' requests, the race the comment on the mount-only
+  // effect above describes.
+  const dashboardVersionRef = useRef(catalogVersion)
+  const dashboardRefreshRef = useRef<AbortController | null>(null)
+  useEffect(() => () => {
+    dashboardRefreshRef.current?.abort()
+    dashboardRefreshRef.current = null
+  }, [])
+  useEffect(() => {
+    if (tab !== 'dashboard' || stats === null) return
+    if (dashboardVersionRef.current === catalogVersion || dashboardRefreshRef.current) return
+    const version = catalogVersion
+    const ac = new AbortController()
+    dashboardRefreshRef.current = ac
+    const stopTimeout = abortAfter(ac)
+    // The side cards count files and titles too; each keeps its last value
+    // when its own refetch fails.
+    Promise.all([
+      getAdminDashboard(ac.signal),
+      getEmbeddingStatus(ac.signal).catch(() => null),
+      getSkipMarkerStatus(ac.signal).catch(() => null),
+    ])
+      .then(([s, emb, skip]) => {
+        stopTimeout()
+        if (dashboardRefreshRef.current !== ac) return
+        dashboardRefreshRef.current = null
+        dashboardVersionRef.current = version
+        setStats(s)
+        if (emb) setEmbStatus(emb)
+        if (skip) setSkipStatus(skip)
+      })
+      .catch(() => {
+        // Keep the numbers on screen (also after LIVE_REFRESH_TIMEOUT_MS).
+        stopTimeout()
+        if (dashboardRefreshRef.current === ac) dashboardRefreshRef.current = null
+      })
+  }, [tab, stats, catalogVersion])
 
   useEffect(() => {
     if (tab !== 'users' || users !== null) return

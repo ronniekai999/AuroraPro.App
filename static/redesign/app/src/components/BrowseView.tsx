@@ -124,13 +124,30 @@ export default function BrowseView({
     () => items.filter(m => m.backdrop && m.backdrop.length > 0).slice(0, 5),
     [items],
   )
-  const [heroIdx, setHeroIdx] = useState(0)
+  // The featured title is held by id, not position: a live catalog refresh
+  // (a scan adding titles) can insert titles ahead of it, and a position
+  // swapped the hero mid-read, past the hover pause and reduced motion. It
+  // stays while it is anywhere in the list with a backdrop, not only in the
+  // pool: under the Recently Added sort an import pushes it out of the first
+  // five within a refresh or two. One that leaves the list falls back to the
+  // pool's first.
+  const [heroId, setHeroId] = useState<number | null>(null)
   const [heroPaused, setHeroPaused] = useState(false)
-  // Clamp index when the pool shrinks (e.g. genre change loads fewer
-  // backdrop items) so we never index past the end.
+  const heroAt = heroPool.findIndex(m => m.id === heroId)
+  const heldOutsidePool = heroAt < 0 && heroId !== null
+    ? items.find(m => m.id === heroId && !!m.backdrop)
+    : undefined
+  const heroMedia = heroAt >= 0 ? heroPool[heroAt] : heldOutsidePool ?? heroPool[0]
+  // Hold whatever is showing from the start, not from the first rotation:
+  // a reduced-motion reader never rotates, and anyone reads for 9 s before
+  // it, so an insertion in that time swapped the hero too.
   useEffect(() => {
-    if (heroIdx >= heroPool.length && heroPool.length > 0) setHeroIdx(0)
-  }, [heroPool.length, heroIdx])
+    if (heroAt < 0 && !heldOutsidePool && heroPool.length > 0) setHeroId(heroPool[0].id)
+  }, [heroAt, heldOutsidePool, heroPool])
+  // Read by the rotation's interval, which is not re-created when the pool's
+  // contents change at the same length.
+  const heroPoolRef = useRef(heroPool)
+  useEffect(() => { heroPoolRef.current = heroPool }, [heroPool])
   // Auto-advance every 9s (matches Home), paused on hover. Only when
   // there's more than one to rotate through.
   useEffect(() => {
@@ -141,11 +158,16 @@ export default function BrowseView({
     // hover-pause / "Not tonight" affordances still work.
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
     const id = window.setInterval(() => {
-      setHeroIdx(i => (i + 1) % heroPool.length)
+      setHeroId(cur => {
+        const pool = heroPoolRef.current
+        if (pool.length === 0) return cur
+        const at = pool.findIndex(m => m.id === cur)
+        // From a title held outside the pool, rotation resumes at its start.
+        return pool[at < 0 ? 0 : (at + 1) % pool.length].id
+      })
     }, 9000)
     return () => window.clearInterval(id)
   }, [heroPool.length, heroPaused])
-  const heroMedia = heroPool[heroIdx] ?? heroPool[0]
   // Resume bundle for the hero's CTA — if the featured title has a
   // resumable CW record, the hero shows "Resume …" instead of "Play".
   const heroResume = heroMedia && continueItems

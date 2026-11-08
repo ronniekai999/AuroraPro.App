@@ -54,3 +54,44 @@ describe('useRealtime connection key', () => {
     expect(FakeSocket.opened).toHaveLength(0)
   })
 })
+
+describe('useRealtime library_update', () => {
+  it('hands library_update payloads to onLibraryUpdate', () => {
+    const onLibraryUpdate = vi.fn()
+    renderHook(() => useRealtime({ enabled: true, connectionKey: 1, onLibraryUpdate }))
+    const payload = { library_id: 3, library_name: 'Movies', new_items: 2, action: 'items_added' }
+    FakeSocket.opened[0].onmessage?.({ data: JSON.stringify({ type: 'library_update', data: payload }) })
+    FakeSocket.opened[0].onmessage?.({ data: JSON.stringify({ type: 'scan_progress', data: { library_id: 3 } }) })
+    expect(onLibraryUpdate).toHaveBeenCalledTimes(1)
+    expect(onLibraryUpdate).toHaveBeenCalledWith(payload)
+  })
+})
+
+describe('useRealtime onReconnect', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('fires when the socket opens again after dropping, not on the first open', () => {
+    const onReconnect = vi.fn()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    renderHook(() => useRealtime({ enabled: true, connectionKey: 1, onReconnect }))
+    FakeSocket.opened[0].onopen?.()
+    expect(onReconnect).not.toHaveBeenCalled()
+    FakeSocket.opened[0].onclose?.()
+    vi.advanceTimersByTime(30_000)
+    expect(FakeSocket.opened).toHaveLength(2)
+    FakeSocket.opened[1].onopen?.()
+    expect(onReconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire for a reopen a new connection key caused', () => {
+    const onReconnect = vi.fn()
+    const { rerender } = renderHook((h: RealtimeHandlers) => useRealtime(h), {
+      initialProps: { enabled: true, connectionKey: 1, onReconnect } as RealtimeHandlers,
+    })
+    FakeSocket.opened[0].onopen?.()
+    rerender({ enabled: true, connectionKey: 2, onReconnect })
+    FakeSocket.opened[1].onopen?.()
+    expect(onReconnect).not.toHaveBeenCalled()
+  })
+})

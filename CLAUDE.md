@@ -436,16 +436,19 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   Home's own library count (its greeting's "titles in your library") waits
   for the startup binding too (`catalogProfileSettled`) and is asked again
   for each profile the session acts as: one request once the startup load
-  settles and one per switch, keyed on the user's id, not the user object
+  settles and one per switch (Home's live catalog refresh also asks for it
+  beside its catalog rails and sets it under the same key; see Live catalog
+  updates), keyed on the user's id, not the user object
   that /me and other tabs' auth signals replace. Only the latest request
-  lands, and an answer shows only while the app acts as the user and
+  lands (requests from both askers are numbered, and an answer lands only
+  if no later-asked one has), and an answer shows only while the app acts as the user and
   profile it was asked for, so a switch's commit shows no count; the
   stored answer is dropped whenever the user's id, the profile or the
   startup settle changes, so a return to a profile, or the same user
   signing in again in the tab, waits for a new answer. It is keyed on the
   profile, not its ceiling: a ceiling changed elsewhere keeps the old
-  count until the next switch, sign-in or reload, even after Home's rails
-  have refreshed under the new one. It was fetched once per sign-in,
+  count until the next switch, sign-in, reload or live catalog refresh, even
+  after Home's rails have refreshed under the new one. It was fetched once per sign-in,
   before the binding was read, so a fresh sign-in that bound the default and then
   re-selected the profile this browser last showed counted the default's
   catalog, and a switch kept the previous profile's count. While it is in
@@ -1544,6 +1547,129 @@ is not notified, so participants stay connected to a room whose row is gone; the
 rescan goroutine is a bare `go` like `Create`'s and `Scan`'s, so shutdown does
 not wait for it and `addDirRecursive` ignores its context; and the report's
 thresholds are reasoned, not calibrated against real installs.
+
+### Live catalog updates
+
+New titles reach open web apps without a reload. Code:
+`internal/api/library_updates.go`, SPA `lib/catalogUpdates.ts` and
+`hooks/useCatalogVersion.ts`.
+
+- `library_update` has one sender, `LibraryUpdates`, made per scan at every
+  scan entry point: `TestLibraryUpdateHasOneSender` fails on another sender
+  and `TestEveryScanFeedsLibraryUpdates` on a `ScanLibrary` callback that
+  does not call `Observe`. It sends `items_added` while a scan adds files (the
+  first at once, then at most every 10 s), `scan_completed` when a scan that
+  added files completes (after the deferred TV enrichment), and
+  `retype_rescan_completed` when a retype's rescan completes, whatever it
+  added (a cancelled or failed scan sends no completion). Every socket gets
+  it; it names the library and a file count, never a title.
+- The SPA coalesces events (1.5 s plus up to 3 s of jitter, so tabs do not
+  refetch in step) into `catalogVersion`, at most one bump per 10 s per tab
+  whatever the server sends, held while the tab is hidden or the player is
+  open (not minimized), plus one after a socket reconnect and one at an
+  admin's scan-bar completion edge (which covers removal-only scans; it used
+  to run the full Home reload). Each view records the version its data
+  reflects and refetches when on screen and behind, one refresh at a time (an
+  update mid-refresh re-runs it after it lands instead of aborting it, which
+  starved refreshes on a busy server), abandoned after 30 s
+  (`LIVE_REFRESH_TIMEOUT_MS`) so a hung request cannot stop a view's updates,
+  and catches up when next shown:
+  - Home refetches only its three catalog rails and its library count,
+    recomposed under the personalized rails; never Continue Watching or the
+    personalized rails, and the hero only when none is showing (a first
+    import into an empty library). Running the full Home load per update
+    reset the hero carousel every ten seconds. Every catalog-rails fetch (the
+    full load's and the live refresh's) takes a number when it starts
+    (`homeRailsSeqRef`), and its rails land only if no later-started fetch's
+    have, so neither puts back rails that missed titles the other saw. The
+    full load records the version it started at, so an update during it is
+    caught up once its rails land. A live refresh whose rails are dropped
+    that way checks again (`homeRefreshRetry`: a recompose can set the very
+    array on screen and re-run nothing), so Home is not left a version
+    behind. The count's own effect asks once per user and profile, and only
+    the live refresh keeps it current (a full load does not ask), so it is
+    tracked apart (`homeCountVersionRef`, the version it was last ASKED at,
+    recorded when a request starts) and a refresh also runs when the count
+    alone is behind. Recorded when an answer landed instead, a count request
+    that kept failing ran a full refresh per recompose in a tight loop; a
+    failed count now waits for the next update. Its requests are numbered
+    across its own effect and this refresh, so an older answer landing last
+    cannot put an older count back.
+    A full load does not abort a live refresh. The refresh runs only under
+    rails the current user and profile already have up, is aborted by a
+    user, profile or settle change, stands down on a switch's first commit
+    (`profileSwitchPending`), and is checked against the rails' owner when it
+    lands; a switch clears that owner until the new profile's rails land, so
+    the check holds on its own. No refresh starts while a switch or a PIN
+    prompt is out (`isSwitching`), and an answer that comes back while one is,
+    or after one started (`switchGeneration`), is dropped, since the server
+    may already have answered it for the next profile while the old one is
+    still named; a dropped answer is checked again once the switch is over
+    (`homeRefreshRetry`, `gridRefreshRetry`; the start guard holds a re-run
+    off meanwhile, so it cannot loop), and closing the prompt (`pinTarget`)
+    runs the refreshes again. The grids do the same.
+  - A grid refetches every loaded page, three at a time, and swaps them in
+    without blanking; a Load More, an admin delete and a user, profile, sort or
+    genre change abort it, and it stands down on a switch's first commit. A
+    grid deeper than 5 pages is left stale rather than refetched or dropped.
+    Its featured hero is held by id from its first render while it is
+    anywhere in the list with a backdrop, not only in the rotation pool (the
+    first five), so an insertion ahead of it does not swap it, under the
+    Recently Added sort included (`BrowseView.hero.test.tsx`).
+  - The admin dashboard refetches its counts while its tab shows.
+  - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
+    and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or
+    an admin delete, replaced on an owner change and undone by a 👍), so a
+    recompose shows neither another owner's catalog or anchor rails nor a
+    removed card (a 👎'd title so stays off Home's catalog rails too). Not a
+    Discover answer still out across an owner change: `refetchDiscover`
+    splices it with no owner check (it predates this).
+  Pinned by `App.liveCatalog.test.tsx` (a live refresh held across a profile
+  switch on Home and on a grid, one released before the new profile's rails
+  land, which fails only when both the abort and the owner clearing are gone,
+  an update during Home's first load, a first import's hero, a full load and
+  a live refresh landing in either order with commits sampled, a refresh
+  started before a full load landing after it, the count catching up when
+  the refresh that carried it was dropped, one refresh, not a loop, when only
+  the count fails, and, on Home and the Movies grid, a refresh dropped for a
+  PIN prompt: held while the prompt is open, with no request until it is
+  cancelled and exactly one after (without the start guard one dropped
+  refresh ran over a hundred more a second), and checked again when it lands
+  after the prompt was cancelled),
+  `AdminView.catalog.test.tsx` and the hook and helper tests.
+- Known gaps: mid-scan, a new show has its folder title and no artwork until
+  the completion event; files found in a scan's last seconds wait for the
+  completion event, which for TV follows the deferred metadata pass; scans
+  that only remove titles, the recovery sweep, and background metadata
+  refreshes send nothing; genre lists are not refreshed; a title crossing a
+  page boundary between a grid's page requests is missed until the next
+  refresh, and Load More during an import can append a duplicate; a grid
+  deeper than 5 pages never live-updates; a failed refresh leaves its view
+  stale until the next update or showing; `onReconnect` does not fire when an
+  admin's socket reopens for a new profile, so an event in that gap is missed;
+  after a deploy every visible tab refetches its view as it reconnects, and a
+  socket the hub drops for a full send buffer refetches on every reconnect;
+  the one-at-a-time and Load More interplay, the reset of Home's buffers on
+  sign-out, the count's numbering, the switch-window drop for a switch with
+  no PIN prompt, the Shows grid's switch handling (the Movies grid's code,
+  which is pinned, line for line), the full load's fallback-hero gate and
+  the count effect's ask-time version have no test,
+  and the full load's guard is pinned against removal but not as a sequence
+  rather than a version check (the equal-version case it adds is not
+  reached by the current triggers); a switch with no PIN prompt that fails,
+  or one whose binding read returns the profile already shown (another tab
+  raced it), runs nothing again, so a refresh it held off or dropped leaves
+  the view behind until the next update or showing; a count request that
+  fails is asked again only at the next update, switch, sign-in or reload
+  (neither a Home visit nor the 30 s full load asks for it), and when only
+  the count was behind, a failed rail request discards a count answer that
+  succeeded; a first import's fallback hero is picked by the first live
+  refresh and not replaced, so a show picked before its enrichment
+  stays bare (no backdrop or overview) until a full Home load (returning or
+  refocusing after 30 s) or a reload, and the live refresh does not ask for
+  the personalized hero pool again (a full Home load does); the dashboard's
+  side cards read at mount can land after, and overwrite, a refresh's newer
+  numbers; the macOS and TV clients ignore the event.
 
 ### Nullable database columns
 

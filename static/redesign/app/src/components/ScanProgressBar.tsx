@@ -24,14 +24,11 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
   /**
    * Fired once when the last running scan finishes.
    *
-   * This component was purely decorative: it polled, drew a bar, and told
-   * nobody. So a scan could add titles and Home — which loads once and keeps
-   * its rails in state — would keep showing the pre-scan library until a hard
-   * refresh. It already knows the exact moment new content landed; this hands
-   * that fact to the one place that can act on it.
-   *
-   * Only whoever is watching the scan gets this, because the polling is
-   * admin-gated. Everyone else is covered by Home's staleness gate.
+   * App treats it as a catalog change (a live catalog refresh, see
+   * lib/catalogUpdates.ts). Every client already hears of scans that add
+   * titles through the server's library_update events; this edge also
+   * covers, for whoever is watching the scan (the polling is admin-gated),
+   * scans that only removed titles, which send no event.
    */
   onScanComplete?: () => void
 }) {
