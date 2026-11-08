@@ -59,6 +59,14 @@ type LibraryUpdates struct {
 	mu      sync.Mutex
 	sentNew int
 	sentAt  time.Time
+
+	// testHookInClaim, when non-nil, runs inside claimMidScan's critical
+	// section, between the check and the claim. Nil in production. A test of
+	// the lock by racing goroutines passes without the lock unless run with
+	// -race, which CI does not do for this package; the hook lets the test
+	// hold one caller inside the window and see whether a second gets in
+	// (the same seam as the scanner's testHookInRequeueClaim).
+	testHookInClaim func()
 }
 
 // NewLibraryUpdates returns the library_update sender for one scan of lib.
@@ -114,6 +122,9 @@ func (u *LibraryUpdates) claimMidScan(newFiles int) bool {
 	now := u.now()
 	if !u.sentAt.IsZero() && now.Sub(u.sentAt) < u.interval {
 		return false
+	}
+	if u.testHookInClaim != nil {
+		u.testHookInClaim()
 	}
 	u.sentNew = newFiles
 	u.sentAt = now

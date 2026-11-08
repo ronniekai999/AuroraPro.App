@@ -66,3 +66,32 @@ describe('useRealtime library_update', () => {
     expect(onLibraryUpdate).toHaveBeenCalledWith(payload)
   })
 })
+
+describe('useRealtime onReconnect', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('fires when the socket opens again after dropping, not on the first open', () => {
+    const onReconnect = vi.fn()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    renderHook(() => useRealtime({ enabled: true, connectionKey: 1, onReconnect }))
+    FakeSocket.opened[0].onopen?.()
+    expect(onReconnect).not.toHaveBeenCalled()
+    FakeSocket.opened[0].onclose?.()
+    vi.advanceTimersByTime(30_000)
+    expect(FakeSocket.opened).toHaveLength(2)
+    FakeSocket.opened[1].onopen?.()
+    expect(onReconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire for a reopen a new connection key caused', () => {
+    const onReconnect = vi.fn()
+    const { rerender } = renderHook((h: RealtimeHandlers) => useRealtime(h), {
+      initialProps: { enabled: true, connectionKey: 1, onReconnect } as RealtimeHandlers,
+    })
+    FakeSocket.opened[0].onopen?.()
+    rerender({ enabled: true, connectionKey: 2, onReconnect })
+    FakeSocket.opened[1].onopen?.()
+    expect(onReconnect).not.toHaveBeenCalled()
+  })
+})

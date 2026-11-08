@@ -12,23 +12,35 @@
 // remembers the version its data was loaded at and refetches when it is on
 // screen and behind; a view that is not on screen catches up the next time it
 // is shown. So an event costs each open tab one refetch of the view it shows,
-// not a refetch of everything.
+// not a refetch of everything, and Home refetches only its catalog rails, not
+// the hero, Continue Watching or the personalized rails.
 
 /** Events closer together than this become one refresh. */
 export const CATALOG_UPDATE_DELAY_MS = 1500
 
 /**
- * A grid refreshed in place refetches every page it has loaded. Past this
- * many pages it is not refetched while on screen (the refresh would be a
- * burst of requests every few seconds during a scan); it is dropped once it is
- * off screen instead, so the next visit loads page 1 afresh.
+ * The least time between two refreshes. The server holds each scan to one
+ * mid-scan event per 10 seconds, but several libraries scanning at once each
+ * send their own; this keeps a tab to one refresh per 10 seconds whatever the
+ * server sends.
  */
-export const CATALOG_REFRESH_MAX_PAGES = 20
+export const CATALOG_UPDATE_MIN_GAP_MS = 10_000
+
+/**
+ * A grid refreshed in place refetches every page it has loaded. Past this
+ * many pages it is left as it is (stale until a sort or genre change or a
+ * reload) rather than refetched, which would be a burst of requests every ten
+ * seconds of a scan, or dropped, which would lose the reader's place.
+ */
+export const CATALOG_REFRESH_MAX_PAGES = 10
+
+/** Page requests one grid refresh has in flight at once. */
+export const CATALOG_REFRESH_CONCURRENCY = 3
 
 export interface CatalogUpdateScheduler {
-  /** A library_update arrived. */
+  /** A library_update arrived (or the socket reconnected). */
   notify(): void
-  /** The document may have become visible; flush a refresh held while hidden. */
+  /** The tab may have become visible, or the hold lifted; flush a held refresh. */
   visible(): void
   dispose(): void
 }
@@ -38,24 +50,35 @@ export interface CatalogUpdateScheduler {
  *
  * The first event starts a short timer and later events inside it ride along,
  * so a mid-scan event followed closely by the completion, or two libraries
- * scanning at once, make one refresh. A refresh due while the tab is hidden
- * waits until it is visible: a background tab on Home would otherwise refetch
- * every ten seconds of a long import for nobody.
+ * scanning at once, make one refresh; a refresh also waits until
+ * `minGapMs` after the previous one. A refresh due while `isHidden()` (the tab
+ * is hidden, or the app holds refreshes while the player is open) waits until
+ * `visible()` is called with it false: a background tab on Home would
+ * otherwise refetch every ten seconds of a long import for nobody.
  */
 export function createCatalogUpdateScheduler(opts: {
   onFlush: () => void
   isHidden: () => boolean
   delayMs?: number
+  minGapMs?: number
+  now?: () => number
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearTimer?: (id: ReturnType<typeof setTimeout>) => void
 }): CatalogUpdateScheduler {
   const delayMs = opts.delayMs ?? CATALOG_UPDATE_DELAY_MS
+  const minGapMs = opts.minGapMs ?? CATALOG_UPDATE_MIN_GAP_MS
+  const now = opts.now ?? (() => Date.now())
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimer = opts.clearTimer ?? (id => clearTimeout(id))
   let timer: ReturnType<typeof setTimeout> | null = null
   let heldWhileHidden = false
+  let lastFlushAt = -Infinity
   let disposed = false
 
+  const flush = () => {
+    lastFlushAt = now()
+    opts.onFlush()
+  }
   const fire = () => {
     timer = null
     if (disposed) return
@@ -63,18 +86,19 @@ export function createCatalogUpdateScheduler(opts: {
       heldWhileHidden = true
       return
     }
-    opts.onFlush()
+    flush()
   }
 
   return {
     notify() {
       if (disposed || timer !== null) return
-      timer = setTimer(fire, delayMs)
+      timer = setTimer(fire, Math.max(delayMs, lastFlushAt + minGapMs - now()))
     },
     visible() {
-      if (disposed || !heldWhileHidden || opts.isHidden()) return
+      if (disposed || !heldWhileHidden || opts.isHidden() || timer !== null) return
       heldWhileHidden = false
-      opts.onFlush()
+      // Through the timer, so a held refresh still keeps the minimum gap.
+      timer = setTimer(fire, Math.max(0, lastFlushAt + minGapMs - now()))
     },
     dispose() {
       disposed = true
@@ -92,20 +116,31 @@ export function loadedPageCount(loaded: number, perPage: number): number {
 
 /**
  * Refetches pages 1..`pages` of a grid, so it can be replaced in place with
- * the same depth and a Load More cursor that matches the server again.
+ * the same depth and a Load More cursor that matches the server again. At most
+ * `concurrency` pages are in flight at once, so a refresh never takes all of a
+ * browser's connections to the server.
  *
- * Pages are fetched together while a scan may still be writing, so a title
- * that moves across a page boundary between two requests could arrive twice;
- * the first copy is kept. (One that moves the other way is missed until the
- * next refresh, which the scan's completion event brings.) Rejects if any page
+ * Pages are fetched while a scan may still be writing, so a title that moves
+ * across a page boundary between two requests could arrive twice; the first
+ * copy is kept. (One that moves the other way is missed until the next
+ * refresh, which the scan's completion event brings.) Rejects if any page
  * fails, leaving the caller's list as it was.
  */
 export async function refetchLoadedPages<T extends { id: number }>(
   fetchPage: (page: number) => Promise<{ items: T[]; total: number }>,
   pages: number,
+  concurrency = CATALOG_REFRESH_CONCURRENCY,
 ): Promise<{ items: T[]; total: number; nextPage: number }> {
   const count = Math.max(1, pages)
-  const results = await Promise.all(Array.from({ length: count }, (_, i) => fetchPage(i + 1)))
+  const results: { items: T[]; total: number }[] = new Array(count)
+  let next = 0
+  const worker = async () => {
+    while (next < count) {
+      const i = next++
+      results[i] = await fetchPage(i + 1)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), count) }, worker))
   const seen = new Set<number>()
   const items: T[] = []
   for (const r of results) {
@@ -116,4 +151,15 @@ export async function refetchLoadedPages<T extends { id: number }>(
     }
   }
   return { items, total: results[0].total, nextPage: count + 1 }
+}
+
+/**
+ * The rails with every title in `removed` taken out. Home keeps the rails it
+ * fetched in buffers and recomposes them on each refresh, so a card removed
+ * from the screen (a 👎, an admin delete) has to be removed from what is
+ * recomposed too, or the next refresh puts it back.
+ */
+export function withoutRemoved<R extends { items: { id: number }[] }>(rails: R[], removed: ReadonlySet<number>): R[] {
+  if (removed.size === 0) return rails
+  return rails.map(r => ({ ...r, items: r.items.filter(it => !removed.has(it.id)) }))
 }

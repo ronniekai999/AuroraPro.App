@@ -43,6 +43,11 @@ export interface RealtimeHandlers {
   onNotification?: (n: AppNotification) => void
   onDiscoverReady?: (ev: DiscoverReadyEvent) => void
   onLibraryUpdate?: (ev: LibraryUpdateEvent) => void
+  // The socket opened again after dropping (a server restart, a network
+  // blip), within one connection key. Events sent while it was down are not
+  // replayed, so a consumer can catch up here. Not called for the first open,
+  // nor for a reopen that a new connection key caused.
+  onReconnect?: () => void
 }
 
 // useRealtime maintains ONE app-lifetime WebSocket to the shared hub (/ws) while
@@ -74,6 +79,7 @@ export function useRealtime(handlers: RealtimeHandlers): void {
     let closedByUs = false
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let attempt = 0
+    let openedBefore = false
 
     const scheduleReconnect = () => {
       if (closedByUs || reconnectTimer) return
@@ -101,6 +107,8 @@ export function useRealtime(handlers: RealtimeHandlers): void {
 
       socket.onopen = () => {
         attempt = 0 // reset backoff on a healthy connection
+        if (openedBefore) handlersRef.current.onReconnect?.()
+        openedBefore = true
       }
 
       socket.onmessage = (e) => {

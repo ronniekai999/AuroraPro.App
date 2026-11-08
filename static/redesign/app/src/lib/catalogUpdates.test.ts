@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CATALOG_UPDATE_DELAY_MS,
+  CATALOG_UPDATE_MIN_GAP_MS,
   createCatalogUpdateScheduler,
   loadedPageCount,
   refetchLoadedPages,
+  withoutRemoved,
 } from './catalogUpdates'
 
 describe('createCatalogUpdateScheduler', () => {
@@ -22,11 +24,30 @@ describe('createCatalogUpdateScheduler', () => {
     expect(onFlush).toHaveBeenCalledTimes(1)
   })
 
-  it('starts a new refresh for an event after the last one flushed', () => {
+  it('keeps the minimum gap between refreshes, however often events come', () => {
     const onFlush = vi.fn()
     const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+    // Several libraries' events, one after another.
+    for (let i = 0; i < 5; i++) {
+      s.notify()
+      vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
+    }
+    expect(onFlush).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(CATALOG_UPDATE_MIN_GAP_MS - 5 * CATALOG_UPDATE_DELAY_MS - 1)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
+    expect(onFlush).toHaveBeenCalledTimes(2)
+  })
+
+  it('flushes an event long after the last refresh after the short delay only', () => {
+    const onFlush = vi.fn()
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => false })
+    s.notify()
+    vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
+    vi.advanceTimersByTime(CATALOG_UPDATE_MIN_GAP_MS * 2)
     s.notify()
     vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
     expect(onFlush).toHaveBeenCalledTimes(2)
@@ -46,7 +67,24 @@ describe('createCatalogUpdateScheduler', () => {
     hidden = false
     s.visible()
     s.visible()
+    vi.advanceTimersByTime(0)
     expect(onFlush).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the minimum gap for a refresh held while hidden', () => {
+    let hidden = false
+    const onFlush = vi.fn()
+    const s = createCatalogUpdateScheduler({ onFlush, isHidden: () => hidden })
+    s.notify()
+    vi.advanceTimersByTime(CATALOG_UPDATE_DELAY_MS)
+    expect(onFlush).toHaveBeenCalledTimes(1)
+    hidden = true
+    s.notify()
+    vi.advanceTimersByTime(CATALOG_UPDATE_MIN_GAP_MS)
+    hidden = false
+    s.visible()
+    vi.advanceTimersByTime(0)
+    expect(onFlush).toHaveBeenCalledTimes(2)
   })
 
   it('does nothing on visible when no refresh was held', () => {
@@ -98,11 +136,36 @@ describe('refetchLoadedPages', () => {
     expect(got.items.map(i => i.id)).toEqual([1, 2, 3])
   })
 
+  it('has at most `concurrency` pages in flight at once', async () => {
+    let inFlight = 0
+    let most = 0
+    const fetchPage = async (p: number) => {
+      inFlight++
+      most = Math.max(most, inFlight)
+      await new Promise(done => setTimeout(done, 1))
+      inFlight--
+      return page([p], 7)
+    }
+    const got = await refetchLoadedPages(fetchPage, 7, 3)
+    expect(most).toBe(3)
+    expect(got.items.map(i => i.id)).toEqual([1, 2, 3, 4, 5, 6, 7])
+  })
+
   it('rejects when any page fails, so the caller keeps its list', async () => {
     const fetchPage = async (p: number) => {
       if (p === 2) throw new Error('boom')
       return page([1], 2)
     }
     await expect(refetchLoadedPages(fetchPage, 2)).rejects.toThrow('boom')
+  })
+})
+
+describe('withoutRemoved', () => {
+  it('takes removed titles out of every rail and leaves the rest', () => {
+    const rails = [{ title: 'a', items: [{ id: 1 }, { id: 2 }] }, { title: 'b', items: [{ id: 2 }, { id: 3 }] }]
+    expect(withoutRemoved(rails, new Set([2]))).toEqual([
+      { title: 'a', items: [{ id: 1 }] }, { title: 'b', items: [{ id: 3 }] },
+    ])
+    expect(withoutRemoved(rails, new Set())).toBe(rails)
   })
 })

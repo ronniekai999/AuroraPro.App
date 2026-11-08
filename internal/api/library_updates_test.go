@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -152,32 +153,117 @@ func TestRetypeLibraryUpdatesAnnounceEveryCompletion(t *testing.T) {
 	assertOneUpdate(t, hub.take(), libraryUpdateRetypeCompleted, 0)
 }
 
-func TestLibraryUpdatesClaimOneEventAcrossConcurrentWorkers(t *testing.T) {
-	// The scanner reports progress from its worker goroutines. Run with -race.
+func TestLibraryUpdatesClaimIsExclusive(t *testing.T) {
+	// The scanner reports progress from its worker goroutines. Two reports
+	// inside the claim window at once would both read "nothing sent yet" and
+	// both send. Hold the first caller inside the window and see whether a
+	// second gets in, rather than racing goroutines, which passes without the
+	// lock unless the test runs under -race.
 	u, hub, _ := newTestUpdates(t, false)
-	var wg sync.WaitGroup
-	for i := 1; i <= 32; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			u.Observe(running(n))
-		}(i)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	u.testHookInClaim = func() {
+		entered <- struct{}{}
+		<-release
 	}
-	wg.Wait()
+	var done sync.WaitGroup
+	done.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer done.Done()
+			u.Observe(running(1))
+		}()
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		done.Wait()
+		t.Fatal("no caller reached the claim window")
+	}
+	overlapped := false
+	select {
+	case <-entered:
+		overlapped = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	done.Wait()
+	if overlapped {
+		t.Error("two progress reports were inside the claim window at once; the check and the claim must be one critical section")
+	}
 	if got := hub.take(); len(got) != 1 {
-		t.Fatalf("32 concurrent reports inside one interval sent %d events, want 1", len(got))
+		t.Fatalf("two concurrent reports of one new file sent %d events, want 1", len(got))
 	}
+}
+
+// TestEveryScanFeedsLibraryUpdates is the other half of the one-sender
+// guard: it fails when a scan entry point stops passing its progress to a
+// LibraryUpdates (or a new one never did), which would silently end live
+// updates for the scans it starts. Every ScanLibrary call outside the scanner
+// package must call Observe within its progress callback.
+func TestEveryScanFeedsLibraryUpdates(t *testing.T) {
+	root := repoRoot(t)
+	calls := 0
+	var missing []string
+	for _, dir := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(root, path)
+			if strings.HasPrefix(rel, filepath.Join("internal", "library")+string(filepath.Separator)) {
+				return nil
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			lines := strings.Split(string(src), "\n")
+			for i, line := range lines {
+				if !strings.Contains(line, ".ScanLibrary(") {
+					continue
+				}
+				calls++
+				end := i + 6
+				if end > len(lines) {
+					end = len(lines)
+				}
+				if !strings.Contains(strings.Join(lines[i:end], "\n"), ".Observe(") {
+					missing = append(missing, fmt.Sprintf("%s:%d", rel, i+1))
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	if calls < 5 {
+		t.Fatalf("found %d ScanLibrary calls, want the 5 scan entry points at least; has the call shape changed?", calls)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("ScanLibrary progress not passed to LibraryUpdates.Observe within the callback: %v", missing)
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
+	}
+	return filepath.Join(filepath.Dir(self), "..", "..")
 }
 
 // TestLibraryUpdateHasOneSender keeps every library_update going through
 // LibraryUpdates. The scan sites each used to build the event inline; a new
 // one doing that again would skip the throttle and the mid-scan events.
 func TestLibraryUpdateHasOneSender(t *testing.T) {
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate this test file")
-	}
-	root := filepath.Join(filepath.Dir(self), "..", "..")
+	root := repoRoot(t)
 	allowed := map[string]bool{
 		filepath.Join("internal", "api", "library_updates.go"): true,
 		filepath.Join("internal", "websocket", "events.go"):    true,

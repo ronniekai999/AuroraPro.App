@@ -10,10 +10,11 @@
 //
 // What is pinned: an on-screen grid refetches in place and never blanks; an
 // off-screen grid waits for its next visit rather than fetching for nobody;
-// Home refetches with its personalized rails kept on screen (a background
-// refresh used to set the core rails alone and drop every AI rail until its
-// fetch came back, which a scan now does every ten seconds), and its library
-// count stays up until the new one lands.
+// Home refetches only its catalog rails and library count, under the
+// personalized rails already on screen, and its count stays up until the new
+// one lands. The hero, Continue Watching and the personalized rails are not
+// asked for again: running the whole Home load per update reset the hero
+// carousel to its first pick every ten seconds of an import.
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -60,11 +61,14 @@ function stubServer() {
   const catalog: Item[] = [item(1, 'Old Movie')]
   // Each browse-grid request (Home's Top Rated rails ask for 20 a type).
   const gridRequests: string[] = []
+  // Requests per path.
+  const asked: Record<string, number> = {}
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
+    asked[p] = (asked[p] ?? 0) + 1
     if (p === '/api/media' && url.searchParams.get('per_page') === '100') gridRequests.push(url.search)
     // The personalized rails answer a moment after the core ones, as a
     // vector query does; answered at once they would land in the same render
@@ -75,7 +79,9 @@ function stubServer() {
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
     if (p === '/api/profiles') return json(PROFILES)
     if (p === '/api/profiles/active') return json(PROFILES[0])
-    if (p === '/api/me/hero') return json({ picks: [] })
+    if (p === '/api/me/hero') {
+      return json({ picks: [item(80, 'Hero One'), item(81, 'Hero Two')].map(it => ({ item: it, reason: 'Picked for you' })), slate_token: 'slate' })
+    }
     const newestFirst = [...catalog].reverse()
     if (p === '/api/media/recent') return json({ data: newestFirst })
     if (p === '/api/media') {
@@ -94,6 +100,7 @@ function stubServer() {
   return {
     add(it: Item) { catalog.push(it) },
     gridRequests,
+    asked,
   }
 }
 let server: ReturnType<typeof stubServer>
@@ -159,13 +166,20 @@ describe('a scan’s new titles appear without a reload', () => {
     await screen.findByText(ANCHOR_RAIL, undefined, { timeout: 5000 })
     await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    // Everything Home's startup asked for has landed.
+    await new Promise(done => setTimeout(done, 300))
+    const before = { ...server.asked }
     page.on()
     server.add(item(2, 'New Movie'))
     scanAdded(1)
     await screen.findAllByText('New Movie', undefined, { timeout: 5000 })
     await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
-    // Let the personalized rails' refetch land too.
     await new Promise(done => setTimeout(done, 300))
+    // Only the catalog rails and the count were asked for again.
+    for (const p of ['/api/me/hero', '/api/progress/continue', '/api/me/anchor-rails', '/api/me/discover']) {
+      expect([p, server.asked[p] ?? 0]).toEqual([p, before[p] ?? 0])
+    }
+    expect(server.asked['/api/media/recent']).toBe((before['/api/media/recent'] ?? 0) + 1)
     expect(page.commits.length).toBeGreaterThan(0)
     expect(page.commits.filter(c => !c.text.includes(ANCHOR_RAIL))).toEqual([])
     expect(page.commits.filter(c => !/\b[12] titles in your library/.test(c.text))).toEqual([])

@@ -436,7 +436,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   Home's own library count (its greeting's "titles in your library") waits
   for the startup binding too (`catalogProfileSettled`) and is asked again
   for each profile the session acts as: one request once the startup load
-  settles and one per switch, keyed on the user's id, not the user object
+  settles and one per switch (and one per live catalog update while Home
+  shows, or at its next showing; see Live catalog updates, which keeps the
+  answer on screen meanwhile), keyed on the user's id, not the user object
   that /me and other tabs' auth signals replace. Only the latest request
   lands, and an answer shows only while the app acts as the user and
   profile it was asked for, so a switch's commit shows no count; the
@@ -1552,30 +1554,43 @@ New titles reach open web apps without a reload. Code:
 `hooks/useCatalogVersion.ts`.
 
 - `library_update` has one sender, `LibraryUpdates`, made per scan at every
-  scan entry point (`TestLibraryUpdateHasOneSender` fails on another). It
-  sends `items_added` while a scan adds files (the first at once, then at most
-  every 10 s), `scan_completed` when a scan that added files completes (after
-  the deferred TV enrichment), and `retype_rescan_completed` after every
-  retype rescan. Every socket gets it; it names the library and a file count,
-  never a title.
-- The SPA coalesces events (1.5 s) into `catalogVersion` and holds a refresh
-  while the tab is hidden. Home, the Movies and Shows grids, Home's library
-  count and the admin dashboard each refetch when on screen and behind it,
-  and catch up when next shown. A grid refetches every page it has loaded and
-  swaps them in (never blanking); one deeper than 20 pages is dropped once off
-  screen instead. A grid refresh stands down on a switch's first commit
-  (`profileSwitchPending`), as its first page does. A background Home refresh
-  keeps the personalized rails on screen (it used to drop them until they
-  re-resolved), and the library count stays up unless the user, profile or
-  startup settle changed. Pinned by `App.liveCatalog.test.tsx` and
-  `AdminView.catalog.test.tsx`.
+  scan entry point: `TestLibraryUpdateHasOneSender` fails on another sender
+  and `TestEveryScanFeedsLibraryUpdates` on a `ScanLibrary` callback that
+  does not call `Observe`. It sends `items_added` while a scan adds files (the
+  first at once, then at most every 10 s), `scan_completed` when a scan that
+  added files completes (after the deferred TV enrichment), and
+  `retype_rescan_completed` after every retype rescan. Every socket gets it;
+  it names the library and a file count, never a title.
+- The SPA coalesces events (1.5 s) into `catalogVersion`, at most one bump
+  per 10 s per tab whatever the server sends, held while the tab is hidden or
+  the player is open (not minimized), plus one after a socket reconnect.
+  Each view refetches when on screen and behind it, and catches up when next
+  shown: Home refetches only its three catalog rails and its library count
+  (`homeCatalogNonce`), recomposed under the personalized rails; never the
+  hero, Continue Watching or the personalized rails (running the full Home
+  load per update reset the hero carousel every ten seconds). A grid
+  refetches every loaded page, three at a time, and swaps them in without
+  blanking; one refresh at a time (an update mid-refresh re-runs it after),
+  aborted by a Load More and by a user, profile, sort or genre change, and
+  standing down on a switch's first commit (`profileSwitchPending`). A grid
+  deeper than 10 pages is left stale rather than refetched or dropped. The
+  admin dashboard refetches its counts while its tab shows. Home's rail
+  buffers carry their owner (`railsUserRef`, `railsProfileRef`) and the
+  titles removed this session (`removedFromHomeRef`, from a 👎 or an admin
+  delete), so a recompose never shows another account's rails or a removed
+  card (a 👎'd title so stays off Home's catalog rails too, until the
+  profile or account changes). Pinned by `App.liveCatalog.test.tsx`, `AdminView.catalog.test.tsx`
+  and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
-  the completion event; a socket that is down when an event is sent misses it
-  (Home's 30 s staleness and focus checks are the only fallback); scans that
-  only remove titles, the recovery sweep, and background metadata refreshes
-  send nothing; a title crossing a page boundary between a grid's parallel
-  page requests is missed until the next refresh; the macOS and TV clients
-  ignore the event.
+  the completion event; files found in a scan's last seconds wait for the
+  completion event, which for TV follows the deferred metadata pass; scans
+  that only remove titles, the recovery sweep, and background metadata
+  refreshes send nothing; genre lists are not refreshed; a title crossing a
+  page boundary between a grid's page requests is missed until the next
+  refresh, and Load More during an import can append a duplicate; a grid
+  deeper than 10 pages never live-updates; a refresh's one-at-a-time and
+  Load More interplay and the reset of Home's buffers on sign-out have no
+  App-level test; the macOS and TV clients ignore the event.
 
 ### Nullable database columns
 
