@@ -44,3 +44,18 @@ describe('BrowseView featured hero', () => {
     expect(screen.getByLabelText('More info about Charlie')).toBeTruthy()
   })
 })
+
+describe('BrowseView featured hero under an import', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('stays on the title showing when five new titles push it out of the pool', () => {
+    const old = [m(1, 'Alpha'), m(2, 'Bravo')]
+    const { rerender } = render(view(old))
+    const fresh = [10, 11, 12, 13, 14].map(id => m(id, `New ${id}`))
+    rerender(view([...fresh, ...old]))
+    expect(screen.getByLabelText('More info about Alpha')).toBeTruthy()
+  })
+})

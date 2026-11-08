@@ -362,3 +362,105 @@ describe('an update while Home is still loading', () => {
     await screen.findAllByText('Parentonly New', undefined, { timeout: 5000 })
   })
 })
+
+// A full Home load (the staleness gate) and the live catalog refresh can be
+// out at once and land in either order. Home must end on the newest catalog
+// and the newest count either way.
+describe('a full Home load and a live refresh overlapping', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aurora_user', JSON.stringify(USER))
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    FakeSocket.opened = []
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+  })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  /** Moves the clock the staleness gate reads past its 30 s window. */
+  function staleClock() {
+    const realNow = Date.now.bind(Date)
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 31_000)
+  }
+  const main = () => document.querySelector('main')?.textContent ?? ''
+
+  it('updates the greeting count when the full load lands before the live refresh', async () => {
+    // Returning to Home after a scan runs both at the same version; the count
+    // comes only with the live refresh, which must not be dropped for it.
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 300))
+    goTo('Movies')
+    await waitFor(() => expect(main()).toContain('Parentonly Old'), { timeout: 5000 })
+    server.addForParent(item(3, 'Parentonly New'))
+    scanAdded(1)
+    await waitFor(() => expect(main()).toContain('Parentonly New'), { timeout: 5000 })
+    const count = server.hold((u, b) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '1')
+    staleClock()
+    goTo('Home')
+    await waitFor(() => expect(count.sent()).toBe(true), { timeout: 5000 })
+    await waitFor(() => expect(main()).toContain('Parentonly New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    count.release()
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+  })
+
+  it('lands a newer live refresh that was out when an older full load landed', async () => {
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const fullLoad = server.hold((u, b) => b === 1 && u.pathname === '/api/media' &&
+      u.searchParams.get('type') === 'show' && u.searchParams.get('per_page') === '20')
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(fullLoad.sent()).toBe(true), { timeout: 5000 })
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    const second = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(4, 'Bravo New'))
+    scanAdded(2)
+    await waitFor(() => expect(second.sent()).toBe(true), { timeout: 15000 })
+    fullLoad.release()
+    await new Promise(done => setTimeout(done, 300))
+    second.release()
+    await waitFor(() => expect(main()).toContain('Bravo New'), { timeout: 5000 })
+  }, 30000)
+
+  it('runs again when a live refresh lands older than a full load and is dropped', async () => {
+    // R (v1) is out; the next update (v2) waits on it; a full load starts at
+    // v2; a third update (v3) arrives; the full load lands at v2, then R lands
+    // older than it and is dropped. Nothing else changes, so without the
+    // retry Home stays at v2 and never shows the third title.
+    const server = stubTwoProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    server.addForParent(item(4, 'Bravo New'))
+    scanAdded(2)
+    // The second update's refresh waits out the scheduler's 10 s gap.
+    await new Promise(done => setTimeout(done, 11_000))
+    const fullLoad = server.hold((u, b) => b === 1 && u.pathname === '/api/media' &&
+      u.searchParams.get('type') === 'show' && u.searchParams.get('per_page') === '20')
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(fullLoad.sent()).toBe(true), { timeout: 5000 })
+    server.addForParent(item(5, 'Charlie New'))
+    scanAdded(3)
+    await new Promise(done => setTimeout(done, 2500))
+    fullLoad.release()
+    await waitFor(() => expect(main()).toContain('Bravo New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    r.release()
+    await waitFor(() => expect(main()).toContain('Charlie New'), { timeout: 5000 })
+  }, 40000)
+})

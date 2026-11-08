@@ -4401,12 +4401,6 @@ export default function App() {
         lastHomeLoadRef.current = Date.now()
         railsProfileRef.current = activeProfileId
         railsUserRef.current = user.id
-        // This load supersedes a live refresh still out. Abandoning it lets
-        // the live refresh run again on the rails set below if they are
-        // behind; dropped on landing instead (older than these rails), it set
-        // nothing and left them a version behind.
-        homeRefreshAcRef.current?.abort()
-        homeRefreshAcRef.current = null
         // A live refresh that landed while this load was out has newer
         // catalog rails; a background load keeps them rather than putting the
         // older ones back (the new titles would vanish for a round trip).
@@ -4541,6 +4535,11 @@ export default function App() {
   // cannot put an older count back.
   const homeCountSeqRef = useRef(0)
   const homeCountAppliedRef = useRef(0)
+  // Bumped when a refresh lands older than the rails on screen (a full load
+  // that started later landed first) and is dropped: that sets nothing the
+  // effect depends on (a recompose can set the very array already on
+  // screen), so without this Home could stay a version behind.
+  const [homeRefreshRetry, setHomeRefreshRetry] = useState(0)
   useEffect(() => () => {
     homeRefreshAcRef.current?.abort()
     homeRefreshAcRef.current = null
@@ -4570,7 +4569,8 @@ export default function App() {
         homeRefreshAcRef.current = null
         if (railsProfileRef.current !== activeProfileId || railsUserRef.current !== realtimeUserId) return
         // A full load that started later may have landed newer rails first.
-        if (version < homeRailsVersionRef.current) return
+        // Check again: the rails can still be behind the latest version.
+        if (version < homeRailsVersionRef.current) { setHomeRefreshRetry(n => n + 1); return }
         homeRailsVersionRef.current = version
         coreRailsRef.current = coreHomeRails(recent as Media[], movies as Media[], shows as Media[])
         recomposeHomeRails()
@@ -4590,7 +4590,7 @@ export default function App() {
         if (homeRefreshAcRef.current === ac) homeRefreshAcRef.current = null
         ac.abort()
       })
-  }, [view, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, catalogVersion, homeRails, recomposeHomeRails])
+  }, [view, realtimeUserId, catalogProfileSettled, profileSwitchPending, activeProfileId, catalogVersion, homeRails, homeRefreshRetry, recomposeHomeRails])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the

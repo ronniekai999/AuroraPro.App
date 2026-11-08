@@ -1580,9 +1580,11 @@ New titles reach open web apps without a reload. Code:
     import into an empty library). Running the full Home load per update
     reset the hero carousel every ten seconds. The full load records the
     version it started at, so an update during it is caught up once its rails
-    land, abandons a live refresh still out (which then runs again if the
-    rails are behind), and, landing after a newer live refresh, keeps the
-    newer rails. The refresh runs only under rails the current user and
+    land, and, landing after a newer live refresh, keeps the newer rails. A
+    live refresh landing older than the rails on screen is dropped and checks
+    again (`homeRefreshRetry`, since a recompose can set the very array on
+    screen and re-run nothing), so Home is not left a version behind; a full
+    load does not abort a live refresh, which carries the only count update. The refresh runs only under rails the current user and
     profile already have up, is aborted by a user, profile or settle change,
     stands down on a switch's first commit (`profileSwitchPending`), and is
     checked against the rails' owner when it lands; a switch clears that
@@ -1593,9 +1595,10 @@ New titles reach open web apps without a reload. Code:
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
     grid deeper than 5 pages is left stale rather than refetched or dropped.
-    Its featured hero is held by id from its first render while it stays in
-    the pool (the first five titles with a backdrop), so an insertion ahead
-    of it does not swap it (`BrowseView.hero.test.tsx`).
+    Its featured hero is held by id from its first render while it is
+    anywhere in the list with a backdrop, not only in the rotation pool (the
+    first five), so an insertion ahead of it does not swap it, under the
+    Recently Added sort included (`BrowseView.hero.test.tsx`).
   - The admin dashboard refetches its counts while its tab shows.
   - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
     and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or
@@ -1607,7 +1610,8 @@ New titles reach open web apps without a reload. Code:
   Pinned by `App.liveCatalog.test.tsx` (a live refresh held across a profile
   switch on Home and on a grid, one released before the new profile's rails
   land, which fails only when both the abort and the owner clearing are gone,
-  an update during Home's first load, and a first import's hero),
+  an update during Home's first load, a first import's hero, and a full load
+  and a live refresh landing in either order, the count included),
   `AdminView.catalog.test.tsx` and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
   the completion event; files found in a scan's last seconds wait for the
@@ -1622,12 +1626,11 @@ New titles reach open web apps without a reload. Code:
   after a deploy every visible tab refetches its view as it reconnects, and a
   socket the hub drops for a full send buffer refetches on every reconnect;
   the one-at-a-time and Load More interplay, the reset of Home's buffers on
-  sign-out, the full load's and live refresh's ordering, the count's
-  numbering have no test; a first import's fallback hero is picked by the
+  sign-out and the count's numbering have no test; a first import's fallback hero is picked by the
   first live refresh and not replaced, so a show picked before its
   enrichment stays bare (no backdrop or overview) until a full Home load
-  (returning or refocusing after 30 s) or a reload, and the personalized hero
-  pool is not asked for again; the dashboard's side
+  (returning or refocusing after 30 s) or a reload, and the live refresh does
+  not ask for the personalized hero pool again (a full Home load does); the dashboard's side
   cards read at mount can land after, and overwrite, a refresh's newer
   numbers; the macOS and TV clients ignore the event.
 
