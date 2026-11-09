@@ -328,9 +328,12 @@ function pickProfile(name: RegExp) {
 // previous profile's titles under the new profile's name. Each answer here is
 // the one the server gave for the profile bound when it was asked, held until
 // the switch is done. What holds it off is a combination: the refresh's abort
-// on an owner change, its stand-down on a switch's first commit
-// (profileSwitchPending) and, on Home, the owner check when it lands; this
-// fails only when none of them does.
+// on an owner change or a switch's first commit (profileSwitchPending), the
+// drop of an answer once a switch has started since it was asked
+// (switchGeneration) and, on Home, the owner check when it lands and, once the
+// new profile's rails have landed, the drop of rails older than that
+// later-started load (homeRailsSeqRef). Each case passes with any one of the
+// guards that reach it and fails only when all of them are gone.
 describe('a live refresh out during a profile switch', () => {
   const switchToKid = () => pickProfile(/Kid/)
 
@@ -346,8 +349,9 @@ describe('a live refresh out during a profile switch', () => {
 
   it('on Home, before the new profile’s rails have landed', async () => {
     // The previous profile's refresh answers while the new profile's first
-    // load is still out. Its abort is one guard; the rails' owner, cleared on
-    // the switch, is the other, and this holds with either alone.
+    // load is still out. Its abort is one guard, the rails' owner, cleared on
+    // the switch, another, and the switchGeneration half of the drop a third;
+    // this holds with any one of them alone.
     const server = stubProfiles()
     const commits = renderSampled('/')
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
@@ -502,9 +506,10 @@ describe('a live refresh out during a PIN prompt', () => {
   const pickLocked = () => pickProfile(/Locked/)
 
   // Landing while the prompt is open, the answer is dropped. The re-check
-  // that follows starts nothing while the prompt stays open (without that
-  // guard, one dropped refresh ran over a hundred more a second), and
-  // cancelling the prompt runs exactly one (pinTarget).
+  // that follows starts nothing while the prompt stays open (without the
+  // refresh's guard against starting during a switch or prompt, one dropped
+  // refresh ran over a hundred more a second), and cancelling the prompt
+  // runs exactly one (pinTarget).
   it.each(cases)('on %s, holds a refresh dropped while the prompt is open until it is cancelled, then checks again once', async (_name, path, requests, match) => {
     const { server, held } = await refreshOut(path, match)
     pickLocked()
