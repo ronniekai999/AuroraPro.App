@@ -1,0 +1,10 @@
+{
+  "sha": "4f9504a53f42b242f5b7a4fb0365b7579d59d821",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only adversarial reviews of the full diff main...HEAD (CLAUDE.md 'Live catalog updates' wording; App.liveCatalog.test.tsx: PIN tests moved to their own group with per-test servers, request-count pin on the cancelled-prompt case, stub holdServed/bindElsewhere, new 'answered for the profile a switch bound' group). Four rounds. Round 1 (459e709, on #553's head, same tree as a8657d8): fix-first, the wording claimed switchGeneration changes nothing on screen; refuted by another tab rebinding during a no-PIN switch. Fixed with tests that fail without the comparison (Kid titles under Parent). Round 2 (047fb6b) lows-only; round 3 (604af33) lows-only; fixes applied each time. Round 4 (4f9504a) lows-only: every coverage claim reproduced by mutating App.tsx (switchGeneration deleted: 4 named cases fail; isSwitching deleted: 43/43 App-level tests pass; both deleted: 8 fail; retry bumps, start guard (154/207 req/s), pinTarget each fail their named cases; Shows grid unpinned as documented); new groups stable under load; tsc/eslint clean; no assertion lost. Remaining: 1 low disputed (round 4 could not reproduce an answer landing between a switch's commit and its effects; the implementer's probe and round 2's probe did), 1 low left (300 ms wait in the Parent-back case can only fail falsely), 6 wording nits (retry/exception sentence scope, 'after... since', short wrapped lines, 'the comparison' antecedent, 'an answer that was right' phrasing, 'that guard'). Implementer ran go build/vet/test, 1590 SPA tests, eslint and npm run audit (CHROMIUM_PATH=/opt/pw-browsers/chromium).",
+  "reviewer": "independent-subagent-general-purpose-round4",
+  "findings": "8",
+  "diff_digest": "686a2b76494c43bcac6b6871fcc60e3b2bd985f4a2db07e7b6dbb4c75a1987c0",
+  "branch": "claude/exciting-meitner-vy6vp5",
+  "recorded_at": "2026-11-09T01:25:05Z"
+}
