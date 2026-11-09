@@ -215,7 +215,7 @@ if (RUN_DIRECTLY) {
 const CASES = [
   { name: 'MiniDock chat input, focused (MiniDock.tsx:74)',
     el: { tag: 'input', classes: ['focus:outline-none', 'border-0'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
-  { name: 'RequestsView search input, focused (RequestsView.tsx:225)',
+  { name: 'RequestsView search input, focused (RequestsView.tsx:214)',
     el: { tag: 'input', classes: ['w-full', 'bg-white/[0.04]', 'border', 'border-white/[0.06]', 'rounded-lg', 'focus:outline-none', 'focus:bg-white/[0.06]'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
   { name: 'BugReportModal input, focused (BugReportModal.tsx:1153)',
     el: { tag: 'input', classes: ['w-full', 'bg-white/[0.04]', 'border', 'border-white/[0.08]', 'rounded-lg', 'focus:outline-none', 'focus:border-purple-500/60'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },

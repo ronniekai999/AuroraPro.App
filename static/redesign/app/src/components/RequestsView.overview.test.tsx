@@ -42,15 +42,28 @@ describe('RequestsView overview', () => {
   })
 
   // Some older TMDB entries carry no overview, or only whitespace: the card
-  // renders no empty paragraph for them.
+  // renders nothing for them. Compared as whole cards rather than by tag, so
+  // the check holds whatever element the overview is drawn in: a whitespace
+  // overview must render exactly what an empty one does, and an empty one
+  // must render nothing a real overview adds.
   it('renders nothing for a blank overview', () => {
-    const { container } = render(
-      <RequestsView
-        requests={[request(1, { overview: '   ' })]}
-        onRequestSubmitted={() => {}}
-        onRequestDeleted={() => {}}
-      />,
-    )
-    expect(container.querySelectorAll('li p')).toHaveLength(0)
+    const card = (overview: string) => {
+      const { container, unmount } = render(
+        <RequestsView
+          requests={[request(1, { overview })]}
+          onRequestSubmitted={() => {}}
+          onRequestDeleted={() => {}}
+        />,
+      )
+      const li = container.querySelector('li')
+      expect(li).not.toBeNull()
+      const html = li!.innerHTML
+      const elements = li!.querySelectorAll('*').length
+      unmount()
+      return { html, elements }
+    }
+    const empty = card('')
+    expect(card('   ').html).toBe(empty.html)
+    expect(card('Some overview.').elements).toBeGreaterThan(empty.elements)
   })
 })

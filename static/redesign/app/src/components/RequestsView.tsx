@@ -378,7 +378,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     // posters, which is exactly what showed up on
                     // "In the City (2026)" — broken alt-text rendered
                     // in the card). alt="" so the card doesn't echo
-                    // the title twice (the <h3> below already shows
+                    // the title twice (the title span below already shows
                     // it). onError swaps in the film/tv glyph from
                     // the no-poster path.
                     <img
@@ -451,10 +451,13 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                       {humanizeRequestError(req.error_message, req.media_type)}
                     </p>
                   )}
-                  {/* The TMDB overview, always shown. It used to sit behind a
-                      Show/Hide overview toggle; an overview is a few lines and
-                      is what tells similar titles apart, so it is not worth a
-                      click. Some older TMDB entries have none: nothing renders. */}
+                  {/* The TMDB overview, always shown and never clamped. It used
+                      to sit behind a Show/Hide overview toggle; by the owner's
+                      choice it no longer does. On a phone a typical overview
+                      wraps to a dozen or more lines, so cards there are much
+                      taller than the poster; a clamp would hide text again with
+                      no way to reveal it. Some older TMDB entries have no
+                      overview: nothing renders. */}
                   {hasOverview && (
                     <p className="text-white/65 text-xs mt-2 leading-relaxed">
                       {req.overview}

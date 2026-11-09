@@ -27,8 +27,9 @@ const icons: Record<string, ReactNode> = {
     star: <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />,
     chevronRight: <polyline points="9 18 15 12 9 6" />,
     chevronLeft: <polyline points="15 18 9 12 15 6" />,
-    // chevronDown / alertTriangle added for Aurora Stage Phase 6 (the
-    // request row's "click to expand" hint and its error line). Same Feather
+    // chevronDown / alertTriangle added for Aurora Stage Phase 6 (alertTriangle
+    // marks the request row's error line; chevronDown drew the row's former
+    // Show/Hide overview hint and is kept as a general icon). Same Feather
     // 24×24 geometry and stroke conventions as the rest of the map — these
     // render through the shared <svg> below, so they inherit its
     // fill="none"/stroke="currentColor"/strokeWidth and must not set their own.
