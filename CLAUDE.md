@@ -1620,15 +1620,18 @@ New titles reach open web apps without a reload. Code:
     `profileSwitchPending` renders cold, or between that commit and its
     effects, whose resets then overwrite it (checked with the
     `switchGeneration` half deleted; no test keeps that); later, the refresh
-    has been aborted. Where the profile shown stays and nothing was bound in
-    between (a cancelled prompt), it drops an answer that was right and asks
-    once more. An answer dropped after the switch ended is asked again at
-    once (`homeRefreshRetry`, `gridRefreshRetry`; the start guard holds a
-    re-run off while a switch or prompt is out, so it cannot loop); one
-    dropped while the switch was out waits for the prompt to close
-    (`pinTarget`) or the new profile's load, and, after a switch with no PIN
-    prompt that fails or ends where it started, for nothing (see the known
-    gaps). The grids do the same.
+    has been aborted, and the new profile's load fills the view. Where the
+    profile shown stays and nothing was bound in between (a cancelled
+    prompt), it drops an answer that was right. An answer dropped after a
+    switch that ended on the profile already shown is asked again at once
+    (`homeRefreshRetry`, `gridRefreshRetry`; the start guard holds a re-run
+    off while a switch or prompt is out, and the re-run records the current
+    generation, so it cannot loop), except Home's library count when Home's
+    rails are already current (see the known gaps). One dropped while the
+    switch was out waits for the prompt to close (`pinTarget`) or the new
+    profile's load; after a switch with no PIN prompt that fails and stays
+    on the profile shown, or ends where it started, nothing runs it until
+    the next update or showing (see the known gaps). The grids do the same.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1686,11 +1689,17 @@ New titles reach open web apps without a reload. Code:
   version have no test, and the full load's guard is pinned against
   removal but not as a sequence rather than a version check (the
   equal-version case it adds is not reached by the current triggers); a
-  switch with no PIN prompt that fails, or one whose binding read returns
-  the profile already shown (another tab raced it), runs nothing again, so
-  a refresh it held off, or dropped while it was out, leaves the view
-  behind until the next update or showing; when such a failed switch did
-  bind (its answer lost) and its binding read failed too, the tab stays on
+  switch with no PIN prompt that fails and stays on the profile shown, or
+  one whose binding read returns the profile already shown (another tab
+  raced it), runs nothing again, so a refresh it held off, or dropped while
+  it was out, leaves the view behind until the next update or showing;
+  Home's library count is recorded as asked when a live refresh starts
+  (`homeCountVersionRef`), so when a switch drop discards one while Home's
+  rails are already current (a full load landed meanwhile, or only the
+  count was behind), the retry finds nothing behind and the count stays
+  stale until the next update, switch, sign-in or reload (the grids record
+  their version only when an answer lands); when a no-PIN switch that failed
+  did bind (its answer lost) and its binding read failed too, the tab stays on
   the old profile while the server acts as the new one, and a refresh
   dropped after it is asked again under the new binding, so the new
   profile's titles show under the old name until the tab-visibility
