@@ -1602,31 +1602,33 @@ New titles reach open web apps without a reload. Code:
     lands; a switch clears that owner until the new profile's rails land, so
     the check holds on its own. No refresh starts while a switch or a PIN
     prompt is out (`isSwitching`), and an answer that comes back while one is
-    out, or after one started since it was asked (`switchGeneration`), is
+    out, or once one has started since it was asked (`switchGeneration`), is
     dropped: the server may have answered it for a profile other than the
     one still named, either one a switch has bound that this tab does not
     show yet, or one bound in between by a switch that then ended on the
     profile already shown (another tab binding that back before this tab
-    read the binding).
-    Landing after such a switch has ended, it is dropped by the
-    `switchGeneration` half alone: nothing is switching, no commit names a
-    new profile, and, on Home, the rails' owner still matches. Since no
-    refresh starts during a switch, one out during a switch began before
+    read the binding). Landing after such a switch has ended, it is dropped
+    by the `switchGeneration` half alone: nothing is switching, no commit
+    names a new profile, and, on Home, the rails' owner still matches. Since
+    no refresh starts during a switch, one out during a switch began before
     it, so that half also drops everything the `isSwitching` half does;
-    deleting the `isSwitching` half fails no test. Where a switch changes
-    the profile shown, the drop adds nothing once `isSwitching` is false: an
-    answer gets past `isSwitching` only after `setActiveProfileId`, so it
-    lands in the commit naming the new profile, which `profileSwitchPending`
-    renders cold, or between that commit and its effects, whose resets then
-    overwrite it (checked with the comparison deleted; no test keeps that);
-    later, the refresh has been aborted. Where the profile shown stays
-    and nothing was bound in between (a cancelled prompt), it drops an
-    answer that was right and asks once more. A dropped answer is checked
-    again once the switch is over (`homeRefreshRetry`, `gridRefreshRetry`;
-    the start guard holds a re-run off meanwhile, so it cannot loop), except
-    one dropped while a switch that fails or ends where it started was out
-    (see the known gaps), and closing the prompt (`pinTarget`) runs the
-    refreshes again. The grids do the same.
+    deleting the `isSwitching` half fails no test, and it is kept by choice,
+    in case the flag is ever set without a generation bump. Where a switch
+    changes the profile shown, the drop adds nothing once `isSwitching` is
+    false: an answer gets past `isSwitching` only after `setActiveProfileId`,
+    so it lands in the commit naming the new profile, which
+    `profileSwitchPending` renders cold, or between that commit and its
+    effects, whose resets then overwrite it (checked with the
+    `switchGeneration` half deleted; no test keeps that); later, the refresh
+    has been aborted. Where the profile shown stays and nothing was bound in
+    between (a cancelled prompt), it drops an answer that was right and asks
+    once more. An answer dropped after the switch ended is asked again at
+    once (`homeRefreshRetry`, `gridRefreshRetry`; the start guard holds a
+    re-run off while a switch or prompt is out, so it cannot loop); one
+    dropped while the switch was out waits for the prompt to close
+    (`pinTarget`) or the new profile's load, and, after a switch with no PIN
+    prompt that fails or ends where it started, for nothing (see the known
+    gaps). The grids do the same.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1655,12 +1657,12 @@ New titles reach open web apps without a reload. Code:
   switch ends, it is dropped, and the test fails only with both halves of
   the drop deleted; delivered after another tab bound Parent back before
   this tab's binding read, it is dropped by `switchGeneration` alone and
-  asked again under Parent, and without the comparison Kid's titles show
-  under Parent's name) and a refresh out during a PIN prompt (landing while the
-  prompt is open, dropped, with no request until it is cancelled and
-  exactly one after, where without the start guard one dropped refresh ran
-  over a hundred more a second; landing after the prompt was cancelled,
-  dropped and asked again exactly once, an answer that was right, so
+  asked again under Parent, and without `switchGeneration` Kid's titles
+  show under Parent's name) and a refresh out during a PIN prompt (landing
+  while the prompt is open, dropped, with no request until it is cancelled
+  and exactly one after, where without the start guard one dropped refresh
+  ran over a hundred more a second; landing after the prompt was
+  cancelled, dropped though it was right and asked again exactly once, so
   deleting `switchGeneration` fails that case only by the one request)),
   `AdminView.catalog.test.tsx` and the hook and helper tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
@@ -1687,27 +1689,26 @@ New titles reach open web apps without a reload. Code:
   switch with no PIN prompt that fails, or one whose binding read returns
   the profile already shown (another tab raced it), runs nothing again, so
   a refresh it held off, or dropped while it was out, leaves the view
-  behind until the next update or showing; when
-  such a failed switch did bind (its answer lost) and its binding read
-  failed too, the tab stays on the old profile while the server acts as
-  the new one, and a refresh dropped after it is asked again under the new
-  binding, so the new profile's titles show under the old name until the
-  tab-visibility re-read, as does any later request's answer (the dropped
-  answer may have been the old profile's, if the server answered it before
-  the bind); a switch made only in another tab is
-  seen by neither half of the drop, so a refresh the server answered for it
-  lands under this tab's profile until the `storage` or visibility re-read
-  moves this tab; a count request that fails is asked again only at the
-  next update, switch, sign-in or reload (neither a Home visit nor the 30 s
-  full load asks for it), and when only the count was behind, a failed rail
-  request discards a count answer that succeeded; a first import's
-  fallback hero is picked by the first live refresh and not replaced, so a
-  show picked before its enrichment stays bare (no backdrop or overview)
-  until a full Home load (returning or refocusing after 30 s) or a reload,
-  and the live refresh does not ask for the personalized hero pool again (a
-  full Home load does); the dashboard's side cards read at mount can land
-  after, and overwrite, a refresh's newer numbers; the macOS and TV clients
-  ignore the event.
+  behind until the next update or showing; when such a failed switch did
+  bind (its answer lost) and its binding read failed too, the tab stays on
+  the old profile while the server acts as the new one, and a refresh
+  dropped after it is asked again under the new binding, so the new
+  profile's titles show under the old name until the tab-visibility
+  re-read, as does any later request's answer (the dropped answer may have
+  been the old profile's, if the server answered it before the bind); a
+  switch made only in another tab is seen by neither half of the drop, so
+  a refresh the server answered for it lands under this tab's profile
+  until the `storage` or visibility re-read moves this tab; a count request
+  that fails is asked again only at the next update, switch, sign-in or
+  reload (neither a Home visit nor the 30 s full load asks for it), and when
+  only the count was behind, a failed rail request discards a count answer
+  that succeeded; a first import's fallback hero is picked by the first live
+  refresh and not replaced, so a show picked before its enrichment stays bare
+  (no backdrop or overview) until a full Home load (returning or refocusing
+  after 30 s) or a reload, and the live refresh does not ask for the
+  personalized hero pool again (a full Home load does); the dashboard's side
+  cards read at mount can land after, and overwrite, a refresh's newer
+  numbers; the macOS and TV clients ignore the event.
 
 ### Nullable database columns
 

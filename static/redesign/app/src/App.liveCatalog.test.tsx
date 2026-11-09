@@ -502,8 +502,8 @@ describe('a live refresh out during a PIN prompt', () => {
   const pickLocked = () => pickProfile(/Locked/)
 
   // Landing while the prompt is open, the answer is dropped. The re-check
-  // that follows starts nothing while the prompt stays open (without that
-  // guard, one dropped refresh ran over a hundred more a second), and
+  // that follows starts nothing while the prompt stays open (without the
+  // start guard, one dropped refresh ran over a hundred more a second), and
   // cancelling the prompt runs exactly one (pinTarget).
   it.each(cases)('on %s, holds a refresh dropped while the prompt is open until it is cancelled, then checks again once', async (_name, path, requests, match) => {
     const { server, held } = await refreshOut(path, match)
