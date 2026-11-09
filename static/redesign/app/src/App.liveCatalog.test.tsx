@@ -328,9 +328,10 @@ function pickProfile(name: RegExp) {
 // previous profile's titles under the new profile's name. Each answer here is
 // the one the server gave for the profile bound when it was asked, held until
 // the switch is done. What holds it off is a combination: the refresh's abort
-// on an owner change, its stand-down on a switch's first commit
-// (profileSwitchPending) and, on Home, the owner check when it lands; this
-// fails only when none of them does.
+// on an owner change or a switch's first commit (profileSwitchPending), the
+// drop of an answer once a switch has started since it was asked
+// (switchGeneration) and, on Home, the owner check when it lands; this fails
+// only when none of them does.
 describe('a live refresh out during a profile switch', () => {
   const switchToKid = () => pickProfile(/Kid/)
 
@@ -346,8 +347,9 @@ describe('a live refresh out during a profile switch', () => {
 
   it('on Home, before the new profile’s rails have landed', async () => {
     // The previous profile's refresh answers while the new profile's first
-    // load is still out. Its abort is one guard; the rails' owner, cleared on
-    // the switch, is the other, and this holds with either alone.
+    // load is still out. Its abort is one guard, the rails' owner, cleared on
+    // the switch, another, and the switchGeneration half of the drop a third;
+    // this holds with any one of them alone.
     const server = stubProfiles()
     const commits = renderSampled('/')
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })

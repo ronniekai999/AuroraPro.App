@@ -4561,20 +4561,20 @@ export default function App() {
   // profile's load, or, after a switch with no prompt that fails and stays on
   // the profile shown, or whose binding read returns that profile, nothing
   // until something else re-runs this, such as the next update or showing, a
-  // full Home load or recompose, or a 👎 or an admin delete (a known gap in
-  // CLAUDE.md). A re-check starts a refresh only while the rails or the count
-  // is behind (and then asks for both), and the count is recorded as asked
-  // when a refresh starts (homeCountVersionRef): on a tab that stays on its
-  // profile, if no update has come since the dropped refresh was asked and the
-  // rails have caught up to it (a full load from that version landed
-  // meanwhile, or only the count was behind), nothing asks for the count
-  // again, and a count last asked before that version stays stale until the
-  // next update, a switch to another profile, sign-in or reload (also a known
-  // gap). Where a switch changes the profile shown, the new profile's load
-  // fills Home. Closing the prompt also runs a refresh the start guard refused
-  // while it was open. Off Home it waits: the next showing (view) catches up.
-  // A failed refresh leaves the rails behind until the next update, showing or
-  // recompose.
+  // full Home load, a recompose that changes the rails, or a 👎 or an admin
+  // delete (a known gap in CLAUDE.md). A re-check starts a refresh only while
+  // the rails or the count is behind (and then asks for both), and the count
+  // is recorded as asked when a refresh starts (homeCountVersionRef): on a tab
+  // that stays on its profile, if no update has come since the dropped refresh
+  // was asked and the rails have caught up to the version it was asked at (a
+  // full load from that version landed meanwhile, or only the count was
+  // behind), nothing asks for the count again, and a count last asked before
+  // that version stays stale until the next update, a switch to another
+  // profile, sign-in or reload (also a known gap). Where a switch changes the
+  // profile shown, the new profile's load fills Home. Closing the prompt also
+  // runs a refresh the start guard refused while it was open. Off Home it
+  // waits: the next showing (view) catches up. A failed refresh leaves the
+  // rails behind until the next update, showing or recompose.
   // The library count is tracked apart (homeCountVersionRef): its own effect
   // asks once per user and profile, and only this refresh keeps it current,
   // so a refresh also runs when the count alone is behind (a full load does
