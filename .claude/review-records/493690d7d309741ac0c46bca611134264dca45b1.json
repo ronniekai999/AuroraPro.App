@@ -1,0 +1,10 @@
+{
+  "sha": "493690d7d309741ac0c46bca611134264dca45b1",
+  "verdict": "lows-only",
+  "summary": "Requests page always shows the TMDB overview; Show/Hide toggle removed. Round 1 (9163305): 2 lows + 1 nit (stale Icon comment, tag-coupled blank test, resolve-focus line ref), all fixed in 493690d. Round 2: 1 nit left (blank-overview test reads Date.now via formatRequestDate; ms-wide flake window at 12:00Z Nov 10-15 2026, self-expiring).",
+  "reviewer": "fresh-context-subagent",
+  "findings": "1",
+  "diff_digest": "e6518f05921b100225cd93ed341c1731eb653cb8551443570d9cf88314653ab3",
+  "branch": "claude/lucid-einstein-6441no",
+  "recorded_at": "2026-11-09T16:54:18Z"
+}
