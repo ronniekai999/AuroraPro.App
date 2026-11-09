@@ -4554,20 +4554,24 @@ export default function App() {
   // matches. The isSwitching half of the drop adds nothing today (a refresh
   // out during a switch began before it, so the generation has moved too)
   // and is kept in case the flag is ever set without a bump. An answer
-  // dropped after a switch that ended on the profile already shown is asked
-  // again at once (homeRefreshRetry), if the rails are behind: the count is
-  // recorded as asked when the refresh starts (homeCountVersionRef), so when
-  // the rails are already current (a full load landed meanwhile, or only the
-  // count was behind) the retry finds nothing to do and the count stays
-  // stale until the next update, switch, sign-in or reload (a known gap in
-  // CLAUDE.md). Dropped while the switch was out, the retry's re-run meets
-  // the start guard, and what runs it is closing the prompt (pinTarget) or
-  // the new profile's load, or, after a switch with no prompt that fails and
-  // stays on the profile shown or ends where it started, nothing until the
-  // next update or showing (also a known gap). Where a switch changes the
-  // profile shown, the new profile's load fills Home. Off Home it waits: the
-  // next showing (view) catches up. A failed refresh leaves the rails behind
-  // until the next update, showing or recompose.
+  // dropped after a switch that ended on the profile already shown is
+  // re-checked at once (homeRefreshRetry). Dropped while the switch was out,
+  // the retry's re-run is held off, and what re-checks it is closing the
+  // prompt (pinTarget) or the new profile's load, or, after a switch with no
+  // prompt that fails and stays on the profile shown or whose binding read
+  // returns that profile, nothing until the next update or showing (a known
+  // gap in CLAUDE.md). A re-check asks only for what is behind, and the
+  // count is recorded as asked when the refresh starts (homeCountVersionRef):
+  // on a tab that stays on its profile, if no update has come since the
+  // dropped refresh was asked and the rails have caught up to it (a full
+  // load from that version landed meanwhile, or only the count was behind),
+  // nothing asks for the count again and it stays stale until the next
+  // update, a switch to another profile, sign-in or reload (also a known
+  // gap). Where a switch changes the profile shown, the new profile's load
+  // fills Home. Closing the prompt also runs a refresh the start guard held
+  // off. Off Home it waits: the next showing (view) catches up. A failed
+  // refresh leaves the rails behind until the next update, showing or
+  // recompose.
   // The library count is tracked apart (homeCountVersionRef): its own effect
   // asks once per user and profile, and only this refresh keeps it current,
   // so a refresh also runs when the count alone is behind (a full load does

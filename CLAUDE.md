@@ -1623,15 +1623,17 @@ New titles reach open web apps without a reload. Code:
     has been aborted, and the new profile's load fills the view. Where the
     profile shown stays and nothing was bound in between (a cancelled
     prompt), it drops an answer that was right. An answer dropped after a
-    switch that ended on the profile already shown is asked again at once
+    switch that ended on the profile already shown is re-checked at once
     (`homeRefreshRetry`, `gridRefreshRetry`; the start guard holds a re-run
     off while a switch or prompt is out, and the re-run records the current
-    generation, so it cannot loop), except Home's library count when Home's
-    rails are already current (see the known gaps). One dropped while the
-    switch was out waits for the prompt to close (`pinTarget`) or the new
-    profile's load; after a switch with no PIN prompt that fails and stays
-    on the profile shown, or ends where it started, nothing runs it until
-    the next update or showing (see the known gaps). The grids do the same.
+    generation, so it cannot loop). One dropped while the switch was out
+    waits for the prompt to close (`pinTarget`) or the new profile's load;
+    after a switch with no PIN prompt that fails and stays on the profile
+    shown, or whose binding read returns that profile, nothing re-checks it
+    until the next update or showing (see the known gaps). A re-check asks
+    only for what is behind, so either way Home's library count can be left
+    stale (see the known gaps). Closing the prompt also runs a refresh the
+    start guard held off. The grids do the same.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1694,30 +1696,32 @@ New titles reach open web apps without a reload. Code:
   raced it), runs nothing again, so a refresh it held off, or dropped while
   it was out, leaves the view behind until the next update or showing;
   Home's library count is recorded as asked when a live refresh starts
-  (`homeCountVersionRef`), so when a switch drop discards one while Home's
-  rails are already current (a full load landed meanwhile, or only the
-  count was behind), the retry finds nothing behind and the count stays
-  stale until the next update, switch, sign-in or reload (the grids record
-  their version only when an answer lands); when a no-PIN switch that failed
-  did bind (its answer lost) and its binding read failed too, the tab stays on
-  the old profile while the server acts as the new one, and a refresh
-  dropped after it is asked again under the new binding, so the new
-  profile's titles show under the old name until the tab-visibility
+  (`homeCountVersionRef`), so when a switch drop discards that refresh's
+  answer on a tab that stays on its profile, and no update has come since it
+  was asked while Home's rails have caught up to it (a full load from that
+  version landed meanwhile, or only the count was behind), nothing asks for
+  the count again, neither the retry nor closing the prompt, and it stays
+  stale until the next update, a switch to another profile, sign-in or reload
+  (the grids record their version only when an answer lands); when a no-PIN
+  switch that failed did bind (its answer lost) and its binding read failed
+  too, the tab stays on the old profile while the server acts as the new one,
+  and a refresh dropped after it is asked again under the new binding, so the
+  new profile's titles show under the old name until the tab-visibility
   re-read, as does any later request's answer (the dropped answer may have
   been the old profile's, if the server answered it before the bind); a
-  switch made only in another tab is seen by neither half of the drop, so
-  a refresh the server answered for it lands under this tab's profile
-  until the `storage` or visibility re-read moves this tab; a count request
-  that fails is asked again only at the next update, switch, sign-in or
-  reload (neither a Home visit nor the 30 s full load asks for it), and when
-  only the count was behind, a failed rail request discards a count answer
-  that succeeded; a first import's fallback hero is picked by the first live
-  refresh and not replaced, so a show picked before its enrichment stays bare
-  (no backdrop or overview) until a full Home load (returning or refocusing
-  after 30 s) or a reload, and the live refresh does not ask for the
-  personalized hero pool again (a full Home load does); the dashboard's side
-  cards read at mount can land after, and overwrite, a refresh's newer
-  numbers; the macOS and TV clients ignore the event.
+  switch made only in another tab is seen by neither half of the drop, so a
+  refresh the server answered for it lands under this tab's profile until the
+  `storage` or visibility re-read moves this tab; a count request that fails
+  is asked again only at the next update, switch, sign-in or reload (neither
+  a Home visit nor the 30 s full load asks for it), and when only the count
+  was behind, a failed rail request discards a count answer that succeeded; a
+  first import's fallback hero is picked by the first live refresh and not
+  replaced, so a show picked before its enrichment stays bare (no backdrop or
+  overview) until a full Home load (returning or refocusing after 30 s) or a
+  reload, and the live refresh does not ask for the personalized hero pool
+  again (a full Home load does); the dashboard's side cards read at mount can
+  land after, and overwrite, a refresh's newer numbers; the macOS and TV
+  clients ignore the event.
 
 ### Nullable database columns
 
