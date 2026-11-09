@@ -121,6 +121,8 @@ function goTo(label: string) {
   fireEvent.click(tab)
 }
 
+const main = () => document.querySelector('main')?.textContent ?? ''
+
 describe('a scan’s new titles appear without a reload', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -203,7 +205,11 @@ describe('a scan’s new titles appear without a reload', () => {
 
 // Three profiles: Parent, bound at first; Kid, restricted; Locked, behind a
 // PIN. Every answer is for the profile bound when it was asked, from the
-// catalog as it was then.
+// catalog as it was then, with two exceptions: one held with holdServed is
+// answered when the test serves it, for the profile bound then, as a request
+// the server reaches late is; and the binding read (/api/profiles/active)
+// answers with the binding at the moment it answers, so one held across
+// bindElsewhere reports the other tab's binding.
 const PROFILES2 = [
   { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW },
   { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' },
@@ -218,7 +224,13 @@ function stubProfiles() {
   // Browse-grid requests (Home's Top Rated rails ask for 20 a type).
   let gridAsked = 0
   const sees: Record<number, Item[]> = { 1: [item(1, 'Parentonly Old')], 2: [item(2, 'Kidonly Old')] }
-  const holds: { match: (u: URL, bound: number) => boolean; gate: Promise<void>; captured: number; every: boolean }[] = []
+  type Hold = {
+    match: (u: URL, bound: number) => boolean; gate: Promise<void>; captured: number; every: boolean
+    // holdServed: the profile it was served for, and the gate it waits at
+    // after that, until the answer is delivered.
+    servedFor?: number; delivered?: Promise<void>
+  }
+  const holds: Hold[] = []
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
@@ -228,9 +240,16 @@ function stubProfiles() {
     if (p === '/api/media' && url.searchParams.get('per_page') === '100') gridAsked++
     const askedFor = bound
     // Answered from the catalog as it was when asked, as a query is.
-    const list = [...sees[askedFor]].reverse()
+    let list = [...sees[askedFor]].reverse()
     const hold = holds.find(h => (h.every || h.captured === 0) && h.match(url, askedFor))
-    if (hold) { hold.captured++; await hold.gate }
+    if (hold) {
+      hold.captured++
+      await hold.gate
+      if (hold.delivered) {
+        list = [...sees[hold.servedFor!]].reverse()
+        await hold.delivered
+      }
+    }
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
@@ -263,11 +282,45 @@ function stubProfiles() {
      *  released); returns the release and whether one was sent. */
     hold(match: (u: URL, bound: number) => boolean, { every = false } = {}) {
       let release!: () => void
-      const h = { match, gate: new Promise<void>(done => { release = done }), captured: 0, every }
+      const h: Hold = { match, gate: new Promise<void>(done => { release = done }), captured: 0, every }
       holds.push(h)
       return { release, sent: () => h.captured > 0 }
     },
+    /** Holds the next request `match` accepts until serve(), which answers
+     *  it for the profile bound at that moment, and then until deliver(),
+     *  which hands that answer to the app. */
+    holdServed(match: (u: URL, bound: number) => boolean) {
+      let serve!: () => void
+      let deliver!: () => void
+      const h: Hold = {
+        match, gate: new Promise<void>(done => { serve = done }), captured: 0, every: false,
+        delivered: new Promise<void>(done => { deliver = done }),
+      }
+      holds.push(h)
+      return { serve: () => { h.servedFor = bound; serve() }, deliver, sent: () => h.captured > 0 }
+    },
+    /** Binds the session to `id`, as a switch made in another tab does. */
+    bindElsewhere(id: number) { bound = id },
+    /** The profile the session is bound to. */
+    get bound() { return bound },
   }
+}
+
+const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null
+/** Renders `path`, recording at every commit the profile the top bar names
+ *  and whose titles are on the page. */
+function renderSampled(path: string) {
+  const commits: { label: string | null; parent: boolean; kid: boolean }[] = []
+  const onRender = () => {
+    const text = document.body.textContent ?? ''
+    commits.push({ label: label(), parent: text.includes('Parentonly'), kid: text.includes('Kidonly') })
+  }
+  render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
+  return commits
+}
+function pickProfile(name: RegExp) {
+  fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
+  fireEvent.click(screen.getByRole('menuitemradio', { name }))
 }
 
 
@@ -279,17 +332,7 @@ function stubProfiles() {
 // (profileSwitchPending) and, on Home, the owner check when it lands; this
 // fails only when none of them does.
 describe('a live refresh out during a profile switch', () => {
-  const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null
-  function renderSampled(path: string) {
-    const commits: { label: string | null; parent: boolean }[] = []
-    const onRender = () => commits.push({ label: label(), parent: (document.body.textContent ?? '').includes('Parentonly') })
-    render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
-    return commits
-  }
-  function switchToKid() {
-    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Kid/ }))
-  }
+  const switchToKid = () => pickProfile(/Kid/)
 
   beforeEach(() => {
     localStorage.clear()
@@ -348,6 +391,156 @@ describe('a live refresh out during a profile switch', () => {
   })
 })
 
+// A no-PIN switch to Kid binds the session before this tab shows Kid: the
+// binding read in between is held here. A refresh asked under Parent that the
+// server reaches while Kid is bound comes back with Kid's titles, and they
+// must never show under Parent's name. Delivered while the switch is still
+// out, it is dropped (either half of the drop takes it). Delivered after a
+// switch that ended back on Parent, because another tab bound Parent before
+// this tab read the binding, nothing is switching and the profile shown never
+// changed, so no commit names a new profile (profileSwitchPending) and, on
+// Home, the rails' owner still matches: only the switchGeneration comparison
+// drops it, and the retry asks again under Parent.
+describe('a live refresh answered for the profile a switch bound', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aurora_user', JSON.stringify(USER))
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    FakeSocket.opened = []
+    // No jitter: an update's refresh comes after the 1.5 s delay alone.
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+  })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  const views: [string, string, (u: URL, b: number) => boolean][] = [
+    ['Home', '/', (u, b) => b === 1 && u.pathname === '/api/media/recent'],
+    ['the Movies grid', '/movies',
+      (u, b) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
+  ]
+  const cases = views.flatMap(([name, path, match]) => [
+    [name, 'while the switch is out', path, match] as const,
+    [name, 'after another tab bound Parent back', path, match] as const,
+  ])
+
+  it.each(cases)('on %s, delivered %s', async (_name, when, path, match) => {
+    const server = stubProfiles()
+    const commits = renderSampled(path)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const refresh = server.holdServed(match)
+    server.addForParent(item(3, 'Parentonly New'))
+    scanAdded(1)
+    await waitFor(() => expect(refresh.sent()).toBe(true), { timeout: 5000 })
+    const read = server.hold((u, b) => b === 2 && u.pathname === '/api/profiles/active')
+    pickProfile(/Kid/)
+    await waitFor(() => expect(read.sent()).toBe(true), { timeout: 5000 })
+    expect(server.bound).toBe(2)
+    refresh.serve()
+    if (when === 'while the switch is out') {
+      refresh.deliver()
+      await new Promise(done => setTimeout(done, 500))
+      expect(label()).toBe('Parent')
+      read.release()
+      await screen.findAllByText('Kidonly Old', undefined, { timeout: 5000 })
+      await new Promise(done => setTimeout(done, 300))
+    } else {
+      server.bindElsewhere(1)
+      read.release()
+      // The read answers Parent: the switch ends with Parent still shown.
+      await new Promise(done => setTimeout(done, 300))
+      expect(label()).toBe('Parent')
+      refresh.deliver()
+      await new Promise(done => setTimeout(done, 500))
+      expect(commits.filter(c => c.label === 'Parent' && c.kid)).toEqual([])
+      // The retry, asked under Parent, brings the new title.
+      await waitFor(() => expect(main()).toContain('Parentonly New'), { timeout: 5000 })
+      await new Promise(done => setTimeout(done, 300))
+      expect(label()).toBe('Parent')
+    }
+    expect(commits.filter(c => c.label === 'Parent' && c.kid)).toEqual([])
+  }, 20000)
+})
+
+// Picking a locked profile is a switch until its prompt closes, and these
+// tests cancel the prompt, so the session stays on Parent throughout. A
+// refresh out then is dropped when it lands, and is checked again: when the
+// prompt closes, or, landing after that, at once.
+describe('a live refresh out during a PIN prompt', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aurora_user', JSON.stringify(USER))
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    FakeSocket.opened = []
+    // No jitter: an update's refresh comes after the 1.5 s delay alone.
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+  })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  type Server = ReturnType<typeof stubProfiles>
+  const cases: [string, string, (s: Server) => number, (u: URL, b: number) => boolean][] = [
+    ['Home', '/', s => s.asked['/api/media/recent'] ?? 0,
+      (u, b) => b === 1 && u.pathname === '/api/media/recent'],
+    ['the Movies grid', '/movies', s => s.gridAsked,
+      (u, b) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
+  ]
+
+  /** Renders `path`, holds the live refresh the next update starts, and
+   *  returns once its request is out. */
+  async function refreshOut(path: string, match: (u: URL, b: number) => boolean) {
+    const server = stubProfiles()
+    render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const held = server.hold(match)
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(held.sent()).toBe(true), { timeout: 5000 })
+    return { server, held }
+  }
+  const pickLocked = () => pickProfile(/Locked/)
+
+  // Landing while the prompt is open, the answer is dropped. The re-check
+  // that follows starts nothing while the prompt stays open (without that
+  // guard, one dropped refresh ran over a hundred more a second), and
+  // cancelling the prompt runs exactly one (pinTarget).
+  it.each(cases)('on %s, holds a refresh dropped while the prompt is open until it is cancelled, then checks again once', async (_name, path, requests, match) => {
+    const { server, held } = await refreshOut(path, match)
+    pickLocked()
+    const cancel = await screen.findByRole('button', { name: 'Cancel' })
+    const atRelease = requests(server)
+    held.release()
+    await new Promise(done => setTimeout(done, 1000))
+    expect(requests(server) - atRelease).toBe(0)
+    expect(main()).not.toContain('Alpha New')
+    fireEvent.click(cancel)
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 1000))
+    expect(requests(server) - atRelease).toBe(1)
+  }, 15000)
+
+  // Landing after the prompt was cancelled: closing it ran nothing new (this
+  // refresh was still out), and with nothing switching any more only the
+  // switchGeneration comparison (a switch started after it was asked) drops
+  // the answer; the retry (homeRefreshRetry, gridRefreshRetry) then asks
+  // again, once. Nothing was bound in between, so the answer was right, and
+  // with the comparison deleted it lands as it is: here the comparison shows
+  // only as that one request, and the title alone would not pin it. Where it
+  // keeps another profile's titles off the page is pinned above.
+  it.each(cases)('on %s, drops a refresh that lands after the prompt was cancelled and asks again once', async (_name, path, requests, match) => {
+    const { server, held } = await refreshOut(path, match)
+    pickLocked()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull())
+    const atRelease = requests(server)
+    held.release()
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 1000))
+    expect(requests(server) - atRelease).toBe(1)
+  }, 15000)
+})
+
 describe('an update while Home is still loading', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -383,7 +576,6 @@ describe('an update while Home is still loading', () => {
 // out at once and land in either order. Home must end on the newest catalog
 // and the newest count either way.
 describe('a full Home load and a live refresh overlapping', () => {
-  let server: ReturnType<typeof stubProfiles>
   beforeEach(() => {
     localStorage.clear()
     localStorage.setItem('aurora_user', JSON.stringify(USER))
@@ -398,7 +590,6 @@ describe('a full Home load and a live refresh overlapping', () => {
     const realNow = Date.now.bind(Date)
     vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 31_000)
   }
-  const main = () => document.querySelector('main')?.textContent ?? ''
 
   it('updates the greeting count when the full load lands before the live refresh', async () => {
     // Returning to Home after a scan runs both at the same version; the count
@@ -499,65 +690,6 @@ describe('a full Home load and a live refresh overlapping', () => {
     await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
     await new Promise(done => setTimeout(done, 1500))
     expect((server.asked['/api/media/recent'] ?? 0) - before).toBe(1)
-  })
-
-  // Picking a locked profile is a switch: a refresh out then is dropped when
-  // it lands, in case the server answered it for the next profile, and is
-  // checked again once the prompt closes. While the prompt is open the
-  // re-check starts nothing (without that guard, one dropped refresh ran 234
-  // more in 1.5 s); cancelling it runs exactly one.
-  it.each([
-    ['Home', '/', () => server.asked['/api/media/recent'] ?? 0,
-      (u: URL, b: number) => b === 1 && u.pathname === '/api/media/recent'],
-    ['the Movies grid', '/movies', () => server.gridAsked,
-      (u: URL, b: number) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
-  ])('on %s, holds a refresh dropped for a PIN prompt until it is cancelled, then checks again once', async (_name, path, requests, match) => {
-    server = stubProfiles()
-    render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
-    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
-    await new Promise(done => setTimeout(done, 500))
-    const r = server.hold(match)
-    server.addForParent(item(3, 'Alpha New'))
-    scanAdded(1)
-    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
-    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Locked/ }))
-    const cancel = await screen.findByRole('button', { name: 'Cancel' })
-    const atRelease = requests()
-    r.release()
-    await new Promise(done => setTimeout(done, 1000))
-    expect(requests() - atRelease).toBe(0)
-    expect(main()).not.toContain('Alpha New')
-    fireEvent.click(cancel)
-    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
-    await new Promise(done => setTimeout(done, 1000))
-    expect(requests() - atRelease).toBe(1)
-  })
-
-  // The same refresh landing after the prompt was cancelled: closing it ran
-  // nothing new (this one was still out), and the answer is dropped since a
-  // switch started after it was asked. Only the retry checks again.
-  it.each([
-    ['Home', '/', (u: URL, b: number) => b === 1 && u.pathname === '/api/media/recent'],
-    ['the Movies grid', '/movies',
-      (u: URL, b: number) => b === 1 && u.pathname === '/api/media' && u.searchParams.get('per_page') === '100'],
-  ])('on %s, checks again after a refresh dropped for a PIN prompt cancelled before it landed', async (_name, path, match) => {
-    server = stubProfiles()
-    render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
-    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
-    await new Promise(done => setTimeout(done, 500))
-    const r = server.hold(match)
-    server.addForParent(item(3, 'Alpha New'))
-    scanAdded(1)
-    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
-    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Locked/ }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull())
-    r.release()
-    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
   })
 
   it('brings the count up to date when the refresh that carried it was dropped', async () => {
