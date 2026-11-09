@@ -4543,35 +4543,37 @@ export default function App() {
   // again. A change of user, profile or startup settle, or a switch's first
   // commit, aborts it (the effect below), and each answer is checked against
   // the rails' owner before it lands. No refresh starts while a switch or a
-  // PIN prompt is out (isSwitching), and an answer that comes back once a
-  // switch has started since it was asked (switchGeneration) is dropped: the
-  // server may have answered it for a profile other than the one still named,
-  // either one the switch has bound that this tab does not show yet, or one
-  // bound in between by a switch that then ended on the profile already shown
-  // (another tab binding that back before this tab read the binding). In that
-  // second case, landing after the switch has ended, nothing else catches it:
-  // nothing is switching, no commit names a new profile, and the owner still
-  // matches. The isSwitching half of the drop adds nothing today (a refresh
-  // out during a switch began before it, so the generation has moved too)
-  // and is kept in case the flag is ever set without a bump. An answer
-  // dropped after a switch that ended on the profile already shown is
-  // re-checked at once (homeRefreshRetry). Dropped while the switch was out,
-  // the retry's re-run is held off, and what re-checks it is closing the
-  // prompt (pinTarget) or the new profile's load, or, after a switch with no
-  // prompt that fails and stays on the profile shown or whose binding read
-  // returns that profile, nothing until the next update or showing (a known
-  // gap in CLAUDE.md). A re-check asks only for what is behind, and the
-  // count is recorded as asked when the refresh starts (homeCountVersionRef):
-  // on a tab that stays on its profile, if no update has come since the
-  // dropped refresh was asked and the rails have caught up to it (a full
-  // load from that version landed meanwhile, or only the count was behind),
-  // nothing asks for the count again and it stays stale until the next
-  // update, a switch to another profile, sign-in or reload (also a known
-  // gap). Where a switch changes the profile shown, the new profile's load
-  // fills Home. Closing the prompt also runs a refresh the start guard held
-  // off. Off Home it waits: the next showing (view) catches up. A failed
-  // refresh leaves the rails behind until the next update, showing or
-  // recompose.
+  // PIN prompt is out (isSwitching), and an answer that comes back while one
+  // is out, or once one has started since it was asked (switchGeneration), is
+  // dropped: the server may have answered it for a profile other than the one
+  // still named, either one the switch has bound that this tab does not show
+  // yet, or one bound in between by a switch that then ended on the profile
+  // already shown (another tab binding that back before this tab read the
+  // binding). In that second case, landing after the switch has ended,
+  // nothing else catches it: nothing is switching, no commit names a new
+  // profile, and the owner still matches. The isSwitching half of the drop
+  // adds nothing today (a refresh out during a switch began before it, so
+  // the generation has moved too) and is kept in case the flag is ever set
+  // without a bump. An answer dropped after a switch that ended on the
+  // profile already shown is re-checked at once (homeRefreshRetry). For one
+  // dropped while the switch was out, the retry's re-run is held off, and
+  // what re-checks it is closing the prompt (pinTarget) or the new profile's
+  // load, or, after a switch with no prompt that fails and stays on the
+  // profile shown or whose binding read returns that profile, nothing until
+  // the next update, showing, full Home load or recompose (a known gap in
+  // CLAUDE.md). A re-check starts a refresh only while the rails or the
+  // count is behind (and then asks for both), and the count is recorded as
+  // asked when a refresh starts (homeCountVersionRef): on a tab that stays
+  // on its profile, if no update has come since the dropped refresh was
+  // asked and the rails have caught up to it (a full load from that version
+  // landed meanwhile, or only the count was behind), nothing asks for the
+  // count again, and a count last asked before that version stays stale
+  // until the next update, a switch to another profile, sign-in or reload
+  // (also a known gap). Where a switch changes the profile shown, the new
+  // profile's load fills Home. Closing the prompt also runs a refresh the
+  // start guard held off. Off Home it waits: the next showing (view) catches
+  // up. A failed refresh leaves the rails behind until the next update,
+  // showing or recompose.
   // The library count is tracked apart (homeCountVersionRef): its own effect
   // asks once per user and profile, and only this refresh keeps it current,
   // so a refresh also runs when the count alone is behind (a full load does
@@ -4816,16 +4818,17 @@ export default function App() {
   // change or a reload, rather than dropped, which lost the reader's place. A
   // failed refresh keeps the list; the next update or visit tries again.
   // No refresh starts while a profile switch or a PIN prompt is out, and an
-  // answer that comes back once a switch has started since it was asked is
-  // dropped and asked again (gridRefreshRetry), as on Home: see the Home
-  // refresh's comment for why, why its isSwitching half is kept, and when
-  // the retry runs (a grid records its version only when an answer lands,
-  // so Home's count gap does not apply). Closing the prompt (pinTarget) runs
-  // this again.
+  // answer that comes back while one is out, or once one has started since
+  // it was asked, is dropped and re-checked (gridRefreshRetry), as on Home:
+  // see the Home refresh's comment for why, why its isSwitching half is
+  // kept, and when the re-check runs (a grid records its version only when
+  // an answer lands, so Home's count gap does not apply). On a profile
+  // change the grid is reset rather than re-checked, and off screen it waits
+  // for the next visit. Closing the prompt (pinTarget) runs this again.
   const moviesRefreshAcRef = useRef<AbortController | null>(null)
   const showsRefreshAcRef = useRef<AbortController | null>(null)
   // Bumped when a grid refresh's answer is dropped for a profile switch, so
-  // the grid asks again (see Home's retry for when that runs).
+  // the grid is re-checked (see Home's refresh comment for when that runs).
   const [gridRefreshRetry, setGridRefreshRetry] = useState(0)
   useEffect(() => () => {
     moviesRefreshAcRef.current?.abort()
@@ -4855,7 +4858,8 @@ export default function App() {
         if (moviesRefreshAcRef.current !== ac) return
         moviesRefreshAcRef.current = null
         // A switch has started since this was asked, so it may be another
-        // profile's answer (see Home's refresh). The retry asks again.
+        // profile's answer (see Home's refresh). The retry re-checks once
+        // nothing is switching.
         if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setGridRefreshRetry(n => n + 1); return }
         moviesCatalogVersionRef.current = version
         setMoviesList(items as Media[])
@@ -4890,7 +4894,8 @@ export default function App() {
         if (showsRefreshAcRef.current !== ac) return
         showsRefreshAcRef.current = null
         // A switch has started since this was asked, so it may be another
-        // profile's answer (see Home's refresh). The retry asks again.
+        // profile's answer (see Home's refresh). The retry re-checks once
+        // nothing is switching.
         if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setGridRefreshRetry(n => n + 1); return }
         showsCatalogVersionRef.current = version
         setShowsList(items as Media[])
