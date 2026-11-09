@@ -130,14 +130,6 @@ const STATUS_LABELS: Record<string, string> = {
 // TMDB search + create dialog.
 export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'>('all')
-  // QA 2026-05-25 — request cards looked clickable but didn't do
-  // anything when clicked. The request carries `overview` text from
-  // TMDB that we were fetching and storing but never rendering. Now:
-  // clicking a card toggles an inline overview reveal. Tracks which
-  // request IDs are currently expanded so multiple can be open at
-  // once. Closes on a second click. Stays a no-op if overview is
-  // empty (some older TMDB entries have nothing).
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
   // Inline TMDB search + create dialog.
   const [createOpen, setCreateOpen] = useState(false)
   // The composer stays mounted for its exit fade after createOpen flips false.
@@ -362,37 +354,14 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         <ul className="flex flex-col gap-3 list-none p-0 m-0">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
-            const isExpanded = expanded.has(req.id)
             const hasOverview = !!req.overview && req.overview.trim().length > 0
-            const toggle = () => {
-              if (!hasOverview) return
-              setExpanded(prev => {
-                const next = new Set(prev)
-                if (next.has(req.id)) next.delete(req.id)
-                else next.add(req.id)
-                return next
-              })
-            }
             return (
-              // The ROW is a plain container. It used to carry role="button" +
-              // tabIndex + aria-label, and that was wrong in a way that got
-              // worse when this phase made it keyboard-operable:
-              // role="button" is Children Presentational (ARIA 1.2 §5.2.8), so
-              // the whole subtree stops being exposed and the row's aria-label
-              // replaces it for name computation. A screen-reader user heard
-              // "Aliens, show overview, button" and NOTHING else — not the
-              // PENDING/FAILED status, not the humanized error ("Radarr
-              // rejected this request…"), and not the overview that pressing
-              // Enter reveals. It also put a focusable <button> (delete) inside
-              // a presentational subtree, which the spec forbids and Chrome
-              // prunes from the a11y tree while leaving it in the tab order.
-              //
-              // The expand affordance is now a real <button> around the title
-              // and the hint only (see below), so status, meta, error, the
-              // revealed overview, and delete are all siblings OUTSIDE it and
-              // stay in the accessibility tree. That also removes the
-              // button-in-button problem for good, rather than dodging it with
-              // role="button" the way the Collections card did.
+              // The ROW is a plain container. Do not give it role="button":
+              // that role is Children Presentational (ARIA 1.2 §5.2.8), so the
+              // whole subtree stops being exposed and a screen-reader user
+              // hears only the row's name — not the status, the humanized
+              // error, or the overview — and the delete <button> inside it
+              // becomes a focusable control in a presentational subtree.
               <li key={req.id} className="stage-req flex gap-4 sm:gap-[18px] p-3 sm:pr-[18px]">
                 <div className="stage-req-poster flex-shrink-0 flex items-center justify-center">
                   {/* Layout invariant: the img and the fallback div
@@ -482,40 +451,14 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                       {humanizeRequestError(req.error_message, req.media_type)}
                     </p>
                   )}
+                  {/* The TMDB overview, always shown. It used to sit behind a
+                      Show/Hide overview toggle; an overview is a few lines and
+                      is what tells similar titles apart, so it is not worth a
+                      click. Some older TMDB entries have none: nothing renders. */}
                   {hasOverview && (
-                    <>
-                      {/* A real <button>, scoped to the affordance itself. The
-                          mockup's .expand-hint — the row has been expandable
-                          since QA 2026-05-25 with nothing to say so, since
-                          `cursor: pointer` was the only signal and touch and
-                          keyboard users never see it.
-
-                          aria-controls + a stable id point at the revealed
-                          paragraph, which is a SIBLING of this button rather
-                          than a descendant, so it stays in the accessibility
-                          tree (a role="button" wrapper would have made it
-                          presentational). "Show"/"Hide", not "Click to" — the
-                          control is operable by keyboard and touch too. */}
-                      <button
-                        type="button"
-                        onClick={toggle}
-                        aria-expanded={isExpanded}
-                        aria-controls={`req-overview-${req.id}`}
-                        className="mt-1.5 text-[11px] text-white/60 hover:text-white/90 inline-flex items-center gap-1.5 rounded transition-colors"
-                      >
-                        <Icon
-                          name="chevronDown"
-                          size={12}
-                          className={isExpanded ? 'rotate-180 motion-safe:transition-transform' : 'motion-safe:transition-transform'}
-                        />
-                        {isExpanded ? 'Hide overview' : 'Show overview'}
-                      </button>
-                      {isExpanded && (
-                        <p id={`req-overview-${req.id}`} className="text-white/65 text-xs mt-2 leading-relaxed">
-                          {req.overview}
-                        </p>
-                      )}
-                    </>
+                    <p className="text-white/65 text-xs mt-2 leading-relaxed">
+                      {req.overview}
+                    </p>
                   )}
                 </div>
                 {/* Right stack — delete above, nothing below. Kept as a
@@ -523,9 +466,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     intended place; the requested-at date moved to the meta
                     line, where it reads with "requested by".
 
-                    No stopPropagation needed any more: the row is a plain <li>
-                    and the only click/key handler is on the expand button, which
-                    is a sibling of this one rather than an ancestor. */}
+                    No stopPropagation needed: the row is a plain <li> with no
+                    click or key handler of its own. */}
                 {(req.status === 'pending' || req.status === 'failed') && (
                   <div className="flex-none flex flex-col items-end gap-2.5">
                     <button

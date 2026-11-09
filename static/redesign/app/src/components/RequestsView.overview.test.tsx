@@ -1,0 +1,56 @@
+// @vitest-environment jsdom
+
+import { describe, expect, it } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import type { MediaRequest } from '@/lib/api'
+import RequestsView from './RequestsView'
+
+const request = (id: number, extra: Partial<MediaRequest> = {}): MediaRequest => ({
+  id,
+  user_id: 1,
+  media_type: 'movie',
+  tmdb_id: 1000 + id,
+  title: `Title ${id}`,
+  poster_path: '',
+  overview: '',
+  year: 2001,
+  status: 'available',
+  quality_1080p: true,
+  quality_4k: false,
+  requested_at: '2026-11-08T12:00:00Z',
+  updated_at: '2026-11-08T12:00:00Z',
+  ...extra,
+})
+
+describe('RequestsView overview', () => {
+  // The overview used to sit behind a Show/Hide overview toggle. It is now
+  // part of the card, with nothing to press.
+  it('shows each overview without a toggle', () => {
+    render(
+      <RequestsView
+        requests={[
+          request(1, { overview: 'A witch family moves to a hidden town.' }),
+          request(2, { overview: 'A masked killer returns home.' }),
+        ]}
+        onRequestSubmitted={() => {}}
+        onRequestDeleted={() => {}}
+      />,
+    )
+    expect(screen.getByText('A witch family moves to a hidden town.')).toBeInTheDocument()
+    expect(screen.getByText('A masked killer returns home.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /overview/i })).not.toBeInTheDocument()
+  })
+
+  // Some older TMDB entries carry no overview, or only whitespace: the card
+  // renders no empty paragraph for them.
+  it('renders nothing for a blank overview', () => {
+    const { container } = render(
+      <RequestsView
+        requests={[request(1, { overview: '   ' })]}
+        onRequestSubmitted={() => {}}
+        onRequestDeleted={() => {}}
+      />,
+    )
+    expect(container.querySelectorAll('li p')).toHaveLength(0)
+  })
+})
