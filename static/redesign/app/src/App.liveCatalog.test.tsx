@@ -330,8 +330,10 @@ function pickProfile(name: RegExp) {
 // the switch is done. What holds it off is a combination: the refresh's abort
 // on an owner change or a switch's first commit (profileSwitchPending), the
 // drop of an answer once a switch has started since it was asked
-// (switchGeneration) and, on Home, the owner check when it lands; this fails
-// only when none of them does.
+// (switchGeneration) and, on Home, the owner check when it lands and, once the
+// new profile's rails have landed, the drop of rails older than that
+// later-started load (homeRailsSeqRef). Each case passes with any one of the
+// guards that reach it and fails only when all of them are gone.
 describe('a live refresh out during a profile switch', () => {
   const switchToKid = () => pickProfile(/Kid/)
 

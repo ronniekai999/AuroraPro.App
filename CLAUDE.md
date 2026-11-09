@@ -1618,26 +1618,27 @@ New titles reach open web apps without a reload. Code:
     answer gets past `isSwitching` only after `setActiveProfileId`, so it lands
     in the commit naming the new profile, which `profileSwitchPending` renders
     cold, or between that commit and its effects, whose resets then overwrite
-    it (checked with the `switchGeneration` half deleted; no test keeps that);
-    later, the refresh has been aborted, and the new profile's load fills the
-    view. Where the profile shown stays and nothing was bound in between (a
-    cancelled prompt), it drops an answer that was right. An answer dropped
-    after a switch that ended on the profile already shown is re-checked at
-    once (`homeRefreshRetry`, `gridRefreshRetry`; a refresh the re-run starts
-    records the current generation, so it cannot loop). One dropped while a
-    switch was out (the re-run normally returns at the start guard), or a
-    refresh the start guard kept from starting, waits for the prompt to close
-    (`pinTarget`) or the new profile's load; after a switch with no PIN prompt
-    that fails and stays on the profile shown, or whose binding read returns
-    that profile, nothing re-checks it until something else re-runs the refresh
-    (see the known gaps). A re-check starts a refresh only while the rails or
-    the count is behind (and then asks for both), and the dropped refresh
-    already recorded the count as asked (`homeCountVersionRef`), so if no
-    update has come since it was asked and the rails have caught up to the
-    version it was asked at, a re-check asks for nothing and, on a tab that
-    stays on its profile, Home's library count can be left stale (see the known
-    gaps). The grids drop and re-check the same way, but record their version
-    only when an answer lands, so they have no such gap.
+    it (checked by hand with the `switchGeneration` half deleted; no test pins
+    it); later, the refresh has been aborted, and the new profile's load fills
+    the view. Where the profile shown stays and nothing was bound in between (a
+    cancelled prompt), it drops an answer that was right. An answer that lands,
+    and is dropped, after a switch that ended on the profile already shown is
+    re-checked at once (`homeRefreshRetry`, `gridRefreshRetry`; a refresh the
+    re-run starts records the current generation, so it cannot loop). One
+    dropped while a switch was out (the re-run normally returns at the start
+    guard), or a refresh the start guard kept from starting, waits for the
+    prompt to close (`pinTarget`) or the new profile's load; after a switch
+    with no PIN prompt that fails and stays on the profile shown, or whose
+    binding read returns that profile, nothing re-checks it until something
+    else re-runs the refresh (see the known gaps). A re-check starts a refresh
+    only while the rails or the count is behind (and then asks for both), and
+    the dropped refresh already recorded the count as asked
+    (`homeCountVersionRef`), so if no update has come since it was asked and
+    the rails have caught up to the version it was asked at, a re-check asks
+    for nothing and, on a tab that stays on its profile, Home's library count
+    can be left stale (see the known gaps). The grids drop and re-check the
+    same way, but record their version only when an answer lands, so they have
+    no such gap.
   - A grid refetches every loaded page, three at a time, and swaps them in
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
@@ -1655,27 +1656,29 @@ New titles reach open web apps without a reload. Code:
     Discover answer still out across an owner change: `refetchDiscover`
     splices it with no owner check (it predates this).
   Pinned by `App.liveCatalog.test.tsx` (a live refresh held across a profile
-  switch on Home and on a grid, where the grid's test fails only when both its
-  abort and the `switchGeneration` half of its drop are gone, one released
-  before the new profile's rails land, which fails only when the abort, the
-  owner clearing and the `switchGeneration` half are all gone, an update during
-  Home's first load, a first import's hero, a full load and a live refresh
-  landing in either order with commits sampled, a refresh started before a full
-  load landing after it, the count catching up when the refresh that carried it
-  had its rails dropped for a full load that landed first, one refresh, not a
-  loop, when only the count fails, and, on Home and the Movies grid, a refresh
-  the server answers for Kid while a no-PIN switch to Kid is out (delivered
-  before the switch ends, it is dropped, and the test fails only with both
-  halves of the drop deleted; delivered after another tab bound Parent back
-  before this tab's binding read, it is dropped by `switchGeneration` alone and
-  asked again under Parent, and without `switchGeneration` Kid's titles show
-  under Parent's name) and a refresh out during a PIN prompt (landing while the
-  prompt is open, dropped, with no request until it is cancelled and exactly
-  one after, where without the start guard one dropped refresh ran over a
-  hundred more a second; landing after the prompt was cancelled, dropped though
-  it was right and asked again exactly once, so deleting `switchGeneration`
-  fails that case only by the one request)), `AdminView.catalog.test.tsx` and
-  the hook and helper tests.
+  switch on Home and on a grid, where Home's test fails only when its abort,
+  the `switchGeneration` half, the owner check and the drop of rails older than
+  a later-started fetch are all gone, and the grid's only when both its abort
+  and its `switchGeneration` half are, one released before the new profile's
+  rails land, which fails only when the abort, the owner clearing and the
+  `switchGeneration` half are all gone, an update during Home's first load, a
+  first import's hero, a full load and a live refresh landing in either order
+  with commits sampled, a refresh started before a full load landing after it,
+  the count catching up when the refresh that carried it had its rails dropped
+  for a full load that landed first, one refresh, not a loop, when only the
+  count fails, and, on Home and the Movies grid, a refresh the server answers
+  for Kid while a no-PIN switch to Kid is out (delivered before the switch
+  ends, it is dropped, and the test fails only with both halves of the drop
+  deleted; delivered after another tab bound Parent back before this tab's
+  binding read, it is dropped by `switchGeneration` alone and asked again under
+  Parent, and without `switchGeneration` Kid's titles show under Parent's name)
+  and a refresh out during a PIN prompt (landing while the prompt is open,
+  dropped, with no request until it is cancelled and exactly one after, where
+  without the start guard one dropped refresh ran over a hundred more a second;
+  landing after the prompt was cancelled, dropped though it was right and asked
+  again exactly once, so deleting `switchGeneration` fails that case only by
+  the one request)), `AdminView.catalog.test.tsx` and the hook and helper
+  tests.
 - Known gaps: mid-scan, a new show has its folder title and no artwork until
   the completion event; files found in a scan's last seconds wait for the
   completion event, which for TV follows the deferred metadata pass; scans
