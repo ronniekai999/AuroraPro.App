@@ -721,6 +721,34 @@ describe('a full Home load and a live refresh overlapping', () => {
     await waitFor(() => expect(document.body.textContent).toMatch(/\b3 titles in your library/), { timeout: 5000 })
   }, 30000)
 
+  it('asks for the count again when a switch drops the refresh that carried it', async () => {
+    // R (v1) is out, the count recorded as asked at v1; a full load at v1
+    // lands first, so the rails are current; R then lands while a PIN prompt
+    // is open and is dropped whole, its count with it. Cancelling the prompt
+    // re-checks, and only the count, put back to the version it was asked at
+    // before R, is behind: without that, nothing asks for it again.
+    const server = stubProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    pickProfile(/Locked/)
+    const cancel = await screen.findByRole('button', { name: 'Cancel' })
+    r.release()
+    await new Promise(done => setTimeout(done, 500))
+    expect(document.body.textContent).toMatch(/\b1 titles in your library/)
+    fireEvent.click(cancel)
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+  }, 20000)
+
   it('runs again when a live refresh lands older than a full load and is dropped', async () => {
     // R (v1) is out; the next update (v2) waits on it; a full load starts at
     // v2; a third update (v3) arrives; the full load lands at v2, then R lands

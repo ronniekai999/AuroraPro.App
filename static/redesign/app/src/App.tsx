@@ -4614,6 +4614,7 @@ export default function App() {
     const version = catalogVersion
     const countKey = `${realtimeUserId}:${activeProfileId}`
     const countSeq = ++homeCountSeqRef.current
+    const countAskedBefore = homeCountVersionRef.current
     homeCountVersionRef.current = version
     const railsSeq = ++homeRailsSeqRef.current
     const switchGen = profileSwitchGeneration()
@@ -4637,8 +4638,14 @@ export default function App() {
         // profile's answer (see above). The retry re-runs this effect, which
         // returns at the start guard while a switch or prompt is out; a
         // refresh it does start records the current generation, so this cannot
-        // loop.
-        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setHomeRefreshRetry(n => n + 1); return }
+        // loop. The count goes with the rest, so unless a later request has
+        // asked for it since, it is put back to the version it was asked at
+        // before this, and the re-check asks for it again.
+        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
+          if (homeCountSeqRef.current === countSeq) homeCountVersionRef.current = countAskedBefore
+          setHomeRefreshRetry(n => n + 1)
+          return
+        }
         if (count && countSeq > homeCountAppliedRef.current) {
           homeCountAppliedRef.current = countSeq
           setHomeLibraryCount({ key: countKey, total: count.total })
