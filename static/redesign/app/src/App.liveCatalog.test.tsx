@@ -221,6 +221,8 @@ function stubProfiles() {
   let bound = 1
   let failCount = false
   const asked: Record<string, number> = {}
+  // Binding reads answered so far, counted as each answer is handed back.
+  let bindingAnswered = 0
   // Browse-grid requests (Home's Top Rated rails ask for 20 a type).
   let gridAsked = 0
   const sees: Record<number, Item[]> = { 1: [item(1, 'Parentonly Old')], 2: [item(2, 'Kidonly Old')] }
@@ -254,7 +256,7 @@ function stubProfiles() {
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
     if (p === '/api/profiles') return json(PROFILES2)
-    if (p === '/api/profiles/active') return json(PROFILES2.find(x => x.id === bound))
+    if (p === '/api/profiles/active') { bindingAnswered++; return json(PROFILES2.find(x => x.id === bound)) }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
     if (p === '/api/me/hero') return json({ picks: [] })
@@ -303,6 +305,8 @@ function stubProfiles() {
     bindElsewhere(id: number) { bound = id },
     /** The profile the session is bound to. */
     get bound() { return bound },
+    /** Binding reads (/api/profiles/active) answered so far. */
+    get bindingAnswered() { return bindingAnswered },
   }
 }
 
@@ -449,10 +453,15 @@ describe('a live refresh answered for the profile a switch bound', () => {
       await screen.findAllByText('Kidonly Old', undefined, { timeout: 5000 })
       await new Promise(done => setTimeout(done, 300))
     } else {
+      const answered = server.bindingAnswered
       server.bindElsewhere(1)
       read.release()
-      // The read answers Parent: the switch ends with Parent still shown.
-      await new Promise(done => setTimeout(done, 300))
+      // The read answers Parent: the switch ends with Parent still shown. Its
+      // end shows nowhere on the page, but once the read is answered the rest
+      // of the switch runs in microtasks, which a macrotask inside act drains,
+      // so the answer below lands after it.
+      await waitFor(() => expect(server.bindingAnswered).toBe(answered + 1), { timeout: 5000 })
+      await act(async () => { await new Promise(done => setTimeout(done, 0)) })
       expect(label()).toBe('Parent')
       refresh.deliver()
       await new Promise(done => setTimeout(done, 500))
