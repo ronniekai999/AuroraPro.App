@@ -1576,25 +1576,26 @@ New titles reach open web apps without a reload. Code:
   and catches up when next shown:
   - Home refetches only its three catalog rails and its library count,
     recomposed under the personalized rails; never Continue Watching or the
-    personalized rails, and the hero only when none is showing (a first
-    import into an empty library). Running the full Home load per update
-    reset the hero carousel every ten seconds. Every catalog-rails fetch (the
-    full load's and the live refresh's) takes a number when it starts
-    (`homeRailsSeqRef`), and its rails land only if no later-started fetch's
-    have, so neither puts back rails that missed titles the other saw. The
-    full load records the version it started at, so an update during it is
-    caught up once its rails land. A live refresh whose rails are dropped
-    that way checks again (`homeRefreshRetry`: a recompose can set the very
-    array on screen and re-run nothing), so Home is not left a version
-    behind. The count's own effect asks once per user and profile, and only
-    the live refresh keeps it current (a full load does not ask), so it is
-    tracked apart (`homeCountVersionRef`, the version it was last ASKED at,
-    recorded when a request starts) and a refresh also runs when the count
-    alone is behind. Recorded when an answer landed instead, a count request
-    that kept failing ran a full refresh per recompose in a tight loop; a
-    failed count now waits for the next update. Its requests are numbered
-    across its own effect and this refresh, so an older answer landing last
-    cannot put an older count back.
+    personalized rails, and the hero only when none is showing (a first import
+    into an empty library). Running the full Home load per update reset the
+    hero carousel every ten seconds. Every catalog-rails fetch (the full load's
+    and the live refresh's) takes a number when it starts (`homeRailsSeqRef`),
+    and its rails land only if no later-started fetch's have, so neither puts
+    back rails that missed titles the other saw. The full load records the
+    version it started at, so an update during it is caught up once its rails
+    land. A live refresh whose rails are dropped that way checks again
+    (`homeRefreshRetry`: a recompose can set the very array on screen and
+    re-run nothing), so Home is not left a version behind. The count's own
+    effect asks once per user and profile, and only the live refresh keeps it
+    current (a full load does not ask), so it is tracked apart
+    (`homeCountVersionRef`, the version it was last ASKED at, recorded when a
+    request starts and put back when a switch drops that request's answer) and
+    a refresh also runs when the count alone is behind. Recorded when an answer
+    landed instead, a count request that kept failing ran a full refresh per
+    recompose in a tight loop; a failed count now waits for the next update,
+    unless a switch drops its refresh. Its requests are numbered across its own
+    effect and this refresh, so an older answer landing last cannot put an
+    older count back.
     A full load does not abort a live refresh. The refresh runs only under
     rails the current user and profile already have up, is aborted by a
     user, profile or settle change, stands down on a switch's first commit
@@ -1698,36 +1699,38 @@ New titles reach open web apps without a reload. Code:
   switch that changes the profile shown and the effects of its commit
   (where the drop adds nothing, see above), the Shows grid's switch
   handling (line for line the Movies grid's code, pinned as listed above),
-  the full load's fallback-hero gate and the count effect's ask-time
-  version have no test, and the full load's guard is pinned against
-  removal but not as a sequence rather than a version check (the equal-version
-  case it adds is not reached by the current triggers); a switch with no PIN
-  prompt that fails and stays on the profile shown, or a switch with no PIN
-  prompt whose binding read returns the profile already shown (another tab
-  raced it), runs nothing again, so a refresh the start guard refused during
-  it, or one dropped while it was out, leaves the view behind until something
-  else re-runs the refresh, such as the next update or showing (on Home also a
-  full Home load, a recompose that changes the rails, a 👎 or an admin delete;
-  on a grid a Load More, a sort or genre change or an admin delete); when a
-  no-PIN switch that failed did bind (its answer lost) and its binding read
-  failed too, the tab stays on the old profile while the server acts as the new
-  one, and a refresh dropped after it is re-checked and, when behind, asked
-  again under the new binding, so the new profile's titles show under the old
-  name until the tab-visibility re-read, as does any later request's answer
-  (the dropped answer may have been the old profile's, if the server answered
-  it before the bind); a switch made only in another tab is seen by neither
-  half of the drop, so a refresh the server answered for it lands under this
-  tab's profile until the `storage` or visibility re-read moves this tab; a
-  count request that fails is asked again only at the next update, switch,
-  sign-in or reload (neither a Home visit nor the 30 s full load asks for it),
-  and when only the count was behind, a failed rail request discards a count
-  answer that succeeded; a first import's fallback hero is picked by the first
-  live refresh and not replaced, so a show picked before its enrichment stays
-  bare (no backdrop or overview) until a full Home load (returning or
-  refocusing after 30 s) or a reload, and the live refresh does not ask for the
-  personalized hero pool again (a full Home load does); the dashboard's side
-  cards read at mount can land after, and overwrite, a refresh's newer numbers;
-  the macOS and TV clients ignore the event.
+  the full load's fallback-hero gate, the count effect's ask-time version and
+  the switch drop's check for a later count request (defensive: the count's own
+  effect re-runs only on a change that aborts the refresh first) have no test,
+  and the full load's guard is pinned against removal but not as a sequence
+  rather than a version check (the equal-version case it adds is not reached by
+  the current triggers); a switch with no PIN prompt that fails and stays on
+  the profile shown, or a switch with no PIN prompt whose binding read returns
+  the profile already shown (another tab raced it), runs nothing again, so a
+  refresh the start guard refused during it, or one dropped while it was out,
+  leaves the view behind until something else re-runs the refresh, such as the
+  next update or showing (on Home also a full Home load, a recompose that
+  changes the rails, a 👎 or an admin delete; on a grid a Load More, a sort or
+  genre change or an admin delete); when a no-PIN switch that failed did bind
+  (its answer lost) and its binding read failed too, the tab stays on the old
+  profile while the server acts as the new one, and a refresh dropped after it
+  is re-checked and, when behind, asked again under the new binding, so the new
+  profile's titles show under the old name until the tab-visibility re-read, as
+  does any later request's answer (the dropped answer may have been the old
+  profile's, if the server answered it before the bind); a switch made only in
+  another tab is seen by neither half of the drop, so a refresh the server
+  answered for it lands under this tab's profile until the `storage` or
+  visibility re-read moves this tab; a count request that fails is asked again
+  only at the next update, switch, sign-in or reload (neither a Home visit nor
+  the 30 s full load asks for it), or at the re-check after a switch drops the
+  refresh that asked for it, and when only the count was behind, a failed rail
+  request discards a count answer that succeeded; a first import's fallback
+  hero is picked by the first live refresh and not replaced, so a show picked
+  before its enrichment stays bare (no backdrop or overview) until a full Home
+  load (returning or refocusing after 30 s) or a reload, and the live refresh
+  does not ask for the personalized hero pool again (a full Home load does);
+  the dashboard's side cards read at mount can land after, and overwrite, a
+  refresh's newer numbers; the macOS and TV clients ignore the event.
 
 ### Nullable database columns
 

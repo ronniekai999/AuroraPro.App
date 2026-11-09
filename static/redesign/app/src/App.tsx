@@ -4565,16 +4565,16 @@ export default function App() {
   // or a 👎 or an admin delete (a known gap in CLAUDE.md). A re-check starts a
   // refresh only while the rails or the count is behind (and then asks for
   // both). The count is recorded as asked when a refresh starts
-  // (homeCountVersionRef), so a drop puts it back to the version it was asked
-  // at before, unless a later request has asked for it since: left as asked,
-  // once the rails had caught up to that version (a full load from it landed
-  // meanwhile, or only the count was behind), no re-check asked for the count
-  // again, and a stale count stayed until the next update. Where a switch
-  // changes the profile shown, the new profile's load fills Home. Closing the
-  // prompt also re-runs this, so a refresh the start guard refused while it
-  // was open starts if Home is still behind. Off Home it waits: the next
-  // showing (view) catches up. A failed refresh leaves the rails behind until
-  // the next update, showing or recompose.
+  // (homeCountVersionRef), so a switch drop puts it back to the version it was
+  // asked at before, unless a later request has asked for it since: left as
+  // asked, once the rails had caught up to that version (a full load from it
+  // landed meanwhile, or only the count was behind), no re-check asked for the
+  // count again, and a stale count stayed until the next update. Where a
+  // switch changes the profile shown, the new profile's load fills Home.
+  // Closing the prompt also re-runs this, so a refresh the start guard refused
+  // while it was open starts if Home is still behind. Off Home it waits: the
+  // next showing (view) catches up. A failed refresh leaves the rails behind
+  // until the next update, showing or recompose.
   // The library count is tracked apart (homeCountVersionRef): its own effect
   // asks once per user and profile, and only this refresh keeps it current,
   // so a refresh also runs when the count alone is behind (a full load does
@@ -4638,9 +4638,11 @@ export default function App() {
         // profile's answer (see above). The retry re-runs this effect, which
         // returns at the start guard while a switch or prompt is out; a
         // refresh it does start records the current generation, so this cannot
-        // loop. The count goes with the rest, so unless a later request has
-        // asked for it since, it is put back to the version it was asked at
-        // before this, and the re-check asks for it again.
+        // loop. The count goes with the rest, so it is put back to the version
+        // it was asked at before this, and the re-check asks for it again if
+        // that is behind. The check for a later count request is defensive:
+        // the count's own effect re-runs only on a change of user, profile or
+        // settle, which aborts this refresh first.
         if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
           if (homeCountSeqRef.current === countSeq) homeCountVersionRef.current = countAskedBefore
           setHomeRefreshRetry(n => n + 1)
