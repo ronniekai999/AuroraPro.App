@@ -46,6 +46,7 @@ import { MoreMenu, SheetAction, SpeedMenu, TracksSheet } from './player/PlayerSh
 import { SkipMarkerEditor } from './player/SkipMarkerEditor'
 import {
   DOUBLE_TAP_MS,
+  activeAudioIndex,
   doubleTapDelta,
   nextPlaybackDetails,
   pipAvailable,
@@ -703,6 +704,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Phase 4.6 can layer on inline-subtitle support like V1's
   // SUBTITLE_TRACKS_UPDATED handler does.
   const [availableAudio, setAvailableAudio] = useState<AudioTrack[]>([])
+  // The audio track the stream decision chose for this viewer (its
+  // audio_track_index: a position in the track list, -1 for the file's own
+  // default). It is what plays until the viewer picks another, and it is only
+  // read to mark that track in the Audio and subtitles sheet.
+  const [decidedAudioIndex, setDecidedAudioIndex] = useState<number | undefined>(undefined)
   const [availableSubs, setAvailableSubs] = useState<SubtitleTrack[]>([])
   // Which of the player's menus is open: Audio and subtitles, speed, the
   // overflow menu, or the admin marker editor it leads to. One at a time.
@@ -3361,6 +3367,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         } catch { /* never let telemetry break playback */ }
         // M10 Phase 4.5 — expose tracks for the picker.
         setAvailableAudio(info.audio_tracks || [])
+        setDecidedAudioIndex(info.stream.audio_track_index)
         // Issue #133 — filter out bitmap-format subtitles (PGS/VobSub/
         // DVB) before showing in the picker. The server can't convert
         // these to WebVTT and returns 400 from
@@ -7536,7 +7543,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {openMenu === 'tracks' && (
                 <TracksSheet
                   audio={availableAudio}
-                  audioIndex={target.audioTrackIndex}
+                  audioIndex={activeAudioIndex(availableAudio, target.audioTrackIndex, decidedAudioIndex)}
                   onPickAudio={(index) => {
                     setOpenMenu(null)
                     if (onChangeAudioTrack) {

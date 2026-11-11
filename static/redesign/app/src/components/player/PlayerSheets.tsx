@@ -85,7 +85,8 @@ export function TracksSheet({
   error, details, onClose,
 }: {
   audio: AudioTrack[]
-  // The viewer's pick for this session; undefined when they have made none.
+  // The `index` of the track that is playing (lib/playerChrome
+  // activeAudioIndex); undefined when it cannot be told.
   audioIndex: number | undefined
   onPickAudio: (index: number) => void
   subtitles: SubtitleTrack[]
@@ -95,9 +96,6 @@ export function TracksSheet({
   details: string | null
   onClose: () => void
 }) {
-  // Only an explicit pick is marked. With none, the server chooses the track
-  // (its own default model, steered by the viewer's preferred language) and
-  // the client is not told which, so marking one here would be a guess.
   const activeAudio = audioIndex
   return (
     <PlayerSheet label="Audio and subtitles" onClose={onClose}>

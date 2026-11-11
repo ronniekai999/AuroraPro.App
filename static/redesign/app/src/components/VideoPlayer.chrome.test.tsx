@@ -372,14 +372,35 @@ describe('one Audio and subtitles sheet', () => {
     expect(within(subs).getByRole('menuitemradio', { name: 'English subs' })).toHaveAttribute('aria-checked', 'false')
   })
 
-  it('marks an audio track only when the viewer picked it', async () => {
+  const checkedAudio = () =>
+    within(screen.getByRole('group', { name: 'Audio' })).getAllByRole('menuitemradio', { checked: true }).map(o => o.textContent)
+
+  it('marks the audio track that is playing: the file\'s default until the stream decision or the viewer says otherwise', async () => {
+    // No decision index and no flagged track: every player starts the first.
     const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
     open()
-    expect(screen.getAllByRole('menuitemradio', { checked: true }).map(o => o.textContent)).toEqual(['Off'])
+    expect(checkedAudio()).toEqual(['EnglishAAC 5.1'])
     open()
+    // The viewer's pick wins.
     view.rerender(<VideoPlayer target={{ ...movie, audioTrackIndex: 1 }} onClose={() => {}} />); await bootHls()
     open()
-    expect(screen.getByRole('menuitemradio', { name: /French/ })).toHaveAttribute('aria-checked', 'true')
+    expect(checkedAudio()).toEqual(['FrenchAAC stereo'])
+  })
+
+  it('marks the track the stream decision chose (a preferred language), and the flagged default when it chose none', async () => {
+    const base = info()
+    vi.mocked(getStreamInfo).mockResolvedValue({ ...base, stream: { ...base.stream, audio_track_index: 1 } } as Info)
+    const first = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    open()
+    expect(checkedAudio()).toEqual(['FrenchAAC stereo'])
+    first.unmount()
+    vi.mocked(getStreamInfo).mockResolvedValue(info({
+      stream: { ...base.stream, audio_track_index: -1 },
+      audio_tracks: [{ index: 0, title: 'English', codec: 'aac', channels: 6 }, { index: 1, title: 'French', codec: 'aac', channels: 2, is_default: true }],
+    }))
+    render(<VideoPlayer target={otherMovie} onClose={() => {}} />); await bootHls()
+    open()
+    expect(checkedAudio()).toEqual(['FrenchAAC stereo'])
   })
 
   it('an audio pick asks the parent to rebuild at the live position and closes the sheet', async () => {

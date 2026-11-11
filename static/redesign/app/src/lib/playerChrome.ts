@@ -187,3 +187,24 @@ function channelLayout(n: number): string {
   if (n === 8) return '7.1'
   return `${n}ch`
 }
+
+/** The `index` of the audio track that is playing, for marking it in the
+ *  sheet. The viewer's own pick wins. Without one, the session was built on
+ *  the stream decision's `audio_track_index`: a POSITION in the track list,
+ *  already steered by the viewer's preferred language, or -1 (or absent) for
+ *  the file's own default. That default is what every player starts on by
+ *  itself: the first track flagged default, or the first track when none is
+ *  flagged (the server's effectiveDefaultIndex).
+ *
+ *  Undefined when there is nothing to mark. */
+export function activeAudioIndex(
+  tracks: readonly { index: number; default?: boolean; is_default?: boolean }[],
+  picked: number | undefined,
+  decided: number | undefined,
+): number | undefined {
+  if (tracks.length === 0) return undefined
+  if (picked !== undefined && tracks.some(t => t.index === picked)) return picked
+  if (decided !== undefined && decided >= 0 && decided < tracks.length) return tracks[decided].index
+  const flagged = tracks.find(t => t.default || t.is_default)
+  return (flagged ?? tracks[0]).index
+}

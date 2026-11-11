@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SkipMarker } from './api'
 import {
+  activeAudioIndex,
   audioNote,
   doubleTapDelta,
   formatDeliveryLine,
@@ -141,5 +142,27 @@ describe('track names', () => {
     expect(audioNote('eac3', 6)).toBe('Dolby Digital Plus 5.1')
     expect(audioNote('aac', 2)).toBe('AAC stereo')
     expect(audioNote(undefined, undefined)).toBe('')
+  })
+})
+
+describe('activeAudioIndex', () => {
+  const tracks = [{ index: 3 }, { index: 5 }, { index: 7 }]
+  it('is the viewer\'s pick when they made one', () => {
+    expect(activeAudioIndex(tracks, 5, 0)).toBe(5)
+  })
+  it('ignores a pick that is not one of this file\'s tracks', () => {
+    expect(activeAudioIndex(tracks, 99, 2)).toBe(7)
+  })
+  it('reads the stream decision as a position in the list, not as a track index', () => {
+    expect(activeAudioIndex(tracks, undefined, 1)).toBe(5)
+  })
+  it('falls back to the file\'s own default: the first flagged track, else the first', () => {
+    expect(activeAudioIndex(tracks, undefined, -1)).toBe(3)
+    expect(activeAudioIndex(tracks, undefined, undefined)).toBe(3)
+    expect(activeAudioIndex([{ index: 3 }, { index: 5, is_default: true }, { index: 7, is_default: true }], undefined, -1)).toBe(5)
+    expect(activeAudioIndex([{ index: 3 }, { index: 5, default: true }], undefined, 9)).toBe(5)
+  })
+  it('marks nothing when there are no tracks', () => {
+    expect(activeAudioIndex([], 1, 1)).toBeUndefined()
   })
 })
