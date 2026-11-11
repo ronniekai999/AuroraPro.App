@@ -15,6 +15,11 @@ import {
   timelineRanges,
   trackLabel,
   timelineTopPx,
+  nextTap,
+  menuKeyTarget,
+  noticeNeedsAction,
+  SESSION_ENDED_NOTICE,
+  DOUBLE_TAP_MS,
 } from './playerChrome'
 
 const marker = (kind: SkipMarker['kind'], start_ms: number, end_ms: number): SkipMarker =>
@@ -179,5 +184,51 @@ describe('timelineTopPx', () => {
     expect(timelineTopPx(184, 200)).toBeNull()
     expect(timelineTopPx(184, -1)).toBeNull()
     expect(timelineTopPx(Number.NaN, 56)).toBeNull()
+  })
+})
+
+describe('nextTap', () => {
+  it('holds a first tap and seeks on a second inside the window', () => {
+    const first = nextTap(null, 1000)
+    expect(first.action).toBe('hold')
+    const second = nextTap(first.state, 1000 + DOUBLE_TAP_MS)
+    expect(second.action).toBe('seek')
+  })
+  it('keeps seeking on every further tap inside the window, and starts over after it', () => {
+    let t = 1000
+    let step = nextTap(nextTap(null, t).state, t += 100)
+    for (let i = 0; i < 3; i++) {
+      step = nextTap(step.state, t += 100)
+      expect(step.action).toBe('seek')
+    }
+    expect(nextTap(step.state, t + DOUBLE_TAP_MS + 1).action).toBe('hold')
+  })
+})
+
+describe('menuKeyTarget', () => {
+  it('moves down and up through the items and wraps at the ends', () => {
+    expect(menuKeyTarget('ArrowDown', 0, 3)).toBe(1)
+    expect(menuKeyTarget('ArrowDown', 2, 3)).toBe(0)
+    expect(menuKeyTarget('ArrowUp', 0, 3)).toBe(2)
+    expect(menuKeyTarget('ArrowUp', 2, 3)).toBe(1)
+  })
+  it('enters from outside the list at the nearest end', () => {
+    expect(menuKeyTarget('ArrowDown', -1, 3)).toBe(0)
+    expect(menuKeyTarget('ArrowUp', -1, 3)).toBe(2)
+  })
+  it('jumps with Home and End, and ignores every other key and an empty menu', () => {
+    expect(menuKeyTarget('Home', 2, 3)).toBe(0)
+    expect(menuKeyTarget('End', 0, 3)).toBe(2)
+    expect(menuKeyTarget('a', 0, 3)).toBeNull()
+    expect(menuKeyTarget('ArrowDown', 0, 0)).toBeNull()
+  })
+})
+
+describe('noticeNeedsAction', () => {
+  it('is true for the notices the player sets from the named constants, and for nothing else', () => {
+    expect(noticeNeedsAction(SESSION_ENDED_NOTICE)).toBe(true)
+    expect(noticeNeedsAction('Reconnecting…')).toBe(false)
+    expect(noticeNeedsAction('please reload to resume')).toBe(false)
+    expect(noticeNeedsAction('')).toBe(false)
   })
 })

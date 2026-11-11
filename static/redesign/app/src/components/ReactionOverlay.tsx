@@ -174,9 +174,27 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
   const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
   const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'
   // Report open state up (VideoPlayer's auto-hide pin). Effect, not inline
-  // in the toggles: every state path — trigger toggle, emoji pick, any
-  // future dismiss — reports through one channel.
-  useEffect(() => { onOpenChange?.(open) }, [open, onOpenChange])
+  // in the toggles: every state path (trigger toggle, emoji pick, Escape,
+  // any future dismiss) reports through one channel.
+  //
+  // Only a CHANGE is reported, and the callback is read through a ref. Keyed
+  // on the callback itself, an inline arrow from the parent re-ran this after
+  // every one of the parent's renders: the player renders about five times a
+  // second while it plays, its callback re-arms the bars' hide timer on
+  // "closed", and so the bars never hid for anyone in a watch party.
+  const onOpenChangeRef = useRef(onOpenChange)
+  useEffect(() => { onOpenChangeRef.current = onOpenChange })
+  const reportedOpenRef = useRef(false)
+  useEffect(() => {
+    if (reportedOpenRef.current === open) return
+    reportedOpenRef.current = open
+    onOpenChangeRef.current?.(open)
+  }, [open])
+  // Unmounted while open (the party ended under it): the parent must not be
+  // left holding an "open" it will never hear closed.
+  useEffect(() => () => {
+    if (reportedOpenRef.current) onOpenChangeRef.current?.(false)
+  }, [])
   // Escape closes the row of emoji and nothing else. Capture phase, stopped:
   // the app's own Escape handler is on window and would close the player or
   // leave the page.

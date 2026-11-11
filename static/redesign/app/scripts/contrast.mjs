@@ -36,17 +36,27 @@ const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
 const INK = hex('#f4f4f5'), INK2 = hex('#b4b6bc'), ON_ACTION = hex('#0e0f11')
 
 // The player's control band (index.css .stage-controls-scrim, .player-band).
-// Heights, bottom up, in px: the band's bottom padding, the transport row(s),
-// the gap, the row of range names (md up), the 20px timeline row, and the
-// fade above it. `y` is how far up the band a thing's centre sits.
-const scrim = [[0, 0.94], [0.66, 0.86], [0.86, 0.5], [1, 0]]   // `to top`
+// The scrim runs `to bottom` with its fade in a FIXED zone at the top of the
+// band (0 at the edge, 0.5 at 26px, 0.86 at 60px) and 0.94 at the bottom, so
+// the alpha behind the timeline does not depend on how many transport rows
+// the band has: the timeline's row starts where the band's top padding ends
+// (56px on a phone, 64px from sm), below the fade, in every band.
+// Heights below are px UP from the band's bottom edge, to a thing's centre.
+const scrimAt = (fromTop, h) =>
+  fromTop <= 0 ? 0
+    : fromTop <= 26 ? 0.5 * (fromTop / 26)
+      : fromTop <= 60 ? 0.5 + 0.36 * ((fromTop - 26) / 34)
+        : 0.86 + 0.08 * ((fromTop - 60) / (h - 60))
 const bands = {
-  'md and up (192px band)': { h: 192, timeline: 118, labels: 96, readout: 52 },
-  'phone (204px band, two transport rows)': { h: 204, timeline: 138, labels: null, readout: 40 },
+  'md and up, one transport row (192px band)': { h: 192, timeline: 118, labels: 96, readout: 52 },
+  'phone, two transport rows (204px band)': { h: 204, timeline: 138, labels: null, readout: 40 },
+  // The tallest: the party rail narrows the band until the transport wraps to
+  // three rows. The readout is on the top row, the worst of the three.
+  'beside the party rail, three transport rows (296px band)': { h: 296, timeline: 222, labels: 200, readout: 156 },
 }
 for (const [name, b] of Object.entries(bands)) {
   console.log(`=== .stage-controls-scrim : ${name} ===`)
-  const at = px => rampAlpha(scrim, px / b.h)
+  const at = px => scrimAt(b.h - px, b.h)
   console.log(`  alpha at the timeline ${f(at(b.timeline))}, at the readout ${f(at(b.readout))}${b.labels ? `, at the range names ${f(at(b.labels))}` : ''}`)
   for (const [frameName, frame] of [['black frame', K], ['white frame', W]]) {
     const bg = over(K, at(b.timeline), frame)

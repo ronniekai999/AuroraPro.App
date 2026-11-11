@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive } from '@/lib/streaming'
 import { getAdminSkipMarkers, reportProgress } from '@/lib/api'
-import { DOUBLE_TAP_MS } from '@/lib/playerChrome'
+import { DOUBLE_TAP_MS, SESSION_ENDED_NOTICE, noticeNeedsAction } from '@/lib/playerChrome'
 
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -806,6 +806,38 @@ describe('the bars fade away in the window, not only in fullscreen', () => {
     expect(topBar).not.toHaveAttribute('inert')
     expect(band).not.toHaveAttribute('inert')
   })
+
+  // In a party with the room connected the player mounts the reaction picker,
+  // which reports its open state back. That report once ran after every
+  // render and re-armed the hide timer each time, and the player renders on
+  // every `timeupdate`: the bars stayed up for the whole film.
+  it('still hides them for someone in a party with the reaction picker mounted, through playback ticks', async () => {
+    render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+    const topBar = screen.getByRole('button', { name: 'Close player' }).closest('[data-player-chrome]')!
+    expect(screen.getByRole('button', { name: /reaction/i })).toBeInTheDocument()
+    expect(topBar).not.toHaveAttribute('inert')
+    // Playback ticks five times a second; each one re-renders the player.
+    for (let i = 0; i < 20; i++) {
+      await act(async () => {
+        video().currentTime = 1 + i * 0.2
+        fireEvent.timeUpdate(video())
+        vi.advanceTimersByTime(200)
+      })
+    }
+    expect(topBar).toHaveAttribute('inert')
+  })
+
+  it('holds them while the reaction picker is open, and lets them go once it closes', async () => {
+    render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+    const topBar = screen.getByRole('button', { name: 'Close player' }).closest('[data-player-chrome]')!
+    const picker = screen.getByRole('button', { name: /reaction/i })
+    fireEvent.click(picker)
+    await act(async () => { vi.advanceTimersByTime(6000) })
+    expect(topBar).not.toHaveAttribute('inert')
+    fireEvent.click(picker)
+    await act(async () => { vi.advanceTimersByTime(3100) })
+    expect(topBar).toHaveAttribute('inert')
+  })
 })
 
 describe('where the timeline is, for everything placed above it', () => {
@@ -850,6 +882,58 @@ describe('where the timeline is, for everything placed above it', () => {
     sizes.band = 0; sizes.scrubTop = 0
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
     expect(published()).toBe('')
+  })
+})
+
+describe('menus and the things around the player', () => {
+  // The party's dock, ticker and voice pill are fixed above the player; the
+  // stylesheet takes them away while this attribute is set.
+  it('marks the document while a menu or the reaction picker is open, and clears it when the player closes', async () => {
+    const view = render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+    const marked = () => document.documentElement.hasAttribute('data-player-menu')
+    expect(marked()).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+    expect(marked()).toBe(true)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(marked()).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /reaction/i }))
+    expect(marked()).toBe(true)
+    view.unmount()
+    expect(marked()).toBe(false)
+  })
+
+  // A sheet left "open" inside the hidden player would swallow the first
+  // Escape pressed anywhere else in the app.
+  it('closes its menu when it minimises, so Escape is not swallowed afterwards', async () => {
+    const element = () => <VideoPlayer target={movie} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    expect(document.querySelector('[data-player-sheet]:not([hidden])')).not.toBeNull()
+    fake.cast.status = { ...fake.cast.status, connected: true }
+    view.rerender(element()); await settle()
+    expect(document.querySelector('[data-player-sheet]:not([hidden])')).toBeNull()
+    const reachedApp = vi.fn()
+    window.addEventListener('keydown', reachedApp)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    window.removeEventListener('keydown', reachedApp)
+    expect(reachedApp).toHaveBeenCalledTimes(1)
+    fake.cast.status = { ...fake.cast.status, connected: false }
+  })
+
+  // A dead session looks exactly like a paused picture once the bars fade.
+  it('keeps a notice the viewer must act on in view after the bars have gone', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    const float = () => document.querySelector('[data-player-notice-float]')
+    expect(float()).toBeNull()
+    vi.mocked(keepalive).mockResolvedValue('gone')
+    await act(async () => { vi.advanceTimersByTime(10_000) }); await settle()
+    expect(document.querySelector('[data-player-notice]')?.textContent).toBe(SESSION_ENDED_NOTICE)
+    // The notice brings the bars back; once they fade again it stays.
+    await act(async () => { vi.advanceTimersByTime(3100) })
+    expect(screen.getByRole('button', { name: 'Close player' }).closest('[data-player-chrome]')).toHaveAttribute('inert')
+    expect(float()?.textContent).toBe(SESSION_ENDED_NOTICE)
+    // An ordinary notice does not.
+    expect(noticeNeedsAction('Reconnecting…')).toBe(false)
   })
 })
 

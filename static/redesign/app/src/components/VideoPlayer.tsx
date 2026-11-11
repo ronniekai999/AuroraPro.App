@@ -51,6 +51,7 @@ import {
   nextPlaybackDetails,
   nextTap,
   noticeNeedsAction,
+  SESSION_ENDED_NOTICE,
   pipAvailable,
   speedLock,
   speedLockExplanation,
@@ -926,6 +927,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // faded out from under someone reading it.
   const openMenuRef = useRef<PlayerMenu>(null)
   const reactionPickerOpenRef = useRef(false)
+  const [reactionPickerOpen, setReactionPickerOpen] = useState(false)
   // Active <track> ref for cleanup when switching subs. Aurora exposes
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
@@ -2359,6 +2361,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (openMenu === 'markers' && speedFileKey) setMarkersFileKey(speedFileKey)
   }, [openMenu, speedFileKey])
   const markersMounted = markersAllowed && markersFileKey !== null && markersFileKey === speedFileKey
+  // A minimised player shows none of its menus, so none may stay open inside
+  // it: the Escape listener below would otherwise swallow the first Escape
+  // pressed anywhere in the app.
+  useEffect(() => {
+    if (minimized) setOpenMenu(null)
+  }, [minimized])
   // Escape closes the open menu, wherever focus is, and nothing else. In the
   // capture phase and stopped there: App's own Escape handler is on window
   // and closes the whole player.
@@ -4747,7 +4755,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         } else {
           // No rebuild available: surface it rather than leaving a dead
           // player on screen. This is the branch that used to be silent.
-          setStatus('Playback session ended — reload to resume')
+          setStatus(SESSION_ENDED_NOTICE)
         }
       })
     }
@@ -6549,6 +6557,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // nothing else would ever start it again and the bars would stay up.
     if (openMenu === null) showControlsTemporarily()
   }, [openMenu, showControlsTemporarily])
+  // The reaction picker reports its open state here. Stable, and called by
+  // the picker only when that state changes: closing re-arms the auto-hide
+  // the open picker was holding off, and a re-arm on every render would keep
+  // the bars up for the whole film.
+  const onReactionPickerOpenChange = useCallback((open: boolean) => {
+    reactionPickerOpenRef.current = open
+    setReactionPickerOpen(open)
+    if (!open) showControlsTemporarily()
+  }, [showControlsTemporarily])
+  // While one of the player's menus is open, the party's surfaces that float
+  // over the picture from outside the player (its mini dock, chat ticker and
+  // voice pill, all above the player in the stacking order) would be drawn
+  // across it. The stylesheet takes them away for as long as this is set.
+  useEffect(() => {
+    if (openMenu === null && !reactionPickerOpen) return
+    document.documentElement.setAttribute('data-player-menu', '')
+    return () => document.documentElement.removeAttribute('data-player-menu')
+  }, [openMenu, reactionPickerOpen])
   // A notice arriving while the bars are hidden brings them back, since the
   // title bar is where it is written. (It is also announced, and one that
   // needs the viewer to act stays on screen: see the render.)
@@ -7420,11 +7446,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               onSend={onSendReaction}
               vertical="down"
               variant="player"
-              onOpenChange={(o) => {
-                reactionPickerOpenRef.current = o
-                // Closing it re-arms the auto-hide it was holding off.
-                if (!o) showControlsTemporarily()
-              }}
+              onOpenChange={onReactionPickerOpenChange}
             />
           )}
           <button
@@ -7498,7 +7520,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   announced. */}
               <p role="status" className="sr-only" data-player-notice="">{notice ?? ''}</p>
               {notice && noticeNeedsAction(notice) && chromeHidden && (
-                <p className="player-float-left absolute top-4 z-[55] max-w-[min(90%,420px)] px-3 py-2 rounded-control bg-surface-raised-2 text-ink text-[14px] shadow-lg" aria-hidden="true">
+                <p data-player-notice-float="" className="player-float-left absolute top-4 z-[55] max-w-[min(90%,420px)] px-3 py-2 rounded-control bg-surface-raised-2 text-ink text-[14px] shadow-lg" aria-hidden="true">
                   {notice}
                 </p>
               )}
@@ -7530,7 +7552,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     }
                     setAutoStartedMuted(false)
                   }}
-                  className="player-lane absolute left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
+                  className="player-lane player-float-center absolute -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
                 >
                   <VolumeX size={18} />
                   Tap for sound
@@ -7601,12 +7623,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                       : 'Next episode available'}
                   </span>
                   <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
-                  <p className="text-ink text-[17px] font-semibold mt-1">Next episode</p>
+                  <p className="stage-upnext-title text-ink text-[17px] font-semibold mt-1">Next episode</p>
                   {/* Issue #460: the host's press moves everyone in the room. */}
                   {partyAdvanceHost && (
-                    <p className="text-ink-2 text-[13px] mt-0.5">Plays for everyone in the party</p>
+                    <p className="stage-upnext-note text-ink-2 text-[13px] mt-0.5">Plays for everyone in the party</p>
                   )}
-                  <div className="mt-3 flex items-center gap-3">
+                  <div className="stage-upnext-actions mt-3 flex items-center gap-3">
                     <button
                       type="button"
                       onClick={() => { void fireAdvance(true) }}
@@ -7711,6 +7733,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   currentSec={currentSec}
                   onMarkersChanged={(all) => setSkipMarkers(all.filter(m => m.end_ms > m.start_ms))}
                   hidden={openMenu !== 'markers'}
+                  onClose={() => setOpenMenu(null)}
                 />
               )}
               {/* A subtitle track that failed while its sheet is closed still
@@ -7718,7 +7741,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {subError && openMenu !== 'tracks' && (
                 <div
                   role="status"
-                  className="player-lane absolute left-1/2 -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
+                  className="player-lane player-float-center absolute -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
                 >
                   {subError}
                 </div>

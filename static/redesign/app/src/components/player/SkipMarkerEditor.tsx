@@ -19,7 +19,7 @@ function fmtMarkerTime(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged, hidden = false }: {
+export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged, hidden = false, onClose }: {
   fileId: number
   fileType: 'media' | 'episode'
   currentSec: number
@@ -31,6 +31,9 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
   // setting a marker means closing it to scrub and opening it again. The
   // unsaved draft has to survive that.
   hidden?: boolean
+  // Puts the editor away (keeping its draft). On a phone it is a sheet over
+  // the timeline with nothing else on it that closes it.
+  onClose?: () => void
 }) {
   type Draft = { start_ms: number; end_ms: number; detector?: string }
   const [drafts, setDrafts] = useState<Partial<Record<SkipMarker['kind'], Draft>>>({})
@@ -102,7 +105,18 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
     // open, which is how a marker's frame is found.
     <PlayerSheet label="Edit skip markers" anchor="top" hidden={hidden} passKeys>
       <div className="px-3 pt-3 pb-2">
-        <h3 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Skip markers</h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Skip markers</h3>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="h-11 px-3 -mr-1 rounded-control text-[14px] font-semibold text-ink hover:bg-action-soft transition-colors"
+            >
+              Done
+            </button>
+          )}
+        </div>
         {!loaded && <p className="mt-2 text-[14px] text-ink-2">Loading…</p>}
         {loaded && MARKER_KINDS.map(kind => {
           const d = drafts[kind]

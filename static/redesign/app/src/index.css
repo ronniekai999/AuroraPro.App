@@ -2034,6 +2034,17 @@ html[data-player-surface="theater"] .stage-party-minidock {
 html[data-player-surface="theater"] .stage-party-ticker {
   bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 92px + var(--player-dock-lift));
 }
+/* While one of the player's menus is open (`html[data-player-menu]`, stamped
+   by the player), the party's dock, chat ticker and voice pill are taken
+   away: they are fixed to the viewport above the player's own stacking
+   context, so they would be drawn across the open sheet or popover, and none
+   of them is needed for the few seconds a menu is up. `visibility`, so the
+   dock keeps a half-typed reply. */
+html[data-player-surface="theater"][data-player-menu] .stage-party-minidock,
+html[data-player-surface="theater"][data-player-menu] .stage-party-ticker,
+html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
+  visibility: hidden;
+}
 /* A short window (a phone held sideways) has about 130px between the title
    bar and the timeline: not enough for the chip's row, the dock, the Skip
    button's lane and a line of chat stacked one above the other. So the dock
@@ -2066,9 +2077,11 @@ html[data-player-surface="theater"] .stage-party-ticker {
   }
   /* The rail's fixed parts (header, who is watching, voice, ready, the reply
      box) are taller than the window, so the whole rail scrolls and the chat
-     keeps a few lines instead of being squeezed to nothing. `html` in the
-     selector: the rail's own `overflow-hidden` utility is emitted later and
-     would win at equal specificity. */
+     keeps a few lines instead of being squeezed to nothing. Wherever the
+     rail is shown, not only over the player: a lobby in a short window has
+     the same parts and the same height. `html` in the selector: the rail's
+     own `overflow-hidden` utility is emitted later and would win at equal
+     specificity. */
   html .stage-party-rail {
     overflow-y: auto;
   }
@@ -2087,9 +2100,21 @@ html[data-player-surface="theater"] .stage-party-ticker {
 }
 .player-float-left { left: 12px; }
 .player-float-right { right: calc(12px + var(--theater-rail-cover)); }
+/* Centred on the part of the picture the rail does not cover, not on the
+   whole of it (the call site adds the -50% translate). */
+.player-float-center { left: calc((100% - var(--theater-rail-cover)) / 2); }
 @media (min-width: 640px) {
   .player-float-left { left: 32px; }
   .player-float-right { right: calc(32px + var(--theater-rail-cover)); }
+}
+/* A short window (a phone held sideways): with a party's chip and voice pill
+   under the title bar there are about 60px between their row and the
+   timeline. The lane closes up to the timeline (and the Up next card, below,
+   becomes one row). */
+@media (max-height: 480px) {
+  .player-lane {
+    bottom: calc(var(--player-timeline-top) + 8px + var(--player-dock-lift));
+  }
 }
 
 /* Timeline. The 20px row is the hit target; the track, its fills, the marker
@@ -2107,11 +2132,12 @@ html[data-player-surface="theater"] .stage-party-ticker {
 .stage-scrub:hover .stage-scrub-track,
 .stage-scrub:focus-visible .stage-scrub-track { height: 6px; }
 /* Track 0.36 and buffered 0.6 are over `.stage-controls-scrim`, which holds
-   0.83 black or more at the timeline's y whatever the frame is doing, so
-   these barely depend on the picture (node scripts/contrast.mjs prints them):
-     track vs backdrop      3.13:1 (black frame) · 3.17:1 (white frame)
-     played vs track        6.71:1 (black frame) · 4.45:1 (white frame)
-   Buffered against track is 3.60:1 on a black frame and 2.68:1 on a white
+   0.86 black or more at the timeline's y whatever the frame is doing and
+   however many rows the band has, so these barely depend on the picture.
+   Worst of the three band heights (node scripts/contrast.mjs prints all):
+     track vs backdrop      3.13:1 (black frame) · 3.28:1 (white frame)
+     played vs track        6.71:1 (black frame) · 4.80:1 (white frame)
+   Buffered against track is 3.60:1 on a black frame and 2.83:1 on a white
    one, short of 3:1: it is a secondary cue (how far the transcoder has got),
    not what locates the control or the playhead. */
 .stage-scrub-buf {
@@ -2389,18 +2415,22 @@ html[data-player-surface="theater"] .stage-party-ticker {
     rgba(0, 0, 0, 0) 100%
   );
 }
-/* The control band. The timeline and everything under it sit in the lower
-   two thirds, on 0.83 black or more, which is what keeps the timeline's own
-   ratios close to frame-independent and carries the 15px readout (--ink-2,
-   8.79:1 on a white frame) and the 12px range names (--ink-2, 8.15:1). The
-   top third is the fade, and holds nothing. */
+/* The control band. The fade is a FIXED zone at the top of the band (the
+   band's own top padding), not a share of its height: the band is one
+   transport row tall on a wide window, two on a phone, and three beside the
+   party rail, and with percentage stops the timeline of a tall band rode up
+   into the fade. From 60px down it holds 0.86 black or more, which is where
+   the timeline's row begins in every band; that keeps the timeline's ratios
+   close to frame-independent and carries the 15px readout (--ink-2, 8.33:1
+   or better on a white frame) and the 12px range names (--ink-2, 7.98:1 or
+   better). */
 .stage-controls-scrim {
   background: linear-gradient(
-    to top,
-    rgba(0, 0, 0, 0.94) 0%,
-    rgba(0, 0, 0, 0.86) 66%,
-    rgba(0, 0, 0, 0.5) 86%,
-    rgba(0, 0, 0, 0) 100%
+    to bottom,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0.5) 26px,
+    rgba(0, 0, 0, 0.86) 60px,
+    rgba(0, 0, 0, 0.94) 100%
   );
 }
 
@@ -2419,6 +2449,25 @@ html[data-player-surface="theater"] .stage-party-ticker {
   text-transform: uppercase;
   color: var(--ink-2);
   font-weight: 600;
+}
+/* In a short window the card is one row: its name, the button, the countdown
+   and the dismiss. The lines it drops are said by the button's own label and
+   the card's status line. After the rules above, which it overrides. */
+@media (max-height: 480px) {
+  .stage-upnext {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: auto;
+    max-width: calc(100% - 24px);
+    padding: 6px 6px 6px 16px;
+  }
+  .stage-upnext .stage-upnext-eyebrow,
+  .stage-upnext .stage-upnext-note { display: none; }
+  /* Two classes: the call site's margin utilities are emitted later and win
+     at equal specificity. */
+  .stage-upnext .stage-upnext-title,
+  .stage-upnext .stage-upnext-actions { margin-top: 0; }
 }
 
 /* ── Player menus ───────────────────────────────────────────────────────

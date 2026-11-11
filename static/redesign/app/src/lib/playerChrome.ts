@@ -139,11 +139,19 @@ export function speedLockExplanation(lock: SpeedLock): string | null {
   return null
 }
 
+/** The session is gone and the player cannot rebuild it by itself. */
+export const SESSION_ENDED_NOTICE = 'Playback session ended — reload to resume'
+
+// The notices the viewer has to act on, by identity: the player sets its
+// status FROM these constants, so rewording one cannot silently stop it being
+// kept on screen.
+const ACTION_NOTICES: ReadonlySet<string> = new Set([SESSION_ENDED_NOTICE])
+
 /** A notice the viewer has to act on. It must stay on screen while it holds,
  *  whether or not the controls are showing: the bars fade away during
  *  playback, and a dead session looks exactly like a paused picture. */
 export function noticeNeedsAction(status: string): boolean {
-  return /reload to resume/i.test(status)
+  return ACTION_NOTICES.has(status)
 }
 
 /** What the next tap on the picture means, given the taps before it.
