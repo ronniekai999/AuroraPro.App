@@ -327,6 +327,24 @@ describe('a profile switch never commits the new name over the previous profileâ
       expect(kidOverParent(commits)).toBe(0)
     })
 
+  // The card menu holds the previous profile's Resume record and closures
+  // over its id (Add, the thumbs, Mark as watched): a pick made after a
+  // switch would act for the profile the session no longer is. It is named
+  // for its title, so a commit that drew it under the Kid's name is seen by
+  // the same probe as any other Parent-only title.
+  it('closes an open card menu', async () => {
+    const commits = renderApp('/')
+    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    fireEvent.click((await screen.findAllByRole('button', { name: /^More actions for Parentonly/ }, { timeout: 5000 }))[0])
+    // Not vacuous: the menu is up, and named for a Parent-only title.
+    expect(screen.getByRole('menu').getAttribute('aria-label')).toMatch(/^Actions for Parentonly/)
+    switchToKid()
+    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
   it('drops a vibe search that was in flight', async () => {
     const commits = renderApp('/')
     await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })

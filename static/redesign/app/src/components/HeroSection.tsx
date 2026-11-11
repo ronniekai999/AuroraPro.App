@@ -782,8 +782,8 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
             )}
             {/* 2026-06-05 (Home redesign B) — "My List" toggle. Adds /
                 removes the hero title from My Library. Only when the
-                caller wired both libraryIds + onToggleLib (matches the
-                MediaCardCinema lib-badge contract). */}
+                caller wired both libraryIds + onToggleLib (as a card's
+                Add button is). */}
             {libraryIds && onToggleLib && (() => {
               const inLib = libraryIds.has(hero.id)
               return (
