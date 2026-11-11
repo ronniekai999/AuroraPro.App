@@ -15,7 +15,7 @@
 //   - guest → silent leave, no dialog. Unchanged.
 
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PartyPanel } from './PartyPanel'
 import type { PartyState } from '@/hooks/useParty'
@@ -139,5 +139,70 @@ describe('guest', () => {
     expect(onLeave).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('button', { name: 'Hand off & leave' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'End for everyone' })).toBeNull()
+  })
+})
+
+// The confirm declares itself modal, so it has to be one: a screen reader
+// that honours `aria-modal` exposes nothing outside it, and a user whose
+// focus was left behind is then nowhere.
+describe('the host\u2019s leave confirmation as a modal', () => {
+  const open = async () => {
+    const user = userEvent.setup()
+    const onLeave = vi.fn(), onEndParty = vi.fn()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1, onLeave, onEndParty })
+    const leave = screen.getByRole('button', { name: 'Leave Party' })
+    await user.click(leave)
+    const dialog = screen.getByRole('alertdialog', { name: 'Leave the party?' })
+    return { user, leave, dialog, onLeave, onEndParty }
+  }
+
+  it('takes focus, on the answer that changes nothing', async () => {
+    const { dialog } = await open()
+    expect(within(dialog).getByRole('button', { name: 'Keep watching' })).toHaveFocus()
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog).toHaveAccessibleDescription(/hosting passes to another/)
+  })
+
+  it('keeps Tab among its own buttons, in both directions', async () => {
+    const { dialog } = await open()
+    const keep = within(dialog).getByRole('button', { name: 'Keep watching' })
+    const handOff = within(dialog).getByRole('button', { name: 'Hand off & leave' })
+    handOff.focus()
+    expect(fireEvent.keyDown(handOff, { key: 'Tab' })).toBe(false)
+    expect(keep).toHaveFocus()
+    expect(fireEvent.keyDown(keep, { key: 'Tab', shiftKey: true })).toBe(false)
+    expect(handOff).toHaveFocus()
+    // Between the ends Tab is the browser's to move.
+    keep.focus()
+    expect(fireEvent.keyDown(keep, { key: 'Tab' })).toBe(true)
+  })
+
+  it('closes on Escape without the key reaching the app, and leaves nobody out of the party', async () => {
+    const { leave, onLeave, onEndParty } = await open()
+    const appHandler = vi.fn()
+    window.addEventListener('keydown', appHandler)
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    window.removeEventListener('keydown', appHandler)
+    expect(appHandler).not.toHaveBeenCalled()
+    expect(onLeave).not.toHaveBeenCalled()
+    expect(onEndParty).not.toHaveBeenCalled()
+    // Focus is back where it came from, on every way of closing.
+    expect(leave).toHaveFocus()
+  })
+
+  it('returns focus to the leave button when dismissed with Keep watching', async () => {
+    const { user, leave, dialog } = await open()
+    await user.click(within(dialog).getByRole('button', { name: 'Keep watching' }))
+    expect(leave).toHaveFocus()
+  })
+
+  it('does not listen for Escape once it is closed', async () => {
+    const { user, dialog } = await open()
+    await user.click(within(dialog).getByRole('button', { name: 'Keep watching' }))
+    const appHandler = vi.fn()
+    window.addEventListener('keydown', appHandler)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    window.removeEventListener('keydown', appHandler)
+    expect(appHandler).toHaveBeenCalledTimes(1)
   })
 })
