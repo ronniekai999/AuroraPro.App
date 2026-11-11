@@ -116,6 +116,35 @@ function rejectReplacement(reason: string | null, identity: 'failed' | 'committe
 async function advanceLoadWindow() { await act(async () => { vi.advanceTimersByTime(3100) }); await settle() }
 
 describe('Cast first-release regressions through VideoPlayer', () => {
+  // A double tap is a user seek like any other: while casting it has to reach
+  // the receiver through the path the skip button takes, not the frozen local
+  // element. Two fresh casts, one seek each; what reached the receiver must match.
+  describe('a double tap while casting', () => {
+    const reached: Record<string, unknown[]> = {}
+    const receiverCalls = () => [
+      ...fake.cast.seek.mock.calls.map(c => ['seek', ...c]),
+      ...fake.cast.loadCurrent.mock.calls.map(c => ['load', ...c]),
+    ]
+    for (const how of ['skip button', 'double tap'] as const) {
+      it(`${how}: seeks the receiver, never the local element`, async () => {
+        const { view, element } = await connectedCast()
+        vi.spyOn(video(), 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 500, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => ({}) } as DOMRect)
+        fake.cast.remote.currentTime = 50; view.rerender(element()); await settle()
+        fake.cast.seek.mockClear(); fake.cast.loadCurrent.mockClear()
+        const localBefore = video().currentTime
+        if (how === 'skip button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+        else for (let i = 0; i < 2; i++) {
+          fireEvent.pointerUp(video(), { pointerType: 'touch', clientX: 800 })
+          fireEvent.click(video(), { clientX: 800 })
+        }
+        await settle(); view.rerender(element()); await settle()
+        reached[how] = receiverCalls()
+        expect(reached[how].length).toBeGreaterThan(0)
+        expect(video().currentTime).toBe(localBefore)
+        if (how === 'double tap') expect(reached['double tap']).toEqual(reached['skip button'])
+      })
+    }
+  })
   it('offers a working Stop control for an SDK-resumed cast without a local target', async () => {
     fake.cast.status.connected = true
     const close = vi.fn(), remote = vi.fn()

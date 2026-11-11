@@ -100,9 +100,9 @@ export function ReactionOverlay({ events }: Props) {
       `}</style>
       <div
         aria-hidden="true"
-        // .stage-party-reactions confines the float area to the theater box
-        // while the theater is up, so reactions don't drift across the dimmed
-        // app either side of the picture.
+        // .stage-party-reactions confines the float area to the picture when
+        // the player is boxed, so reactions do not drift across the page or
+        // the party panel beside it.
         className="stage-party-reactions fixed pointer-events-none z-[65] inset-0 overflow-hidden"
         // 2026-05-27 (holistic deep-debug H1) — exclude from
         // BugReport screenshot capture. Floating emoji reactions
@@ -121,7 +121,7 @@ export function ReactionOverlay({ events }: Props) {
             }}
           >
             {r.emoji}
-            <div className="text-[10px] text-white/70 text-center font-medium -mt-1">
+            <div className="text-[12px] text-white text-center font-semibold -mt-1">
               {r.username}
             </div>
           </div>
@@ -174,21 +174,31 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
   // future dismiss — reports through one channel.
   useEffect(() => { onOpenChange?.(open) }, [open, onOpenChange])
   return (
-    <div className="relative">
+    <div className="relative flex-none">
       <button
+        type="button"
         onClick={() => setOpen(o => !o)}
-        className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
+        className="stage-tr-btn grid text-[20px]"
+        data-open={open || undefined}
+        aria-label="Send a reaction"
+        aria-haspopup="true"
+        aria-expanded={open}
         title="Send a reaction"
       >
-        😂
+        <span aria-hidden="true">😂</span>
       </button>
       {open && (
-        <div className={`absolute ${popoverV} ${popoverAnchor} bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex flex-wrap justify-center gap-1 max-w-[min(90vw,288px)] z-20`}>
+        <div
+          role="group"
+          aria-label="Send a reaction"
+          className={`absolute ${popoverV} ${popoverAnchor} bg-surface-raised-2 rounded-control shadow-[0_24px_64px_rgba(0,0,0,0.6)] p-2 flex flex-wrap justify-center gap-1 w-[min(90vw,288px)] z-20`}
+        >
           {QUICK_EMOJI.map(e => (
             <button
               key={e}
+              type="button"
               onClick={() => { onSend(e); setOpen(false) }}
-              className="text-2xl px-2 py-1 hover:bg-white/[0.08] rounded transition-colors"
+              className="w-12 h-12 grid place-items-center text-2xl rounded-control hover:bg-action-soft transition-colors"
               aria-label={`React with ${e}`}
             >
               {e}

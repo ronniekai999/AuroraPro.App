@@ -119,8 +119,8 @@ describe('WEB regressions through the real VideoPlayer', () => {
     const audio = vi.fn(); render(<RebuildHarness onAudio={audio} />); await bootHls(); video().currentTime = 25
     const pending = deferred<Awaited<ReturnType<typeof getStreamInfo>>>(); vi.mocked(getStreamInfo).mockImplementation(() => pending.promise)
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /English/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /French/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /English/ })); await settle()
     expect(audio.mock.calls).toEqual([[1, 35000], [0, 35000]])
   })
   it.each(['close then open', 'replace target while error visible'])('binds listeners after an error: %s', async mode => {
@@ -333,10 +333,10 @@ describe('Independent adversarial timing checks', () => {
     vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
     const audio = vi.fn(); render(<RebuildHarness onAudio={audio} />); await settle()
     fireEvent.canPlay(video()); await settle(); video().currentTime = 80; video().pause()
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /French/ })); await settle()
     // The new file is not loadable yet; the resume listener is still pending.
     expect(video().currentTime).toBe(0)
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /English/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /English/ })); await settle()
     expect(audio.mock.calls).toEqual([[1, 80000], [0, 80000]])
   })
   it('rebinds party broadcasts after a direct target replacement while an error is visible', async () => {
@@ -446,7 +446,7 @@ it('applies relative seek intent made during a paused direct resume before canpl
   vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
   const audio = vi.fn(); render(<RebuildHarness onAudio={audio} />); await settle(); fireEvent.canPlay(video()); await settle()
   video().currentTime = 80; video().pause()
-  fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+  fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /French/ })); await settle()
   fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
   fireEvent.canPlay(video()); await settle()
   expect(video().currentTime).toBe(90); expect(video().paused).toBe(true)
@@ -474,7 +474,7 @@ describe('Second independent adversarial review', () => {
     vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
     render(<RebuildHarness />); await settle(); fireEvent.canPlay(video()); await settle()
     video().currentTime = 80; video().pause()
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /French/ })); await settle()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     let loaded: unknown
     fake.cast.start.mockImplementation(async () => { loaded = await fake.getter?.(); fake.cast.status.connected = true })
@@ -554,7 +554,7 @@ describe('Second independent adversarial review', () => {
     vi.mocked(getStreamInfo).mockResolvedValue(info('direct_play') as Awaited<ReturnType<typeof getStreamInfo>>)
     render(<RebuildHarness />); await settle(); fireEvent.canPlay(video()); await settle()
     video().currentTime = 80; video().pause()
-    fireEvent.click(screen.getByRole('button', { name: /^Audio/ })); fireEvent.click(screen.getByRole('button', { name: /French/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' })); fireEvent.click(screen.getByRole('menuitemradio', { name: /French/ })); await settle()
     const mint = deferred<Awaited<ReturnType<typeof createDirectCastToken>>>()
     vi.mocked(createDirectCastToken).mockReturnValueOnce(mint.promise)
     let loaded: unknown

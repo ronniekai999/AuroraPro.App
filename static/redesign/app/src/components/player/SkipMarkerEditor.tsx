@@ -1,0 +1,164 @@
+// Admin editor for a file's skip markers, opened from the player's overflow
+// menu. It lives in the player rather than on an admin page because fixing a
+// marker means looking at the picture: pause on the intro's last frame, press
+// "End = now", save. Saved values are written as detector='manual', which the
+// background analyser never overwrites. "Off" stores a zero-length marker (the
+// analyser will not re-add it and the player never shows it); "Auto" deletes
+// the row and queues fresh detection.
+
+import { useCallback, useEffect, useState } from 'react'
+import { deleteSkipMarker, getAdminSkipMarkers, putSkipMarker, type SkipMarker } from '@/lib/api'
+import { PlayerSheet } from './PlayerSheets'
+
+const MARKER_KINDS: SkipMarker['kind'][] = ['recap', 'intro', 'credits']
+
+function fmtMarkerTime(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged, onClose }: {
+  fileId: number
+  fileType: 'media' | 'episode'
+  currentSec: number
+  // Called with the file's full marker list after every write, so the
+  // player's timeline and Skip button follow the edit (the caller drops
+  // zero-length suppressions).
+  onMarkersChanged: (markers: SkipMarker[]) => void
+  onClose: () => void
+}) {
+  type Draft = { start_ms: number; end_ms: number; detector?: string }
+  const [drafts, setDrafts] = useState<Partial<Record<SkipMarker['kind'], Draft>>>({})
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const seedFromServer = useCallback((markers: SkipMarker[]) => {
+    const next: Partial<Record<SkipMarker['kind'], Draft>> = {}
+    for (const m of markers) {
+      next[m.kind] = { start_ms: m.start_ms, end_ms: m.end_ms, detector: m.detector }
+    }
+    setDrafts(next)
+  }, [])
+
+  // The FULL list, suppressions included: stream info carries only the
+  // markers a viewer is shown.
+  useEffect(() => {
+    const ac = new AbortController()
+    getAdminSkipMarkers(fileId, fileType, ac.signal)
+      .then(markers => { seedFromServer(markers); setLoaded(true) })
+      .catch(e => {
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setErr('Failed to load markers')
+        setLoaded(true)
+      })
+    return () => ac.abort()
+  }, [fileId, fileType, seedFromServer])
+
+  const setNow = (kind: SkipMarker['kind'], field: 'start_ms' | 'end_ms') => {
+    const nowMs = Math.max(0, Math.round(currentSec * 1000))
+    setDrafts(prev => {
+      const d = prev[kind] ?? { start_ms: 0, end_ms: 0 }
+      return { ...prev, [kind]: { ...d, [field]: nowMs } }
+    })
+  }
+
+  const write = async (kind: SkipMarker['kind'], startMs: number, endMs: number) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const markers = await putSkipMarker(fileId, fileType, { kind, start_ms: startMs, end_ms: endMs })
+      seedFromServer(markers)
+      onMarkersChanged(markers)
+    } catch {
+      setErr('Save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const redetect = async (kind: SkipMarker['kind']) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await deleteSkipMarker(fileId, fileType, kind)
+      const markers = await getAdminSkipMarkers(fileId, fileType)
+      seedFromServer(markers)
+      onMarkersChanged(markers)
+    } catch {
+      setErr('Update failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <PlayerSheet label="Edit skip markers" anchor="top" onClose={onClose}>
+      <div className="px-3 pt-3 pb-2">
+        <h3 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Skip markers</h3>
+        {!loaded && <p className="mt-2 text-[14px] text-ink-2">Loading…</p>}
+        {loaded && MARKER_KINDS.map(kind => {
+          const d = drafts[kind]
+          const suppressed = !!d && d.start_ms === 0 && d.end_ms === 0 && d.detector === 'manual'
+          const invalid = !!d && d.end_ms < d.start_ms
+          return (
+            <div key={kind} className="py-3 border-t border-line first:border-t-0">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[15px] text-ink capitalize">{kind}</span>
+                <span className="text-[13px] text-ink-2 tabular-nums">
+                  {!d
+                    ? 'none'
+                    : suppressed
+                      ? 'off'
+                      : `${fmtMarkerTime(d.start_ms)} to ${fmtMarkerTime(d.end_ms)}${d.detector === 'manual' ? ' · manual' : ''}`}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center gap-2 flex-wrap">
+                <MarkerEditButton label="Start = now" disabled={busy} onClick={() => setNow(kind, 'start_ms')} />
+                <MarkerEditButton label="End = now" disabled={busy} onClick={() => setNow(kind, 'end_ms')} />
+                <MarkerEditButton
+                  label="Save"
+                  emphasis
+                  disabled={busy || !d || invalid}
+                  onClick={() => { if (d) void write(kind, d.start_ms, d.end_ms) }}
+                />
+                <MarkerEditButton label="Off" disabled={busy || suppressed} onClick={() => void write(kind, 0, 0)} />
+                <MarkerEditButton label="Auto" disabled={busy || !d} onClick={() => void redetect(kind)} />
+              </div>
+              {invalid && <p className="text-warn text-[12px] mt-1.5">End must be at or after start.</p>}
+            </div>
+          )
+        })}
+        {err && <p role="status" className="text-danger-ink text-[13px] mt-2">{err}</p>}
+        <p className="text-ink-2 text-[12px] mt-2 leading-snug">
+          Saved values stick: auto-detection never overwrites them.
+          Off hides the marker; Auto queues detection again.
+        </p>
+      </div>
+    </PlayerSheet>
+  )
+}
+
+function MarkerEditButton({ label, onClick, disabled, emphasis }: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  emphasis?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`h-9 px-3 rounded-control text-[13px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        emphasis
+          ? 'bg-action text-action-on hover:brightness-95'
+          : 'bg-action-soft text-ink hover:bg-white/[0.16]'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}

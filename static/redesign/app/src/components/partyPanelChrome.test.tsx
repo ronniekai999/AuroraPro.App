@@ -4,16 +4,15 @@
 //
 //   1. Minimizing the chat parked the restore chip ON the player title.
 //      The chip belongs at viewport `top-4 left-4`, mirroring the VoicePill
-//      pinned at `top-4 right-4` on the opposite side of the screen. The old
-//      theater rule re-anchored it INTO the theater box's top-left — the
-//      corner the player topbar's title block owns. The rule now adjusts
-//      `top` ONLY (via `--theater-chip-top`, index.css): unchanged while the
-//      box is inset, below the always-visible topbar when the theater goes
-//      full-bleed and the title moves under the viewport corner. jsdom
-//      computes no CSS geometry, so these tests pin the React half of that
-//      contract: the base utilities and the `stage-party-dock` hook the
-//      theater rule keys on. The rule's own geometry lives in index.css and
-//      the manual verify-built-css.mjs report.
+//      pinned at `top-4 right-4` on the opposite side of the screen. An old
+//      rule re-anchored it INTO the player box's top-left, the corner the
+//      player's title block owns. The rule now adjusts `top` ONLY (via
+//      `--theater-chip-top`, index.css): while the player is in the window
+//      the chip drops below the player's top bar, and it is never moved
+//      sideways. jsdom computes no CSS geometry, so these tests pin the
+//      React half of that contract: the base utilities and the
+//      `stage-party-dock` hook the rule keys on. The rule's own geometry
+//      lives in index.css and the manual verify-built-css.mjs report.
 //
 //   2. The rail-header minimize button wore the corners-out glyph — the
 //      universal FULLSCREEN icon, while the player's real fullscreen button

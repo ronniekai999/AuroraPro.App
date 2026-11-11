@@ -1882,302 +1882,186 @@ html[data-effects="reduced"] .stage-toolbar {
   box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.9), 0 0 18px rgba(168, 85, 247, 0.15);
 }
 
-/* ══ Player + theater (Aurora Stage Phase 7) ══════════════════════════
-   D5: the theater inset REPLACES the old black backdrop, so non-fullscreen
-   playback is a rounded box with the dimmed app behind it. D6: that app is
-   inert — see .stage-dim-app.
+/* ══ Player ═══════════════════════════════════════════════════════════
+   The player covers the window edge to edge, with the top bar and the control
+   band as overlays that fade away. A viewer in a watch party can instead box
+   the picture beside the party panel.
 
    None of these sets `display`; the call sites do. */
 
-/* The still-mounted app, seen through the theater for the first time.
-   Kept as a sibling that the player dims rather than something the player
-   contains, so nothing about the app tree changes when playback starts.
-   D6 says inert: `pointer-events: none` here is the styling half, and the call
-   site adds the real `inert` attribute (plus a scroll lock) — which is what
-   actually removes the app from the tab order and the a11y tree. The
-   `pointer-events` here covers the MOUSE only; on its own it would leave every
-   control behind the veil tabbable and screen-reader reachable.
-
-   NOTE `filter` is not free here: per Filter Effects §4 it makes this element a
-   containing block for `position: fixed` AND `position: absolute` descendants,
-   as well as a stacking context. `<main>` is `min-h-screen`, i.e.
-   document-height, so a `fixed inset-0` modal rendered INSIDE `<main>` would
-   resolve against the document rather than the viewport and centre its card at
-   the document's midpoint — off-screen. Nothing hits that today: `inert` stops
-   a new one from opening, and every app overlay (toasts, SearchPalette, the
-   party surfaces, both gates, the portal-based modals) is a sibling AFTER
-   `</main>`. It is a live trap for anything added inside.
-   `opacity` does NOT compound it — opacity creates a stacking context but not a
-   containing block for fixed, and the filter already created the former.
-   `position: sticky` is unaffected either way: its offsets resolve against the
-   scrollport, not the containing block, so the sticky chrome inside `<main>`
-   still behaves. */
+/* The still-mounted app while the player is in the window. The player is
+   opaque, so nothing of the app shows behind it; this is only the styling half
+   of the real `inert` attribute (plus a scroll lock) the call site adds, which
+   is what removes the app from the tab order and the accessibility tree.
+   No opacity and no filter: a filter would make <main> the containing block of
+   every `position: fixed` descendant, for an effect nobody can see. */
 .stage-dim-app {
-  opacity: 0.5;
-  filter: saturate(0.7);
   pointer-events: none;
 }
-/* The veil over it. `backdrop-filter: blur(6px)` composites over a layer that
-   contains PLAYING VIDEO — the per-frame cost flagged as deep-debug Bug 25 and
-   the reason every blurred Stage primitive honours the reduced-blur opt-out.
-   This one has to as well; the fallback below raises the flat alpha so the
-   veil still reads as a veil without the blur. */
-.stage-dim-veil {
-  position: absolute;
-  inset: 0;
-  background: rgba(3, 3, 5, 0.72);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  /* Fades in under the opening theater (Stage refresh, P2). */
-  animation: veilIn 260ms var(--ease-standard) backwards;
-}
-html[data-effects="reduced"] .stage-dim-veil {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: rgba(3, 3, 5, 0.92);
-}
-/* prefers-reduced-transparency is the accessibility counterpart of the blur
-   budget: a user asking for less transparency gets an opaque veil, which also
-   removes the compositing cost. Progressive — no support means no change. */
-@media (prefers-reduced-transparency: reduce) {
-  .stage-dim-veil {
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-    background: #030305;
-  }
-}
 
-/* The theater box itself. Inset via `position: absolute` + edge offsets rather
-   than a max-width card, because the mockup's proportions are asymmetric
-   (90px sides, 58px top/bottom) and a centred card cannot express that. */
-/* The inset lives in custom properties so the theater box and the watch-party
-   surfaces that anchor to it read the same numbers. Declared unlayered and
-   immediately before the rules that consume them, so the responsive `:root`
-   overrides further down win on source order (all are (0,1,0)).
+/* The shell's edges live in custom properties so the box and the watch-party
+   surfaces placed around it read the same numbers. Declared unlayered and
+   immediately before the rules that consume them.
 
-   `--theater-chip-top` is the minimized-party chip's `top` while the theater is
-   up (consumed by the `.stage-party-dock` rule below). 16px = the chip's own
-   `top-4`, putting it in the dimmed strip above the inset box; the full-bleed
-   width block overrides it because there the box corner IS the viewport corner
-   and 16px would sit the chip on the topbar title. */
+   Edge to edge: both insets are 0. Boxed (the player stamps
+   `html[data-player-layout="boxed"]`): a 16px margin all round, and the right
+   edge gives way to the party rail when the rail is open
+   (`html[data-party-rail]`, stamped by PartyPanel): its 340px plus a 16px gap.
+
+   `--theater-chip-top` is where the minimized-party chip sits while the
+   player is in the window: under the top bar, whose back button and title
+   own the corner the chip would otherwise land on (12px of padding, a 48px
+   button, the title's second line, and clearance). */
 :root {
-  --theater-inset-x: 90px;
-  --theater-inset-y: 58px;
-  --theater-chip-top: 16px;
+  --theater-inset-x: 0px;
+  --theater-inset-y: 0px;
+  --theater-rail-space: 0px;
+  --theater-chip-top: 104px;
+}
+/* Boxing is for wide windows. Below lg the party panel covers most of the
+   width anyway and a boxed picture would be a postage stamp, so the layout
+   attribute is simply not honoured there. `min-width: 1024px` is Tailwind's
+   `lg`, so the two agree at every width including fractional ones. */
+@media (min-width: 1024px) {
+  html[data-player-layout="boxed"] {
+    --theater-inset-x: 16px;
+    --theater-inset-y: 16px;
+  }
+  html[data-player-layout="boxed"][data-party-rail] {
+    --theater-rail-space: 356px;
+  }
+  html[data-player-layout="boxed"] .stage-theater {
+    border-radius: var(--radius-control);
+  }
 }
 .stage-theater {
   position: absolute;
   left: var(--theater-inset-x);
-  right: var(--theater-inset-x);
+  right: calc(var(--theater-inset-x) + var(--theater-rail-space));
   top: var(--theater-inset-y);
   bottom: var(--theater-inset-y);
-  border-radius: 20px;
   overflow: hidden;
-  border: 1px solid rgba(220, 200, 255, 0.2);
-  box-shadow: var(--glow-halo-strong), 0 40px 100px rgba(0, 0, 0, 0.8);
   background: #000;
-  /* The theater opens (Stage refresh, P2): a 340ms rise from .985 instead of
-     appearing in one frame; the veil behind it fades in (veilIn). TRANSFORM
-     ONLY: VideoPlayer swaps this class out in fullscreen and back in on
-     leaving it, so the entrance replays on every fullscreen exit, and the
-     first cut also faded the box from opacity 0 — the picture blanked for
-     ~340ms each time. A replayed rise of 8px just reads as the box settling
-     back into place. `backwards`, never `both` or `forwards`: a held `to`
-     transform computes to an identity matrix, which would make this box the
-     containing block for any `position: fixed` descendant for as long as the
-     player is open. Nothing inside it is fixed today (measured; the party
-     overlays mount in App, outside the player) — the fill keeps it that way
-     after the 340ms. */
+  /* The picture settles into place when the player opens. TRANSFORM ONLY, so
+     the picture is never blanked, and `backwards`, never `both` or
+     `forwards`: a held `to` transform computes to an identity matrix, which
+     would make this box the containing block for any `position: fixed`
+     descendant for as long as the player is open. */
   animation: theaterIn 340ms var(--ease-emphasized) backwards;
 }
 @keyframes theaterIn {
-  from { transform: translateY(8px) scale(0.985); }
+  from { transform: scale(0.985); }
   to { transform: none; }
 }
-@keyframes veilIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
 @media (prefers-reduced-motion: reduce) {
-  .stage-theater,
-  .stage-dim-veil {
+  .stage-theater {
     animation: none;
   }
 }
-/* Full-bleed below lg. 90px of inset per side leaves 195px of picture on a
-   375px screen — the theater framing is a desktop affordance, and on a phone
-   the honest answer is to use the whole viewport. Keeping the radius/border at
-   0 here too, since a rounded box flush to the bezel reads as a rendering bug.
-   1024px because at 768px the inset would still eat 23% of the width.
 
-   `not all and (min-width: 1024px)`, NOT `max-width: 1023px`: Tailwind's `lg:`
-   is `min-width: 1024px`, so the max-width form leaves (1023, 1024) exclusive
-   matching neither — reachable at 1023.5px via browser zoom, a fractional DPR
-   or a scrollbar-affected width, where the theater rendered inset (844px of
-   picture in a 1023.5px viewport) instead of full-bleed. Same correction the
-   md-boundary note above records; the negated form is the exact complement. */
-@media not all and (min-width: 1024px) {
-  :root {
-    --theater-inset-x: 0px;
-    --theater-inset-y: 0px;
-    /* Full-bleed: the theater topbar (always visible, in flow — only
-       fullscreen auto-hides it) now starts at the viewport's top-left and
-       draws the title at (24px, ~12px), exactly under a 16px-anchored chip.
-       Drop the chip below the topbar instead: py-3 (24px) + the 17px title
-       line (25.5px at lh 1.5) + the 11.5px subtitle line (~19px with mt-0.5)
-       ≈ 69px of topbar, +7px clearance. The height-only full-bleed block
-       below deliberately does NOT override this: it keeps --theater-inset-x
-       at 90px, so the title starts at x≈114 and the chip (right edge ≈96px)
-       clears it at 16px. */
-    --theater-chip-top: 76px;
-  }
-  .stage-theater {
-    border-radius: 0;
-    border-color: transparent;
-    box-shadow: none;
-  }
-}
-/* Short viewports go full-bleed too, keyed on HEIGHT — the width query alone
-   can't see this case. The insets are absolute where the old card's were
-   proportional (`max-h-[88vh]`), so 116px of vertical inset is 8% of a 1440px
-   viewport but 19% of a 600px one, and it lands on top of a controls band that
-   already covers 36% of the picture there. 88vh gave this for free; an absolute
-   inset has to ask. 720px is the point below which the inset costs more than
-   the framing is worth (at 700px: 84px of inset over a 465px picture). */
-@media (max-height: 720px) {
-  :root {
-    --theater-inset-y: 0px;
-  }
-  .stage-theater {
-    border-radius: 0;
-    border-color: transparent;
-    box-shadow: none;
-  }
-}
+/* ── Watch-party surfaces vs the player ────────────────────────────────
+   These are rendered by App, outside the player, and are viewport-anchored.
+   Gated on `html[data-player-surface="theater"]`, which App stamps while the
+   player is in the window (browser fullscreen and the minimized cast widget
+   keep the call sites' own offsets).
 
-/* ── Watch-party surfaces vs the theater box ───────────────────────────
-   IMPLEMENTATION_PLAN §D5 called for this and Phase 7b's first pass missed it:
-   these were viewport-anchored, which was invisible while the player filled
-   the screen behind an opaque backdrop and is not any more. With the theater
-   inset 90px/58px, the party rail straddled the boundary (~265px over the
-   video, ~75px over the dimmed app) and the reactions overlay floated emoji
-   across the dimmed app.
+   The party rail needs no rule: its own utilities put it 16px from the
+   viewport's right edge, which is over the picture's right side when the
+   picture fills the window and exactly the space the box leaves when it is
+   boxed.
 
-   Gated on `html[data-player-surface="theater"]`, which App stamps from the
-   surface the player reports: fullscreen and minimized must keep their viewport
-   offsets. The rail/reactions offsets are computed from the same inset
-   properties `.stage-theater` uses, and the dock chip's `--theater-chip-top`
-   is declared in the same `:root` blocks, so the responsive blocks above move
-   the box and its overlays together — there is no second copy of the numbers
-   to drift.
+   The minimized-party chip (`.stage-party-dock`) and the voice pill
+   (`.stage-voice-pill`) sit in the top corners, which the player's top bar
+   owns: the back button and title on the left, cast and the overflow menu on
+   the right. Both drop below the bar. `top` ONLY: the chip must never be
+   re-anchored into the box. These beat the call sites' `top-4` on
+   specificity ((0,2,1) vs (0,1,0)), which is the intent: the attribute is
+   only present while the player is up.
 
-   These beat the call sites' positioning utilities (`top-3 right-3` /
-   `sm:top-4 sm:right-4` on the rail, `top-4 left-4` on the dock chip,
-   `inset-0` on reactions) on specificity ((0,2,1) vs (0,1,0)), which is the
-   intent: the attribute is only present while the theater is up.
-
-   The rail and reactions anchor INTO the box. The minimized-party restore
-   chip (`.stage-party-dock`, PartyPanel's "Party" button) is the opposite
-   case: Phase 7b anchored it into the box's top-left too, which is the
-   corner the player topbar's title block owns — the chip sat ON the title.
-   The chip belongs at the viewport's top-left, mirroring the VoicePill's
-   `top-4 right-4` on the opposite side of the screen (the pill was never
-   box-anchored); in the inset theater that is the dimmed strip above the
-   box. Its rule therefore adjusts `top` ONLY, via `--theater-chip-top`:
-   16px (= its own `top-4`) while the box is inset, below the always-visible
-   topbar when the width query zeroes the insets and the title moves under
-   the viewport corner. `left` stays the call site's 16px everywhere. */
-html[data-player-surface="theater"] .stage-party-dock {
-  top: var(--theater-chip-top);
-}
-html[data-player-surface="theater"] .stage-party-rail {
-  top: calc(var(--theater-inset-y) + 12px);
-  right: calc(var(--theater-inset-x) + 12px);
-  bottom: calc(var(--theater-inset-y) + 12px);
+   Reactions float over the picture, so their area follows the box. */
+html[data-player-surface="theater"] .stage-party-dock,
+html[data-player-surface="theater"] .stage-voice-pill {
+  top: calc(var(--theater-inset-y) + var(--theater-chip-top));
 }
 html[data-player-surface="theater"] .stage-party-reactions {
-  inset: var(--theater-inset-y) var(--theater-inset-x);
+  inset: var(--theater-inset-y) calc(var(--theater-inset-x) + var(--theater-rail-space)) var(--theater-inset-y) var(--theater-inset-x);
 }
 
-/* Scrub bar. The track is the hit target; buffered fill, played fill, knob and
-   the hover readout all position against it. */
+/* Timeline. The 20px row is the hit target; the track, its fills, the marker
+   ranges, the knob and the hover readout all position against the track. */
 .stage-scrub-track {
   position: relative;
   width: 100%;
-  height: 5px;
-  border-radius: 5px;
+  height: 4px;
+  border-radius: 2px;
   background: rgba(255, 255, 255, 0.36);
-  /* Thickens 5 → 7px under the pointer or keyboard focus (Stage refresh, P1),
-     inside the 14px hit row, so nothing around it moves. The fills and the knob
-     position against the track and follow it; no alpha changes, so the contrast
-     figures below still hold. */
+  /* Thickens 4 → 6px under the pointer or keyboard focus, inside the 20px hit
+     row, so nothing around it moves. */
   transition: height 160ms var(--ease-standard);
 }
 .stage-scrub:hover .stage-scrub-track,
-.stage-scrub:focus-visible .stage-scrub-track { height: 7px; }
-/* Track 0.36 and buffered 0.75, against the mockup's 0.18/0.30.
-
-   The earlier justification for 0.28/0.45 measured a single sample point over a
-   BLACK frame and stopped there, which is the easy case. These sit over
-   arbitrary video, so the honest test is both extremes, and it only became
-   winnable once `.stage-controls-scrim` deepened the band underneath: with the
-   scrim at ~0.79 black at the scrub row, the backdrop's luminance is pinned to
-   0.000–0.035 whatever the frame is doing, so these ratios stop depending on
-   the content.
+.stage-scrub:focus-visible .stage-scrub-track { height: 6px; }
+/* Track 0.36 and buffered 0.6 are over `.stage-controls-scrim`, which pins the
+   backdrop at the timeline's y to between black and 0.035 luminance whatever
+   the frame is doing, so these do not depend on the picture:
      track vs backdrop      3.13:1 (black frame) · 3.01:1 (white frame)
-     buffered vs track      4.62:1 (black frame) · 3.05:1 (white frame)
-   Both clear the 1.4.11 3:1 floor at both extremes — that is what locates the
-   control and how far it has loaded.
-     played vs buffered     2.73:1 (black frame) · 2.96:1 (white frame)
-   That third boundary does NOT clear 3:1, and no set of alphas in one channel
-   can make three states mutually 3:1 apart over a range this wide. It is
-   carried by hue and by `.stage-scrub-pos`'s purple glow instead, which WCAG
-   credits for neither — stated rather than papered over. */
+     played vs track        4.9:1 and up (the played fill is solid white)
+   Buffered against track is 1.9:1: it is a secondary cue (how far the
+   transcoder has got), not what locates the control or the playhead. */
 .stage-scrub-buf {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.75);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.6);
+}
+/* An intro, recap or credits range: the same bar, taller. Height, not hue, is
+   what marks it, so it survives the played fill running across it (the fill
+   is drawn on top, at the track's own height) and needs no colour of its
+   own. */
+.stage-scrub-range {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  min-width: 3px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
 }
 .stage-scrub-pos {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
-  border-radius: 5px;
-  background: linear-gradient(90deg, var(--stage-purple), var(--stage-purple-lt));
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+  border-radius: 2px;
+  background: var(--action);
 }
 .stage-scrub-knob {
   position: absolute;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.4), 0 2px 8px rgba(0, 0, 0, 0.6);
+  background: var(--action);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
   pointer-events: none;
   transition: transform 120ms ease;
 }
-/* The knob's grow-on-hover lives HERE rather than as `group-hover:scale-110` on
-   the call site, and that is a correctness requirement, not tidiness: Tailwind
-   v3's scale utilities emit the whole transform chain —
-   `translate(var(--tw-translate-x), var(--tw-translate-y)) … scaleX(…) scaleY(…)`
-   — and `--tw-translate-x/y` default to 0 in preflight. At (0,2,0) the variant
-   beat this rule's (0,1,0) `translate(-50%, -50%)`, so hovering the scrub bar
-   REPLACED the knob's centring with translate(0,0) and kicked it 7px down and
-   7px right, mid-grab. Writing both parts in one declaration keeps them
-   composed. `.stage-scrub` is the marker the call site puts on the slider. */
+/* The knob's grow-on-hover lives HERE rather than as a scale utility on the
+   call site, and that is a correctness requirement: Tailwind's scale
+   utilities emit the whole transform chain with translate defaulting to 0,
+   which at (0,2,0) REPLACED this rule's centring and kicked the knob down and
+   right mid-grab. Writing both parts in one declaration keeps them composed.
+   `.stage-scrub` is the marker the call site puts on the slider. */
 .stage-scrub:hover .stage-scrub-knob,
 .stage-scrub:focus-visible .stage-scrub-knob {
   transform: translate(-50%, -50%) scale(1.14);
 }
-/* Reduced motion — the grow is a decorative affordance; the knob is already
-   4px-ringed and unmissable. Declared after the rule it overrides, since both
-   are unlayered and at (0,2,0) source order is what decides. */
+/* Reduced motion: the grow is decorative. Declared after the rule it
+   overrides, since both are unlayered and at (0,2,0) source order decides. */
 @media (prefers-reduced-motion: reduce) {
   .stage-scrub-knob { transition: none; }
   .stage-scrub:hover .stage-scrub-knob,
@@ -2217,65 +2101,76 @@ html[data-player-surface="theater"] .stage-party-reactions {
   .stage-orb:hover,
   .stage-orb:focus-visible { transform: none; }
 }
-/* Hover readout. `pointer-events: none` is load-bearing — the label sits over
+/* Hover readout. `pointer-events: none` is load-bearing: the label sits over
    the track, and without it the pointer would enter the label, leave the
    track, and the readout would flicker itself out of existence. */
 .stage-scrub-ts {
   position: absolute;
   bottom: 18px;
   transform: translateX(-50%);
-  font-size: var(--fs-caption);
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  background: rgba(10, 8, 18, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--ink);
+  background: var(--surface-raised-2);
   padding: 4px 9px;
-  border-radius: 7px;
+  border-radius: var(--radius-art);
   white-space: nowrap;
   pointer-events: none;
 }
 
-/* Transport buttons. */
+/* Player buttons: an icon on the picture, with a fill only under the pointer,
+   while pressed, or while the menu it opens is up. 48px so a thumb can hit
+   them. */
 .stage-tr-btn {
   position: relative;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-control);
   place-items: center;
   color: #fff;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: var(--glass-lip); /* P1 */
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
+  background: transparent;
+  transition: background-color var(--dur-fast) var(--ease-standard), transform 120ms var(--ease-standard);
 }
-.stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
-/* Press feedback (P1). Owned here rather than as a call-site utility so
-   nothing in PlayerControls has to change. */
+.stage-tr-btn:not(:disabled):hover,
+.stage-tr-btn[data-open] { background: rgba(255, 255, 255, 0.16); }
 .stage-tr-btn:not(:disabled):active { transform: scale(0.94); transition-duration: 80ms; }
-.stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-/* The primary play/pause: white on dark, the one control that should be
-   findable without looking. */
+/* A locked control (speed in a party) stays readable: --ink-3 is the lightest
+   text the scrim's backdrop carries at 4.5:1. */
+.stage-tr-btn:disabled { color: var(--ink-3); cursor: not-allowed; }
 .stage-tr-btn-primary {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: #fff;
-  color: #0a0a0a;
-  border-color: transparent;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  width: 56px;
+  height: 56px;
 }
-.stage-tr-btn-primary:hover { background: #f1f1f1; }
-/* A soft purple ring around the white play button under the pointer (P1).
-   box-shadow, so it stacks with the global :focus-visible outline instead of
-   replacing it. */
-.stage-tr-btn-primary:not(:disabled):hover { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(168, 85, 247, 0.32); }
+/* A button that carries words ("Audio and subtitles", "1x"). */
+.stage-tr-btn-text {
+  width: auto;
+  min-width: 48px;
+  padding: 0 14px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* The volume slider: white, like every other fill in the player. */
+.stage-volume { accent-color: var(--action); }
 
-/* The control band glides as it hides and returns (P1). PlayerControls' root
-   carries `data-player-chrome` and flips `aria-hidden` with its own opacity
-   fade (a call-site utility on the ROOT, untouched here); this moves only the
-   inner band, which has no transition or transform utilities of its own. CSS
-   hooks only — PlayerControls.tsx is not edited. The transform exists only while
-   hidden (and inert), so a visible band holds no transform. */
+/* The control band's padding. Phone gutters are 12px and the bottom edge
+   clears the home indicator. */
+.player-band {
+  position: relative;
+  padding: 56px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 640px) {
+  .player-band { padding: 64px 32px 24px; }
+}
+
+/* The band glides as it hides and returns. PlayerControls' root carries
+   `data-player-chrome` and flips `aria-hidden` with its own opacity fade; this
+   moves only the inner band. The transform exists only while hidden (and
+   inert), so a visible band holds no transform. */
 [data-player-chrome] > .stage-controls-scrim {
   transition: transform var(--dur-enter) var(--ease-emphasized);
 }
@@ -2290,148 +2185,231 @@ html[data-player-surface="theater"] .stage-party-reactions {
   [data-player-chrome][aria-hidden="true"] > .stage-controls-scrim,
   .stage-tr-btn:not(:disabled):active { transform: none; }
 }
-/* The "10" on the skip buttons. */
-/* The "10" subscript inside the skip-back/skip-forward glyphs. It is the ONLY
-   thing distinguishing a 10-second skip from any other interval, so it has to
-   be readable — the mockup draws it at 7.5px, which is below the floor at which
-   a two-digit numeral is legible over moving video even at 800 weight. 9.5px is
-   the smallest size where both digits hold together; `bottom` drops a hair to
-   keep it clear of the arrow's baseline at the larger size. */
+/* The "10" inside the back and forward glyphs: the only thing that says how
+   far they jump, so it has to be readable. 9.5px is the smallest size where
+   both digits hold together inside a 24px arrow; it is a glyph label, exempt
+   from the 12px text floor the way an icon's own strokes are. */
 .stage-tr-secs {
   position: absolute;
-  bottom: 2px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -42%);
   font-size: 9.5px;
   font-weight: 800;
-  color: rgba(255, 255, 255, 0.85);
+  color: #fff;
   letter-spacing: 0.01em;
 }
 
-/* Cast / AirPlay pill — cyan so it never reads as a purple Aurora control;
-   an active remote session is a different kind of state. */
+/* "Casting" / "AirPlay": while a remote session is live this surface is a
+   remote control, and this says so. Opaque, so the label never sits on
+   whatever frame is playing. */
 .stage-cast-pill {
   align-items: center;
   gap: 8px;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
-  font-size: 12px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  font-size: 13px;
   font-weight: 600;
-  background: rgba(8, 47, 54, 0.8);
-  border: 1px solid rgba(34, 211, 238, 0.5);
-  color: #a5f3fc;
+  background: var(--surface-raised-2);
+  color: var(--ink);
   white-space: nowrap;
 }
-/* Near-opaque teal fill, not the mockup's rgba(34,211,238,0.14) over video:
-   that put 12px text on whatever frame happened to be playing. This is the
-   same fix .stage-cbadge-pub needed. */
 .stage-cast-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--stage-cyan);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.8);
+  background: var(--ok);
   flex: none;
 }
 
-/* Skip-intro / skip-credits pill. White-on-dark because it appears over
-   arbitrary video and has to be unmissable for the few seconds it exists. */
+/* Skip intro / recap / credits. White on any frame: it appears for a few
+   seconds and has to be unmissable in that window. */
 .stage-skip-pill {
   align-items: center;
   gap: 8px;
-  height: 40px;
-  padding: 0 18px;
+  height: 48px;
+  padding: 0 24px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.95);
-  color: #0a0a0a;
-  font-weight: 700;
-  font-size: 13px;
-  /* The pill's TEXT is fine either way (19.8:1 on white, 17.7:1 on black). Its
-     BOUNDARY is the problem: a 0.95-white fill against a white frame measures
-     1.00:1 — literally invisible — the exact mirror of the
-     translucent-black-pill-on-a-night-scene failure this pill replaced. 1.4.11
-     applies to the boundary of a control, not only to its label, and the drop
-     shadow separates downward only.
-     0.42, not the 0.25 this was first written at: 0.25 measures 1.83:1 against
-     the fill, which is better than 1.00:1 and still not the 3:1 the criterion
-     asks for. 0.42 is the alpha at which the border clears 3:1 at BOTH frame
-     extremes (2.99:1 on black, 3.04:1 on white) — deriving it rather than
-     eyeballing it is the whole point, since the first pass got the direction
-     right and the magnitude wrong. */
+  background: var(--action);
+  color: var(--on-action);
+  font-weight: 600;
+  font-size: 16px;
+  /* The label is fine on any frame (about 19:1). The BOUNDARY is the problem:
+     a white fill against a white frame measures 1.00:1, and 1.4.11 applies to
+     the boundary of a control, not only to its label. 0.42 is the alpha at
+     which the border clears 3:1 at both frame extremes (2.99:1 on black,
+     3.04:1 on white); the drop shadow separates downward only. */
   border: 1px solid rgba(0, 0, 0, 0.42);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
-  transition: background-color var(--dur-fast) var(--ease-standard);
+  transition: filter var(--dur-fast) var(--ease-standard);
 }
-.stage-skip-pill:hover { background: #fff; }
+.stage-skip-pill:hover { filter: brightness(0.94); }
 
 /* ── The two player scrims ──────────────────────────────────────────────
-   Both were Tailwind gradient utilities at the call sites
-   (`from-black/80 to-transparent`, `from-black via-black/70 to-transparent`),
-   and both were too shallow by a wide margin, because the alpha that matters is
-   the one at the TEXT's y — not the one at the stop.
+   The alpha that matters is the one at the TEXT's y, not the one at the stop.
 
-   The top bar's far stop was 0, so the alpha where the text actually sits was
-   nowhere near 0.8. Measured at the SUBTITLE's y (~70% down the 68.75px bar,
-   the worst case of the two lines — the title sits higher on the same ramp and
-   is therefore strictly better off), the old gradient resolved to 0.242, and
-   over a white frame — a daylight exterior, a title card — the 11.5px
-   `text-white/60` subtitle measured 1.44:1. No text alpha fixes that: `white`
-   itself was only 1.78:1 at that point. The gradient is the only lever, which is
-   exactly what `.stage-topnav` records having learned when Phase 4 made the hero
-   full-bleed — and this bar sits over arbitrary video, a strictly harsher case
-   than one hero image. Same remedy, same 0.72 far stop. At the subtitle's y:
-     subtitle  7.37:1 (black frame) · 4.53:1 (white frame)  [white/60 @ 11.5px]
-     title     21.0:1 (black frame) · 9.23:1 (white frame)  [white @ 17px/700,
-               evaluated at the same y — the true figure is better still, and
-               17px is NOT large text: the threshold is 18.66px, so it needs 4.5]
-   Both figures are reproducible with contrast.mjs; the earlier draft of this
-   comment quoted 4.53:1 for the title, which was the subtitle's number. */
+   Top bar. Its content ends about 96px down a bar that is 136px tall with the
+   fade-out padding; the gradient holds 0.72 until 70% (95px), so every line
+   of text sits on at least 0.72 black over arbitrary video:
+     title      white @ 22px/600   9.2:1 on a white frame
+     subtitle   --ink @ 14px       8.4:1
+     notice     --ink-2 @ 13px     4.6:1
+   and better on anything darker. */
 .stage-player-topbar {
   background: linear-gradient(
     to bottom,
-    rgba(0, 0, 0, 0.92) 0%,
+    rgba(0, 0, 0, 0.88) 0%,
     rgba(0, 0, 0, 0.72) 70%,
     rgba(0, 0, 0, 0) 100%
   );
 }
-/* The controls band, 150.75px tall. The scrub row sits 62% up it, where the old
-   `via-black/70` resolved to 0.533 — enough on a night scene, not enough on
-   anything bright: the 12.5px readouts measured 3.67:1 and 3.04:1 against a
-   white frame, and `white` at that y topped out at 4.47:1. At 0.79 they reach
-   9.4:1 and 6.9:1, and — the reason this matters beyond the text — the scrub
-   track's own backdrop stops being the video at all, which is what makes the
-   track/buffered ratios above frame-independent. */
+/* The control band. The timeline and everything under it sit in the lower
+   two thirds, on 0.86 black or more, which is what makes the timeline's own
+   ratios frame-independent and carries the 15px readout and the 12px range
+   names (--ink-2, 7.6:1 on a white frame). The top third is the fade, and
+   holds nothing. */
 .stage-controls-scrim {
   background: linear-gradient(
     to top,
     rgba(0, 0, 0, 0.94) 0%,
-    rgba(0, 0, 0, 0.86) 55%,
-    rgba(0, 0, 0, 0.62) 80%,
+    rgba(0, 0, 0, 0.86) 66%,
+    rgba(0, 0, 0, 0.5) 86%,
     rgba(0, 0, 0, 0) 100%
   );
 }
 
-/* Up-next card, shown over the credits. */
+/* Up next, shown over the credits; the series-end notice shares it. Opaque:
+   no blur over playing video. */
 .stage-upnext {
-  width: 252px;
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  background: linear-gradient(180deg, rgba(30, 26, 46, 0.94), rgba(12, 10, 20, 0.97));
-  backdrop-filter: blur(20px);
-  border: 1px solid var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong), 0 24px 60px rgba(0, 0, 0, 0.65);
-}
-html[data-effects="reduced"] .stage-upnext {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: #0c0a14;
+  width: min(320px, calc(100vw - 24px));
+  padding: 16px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised-2);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
 }
 .stage-upnext-eyebrow {
-  font-size: var(--fs-label);
-  letter-spacing: 0.12em;
+  font-size: 12px;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--stage-purple-lt);
-  font-weight: 700;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+/* ── Player menus ───────────────────────────────────────────────────────
+   Audio and subtitles, speed, and the overflow menu. A popover in the corner
+   its button lives in; on a phone, or with any coarse pointer, a sheet rising
+   from the bottom edge, where a thumb is. Opaque, above the control band. */
+.player-sheet {
+  position: absolute;
+  z-index: 56;
+  right: 32px;
+  bottom: 132px;
+  width: 360px;
+  max-width: calc(100% - 64px);
+  max-height: min(70%, 560px);
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: var(--radius-sheet);
+  background: var(--surface-raised-2);
+  color: var(--ink);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+.player-sheet[data-anchor="top"] {
+  top: 88px;
+  bottom: auto;
+}
+.player-sheet-grip { display: none; }
+.player-sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  text-align: left;
+  font-size: 15px;
+  color: var(--ink);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.player-sheet-item:hover { background: rgba(255, 255, 255, 0.08); }
+@media not all and (min-width: 640px), (pointer: coarse) {
+  .player-sheet,
+  .player-sheet[data-anchor="top"] {
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    max-width: none;
+    max-height: 78%;
+    padding: 8px 8px calc(12px + env(safe-area-inset-bottom, 0px));
+    border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+    animation: playerSheetIn 220ms var(--ease-emphasized) backwards;
+  }
+  .player-sheet-grip {
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: 4px auto 6px;
+    border-radius: 2px;
+    background: var(--ink-3);
+  }
+}
+@keyframes playerSheetIn {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .player-sheet,
+  .player-sheet[data-anchor="top"] { animation: none; }
+}
+
+/* What a double tap did: "10 seconds back" on the side that was tapped. */
+.player-tap-flash {
+  position: absolute;
+  top: 50%;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(14, 15, 17, 0.78);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  transform: translateY(-50%);
+  pointer-events: none;
+  animation: playerTapFlash 700ms var(--ease-standard) forwards;
+}
+.player-tap-flash[data-side="left"] { left: 12%; }
+.player-tap-flash[data-side="right"] { right: 12%; }
+@keyframes playerTapFlash {
+  0% { opacity: 0; }
+  15%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .player-tap-flash { animation: none; }
+}
+
+/* The floating control for a cast or AirPlay session while the player itself
+   is tucked away. Bottom left, above the phone tab bar's reach. */
+.player-cast-widget {
+  position: fixed;
+  left: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 70;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  padding: 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised-2);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
 }
 
 /* ── Smart-search chip ────────────────────────────────────────────────

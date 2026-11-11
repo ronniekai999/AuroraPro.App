@@ -734,8 +734,6 @@ const EXEMPT = [
   // ── party ──
   { file: 'src/components/PartyInvite.tsx', anchor: 'rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white"', kind: 'non-text',
     why: 'the invite\'s icon-only close button' },
-  { file: 'src/components/PartyPanel.tsx', anchor: "className={speaking ? 'text-emerald-300' : 'text-white/40'}>", kind: 'non-text',
-    why: 'the microphone that marks a participant on voice, at rest (it turns green while they speak)' },
   { file: 'src/components/PartyShareCardModal.tsx', anchor: 'className="text-white/40 hover:text-white/80 text-sm transition-colors"', kind: 'non-text',
     why: 'the share card\'s icon-only "✕" close button' },
   { file: 'src/components/ProfileSwitcher.tsx', anchor: 'strokeWidth="2.5" className="text-white/40" aria-hidden="true">', kind: 'non-text',
@@ -764,8 +762,6 @@ const EXEMPT = [
     why: 'the globe on a social link chip, which names the network in text' },
   { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="eye" size={14} className="text-white/25" />', kind: 'decorative',
     why: 'the eye before the hidden-history message, which says it in words' },
-  { file: 'src/components/VoicePill.tsx', anchor: 'text-white/45 hover:text-red-300 hover:bg-red-500/15 transition-colors"', kind: 'non-text',
-    why: 'the voice pill\'s icon-only leave button' },
   { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
     why: 'the glyph a match candidate shows where its poster is missing' },
   // ── detail ──
@@ -793,15 +789,6 @@ const EXEMPT = [
   // ── index.css ──
   { file: 'src/index.css', anchor: '.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }', kind: 'non-text',
     why: 'the dots between a card\'s meta items, set at 0.45 for 3:1 over the scrim on a bright poster (see the rule)' },
-  // ── deferred: the player, which a separate change was working in ──
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs">{a.codec}', kind: 'deferred',
-    why: 'an audio track\'s codec and channels in the track menu' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '{!loaded && <p className="text-white/40 text-sm">Loading…</p>}', kind: 'deferred',
-    why: 'the skip-marker editor\'s loading line' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs font-mono">', kind: 'deferred',
-    why: 'a skip marker\'s current value in the editor' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<p className="text-white/30 text-[11px] mt-2 leading-snug">', kind: 'deferred',
-    why: 'the skip-marker editor\'s hint' },
 ]
 
 const EXEMPT_KINDS = { decorative: null, placeholder: null, disabled: null, deferred: null, 'non-text': 'large', large: 'large' }

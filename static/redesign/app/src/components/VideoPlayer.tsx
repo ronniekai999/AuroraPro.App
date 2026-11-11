@@ -27,12 +27,12 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
-import { Airplay, Cast, Maximize2, Pause, Play, SkipForward, StopCircle, VolumeX, X } from 'lucide-react'
 import {
-  deleteSkipMarker,
+  Airplay, Cast, ChevronLeft, Expand, Maximize2, MoreHorizontal, PanelRight, Pause, Play, RefreshCw,
+  RotateCcw, RotateCw, Scissors, StopCircle, VolumeX, X,
+} from 'lucide-react'
+import {
   forceTokenRefresh,
-  getAdminSkipMarkers,
-  putSkipMarker,
   type EpisodeFile,
   type MediaFile,
   type SkipMarker,
@@ -42,6 +42,17 @@ import {
 } from '@/lib/api'
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
+import { MoreMenu, SheetAction, SpeedMenu, TracksSheet } from './player/PlayerSheets'
+import { SkipMarkerEditor } from './player/SkipMarkerEditor'
+import {
+  DOUBLE_TAP_MS,
+  doubleTapDelta,
+  nextPlaybackDetails,
+  pipAvailable,
+  speedLock,
+  statusNotice,
+  timelineRanges,
+} from '@/lib/playerChrome'
 import { playerSurface } from '@/lib/playerSurface'
 import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
 import { currentMaxStreamBps, writePrefKey } from '@/lib/appearance'
@@ -360,6 +371,21 @@ interface SeekBootIntent {
 // 1080p (smaller is acceptable); a 1080p-preference avoids 4K
 // unless that's all that exists.
 export type QualityPreference = '1080p' | '4k' | 'auto'
+
+type PlayerMenu = 'tracks' | 'speed' | 'more' | 'markers' | null
+
+// The viewer's choice to watch in a box beside the party panel instead of
+// edge to edge. Per device: it is about this screen's size, not the account.
+const BOXED_PREF_KEY = 'aurora_player_boxed'
+function readBoxedPref(): boolean {
+  try { return localStorage.getItem(BOXED_PREF_KEY) === '1' } catch { return false }
+}
+function writeBoxedPref(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(BOXED_PREF_KEY, '1')
+    else localStorage.removeItem(BOXED_PREF_KEY)
+  } catch { /* private mode: the choice lasts for this player only */ }
+}
 function fileQuality(f: MediaFile | EpisodeFile): '4k' | '1080p' | '720p' | 'other' {
   const res = ((f.resolution || '') + '').toLowerCase()
   const tag = (('version_tag' in f ? f.version_tag : '') || '').toLowerCase()
@@ -678,8 +704,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // SUBTITLE_TRACKS_UPDATED handler does.
   const [availableAudio, setAvailableAudio] = useState<AudioTrack[]>([])
   const [availableSubs, setAvailableSubs] = useState<SubtitleTrack[]>([])
-  const [audioMenuOpen, setAudioMenuOpen] = useState(false)
-  const [subsMenuOpen, setSubsMenuOpen] = useState(false)
+  // Which of the player's menus is open: Audio and subtitles, speed, the
+  // overflow menu, or the admin marker editor it leads to. One at a time.
+  const [openMenu, setOpenMenu] = useState<PlayerMenu>(null)
   const [currentSubIndex, setCurrentSubIndex] = useState<number>(-1) // -1 = off
   // Issue #133 — transient error string for the subtitle picker.
   // Set when a <track> element fails to load (server 4xx, network,
@@ -883,16 +910,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // the `durationchange` listener takes the LATEST vid.duration
   // instead of locking the first (small) HLS-playlist value.
   const serverDurationRef = useRef(false)
-  // Audit M4 fix — refs so the menu-open state is readable from
-  // the video's onClick without participating in the closure dance.
-  const audioMenuOpenRef = useRef(false)
-  const subsMenuOpenRef = useRef(false)
-  // 2026-08-09 — the auto-hide timer also reads these (plus the two
-  // popovers below) so an OPEN picker can't be faded out mid-read.
-  // Until the modality gate went in, menus staying open piggybacked on
-  // the stuck-focus bug: clicking the trigger pinned the chrome. With
-  // that gone, open popovers need an explicit pin.
-  const markersMenuOpenRef = useRef(false)
+  // Ref mirror of the open menu, readable from the video's onClick and from
+  // the auto-hide timer (a zero-dep callback) without a stale closure. The
+  // timer reads it, and the reaction picker's flag, so an OPEN menu cannot be
+  // faded out from under someone reading it.
+  const openMenuRef = useRef<PlayerMenu>(null)
   const reactionPickerOpenRef = useRef(false)
   // Active <track> ref for cleanup when switching subs. Aurora exposes
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
@@ -950,8 +972,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // those rebuilds, otherwise a rebuild mid-credits re-pops the card
   // the user just closed and (autoplay on) auto-advances anyway.
   const skipStateFileRef = useRef<string | null>(null)
-  // Admin marker editor visibility (top-bar "Markers" menu).
-  const [markersMenuOpen, setMarkersMenuOpen] = useState(false)
 
   // ── Chromecast / AirPlay (Cast & AirPlay milestone) ─────────────
   // AirPlay is handled entirely by Safari's native UI: setting
@@ -2168,6 +2188,118 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minimizedActive])
 
+  // ── Chrome-only state ────────────────────────────────────────────────
+  // Nothing below decides how a stream is delivered, cast or synced.
+
+  // Edge to edge is the default. The boxed layout is a viewer's choice for
+  // watching beside the party panel, so it only applies in a party, and never
+  // in browser fullscreen (where the panel is not on screen at all).
+  const [boxedPref, setBoxedPref] = useState<boolean>(readBoxedPref)
+  useEffect(() => { writeBoxedPref(boxedPref) }, [boxedPref])
+  const boxedActive = !!party && boxedPref && !fullscreen
+  // The party surfaces are rendered by App, outside this component, and read
+  // the layout from <html> to place themselves beside the box rather than
+  // over it. Before paint, so they never draw one frame in the other layout.
+  useLayoutEffect(() => {
+    const el = document.documentElement
+    if (!target || minimizedActive) { el.removeAttribute('data-player-layout'); return }
+    el.dataset.playerLayout = boxedActive ? 'boxed' : 'fill'
+    return () => { el.removeAttribute('data-player-layout') }
+  }, [target, minimizedActive, boxedActive])
+
+  // The delivery line ("Direct play · H.264 / AAC") for Playback details. It
+  // is taken out of `status` as that changes, because a later notice
+  // overwrites the string while the delivery it described is still in force.
+  const [playbackDetails, setPlaybackDetails] = useState<string | null>(null)
+  useEffect(() => {
+    setPlaybackDetails(prev => nextPlaybackDetails(prev, status))
+  }, [status])
+
+  // Playback speed. A viewer's choice for THIS title: a new title starts at
+  // 1x again (a speed chosen for a slow documentary must not silently carry
+  // into the next thing played), while a rebuild of the same title (a seek
+  // past the produced edge, an audio switch, a transcode fallback) keeps it.
+  //
+  // In a watch party the drift loop owns `playbackRate`, and on a remote
+  // surface the local element is not what plays, so the control is locked
+  // there (lib/playerChrome speedLock) and this code writes nothing to the
+  // element, with one exception: undoing a speed the viewer had set before
+  // the lock began.
+  const [speed, setSpeed] = useState(1)
+  const speedLockNow = speedLock(Boolean(party), remoteActive)
+  const speedLocked = speedLockNow !== null
+  const speedFileKey = target ? `${target.fileType}:${target.fileId}` : null
+  useEffect(() => {
+    setSpeed(1)
+    setOpenMenu(null)
+  }, [speedFileKey])
+  useEffect(() => {
+    const vid = videoElement
+    if (!vid) return
+    if (speedLocked) {
+      // defaultPlaybackRate away from 1 is this code's own mark that a speed
+      // was set on this element; only then is there anything to undo.
+      if (vid.defaultPlaybackRate !== 1) {
+        vid.defaultPlaybackRate = 1
+        vid.playbackRate = 1
+      }
+      if (speed !== 1) setSpeed(1)
+      if (openMenuRef.current === 'speed') setOpenMenu(null)
+      return
+    }
+    // Never chosen: leave the element exactly as the stream code left it.
+    if (speed === 1 && vid.defaultPlaybackRate === 1) return
+    // defaultPlaybackRate as well: loading a new source (every session
+    // rebuild) resets playbackRate to it, which is what carries the choice
+    // across a rebuild of the same title.
+    vid.defaultPlaybackRate = speed
+    if (vid.playbackRate !== speed) vid.playbackRate = speed
+    if (speed === 1) return
+    // Belt and braces for an engine that does not apply the default on a
+    // MediaSource re-attach.
+    const reapply = () => { if (vid.playbackRate !== speed) vid.playbackRate = speed }
+    vid.addEventListener('loadedmetadata', reapply)
+    return () => vid.removeEventListener('loadedmetadata', reapply)
+  }, [speed, speedLocked, videoElement])
+
+  // Picture in picture. The state follows the element's own events, because
+  // the viewer can also leave it from the PiP window's own close button.
+  const [pipActive, setPipActive] = useState(false)
+  useEffect(() => {
+    const vid = videoElement
+    if (!vid) { setPipActive(false); return }
+    const onEnter = () => setPipActive(true)
+    const onLeave = () => setPipActive(false)
+    vid.addEventListener('enterpictureinpicture', onEnter)
+    vid.addEventListener('leavepictureinpicture', onLeave)
+    return () => {
+      vid.removeEventListener('enterpictureinpicture', onEnter)
+      vid.removeEventListener('leavepictureinpicture', onLeave)
+    }
+  }, [videoElement])
+  // Playback moving to a remote surface leaves a PiP window showing a frozen
+  // frame (Chromecast holds the local element paused), so it is closed.
+  useEffect(() => {
+    if (!remoteActive) return
+    if (typeof document === 'undefined' || !document.pictureInPictureElement) return
+    if (document.pictureInPictureElement !== videoRef.current) return
+    void document.exitPictureInPicture().catch(() => { /* defensive */ })
+  }, [remoteActive])
+
+  // Double tap to seek (touch). See onSurfaceTap.
+  const lastPointerTypeRef = useRef<string>('mouse')
+  const tapTimerRef = useRef<number | null>(null)
+  const lastTapAtRef = useRef<number | null>(null)
+  const [tapFlash, setTapFlash] = useState<{ delta: -10 | 10; key: number } | null>(null)
+  useEffect(() => {
+    if (!tapFlash) return
+    const id = window.setTimeout(() => setTapFlash(null), 700)
+    return () => window.clearTimeout(id)
+  }, [tapFlash])
+  useEffect(() => () => {
+    if (tapTimerRef.current !== null) window.clearTimeout(tapTimerRef.current)
+  }, [])
+
   // ── Cast end-of-life ──────────────────────────────────────────────────
   // The minimized cast widget must end ONLY when the user stops it or the
   // media finishes — never on navigation (gated in App) — and without
@@ -3163,7 +3295,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // seek) must not resurrect a dismissed card or re-arm a fired
     // advance.
     setSkipMarkers([])
-    setMarkersMenuOpen(false)
+    setOpenMenu(m => (m === 'markers' ? null : m))
     {
       const fileKey = `${target.fileType}:${target.fileId}`
       if (skipStateFileRef.current !== fileKey) {
@@ -5971,8 +6103,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // from under a reading user. Ref-based so the zero-dep useCallback below
   // always sees current state.
   const chromePopoverOpen = () =>
-    audioMenuOpenRef.current || subsMenuOpenRef.current ||
-    markersMenuOpenRef.current || reactionPickerOpenRef.current
+    openMenuRef.current !== null || reactionPickerOpenRef.current
 
   // Audit H1 fix — stable showControlsTemporarily reads playingRef
   // (not the captured `playing` value). The useCallback has empty
@@ -6335,11 +6466,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
   }, [target, showControlsTemporarily])
 
-  // Keep menu-open refs in sync with state for the click-outside
-  // dismiss path (audit M4).
-  useEffect(() => { audioMenuOpenRef.current = audioMenuOpen }, [audioMenuOpen])
-  useEffect(() => { subsMenuOpenRef.current = subsMenuOpen }, [subsMenuOpen])
-  useEffect(() => { markersMenuOpenRef.current = markersMenuOpen }, [markersMenuOpen])
+  // Keep the open-menu ref in step with state for the click-outside dismiss
+  // and the auto-hide pin.
+  useEffect(() => { openMenuRef.current = openMenu }, [openMenu])
 
   // Phase 7 — document-level keyboard shortcuts while the player is
   // open. Space=play/pause, ArrowLeft/Right=seek±10s, ArrowUp/Down
@@ -6645,7 +6774,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     partyHost: partyAdvanceHost,
   })
 
-  const fireAdvance = useCallback(async (force: boolean) => {
+  // `early` marks an advance the viewer asked for before the credits (the
+  // Next episode button mid-episode). It moves on exactly like any other, but
+  // the viewing it leaves was not watched to the end, so the playback record
+  // must not report it as completed.
+  const fireAdvance = useCallback(async (force: boolean, early = false) => {
     if (advanceFiredRef.current) return
     advanceFiredRef.current = true
     // NOTE: the QoE row is NOT closed here. The viewing looks complete — the
@@ -6665,7 +6798,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         outcome = (await onPartyAdvanceRef.current?.()) ?? 'failed'
       } catch { /* treated as 'failed' — re-offer below */ }
       if (outcome === 'advanced') {
-        qoeAdvancedRef.current = true
+        qoeAdvancedRef.current = !early
         // Stays 'spent' — the server's broadcast is what re-points us, and
         // the resulting file change resets this state (clearing the
         // watchdog with it). If neither happens the swap was rejected, so
@@ -6690,7 +6823,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     try {
       advanced = !!(await onEndedRef.current?.(force ? { force: true } : undefined))
     } catch { /* parent resolve failed — stay parked on this episode */ }
-    if (advanced) qoeAdvancedRef.current = true
+    if (advanced) qoeAdvancedRef.current = !early
     if (!advanced) {
       // No next episode (series end) or the resolve failed. Re-arm the
       // natural 'ended' flow so close-out behavior matches a playthrough
@@ -6762,21 +6895,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Avoid inventing its anchor/title identity: expose a minimal Stop path.
     return (
       <div
-        className="fixed bottom-4 left-4 z-[70] w-72 max-w-[calc(100vw-2rem)] rounded-2xl bg-zinc-900/95 backdrop-blur ring-1 ring-white/10 shadow-2xl p-3 text-white"
+        className="player-cast-widget"
         role="dialog"
         aria-label="Cast controls"
       >
         <div className="flex items-center gap-2">
-          <Cast size={16} className="text-purple-400 shrink-0" />
+          <Cast size={18} className="text-ink-2 shrink-0" />
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium truncate">{cast.remote.title || 'Casting'}</p>
-            <p className="text-[11px] text-white/50 truncate">Casting to {cast.status.deviceName ?? 'device'}</p>
+            <p className="text-[14px] font-semibold text-ink truncate">{cast.remote.title || 'Casting'}</p>
+            <p className="text-[12px] text-ink-2 truncate">Casting to {cast.status.deviceName ?? 'device'}</p>
           </div>
           <button
             type="button"
             onClick={() => { cast.stop(); onClose() }}
             aria-label="Stop casting"
-            className="p-1.5 rounded-full hover:bg-white/10 text-white/80 hover:text-red-400 transition-colors"
+            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-danger-ink hover:bg-action-soft transition-colors"
           >
             <StopCircle size={18} />
           </button>
@@ -6816,8 +6949,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return null
   })()
   const skipLabel = activeSkipMarker?.kind === 'recap'
-    ? 'Skip Recap'
-    : activeSkipMarker?.kind === 'credits' ? 'Skip Credits' : 'Skip Intro'
+    ? 'Skip recap'
+    : activeSkipMarker?.kind === 'credits' ? 'Skip credits' : 'Skip intro'
   const handleSkip = () => {
     if (!activeSkipMarker) return
     setSkipDismissedKey(`${activeSkipMarker.kind}:${activeSkipMarker.start_ms}`)
@@ -6869,31 +7002,172 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     onClose()
   }
 
+  // One relative-seek path for the skip buttons, the timeline's arrow keys and
+  // a double tap, so every one of them is the same user seek.
+  //
+  // The delta becomes a REAL-FILE absolute target and goes through
+  // seekToRealSec, which rebuilds a transcode when the target is past what
+  // has been produced (a raw `vid.currentTime +=` there stalls hls.js on a
+  // segment that is not on disk yet).
+  //
+  // While Chromecasting, vid.currentTime is frozen wherever local playback
+  // stopped when the cast began, so the base is the RECEIVER's position.
+  // Receiver seconds carry the cast session's own anchor; with no known
+  // anchor there is no correct target, and the control does nothing rather
+  // than seek somewhere invented.
+  const seekRelative = (delta: number) => {
+    if (cast.status.connected) {
+      const baseAbsSec = recvToAbsSec(cast.remote.currentTime)
+      if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
+      return
+    }
+    seekToRealSec(readLocalAbsoluteSec() + delta)
+  }
+
+  // A press on the picture with a mouse: reveal the controls and toggle
+  // playback. The reveal is unconditional because play() can reject silently
+  // (autoplay policy, a suspended audio context); without it the viewer
+  // clicked and saw nothing happen.
+  const togglePlaybackFromSurface = () => {
+    showControlsTemporarily()
+    const vid = videoRef.current
+    if (!vid) return
+    toggleLocalPlayback(vid)
+  }
+
+  // Touch: a double tap on the left or right half seeks ten seconds. The
+  // first tap's own action (toggle playback) therefore waits one double-tap
+  // window, or a double tap would pause and resume around the seek.
+  const onSurfaceTap = (clientX: number, rect: { left: number; width: number }) => {
+    const now = Date.now()
+    const first = lastTapAtRef.current
+    if (tapTimerRef.current !== null && first !== null && now - first <= DOUBLE_TAP_MS) {
+      window.clearTimeout(tapTimerRef.current)
+      tapTimerRef.current = null
+      lastTapAtRef.current = null
+      const delta = doubleTapDelta(clientX, rect)
+      showControlsTemporarily()
+      if (delta !== null) {
+        seekRelative(delta)
+        setTapFlash({ delta, key: now })
+      }
+      return
+    }
+    lastTapAtRef.current = now
+    tapTimerRef.current = window.setTimeout(() => {
+      tapTimerRef.current = null
+      lastTapAtRef.current = null
+      togglePlaybackFromSurface()
+    }, DOUBLE_TAP_MS)
+  }
+
+  const togglePip = () => {
+    const vid = videoRef.current
+    if (!vid) return
+    if (document.pictureInPictureElement) {
+      void document.exitPictureInPicture().catch(() => { /* defensive */ })
+    } else {
+      // Rejects without a user gesture or before metadata; nothing to tell
+      // the viewer beyond the button not having worked.
+      void vid.requestPictureInPicture?.().catch(() => { /* defensive */ })
+    }
+  }
+
+  const toggleMenu = (menu: Exclude<PlayerMenu, null>) => setOpenMenu(m => (m === menu ? null : menu))
+
+  // Guest-only escape hatch for when soft drift correction has not caught up
+  // (a network blip, a long pause): snap to the host's projected position.
+  const resyncToHost = () => {
+    if (!party) return
+    const vid = videoRef.current
+    const t = party.tickRef.current
+    if (!vid || !t) return
+    // tickRef can outlive the party that produced it (a ref, not state). The
+    // steady-state drift loop refuses to act on another title's tick; so
+    // must this.
+    if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
+    if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
+    // The same clock-offset and extrapolation the drift loop uses, so the
+    // press lands exactly where the loop is aiming instead of undoing its
+    // soft corrections with a stale tick position.
+    const clockOffset = party.clockOffsetRef?.current ?? 0
+    const correctedNow = Date.now() + clockOffset
+    const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
+    const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
+    const targetSec = Math.max(0, (projectedAbsMs / 1000) - (startSecRef.current ?? 0))
+    // Suppressed like the hard-snap path, so the resulting `seeked` is not
+    // re-broadcast as a request-seek that would ping-pong the other guests.
+    extendSuppression(300)
+    try { vid.currentTime = targetSec } catch { /* defensive */ }
+    vid.playbackRate = 1.0
+  }
+
+  const startCast = () => {
+    // Issue #503: refuse a title the receiver cannot play BEFORE opening the
+    // picker, so an unsupported format never looks like a device fault.
+    const blocked = castUnavailableReason()
+    if (blocked) {
+      flashCastError(blocked)
+      return
+    }
+    // A new attempt: a mint failure recorded by the last one must not label
+    // this one's outcome. Deliberately NOT consulted by the pre-flight above:
+    // a mint failure is transient, and refusing to retry it would strand the
+    // viewer on a stale error.
+    castMintFailedRef.current = false
+    // runCastLoad releases the mint when the receiver never takes it
+    // (dismissed picker, load_failed, receiver stall) rather than leaving a
+    // stillborn session leased for 30 minutes.
+    void runCastLoad(() => cast.start()).catch((err) => {
+      // Never setErrorMsg here: that is the full "Playback Error" screen for
+      // real stream failures, and it would kill local playback over a cast
+      // hiccup. The viewer can press Cast again.
+      const raw = err instanceof Error ? err.message : String(err)
+      // CAST_NO_MEDIA_ERROR is an internal sentinel, not a sentence (it
+      // reached a screen verbatim in issue #503). Prefer the specific reason.
+      const msg =
+        raw === CAST_NO_MEDIA_ERROR
+          ? castMintFailedRef.current
+            ? CAST_MINT_FAILED
+            : castUnavailableReason() ?? CAST_NOTHING_TO_CAST
+          : raw
+      if (!/cancel|dismiss/i.test(msg)) {
+        // eslint-disable-next-line no-console
+        console.warn('[Aurora Cast] start failed:', raw)
+        // onToast, NOT flashCastError. By the time a start can fail,
+        // requestSession has usually resolved and remoteActive has minimized
+        // the player, so the inline banner would live in a subtree that is
+        // opacity-0, inert and aria-hidden. The inline banner is for the
+        // pre-flight refusal above, which always runs against a visible
+        // player.
+        onToast?.(`Cast failed: ${msg}`, 'error')
+      }
+    })
+  }
+
+  const notice = statusNotice(status)
+  const pipOffered = pipAvailable(typeof document === 'undefined' ? null : document, videoElement, remoteActive)
+  const tracksOffered = availableAudio.length > 1 || availableSubs.length > 0
+  // Offered on an episode when this viewer may advance: alone, or as the host
+  // of a party that is watching this episode. Never while Chromecasting,
+  // where the receiver's own end-of-media owns the advance (as it does for
+  // the Up next card).
+  const nextEpisodeOffered = target.fileType === 'episode' && !cast.status.connected &&
+    (!party || partyAdvanceHost)
+  const ranges = timelineRanges(skipMarkers, realDurationSec)
+  const chromeHidden = !controlsVisible
+
   return (
     <>
     <div
       ref={overlayRootRef}
-      // Phase 7 — mouse/touch on the overlay (anywhere, including
-      // letterbox bars) reveals the controls. Same handler also
-      // schedules the auto-hide. Prevents the "cursor over black
-      // letterbox doesn't trigger native controls" Chrome+Mac bug
-      // since OUR overlay renders independently of cursor-over-
-      // video state.
+      // Pointer or touch anywhere on the surface, letterbox bars included,
+      // reveals the controls and re-arms the auto-hide.
       //
-      // Phase 8 follow-up — intent-zone pin. When the cursor is in
-      // the bottom ~22% of the PLAYER (where the seek bar + button
-      // row live), treat it as "user is reaching for controls" and
-      // keep them visible indefinitely. Without this, passive
-      // viewers (esp. older shows where the watcher rarely touches
-      // the mouse mid-episode) lose controls after 3s and have no
-      // affordance to find them — which is why the bug surfaced as
-      // "older resolution videos hide the controls."
-      //
-      // Audit M1 (deep-debug round 2) — math is relative to the
-      // overlay's own bounding rect (NOT `window.innerHeight`) so
-      // it survives any future wrapping/margins around the player.
-      // For today's `fixed inset-0` overlay the two are equal, but
-      // tying the threshold to the actual element is more robust.
+      // Intent zone: while the cursor is in the bottom 22% of the PLAYER
+      // (the timeline and the transport row) the controls stay up for as long
+      // as it is there. Measured against this element's own rect, not the
+      // window, so it holds when the player is boxed.
       onMouseMove={(e) => {
         const rect = e.currentTarget.getBoundingClientRect()
         const bottomZoneThreshold = rect.top + rect.height * 0.78
@@ -6901,435 +7175,233 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         showControlsTemporarily()
       }}
       onTouchStart={() => showControlsTemporarily()}
-      // Hide the cursor when the controls auto-hide so the screen
-      // is fully chrome-less while watching. Reappears on the next
-      // mousemove (which also un-hides the controls via the handler
-      // above). Matches Plex/Netflix/YouTube behavior.
+      // The cursor hides with the controls; the next mousemove brings both back.
       style={{ cursor: controlsVisible ? 'auto' : 'none' }}
-      // `inert` alongside aria-hidden: the minimized surface is
-      // `opacity-0 pointer-events-none`, which hides it from the mouse and from
-      // AT but leaves every button inside it TABBABLE — the exact 4.1.2 failure
-      // PlayerControls cites inert to avoid, in the same file. The .blur() on
-      // entering minimized mode handles the moment of transition, not subsequent
-      // Tab presses.
+      // `inert` alongside aria-hidden: the minimized surface is `opacity-0
+      // pointer-events-none`, which hides it from the mouse and from AT but
+      // leaves every button inside it TABBABLE.
       inert={minimizedActive || undefined}
       aria-hidden={minimizedActive || undefined}
-      // role="dialog" + aria-modal are TRUTHFUL now, and weren't before.
-      // Phase 7b makes App mark <main> inert while the theater plays, so the
-      // rest of the app really is unavailable — which is exactly the condition
-      // aria-modal asserts. When the backdrop was just `bg-black` the app behind
-      // stayed interactive and claiming modality would have been a lie.
-      //
-      // Naming it also fixes the announcement gap: without a role the surface
-      // was a bare div, so a screen-reader user got NOTHING when playback
-      // started — their whole browse buffer silently swapped (main having become
-      // AT-hidden) with no event to explain it.
+      // role="dialog" and aria-modal are truthful: App marks <main> inert
+      // while the player is up, so the rest of the app really is unavailable.
+      // Naming the surface is also what announces that playback started.
       role={minimizedActive ? undefined : 'dialog'}
       aria-modal={minimizedActive ? undefined : true}
       aria-label={minimizedActive ? undefined : `Playing ${target?.title ?? 'video'}`}
-      // Focusable so the surface can take focus on open. -1: reachable
-      // programmatically, never a tab stop of its own.
+      // Focusable so the surface can take focus on open; never a tab stop.
       tabIndex={minimizedActive ? undefined : -1}
+      data-player-layout={minimizedActive ? undefined : boxedActive ? 'boxed' : 'fill'}
       className={
         minimizedActive
-          // STACKING CONTEXT: irrelevant here, and that is the point. This element
-          // carries `opacity-0`, which makes it a stacking context in its own right,
-          // and it is `fixed inset-0 pointer-events-none` — fully transparent and
-          // non-interactive. The `-z-10` is belt-and-braces to keep a mounted-but-
-          // invisible player out of the paint order; wherever it lands it is
-          // invisible by construction, so no ancestor's motion-dependence can
-          // change what the user sees. Annotated rather than removed because
-          // audit-reduced-motion.mjs Check 2 rightly asks about every negative z.
           // Keep the full player MOUNTED but off-screen while minimized: the
-          // Chromecast streaming session and the AirPlay <video> source must
-          // stay alive (closing the laptop view must not kill the cast). The
-          // floating widget below is the visible surface.
+          // Chromecast session and the AirPlay <video> source must stay alive
+          // (closing the laptop view must not end the cast).
+          // STACKING CONTEXT: irrelevant here, and that is the point. This
+          // element carries `opacity-0`, which makes it a stacking context in
+          // its own right, and it is `fixed inset-0 pointer-events-none`, so
+          // it is invisible wherever it lands; no ancestor's dependence on
+          // motion can change what the viewer sees. The `-z-10` only keeps a
+          // mounted-but-invisible player out of the paint order.
           ? 'fixed inset-0 -z-10 opacity-0 pointer-events-none'
-          // No `bg-black` and no flex centring any more (D5). The surface is
-          // transparent; what fills it is the veil over the dimmed app plus the
-          // theater box, both absolutely positioned. In fullscreen the box
-          // covers the viewport and the veil is skipped entirely — there is
-          // nothing to see behind it, so compositing a blur there would be pure
-          // cost. See the .stage-dim-veil note in index.css about that budget.
-          : 'fixed inset-0 z-[60]'
+          // Opaque: the picture runs edge to edge and nothing of the app
+          // shows behind it. Boxed (beside the party panel) paints the page
+          // colour around the box instead of black.
+          : `fixed inset-0 z-[60] ${boxedActive ? 'bg-surface-page' : 'bg-black'}`
       }
     >
-      {/* The veil. Theater only — see above. */}
-      {!fullscreen && !minimizedActive && <div className="stage-dim-veil" aria-hidden="true" />}
-      {/* Player shell.
-          THEATER (Aurora Stage Phase 7b, D5): the mockup's inset box — 90px
-          sides, 58px top/bottom, 20px radius — with the dimmed app visible
-          behind it. This REPLACES the previous treatment, which was a card
-          capped at 94vw/88vh centred inside an opaque black backdrop. The
-          asymmetric inset is why it is absolute edge offsets rather than a
-          max-width card: a centred `max-w` cannot express 90/58, and the black
-          backdrop it used to sit on is now the app.
-          It falls back to full-bleed below lg — 90px per side leaves 195px of
-          picture on a phone; see .stage-theater's media query.
-          FULLSCREEN: fills the viewport edge-to-edge (box chrome looks wrong
-          against the screen bezel).
-          The <video> inside still uses object-contain, so the picture
-          letterboxes within the box — margins are (inset) + (aspect letterbox).
-
-          NOTE the word "windowed" is deliberately gone from this file. It used
-          to mean "not browser-fullscreen", which collided with 7b's windowed
-          theater; the two states are now `theater` and `fullscreen`. */}
-      <div
-        className={
-          fullscreen
-            ? 'relative w-full h-full flex flex-col'
-            : 'stage-theater flex flex-col'
-        }
-      >
-        {/* Top bar. WINDOWED: a chrome strip above the video (part of the
-            theater card), always visible. FULLSCREEN: an auto-hiding OVERLAY —
-            positioned absolute so it no longer reserves layout space (the video
-            fills the whole screen edge-to-edge), and gated on controlsVisible so
-            the title / episode / "Remux · mkv" / Close fade out with the
-            controls when the pointer is idle, leaving a clean full-screen
-            picture. A mouse-move / touch reveals it again with the controls. */}
+      {/* The shell. `.stage-theater` positions it from the same custom
+          properties the watch-party surfaces read, so the box and the party
+          rail beside it move together. It fills the surface unless the boxed
+          layout is on. The <video> inside is object-contain, so the picture
+          letterboxes within it. */}
+      <div className="stage-theater flex flex-col">
+        {/* Top bar: an overlay over a scrim that fades away with the
+            controls, in every layout. */}
         <div
           // data-player-chrome marks every auto-hiding region, so the hide
           // timer can refuse to fire while KEYBOARD focus is inside one
-          // (lib/chromeFocus gates the guard on input modality — pointer
-          // click-focus must not suppress auto-hide). See
-          // showControlsTemporarily.
+          // (lib/chromeFocus gates the guard on input modality).
           data-player-chrome=""
-          // `pointer-events-none` alone hid this from the MOUSE and left it in
-          // the tab ring: in fullscreen, three seconds of idle made the title
-          // bar's Close and track pickers invisible-but-focusable, so Tab
-          // painted a focus ring on nothing (WCAG 2.4.7, 2.4.11). `inert`
-          // removes them from the tab order and the a11y tree too — the same
-          // treatment PlayerControls already applies to its own row.
-          inert={(fullscreen && !controlsVisible) || undefined}
-          className={
-            fullscreen
-              ? `stage-player-topbar absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 transition-opacity duration-200 ${
-                  controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`
-              : 'stage-player-topbar flex items-center justify-between px-6 py-3 z-10'
-          }
+          // `pointer-events-none` alone hides this from the mouse and leaves
+          // it in the tab ring; `inert` takes it out of the tab order and the
+          // a11y tree too (WCAG 2.4.7, 2.4.11).
+          inert={chromeHidden || undefined}
+          className={`stage-player-topbar absolute top-0 inset-x-0 z-20 flex items-center gap-2 sm:gap-4 px-3 sm:px-8 pt-3 sm:pt-6 pb-10 transition-opacity duration-200 ${
+            controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
         >
-          {/* Title block — the mockup's .t-title: one 17px display line with the
-              episode and the stream status stacked under it as one small line,
-              rather than three stacked paragraphs at three sizes. */}
-          <div className="min-w-0 flex items-center gap-3">
-            <div className="min-w-0">
-              <h2 className="text-white font-display text-[17px] font-bold truncate">{target.title}</h2>
-              <p className="text-white/60 text-[11.5px] font-medium mt-0.5 truncate">
-                {[target.subtitle, status].filter(Boolean).join(' · ')}
-              </p>
-            </div>
-            {/* Casting status pill. Net-new chrome for state that already
-                existed but was only inferable from the Cast button's colour:
-                while a remote session is live, the local surface is a REMOTE
-                CONTROL, not the thing playing, and nothing said so. Cyan
-                rather than purple because it is a different kind of state from
-                an Aurora control. Only when a session is actually connected —
-                never as decoration. */}
-            {remoteActive && (
-              // No role="status". Once connected the text never changes, so it
-              // would be a live region that can never fire again — and the
-              // announcement it was meant to make is unreliable anyway, since the
-              // region and its content are inserted in the SAME mutation, which
-              // many screen readers do not announce (a live region generally has
-              // to pre-exist to be watched). Plain labelled text is honest; the
-              // state also reaches AT through the Cast button's own name.
-              <span className="stage-cast-pill inline-flex flex-none">
-                <i className="stage-cast-dot" aria-hidden="true" />
-                {cast.status.connected ? 'Casting' : 'AirPlay'}
-              </span>
+          <button
+            type="button"
+            onClick={remoteActive ? () => setMinimized(true) : onClose}
+            className="stage-tr-btn grid flex-none"
+            aria-label={remoteActive ? 'Minimize player' : 'Close player'}
+            title={remoteActive ? 'Minimize (keeps it playing on the other screen)' : 'Back'}
+          >
+            <ChevronLeft size={26} strokeWidth={2} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <h2 className="font-display text-ink text-[18px] sm:text-[22px] font-semibold tracking-[-0.01em] leading-tight truncate">{target.title}</h2>
+            {target.subtitle && (
+              <p className="text-ink text-[13px] sm:text-[14px] truncate">{target.subtitle}</p>
+            )}
+            {/* What the player is doing right now ("Syncing to party…",
+                "Only the party host can seek"). The codec line is not here:
+                it is in Playback details. */}
+            {notice && (
+              <p role="status" className="text-ink-2 text-[13px] truncate">{notice}</p>
             )}
           </div>
-          <div className="flex items-center gap-2 relative">
-            {/* M10 Phase 4.5 — Audio track picker. Only shown when
-                more than one audio track exists. Switching forces
-                a session re-create (FFmpeg maps audio_0 at session
-                spawn) — that's why this is a click-and-rebuild
-                pattern, not a hls.js property toggle. */}
-            {availableAudio.length > 1 && (
-              <div className="relative">
-                <button
-                  onClick={() => { setAudioMenuOpen(o => !o); setSubsMenuOpen(false); setMarkersMenuOpen(false) }}
-                  className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-                  aria-label="Audio tracks"
-                  title="Audio tracks"
-                >
-                  Audio
-                </button>
-                {audioMenuOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-64 max-h-80 overflow-y-auto bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl z-20 py-1">
-                    {availableAudio.map(a => (
-                      <button
-                        key={a.index}
-                        onClick={() => {
-                          setAudioMenuOpen(false)
-                          if (onChangeAudioTrack) {
-                            // Audit M2 — capture live position
-                            // in REAL-FILE ms (local vid.currentTime
-                            // PLUS the session's startSec offset)
-                            // so the parent rebuilds the session
-                            // resuming from where we are right now.
-                            const absoluteSec = readLocalAbsoluteSec()
-                            prepareLocalReplacement(absoluteSec, videoRef.current)
-                            onChangeAudioTrack(a.index, Math.round(absoluteSec * 1000))
-                          }
-                        }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] transition-colors ${
-                          (target.audioTrackIndex ?? -2) === a.index ? 'text-purple-300' : 'text-white/80'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span>{a.title || a.language || `Track ${a.index}`}</span>
-                          <span className="text-white/40 text-xs">{a.codec}{a.channels ? ` · ${a.channels}ch` : ''}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {/* M10 Phase 4.5 — Subtitle picker. Off + each available
-                track. Subtitle switching is seamless (no session
-                rebuild); applySubtitle handles add/remove of the
-                <track> element. */}
-            {availableSubs.length > 0 && (
-              <div className="relative">
-                {/* Issue #133 — transient error pill rendered above
-                    the CC button when a subtitle track fails to
-                    load. Auto-dismisses after 4s via the effect on
-                    subError. role="status" so screen readers
-                    announce it as a polite update. */}
-                {subError && (
-                  <div
-                    role="status"
-                    // top-full (opens downward) — this pill is anchored
-                    // to a TOP-BAR button; opening upward (bottom-full)
-                    // would clip against the windowed card's
-                    // overflow-hidden (#98).
-                    className="absolute top-full right-0 mt-1 px-2 py-1 bg-red-500/15 border border-red-500/40 text-red-200 rounded text-xs whitespace-nowrap pointer-events-none"
-                  >
-                    {subError}
-                  </div>
-                )}
-                <button
-                  onClick={() => { setSubsMenuOpen(o => !o); setAudioMenuOpen(false); setMarkersMenuOpen(false) }}
-                  className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-                  aria-label="Subtitles"
-                  title="Subtitles"
-                >
-                  CC
-                </button>
-                {subsMenuOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-64 max-h-80 overflow-y-auto bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl z-20 py-1">
-                    <button
-                      onClick={() => { applySubtitle(-1); setSubsMenuOpen(false) }}
-                      className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] transition-colors ${
-                        currentSubIndex === -1 ? 'text-purple-300' : 'text-white/80'
-                      }`}
-                    >
-                      Off
-                    </button>
-                    {availableSubs.map(s => (
-                      <button
-                        key={s.index}
-                        onClick={() => { applySubtitle(s.index); setSubsMenuOpen(false) }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] transition-colors ${
-                          currentSubIndex === s.index ? 'text-purple-300' : 'text-white/80'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span>{s.title || s.language || `Sub ${s.index}`}</span>
-                          {s.forced && <span className="text-amber-300 text-[10px] uppercase">forced</span>}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Smart Skip — admin-only marker editor. Lives in the
-                player (not an admin page) because correcting a marker
-                means eyeballing the timeline: pause on the intro's
-                last frame, hit "End = now". Writes detector='manual'
-                rows the background analyzer never overwrites. Hidden
-                in parties — pausing/scrubbing to fix markers would
-                drag every guest along. */}
-            {isAdmin && !party && (
-              <div className="relative">
-                <button
-                  onClick={() => { setMarkersMenuOpen(o => !o); setAudioMenuOpen(false); setSubsMenuOpen(false) }}
-                  className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-                  aria-label="Edit skip markers"
-                  title="Edit skip markers (admin)"
-                >
-                  Markers
-                </button>
-                {markersMenuOpen && (
-                  <SkipMarkerEditor
-                    fileId={target.fileId}
-                    fileType={target.fileType}
-                    currentSec={currentSec}
-                    onMarkersChanged={(all) => setSkipMarkers(all.filter(m => m.end_ms > m.start_ms))}
-                  />
-                )}
-              </div>
-            )}
-            {/* 2026-05-25 — "Resync Now" button. Guest-only escape hatch
-                for when soft drift-correction hasn't caught up yet (e.g.
-                after a quick network blip, a long pause, or because the
-                guest's HLS pipeline is structurally a beat behind). Snaps
-                the local player to the host's projected target position.
-                Hidden for the host (would be a no-op + confusing UX) and
-                hidden outside a party. Equivalent in spirit to Plex's
-                "Sync" button + Jellyfin's "Re-sync" link. */}
-            {party && !party.isHost && (
-              <button
-                onClick={() => {
-                  const vid = videoRef.current
-                  const t = party.tickRef.current
-                  if (!vid || !t) return
-                  // 2026-05-25 deep-debug (Medium #4) — media-match guard.
-                  // tickRef can outlive the party that produced it (it's
-                  // a ref, not state, so `party-ended` → setState(
-                  // INITIAL_STATE) doesn't clear it). If the user joined
-                  // a new party but kept the previous player open, the
-                  // raw click would snap to the OLD party's projected
-                  // position on the NEW party's media — confusing seek.
-                  // The steady-state drift loop has the same guard at
-                  // VideoPlayer.tsx ~941; mirror it here.
-                  if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
-                  if (isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId)) return
-                  // Apply same clock-offset + extrapolation logic as
-                  // the steady-state drift loop so a manual click
-                  // lands on EXACTLY where the loop is targeting.
-                  // Without this, the button could undo all the
-                  // existing soft-corrections by snapping to a stale
-                  // tick position.
-                  const clockOffset = party.clockOffsetRef?.current ?? 0
-                  const correctedNow = Date.now() + clockOffset
-                  const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
-                  const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
-                  const targetSec = Math.max(0, (projectedAbsMs / 1000) - (startSecRef.current ?? 0))
-                  // Same 300ms suppression as the hard-snap path so
-                  // the resulting `seeked` event isn't re-broadcast
-                  // by the guest's onSeeked handler as a request-seek
-                  // (which would ping-pong every other guest).
-                  extendSuppression(300)
-                  try { vid.currentTime = targetSec } catch { /* defensive */ }
-                  vid.playbackRate = 1.0
-                }}
-                className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-                aria-label="Resync to host"
-                title="Snap to host's current position"
-              >
-                ⟳ Sync
-              </button>
-            )}
-            {/* M10 Phase 4.5 — reaction picker (party only). */}
-            {onSendReaction && (
-              // vertical="down" — top-bar trigger; opening upward would
-              // clip against the windowed card's overflow-hidden (#98).
-              <ReactionPicker
-                onSend={onSendReaction}
-                vertical="down"
-                // Pin the auto-hide timer while the picker is open so the
-                // emoji row can't fade out mid-choice (fullscreen chrome
-                // auto-hides; this trigger lives in it).
-                onOpenChange={(o) => { reactionPickerOpenRef.current = o }}
-              />
-            )}
+          {/* While a remote session is live this surface is a REMOTE
+              CONTROL, not the thing playing, and something has to say so.
+              No role="status": once connected the text never changes, and a
+              live region inserted together with its content is not read. */}
+          {remoteActive && (
+            <span className="stage-cast-pill hidden sm:inline-flex flex-none">
+              <i className="stage-cast-dot" aria-hidden="true" />
+              {cast.status.connected ? 'Casting' : 'AirPlay'}
+            </span>
+          )}
+          {/* AirPlay. The custom controls suppress Safari's own glyph, so
+              this opens the system picker. Shown only when a wireless target
+              is available (Chrome never reports one). AirPlay needs no party
+              wiring: the local <video> IS the mirrored source. */}
+          {airplayAvailable && !cast.status.connected && (
             <button
-              onClick={remoteActive ? () => setMinimized(true) : onClose}
-              className="px-4 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-              aria-label={remoteActive ? 'Minimize player' : 'Close player'}
-              title={remoteActive ? 'Minimize — keeps the cast going' : 'Close player'}
+              type="button"
+              onClick={() => videoRef.current?.webkitShowPlaybackTargetPicker?.()}
+              title="AirPlay to an Apple TV or AirPlay device"
+              aria-label="AirPlay"
+              className="stage-tr-btn grid flex-none"
             >
-              {remoteActive ? 'Minimize' : 'Close'}
+              <Airplay size={22} strokeWidth={1.75} />
             </button>
-          </div>
+          )}
+          {/* Chromecast. Shown whenever the Cast SDK loaded, not only when a
+              receiver is reachable: discovery is slow on some networks and
+              the picker itself handles "no devices". Available in a watch
+              party too, where the receiver becomes the synced surface. */}
+          {cast.status.supported && (
+            cast.status.connected ? (
+              <button
+                type="button"
+                onClick={() => { void stopCastWithProgress() }}
+                title={`Stop casting to ${cast.status.deviceName ?? 'device'}`}
+                aria-label="Stop casting"
+                className="stage-tr-btn stage-tr-btn-text inline-flex flex-none"
+                data-open=""
+              >
+                <StopCircle size={20} strokeWidth={1.75} />
+                <span className="hidden md:inline max-w-[220px] truncate">
+                  Casting to {cast.status.deviceName ?? 'device'}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={startCast}
+                title={
+                  cast.status.available
+                    ? 'Play on another screen'
+                    : 'Play on another screen (no devices found: check that your Chromecast is on the same Wi-Fi)'
+                }
+                aria-label="Cast"
+                // Dimmed when no device is visible: a hint that it may not
+                // do anything yet, without hiding it.
+                className={`stage-tr-btn grid flex-none ${cast.status.available ? '' : 'opacity-60'}`}
+              >
+                <Cast size={22} strokeWidth={1.75} />
+              </button>
+            )
+          )}
+          {/* Reactions (party only). Opens downward; the open state pins the
+              auto-hide so the row cannot fade mid-choice. */}
+          {onSendReaction && (
+            <ReactionPicker
+              onSend={onSendReaction}
+              vertical="down"
+              onOpenChange={(o) => { reactionPickerOpenRef.current = o }}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => toggleMenu('more')}
+            aria-label="More"
+            aria-haspopup="dialog"
+            aria-expanded={openMenu === 'more' || openMenu === 'markers'}
+            title="More: playback details"
+            className="stage-tr-btn grid flex-none"
+            data-open={openMenu === 'more' || openMenu === 'markers' || undefined}
+          >
+            <MoreHorizontal size={24} />
+          </button>
         </div>
 
-        {/* Video */}
-        {/* 2026-05-20 — `min-h-0` is the canonical Tailwind/flexbox fix
-            for the "child overflows flex parent by N pixels" bug. By
-            default, a flex child gets `min-height: auto` which prevents
-            it from shrinking below its intrinsic content size. With a
-            <video object-contain> child, that intrinsic size depends
-            on the video's natural dimensions and can exceed the
-            available flex space — pushing the container's bottom past
-            the viewport.
-            Symptom in production: controls (positioned `absolute bottom-0`
-            of this container) rendered 1.25px below the viewport,
-            invisible behind macOS browser chrome / dock. DevTools
-            opening triggered a layout recompute that pulled things
-            back into view, which is why the bug only surfaced
-            "without DevTools open."
-            `overflow-hidden` is belt-and-suspenders — if any future
-            child still overflows for some reason, it clips visually
-            instead of pushing absolute-positioned descendants past
-            the viewport. */}
+        {/* Video.
+            `min-h-0` is load-bearing: a flex child's default `min-height:
+            auto` stops it shrinking below its content, and a <video> whose
+            natural size exceeds the space pushed this container past the
+            viewport, taking the controls (absolute, bottom) with it.
+            `overflow-hidden` clips anything that still overflows instead of
+            moving them. */}
         <div className="flex-1 min-h-0 flex items-center justify-center bg-black relative overflow-hidden">
           {errorMsg ? (
             <div className="text-center px-8">
-              <p className="text-red-400 text-lg font-medium">Playback Error</p>
-              <p className="text-white/60 text-sm mt-2 max-w-md">{errorMsg}</p>
+              <p className="text-danger-ink text-[22px] font-display font-semibold">Playback Error</p>
+              <p className="text-ink-2 text-[15px] mt-2 max-w-md mx-auto">{errorMsg}</p>
               <button
                 onClick={onClose}
-                className="mt-6 px-6 py-2.5 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
+                className="mt-6 h-12 px-6 rounded-full bg-action text-action-on text-[15px] font-semibold hover:brightness-95 transition-[filter]"
               >
                 Back
               </button>
             </div>
           ) : (
             <>
-              {/* Phase 7 — native `controls` attribute REMOVED. Our
-                  custom PlayerControls overlay below renders the
-                  full controls UI, with REAL source-file duration
-                  (not the growing HLS playlist length) so users
-                  can sync with friends. */}
+              {/* No native `controls`: PlayerControls below is the whole
+                  control surface, on the REAL source duration. */}
               <video
                 ref={bindVideoElement}
                 className="w-full h-full object-contain cursor-pointer"
                 playsInline
                 preload="auto"
-                // Opt the video into Safari's AirPlay target picker.
-                // No-op everywhere else; ignored by non-WebKit browsers.
+                // Opts the element into Safari's AirPlay target picker.
                 x-webkit-airplay="allow"
-                // Click on the video toggles play/pause. Mirrors
-                // YouTube/Plex muscle memory.
-                // Audit M4 fix — if a menu (audio/subs picker) is
-                // open, the click should DISMISS the menu, not
-                // toggle play. Otherwise users get a "I clicked
-                // outside the menu and now the video paused" jank.
-                onClick={() => {
-                  if (audioMenuOpenRef.current || subsMenuOpenRef.current) {
-                    setAudioMenuOpen(false)
-                    setSubsMenuOpen(false)
+                // The click that follows a touch arrives as an ordinary
+                // click; remembering the pointer type is how the two are
+                // told apart.
+                onPointerUp={(e) => { lastPointerTypeRef.current = e.pointerType || 'mouse' }}
+                onClick={(e) => {
+                  // An open menu takes the press: it closes, and playback
+                  // is left alone. The marker editor is the exception. An
+                  // admin setting a marker has to pause and play on the
+                  // picture with the editor still open.
+                  if (openMenuRef.current && openMenuRef.current !== 'markers') {
+                    setOpenMenu(null)
                     return
                   }
-                  // 2026-05-20 — reveal controls on EVERY click,
-                  // not just on state-changing ones. Previously
-                  // controls came back via the [playing]-effect
-                  // when play/pause state flipped, but if vid.play()
-                  // promise-rejected silently (autoplay policy,
-                  // suspended audio context) the state wouldn't
-                  // change and controls stayed hidden — operator
-                  // saw "I clicked the video and nothing happened".
-                  showControlsTemporarily()
-                  const vid = videoRef.current
-                  if (!vid) return
-                  toggleLocalPlayback(vid)
+                  if (lastPointerTypeRef.current === 'touch') {
+                    onSurfaceTap(e.clientX, e.currentTarget.getBoundingClientRect())
+                    return
+                  }
+                  togglePlaybackFromSurface()
                 }}
               />
-              {/* #334 — "Tap for sound" affordance. Shown only when we
-                  auto-started playback muted because the browser blocked a
-                  sounded autoplay (almost always a party start, where play()
-                  fires from a WebSocket event rather than a click). NOT gated
-                  on controlsVisible — it's a call to action that must stay
-                  put until the user acts. One tap restores audio and clears
-                  the flag (also cleared via onVolumeChange if they use the
-                  normal mute control). */}
+              {/* What a double tap did, on the side it was made. */}
+              {tapFlash && (
+                <span
+                  key={tapFlash.key}
+                  aria-hidden="true"
+                  className="player-tap-flash"
+                  data-side={tapFlash.delta < 0 ? 'left' : 'right'}
+                >
+                  {tapFlash.delta < 0 ? <RotateCcw size={22} /> : <RotateCw size={22} />}
+                  {tapFlash.delta < 0 ? '10 seconds back' : '10 seconds on'}
+                </span>
+              )}
+              {/* #334: playback auto-started MUTED because the browser
+                  blocked a sounded autoplay (a party start fires play() from
+                  a socket event, not a click). Not tied to the controls'
+                  visibility: it stays until the viewer acts. */}
               {autoStartedMuted && (
                 <button
                   type="button"
@@ -7342,195 +7414,35 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     }
                     setAutoStartedMuted(false)
                   }}
-                  className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 rounded-full bg-purple-600/90 hover:bg-purple-600 px-4 h-10 text-white text-sm font-semibold shadow-lg animate-fade-in"
+                  className="absolute bottom-44 left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
                 >
                   <VolumeX size={18} />
                   Tap for sound
                 </button>
               )}
-              {/* Cast button. Visible whenever the Cast SDK loaded
-                  successfully, NOT gated on a currently-reachable
-                  receiver — mDNS discovery is slow and unreliable
-                  on some networks, and YouTube/Netflix both show
-                  the button even when no devices are yet visible
-                  (the picker itself handles the "no devices"
-                  case).
-
-                  Available during a watch party too: when the party
-                  controls this media, a dedicated receiver-driven sync
-                  effect (below the local guest-mirror/host-broadcast
-                  effect) takes over — the receiver itself becomes the
-                  mirrored/broadcast surface instead of the local <video>.
-                  A party room playing UNRELATED solo content behaves
-                  exactly like solo casting (nothing to sync).
-
-                  AirPlay deliberately has no custom button: Safari
-                  renders its own native AirPlay glyph on the video
-                  element when `x-webkit-airplay="allow"` is set
-                  and a receiver is reachable. A second button
-                  would be visual clutter that opens the same
-                  picker. Chrome has no AirPlay support at all,
-                  so there's nothing to add there either.
-
-                  UPDATE (cast/AirPlay controls) — our custom controls SUPPRESS
-                  Safari's native AirPlay glyph, so we surface our own button
-                  that opens the system target picker. Shown only when a
-                  wireless target is available (Chrome never fires availability,
-                  so it stays hidden there).
-
-                  AirPlay needs no special party-sync wiring at all: unlike
-                  Chromecast, the local <video> element IS the AirPlay-mirrored
-                  source (see the airplayActive effect above), so it stays
-                  driven by the ordinary, unmodified local guest-mirror /
-                  host-broadcast effect the whole time — full sync fidelity
-                  "for free." */}
-              {airplayAvailable && !cast.status.connected && (
-                <div
-                  data-player-chrome=""
-                  inert={!controlsVisible || undefined}
-                  className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
-                    controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => videoRef.current?.webkitShowPlaybackTargetPicker?.()}
-                    title="AirPlay to an Apple TV or AirPlay device"
-                    aria-label="AirPlay"
-                    className="inline-flex items-center justify-center rounded-full w-9 h-9 text-white bg-black/60 hover:bg-black/80"
-                  >
-                    <Airplay size={18} />
-                  </button>
-                </div>
-              )}
-              {cast.status.supported && (
-                <div
-                  data-player-chrome=""
-                  inert={!controlsVisible || undefined}
-                  className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
-                    controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                  }`}
-                >
-                  {cast.status.connected ? (
-                    <button
-                      type="button"
-                      onClick={() => { void stopCastWithProgress() }}
-                      title={`Stop casting to ${cast.status.deviceName ?? 'device'}`}
-                      aria-label="Stop casting"
-                      className="inline-flex items-center gap-2 rounded-full bg-purple-600/90 hover:bg-purple-600 px-3 h-9 text-white text-xs font-medium"
-                    >
-                      <StopCircle size={16} />
-                      <span className="hidden sm:inline">
-                        Casting to {cast.status.deviceName ?? 'device'}
-                      </span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // Issue #503: refuse a title the receiver cannot play
-                        // BEFORE opening the picker, so an unsupported format
-                        // never masquerades as a device fault.
-                        const blocked = castUnavailableReason()
-                        if (blocked) {
-                          flashCastError(blocked)
-                          return
-                        }
-                        // A new attempt: a mint failure recorded by the last
-                        // one must not label this one's outcome. Deliberately
-                        // NOT consulted by the pre-flight above — a mint
-                        // failure is transient, and refusing to retry it
-                        // would strand the user on a stale error.
-                        castMintFailedRef.current = false
-                        // runCastLoad releases the mint when the receiver
-                        // never takes it (dismissed picker, load_failed,
-                        // receiver stall) rather than leaving a stillborn
-                        // session leased for 30 minutes.
-                        void runCastLoad(() => cast.start()).catch((err) => {
-                          // Log + briefly flag the button. Deliberately
-                          // do NOT call setErrorMsg here — that would
-                          // surface the full-screen "Playback Error"
-                          // overlay used for actual hls.js failures,
-                          // killing the in-progress local playback over
-                          // a transient cast hiccup. The user can just
-                          // click Cast again to retry.
-                          const raw = err instanceof Error ? err.message : String(err)
-                          // CAST_NO_MEDIA_ERROR is an internal sentinel, not
-                          // a sentence — it reached a user's screen verbatim
-                          // in issue #503. Prefer the specific reason when we
-                          // have one; otherwise say the honest general thing.
-                          const msg =
-                            raw === CAST_NO_MEDIA_ERROR
-                              ? castMintFailedRef.current
-                                ? CAST_MINT_FAILED
-                                : castUnavailableReason() ?? CAST_NOTHING_TO_CAST
-                              : raw
-                          if (!/cancel|dismiss/i.test(msg)) {
-                            // eslint-disable-next-line no-console
-                            console.warn('[Aurora Cast] start failed:', raw)
-                            // onToast, NOT flashCastError. By the time a start
-                            // can fail, requestSession has usually resolved and
-                            // remoteActive has minimized the player — so the
-                            // inline cast banner lives inside a subtree that is
-                            // opacity-0, inert and aria-hidden, and its 4s timer
-                            // expires unseen. Same reasoning, and the same fix,
-                            // as the keepalive-death message below. Keep the
-                            // inline banner for the PRE-FLIGHT refusal above,
-                            // which returns before any session is opened and so
-                            // always runs against a visible player.
-                            onToast?.(`Cast failed: ${msg}`, 'error')
-                          }
-                        })
-                      }}
-                      title={
-                        cast.status.available
-                          ? 'Cast to a Chromecast device'
-                          : 'Cast (no devices found — check that your Chromecast is on the same Wi-Fi)'
-                      }
-                      aria-label="Cast"
-                      // Dim the button when no devices are visible so users
-                      // get a visual hint that it may not do anything yet,
-                      // without hiding it entirely (the SDK's picker will
-                      // surface the real status if they click).
-                      className={`inline-flex items-center justify-center rounded-full w-9 h-9 text-white ${
-                        cast.status.available
-                          ? 'bg-black/60 hover:bg-black/80'
-                          : 'bg-black/40 hover:bg-black/60 text-white/70'
-                      }`}
-                    >
-                      <Cast size={18} />
-                    </button>
-                  )}
-                </div>
-              )}
-              {/* Cast error toast — positioned just under the Cast
-                  button cluster. Auto-clears after 4s via setTimeout
-                  in the click handler. Local playback continues
-                  unaffected. */}
+              {/* A refused cast (the pre-flight above). Local playback is
+                  unaffected; it clears by itself after four seconds. */}
               {castError && (
                 <div
-                  className="absolute top-16 right-4 max-w-xs px-3 py-2 rounded-md bg-red-600/90 text-white text-xs shadow-lg"
+                  className="absolute top-24 right-3 sm:right-8 z-30 max-w-xs px-3 py-2 rounded-control bg-danger text-white text-[13px] shadow-lg"
                   role="status"
                   aria-live="polite"
                 >
                   Cast failed: {castError}
                 </div>
               )}
-              {/* Smart Skip pill — Netflix-style bottom-right button
-                  while the playhead is inside an intro/recap (or, for
-                  movies, credits) window. Always visible during the
-                  window regardless of controls auto-hide: surfacing
-                  it IS the feature. Advisory only — a click seeks,
-                  nothing ever auto-seeks. z-[55] floats it above the
-                  controls overlay (z-50) so it stays clickable over
-                  the gradient. */}
-              {/* One-shot announcement. The pill is a transient, time-boxed
-                  offer — it appears for a few seconds and then it's gone — so a
-                  screen-reader user who never tabs into the video surface had no
-                  way to learn it existed (WCAG 4.1.3 Status Messages). The live
-                  line is separate from the button so the button's own label
-                  isn't re-read, and it is keyed on the marker so re-entering a
-                  window announces again while a re-render does not. */}
+              {/* Skip intro / recap / credits. Advisory: a press seeks,
+                  nothing ever seeks by itself. It stays up for the whole
+                  window whether or not the controls are showing, because
+                  surfacing it IS the feature, and sits above the control
+                  band (z-50) so it stays clickable over the scrim.
+
+                  The separate sr-only line announces the offer once per
+                  window (WCAG 4.1.3): the button appears for a few seconds
+                  and a screen-reader user who never tabs into the picture
+                  would not otherwise learn it exists. Keyed on the marker so
+                  re-entering a window announces again and a re-render does
+                  not. */}
               {activeSkipMarker && (
                 <p key={`${activeSkipMarker.kind}:${activeSkipMarker.start_ms}`} role="status" className="sr-only">
                   {skipLabel} available — press S
@@ -7540,139 +7452,171 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 <button
                   type="button"
                   onClick={handleSkip}
-                  // The shortcut is in the accessible name, not only in a
-                  // `title`: a tooltip is neither keyboard- nor AT-discoverable.
+                  // The shortcut is in aria-keyshortcuts, not only a `title`:
+                  // a tooltip is neither keyboard- nor AT-discoverable.
                   aria-keyshortcuts="S"
                   title={`${skipLabel} (S)`}
                   data-skip-pill=""
-                  // .stage-skip-pill: white-on-dark, not the previous
-                  // dark-on-video. This appears over an arbitrary frame for a
-                  // few seconds and is the one control that has to be
-                  // unmissable in that window — a translucent black pill on a
-                  // night-time scene was close to invisible, which defeats the
-                  // feature. Position stays where it was.
-                  className="stage-skip-pill absolute bottom-28 right-[26px] z-[55] inline-flex"
+                  className="stage-skip-pill absolute left-3 sm:left-8 bottom-44 z-[55] inline-flex"
                 >
                   {skipLabel}
-                  <SkipForward size={15} />
                 </button>
               )}
-              {/* Smart Skip next-up card — appears when an episode
-                  crosses its credits onset. Countdown mode when the
-                  autoplay pref is on; explicit-button mode when off
-                  (the click then forces the advance past the pref —
-                  an explicit click outranks a passive setting). */}
+              {/* Up next: appears when an episode crosses its credits.
+                  Countdown when the autoplay preference is on, an explicit
+                  button when off.
+
+                  Issue #460: the party clause covers host succession. A
+                  host demoted while the card is up must lose it, or their
+                  button would fall through to the solo advance, which
+                  refuses to move a party.
+
+                  NO role="status" on the card: it CONTAINS the countdown, so
+                  as a live region every tick would be re-announced. The
+                  sr-only line announces it once; the counter is aria-hidden. */}
               {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (!party || partyAdvanceHost) && (
-                // Issue #460 — the party clause covers host succession: if
-                // the host is demoted while their card is up, it has to go.
-                // Without this the ex-host keeps a button that would fall
-                // through to the solo advance path, which refuses to move a
-                // party and reports "that's the last episode" instead.
-                //
-                // .stage-upnext. The mockup's card leads with a purple
-                // "UP NEXT" eyebrow and puts the countdown in the corner rather
-                // than in the body line, so the card reads the same whether the
-                // autoplay pref is on or off — only the counter appears.
-                // No thumbnail: the mockup shows one, but nothing here knows the
-                // next episode's still until the advance resolves it, and
-                // rendering a placeholder frame would imply we do.
-                // NO role="status" on this wrapper. Adding one (which the first
-                // version of this restyle did) turned the card into a live region
-                // that CONTAINS the countdown, so every tick re-announced —
-                // "in 5s… in 4s… in 3s…" queued over whatever the user was
-                // doing. The classic countdown-in-a-live-region anti-pattern.
-                // The card's appearance is announced once by the sr-only line
-                // below; the ticking counter is aria-hidden.
-                <div className="stage-upnext absolute bottom-28 right-[26px] z-[55]">
-                  <div className="p-[15px] pb-3.5">
-                    {/* One polite announcement when the card appears, with no
-                        number in it, so it never re-fires. */}
-                    {/* Still number-free so it announces exactly once, but
-                        it has to carry the blast radius: the visible
-                        "plays for everyone" line sits outside the live
-                        region, so without this a screen-reader host hears
-                        precisely what a solo viewer hears before taking an
-                        action that moves the whole room. */}
-                    <span className="sr-only" role="status">
-                      {partyAdvanceHost
-                        ? 'Next episode available — playing it starts it for everyone in the party'
-                        : 'Next episode available'}
-                    </span>
-                    <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
-                    <p className="text-white text-[13.5px] font-semibold mt-1">Next episode</p>
-                    {/* Issue #460 — name the blast radius. The host's click
-                        moves every person in the room, and a button that
-                        looks identical to the solo one hides that. */}
-                    {partyAdvanceHost && (
-                      <p className="text-white/60 text-[11px] mt-0.5">Plays for everyone in the party</p>
+                <div className="stage-upnext absolute bottom-44 right-3 sm:right-8 z-[55]">
+                  {/* Number-free, so it is announced exactly once; and it
+                      carries the blast radius, because the visible "plays for
+                      everyone" line is outside this live region. */}
+                  <span className="sr-only" role="status">
+                    {partyAdvanceHost
+                      ? 'Next episode available — playing it starts it for everyone in the party'
+                      : 'Next episode available'}
+                  </span>
+                  <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
+                  <p className="text-ink text-[17px] font-semibold mt-1">Next episode</p>
+                  {/* Issue #460: the host's press moves everyone in the room. */}
+                  {partyAdvanceHost && (
+                    <p className="text-ink-2 text-[13px] mt-0.5">Plays for everyone in the party</p>
+                  )}
+                  <div className="mt-3 flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => { void fireAdvance(true) }}
+                      className="inline-flex items-center gap-2 h-11 px-5 rounded-full bg-action text-action-on text-[15px] font-semibold hover:brightness-95 transition-[filter]"
+                    >
+                      <Play size={16} fill="currentColor" strokeWidth={0} />
+                      {partyAdvanceHost ? 'Play for all' : 'Play now'}
+                    </button>
+                    {nextUpPhase === 'countdown' && (
+                      // aria-hidden: a per-second counter is for the eye.
+                      <span className="text-ink-2 text-[13px] tabular-nums" aria-hidden="true">
+                        in {Math.max(0, nextUpSecs)}s
+                      </span>
                     )}
-                    <div className="mt-2.5 flex items-center gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => { void fireAdvance(true) }}
-                        className="inline-flex items-center gap-1.5 h-[30px] px-3.5 rounded-lg bg-white hover:bg-white/90 text-[#0a0a0a] text-[11.5px] font-bold transition-colors"
-                      >
-                        <Play size={12} />
-                        {partyAdvanceHost ? 'Play for all' : 'Play now'}
-                      </button>
-                      {nextUpPhase === 'countdown' && (
-                        // aria-hidden: a per-second counter is information for
-                        // the eye. The "Play now" button says what the action is,
-                        // and re-announcing a number every second is noise.
-                        <span className="text-white/70 text-[11px] tabular-nums" aria-hidden="true">
-                          in {Math.max(0, nextUpSecs)}s
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setNextUpPhase('spent')}
-                        aria-label="Dismiss next-episode card"
-                        title="Keep watching the credits"
-                        className="ml-auto w-[26px] h-[26px] rounded-full grid place-items-center bg-black/60 hover:bg-black/80 border border-white/20 text-white/85 transition-colors"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setNextUpPhase('spent')}
+                      aria-label="Dismiss next-episode card"
+                      title="Keep watching the credits"
+                      className="ml-auto w-11 h-11 rounded-control grid place-items-center text-ink-2 hover:text-ink hover:bg-action-soft transition-colors"
+                    >
+                      <X size={18} />
+                    </button>
                   </div>
                 </div>
               )}
-              {/* Series end: the advance found nothing to play. Brief
-                  honest feedback (auto-dismisses) instead of a card
-                  that promised a next episode and silently vanished. */}
+              {/* Series end: the advance found nothing to play. Said plainly
+                  and briefly, instead of a card that promised a next episode
+                  and vanished. Same party gate as the card: a guest who armed
+                  this alone and then joined a party must not be told the
+                  series ended on the host's behalf. */}
               {nextUpPhase === 'finale' && (!party || partyAdvanceHost) && (
-                // Same party gate as the card above: a guest who armed
-                // this while watching alone and then joined a party must
-                // not be told the series ended on the host's behalf.
                 <div
                   role="status"
-                  className="absolute bottom-28 right-6 z-[55] rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl px-4 py-3"
+                  className="stage-upnext absolute bottom-44 right-3 sm:right-8 z-[55]"
                 >
-                  <p className="text-white/80 text-sm">That's the last episode — you're all caught up.</p>
+                  <p className="text-ink text-[15px]">That's the last episode — you're all caught up.</p>
                 </div>
               )}
-              {/* 2026-08 review fix (issue #461 follow-up) — while
-                  Chromecasting (reachable via "Expand player" without
-                  stopping the cast, in or out of a party), playing/
-                  currentSec/bufferedSec are local-<video> state that
-                  pausedByCastRef holds paused/frozen for the whole cast
-                  session. onSeek/onSeekRelative/onPlayPause below already
-                  act on the receiver when casting — display what they'd
-                  actually act on too, or the scrub bar shows a frozen
-                  position/wrong icon that visibly jumps once touched.
-                  cast.remote.currentTime is relative to the CAST session's
-                  own -ss anchor, which since cast clones are anchored near
-                  the sender is routinely not the local <video>'s — so it is
-                  converted through recvToAbsSec (castStartSecRef), never
-                  +startSecRef, to become REAL-FILE absolute, and falls back
-                  to the raw reading when that anchor is unknown;
-                  cast.remote.duration is comparatively
-                  unreliable for a growing HLS transcode, so durationSec
-                  keeps using the already-absolute, receiver-independent
-                  realDurationSec regardless of cast state. There's no
-                  receiver-side "buffered ahead" concept to substitute for
-                  bufferedSec, so it just tracks the (also substituted)
-                  playhead — no buffered-ahead fill rather than a stale or
-                  fabricated one. */}
+
+              {/* The menus. An open one pins the chrome (chromePopoverOpen),
+                  so they never need to hide with it. */}
+              {openMenu === 'tracks' && (
+                <TracksSheet
+                  audio={availableAudio}
+                  audioIndex={target.audioTrackIndex}
+                  onPickAudio={(index) => {
+                    setOpenMenu(null)
+                    if (onChangeAudioTrack) {
+                      // Switching audio rebuilds the session (FFmpeg maps the
+                      // track at spawn), so capture the live position in
+                      // REAL-FILE ms for the parent to resume from.
+                      const absoluteSec = readLocalAbsoluteSec()
+                      prepareLocalReplacement(absoluteSec, videoRef.current)
+                      onChangeAudioTrack(index, Math.round(absoluteSec * 1000))
+                    }
+                  }}
+                  subtitles={availableSubs}
+                  subtitleIndex={currentSubIndex}
+                  onPickSubtitle={(index) => { applySubtitle(index); setOpenMenu(null) }}
+                  error={subError}
+                  details={playbackDetails}
+                  onClose={() => setOpenMenu(null)}
+                />
+              )}
+              {openMenu === 'speed' && speedLockNow === null && (
+                <SpeedMenu
+                  rate={speed}
+                  onPick={(rate) => { setSpeed(rate); setOpenMenu(null) }}
+                  onClose={() => setOpenMenu(null)}
+                />
+              )}
+              {openMenu === 'more' && (
+                <MoreMenu details={playbackDetails} onClose={() => setOpenMenu(null)}>
+                  {/* The boxed layout exists to sit beside the party panel,
+                      so it is only offered in a party. */}
+                  {party && !fullscreen && (
+                    <SheetAction
+                      icon={boxedPref ? <Expand size={20} /> : <PanelRight size={20} />}
+                      label={boxedPref ? 'Fill the window' : 'Show beside the party chat'}
+                      note={boxedPref ? 'The picture runs edge to edge' : 'The picture sits in a box next to the chat'}
+                      onSelect={() => { setBoxedPref(b => !b); setOpenMenu(null) }}
+                    />
+                  )}
+                  {/* Admin only, and never in a party: pausing and scrubbing
+                      to fix a marker would drag every guest along. */}
+                  {isAdmin && !party && (
+                    <SheetAction
+                      icon={<Scissors size={20} />}
+                      label="Edit skip markers"
+                      note="Intro, recap and credits for this file"
+                      onSelect={() => setOpenMenu('markers')}
+                    />
+                  )}
+                </MoreMenu>
+              )}
+              {openMenu === 'markers' && isAdmin && !party && (
+                <SkipMarkerEditor
+                  fileId={target.fileId}
+                  fileType={target.fileType}
+                  currentSec={currentSec}
+                  onMarkersChanged={(all) => setSkipMarkers(all.filter(m => m.end_ms > m.start_ms))}
+                  onClose={() => setOpenMenu(null)}
+                />
+              )}
+              {/* A subtitle track that failed while its sheet is closed still
+                  has to be said somewhere. */}
+              {subError && openMenu !== 'tracks' && (
+                <div
+                  role="status"
+                  className="absolute bottom-44 left-1/2 -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
+                >
+                  {subError}
+                </div>
+              )}
+
+              {/* While Chromecasting (reachable through "Expand player"),
+                  playing/currentSec/bufferedSec are the local <video>'s, which
+                  the cast holds paused and frozen. The callbacks below already
+                  act on the receiver, so the display must show the receiver
+                  too. cast.remote.currentTime is relative to the CAST
+                  session's own anchor, so it is converted through
+                  recvToAbsSec (never +startSecRef) and falls back to the raw
+                  reading when that anchor is unknown. The duration stays the
+                  absolute source duration. A receiver has no "buffered
+                  ahead", so that fill just tracks the playhead. */}
               <PlayerControls
                 playing={cast.status.connected ? !cast.remote.isPaused : playing}
                 currentSec={cast.status.connected
@@ -7686,9 +7630,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 muted={muted}
                 fullscreen={fullscreen}
                 visible={controlsVisible}
+                ranges={ranges}
                 onPlayPause={() => {
-                  // While Chromecasting, the play/pause control drives the
-                  // RECEIVER (the local <video> is held paused as the surface).
+                  // While Chromecasting, play/pause drives the RECEIVER.
                   // resumeCast renews an expired cast token before resuming.
                   if (cast.status.connected) { resumeCast(); return }
                   const vid = videoRef.current
@@ -7696,45 +7640,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   toggleLocalPlayback(vid)
                 }}
                 onSeek={seekToRealSec}
-                onSeekRelative={(delta) => {
-                  // Med-fix (2026-05-29) — was a raw
-                  // `vid.currentTime = max(0, currentTime + delta)`,
-                  // so the forward skip button (then +30s, now +10s)
-                  // seeked past the FFmpeg
-                  // output head and stalled hls.js. Convert the
-                  // relative delta to a REAL-FILE absolute target
-                  // (local currentTime + startSec offset + delta) and
-                  // route through seekToRealSec, which triggers a
-                  // transcode rebuild on a forward jump past the
-                  // buffered head — same path the scrubber uses.
-                  // Backward deltas flow through unchanged (the
-                  // rebuild branch only fires near/past the buffered
-                  // edge; going back just clamps).
-                  //
-                  // 2026-08 review fix (issue #461 follow-up) — while
-                  // Chromecasting, vid.currentTime is frozen wherever local
-                  // playback was paused when the cast began; basing a
-                  // relative skip off it would compute a target completely
-                  // disconnected from where the receiver's TV actually is.
-                  // Use the receiver's own live position instead.
-                  // Receiver seconds carry the CAST anchor, local seconds the
-                  // local one — see the keyboard handler above for what mixing
-                  // them costs. A cast whose anchor we don't know has no
-                  // correct target, so the control no-ops rather than guess.
-                  if (cast.status.connected) {
-                    const baseAbsSec = recvToAbsSec(cast.remote.currentTime)
-                    if (baseAbsSec !== null) seekToRealSec(baseAbsSec + delta)
-                    return
-                  }
-                  seekToRealSec(readLocalAbsoluteSec() + delta)
-                }}
+                onSeekRelative={seekRelative}
                 onVolumeChange={(v) => {
                   const vid = videoRef.current
                   if (!vid) return
                   vid.volume = v
-                  // Setting volume>0 also implicitly unmutes — match
-                  // YouTube/Netflix behavior so the user doesn't get
-                  // a "no sound after dragging slider up" surprise.
+                  // Raising the volume also unmutes, or dragging the slider
+                  // up would produce no sound.
                   if (v > 0 && vid.muted) vid.muted = false
                 }}
                 onMuteToggle={() => {
@@ -7743,6 +7655,40 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   vid.muted = !vid.muted
                 }}
                 onFullscreenToggle={handleFullscreenToggle}
+                nextEpisode={nextEpisodeOffered ? {
+                  label: partyAdvanceHost ? 'Next episode for everyone in the party' : 'Next episode',
+                  onClick: () => {
+                    // Before the credits this is a skip, not a finished
+                    // viewing; the playback record must not call it one.
+                    void fireAdvance(true, nextUpArmSec == null || currentSec < nextUpArmSec)
+                  },
+                } : null}
+                tracks={tracksOffered ? { open: openMenu === 'tracks', onToggle: () => toggleMenu('tracks') } : null}
+                speed={{
+                  rate: speedLockNow === null ? speed : 1,
+                  lock: speedLockNow,
+                  open: openMenu === 'speed',
+                  onToggle: () => toggleMenu('speed'),
+                }}
+                pip={pipOffered ? { active: pipActive, onToggle: togglePip } : null}
+                status={partyControlsMedia && party ? (
+                  <span className="ml-3 hidden sm:inline-flex items-center gap-2 text-[13px] text-ink">
+                    <i aria-hidden="true" className="w-2 h-2 rounded-full [background:var(--aurora)]" />
+                    {party.isHost ? 'You are hosting' : 'Following the host'}
+                    {!party.isHost && (
+                      <button
+                        type="button"
+                        onClick={resyncToHost}
+                        className="stage-tr-btn stage-tr-btn-text inline-flex"
+                        aria-label="Resync to host"
+                        title="Jump to the host's position"
+                      >
+                        <RefreshCw size={18} strokeWidth={1.75} />
+                        Resync
+                      </button>
+                    )}
+                  </span>
+                ) : null}
               />
             </>
           )}
@@ -7751,19 +7697,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     </div>
     {minimizedActive && (
       <div
-        className="fixed bottom-4 left-4 z-[70] w-72 max-w-[calc(100vw-2rem)] rounded-2xl bg-zinc-900/95 backdrop-blur ring-1 ring-white/10 shadow-2xl p-3 text-white"
+        className="player-cast-widget"
         role="dialog"
         aria-label="Cast controls"
       >
         <div className="flex items-center gap-2">
           {cast.status.connected ? (
-            <Cast size={16} className="text-purple-400 shrink-0" />
+            <Cast size={18} className="text-ink-2 shrink-0" />
           ) : (
-            <Airplay size={16} className="text-sky-400 shrink-0" />
+            <Airplay size={18} className="text-ink-2 shrink-0" />
           )}
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium truncate">{target.title}</p>
-            <p className="text-[11px] text-white/50 truncate">
+            <p className="text-[14px] font-semibold text-ink truncate">{target.title}</p>
+            <p className="text-[12px] text-ink-2 truncate">
               {cast.status.connected
                 ? `Casting to ${cast.status.deviceName ?? 'device'}`
                 : 'Playing via AirPlay'}
@@ -7774,18 +7720,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             onClick={() => setMinimized(false)}
             title="Expand player"
             aria-label="Expand player"
-            className="p-1.5 rounded-full hover:bg-white/10 transition-colors"
+            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft transition-colors"
           >
-            <Maximize2 size={15} />
+            <Maximize2 size={18} />
           </button>
           <button
             type="button"
             onClick={widgetStopAndClose}
             title={cast.status.connected ? 'Stop casting' : 'Stop'}
             aria-label="Stop and close"
-            className="p-1.5 rounded-full hover:bg-white/10 text-white/80 hover:text-red-400 transition-colors"
+            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-danger-ink hover:bg-action-soft transition-colors"
           >
-            <X size={15} />
+            <X size={18} />
           </button>
         </div>
         <div className="mt-2.5 flex items-center gap-3">
@@ -7793,13 +7739,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             type="button"
             onClick={widgetToggle}
             aria-label={widgetPaused ? 'Play' : 'Pause'}
-            className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-white text-black hover:bg-white/90 shrink-0 transition-colors"
+            className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-action text-action-on hover:brightness-95 shrink-0 transition-[filter]"
           >
-            {widgetPaused ? <Play size={16} className="ml-0.5" /> : <Pause size={16} />}
+            {widgetPaused ? <Play size={16} className="ml-0.5" fill="currentColor" strokeWidth={0} /> : <Pause size={16} fill="currentColor" strokeWidth={0} />}
           </button>
-          <div className="h-1 flex-1 rounded-full bg-white/15 overflow-hidden">
+          <div className="h-[3px] flex-1 rounded-full bg-[var(--track)] overflow-hidden">
             <div
-              className="h-full bg-white/80"
+              className="h-full bg-action"
               style={{
                 width: `${
                   widgetDurSec > 0
@@ -7813,163 +7759,5 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       </div>
     )}
     </>
-  )
-}
-
-// ── Smart Skip: admin marker editor ─────────────────────────────────
-//
-// Per-kind manual correction panel, anchored under the top bar's
-// "Markers" button. Workflow: scrub/pause the video where the window
-// should start, hit "Start = now", same for the end, Save. "Off"
-// stores a zero-length suppression (the analyzer won't re-add the
-// marker; the player never shows it); "Auto" deletes the row and
-// queues fresh auto-detection server-side.
-
-const MARKER_KINDS: SkipMarker['kind'][] = ['recap', 'intro', 'credits']
-
-function fmtMarkerTime(ms: number): string {
-  const total = Math.floor(ms / 1000)
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged }: {
-  fileId: number
-  fileType: 'media' | 'episode'
-  currentSec: number
-  // Fires with the file's full updated marker list after every write
-  // so the player's live overlay state stays in sync (the caller
-  // filters out zero-length suppressions).
-  onMarkersChanged: (markers: SkipMarker[]) => void
-}) {
-  type Draft = { start_ms: number; end_ms: number; detector?: string }
-  const [drafts, setDrafts] = useState<Partial<Record<SkipMarker['kind'], Draft>>>({})
-  const [loaded, setLoaded] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-
-  const seedFromServer = useCallback((markers: SkipMarker[]) => {
-    const next: Partial<Record<SkipMarker['kind'], Draft>> = {}
-    for (const m of markers) {
-      next[m.kind] = { start_ms: m.start_ms, end_ms: m.end_ms, detector: m.detector }
-    }
-    setDrafts(next)
-  }, [])
-
-  // Load the FULL marker list (including suppressions) on mount.
-  useEffect(() => {
-    const ac = new AbortController()
-    getAdminSkipMarkers(fileId, fileType, ac.signal)
-      .then(markers => { seedFromServer(markers); setLoaded(true) })
-      .catch(e => {
-        if (e instanceof DOMException && e.name === 'AbortError') return
-        setErr('Failed to load markers')
-        setLoaded(true)
-      })
-    return () => ac.abort()
-  }, [fileId, fileType, seedFromServer])
-
-  const setNow = (kind: SkipMarker['kind'], field: 'start_ms' | 'end_ms') => {
-    const nowMs = Math.max(0, Math.round(currentSec * 1000))
-    setDrafts(prev => {
-      const d = prev[kind] ?? { start_ms: 0, end_ms: 0 }
-      return { ...prev, [kind]: { ...d, [field]: nowMs } }
-    })
-  }
-
-  const write = async (kind: SkipMarker['kind'], startMs: number, endMs: number) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      const markers = await putSkipMarker(fileId, fileType, { kind, start_ms: startMs, end_ms: endMs })
-      seedFromServer(markers)
-      onMarkersChanged(markers)
-    } catch {
-      setErr('Save failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const redetect = async (kind: SkipMarker['kind']) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      await deleteSkipMarker(fileId, fileType, kind)
-      const markers = await getAdminSkipMarkers(fileId, fileType)
-      seedFromServer(markers)
-      onMarkersChanged(markers)
-    } catch {
-      setErr('Update failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="absolute top-full right-0 mt-1 w-80 bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl z-20 p-3">
-      <p className="text-white/50 text-[11px] uppercase tracking-wide mb-2">Skip markers (admin)</p>
-      {!loaded && <p className="text-white/40 text-sm">Loading…</p>}
-      {loaded && MARKER_KINDS.map(kind => {
-        const d = drafts[kind]
-        const suppressed = !!d && d.start_ms === 0 && d.end_ms === 0 && d.detector === 'manual'
-        const invalid = !!d && d.end_ms < d.start_ms
-        return (
-          <div key={kind} className="py-2 border-t border-white/[0.06] first:border-t-0">
-            <div className="flex items-center justify-between">
-              <span className="text-white/85 text-sm capitalize">{kind}</span>
-              <span className="text-white/40 text-xs font-mono">
-                {!d
-                  ? 'none'
-                  : suppressed
-                    ? 'disabled'
-                    : `${fmtMarkerTime(d.start_ms)} → ${fmtMarkerTime(d.end_ms)}${d.detector === 'manual' ? ' · manual' : ''}`}
-              </span>
-            </div>
-            <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
-              <MarkerEditButton label="Start = now" disabled={busy} onClick={() => setNow(kind, 'start_ms')} />
-              <MarkerEditButton label="End = now" disabled={busy} onClick={() => setNow(kind, 'end_ms')} />
-              <MarkerEditButton
-                label="Save"
-                emphasis
-                disabled={busy || !d || invalid}
-                onClick={() => { if (d) void write(kind, d.start_ms, d.end_ms) }}
-              />
-              <MarkerEditButton label="Off" disabled={busy || suppressed} onClick={() => void write(kind, 0, 0)} />
-              <MarkerEditButton label="Auto" disabled={busy || !d} onClick={() => void redetect(kind)} />
-            </div>
-            {invalid && <p className="text-amber-300/80 text-[11px] mt-1">End must be at or after start.</p>}
-          </div>
-        )
-      })}
-      {err && <p className="text-red-300 text-xs mt-2">{err}</p>}
-      <p className="text-white/30 text-[11px] mt-2 leading-snug">
-        Manual values stick — auto-detection never overwrites them.
-        "Off" hides the marker; "Auto" re-queues detection.
-      </p>
-    </div>
-  )
-}
-
-function MarkerEditButton({ label, onClick, disabled, emphasis }: {
-  label: string
-  onClick: () => void
-  disabled?: boolean
-  emphasis?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`px-2 py-1 rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-        emphasis
-          ? 'bg-purple-600 hover:bg-purple-500 text-white'
-          : 'bg-white/10 hover:bg-white/15 text-white/80'
-      }`}
-    >
-      {label}
-    </button>
   )
 }

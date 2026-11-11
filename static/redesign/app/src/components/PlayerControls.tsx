@@ -1,88 +1,62 @@
-// Phase 7 — Custom video player controls overlay.
+// The player's bottom control band: the timeline and the transport row.
 //
-// Replaces the browser-native `<video controls>` UI for two reasons:
-//   1. Native controls hide/reveal on browser-specific heuristics
-//      (cursor over letterbox bars doesn't trigger, fullscreen-API
-//      edge cases hide them entirely, Chrome+Mac specifically has
-//      had reports of them not appearing at all). The custom overlay
-//      is rendered by React unconditionally so visibility is fully
-//      under app control.
-//   2. Native controls' time display uses `vid.duration`, which is
-//      the HLS-playlist duration during transcode (it GROWS as
-//      segments are produced). For sync-with-friends parity the
-//      user needs the REAL source-file duration. We pass it in as a
-//      prop and the time display uses THAT.
+// Custom controls rather than `<video controls>` for two reasons that still
+// hold. Native controls hide and reveal on browser heuristics the app cannot
+// steer (a cursor over the letterbox bars does not count as "over the video").
+// And their clock is `vid.duration`, which for a transcode is the length of
+// the playlist so far and GROWS as segments are produced; people syncing with
+// friends need the real source duration, which the parent passes in.
 //
-// State strategy: this component is fully controlled by the parent
-// (VideoPlayer). All state lives there; we just render and emit
-// callbacks. That keeps hls.js orchestration + the various refs in
-// one place and makes this component trivially testable.
-//
-// Visibility behavior:
-//   - Always visible when paused, or for the first second after
-//     mount, or on touch devices.
-//   - When playing: visible after any `mousemove` / `keydown` inside
-//     the player overlay; auto-fades after 3s of inactivity.
-//   - Parent owns the `visible` prop so it can override (e.g. force
-//     visible during seek-bar drag).
+// Fully controlled: every piece of state lives in VideoPlayer, next to the
+// stream it describes, and this component only renders and emits callbacks.
+// The scrub drag is the one exception (local until released, because
+// committing on every pointermove makes hls.js seek on every pixel).
 
-import { useRef, useState, useEffect } from 'react'
-
-// Inline SVG icons. Aurora's main Icon component lives in App.tsx
-// (inline-defined for the V2 prototype's single-file design) and
-// isn't importable from a sub-component without a wider refactor.
-// The 7 icons the player needs are duplicated here — small enough
-// to be self-contained without bloating the bundle measurably.
-function PlayerIcon({ name, size = 18 }: { name: 'play' | 'pause' | 'skipBack' | 'skipForward' | 'volume' | 'volumeX' | 'maximize'; size?: number }) {
-  const paths: Record<string, React.ReactNode> = {
-    play: <polygon points="5 3 19 12 5 21 5 3" />,
-    pause: <><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></>,
-    skipBack: <><polygon points="19 20 9 12 19 4 19 20" /><line x1="5" y1="19" x2="5" y2="5" /></>,
-    skipForward: <><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" y1="5" x2="19" y2="19" /></>,
-    volume: <><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" /></>,
-    volumeX: <><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>,
-    maximize: <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" />,
-  }
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      {paths[name]}
-    </svg>
-  )
-}
+import { useRef, useState, useEffect, type ReactNode } from 'react'
+import {
+  Captions, Maximize, Minimize, Pause, PictureInPicture2, Play, RotateCcw, RotateCw,
+  SkipForward, Volume2, VolumeX,
+} from 'lucide-react'
+import { speedLabel, speedLockMessage, type SpeedLock, type TimelineRange } from '@/lib/playerChrome'
 
 interface PlayerControlsProps {
-  // Player state (controlled by parent)
   playing: boolean
-  // Current playback time in REAL-FILE seconds (i.e. hls.currentTime
-  // plus the session's start_sec offset). NOT hls.js's local time.
+  // Current playback time in REAL-FILE seconds (the element's time plus the
+  // session's start offset), never hls.js's local time.
   currentSec: number
-  // REAL total duration in seconds (from streamInfo.duration_ms, NOT
-  // vid.duration). When 0/undefined, we hide the time display rather
-  // than show a misleading "12:34 / 0:00".
+  // REAL total duration in seconds (stream info's duration_ms, not
+  // vid.duration). 0 hides the readout rather than showing "12:34 / 0:00".
   durationSec: number
-  // Buffered range high-water mark in REAL-FILE seconds. Visualized
-  // as a translucent fill on the scrub bar so the user can see the
-  // transcoder's progress.
+  // Buffered high-water mark in REAL-FILE seconds: how far the transcoder
+  // has got.
   bufferedSec: number
   volume: number          // 0..1
   muted: boolean
   fullscreen: boolean
-  // Whether the bar should be visible right now. Parent computes
-  // this from "paused OR recent mousemove" logic.
+  // Whether the band is visible right now. The parent decides ("paused, or
+  // the pointer moved recently") so it can keep the top bar in step.
   visible: boolean
+  // Intro, recap and credits ranges to draw on the timeline.
+  ranges?: TimelineRange[]
 
-  // Callbacks
   onPlayPause: () => void
   onSeek: (sec: number) => void
   onSeekRelative: (deltaSec: number) => void
   onVolumeChange: (v: number) => void
   onMuteToggle: () => void
   onFullscreenToggle: () => void
+
+  // Absent → the control is not offered at all.
+  nextEpisode?: { label: string; onClick: () => void } | null
+  tracks?: { open: boolean; onToggle: () => void } | null
+  speed?: { rate: number; lock: SpeedLock; open: boolean; onToggle: () => void } | null
+  pip?: { active: boolean; onToggle: () => void } | null
+  // Extra content after the time readout (the party's sync line).
+  status?: ReactNode
 }
 
-// Format seconds as either "M:SS" (< 1 hour) or "H:MM:SS" (>= 1h).
-// Negative or NaN inputs render as "0:00" to avoid leaking weird
-// states like "NaN:undefined" into the UI.
+// "M:SS" under an hour, "H:MM:SS" from an hour. Negative or NaN reads as 0:00
+// so a half-booted stream can never print "NaN:undefined".
 function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0
   const total = Math.floor(sec)
@@ -97,31 +71,23 @@ function formatTime(sec: number): string {
 export function PlayerControls(props: PlayerControlsProps) {
   const {
     playing, currentSec, durationSec, bufferedSec,
-    volume, muted, fullscreen, visible,
+    volume, muted, fullscreen, visible, ranges = [],
     onPlayPause, onSeek, onSeekRelative,
     onVolumeChange, onMuteToggle, onFullscreenToggle,
+    nextEpisode, tracks, speed, pip, status,
   } = props
 
-  // Local-only state for the scrub-bar drag interaction. While
-  // dragging we render the marker at the drag position even though
-  // we haven't committed the seek yet (committing on pointerdown
-  // causes jittery hls.js seeks).
   const [dragging, setDragging] = useState(false)
   const [dragSec, setDragSec] = useState(0)
   const scrubRef = useRef<HTMLDivElement | null>(null)
   const [hoverSec, setHoverSec] = useState<number | null>(null)
 
-  // Display position = drag position while dragging, else committed
-  // current position. Same idiom YouTube/Netflix use.
+  // While dragging, show the drag position; the seek is committed on release.
   const displaySec = dragging ? dragSec : currentSec
   const hasDuration = durationSec > 0
-  // Pct only meaningful when we have a duration; default to 0 so
-  // the scrub bar renders an empty (but visible) track.
   const pct = hasDuration ? Math.min(100, Math.max(0, (displaySec / durationSec) * 100)) : 0
   const bufferedPct = hasDuration ? Math.min(100, Math.max(0, (bufferedSec / durationSec) * 100)) : 0
 
-  // pointerSec computes the real-file second corresponding to a
-  // pointer x position over the scrub bar. Clamped to [0, duration].
   const pointerSec = (clientX: number): number => {
     if (!scrubRef.current || !hasDuration) return 0
     const rect = scrubRef.current.getBoundingClientRect()
@@ -129,9 +95,8 @@ export function PlayerControls(props: PlayerControlsProps) {
     return ratio * durationSec
   }
 
-  // Pointer interactions on the scrub bar. We use Pointer Events
-  // (covers mouse + touch + stylus) and capture the pointer so the
-  // drag tracks even if the cursor leaves the bar's bounds.
+  // Pointer Events cover mouse, touch and stylus; capturing the pointer keeps
+  // the drag alive when the cursor leaves the bar.
   const onScrubPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!hasDuration) return
     e.preventDefault()
@@ -154,248 +119,256 @@ export function PlayerControls(props: PlayerControlsProps) {
   }
   const onScrubPointerLeave = () => setHoverSec(null)
 
-  // Keep state synced if parent props update while we're mid-drag
-  // (e.g. session reload bumps duration). Don't override dragSec
-  // from props — that'd snap the marker out from under the user.
+  // A session reload can shorten the duration mid-drag; keep the marker on
+  // the bar without snapping it to the committed position.
   useEffect(() => {
     if (!dragging && hasDuration && dragSec > durationSec) {
       setDragSec(durationSec)
     }
   }, [dragging, hasDuration, durationSec, dragSec])
 
+  const speedLocked = speed ? speedLockMessage(speed.lock) : null
+  const labelled = ranges.filter(r => r.showLabel)
+
   return (
     <div
-      // High z-index so we sit above the video AND above any
-      // letterbox bars. pointer-events-none on the wrapper lets
-      // mouse hit the video for click-to-pause; the inner row
-      // re-enables pointer-events for interactive elements.
-      // Audit M5 fix — `inert` actually prevents tab-focus from
-      // landing on invisible buttons. `aria-hidden` alone is just
-      // an a11y hint and doesn't block focus. React 19 supports
-      // `inert` as a JSX prop; we pass empty string when invisible
-      // (HTML attribute pattern) and undefined when visible.
+      // pointer-events-none on the wrapper lets a click reach the video for
+      // click-to-pause; the band re-enables it for its own controls.
       className={`absolute inset-x-0 bottom-0 z-50 pointer-events-none transition-opacity duration-300 ${
         visible ? 'opacity-100' : 'opacity-0'
       }`}
       aria-hidden={!visible}
-      // Marks this as an auto-hiding region. VideoPlayer's hide timer refuses
-      // to fire while KEYBOARD focus is inside one — going `inert` under a
-      // keyboard-focused element triggers the HTML focus-fixup rule and dumps
-      // activeElement to <body>, so a keyboard user parked on the scrub bar
-      // used to lose their place after three idle seconds (WCAG 2.4.3). The
-      // guard is modality-gated (lib/chromeFocus): mouse click-focus, like
-      // the fullscreen button keeping focus after activation, does NOT pin
-      // the chrome — that was the 2026-08-09 stuck-visible-controls bug.
+      // Marks an auto-hiding region. VideoPlayer's hide timer refuses to fire
+      // while KEYBOARD focus is inside one: going `inert` under a focused
+      // element makes the browser drop focus to <body>, so a keyboard user
+      // parked on the timeline would lose their place (WCAG 2.4.3). The guard
+      // is modality-gated (lib/chromeFocus): mouse click-focus does not pin
+      // the chrome.
       data-player-chrome=""
-      // 2026-05-20 — React 19 supports `inert` as a proper boolean
-      // prop. The previous code used `{inert: '' | undefined}` as a
-      // React-18-era hack; React 19's native form is cleaner and
-      // (more importantly) doesn't risk the empty-string being
-      // re-interpreted by React's prop handling in a way that
-      // accidentally blocks parent event bubbling.
-      //
-      // `!visible || undefined` evaluates to `true` (apply inert)
-      // when invisible, `undefined` (no attribute) when visible —
-      // React 19 treats `inert={true}` as the attribute being set.
+      // `inert`, not only aria-hidden: hidden buttons must leave the tab order
+      // too, or Tab paints a focus ring on nothing.
       inert={!visible || undefined}
     >
-      {/* Gradient backdrop to lift legibility off bright frames. */}
-      {/* `.stage-controls-scrim`, not `from-black via-black/70 to-transparent`:
-          the utility resolved to 0.533 alpha at the scrub row's y, where the
-          12.5px readouts measured 3.04:1 over a white frame and no text alpha
-          could reach 4.5. The primitive also pins the scrub track's backdrop, so
-          the track/buffered ratios stop depending on the video. */}
-      <div className="stage-controls-scrim pt-12 pb-4 px-6 pointer-events-auto">
-        {/* Scrub bar row */}
-        <div className="flex items-center gap-3.5 mb-4">
-          {/* tabular-nums, not font-mono: the mockup's readout is the body face
-              with figures locked to one advance width, which reads as part of
-              the chrome rather than as code. Both stop the row twitching as
-              digits change. */}
-          <span className="text-white/85 text-[12.5px] font-medium tabular-nums min-w-[52px] text-right">
-            {formatTime(displaySec)}
-          </span>
-          <div
-            ref={scrubRef}
-            onPointerDown={onScrubPointerDown}
-            onPointerMove={onScrubPointerMove}
-            onPointerUp={onScrubPointerUp}
-            onPointerCancel={onScrubPointerUp}
-            // `lostpointercapture` fires when the browser yanks
-            // pointer capture (OS-level focus change, etc.) without
-            // firing pointerup or pointercancel. Without this
-            // handler, `dragging` state would stick true and the
-            // scrub bar would show a phantom drag indicator until
-            // the next pointerdown.
-            onLostPointerCapture={() => setDragging(false)}
-            onPointerLeave={onScrubPointerLeave}
-            role="slider"
-            aria-label="Seek"
-            aria-valuemin={0}
-            aria-valuemax={Math.max(1, Math.floor(durationSec))}
-            aria-valuenow={Math.floor(displaySec)}
-            // Without this a screen reader reads aria-valuenow raw and
-            // announces "2704" for 45:04 — a number with no unit, on the one
-            // control where the value IS a duration (WCAG 4.1.2, APG Slider:
-            // supply aria-valuetext whenever the numeric value is not what a
-            // user would say out loud).
-            aria-valuetext={hasDuration ? `${formatTime(displaySec)} of ${formatTime(durationSec)}` : 'Duration unknown'}
-            tabIndex={0}
-            // Keyboard contract. ArrowUp/ArrowDown are deliberately NOT handled
-            // here — they bubble to the player's window-level handler, which
-            // maps them to volume, and that shortcut predates the slider.
-            // Everything this DOES handle is stopped so the window handler
-            // can't apply the same seek twice.
-            onKeyDown={e => {
-              if (!hasDuration) return
-              const abs = (sec: number) => {
-                e.preventDefault()
-                e.stopPropagation()
-                onSeek(Math.min(durationSec, Math.max(0, sec)))
-              }
-              const relative = (deltaSec: number) => {
-                e.preventDefault()
-                e.stopPropagation()
-                // Let the active transport convert its own trusted clock.
-                // Display seconds may be only a raw receiver fallback.
-                onSeekRelative(Math.min(durationSec, Math.max(0, displaySec + deltaSec)) - displaySec)
-              }
-              switch (e.key) {
-                case 'ArrowLeft': relative(-10); break
-                case 'ArrowRight': relative(10); break
-                // PageUp/PageDown are the APG "large step". A minute matches
-                // the ±10s arrows' ratio to a typical 45-90 minute runtime.
-                case 'PageDown': relative(-60); break
-                case 'PageUp': relative(60); break
-                case 'Home': abs(0); break
-                case 'End': abs(durationSec); break
-              }
-            }}
-            // h-3.5 on the hit target, 5px on the visible track: the mockup's
-            // .scrub wraps a thin bar in a taller row so the pointer has 14px
-            // to find rather than 5. Fitts's law — the bar this thin is
-            // otherwise genuinely hard to grab.
-            // `.stage-scrub` is the hook the knob's hover/focus growth hangs
-            // off in index.css. It used to be `group` + `group-hover:scale-110`
-            // on the knob itself, and at (0,3,0) that variant beat the knob's
-            // own (0,1,0) `transform: translate(-50%, -50%)` and REPLACED it —
-            // Tailwind v3 emits the whole transform chain with
-            // `--tw-translate-x/y` defaulting to 0 — so hovering the bar kicked
-            // the knob 7px down and 7px right, out of a 5px track, and left it
-            // there for the whole drag. `group` stays for the ring on the
-            // avatar-style children; the transform is CSS's now.
-            className={`stage-scrub relative flex-1 h-3.5 flex items-center ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} group`}
-          >
-            <div className="stage-scrub-track">
-              {/* Buffered fill — the transcoder's progress. Sits below the
-                  position fill but above the track. */}
-              <div className="stage-scrub-buf" style={{ width: `${bufferedPct}%` }} />
-              {/* Position fill — "you've watched up to here". */}
-              <div className="stage-scrub-pos" style={{ width: `${pct}%` }} />
-              {/* Handle. */}
+      <div className="stage-controls-scrim player-band pointer-events-auto">
+        {/* Timeline. */}
+        <div
+          ref={scrubRef}
+          onPointerDown={onScrubPointerDown}
+          onPointerMove={onScrubPointerMove}
+          onPointerUp={onScrubPointerUp}
+          onPointerCancel={onScrubPointerUp}
+          // The browser can take pointer capture away (an OS-level focus
+          // change) without a pointerup; without this the bar would show a
+          // phantom drag until the next press.
+          onLostPointerCapture={() => setDragging(false)}
+          onPointerLeave={onScrubPointerLeave}
+          role="slider"
+          aria-label="Seek"
+          aria-valuemin={0}
+          aria-valuemax={Math.max(1, Math.floor(durationSec))}
+          aria-valuenow={Math.floor(displaySec)}
+          // A screen reader would otherwise announce "2704" for 45:04 (WCAG
+          // 4.1.2; APG Slider asks for aria-valuetext whenever the number is
+          // not what a person would say).
+          aria-valuetext={hasDuration ? `${formatTime(displaySec)} of ${formatTime(durationSec)}` : 'Duration unknown'}
+          tabIndex={0}
+          // ArrowUp/ArrowDown are deliberately NOT handled: they bubble to the
+          // player's window-level handler, which maps them to volume.
+          // Everything handled here is stopped so that handler cannot apply
+          // the same seek twice.
+          onKeyDown={e => {
+            if (!hasDuration) return
+            const abs = (sec: number) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onSeek(Math.min(durationSec, Math.max(0, sec)))
+            }
+            const relative = (deltaSec: number) => {
+              e.preventDefault()
+              e.stopPropagation()
+              // The active transport converts from its own trusted clock;
+              // the displayed second may be only a raw receiver fallback.
+              onSeekRelative(Math.min(durationSec, Math.max(0, displaySec + deltaSec)) - displaySec)
+            }
+            switch (e.key) {
+              case 'ArrowLeft': relative(-10); break
+              case 'ArrowRight': relative(10); break
+              // APG's "large step": a minute keeps the arrows' ratio to a
+              // 45 to 90 minute runtime.
+              case 'PageDown': relative(-60); break
+              case 'PageUp': relative(60); break
+              case 'Home': abs(0); break
+              case 'End': abs(durationSec); break
+            }
+          }}
+          // `.stage-scrub` is the hook the knob's hover and focus growth hangs
+          // off in index.css. It must stay CSS: a Tailwind scale utility emits
+          // the whole transform chain and would replace the knob's centring.
+          className={`stage-scrub relative h-5 flex items-center ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+        >
+          <div className="stage-scrub-track">
+            <div className="stage-scrub-buf" style={{ width: `${bufferedPct}%` }} />
+            {/* Intro, recap and credits: a taller, brighter stretch of the
+                track. Drawn under the played fill so progress stays readable
+                across them, and aria-hidden because the Skip button and its
+                announcement are how these reach a screen reader. */}
+            {ranges.map(r => (
+              <span
+                key={`${r.kind}:${r.leftPct}`}
+                className="stage-scrub-range"
+                data-range={r.kind}
+                title={r.label}
+                aria-hidden="true"
+                style={{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }}
+              />
+            ))}
+            <div className="stage-scrub-pos" style={{ width: `${pct}%` }} />
+            <div className="stage-scrub-knob" style={{ left: `${pct}%` }} />
+            {/* What time a click would seek to. Hidden while dragging: the
+                knob already says it. clamp() keeps the label on the bar at
+                both ends. */}
+            {hoverSec !== null && !dragging && hasDuration && (
               <div
-                className="stage-scrub-knob"
-                style={{ left: `${pct}%` }}
-              />
-              {/* Hover readout — what time a click would seek to. Suppressed
-                  while dragging, since the knob already shows that position and
-                  two competing indicators read as a bug.
-
-                  clamp() keeps the label roughly inside the TRACK at the
-                  extremes. It does not, as previously claimed, save it from the
-                  theater's overflow:hidden — the track's left edge already sits
-                  ~90px inside that box (px-6 + the 52px readout + gap-3.5) and
-                  the widest h:mm:ss label is ~66px, so slicing was never
-                  geometrically possible. The real (small) cost of the clamp is
-                  that the readout stops tracking the pointer in the outer 28px
-                  of the track, which is the lesser of the two evils against a
-                  label half-hanging off the end of the bar. */}
-              {hoverSec !== null && !dragging && hasDuration && (
-                <div
-                  className="stage-scrub-ts"
-                  style={{ left: `clamp(28px, ${(hoverSec / durationSec) * 100}%, calc(100% - 28px))` }}
-                >
-                  {formatTime(hoverSec)}
-                </div>
-              )}
-            </div>
-          </div>
-          {/* The remaining/total readout is dimmer than the elapsed one — the
-              mockup's `.tm.r`. 0.7, not its 0.55: at 12.5px over a bright frame
-              0.55 measured 3.4:1. */}
-          <span className="text-white/70 text-[12.5px] font-medium tabular-nums min-w-[52px]">
-            {hasDuration ? formatTime(durationSec) : '—'}
-          </span>
-        </div>
-
-        {/* Transport row. The mockup squares these off (12px radius on a 42px
-            box, 14px on the 52px primary) rather than the round pills this had
-            — it reads as equipment rather than as web buttons, which is the
-            whole point of the theater framing.
-
-            The skip buttons carry their interval as a subscript. They were
-            asymmetric (-10 / +30) with the amount only in the tooltip, so on
-            touch there was no way to know either number. Both are 10s now:
-            asymmetric skip is a YouTube-ism that assumes you only ever skip
-            forward past something, and this player is used to re-hear a line
-            as often as to jump an intro. */}
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <ControlButton
-              onClick={() => onSeekRelative(-10)}
-              aria-label="Skip back 10 seconds"
-              title="Skip back 10s (←)"
-            >
-              <PlayerIcon name="skipBack" size={19} />
-              <span className="stage-tr-secs" aria-hidden="true">10</span>
-            </ControlButton>
-            <ControlButton
-              onClick={onPlayPause}
-              aria-label={playing ? 'Pause' : 'Play'}
-              title={playing ? 'Pause (Space)' : 'Play (Space)'}
-              size="large"
-            >
-              <PlayerIcon name={playing ? 'pause' : 'play'} size={23} />
-            </ControlButton>
-            <ControlButton
-              onClick={() => onSeekRelative(10)}
-              aria-label="Skip forward 10 seconds"
-              title="Skip forward 10s (→)"
-            >
-              <PlayerIcon name="skipForward" size={19} />
-              <span className="stage-tr-secs" aria-hidden="true">10</span>
-            </ControlButton>
-
-            {/* Volume cluster */}
-            <div className="flex items-center gap-2.5 ml-1.5">
-              <ControlButton
-                onClick={onMuteToggle}
-                aria-label={muted ? 'Unmute' : 'Mute'}
-                title={muted ? 'Unmute (M)' : 'Mute (M)'}
+                className="stage-scrub-ts"
+                style={{ left: `clamp(28px, ${(hoverSec / durationSec) * 100}%, calc(100% - 28px))` }}
               >
-                <PlayerIcon name={muted || volume === 0 ? 'volumeX' : 'volume'} size={19} />
-              </ControlButton>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={muted ? 0 : volume}
-                onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
-                className="w-[78px] accent-purple-400"
-                aria-label="Volume"
-              />
-            </div>
+                {formatTime(hoverSec)}
+              </div>
+            )}
           </div>
+        </div>
+        {/* Range names, under the timeline. Wide screens only: on a phone the
+            ranges are a few pixels apart and the names would collide. */}
+        {labelled.length > 0 && (
+          <div className="relative h-4 mt-1 hidden md:block text-[12px] leading-4 text-ink-2" aria-hidden="true">
+            {labelled.map(r => (
+              <span
+                key={`${r.kind}:${r.leftPct}`}
+                className="absolute whitespace-nowrap"
+                style={{ left: `min(${r.leftPct}%, calc(100% - 56px))` }}
+              >
+                {r.label}
+              </span>
+            ))}
+          </div>
+        )}
 
-          <div className="flex items-center gap-2.5">
-            <ControlButton
-              onClick={onFullscreenToggle}
-              aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-              title={fullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
+        {/* Transport row. Wraps on a narrow screen instead of clipping. */}
+        <div className="mt-2 flex flex-wrap items-center gap-1">
+          <ControlButton
+            onClick={onPlayPause}
+            aria-label={playing ? 'Pause' : 'Play'}
+            title={playing ? 'Pause (Space)' : 'Play (Space)'}
+            size="large"
+          >
+            {playing ? <Pause size={28} fill="currentColor" strokeWidth={0} /> : <Play size={28} fill="currentColor" strokeWidth={0} />}
+          </ControlButton>
+          <ControlButton
+            onClick={() => onSeekRelative(-10)}
+            aria-label="Skip back 10 seconds"
+            title="Back 10 seconds (←)"
+          >
+            <RotateCcw size={24} strokeWidth={1.75} />
+            <span className="stage-tr-secs" aria-hidden="true">10</span>
+          </ControlButton>
+          <ControlButton
+            onClick={() => onSeekRelative(10)}
+            aria-label="Skip forward 10 seconds"
+            title="Forward 10 seconds (→)"
+          >
+            <RotateCw size={24} strokeWidth={1.75} />
+            <span className="stage-tr-secs" aria-hidden="true">10</span>
+          </ControlButton>
+          <ControlButton
+            onClick={onMuteToggle}
+            aria-label={muted ? 'Unmute' : 'Mute'}
+            title={muted ? 'Unmute (M)' : 'Mute (M)'}
+          >
+            {muted || volume === 0 ? <VolumeX size={24} strokeWidth={1.75} /> : <Volume2 size={24} strokeWidth={1.75} />}
+          </ControlButton>
+          {/* A phone sets volume with its hardware keys; the slider would only
+              take a row of its own there. */}
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={muted ? 0 : volume}
+            onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
+            className="stage-volume hidden sm:block w-[84px]"
+            aria-label="Volume"
+          />
+          <span className="ml-2 text-[15px] text-ink tabular-nums whitespace-nowrap">
+            {formatTime(displaySec)}
+            <span className="text-ink-2"> / {hasDuration ? formatTime(durationSec) : '—'}</span>
+          </span>
+          {status}
+
+          {/* `ml-auto`, not a spacer: when the row wraps on a phone this
+              group still sits against the right edge. */}
+          <div className="ml-auto flex items-center gap-1">
+          {nextEpisode && (
+            <button
+              type="button"
+              onClick={nextEpisode.onClick}
+              className="stage-tr-btn stage-tr-btn-text inline-flex"
+              aria-label={nextEpisode.label}
+              title={nextEpisode.label}
             >
-              <PlayerIcon name="maximize" size={19} />
+              <SkipForward size={22} fill="currentColor" strokeWidth={0} />
+              <span className="hidden lg:inline">Next episode</span>
+            </button>
+          )}
+          {tracks && (
+            <button
+              type="button"
+              onClick={tracks.onToggle}
+              aria-label="Audio and subtitles"
+              aria-haspopup="dialog"
+              aria-expanded={tracks.open}
+              title="Audio and subtitles"
+              className="stage-tr-btn stage-tr-btn-text inline-flex"
+              data-open={tracks.open || undefined}
+            >
+              <Captions size={24} strokeWidth={1.75} className="lg:hidden" />
+              <span className="hidden lg:inline">Audio and subtitles</span>
+            </button>
+          )}
+          {speed && (
+            <button
+              type="button"
+              onClick={speed.onToggle}
+              // A locked speed stays on screen, disabled, with the reason as
+              // its name: a control that vanishes in a party reads as a bug,
+              // one that says why does not.
+              disabled={speed.lock !== null}
+              aria-label={speedLocked ?? `Playback speed, ${speedLabel(speed.rate)}`}
+              aria-haspopup={speed.lock === null ? 'dialog' : undefined}
+              aria-expanded={speed.lock === null ? speed.open : undefined}
+              title={speedLocked ?? 'Playback speed'}
+              className="stage-tr-btn stage-tr-btn-text inline-flex tabular-nums"
+              data-open={speed.open || undefined}
+            >
+              {speedLabel(speed.rate)}
+            </button>
+          )}
+          {pip && (
+            <ControlButton
+              onClick={pip.onToggle}
+              aria-label={pip.active ? 'Exit picture in picture' : 'Picture in picture'}
+              aria-pressed={pip.active}
+              title={pip.active ? 'Exit picture in picture' : 'Picture in picture'}
+            >
+              <PictureInPicture2 size={24} strokeWidth={1.75} />
             </ControlButton>
+          )}
+          <ControlButton
+            onClick={onFullscreenToggle}
+            aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            title={fullscreen ? 'Exit full screen (F)' : 'Full screen (F)'}
+          >
+            {fullscreen ? <Minimize size={24} strokeWidth={1.75} /> : <Maximize size={24} strokeWidth={1.75} />}
+          </ControlButton>
           </div>
         </div>
       </div>
@@ -403,19 +376,20 @@ export function PlayerControls(props: PlayerControlsProps) {
   )
 }
 
-// Reusable styled control button. `size='large'` for the central
-// play/pause; default for skip + volume + fullscreen.
+// Icon button for the transport row. `size="large"` is play/pause.
 function ControlButton({
   children, onClick, size = 'normal', ...rest
 }: {
-  children: React.ReactNode
+  children: ReactNode
   onClick: () => void
   size?: 'normal' | 'large'
 } & React.AriaAttributes & { title?: string }) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      // `grid` at the call site, not in the primitive — the CASCADE HAZARD rule.
+      // `grid` at the call site, not in the rule: the primitive sets no
+      // `display`, so a `hidden` on it elsewhere can never be overridden.
       className={`stage-tr-btn grid ${size === 'large' ? 'stage-tr-btn-primary' : ''}`}
       {...rest}
     >

@@ -7,11 +7,9 @@
 // each one out and dismisses it after a few seconds — so the resting
 // state is "just the movie."
 //
-// Cinematic overlay contract (`.ticker`):
-//   - lower-third, left-aligned, translucent glass bubbles
-//   - purple author name, near-white message text (AA over the blur)
-//   - new messages slide in from the left (motion-safe only)
-//   - older still-visible messages dim (opacity .45) before they leave
+// Look: lower third, left-aligned, a near-opaque dark bubble per message
+// with the author's name in their own colour. New messages slide in from the
+// left (motion-safe only); a message dims a little before it leaves.
 //
 // Lifecycle correctness (this is the tricky part):
 //   - We never want the initial chat backlog to all animate in at once
@@ -31,10 +29,11 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ChatMessageEvent } from '@/lib/party'
+import { personColor } from '@/lib/personColor'
 
 interface Props {
   chat: ChatMessageEvent[]
-  // Highlight the current user's own messages with the purple "me" tint.
+  // Kept so the parent can pass either party face the same props.
   currentUserId?: number
   // How many messages to keep on screen at once (oldest drop off the
   // top as new ones arrive). Default mirrors the mockup's ~3.
@@ -50,6 +49,7 @@ const DISMISS_TAIL_MS = 1200
 
 interface TickerItem {
   id: string
+  userId: number
   username: string
   message: string
   mine: boolean
@@ -95,6 +95,7 @@ export function CinematicChatTicker({
       seen.add(m.id)
       return {
         id: m.id,
+        userId: m.user_id,
         username: m.username,
         message: m.message,
         mine: m.user_id === currentUserId,
@@ -160,41 +161,29 @@ export function CinematicChatTicker({
       <div
         aria-hidden="true"
         data-screenshot-exclude="true"
-        className="fixed left-4 right-4 bottom-12 z-[66] flex flex-col items-start gap-1.5 pointer-events-none"
+        className="fixed left-4 right-4 bottom-36 z-[66] flex flex-col items-start gap-1.5 pointer-events-none"
       >
         {items.map(item => (
           <div
             key={item.id}
             className={[
-              'aurora-ticker-msg inline-flex items-baseline gap-2 max-w-[62%]',
-              'px-3 py-1.5 rounded-[13px] text-sm leading-snug',
-              // Flat dark scrim, NO backdrop-filter: the ticker shows up to
-              // `maxVisible` bubbles at once over PLAYING video — a blur
-              // layer per bubble is the per-frame re-composite cost
-              // index.css flags (deep-debug Bug 25). A solid-ish fill reads
-              // identically at this size and costs nothing to composite, and
-              // doubles as the contrast scrim that keeps text ≥AA over bright
-              // video (no backdrop needed).
-              'bg-[rgba(6,5,12,0.72)] border',
-              item.mine
-                ? 'border-purple-400/30'
-                : 'border-[rgba(220,200,255,0.16)]',
-              // Dim is a brief pre-exit cue; keep it shallow (80%) so the
-              // near-white text stays legible over bright video while fading.
+              'aurora-ticker-msg inline-block max-w-[62%]',
+              'px-3 py-1.5 rounded-control text-[14px] leading-snug break-words',
+              // A flat dark fill, NO backdrop-filter: up to `maxVisible`
+              // bubbles sit over PLAYING video, and a blur layer per bubble
+              // is re-composited on every frame. At 0.78 the fill is also
+              // the scrim that keeps the text at AA over a bright frame.
+              'bg-[rgba(14,15,17,0.78)] text-ink',
+              // A shallow dim (80%) is the pre-exit cue; any deeper and the
+              // text stops being legible over bright video while it fades.
               'transition-opacity duration-700 ease-out',
               item.lit ? 'opacity-100' : 'opacity-80',
             ].join(' ')}
-            style={{ textShadow: '0 1px 8px rgba(0,0,0,0.85)' }}
           >
-            <span
-              className={[
-                'text-xs font-semibold shrink-0',
-                item.mine ? 'text-purple-200' : 'text-purple-300',
-              ].join(' ')}
-            >
+            <span className="font-semibold" style={{ color: personColor(item.userId) }}>
               {item.username}
-            </span>
-            <span className="text-white/95 break-words">{item.message}</span>
+            </span>{' '}
+            {item.message}
           </div>
         ))}
       </div>
