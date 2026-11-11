@@ -13,6 +13,7 @@
 // the other order is the classic way to get a plausible wrong answer.
 
 // Reproduces every contrast figure quoted in the player's CSS comments.
+import fs from 'node:fs'
 const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
 const Y = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 const over = (fg, a, bg) => fg.map((c, i) => a * c + (1 - a) * bg[i])
@@ -93,4 +94,32 @@ for (const [name, frame] of [['black frame', K], ['white frame', W]]) {
   const fill = W
   const border = over(K, 0.42, fill)
   console.log(`  ${name}: fill vs frame ${f(ratio(fill, frame))}:1 · border vs fill ${f(ratio(border, fill))}:1 · border vs frame ${f(ratio(border, frame))}:1 · label --on-action vs fill ${f(ratio(ON_ACTION, fill))}:1`)
+}
+
+// The party's chat ticker: a name in the person's own colour, and the message
+// in --ink, on a dark bubble over playing video. The bubble's fill and the
+// depth of its pre-exit dim are read from lib/personColor.ts, with the nine
+// colours, so this cannot drift from what is drawn. While dimmed the whole
+// bubble, text included, is partly transparent over the frame.
+{
+  const src = fs.readFileSync(new URL('../src/lib/personColor.ts', import.meta.url), 'utf8')
+  const num = name => {
+    const m = src.match(new RegExp(`export const ${name} = ([\\d.]+)`))
+    if (!m) throw new Error(`contrast: could not read ${name} from lib/personColor.ts`)
+    return Number(m[1])
+  }
+  const list = src.match(/PERSON_COLORS = \[([^\]]*)\]/)
+  const rgb = src.match(/NAME_BUBBLE_FILL_RGB = \[(\d+), (\d+), (\d+)\]/)
+  if (!list || !rgb) throw new Error('contrast: could not read the person colours or the bubble fill from lib/personColor.ts')
+  const colors = [...list[1].matchAll(/#[0-9a-f]{6}/gi)].map(m => m[0])
+  const FILL = [rgb[1], rgb[2], rgb[3]].map(v => Number(v) / 255)
+  const fillAlpha = num('NAME_BUBBLE_FILL_ALPHA'), dim = num('NAME_BUBBLE_DIM_OPACITY')
+  console.log(`\n=== chat ticker bubble over a white frame : fill ${fillAlpha}, dims to ${dim} ===`)
+  for (const [state, opacity] of [['lit', 1], ['dimmed', dim]]) {
+    const bg = over(FILL, fillAlpha * opacity, W)
+    const names = colors.map(c => [c, ratio(over(hex(c), opacity, W), bg)])
+    const worst = names.reduce((a, b) => (b[1] < a[1] ? b : a))
+    console.log(`  ${state}: lowest name ${worst[0]} ${f(worst[1])}:1 · message --ink ${f(ratio(over(INK, opacity, W), bg))}:1  (need 4.5)`)
+    for (const [c, r] of names) console.log(`     ${c}  ${f(r)}:1`)
+  }
 }

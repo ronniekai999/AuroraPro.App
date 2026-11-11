@@ -29,3 +29,16 @@ export function personInitial(name: string | null | undefined): string {
   const c = (name ?? '').trim().charAt(0)
   return c ? c.toUpperCase() : '?'
 }
+
+/** The bubble a chat line is printed on over playing video (the party's chat
+ *  ticker): how opaque its dark fill is, and how far the whole bubble dims
+ *  before it leaves. The person's name is drawn in their colour ON that
+ *  bubble, over whatever frame is behind it, so these two numbers decide
+ *  whether a name can be read over a white frame. With them every one of
+ *  PERSON_COLORS keeps 4.5:1 or better there in both states (5.27:1 at the
+ *  lowest; personColor.test.ts computes it and scripts/contrast.mjs prints
+ *  it). At 0.78 and a dim to 0.8 the lowest was 2.73:1. */
+export const NAME_BUBBLE_FILL_ALPHA = 0.92
+export const NAME_BUBBLE_DIM_OPACITY = 0.9
+/** The fill's colour: the page's graphite. */
+export const NAME_BUBBLE_FILL_RGB = [14, 15, 17] as const

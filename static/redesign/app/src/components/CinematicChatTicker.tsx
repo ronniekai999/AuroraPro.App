@@ -29,7 +29,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ChatMessageEvent } from '@/lib/party'
-import { personColor } from '@/lib/personColor'
+import { NAME_BUBBLE_DIM_OPACITY, NAME_BUBBLE_FILL_ALPHA, NAME_BUBBLE_FILL_RGB, personColor } from '@/lib/personColor'
 
 interface Props {
   chat: ChatMessageEvent[]
@@ -173,14 +173,19 @@ export function CinematicChatTicker({
               'px-3 py-1.5 rounded-control text-[14px] leading-snug break-words',
               // A flat dark fill, NO backdrop-filter: up to `maxVisible`
               // bubbles sit over PLAYING video, and a blur layer per bubble
-              // is re-composited on every frame. At 0.78 the fill is also
-              // the scrim that keeps the text at AA over a bright frame.
-              'bg-[rgba(14,15,17,0.78)] text-ink',
-              // A shallow dim (80%) is the pre-exit cue; any deeper and the
-              // text stops being legible over bright video while it fades.
+              // is re-composited on every frame. The fill is also the scrim
+              // that keeps the message AND the name, which is drawn in the
+              // person's own colour, readable over a bright frame; its
+              // strength and the depth of the pre-exit dim are the two
+              // numbers in lib/personColor, set there against all nine
+              // colours.
+              'text-ink',
               'transition-opacity duration-700 ease-out',
-              item.lit ? 'opacity-100' : 'opacity-80',
             ].join(' ')}
+            style={{
+              background: `rgba(${NAME_BUBBLE_FILL_RGB.join(', ')}, ${NAME_BUBBLE_FILL_ALPHA})`,
+              opacity: item.lit ? 1 : NAME_BUBBLE_DIM_OPACITY,
+            }}
           >
             <span className="font-semibold" style={{ color: personColor(item.userId) }}>
               {item.username}
