@@ -7539,8 +7539,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {/* #334: playback auto-started MUTED because the browser
                   blocked a sounded autoplay (a party start fires play() from
                   a socket event, not a click). Not tied to the controls'
-                  visibility: it stays until the viewer acts. */}
-              {autoStartedMuted && (
+                  visibility: it stays until the viewer acts. On the right
+                  of the lane: the Skip button has the left, and centred it
+                  ran into it on a phone and beside the party rail. The Up
+                  next card and the series-end notice take the same corner
+                  when they come, and the muted speaker in the transport row
+                  still says why there is no sound. */}
+              {autoStartedMuted && !(nextUpPhase === 'countdown' || nextUpPhase === 'prompt' || nextUpPhase === 'finale') && (
                 <button
                   type="button"
                   aria-label="Playback started muted — tap for sound"
@@ -7552,7 +7557,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     }
                     setAutoStartedMuted(false)
                   }}
-                  className="player-lane player-float-center absolute -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
+                  className="player-lane player-float-right absolute z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
                 >
                   <VolumeX size={18} />
                   Tap for sound
@@ -7741,7 +7746,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {subError && openMenu !== 'tracks' && (
                 <div
                   role="status"
-                  className="player-lane player-float-center absolute -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
+                  // One row above the lane, which the Skip button, "Tap for
+                  // sound" and the Up next card share.
+                  className="player-lane-upper player-float-center absolute -translate-x-1/2 z-[55] max-w-[calc(100%-24px)] truncate px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] pointer-events-none"
                 >
                   {subError}
                 </div>

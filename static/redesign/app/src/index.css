@@ -2098,6 +2098,11 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 .player-lane {
   bottom: calc(var(--player-timeline-top) + 28px + var(--player-dock-lift));
 }
+/* The row above the lane, for a passing message that must not sit on the
+   lane's buttons. */
+.player-lane-upper {
+  bottom: calc(var(--player-timeline-top) + 88px + var(--player-dock-lift));
+}
 .player-float-left { left: 12px; }
 .player-float-right { right: calc(12px + var(--theater-rail-cover)); }
 /* Centred on the part of the picture the rail does not cover, not on the
@@ -2114,6 +2119,9 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 @media (max-height: 480px) {
   .player-lane {
     bottom: calc(var(--player-timeline-top) + 8px + var(--player-dock-lift));
+  }
+  .player-lane-upper {
+    bottom: calc(var(--player-timeline-top) + 64px + var(--player-dock-lift));
   }
 }
 
