@@ -7,7 +7,7 @@
 // for the session's acting profile: App passes empty lists on the render that
 // switches profile, and until the first answer for the new profile lands.
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import type { ActiveParty, MyPartyInvite } from '@/lib/api'
 import { formatPartyTime } from '@/lib/partyInvites'
 import { isScheduledLobby } from '@/hooks/useActiveParties'
@@ -51,6 +51,25 @@ export default function TogetherView({
   useEffect(() => { onRefreshInvites() }, [onRefreshInvites])
   const others = activeParties.filter(p => p.host_user_id !== currentUserId)
   const pending = (invites ?? []).filter(i => i.rsvp === 'pending')
+  // A join that the server refuses (full, ended, a title over this profile's
+  // limit) used to say nothing: the button was pressed and nothing happened.
+  // The reason is shown under the party it was for, until another is tried.
+  const [joining, setJoining] = useState<string | null>(null)
+  const [joinError, setJoinError] = useState<{ code: string; message: string } | null>(null)
+  const join = async (code: string) => {
+    setJoinError(null)
+    setJoining(code)
+    const r = await onJoinParty(code).catch((): { ok: boolean; error?: string } => ({ ok: false }))
+    setJoining(null)
+    if (!r.ok) setJoinError({ code, message: r.error || 'Could not join the party. Try again.' })
+  }
+  // One line says what the list is doing, in one polite status region that
+  // stays mounted: loading, could not load, nobody is watching, or how many
+  // are. A region added to the page together with its text is not announced.
+  const partyStatus = partiesFailed ? 'Couldn’t load watch parties. Trying again…'
+    : !partiesLoaded ? 'Looking for parties…'
+      : others.length === 0 ? 'Nobody is watching together right now.'
+        : null
   return (
     <div className="animate-fade-in">
       <PageHeader title="Together" sub="Watch with the people on this server" />
@@ -64,16 +83,13 @@ export default function TogetherView({
       </div>
 
       <h2 className="mt-10 font-display text-[22px] font-semibold text-ink">Happening now</h2>
-      {partiesFailed ? (
-        <p className="mt-3 text-sm text-ink-2" role="status">Couldn&rsquo;t load watch parties. Trying again…</p>
-      ) : !partiesLoaded ? (
-        <p className="mt-3 text-sm text-ink-2">Looking for parties…</p>
-      ) : others.length === 0 ? (
-        <p className="mt-3 text-sm text-ink-2">Nobody is watching together right now.</p>
-      ) : (
+      <p className={partyStatus ? 'mt-3 text-sm text-ink-2' : 'sr-only'} role="status" data-party-status>
+        {partyStatus ?? `${others.length} watch ${others.length === 1 ? 'party' : 'parties'} listed.`}
+      </p>
+      {!partyStatus && (
         <ul className="mt-3 grid gap-3">
           {others.map(p => (
-            <li key={p.code} className="flex min-h-[76px] items-center gap-4 rounded-control bg-surface-raised px-4 py-3.5">
+            <li key={p.code} className="flex min-h-[76px] flex-wrap items-center gap-x-4 gap-y-2 rounded-control bg-surface-raised px-4 py-3.5">
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-semibold text-ink">{p.party_name?.trim() || p.media_title || 'Watch party'}</div>
                 <div className="truncate text-[13px] text-ink-2">
@@ -82,9 +98,12 @@ export default function TogetherView({
                     : `Live now · ${p.participant_count} watching${p.media_title ? ` ${p.media_title}` : ''}`}
                 </div>
               </div>
-              <button type="button" className="stage-btn stage-btn-sm stage-btn-primary" onClick={() => { void onJoinParty(p.code) }}>
-                {isScheduledLobby(p) ? 'Open lobby' : 'Join'}
+              <button type="button" className="stage-btn stage-btn-sm stage-btn-primary" disabled={joining !== null} onClick={() => { void join(p.code) }}>
+                {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
               </button>
+              {joinError?.code === p.code && (
+                <p className="basis-full text-[13px] text-danger-ink" role="alert">{joinError.message}</p>
+              )}
             </li>
           ))}
         </ul>
