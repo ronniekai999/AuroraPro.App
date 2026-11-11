@@ -7,7 +7,7 @@
 // subtitle, or, for a rail the recommender built, the AI attribution (the
 // aurora dot and "Picked by Aurora", with the rail's reason after it). The
 // attribution is said once here, not on every card.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
@@ -22,12 +22,15 @@ const RAIL = {
   gap: 20,
 } as const
 
-export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, resolveResume, subtitle, aiPick, cardSubtitleFor, eagerCount = 0, size = 'default' }: {
+export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, resumableIds, subtitle, aiPick, cardSubtitleFor, eagerCount = 0, size = 'default' }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
-  // Play a card's title from its hover Play button (and its menu).
+  // Play a card's title from its hover Play button. The handler resumes
+  // when the viewer has a position in the title; resumableIds says which
+  // cards that is, so their button reads "Resume".
   onPlay?: (m: Media) => void
+  resumableIds?: Set<number>
   aspect?: 'poster' | 'landscape'
   // How many leading cards load their art eagerly (a rail at the fold).
   eagerCount?: number
@@ -37,9 +40,9 @@ export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', o
   aiPick?: boolean
   // Per-card facts line override (Continue Watching's "S2E5 · 23m left").
   cardSubtitleFor?: (m: Media) => string | undefined
-  // A card with somewhere to resume from gets a Resume button instead of Play.
-  resolveResume?: (m: Media) => (() => void) | undefined
-  onCardContext?: (e: MouseEvent, m: Media) => void
+  // The card menu (right click, More, a long press). Required: it is the
+  // only way a keyboard or a touch screen adds, removes or resumes.
+  onCardContext: (e: MouseEvent, m: Media) => void
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
   // Makes the title a link to the rail's full list.
@@ -66,6 +69,7 @@ export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', o
     return () => window.removeEventListener('resize', updatePaddles)
   }, [updatePaddles])
 
+  const titleId = useId()
   const dims = aspect === 'landscape' ? RAIL.landscape : size === 'large' ? RAIL.large : RAIL.poster
   // A page is as many whole cards as fit in 90% of the row.
   const page = (dir: -1 | 1) => {
@@ -77,9 +81,11 @@ export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', o
   }
 
   return (
-    <section className="rail-container" aria-label={title}>
+    // Named by its own heading, so the rail is one landmark with one name,
+    // not a label that repeats the h2 beside it.
+    <section className="rail-container" aria-labelledby={titleId}>
       <div className="rail-header">
-        <h2 className="rail-title">
+        <h2 className="rail-title" id={titleId}>
           {onSeeAll ? (
             <button type="button" onClick={onSeeAll} className="rail-see-all" aria-label={`${title}, see all`}>
               <span>{title}</span>
@@ -121,7 +127,7 @@ export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', o
               className={dims.cls}
               aspect={aspect}
               size={size}
-              onResume={resolveResume?.(item)}
+              resumable={resumableIds?.has(item.id)}
               subtitle={cardSubtitleFor?.(item)}
             />
           ))}

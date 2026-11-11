@@ -8,16 +8,29 @@
 //   - Play, Add and More, over a short scrim, under a pointer or keyboard
 //     focus. On a touch screen (no hover) More is always there instead.
 // Saved is a small tick at the head of the caption's facts line. AI
-// attribution is said once per rail, in the rail's header, not per card.
+// attribution is said once per rail, in the rail's header; a pick's own
+// reason takes the facts line's place under a pointer or keyboard focus, and
+// heads the menu.
 //
 // More and a long press open the same menu right-click does (onCardContext),
-// so nothing is reachable only by a right click.
+// so nothing is reachable only by a right click. That menu is REQUIRED: Play
+// and Add are pointer conveniences, out of the tab order and absent on a
+// touch screen, so a card without the menu would leave a keyboard or a phone
+// with no way to add, remove or resume. Every surface that renders a card
+// wires it.
+//
+// Structure, for assistive tech: the art is a real <button> that opens the
+// title and carries the card's whole name; the progress bar and the action
+// buttons are its SIBLINGS, not its descendants (a button's descendants are
+// presentational, so anything inside one is pruned from the accessibility
+// tree). The card's root is a plain element that only catches clicks on the
+// caption, the right click and the long press.
 //
 // Lives outside App.tsx because the grid views live in their own files and
 // components do not import from App. The icons are inlined so this file has
 // no dependency on the shared Icon table.
 
-import { memo, useId, useRef, useState } from 'react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 
 // MediaLike is the structural subset of the UI's `Media` this card reads, so
@@ -32,9 +45,11 @@ export interface MediaLike {
   year?: number
   rating?: number
   genre?: string
-  // An LLM-written reason for a personalized pick. Not drawn on the card
-  // (the rail's header carries the attribution); kept for assistive tech.
+  // An LLM-written reason for a personalized pick. It takes the facts
+  // line's place under a pointer or keyboard focus, describes the card to
+  // assistive tech, and heads the card's menu.
   reason?: string
+  // How far in, as a fraction: 0..1 (lib/api.ts normalises it).
   progress?: number
   duration?: string
   tags?: string[]
@@ -45,8 +60,9 @@ export interface MediaCardCinemaProps<T extends MediaLike = MediaLike> {
   onSelect: (item: T) => void
   // Opens the card's menu. Called for a right click, for the More button
   // (with that click, so the menu can anchor to the button) and for a long
-  // press on a touch screen (with the press's position).
-  onCardContext?: (e: ReactMouseEvent, item: T) => void
+  // press on a touch screen (with the press's position). Required: see the
+  // header.
+  onCardContext: (e: ReactMouseEvent, item: T) => void
   libraryIds?: Set<number>
   onToggleLib?: (item: T) => void
   className?: string
@@ -56,10 +72,11 @@ export interface MediaCardCinemaProps<T extends MediaLike = MediaLike> {
   aspect?: 'poster' | 'landscape'
   // Rendered over the art's top-right corner (a collection's remove-X).
   topRightOverlay?: React.ReactNode
-  // Play this title. When there is somewhere to resume from, the caller
-  // passes onResume instead and the button says so.
+  // Play this title. The caller's handler resumes when the viewer has a
+  // position in it (the menu's first row does the same, and the two must
+  // agree); `resumable` only makes the button say so.
   onPlay?: (item: T) => void
-  onResume?: () => void
+  resumable?: boolean
   // Adds the runtime to the facts line.
   showLength?: boolean
   // Larger caption, for the children's presentation.
@@ -135,7 +152,7 @@ function MovieSvg() {
 
 function MediaCardCinemaInner<T extends MediaLike>({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
-  className = '', subtitle, aspect = 'poster', topRightOverlay, onPlay, onResume,
+  className = '', subtitle, aspect = 'poster', topRightOverlay, onPlay, resumable = false,
   showLength = false, size = 'default', eager = false,
 }: MediaCardCinemaProps<T>) {
   const isInLib = !!libraryIds?.has(item.id)
@@ -152,8 +169,9 @@ function MediaCardCinemaInner<T extends MediaLike>({
     if (el && el.complete && el.naturalWidth > 0) el.setAttribute('data-loaded', '')
   }
   const metaTokens = buildCardMeta(item, { subtitle, showLength })
-  const hasProgress = item.progress !== undefined && item.progress > 0
-  const play = onResume ?? (onPlay ? () => onPlay(item) : undefined)
+  // A fraction, 0..1. Drawn as a percentage of the bar.
+  const progressPct = Math.round(Math.min(1, Math.max(0, item.progress ?? 0)) * 100)
+  const hasProgress = progressPct > 0
   const reasonId = useId()
 
   // Long press (touch only): a mouse has its own contextmenu event, and
@@ -165,11 +183,17 @@ function MediaCardCinemaInner<T extends MediaLike>({
   const cancelPress = () => {
     if (press.current) { window.clearTimeout(press.current.timer); press.current = null }
   }
+  // A card replaced or removed mid-press (a live recompose, "Not interested",
+  // a profile switch) must not open a menu for the item it used to hold.
+  useEffect(() => () => {
+    if (press.current) { window.clearTimeout(press.current.timer); press.current = null }
+  }, [item.id])
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     suppressClick.current = false
-    if (!onCardContext || e.pointerType !== 'touch') return
+    if (e.pointerType !== 'touch') return
     // A press that starts on one of the card's own buttons is that button's.
-    if ((e.target as Element).closest?.('button')) return
+    // (The art is a button too, and a press on it is the card's.)
+    if ((e.target as Element).closest?.('button:not(.card-open)')) return
     cancelPress()
     const el = e.currentTarget
     const { clientX, clientY } = e
@@ -189,123 +213,134 @@ function MediaCardCinemaInner<T extends MediaLike>({
     if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress()
   }
 
+  const name = [
+    `${item.title}${item.year ? ` (${item.year})` : ''}`,
+    metaTokens.length > 0
+      ? metaTokens.map(t => (t.kind === 'rating' ? `rated ${t.value}` : t.value)).join(', ')
+      : '',
+    // Quality and the content rating are not drawn on a card; they stay in
+    // its name.
+    item.tags && item.tags.length > 0 ? item.tags.join(', ') : '',
+    isInLib ? 'in My Library' : '',
+  ].filter(Boolean).join(' — ')
+
   return (
     <div
-      className={`media-card-cinema group ${size === 'large' ? 'is-large ' : ''}${className}`}
+      className={`media-card-cinema group ${size === 'large' ? 'is-large ' : ''}${item.reason ? 'has-reason ' : ''}${className}`}
+      // Not a control itself: the art below is the button. This catches a
+      // click on the caption (and the art button's own, as it bubbles), the
+      // right click and the long press.
       onClick={() => {
         if (suppressClick.current) { suppressClick.current = false; return }
         onSelect(item)
       }}
-      onContextMenu={onCardContext ? (e) => { cancelPress(); onCardContext(e, item) } : undefined}
+      onContextMenu={(e) => { cancelPress(); onCardContext(e, item) }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={cancelPress}
       onPointerCancel={cancelPress}
       onPointerLeave={cancelPress}
-      role="button"
-      tabIndex={0}
-      // The menu is also the context-menu key's (Shift+F10 fires a
-      // contextmenu event); announce it where there is one.
-      aria-keyshortcuts={onCardContext ? 'Shift+F10' : undefined}
-      // The whole card's name: title, year, the facts line, and whether it
-      // is saved. Sighted users get the same from the caption.
-      aria-label={[
-        `${item.title}${item.year ? ` (${item.year})` : ''}`,
-        metaTokens.length > 0
-          ? metaTokens.map(t => (t.kind === 'rating' ? `rated ${t.value}` : t.value)).join(', ')
-          : '',
-        isInLib ? 'in My Library' : '',
-      ].filter(Boolean).join(' — ')}
-      aria-describedby={item.reason ? reasonId : undefined}
-      // No text selection or image callout from a long press on the card.
-      style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
-      onKeyDown={(e) => {
-        // Only when the card itself has focus: a nested button handles its
-        // own Enter and Space.
-        if (e.target !== e.currentTarget) return
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSelect(item)
-        }
-      }}
     >
       <div className="poster-wrap">
-        {artSrc ? (
-          <img
-            // Keyed on the URL so a new item gets a fresh element, and with
-            // it a fresh fade-in and error state.
-            key={artSrc}
-            src={artSrc}
-            alt={item.title}
-            draggable={false}
-            className="poster-img"
-            loading={eager ? 'eager' : 'lazy'}
-            decoding="async"
-            style={landscapeStyle}
-            ref={markLoaded}
-            onLoad={(e) => e.currentTarget.setAttribute('data-loaded', '')}
-            onError={() => setFailedSrc(artSrc)}
-          />
-        ) : (
-          <div className="poster-img poster-placeholder" style={landscapeStyle}>
-            <MovieSvg />
-          </div>
-        )}
+        <button
+          type="button"
+          className="card-open"
+          // The menu is also the context-menu key's (Shift+F10 fires a
+          // contextmenu event, which bubbles to the card).
+          aria-keyshortcuts="Shift+F10"
+          // The whole card's name: title, year, the facts line, quality and
+          // rating, and whether it is saved. Sighted users get the same from
+          // the caption, which is hidden from assistive tech for that reason.
+          aria-label={name}
+          aria-describedby={item.reason ? reasonId : undefined}
+        >
+          {artSrc ? (
+            <img
+              // Keyed on the URL so a new item gets a fresh element, and with
+              // it a fresh fade-in and error state.
+              key={artSrc}
+              src={artSrc}
+              // The button carries the name.
+              alt=""
+              className="poster-img"
+              loading={eager ? 'eager' : 'lazy'}
+              decoding="async"
+              style={landscapeStyle}
+              ref={markLoaded}
+              onLoad={(e) => e.currentTarget.setAttribute('data-loaded', '')}
+              onError={() => setFailedSrc(artSrc)}
+            />
+          ) : (
+            <span className="poster-img poster-placeholder" style={landscapeStyle}>
+              <MovieSvg />
+            </span>
+          )}
+        </button>
 
         {hasProgress && (
-          <div className="progress-bar">
-            <div className="progress-fill" style={{ width: `${Math.min(100, item.progress ?? 0)}%` }} />
+          // The only sign of how far in the viewer is, so it says so.
+          <div
+            className="progress-bar"
+            role="progressbar"
+            aria-label={`${item.title}: watched`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressPct}
+          >
+            <div className="progress-fill" style={{ width: `${progressPct}%` }} />
           </div>
         )}
 
         {/* Play and Add are pointer conveniences and stay out of the tab
-            order: the card itself opens the title, and More, which IS in the
-            tab order, opens a menu that holds both. Two stops per card, not
-            four. Each stops the click from also opening the title. */}
-        {(play || onToggleLib || onCardContext) && (
-          <div className={`card-actions${hasProgress ? ' has-progress' : ''}`}>
-            {play && (
-              <button
-                type="button"
-                tabIndex={-1}
-                className="card-act card-act-play"
-                aria-label={`${onResume ? 'Resume' : 'Play'} ${item.title}`}
-                onClick={(e) => { e.stopPropagation(); play() }}
-              >
-                <PlaySvg />
-              </button>
-            )}
-            {onToggleLib && (
-              <button
-                type="button"
-                tabIndex={-1}
-                className="card-act"
-                aria-pressed={isInLib}
-                aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
-                title={isInLib ? 'In My Library' : 'Add to My Library'}
-                onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
-              >
-                {isInLib ? <CheckSvg /> : <PlusSvg />}
-              </button>
-            )}
-            {onCardContext && (
-              <button
-                type="button"
-                className="card-act card-act-more"
-                aria-haspopup="menu"
-                aria-label={`More actions for ${item.title}`}
-                onClick={(e) => { e.stopPropagation(); onCardContext(e, item) }}
-              >
-                <MoreSvg />
-              </button>
-            )}
-          </div>
-        )}
+            order: the art opens the title, and More, which IS in the tab
+            order, opens a menu that holds both. Two stops per card, not
+            four. Each stops the click from also opening the title. CSS keeps
+            them out of the accessibility tree and out of hit-testing while
+            they are not drawn. */}
+        <div className={`card-actions${hasProgress ? ' has-progress' : ''}`}>
+          {onPlay && (
+            <button
+              type="button"
+              tabIndex={-1}
+              className="card-act card-act-play"
+              aria-label={`${resumable ? 'Resume' : 'Play'} ${item.title}`}
+              onClick={(e) => { e.stopPropagation(); onPlay(item) }}
+            >
+              <PlaySvg />
+            </button>
+          )}
+          {onToggleLib && (
+            <button
+              type="button"
+              tabIndex={-1}
+              className="card-act"
+              // The label says what a press will do; no pressed state beside
+              // it, which would say the opposite.
+              aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
+              title={isInLib ? 'In My Library' : 'Add to My Library'}
+              onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
+            >
+              {isInLib ? <CheckSvg /> : <PlusSvg />}
+            </button>
+          )}
+          <button
+            type="button"
+            className="card-act card-act-more"
+            aria-haspopup="menu"
+            // The menu sets this to true on this button while it is open.
+            aria-expanded={false}
+            aria-label={`More actions for ${item.title}`}
+            onClick={(e) => { e.stopPropagation(); onCardContext(e, item) }}
+          >
+            <MoreSvg />
+          </button>
+        </div>
 
         {topRightOverlay}
       </div>
 
-      <div className="card-caption">
+      {/* Hidden from assistive tech: the art button's name says all of it. */}
+      <div className="card-caption" aria-hidden="true">
         <div className="cc-title" title={item.title}>{item.title}</div>
         {(metaTokens.length > 0 || isInLib) && (
           <div className="co-meta">
@@ -327,7 +362,15 @@ function MediaCardCinemaInner<T extends MediaLike>({
             ))}
           </div>
         )}
-        {item.reason && <span id={reasonId} className="sr-only">{item.reason}</span>}
+        {/* Why Aurora picked it. In place of the facts line while the card
+            is under a pointer or holds keyboard focus (CSS swaps the two, so
+            the caption keeps its height); the menu shows it in full. */}
+        {item.reason && (
+          <div id={reasonId} className="co-reason" title={item.reason}>
+            <span className="co-reason-dot" />
+            <span className="co-reason-txt">{item.reason}</span>
+          </div>
+        )}
       </div>
     </div>
   )

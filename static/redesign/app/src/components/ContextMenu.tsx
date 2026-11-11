@@ -27,7 +27,7 @@
 // a `role="menu"` without arrow-key support is a WORSE widget than a plain div,
 // because the screen reader stops offering its own navigation in exchange.
 
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useRef, useState } from 'react'
 
 export interface MediaContextItem {
   label: string
@@ -60,6 +60,46 @@ interface Props {
    * what they already knew: they just pressed the Menu key on a card.
    */
   title?: string
+  /**
+   * Why Aurora picked this title, when it did. Shown above the items, with
+   * the aurora dot, and read as the menu's description: on a card it has one
+   * clipped line under a pointer, and a touch screen has no pointer at all.
+   */
+  reason?: string
+  /**
+   * The control that opened the menu (a card's More button), when one did.
+   * Focus goes back to it on close, and while the menu is open it carries
+   * `aria-expanded="true"`. Without it, focus returns to whatever held it
+   * when the menu opened.
+   */
+  opener?: HTMLElement | null
+}
+
+// ── a press that is still held when the menu opens ─────────────────────────
+// A long press on a touch screen opens this menu while the finger is still
+// down. On a phone the menu is a sheet with a scrim across the whole screen,
+// so whatever the browser sends when that finger lifts lands on the scrim:
+// the release itself, and, on engines that follow a touch with compatibility
+// mouse events, a `mousedown` and a `click`. Read as a press outside, any of
+// them closed the sheet the moment it opened. Which engines send what after a
+// half-second hold is not something this project has measured on a device, so
+// the menu does not depend on it: presses outside are ignored until the touch
+// that was down when it opened has been released, and for a short grace after
+// that release, which is when its compatibility events arrive.
+//
+// Touches are tracked at module level because the menu mounts mid-press and
+// cannot learn afterwards whether a finger is down.
+const touchesDown = new Set<number>()
+/** How long after the opening touch lifts its own compatibility mouse events
+ *  may still arrive. They are sent in the same task or within the legacy
+ *  ~300ms tap delay. */
+export const PRESS_RELEASE_GRACE_MS = 500
+if (typeof window !== 'undefined') {
+  const down = (e: PointerEvent) => { if (e.pointerType === 'touch') touchesDown.add(e.pointerId) }
+  const up = (e: PointerEvent) => { touchesDown.delete(e.pointerId) }
+  window.addEventListener('pointerdown', down, true)
+  window.addEventListener('pointerup', up, true)
+  window.addEventListener('pointercancel', up, true)
 }
 
 /**
@@ -128,7 +168,8 @@ const MENU_W_PX = 280
 const ROW_PX = 44
 const RULE_PX = 13
 
-export function ContextMenu({ x, y, items, onClose, title }: Props) {
+export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Props) {
+  const reasonId = useId()
   const ref = useRef<HTMLDivElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   // STATE, not a ref: `tabIndex` has to re-render to move, and the previous
@@ -142,30 +183,55 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
   // restore, activating an item unmounts the focused element and focus falls to
   // <body> — the card you opened the menu from is then gone from under the
   // user (WCAG 2.4.3).
+  //
+  // The control that opened it is given when there is one (a card's More
+  // button): Safari does not focus a button on a click, so "whatever has
+  // focus" is not it there. A right click or a long press has no control, and
+  // focus returns to wherever it was.
+  const openerRef = useRef(opener)
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null
+    const given = openerRef.current
+    const control = given && given.matches('button, [href], [tabindex]') ? given : null
+    const back = control ?? (document.activeElement as HTMLElement | null)
+    const popup = control && control.getAttribute('aria-haspopup') === 'menu' ? control : null
+    popup?.setAttribute('aria-expanded', 'true')
     const raf = requestAnimationFrame(() => {
       setActive(0)
       itemRefs.current[0]?.focus()
     })
     return () => {
       cancelAnimationFrame(raf)
-      if (opener && opener.isConnected) opener.focus({ preventScroll: true })
+      popup?.setAttribute('aria-expanded', 'false')
+      if (back && back.isConnected) back.focus({ preventScroll: true })
     }
-    // Mount/unmount only — re-running would yank focus mid-interaction. No
-    // disable comment needed: the effect closes over nothing but refs.
+    // Mount/unmount only — re-running would yank focus mid-interaction.
   }, [])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    // A touch that was down when the menu opened (a long press): its release,
+    // and the compatibility mouse events that may follow it, are not a press
+    // outside. See the note at touchesDown.
+    const held = new Set(touchesDown)
+    // Outside presses count from this time on: at once for a menu no touch
+    // was holding, else from the grace after the last such touch lifts.
+    let listenFrom = held.size > 0 ? Infinity : 0
+    const onRelease = (e: PointerEvent) => {
+      if (held.delete(e.pointerId) && held.size === 0) listenFrom = performance.now() + PRESS_RELEASE_GRACE_MS
+    }
     const onClick = (e: MouseEvent) => {
+      if (performance.now() < listenFrom) return
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
     }
+    window.addEventListener('pointerup', onRelease, true)
+    window.addEventListener('pointercancel', onRelease, true)
     window.addEventListener('keydown', onKey)
     // Bind on next tick so the same right-click that opened us
     // doesn't immediately close us via this listener.
     const t = window.setTimeout(() => window.addEventListener('mousedown', onClick), 0)
     return () => {
+      window.removeEventListener('pointerup', onRelease, true)
+      window.removeEventListener('pointercancel', onRelease, true)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('mousedown', onClick)
       window.clearTimeout(t)
@@ -178,7 +244,9 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
   const [sheet] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 767px)').matches)
   // Keep the popover on screen: 280px wide, 44px rows, 13px per group rule,
   // 8px padding top and bottom.
-  const height = items.length * ROW_PX + items.filter((it, i) => it.group && i > 0).length * RULE_PX + 16
+  // The reason wraps at about 36 characters a line (13px text, 18px lines).
+  const reasonPx = reason ? Math.ceil(('Picked by Aurora: '.length + reason.length) / 36) * 18 + 14 : 0
+  const height = items.length * ROW_PX + items.filter((it, i) => it.group && i > 0).length * RULE_PX + 16 + reasonPx
   const maxX = typeof window !== 'undefined' ? window.innerWidth - MENU_W_PX - 8 : x
   const maxY = typeof window !== 'undefined' ? window.innerHeight - height - 8 : y
   const clampedX = Math.min(x, Math.max(8, maxX))
@@ -198,6 +266,7 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
       ref={ref}
       role="menu"
       aria-label={title ? `Actions for ${title}` : 'Media actions'}
+      aria-describedby={reason ? reasonId : undefined}
       className={sheet
         ? 'fixed inset-x-0 bottom-0 z-[100] max-h-[80vh] overflow-y-auto rounded-t-sheet bg-surface-raised-2 p-2 pb-[calc(8px+env(safe-area-inset-bottom,0px))] shadow-[0_-24px_64px_rgba(0,0,0,0.6)] stage-sheet-in'
         : 'fixed z-[100] w-[280px] rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-fade-in'}
@@ -249,6 +318,13 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
     >
       {sheet && title && (
         <p className="truncate px-3 pb-2 pt-2.5 text-[13px] font-semibold text-ink-2" aria-hidden="true">{title}</p>
+      )}
+      {reason && (
+        // Not an item: the menu's description (aria-describedby above).
+        <p id={reasonId} role="none" data-menu-reason className="flex gap-2 px-3 pb-2 pt-1.5 text-[13px] leading-[18px] text-ink-2">
+          <span aria-hidden="true" className="mt-[5px] h-2 w-2 flex-none rounded-full [background:var(--aurora)]" />
+          <span className="min-w-0">Picked by Aurora: {reason}</span>
+        </p>
       )}
       {items.map((it, i) => (
         <Fragment key={i}>

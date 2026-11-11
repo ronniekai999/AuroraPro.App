@@ -3,7 +3,7 @@
 // Two states: list (all visible collections) and detail (one
 // collection's items). Click a collection card → detail.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
 import {
   listCollections,
   getCollection,
@@ -65,6 +65,10 @@ interface Props {
   // if a caller hasn't wired them yet.
   libraryIds?: Set<number>
   onToggleLib?: (m: ServerMediaItem) => void
+  // The card menu (right click, More, a long press), given the server's
+  // record like onToggleLib: how a keyboard or a phone adds a title here to
+  // My Library or plays it.
+  onCardContext: (e: MouseEvent, m: ServerMediaItem) => void
   // QA 2026-05-25 — bumped by App.handleNavigate when the user clicks
   // the Collections nav item while already on /collections. Acts as
   // a "back to index" signal so the side-nav doubles as a back
@@ -74,7 +78,7 @@ interface Props {
   rewindNonce?: number
 }
 
-export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, rewindNonce }: Props) {
+export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, onCardContext, rewindNonce }: Props) {
   const [collections, setCollections] = useState<Collection[] | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [items, setItems] = useState<ServerMediaItem[]>([])
@@ -267,7 +271,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
           <div className="text-center py-20">
             <p className="text-white/60 text-lg">This collection is empty.</p>
             <p className="text-white/60 text-sm mt-2">
-              Add titles via the right-click context menu on any media card.
+              Add titles from any poster's menu: its More button, a right click or a long press.
             </p>
           </div>
         ) : (
@@ -291,6 +295,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                   // hides via the existing meta guard.
                 }}
                 onSelect={() => onOpenMedia(m.id)}
+                onCardContext={(e) => onCardContext(e, m)}
                 libraryIds={libraryIds}
                 onToggleLib={onToggleLib ? () => onToggleLib(m) : undefined}
                 topRightOverlay={isAdmin && (

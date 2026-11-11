@@ -6,7 +6,7 @@
 // (deep-debug H3). Shares isResumable (format), MediaCardCinema, Icon, and
 // the app-side Media type with the other views — no reach-back into App.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
@@ -20,11 +20,18 @@ import { type Media } from '@/lib/types'
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, loading = false }: {
+export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, onCardContext, onCardPlay, resumableIds, loading = false }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
   onToggleLib: (m: Media) => void
+  // The card menu (right click, More, a long press). It is how a keyboard
+  // or a phone removes a title from here or resumes one.
+  onCardContext: (e: MouseEvent, m: Media) => void
+  // A card's on-poster Play: resumes when the viewer has a position in the
+  // title (App decides); resumableIds says which cards that is.
+  onCardPlay?: (m: Media) => void
+  resumableIds?: Set<number>
   // True until the server's copy of the library has been reconciled once.
   // `library` hydrates from localStorage, so on a device that has never
   // seen this account it starts EMPTY and the view showed the "No saved
@@ -111,20 +118,20 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       ) : filteredLibrary.length === 0 ? (
         <p className="text-white/50 text-sm">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
       ) : (
-        // 2028-05-28 — Saved library grid converted to <MediaCardCinema/>
-        // so My Library matches the home rails. The library is a closed
-        // set (every card IS in the library) so onToggleLib here is
-        // always a "remove" — MediaCardCinema renders the filled-purple
-        // ✓ state because libraryIds.has(m.id) is always true. The
-        // click on the badge triggers onToggleLib which fires the remove.
+        // Every card here IS in the library, so its Add button reads
+        // "Remove" and its caption carries the saved tick. Removing is also
+        // in the card's menu, which is how a keyboard or a phone does it.
         <div className="poster-grid mb-12">
           {filteredLibrary.map((m) => (
             <MediaCardCinema
               key={m.id}
               item={m}
               onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib}
+              onPlay={onCardPlay}
+              resumable={resumableIds?.has(m.id)}
             />
           ))}
         </div>
@@ -152,14 +159,12 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
               // `m` here carries it on m.progress, so no per-card
               // wrapper needed. Rating=0 is also from mapContinueToMedia
               // and the card's meta-star guard hides the star.
-              // 2026-05-27 — Resume pill: one click on the pill
-              // resumes via App's handlePlayContinue (threaded
-              // through as onPlayContinue prop). Shared RESUME_THRESHOLD
-              // via isResumable() — same gate as Hero, home CW rail,
-              // DetailView. Deep-debug H3 — read continueItems via
-              // ref at click-time so a mid-hover refresh doesn't
-              // dispatch a stale record.
-              const resumeHandler = onPlayContinue && isResumable(c)
+              // Play on this card resumes THIS record (a show can have one
+              // per episode here), read at click time so a refresh between
+              // render and click does not dispatch a stale position. Below
+              // the resume threshold it falls back to the card's Play.
+              const resumable = !!onPlayContinue && isResumable(c)
+              const play = resumable
                 ? () => {
                     const latest = continueItemsRef.current.find(
                       x => x.media_item_id === c.media_item_id
@@ -167,7 +172,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
                     )
                     if (latest && isResumable(latest)) onPlayContinue(latest)
                   }
-                : undefined
+                : onCardPlay
               return (
                 <MediaCardCinema
                   key={`${c.media_item_id}-${c.episode_id ?? ''}`}
@@ -176,7 +181,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
                   libraryIds={libraryIds}
                   onToggleLib={onToggleLib}
                   subtitle={sub}
-                  onResume={resumeHandler}
+                  onCardContext={onCardContext}
+                  onPlay={play}
+                  resumable={resumable}
                 />
               )
             })}

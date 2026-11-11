@@ -21,7 +21,7 @@ export default function BrowseView({
   items, title, subtitle, total, sortBy, onSortChange,
   genreFilter, onGenreChange, availableGenres,
   onLoadMore, isLoadingMore,
-  onSelect, onPlay, onCardContext,
+  onSelect, onPlay, onCardContext, onCardPlay, resumableIds,
   libraryIds, onToggleLib,
   mediaType, continueItems, onPlayContinue,
 }: {
@@ -61,7 +61,12 @@ export default function BrowseView({
   // language); they do NOT call onPlay. So unlike the pre-2028 prop this
   // one has a real, single consumer.
   onPlay: (m: Media) => void
-  onCardContext?: (e: MouseEvent, m: Media) => void
+  // The card menu. Required: see MediaCardCinema.
+  onCardContext: (e: MouseEvent, m: Media) => void
+  // A card's on-poster Play: resumes when the viewer has a position in the
+  // title (App decides); resumableIds says which cards that is.
+  onCardPlay: (m: Media) => void
+  resumableIds?: Set<number>
   // My Library + button on cards. Same contract as MediaRail.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
@@ -204,24 +209,6 @@ export default function BrowseView({
   // ref in sync and read it inside the click handler.
   const continueItemsRef = useRef(continueItems)
   useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
-  // Click-time resolver for the CW rail's resume pills. Render-time
-  // check decides whether to show a pill; click-time re-lookup (via the
-  // ref) dispatches against the latest data.
-  const cwResolveResume = (m: Media) => {
-    if (!continueItems || !onPlayContinue) return undefined
-    if (!continueItems.some(c => c.media_item_id === m.id && isResumable(c))) {
-      return undefined
-    }
-    return () => {
-      const latest = continueItemsRef.current
-      if (!latest) return
-      const match = latest.find(
-        c => c.media_item_id === m.id && isResumable(c),
-      )
-      if (match) onPlayContinue(match)
-    }
-  }
-
   // Phase 5.3 final QA — pill identifier above the page headline.
   // "TV Shows" and "Movies" pages both use the same pattern. Built
   // from the page title for now; could be derived from view if we
@@ -429,7 +416,8 @@ export default function BrowseView({
           onCardContext={onCardContext}
           libraryIds={libraryIds}
           onToggleLib={onToggleLib}
-          resolveResume={cwResolveResume}
+          onPlay={onCardPlay}
+          resumableIds={resumableIds}
         />
       )}
 
@@ -448,7 +436,8 @@ export default function BrowseView({
               onCardContext={onCardContext}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib}
-              onPlay={onPlay}
+              onPlay={onCardPlay}
+              resumable={resumableIds?.has(item.id)}
               showLength
             />
           ))}
@@ -474,7 +463,7 @@ export default function BrowseView({
               key={item.id}
               item={item}
               onSelect={() => onSelect(item)}
-              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              onCardContext={(e) => onCardContext(e, item)}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
             />

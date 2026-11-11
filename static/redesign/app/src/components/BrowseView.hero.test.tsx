@@ -19,7 +19,7 @@ const view = (items: Media[]) => (
   <BrowseView
     items={items} title="Movies" subtitle="" total={items.length} sortBy="recent"
     onSortChange={() => {}} genreFilter="" onGenreChange={() => {}} availableGenres={[]}
-    onLoadMore={() => {}} isLoadingMore={false} onSelect={() => {}} onPlay={() => {}}
+    onLoadMore={() => {}} isLoadingMore={false} onSelect={() => {}} onCardContext={() => {}} onCardPlay={() => {}} onPlay={() => {}}
     mediaType="movie"
   />
 )

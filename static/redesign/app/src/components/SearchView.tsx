@@ -8,7 +8,7 @@
 // reach-back into App, and no dependency on UpdatePanel's ACTIVE_STATES /
 // updateStateMeta / timeAgo (those stay with UpdatePanel in the admin chunk).
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { GridSkeleton } from '@/components/Skeletons'
@@ -19,7 +19,7 @@ import { type Media } from '@/lib/types'
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
 // SearchView — debounced 300ms per keystroke (the semantic path is
 // LLM-routed and not free).
-export default function SearchView({ query, onQueryChange, focusNonce, takeFocus, onSelect, libraryIds, onToggleLib }: {
+export default function SearchView({ query, onQueryChange, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, libraryIds, onToggleLib }: {
   query: string
   // Below md the top bar has no search field, so the page carries its own.
   // It is the only way to type a query on a phone.
@@ -32,10 +32,13 @@ export default function SearchView({ query, onQueryChange, focusNonce, takeFocus
   focusNonce?: number
   takeFocus?: () => boolean
   onSelect: (m: Media) => void
-  // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` prop. The
-  // cinema card has no hover Play CTA for it to attach to, and the
-  // SearchView body never read it; leaving it in the type implied a
-  // behavior that never fired. Call site must also drop `onPlay={handlePlay}`.
+  // The card menu (right click, More, a long press): how a keyboard or a
+  // phone adds a result to My Library or plays it.
+  onCardContext: (e: MouseEvent, m: Media) => void
+  // A card's on-poster Play: resumes when the viewer has a position in the
+  // title (App decides); resumableIds says which cards that is.
+  onCardPlay?: (m: Media) => void
+  resumableIds?: Set<number>
   // My Library + button — same contract as MediaRail / BrowseView.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
@@ -179,8 +182,11 @@ export default function SearchView({ query, onQueryChange, focusNonce, takeFocus
               key={item.id}
               item={item}
               onSelect={onSelect}
+              onCardContext={onCardContext}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib}
+              onPlay={onCardPlay}
+              resumable={resumableIds?.has(item.id)}
             />
           ))}
         </div>

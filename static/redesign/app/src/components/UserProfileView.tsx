@@ -12,7 +12,7 @@
 // this" subtitle, so your own page is an exact preview of what opting in
 // would reveal.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaRail } from '@/components/MediaRail'
 import { PageHeader } from '@/components/PageHeader'
@@ -62,9 +62,12 @@ function watchedAgo(iso: string): string {
   return 'Watched ' + new Date(t).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
 }
 
-export default function UserProfileView({ username, onSelect, onOpenMember }: {
+export default function UserProfileView({ username, onSelect, onCardContext, onOpenMember }: {
   username: string
   onSelect: (m: Media) => void
+  // The card menu (right click, More, a long press), required by every
+  // surface that renders a card: see MediaCardCinema.
+  onCardContext: (e: MouseEvent, m: Media) => void
   /** Navigate to another member's profile (follower/following rows). */
   onOpenMember?: (username: string) => void
 }) {
@@ -315,6 +318,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
               items={watches.map(mapWatchToMedia)}
               aspect="poster"
               onSelect={onSelect}
+              onCardContext={onCardContext}
               cardSubtitleFor={m => watchedAt[m.id]}
             />
           ) : (

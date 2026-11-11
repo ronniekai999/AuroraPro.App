@@ -3151,16 +3151,36 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   gap: 10px;
   min-width: 0;
   cursor: pointer;
-  /* The card is the focusable thing, but the ring belongs on the poster:
-     a ring round poster-plus-caption reads as a box. */
-  outline: none;
 }
-.media-card-cinema:focus-visible {
+/* The art is the button that opens the title. Its ring is drawn on the
+   poster's frame, which clips its own contents: a ring round
+   poster-plus-caption reads as a box, and an outline on the button itself
+   would be cut off by the frame's rounded corners. */
+.media-card-cinema .card-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.media-card-cinema .card-open:focus-visible {
   outline: none;
   box-shadow: none;
 }
-.media-card-cinema:focus-visible .poster-wrap {
+.media-card-cinema .poster-wrap:has(.card-open:focus-visible) {
   box-shadow: 0 0 0 2px var(--surface-page), 0 0 0 4px #ffffff, 0 0 0 6px var(--surface-page);
+}
+/* A long press on a touch screen opens the card's menu, so it must not
+   also select the title's text or raise the image callout. A mouse can
+   still select and copy a title. */
+@media (hover: none), (pointer: coarse) {
+  .media-card-cinema {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -3197,9 +3217,16 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 }
 
 /* The actions on the art: Play, Add and More over a short dark scrim at
-   the poster's foot. Hidden at rest. Shown under a pointer, and whenever
-   focus is on the card or inside it. The layer itself takes no clicks, so
-   everywhere but the buttons a click still opens the title. */
+   the poster's foot. Hidden at rest; shown under a fine pointer, and while
+   keyboard focus is on the card's art or on one of the buttons. The layer
+   itself takes no clicks, so everywhere but the buttons a click still opens
+   the title.
+
+   A button that is not drawn is not hit-testable either (pointer-events),
+   so a tap on a touchscreen laptop cannot land on an invisible Play; and
+   Play and Add, which a keyboard never reaches, are also out of the
+   accessibility tree until they are drawn (visibility). More stays
+   focusable, since it is the keyboard's way to the menu. */
 .media-card-cinema .card-actions {
   position: absolute;
   inset: auto 0 0 0;
@@ -3209,25 +3236,20 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   gap: 8px;
   height: 96px;
   padding: 10px;
-  /* Black, not the page ink: it sits on artwork, and the buttons carry
-     their own fills, so this only has to settle the art behind them. */
-  background: linear-gradient(0deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0) 100%);
+  /* Black, not the page ink: it sits on artwork. Strong enough at the
+     buttons' top edge (56% up) that the white Play disc keeps 3:1 against
+     white artwork (audit-glass-contrast measures it there). */
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0.5) 60%, rgba(0, 0, 0, 0) 100%);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-fast) var(--ease-standard);
 }
 /* With progress showing, the buttons clear the bar. */
 .media-card-cinema .card-actions.has-progress { padding-bottom: 14px; }
-.media-card-cinema:focus-visible .card-actions,
-.media-card-cinema:focus-within .card-actions {
-  opacity: 1;
-}
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .card-actions { opacity: 1; }
-}
 /* The fill is opaque enough to hold a white glyph over white artwork
    (audit-glass-contrast measures it there). */
 .media-card-cinema .card-act {
+  position: relative;
   flex: none;
   display: grid;
   place-items: center;
@@ -3236,10 +3258,11 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   border-radius: 50%;
   background: rgba(14, 15, 17, 0.78);
   color: #ffffff;
-  pointer-events: auto;
+  pointer-events: none;
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
 }
+.media-card-cinema .card-act:not(.card-act-more) { visibility: hidden; }
 .media-card-cinema .card-act:hover { background: rgba(14, 15, 17, 0.94); }
 .media-card-cinema .card-act:active { transform: scale(0.94); }
 .media-card-cinema .card-act-play {
@@ -3248,29 +3271,82 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 }
 .media-card-cinema .card-act-play:hover { background: rgba(255, 255, 255, 0.9); }
 .media-card-cinema .card-act-more { margin-left: auto; }
+/* Revealed. :has(:focus-visible), not :focus-within: a MOUSE click on Add or
+   More leaves focus on that button, and :focus-within then kept the scrim
+   and buttons up after the pointer had left. */
+.media-card-cinema:has(:focus-visible) .card-actions { opacity: 1; }
+.media-card-cinema:has(:focus-visible) .card-act {
+  pointer-events: auto;
+  visibility: visible;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-actions { opacity: 1; }
+  .media-card-cinema:hover .card-act {
+    pointer-events: auto;
+    visibility: visible;
+  }
+}
 /* A narrow card (the compact grid, a two-up phone grid) has no room for
-   three 44px targets in a row: the buttons shrink, and on the narrowest
+   three 44px discs in a row: the discs are drawn at 36px, each with a 44px
+   hit area (its ::before reaches 4px past the disc, and the 8px gap and
+   padding keep those areas apart and on the poster), and on the narrowest
    Add drops out (it is in the menu More opens). They never overlap and
-   never leave the poster; scripts/verify-mobile-layout.mjs measures it. */
+   never leave the poster; scripts/verify-mobile-layout.mjs measures the
+   hit areas, not the discs. */
 @container card (max-width: 167px) {
   .media-card-cinema .card-act { width: 36px; height: 36px; }
-  .media-card-cinema .card-actions { gap: 6px; padding: 8px; }
+  .media-card-cinema .card-act::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+  }
+  .media-card-cinema .card-actions { gap: 8px; padding: 8px; }
+  .media-card-cinema .card-actions.has-progress { padding-bottom: 12px; }
 }
 @container card (max-width: 139px) {
   .media-card-cinema .card-act:not(.card-act-play):not(.card-act-more) { display: none; }
 }
 .media-card-cinema .poster-wrap { container: card / inline-size; }
-/* Touch screens have no hover. More is always there, alone, so the poster
-   stays clean and nothing is reachable only by a gesture; Play and Add are
-   in the menu it opens. No scrim: the button's own fill carries it. */
-@media (hover: none) {
+/* Touch screens have no hover, and a coarse pointer that claims one cannot
+   be trusted with it. More is always there, alone, so the poster stays clean
+   and nothing is reachable only by a gesture; Play and Add are in the menu
+   it opens. No scrim: the button's own fill carries it. The disc is 36px
+   with a 44px hit area. */
+@media (hover: none), (pointer: coarse) {
   .media-card-cinema .card-actions {
     opacity: 1;
     height: auto;
     background: none;
+    gap: 8px;
+    padding: 8px;
   }
+  .media-card-cinema .card-actions.has-progress { padding-bottom: 12px; }
   .media-card-cinema .card-act:not(.card-act-more) { display: none; }
-  .media-card-cinema .card-act-more { width: 36px; height: 36px; }
+  .media-card-cinema .card-act-more {
+    width: 36px;
+    height: 36px;
+    pointer-events: auto;
+  }
+  .media-card-cinema .card-act-more::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+  }
+}
+/* A browser without :has() drops every rule above that uses it, which
+   would leave a keyboard with no ring and no buttons. It gets the older
+   :focus-within reveal instead. */
+@supports not selector(:has(*)) {
+  .media-card-cinema:focus-within .poster-wrap {
+    box-shadow: 0 0 0 2px var(--surface-page), 0 0 0 4px #ffffff, 0 0 0 6px var(--surface-page);
+  }
+  .media-card-cinema:focus-within .card-actions { opacity: 1; }
+  .media-card-cinema:focus-within .card-act {
+    pointer-events: auto;
+    visibility: visible;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .media-card-cinema .poster-wrap,
@@ -3350,6 +3426,38 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   flex: none;
   margin-right: 6px;
   color: var(--ink-2);
+}
+/* Why Aurora picked it: one line, in the facts line's place and at its
+   height, while the card is under a fine pointer or holds keyboard focus.
+   The aurora dot marks it as Aurora's words. The menu shows it in full. */
+.media-card-cinema .co-reason {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  height: 16px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-2);
+}
+.media-card-cinema .co-reason .co-reason-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--aurora);
+}
+.media-card-cinema .co-reason .co-reason-txt {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.media-card-cinema.has-reason:has(:focus-visible) .co-meta { display: none; }
+.media-card-cinema.has-reason:has(:focus-visible) .co-reason { display: flex; }
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema.has-reason:hover .co-meta { display: none; }
+  .media-card-cinema.has-reason:hover .co-reason { display: flex; }
 }
 /* The poster grid every content grid shares. Columns are as many as fit
    at the comfortable width (compact: more, smaller posters), so the grid

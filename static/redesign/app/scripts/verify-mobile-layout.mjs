@@ -22,14 +22,29 @@
 //      wrap its OWN text: at a two-up phone grid's ~165px, "2h 16m" broke
 //      over two lines and the row grew. Tokens that do not fit must drop
 //      WHOLE, a lone token must ellipsize, and the caption must be the same
-//      height on every card whatever its facts are.
+//      height on every card that has a facts line, whatever its facts are (a
+//      card with none is the title alone, one line shorter, and is not held
+//      to that). A pick's reason takes the facts line's place under a pointer
+//      or keyboard focus, and must not change the caption's height either.
 //
 //   3. CARD ACTIONS. Play, Add and More sit on the poster's foot (under a
-//      pointer or focus; More alone on a touch screen). On a narrow card
-//      (the compact grid, a two-up phone grid) three 44px targets do not
-//      fit: they must shrink or drop, never overlap each other or leave the
-//      poster. And at rest nothing but the art (and a progress bar) may be
-//      painted on the poster.
+//      pointer or keyboard focus; More alone on a touch screen). Each must
+//      be a 44px TARGET: what is measured is the hit area, by hit-testing,
+//      not the drawn disc, which on a narrow card (the compact grid, a
+//      two-up phone grid) is 36px inside a 44px area, with Add dropping out
+//      on the narrowest. An earlier version of this check measured the disc
+//      and set its floor at 36 to pass; the requirement is 44 and so is the
+//      floor now. The areas must not overlap each other, leave the poster or
+//      sit on the progress bar.
+//
+//      A button that is not drawn must not be hit-testable: at rest, with a
+//      pointer device, a point over any of the three must reach the art, not
+//      the button (a tap on a touchscreen laptop landed on an invisible
+//      Play), and Play and Add must be out of the accessibility tree
+//      (visibility). After a MOUSE click on More, with the pointer gone, the
+//      layer must be hidden again (:focus-within kept it up).
+//      And at rest nothing but the art (and a progress bar) may be painted
+//      on the poster.
 //
 // Class lists are READ FROM THE SOURCE (see classesOf / mustHave), so a call
 // site drifting away from the fix fails here rather than passing against a
@@ -42,14 +57,20 @@
 // MUTATION-TESTED: each of these, applied ALONE to index.css, turns this check
 // red — the facts row losing its clip or its one-line height; a token losing
 // nowrap; `.co-txt` losing its ellipsis; the caption title wrapping; either
-// narrow-card tier for the action buttons removed; the actions layer shown at
-// rest; focus no longer revealing it; a touch screen showing all three
-// buttons; the rail title or subtitle unable to break a word; the AI dot
-// allowed to shrink; the buttons sitting on the progress bar.
+// narrow-card tier for the action buttons removed; the narrow tier's or the
+// touch More's 44px hit area (its ::before) removed; the actions layer shown
+// at rest; a hidden button left hit-testable (pointer-events) or in the
+// accessibility tree (visibility); focus or a pointer no longer revealing
+// the layer; the layer held up by :focus-within after a mouse click; a touch
+// screen showing all three buttons; the rail title or subtitle unable to
+// break a word; the AI dot allowed to shrink; the buttons sitting on the
+// progress bar; the reason line changing the caption's height or not
+// replacing the facts.
 //
 // What this cannot see is the card markup itself — the probe rebuilds it from
 // class names — so the token / separator STRUCTURE and the action buttons'
-// behaviour are pinned by MediaCardCinema.meta.test.tsx instead.
+// behaviour are pinned by MediaCardCinema.meta.test.tsx and
+// MediaCardCinema.actions.test.tsx instead.
 //
 //   npm run build && node scripts/verify-mobile-layout.mjs
 
@@ -114,6 +135,9 @@ mustHave(CARD, 'className="card-act"')
 mustHave(CARD, '`card-actions${')
 mustHave(CARD, '`media-card-cinema group ')
 mustHave(CARD, 'className="progress-bar"')
+mustHave(CARD, 'className="card-open"')
+mustHave(CARD, 'className="co-reason"')
+mustHave(CARD, "'has-reason '")
 
 const SUBTITLE = 'Hand-picked by Aurora for your taste'
 // [title, AI attribution, subtitle, See All]
@@ -158,22 +182,29 @@ const META_LONE = tok(`<span class="${CO_TXT}">S12E104 · 1h 23m left of 1h 58m<
 // two-up phone grid ~130–190px; 176 is the rail card, 232 the children's.
 const CARD_WIDTHS = [104, 120, 128, 140, 150, 165, 176, 190, 232]
 // Per width: the full facts row, the same on a saved title, a lone long
-// token, and a card with no facts at all (its caption is the title alone).
-const VARIANTS = [['full', META], ['saved', SAVED + META], ['lone', META_LONE], ['bare', null]]
+// token, a pick with a reason (longer than any card is wide), and a card
+// with no facts at all (its caption is the title alone).
+mustHave(CARD, 'className="co-reason-dot"')
+mustHave(CARD, 'className="co-reason-txt"')
+const REASON = '<div class="co-reason"><span class="co-reason-dot"></span><span class="co-reason-txt">A slow-burn thriller with the patient tension you gave five stars last month</span></div>'
+const VARIANTS = [['full', META], ['saved', SAVED + META], ['lone', META_LONE], ['reason', META], ['bare', null]]
+// The card as MediaCardCinema builds it: the art is a button, and the
+// progress bar and the actions are its siblings.
 const cardHtml = CARD_WIDTHS.flatMap(w => VARIANTS.map(([kind, meta]) => `
-  <div class="media-card-cinema group" tabindex="0" style="width:${w}px" data-card="${w} ${kind}">
+  <div class="media-card-cinema group ${kind === 'reason' ? 'has-reason ' : ''}" style="width:${w}px" data-card="${w} ${kind}">
     <div class="${POSTER_WRAP}">
-      <div class="poster-img" style="aspect-ratio:2/3;background:#345"></div>
+      <button type="button" class="card-open"><span class="poster-img" style="aspect-ratio:2/3;background:#345"></span></button>
       <div class="progress-bar"><div class="progress-fill" style="width:40%"></div></div>
       <div class="card-actions has-progress">
-        <button class="${ACT_PLAY}"><svg width="18" height="18"></svg></button>
-        <button class="card-act"><svg width="20" height="20"></svg></button>
+        <button tabindex="-1" class="${ACT_PLAY}"><svg width="18" height="18"></svg></button>
+        <button tabindex="-1" class="card-act"><svg width="20" height="20"></svg></button>
         <button class="${ACT_MORE}"><svg width="20" height="20"></svg></button>
       </div>
     </div>
     <div class="${CAPTION}">
       <div class="${CC_TITLE}">The Grand Budapest Hotel and the Very Long Subtitle</div>
       ${meta ? `<div class="${CO_META}">${meta}</div>` : ''}
+      ${kind === 'reason' ? REASON : ''}
     </div>
   </div>`)).join('')
 
@@ -216,6 +247,10 @@ for (const touch of [true, false]) {
     })
     const page = await ctx.newPage()
     await page.goto(`${ORIGIN}/`)
+    // A real key press, so the focus() calls below are keyboard focus to the
+    // browser (:focus-visible), which is what reveals a card's actions.
+    await page.keyboard.press('Tab')
+    await page.evaluate(() => document.activeElement?.blur?.())
     const r = await page.evaluate(async () => {
       await document.fonts.ready
       // The family body text resolves to — the one the card caption and the
@@ -250,22 +285,55 @@ for (const touch of [true, false]) {
 
       const boxOf = el => { const b = el.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height } }
       const shown = el => { const s = getComputedStyle(el); return s.display !== 'none' && s.visibility !== 'hidden' }
+      /** Whether a press at (x, y) reaches `el` (its ::before included). */
+      const hits = (el, x, y) => { const at = document.elementFromPoint(x, y); return !!at && (at === el || el.contains(at)) }
+      /** The button's TARGET, measured by hit-testing in half-pixel steps out
+       *  from its centre: how far a press may land and still reach it. A
+       *  neighbour's area laid over it, or the poster clipping it, shortens
+       *  this, where the drawn box would not show either. */
+      const hitArea = el => {
+        const b = el.getBoundingClientRect()
+        const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2
+        if (!hits(el, cx, cy)) return { w: 0, h: 0, l: cx, r: cx, t: cy, b: cy }
+        const run = (dx, dy) => { let n = 0; while (n < 200 && hits(el, cx + dx * (n + 1) * 0.5, cy + dy * (n + 1) * 0.5)) n++; return n }
+        const [left, right, up, down] = [run(-1, 0), run(1, 0), run(0, -1), run(0, 1)]
+        return { w: (left + right + 1) * 0.5, h: (up + down + 1) * 0.5,
+                 l: cx - left * 0.5, r: cx + (right + 1) * 0.5, t: cy - up * 0.5, b: cy + (down + 1) * 0.5 }
+      }
       const cards = []
       for (const card of document.querySelectorAll('[data-card]')) {
+        // Hit-testing only answers for points on screen.
+        card.scrollIntoView({ block: 'center' })
         const wrap = card.querySelector('.poster-wrap')
         const layer = card.querySelector('.card-actions')
-        const atRest = { layerOpacity: getComputedStyle(layer).opacity }
-        // Keyboard focus on the card is what reveals the actions without a
-        // pointer; measure them in that state.
-        card.focus({ preventScroll: true })
+        const all = [...card.querySelectorAll('.card-act')]
+        const nameOf = a => (a.className.includes('card-act-play') ? 'play' : a.className.includes('card-act-more') ? 'more' : 'add')
+        const centreHit = a => { const b = a.getBoundingClientRect(); return b.width > 0 && hits(a, (b.left + b.right) / 2, (b.top + b.bottom) / 2) }
+        const caption0 = card.querySelector('.card-caption').getBoundingClientRect().height
+        const reasonEl = card.querySelector('.co-reason')
+        const metaEl = card.querySelector('.co-meta')
+        const atRest = { layerOpacity: getComputedStyle(layer).opacity,
+          // What a press would reach, and what assistive tech is offered,
+          // while nothing is drawn.
+          hittable: all.filter(centreHit).map(nameOf),
+          inTree: all.filter(shown).map(nameOf),
+          reasonShown: reasonEl ? getComputedStyle(reasonEl).display !== 'none' : null }
+        // Keyboard focus on the card's art is what reveals the actions
+        // without a pointer; measure them in that state.
+        card.querySelector('.card-open').focus({ preventScroll: true })
         const poster = boxOf(wrap)
-        const acts = [...card.querySelectorAll('.card-act')].filter(shown).map(a => ({ cls: a.className, ...boxOf(a) }))
-        const focused = { layerOpacity: getComputedStyle(layer).opacity }
-        card.blur()
+        const acts = all.filter(shown).map(a => ({ cls: a.className, ...boxOf(a), hit: hitArea(a) }))
+        const focused = { layerOpacity: getComputedStyle(layer).opacity,
+          captionH: card.querySelector('.card-caption').getBoundingClientRect().height,
+          reasonShown: reasonEl ? getComputedStyle(reasonEl).display !== 'none' : null,
+          metaShown: metaEl ? getComputedStyle(metaEl).display !== 'none' : null,
+          reasonSpill: reasonEl ? Math.max(0, ...[reasonEl, ...reasonEl.querySelectorAll('*')].map(e => e.getBoundingClientRect().right - card.getBoundingClientRect().right)) : 0,
+          reasonH: reasonEl ? reasonEl.getBoundingClientRect().height : 0 }
+        document.activeElement.blur()
         const title = card.querySelector('.cc-title')
         const meta = card.querySelector('.co-meta')
         const caption = boxOf(card.querySelector('.card-caption'))
-        const out = { w: card.dataset.card, poster, acts, atRest, focused, captionH: +caption.h.toFixed(1),
+        const out = { w: card.dataset.card, poster, acts, atRest, focused, captionH: +caption.h.toFixed(1), caption0,
                       titleLines: +(title.getBoundingClientRect().height / parseFloat(getComputedStyle(title).lineHeight)).toFixed(2),
                       titleClips: title.scrollWidth <= title.clientWidth + 1 || getComputedStyle(title).textOverflow === 'ellipsis' }
         if (meta) {
@@ -312,6 +380,34 @@ for (const touch of [true, false]) {
     })
 
     const before = problems
+    if (!touch) {
+      // With a real pointer, on one card of each tier: hovering reveals the
+      // actions and makes them take presses; a click on More, and the pointer
+      // then leaving, hides them again though More still has focus.
+      for (const w of [128, 150, 176]) {
+        const sel = `[data-card="${w} full"]`
+        await page.locator(sel).scrollIntoViewIfNeeded()
+        await page.mouse.move(0, 0)
+        const art = await page.locator(`${sel} .card-open`).boundingBox()
+        await page.mouse.move(art.x + art.width / 2, art.y + art.height / 3)
+        const more = await page.locator(`${sel} .card-act-more`).boundingBox()
+        const state = () => page.evaluate(s => {
+          const card = document.querySelector(s)
+          const m = card.querySelector('.card-act-more').getBoundingClientRect()
+          const at = document.elementFromPoint((m.left + m.right) / 2, (m.top + m.bottom) / 2)
+          return { opacity: getComputedStyle(card.querySelector('.card-actions')).opacity, moreHit: !!at?.closest?.('.card-act-more'),
+                   focusOnMore: document.activeElement?.classList.contains('card-act-more') }
+        }, sel)
+        const hovered = await state()
+        if (hovered.opacity !== '1' || !hovered.moreHit) fail(`card ${w}px: a pointer over the card does not reveal its actions (opacity ${hovered.opacity}, More takes a press: ${hovered.moreHit})`)
+        await page.mouse.click(more.x + more.width / 2, more.y + more.height / 2)
+        await page.mouse.move(0, 0)
+        const after = await state()
+        if (!after.focusOnMore) fail(`card ${w}px: the click did not land on More, so this pass proves nothing`)
+        if (after.opacity !== '0' || after.moreHit) fail(`card ${w}px: after a mouse click on More the actions stay up with the pointer gone (opacity ${after.opacity}, More takes a press: ${after.moreHit})`)
+        await page.evaluate(() => document.activeElement?.blur?.())
+      }
+    }
     if (r.hover === touch) fail(`this pass is meant to be ${touch ? 'without' : 'with'} hover, and the page reports the opposite — the action checks below would be measuring the wrong mode`)
     if (r.fontErrors.length) fail(`web fonts failed to load: ${[...new Set(r.fontErrors)].join(', ')} — measurements would use a fallback font`)
     if (!r.fontsLoaded.includes(r.bodyFamily)) fail(`body font "${r.bodyFamily}" did not load (loaded: ${[...new Set(r.fontsLoaded)].join(', ') || 'none'}) — measurements would use a fallback font`)
@@ -332,18 +428,39 @@ for (const touch of [true, false]) {
       // 3. Actions.
       if (c.atRest.layerOpacity !== (touch ? '1' : '0')) fail(`${at}: the actions layer is at opacity ${c.atRest.layerOpacity} at rest; ${touch ? 'a touch screen needs More always there' : 'a poster shows nothing on its art at rest'}`)
       if (c.focused.layerOpacity !== '1') fail(`${at}: keyboard focus on the card does not reveal its actions (opacity ${c.focused.layerOpacity})`)
+      // A button that is not drawn takes no press and is not offered to
+      // assistive tech. With a pointer nothing is drawn at rest; on a touch
+      // screen More is, alone.
+      const restWant = touch ? 'more' : ''
+      if (c.atRest.hittable.join() !== restWant) fail(`${at}: at rest a press reaches ${c.atRest.hittable.join(', ') || 'no button'}; ${touch ? 'a touch screen offers More alone' : 'an action that is not drawn must not be hit-testable'}`)
+      if (c.atRest.inTree.join() !== 'more') fail(`${at}: at rest the accessibility tree holds ${c.atRest.inTree.join(', ') || 'no button'}, expected More alone (Play and Add are not drawn and a keyboard never reaches them)`)
       const names = c.acts.map(a => (a.cls.includes('card-act-play') ? 'play' : a.cls.includes('card-act-more') ? 'more' : 'add'))
       if (!names.includes('more')) fail(`${at}: no More button is shown — on a card this narrow the menu is the only way to everything`)
       if (touch && names.join() !== 'more') fail(`${at}: a touch screen shows ${names.join(', ') || 'nothing'}, expected More alone`)
       for (const a of c.acts) {
         if (a.l < c.poster.l - 0.5 || a.r > c.poster.r + 0.5 || a.t < c.poster.t - 0.5 || a.b > c.poster.b + 0.5) fail(`${at}: an action button leaves the poster (${a.l.toFixed(0)}..${a.r.toFixed(0)} in ${c.poster.l.toFixed(0)}..${c.poster.r.toFixed(0)})`)
-        if (a.w < 35.5 || a.h < 35.5) fail(`${at}: an action button is ${a.w.toFixed(0)}x${a.h.toFixed(0)}, under the 36px floor`)
+        // The TARGET, by hit-testing: 44px, the requirement. The drawn disc
+        // may be smaller (36px on a narrow card) and is not what is held.
+        if (a.hit.w < 44 || a.hit.h < 44) fail(`${at}: an action's target is ${a.hit.w}x${a.hit.h}px by hit-testing (its disc is ${a.w.toFixed(0)}x${a.h.toFixed(0)}), under the 44px a touch target needs`)
+        if (a.w < 35.5 || a.h < 35.5) fail(`${at}: an action's disc is drawn at ${a.w.toFixed(0)}x${a.h.toFixed(0)}, too small to read`)
+        if (a.hit.l < c.poster.l - 0.5 || a.hit.r > c.poster.r + 0.5 || a.hit.t < c.poster.t - 0.5 || a.hit.b > c.poster.b + 0.5) fail(`${at}: an action's target leaves the poster`)
         // The progress bar is 3px at the poster's foot; a button must not sit on it.
         if (a.b > c.poster.b - 3 + 0.5) fail(`${at}: an action button covers the progress bar`)
       }
       for (let i = 0; i < c.acts.length; i++) for (let j = i + 1; j < c.acts.length; j++) {
         const [a, b] = [c.acts[i], c.acts[j]]
         if (a.l < b.r - 0.5 && b.l < a.r - 0.5 && a.t < b.b - 0.5 && b.t < a.b - 0.5) fail(`${at}: action buttons OVERLAP`)
+      }
+      // The reason: hidden at rest, in the facts line's place under focus,
+      // inside the card, and the caption no taller for it.
+      if (c.atRest.reasonShown !== null) {
+        if (c.atRest.reasonShown) fail(`${at}: the pick's reason is drawn at rest, under the facts`)
+        if (!touch) {
+          if (!c.focused.reasonShown || c.focused.metaShown) fail(`${at}: keyboard focus does not swap the facts line for the pick's reason`)
+          if (Math.abs(c.focused.captionH - c.caption0) > 0.5) fail(`${at}: the caption is ${c.focused.captionH}px with the reason and ${c.caption0}px without — the row's posters would jump`)
+          if (c.focused.reasonSpill > 0.5) fail(`${at}: the reason runs ${c.focused.reasonSpill.toFixed(1)}px past the card`)
+          if (c.focused.reasonH > 17) fail(`${at}: the reason wraps (${c.focused.reasonH}px tall)`)
+        }
       }
       // The title is one line, ellipsized.
       if (c.titleLines > 1.1) fail(`${at}: the caption title wraps to ${c.titleLines} lines`)

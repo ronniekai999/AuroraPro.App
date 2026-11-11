@@ -86,6 +86,7 @@ import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
+import { resolvePartyEpisodeId } from '@/lib/partyEpisode'
 import {
   isPlaybackResolutionCurrent,
   partyPlayerDismissalKeyOnClose,
@@ -804,7 +805,7 @@ interface HomeViewProps {
   // for the interceptor to attach to, the props are unreachable. Resume
   // now happens via card-click → detail view → Play; tracked as a separate
   // follow-up.
-  onCardContext?: (e: React.MouseEvent, m: Media) => void
+  onCardContext: (e: React.MouseEvent, m: Media) => void
   // Phase 5.3 — hero reason + refresh + pause hooks.
   heroReason?: string
   // True when homeHero is the rails-derived catalog fallback (not a pool pick).
@@ -843,20 +844,12 @@ interface HomeViewProps {
     item: ContinueWatchingItem
     onPlay: (c: ContinueWatchingItem) => void
   }
-  // 2026-05-27 — Continue Watching one-click resume affordance.
-  // When set, the home Continue Watching rail's cards each get a
-  // Resume pill on hover; click on the pill calls onPlay with the
-  // matched record, bypassing detail. Card click still opens detail
-  // (preserves the "click → detail → act" pattern for non-CW
-  // interactions like "I want to see the description"). Discriminated
-  // bundle so partial wiring is a type error. Wired ONLY on the
-  // home CW rail — other rails (Top Rated, Discover, etc.) don't
-  // sprout resume pills even if the user has progress on a title
-  // they happen to contain.
-  cwResume?: {
-    items: ContinueWatchingItem[]
-    onPlay: (c: ContinueWatchingItem) => void
-  }
+  // Play from a card's on-poster button, on every rail. The handler resumes
+  // when the viewer has a position in the title, as the card's menu does
+  // (its first row is Resume then), so the two controls on one card agree;
+  // resumableIds says which cards that is, so their button reads "Resume".
+  onCardPlay?: (m: Media) => void
+  resumableIds?: Set<number>
   // 2026-06-05 (Home redesign A/F) — greeting band + watch-together
   // inputs.
   //  • user        — logged-in account; first name is derived from
@@ -910,21 +903,13 @@ function coreHomeRails(recent: Media[], movies: Media[], shows: Media[]): NonNul
   ]
 }
 
-function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, parties, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, onCardPlay, resumableIds, user, pickCount, libraryTotal, onOpenParty, parties, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
   const effectiveRails = rails ?? []
   // Phase D — local text for the conversational "describe a vibe" box.
   const [convoText, setConvoText] = useState('')
-  // Deep-debug H3 — keep the latest cwResume bundle in a ref so the
-  // Resume pill click handler resolves the freshest ContinueWatchingItem
-  // at click-time (not render-time). Without this, a mid-hover
-  // continueItems refresh would still dispatch the stale match
-  // captured when the rail mapped.
-  const cwResumeRef = useRef(cwResume)
-  useEffect(() => { cwResumeRef.current = cwResume }, [cwResume])
-
   // 2026-06-05 (Home redesign A/E) — derived greeting bits + top genre.
   // Time-of-day from the client clock; first name from the username.
   // pickCount drives "{N} worth your time"; libraryTotal (real, or null)
@@ -1397,39 +1382,6 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
           : undefined
-        // 2026-05-27 — Resume pill wiring. ONLY the Continue Watching
-        // rail (rail.kind === 'continue-watching') gets the per-card
-        // resume resolver. Other rails leave it undefined so
-        // partial-watch matches on Top Rated / Discover / etc. don't
-        // sprout pills (per design — those rails are discovery-focused,
-        // not action-focused).
-        //
-        // Deep-debug H3 — the click handler resolves the match from
-        // `cwResumeRef.current` at click-time (NOT render-time) so a
-        // mid-hover continueItems refresh (e.g. another device just
-        // watched 2 minutes and the server's position_ms jumped)
-        // doesn't dispatch a stale ContinueWatchingItem. isResumable
-        // also runs at click-time so a record that fell below the
-        // threshold between render and click correctly no-ops.
-        const resolveResume = rail.kind === 'continue-watching' && cwResume
-          ? (m: Media) => {
-              // Render-time check: if there's no resumable record
-              // RIGHT NOW, don't show a pill (saves rendering it
-              // only to have the click no-op).
-              if (!cwResume.items.some(c => c.media_item_id === m.id && isResumable(c))) {
-                return undefined
-              }
-              return () => {
-                // Click-time re-lookup against the latest data.
-                const latest = cwResumeRef.current
-                if (!latest) return
-                const match = latest.items.find(
-                  c => c.media_item_id === m.id && isResumable(c),
-                )
-                if (match) latest.onPlay(match)
-              }
-            }
-          : undefined
         // 2026-06-05 (Home redesign C) — per-card subtitle resolver
         // from the rail's precomputed map (only the CW rail supplies
         // one). Undefined for cards not in the map → default meta row.
@@ -1444,13 +1396,13 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             // First rail's first row sits at the hero fold: fetch it eagerly.
             eagerCount={i === 0 ? 6 : 0}
             onSelect={onSelect}
-            onPlay={onPlay}
+            onPlay={onCardPlay ?? onPlay}
+            resumableIds={resumableIds}
             aspect={rail.aspect}
             onCardContext={onCardContext}
             libraryIds={libraryIds}
             onToggleLib={onToggleLib}
             onSeeAll={seeAllHandler}
-            resolveResume={resolveResume}
             subtitle={rail.subtitle}
             aiPick={rail.aiPick}
             cardSubtitleFor={cardSubtitleFor}
@@ -2226,6 +2178,25 @@ function followedWatchSubtitle(w: FollowedWatch): string {
   return ago ? `${w.watched_by} · ${ago}` : w.watched_by
 }
 
+// A collection's item as the UI's Media, with its real poster, year, rating
+// and genre: a title saved to My Library from a collection is stored with
+// them (a stub would show as a posterless, year-0 card until the next
+// refresh), and the card menu acts on the same record.
+function collectionItemToMedia(m: ServerMediaItem): Media {
+  return {
+    id: m.id,
+    title: m.title,
+    year: m.year ?? 0,
+    rating: m.rating ?? 0,
+    duration: '',
+    genre: (m.genres && m.genres[0]) || '',
+    type: m.type,
+    poster: posterURL(m.poster_path),
+    backdrop: backdropURL(m.backdrop_path),
+    description: m.overview ?? '',
+  }
+}
+
 function pathToView(pathname: string): string {
   // Exact match first.
   if (VIEW_BY_PATH[pathname] !== undefined) return VIEW_BY_PATH[pathname]
@@ -2443,7 +2414,7 @@ export default function App() {
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string; reason?: string; opener?: HTMLElement | null } | null>(null)
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
   // Phase 6 — Collections modal open state. Triggered by the
@@ -3302,6 +3273,12 @@ export default function App() {
     searchFieldFocusRef.current = false
     return wanted
   }, [])
+  // A press that never reached the field (the page did not mount: the bar's
+  // own field took the query, or the session left) must not be answered by
+  // a later mount, such as coming Back from a title.
+  useEffect(() => {
+    if (view !== 'search') searchFieldFocusRef.current = false
+  }, [view])
   const handleNavigate = useCallback((dest: string) => {
     if (dest === 'search') {
       searchFieldFocusRef.current = true
@@ -4294,7 +4271,6 @@ export default function App() {
             title: 'From People You Follow',
             items: followingRailRef.current.map(mapFollowedToMedia),
             aspect: 'poster' as const,
-           
             subtitle: 'Recently watched by members you follow',
             cardSubtitles: followingRailRef.current.reduce<Record<number, string>>(
               (acc, w) => { acc[w.id] = followedWatchSubtitle(w); return acc }, {}),
@@ -5567,15 +5543,22 @@ export default function App() {
     }
   }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode, activeProfileId])
 
-  // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
-  // identity unless continueItems OR handlePlayContinue changes (both
-  // already memoized upstream). Without this, the inline object
-  // literal at the HomeView render would create a fresh reference
-  // every App render, defeating any future React.memo on the
-  // HomeView/MediaRail/MediaCardCinema tree.
-  const homeCwResumeBundle = useMemo(
-    () => ({ items: continueItems, onPlay: handlePlayContinue }),
-    [continueItems, handlePlayContinue],
+  // A card's on-poster Play, on every rail and grid: resume when the viewer
+  // has a position in the title, else play it. The card's menu says "Resume"
+  // in that case, and a Play that started from zero beside it then overwrote
+  // the saved position. The record is looked up at click time (through the
+  // ref), so a Continue Watching refresh between render and click does not
+  // dispatch a stale one, and the handler keeps its identity across those
+  // refreshes, which the memoised cards rely on.
+  const playOrResume = useCallback((m: Media) => {
+    const record = continueItemsRef.current.find(c => c.media_item_id === m.id && isResumable(c))
+    if (record) void handlePlayContinue(record)
+    else void handlePlay(m)
+  }, [handlePlay, handlePlayContinue])
+  // The titles that Play resumes, for the button's label.
+  const resumableIds = useMemo(
+    () => new Set(continueItems.filter(isResumable).map(c => c.media_item_id)),
+    [continueItems],
   )
 
   // Play a specific file from the version picker — bypasses
@@ -5731,10 +5714,34 @@ export default function App() {
     setPartyComposer({ media: m, episodeId })
   }, [party.state.code, nextToastId])
 
+  // "Watch together" from a card's menu. A show's party needs an episode
+  // (see lib/partyEpisode): the viewer's resume episode, else the show's
+  // first playable one, which is read here because a card has no episode
+  // list. The same choice the title page's Party action makes. Dropped when
+  // the profile changed while the episodes were being read.
+  const actingProfileRef = useRef(activeProfileId)
+  useEffect(() => { actingProfileRef.current = activeProfileId }, [activeProfileId])
+  const startPartyFromCard = useCallback(async (m: Media, resume: ContinueWatchingItem | undefined) => {
+    const asProfile = actingProfileRef.current
+    try {
+      const episodeId = await resolvePartyEpisodeId(m, resume)
+      if (actingProfileRef.current !== asProfile) return
+      handleStartParty(m, episodeId)
+    } catch {
+      setToasts(prev => [...prev, { id: nextToastId(), message: `Could not read the episodes of "${m.title}". Open its page to start a party.`, type: 'error' }])
+    }
+  }, [handleStartParty, nextToastId])
+
   // The card menu: what a right click, a card's More button, the context-menu
   // key and a long press all open (ContextMenu). Everything a card can do is
   // here, so nothing is reachable only by one of those gestures.
-  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => {
+  //
+  // Built by a plain function that reads this render's values, and reached
+  // through a ref, so the callback the cards hold (openCardContextMenu,
+  // below) never changes identity: it used to depend on continueItems,
+  // libraryIds and half a dozen handlers, so every Continue Watching refresh
+  // or party change re-rendered every memoised card on Home and the grids.
+  const buildCardMenu = (e: React.MouseEvent, m: Media) => {
     e.preventDefault()
     const failed = (err: unknown) => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
     const resume = continueItems.find(c => c.media_item_id === m.id && isResumable(c))
@@ -5750,7 +5757,7 @@ export default function App() {
       items.push({ label: 'Play', primary: true, onClick: () => { void handlePlay(m) } })
     }
     // Watching together is not offered to a restricted profile.
-    if (navScope === 'full') items.push({ label: 'Watch together', onClick: () => handleStartParty(m) })
+    if (navScope === 'full') items.push({ label: 'Watch together', onClick: () => { void startPartyFromCard(m, resume) } })
     items.push(
       { label: saved ? 'Remove from My Library' : 'Add to My Library', group: true, onClick: () => handleToggleLib(m) },
     )
@@ -5805,8 +5812,21 @@ export default function App() {
     if (adminUI) {
       items.push({ label: 'Refresh metadata', group: true, note: 'Admin', onClick: () => { void handleRefreshMetadata(m) } })
     }
-    setContextMenu({ ...anchorFor(e), items, title: m.title })
-  }, [profiles, activeProfileId, adminUI, navScope, continueItems, libraryIds, handlePlay, handlePlayContinue, handleToggleLib, handleStartParty, handleRefreshMetadata, nextToastId])
+    // The control that opened it, when one did (a card's More button): focus
+    // returns there, and it says the menu is open. A right click's or a long
+    // press's target is the card, which is not a control.
+    const opener = e.currentTarget instanceof HTMLElement ? e.currentTarget : null
+    setContextMenu({ ...anchorFor(e), items, title: m.title, reason: m.reason, opener })
+  }
+  const buildCardMenuRef = useRef(buildCardMenu)
+  useEffect(() => { buildCardMenuRef.current = buildCardMenu })
+  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => buildCardMenuRef.current(e, m), [])
+  // A profile switch closes the menu: it holds the previous profile's Resume
+  // record and closures over its id (Add, the thumbs, Mark as watched), so a
+  // pick made after a switch, one made in another tab included, would act
+  // for the profile the session no longer is. Its render is also withheld
+  // on the commit that names the new profile (see where it is drawn).
+  useEffect(() => { setContextMenu(null) }, [activeProfileId])
 
 
   // The composer's launch sequence: create (live or scheduled) → send
@@ -6748,14 +6768,8 @@ export default function App() {
                 )
                 return item ? { item, onPlay: handlePlayContinue } : undefined
               })()}
-              // 2026-05-27 — Continue Watching one-click resume on
-              // the home CW rail. HomeView scopes the resume pill
-              // to rail.kind === 'continue-watching'; this prop
-              // just supplies the lookup data + handler.
-              // Deep-debug M2 — memoized so HomeView / MediaRail can
-              // benefit from React.memo in the future without the
-              // bundle re-creating fresh references every render.
-              cwResume={homeCwResumeBundle}
+              onCardPlay={playOrResume}
+              resumableIds={profileSwitchPending ? undefined : resumableIds}
               onNavigate={(v, opts) => {
                 // QA 2026-05-25 — "See All" deep-link to a browse
                 // page with an explicit sort. If the destination's
@@ -6797,6 +6811,8 @@ export default function App() {
                     onSelect={handleSelect}
                     onPlay={handlePlay}
                     onCardContext={openCardContextMenu}
+                    onCardPlay={playOrResume}
+                    resumableIds={profileSwitchPending ? undefined : resumableIds}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
                     continueItems={continueItems}
@@ -6825,6 +6841,8 @@ export default function App() {
                     onSelect={handleSelect}
                     onPlay={handlePlay}
                     onCardContext={openCardContextMenu}
+                    onCardPlay={playOrResume}
+                    resumableIds={profileSwitchPending ? undefined : resumableIds}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
                     continueItems={continueItems}
@@ -6842,8 +6860,10 @@ export default function App() {
                 continueItems={profileSwitchPending ? NO_CONTINUE : continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
-                // 2026-05-27 — Continue Watching one-click resume on
-                // the LibraryView CW grid (mirrors home CW rail).
+                onCardContext={openCardContextMenu}
+                onCardPlay={playOrResume}
+                resumableIds={profileSwitchPending ? undefined : resumableIds}
+                // The Continue Watching grid's Play resumes its own record.
                 onPlayContinue={handlePlayContinue}
               />
             </ViewSuspense></HiddenPage>
@@ -6938,6 +6958,9 @@ export default function App() {
                 focusNonce={searchFocusNonce}
                 takeFocus={takeSearchFieldFocus}
                 onSelect={handleSelect}
+                onCardContext={openCardContextMenu}
+                onCardPlay={playOrResume}
+                resumableIds={resumableIds}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}
               />
@@ -6999,6 +7022,7 @@ export default function App() {
                   key={`${uname}:${activeProfileId}`}
                   username={uname}
                   onSelect={handleSelect}
+                  onCardContext={openCardContextMenu}
                   onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 />
               </ViewSuspense></HiddenPage>
@@ -7113,18 +7137,8 @@ export default function App() {
                 // entry shows up as a posterless year-0 placeholder
                 // until the next /api/media refresh re-hydrates it).
                 libraryIds={libraryIds}
-                onToggleLib={(m) => handleToggleLib({
-                  id: m.id,
-                  title: m.title,
-                  year: m.year ?? 0,
-                  rating: m.rating ?? 0,
-                  duration: '',
-                  genre: (m.genres && m.genres[0]) || '',
-                  type: m.type,
-                  poster: posterURL(m.poster_path),
-                  backdrop: backdropURL(m.backdrop_path),
-                  description: m.overview ?? '',
-                })}
+                onToggleLib={(m) => handleToggleLib(collectionItemToMedia(m))}
+                onCardContext={(e, m) => openCardContextMenu(e, collectionItemToMedia(m))}
               />
             </ViewSuspense></HiddenPage>
           )}
@@ -7577,12 +7591,16 @@ export default function App() {
         />
       )}
 
-      {contextMenu && (
+      {/* Not on the commit that switches profile: the menu is the previous
+          profile's (see the effect that closes it). */}
+      {contextMenu && !profileSwitchPending && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           items={contextMenu.items}
           title={contextMenu.title}
+          reason={contextMenu.reason}
+          opener={contextMenu.opener}
           onClose={() => setContextMenu(null)}
         />
       )}

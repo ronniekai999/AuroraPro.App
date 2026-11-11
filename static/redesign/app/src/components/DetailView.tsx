@@ -20,6 +20,7 @@ import { CastGrid } from '@/components/detail/CastGrid'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { getRecap, getRecapStatus, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type RecapStatusResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
+import { partyEpisodeId } from '@/lib/partyEpisode'
 import { type Media } from '@/lib/types'
 
 interface DetailViewProps {
@@ -546,12 +547,9 @@ export default function DetailView({
               // with episode_id=null and guests who join an already-playing
               // party can't auto-open the correct episode (they hit an empty
               // /api/media/{id}/files response and bail silently).
-              const episodeId = media.type === 'show'
-                ? (ri?.type === 'show' && ri.episode_id
-                    ? ri.episode_id
-                    : apiEpisodes?.find(e => e.files && e.files.length > 0)?.id)
-                : undefined
-              onStartParty(media, episodeId)
+              // The choice is shared with the card menu's "Watch together"
+              // (lib/partyEpisode), so the two cannot drift apart.
+              onStartParty(media, partyEpisodeId(media, ri, apiEpisodes))
             } : undefined}
             inParty={inParty}
             userRating={myRating ?? 0}
