@@ -429,8 +429,13 @@ describe('what a session is offered follows the profile the server has bound', (
     // whatever profile it has bound.
     await waitFor(() => expect(hiddenPage()).toBe('together'), { timeout: 10_000 })
     expect(identity()).toBe('ronnie')
-    // The bar still offers no way in, and no parties are polled for a
-    // session whose profile is unknown.
+    // The page it is let onto works: the parties are asked for and listed.
+    // (They were polled only for a session known to be offered Together, so
+    // this one sat on "Looking for parties…" for ever, with no request out.)
+    await screen.findByText(/Live now · 3 watching Parentonly Party/, {}, { timeout: 10_000 })
+    expect(screen.queryByText('Looking for parties…')).toBeNull()
+    // The bar still offers no way in, and says nothing about who is
+    // watching: that is for a session known to be offered Together.
     expect(destinations()).toEqual(['Tonight', 'Library'])
     expect(commits.filter(c => c.pill !== null)).toEqual([])
     expect(where.path).toBe('/together')

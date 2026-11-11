@@ -2199,6 +2199,9 @@ function collectionItemToMedia(m: ServerMediaItem): Media {
   }
 }
 
+// No parties: the list given to anything that must not show one.
+const NO_PARTIES: ActiveParty[] = []
+
 function pathToView(pathname: string): string {
   // Exact match first.
   if (VIEW_BY_PATH[pathname] !== undefined) return VIEW_BY_PATH[pathname]
@@ -2474,11 +2477,15 @@ export default function App() {
   // so each such page is guarded where it mounts as well.
   const hiddenOk = mayRenderHidden(navScope, { settled: profilesSettled, askingForProfile: profilesGateForced && activeProfileId === null })
   // The account's active watch parties, polled once for the whole app and
-  // read by the nav's presence pill and the Together hub. Only for a session
-  // that is offered Together, and keyed by user and acting profile: the hook
-  // returns nothing on the render that switches profile.
+  // read by the nav's presence pill and the Together hub. For any session
+  // that may be shown Together (hiddenOk): that is a session known to be
+  // offered it, and also one whose profile could not be learned at all, which
+  // is let onto the page and used to find it saying "Looking for parties…"
+  // for ever, with no request out. The pill is only for the first kind (see
+  // livePresence). Keyed by user and acting profile: the hook returns nothing
+  // on the render that switches profile.
   const activeParties = useActiveParties({
-    enabled: !!user && navScope === 'full',
+    enabled: !!user && hiddenOk,
     ownerKey: `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`,
     // Not while the player is open (minimized counts as closed: the page is
     // back on screen then).
@@ -6525,7 +6532,9 @@ export default function App() {
   // most watched party someone else is running, if any. The list is empty
   // for a session not offered Together and on a profile switch's first
   // commit (useActiveParties), so the pill cannot name another profile's.
-  const livePresence = partyPresence(activeParties.parties, user.id)
+  // The bar says who is watching only to a session known to be offered
+  // Together; the list is also polled for one that merely may open the page.
+  const livePresence = partyPresence(navScope === 'full' ? activeParties.parties : NO_PARTIES, user.id)
   const navPresence: NavPresence | null = party.state.code
     ? { label: 'In a watch party', short: 'In a party', expanded: partyPanelOpen }
     : livePresence.label && livePresence.short
