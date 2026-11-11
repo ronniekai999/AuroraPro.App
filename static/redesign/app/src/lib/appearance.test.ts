@@ -7,8 +7,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // here as `font_choice` and `glow_intensity` and applied as `data-font` /
 // `data-glow` on <html>. Both settings are gone. What these tests pin about
 // them is that a blob written by such a build is harmless: nothing reads the
-// two keys, nothing writes an attribute for them, and other writers carry
-// them through untouched instead of crashing on or deleting them.
+// two keys (bar one carry-over, below), nothing writes an attribute for the
+// old settings, and other writers carry the keys through untouched instead
+// of crashing on or deleting them.
+//
+// The carry-over: the "Subtle" glow was that build's lever for weak graphics
+// hardware (no blur over playing video). A blob that still says
+// glow_intensity: 'subtle' reads as reduced effects until the viewer makes an
+// explicit choice, so nobody who chose it for performance silently loses it.
 //
 // Runs in vitest's default `node` environment (no jsdom in devDependencies), so
 // localStorage and document.documentElement are stubbed to the minimum surface
@@ -60,7 +66,8 @@ describe('a typeface or glow choice stored by an older build', () => {
   it('is ignored: no attribute is written for it, whatever it holds', () => {
     for (const blob of [
       { font_choice: 'nova', glow_intensity: 'heavy' },
-      { font_choice: 'halo', glow_intensity: 'subtle' },
+      { font_choice: 'halo', glow_intensity: 'aurora' },
+      { font_choice: 'current', glow_intensity: 'SUBTLE' },
       { font_choice: 42, glow_intensity: { nested: true } },
       { font_choice: null, glow_intensity: [] },
     ]) {
@@ -88,6 +95,42 @@ describe('a typeface or glow choice stored by an older build', () => {
     })
     expect(attrs.has('data-font')).toBe(false)
     expect(attrs.has('data-glow')).toBe(false)
+  })
+})
+
+describe('a stored Subtle glow carries over to reduced effects', () => {
+  it('reads as on, and is what the pre-paint path applies', () => {
+    store.set('aurora_prefs', JSON.stringify({ font_choice: 'nova', glow_intensity: 'subtle' }))
+    expect(currentReduceEffects()).toBe(true)
+    // main.tsx: if (currentReduceEffects()) reflectReduceEffects(true)
+    reflectReduceEffects(currentReduceEffects())
+    expect(attrs.get('data-effects')).toBe('reduced')
+    expect(attrs.has('data-glow')).toBe(false)
+    expect(attrs.has('data-font')).toBe(false)
+  })
+
+  it('yields to an explicit choice either way, so turning it off sticks', () => {
+    store.set('aurora_prefs', JSON.stringify({ glow_intensity: 'subtle' }))
+    applyReduceEffects(false)
+    expect(currentReduceEffects()).toBe(false)
+    expect(attrs.has('data-effects')).toBe(false)
+    // The old key is still there, untouched, and no longer decides anything.
+    expect(prefs()).toEqual({ glow_intensity: 'subtle', reduce_effects: false })
+    applyReduceEffects(true)
+    expect(currentReduceEffects()).toBe(true)
+  })
+
+  it('is not read from any other old glow value', () => {
+    for (const glow of ['aurora', 'heavy', 'Subtle', '', null, 1, true]) {
+      store.set('aurora_prefs', JSON.stringify({ glow_intensity: glow }))
+      expect(currentReduceEffects(), JSON.stringify(glow)).toBe(false)
+    }
+  })
+
+  it('does not let a malformed reduce_effects hide the carry-over', () => {
+    // Only a boolean is an explicit choice.
+    store.set('aurora_prefs', JSON.stringify({ glow_intensity: 'subtle', reduce_effects: 'no' }))
+    expect(currentReduceEffects()).toBe(true)
   })
 })
 

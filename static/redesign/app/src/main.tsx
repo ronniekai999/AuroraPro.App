@@ -50,10 +50,10 @@ if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'm
 // under `/v2/*`. With basename set, navigate composes correctly.
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
 
-// Apply Reduce effects BEFORE first paint so the nav bar and panels never
-// flash their blur on a machine whose owner turned it off. The read is
-// guarded (a corrupt or missing blob reads as off), so nothing here can
-// stop startup.
+// Apply reduced effects BEFORE first paint so the nav bar and panels never
+// flash their blur on a machine set to go without it (see
+// currentReduceEffects for what counts). The read is guarded (a corrupt or
+// missing blob reads as off), so nothing here can stop startup.
 if (currentReduceEffects()) reflectReduceEffects(true)
 
 // The tree itself (the error boundaries, the companion/desktop split and the

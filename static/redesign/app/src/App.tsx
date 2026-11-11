@@ -996,7 +996,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-action-soft hover:bg-white/10 border border-line text-ink hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-action-soft hover:bg-white/20 border border-line text-ink hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>
@@ -1776,7 +1776,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-surface-raised-2 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1936,7 +1936,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-surface-raised-2 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -7235,7 +7235,7 @@ export default function App() {
       {partyInviteOpen && partyPanelOpen && party.state.code &&
         party.state.hostUserId === user.id && partyVariant === 'rail' && (
         <div
-          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm motion-safe:animate-fade-in"
+          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-[var(--scrim)] motion-safe:animate-fade-in"
           onClick={() => setPartyInviteOpen(false)}
         >
           <div onClick={e => e.stopPropagation()} className="w-full max-w-sm">
@@ -7302,7 +7302,7 @@ export default function App() {
       )}
 
       {addToListMedia && activeProfileId && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
+        <div className="fixed inset-0 z-[70] bg-[var(--scrim)] flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>

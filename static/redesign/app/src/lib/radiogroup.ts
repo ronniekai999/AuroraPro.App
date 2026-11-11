@@ -1,16 +1,16 @@
 // Keyboard contract for a `role="radiogroup"` built from buttons.
 //
-// Settings has four of these (Glow, Typeface, Avatar, Content Tone) and none of
-// them implemented the pattern: every `role="radio"` was a natural tab stop and
+// Settings' radiogroups (Avatar, Content Tone and, at the time, two more) did
+// not implement the pattern: every `role="radio"` was a natural tab stop and
 // the arrow keys did nothing. That is worse than a plain button group, because
 // NVDA and JAWS switch into focus/forms mode the moment focus enters a `radio`
 // and hand the arrow keys to the application — which ignored them. So the only
 // key that worked was Tab, which is not how a radio group behaves anywhere else,
 // and 21 sequential stops replaced the 4 the pattern specifies.
 //
-// Aurora Stage Phase 7a. One helper rather than four copies, for the same reason
-// FONT_OPTIONS and MATURITY_OPTIONS are one list each: four hand-written
-// keyboard handlers is four chances to get the wrap arithmetic wrong.
+// One helper rather than a copy per group, for the same reason
+// MATURITY_OPTIONS is one list: every hand-written keyboard handler is a
+// chance to get the wrap arithmetic wrong.
 //
 // APG radiogroup, the parts that matter here:
 //   - Right/Down move to the next radio and CHECK it (radio groups activate on

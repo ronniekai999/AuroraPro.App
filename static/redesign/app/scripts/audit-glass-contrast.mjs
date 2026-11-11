@@ -168,6 +168,22 @@ const lineAt = (src, i) => src.slice(0, i).split('\n').length
 // (`w-1/7`) or a line-height (`text-sm/13`). The `opacity-N` family is checked
 // the same way, with `opacity-0` as the sibling that must compile. Comments are
 // skipped: a class in a comment styles nothing.
+//
+// BRACKETED MODIFIERS ARE CHECKED TOO (`X/[0.97]`, `X/[38%]`). On a literal
+// colour they always compile, which is why this check first looked only at
+// bare `/N`. On a colour the theme maps to a CSS variable they never do: the
+// neutral system's keys (surface-*, line*, ink*, action*, ok, warn, danger*)
+// are plain `var(--token)` strings, Tailwind cannot put an alpha on one, and it
+// emits NO rule for any `/<alpha>` form of them. `bg-surface-raised/[0.97]`
+// shipped exactly that way: the phone menu sheet had no background at all.
+//
+// So two things hold a token colour to "no modifier", and either alone fails
+// the run with the file and line:
+//   - the oracle, now asked about every `/…` modifier, numeric or bracketed;
+//   - a direct rule (`tokenColourModifiers`): any class whose colour is one
+//     the config maps to `var(--…)` and which carries a modifier. It reads the
+//     names from tailwind.config.js rather than restating them, and does not
+//     depend on what Tailwind happens to emit for such a class.
 
 const twConfig = loadConfig(path.join(APP_DIR, 'tailwind.config.js'))
 
@@ -218,12 +234,47 @@ function classesIn(src, keep) {
   return placed.sort((a, b) => a.index - b.index)
 }
 
+// `X/N` or `X/[…]`: a modifier after the LAST slash, numeric or bracketed.
+const MODIFIER = /^(.+)\/(\d+|\[[^\]/\s]+\])$/
+
+/** The theme colours the config maps to a bare `var(--token)`, as the names a
+ *  class would carry: `surface-raised-2`, `line`, `ink-3`, `action-on`… A
+ *  nested key named DEFAULT is the group's own name. */
+function tokenColourNames() {
+  const names = []
+  const walk = (obj, prefix) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const name = k === 'DEFAULT' ? prefix : (prefix ? `${prefix}-${k}` : k)
+      if (typeof v === 'string') { if (/^var\(--[\w-]+\)$/.test(v.trim())) names.push(name) }
+      else if (v && typeof v === 'object') walk(v, name)
+    }
+  }
+  walk(twConfig.theme?.extend?.colors ?? {}, '')
+  return names
+}
+const TOKEN_COLOURS = tokenColourNames()
+if (TOKEN_COLOURS.length < 10) throw new Error(`audit: only ${TOKEN_COLOURS.length} theme colours map to var(--token) in tailwind.config.js; the neutral system should — the audit is out of date, not passing`)
+// Longest name first, so `line-strong` is not read as `line` followed by junk.
+const TOKEN_COLOUR_MODIFIER = new RegExp(
+  String.raw`^(?:[^\s:]+:)*!?-?[a-z][a-z-]*-(?:${[...TOKEN_COLOURS].sort((a, b) => b.length - a.length).join('|')})\/.+$`)
+
+/** Every class in `texts` that puts a modifier on a token-mapped colour, on
+ *  any utility prefix and under any variant, as { where, line, token }. */
+function tokenColourModifiers(texts) {
+  const uses = []
+  for (const { where, text } of texts) {
+    for (const { token, index } of classesIn(text, t => TOKEN_COLOUR_MODIFIER.test(t)))
+      uses.push({ where, line: lineAt(text, index), token })
+  }
+  return uses
+}
+
 /** Every dead modifier in `texts` ({ where, text } pairs), as { where, line, token }. */
 async function deadModifiers(texts) {
   const uses = []
   for (const { where, text } of texts) {
-    for (const { token, index } of classesIn(text, t => /\/\d+$/.test(t) || OPACITY_UTILITY.test(t))) {
-      const mod = token.match(/^(.+)\/(\d+)$/)
+    for (const { token, index } of classesIn(text, t => MODIFIER.test(t) || OPACITY_UTILITY.test(t))) {
+      const mod = token.match(MODIFIER)
       const op = token.match(OPACITY_UTILITY)
       if (mod) uses.push({ where, line: lineAt(text, index), token, base: mod[1] })
       else if (op) uses.push({ where, line: lineAt(text, index), token, base: `${op[1]}0` })
@@ -238,7 +289,9 @@ async function deadModifiers(texts) {
 // If an upgrade starts compiling one of the DEAD probes (Tailwind 4 accepts any
 // number), this fails and says so instead of reporting on a changed premise.
 const MOD_PROBE = {
-  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97'],
+  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97',
+    // Token-mapped colours: dead with ANY modifier, numeric or bracketed.
+    'bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]'],
   live: ['bg-[#0a0a0f]/95', 'bg-[#0a0a0f]/[0.97]', 'hover:text-white/40', 'w-1/2', 'text-sm/6', 'opacity-95', 'text-white/[38%]'],
   ignored: ['/v2/assets/12', '2026-10/25', 'a/b/40'],
   // Shapes a whitespace split got wrong, each holding one dead class.
@@ -258,11 +311,31 @@ let staticFails = 0
     console.log(`  *** known-answer probe: expected exactly [${want}] dead, got [${got}] — the oracle or its premise has changed`)
     staticFails++
   }
+  // The direct rule's own known answers: every token-colour class in the
+  // probe that carries a modifier, and none of the others (a literal colour
+  // with a modifier, a token colour without one, a path).
+  const TOKEN_PROBE = {
+    flagged: ['bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]',
+      'from-surface-raised-2/40', 'placeholder:text-ink-3/70', '!bg-danger/20', 'text-ok/90', 'border-warn/[0.3]', 'ring-offset-line/50'],
+    clean: ['bg-surface-raised', 'text-ink-2', 'border-line-strong', 'bg-white/[0.08]', 'bg-[#0a0a0f]/95', 'text-white/50', 'src/lib/ink/2', 'bg-action-soft'],
+  }
+  const tokenProbe = tokenColourModifiers([{ where: 'probe', text: [...TOKEN_PROBE.flagged, ...TOKEN_PROBE.clean].join(' ') }])
+    .map(u => u.token).sort().join(' ')
+  if (tokenProbe !== [...TOKEN_PROBE.flagged].sort().join(' ')) {
+    console.log(`  *** known-answer probe (token colours): expected exactly [${[...TOKEN_PROBE.flagged].sort().join(' ')}], got [${tokenProbe}]`)
+    staticFails++
+  }
   const files = uiSources()
-  const dead = await deadModifiers(files.map(f => ({ where: f, text: code(f) })))
-  for (const u of dead) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
-  console.log(`  ${dead.length} dead modifier(s) across ${files.length} files.\n`)
-  staticFails += dead.length
+  const texts = files.map(f => ({ where: f, text: code(f) }))
+  const dead = await deadModifiers(texts)
+  const onToken = tokenColourModifiers(texts)
+  const key = u => `${u.where}:${u.line}:${u.token}`
+  const tokenKeys = new Set(onToken.map(key))
+  for (const u of onToken) console.log(`  ${u.where}:${u.line}  ${u.token}  — a token-mapped colour takes no opacity modifier (Tailwind emits no rule); use the plain utility, or bg-[var(--token)] / a literal with the alpha you mean`)
+  for (const u of dead) if (!tokenKeys.has(key(u))) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
+  const total = new Set([...dead, ...onToken].map(key)).size
+  console.log(`  ${total} dead modifier(s) across ${files.length} files (${onToken.length} on token-mapped colours: ${TOKEN_COLOURS.join(', ')}).\n`)
+  staticFails += total
 }
 
 /** rgba()/rgb()/#hex -> { rgb: [0..1 x3], a }. */
@@ -543,16 +616,15 @@ const ONB_INK = (() => {
 // because this script measures ONLY the surfaces listed in SURFACES below and
 // the palette was never listed — the same structural blind spot this file's
 // header describes for the on-art audit and the vibe bar. Modelled, bottom-up:
-// the page's `.aurora-bg` (its tints show through both translucent layers),
-// the full-viewport scrim, then the panel's own fill; the scrim and panel are
-// read from the component. NOT modelled: the two decorative blobs between the
-// scrim and the panel, and whatever view is on screen beneath the scrim (hero
-// art, a backdrop, video). The panel passes about 10% of the blobs, and the
-// scrim and panel together about 1.5% of the view beneath; at full strength
-// that costs the near-threshold text about 0.06 (6.45 → ~6.39).
+// the page's `.aurora-bg`, the full-viewport scrim, then the panel's own fill;
+// the scrim and panel are read from the component. NOT modelled: whatever
+// view is on screen beneath the scrim (hero art, a backdrop, video). That is
+// sound only while the panel's fill is opaque, which is asserted below: a
+// translucent panel would let the view beneath reach the text.
 const PAL = 'src/components/SearchPalette.tsx'
-const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
+const PAL_SCRIM = [[twFill(PAL, 'data-palette-scrim')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
+if (PAL_PANEL[0][0].a !== 1) throw new Error(`audit: the palette panel's fill is no longer opaque (alpha ${PAL_PANEL[0][0].a}); the view beneath the scrim would show through the text's backdrop — model it, do not pass`)
 const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 
 // ── 1. Faint white text, everywhere, against a computed floor ────────────────
@@ -949,7 +1021,7 @@ const SURFACES = [
     what: 'palette "Esc" hint', where: `${PAL} (header kbd)`,
     color: () => twText(PAL, 'uppercase tracking-wider text-[color:').rgb,
     alpha: () => twText(PAL, 'uppercase tracking-wider text-[color:').a,
-    px: 10, on: onPalette,
+    px: 12, on: onPalette,
   },
   {
     what: 'palette empty-state line', where: `${PAL} (empty query)`,
@@ -966,7 +1038,7 @@ const SURFACES = [
     what: 'palette key legend', where: `${PAL} (empty query)`,
     color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
     alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
-    px: 11, on: onPalette,
+    px: 12, on: onPalette,
   },
   {
     what: 'palette no-match line', where: `${PAL} (no results)`,

@@ -4,9 +4,11 @@
 // quality and delivery).
 //
 // The app has one typeface system and one level of edge and shadow. Older
-// builds stored `font_choice` and `glow_intensity` in the same blob; nothing
-// reads them any more. They are left where they are (other writers spread
-// the whole blob back) and are ignored.
+// builds stored `font_choice` and `glow_intensity` in the same blob. They are
+// left where they are (other writers spread the whole blob back) and are
+// ignored, with one exception: `glow_intensity: 'subtle'` was that build's
+// lever for weak graphics hardware, and is read as reduced effects until the
+// viewer makes an explicit choice (see currentReduceEffects).
 
 export type DensityChoice = 'comfortable' | 'compact'
 
@@ -81,12 +83,21 @@ export function writePrefs(patch: Record<string, unknown>): void {
 const writePref = writePrefKey
 
 /**
- * Reduce effects: no backdrop blur and no moving transitions. Stored as a
- * boolean and applied as `<html data-effects="reduced">`, which index.css
- * keys its flat-fill and no-motion rules on. Off (no attribute) by default.
+ * Reduce effects: no backdrop blur behind chrome. Stored as a boolean and
+ * applied as `<html data-effects="reduced">`, which index.css keys its
+ * flat-fill rules on. Off (no attribute) by default.
+ *
+ * Carried over from older builds: their "Subtle" glow setting was the same
+ * lever (it dropped the blur over playing video for weak graphics hardware),
+ * so a blob that still holds `glow_intensity: 'subtle'` and no explicit
+ * `reduce_effects` reads as ON. People who chose it for performance keep it.
+ * An explicit `reduce_effects`, true or false, always wins, so turning it
+ * off sticks; no other old value is read.
  */
 export function currentReduceEffects(): boolean {
-  return readPrefs().reduce_effects === true
+  const prefs = readPrefs()
+  if (typeof prefs.reduce_effects === 'boolean') return prefs.reduce_effects
+  return prefs.glow_intensity === 'subtle'
 }
 
 /** Set or clear the attribute for a stored value; shared with the pre-paint shim. */
@@ -102,9 +113,8 @@ export function applyReduceEffects(on: boolean): void {
 }
 
 /**
- * Library density, or null when the viewer never chose: the library then
- * picks by size (compact above a few hundred titles). A choice made in the
- * library header or in Settings is the same stored value.
+ * The stored library density ('comfortable' or 'compact'), or null when
+ * nothing valid is stored.
  */
 export function currentDensity(): DensityChoice | null {
   const v = readPrefs().library_density

@@ -223,18 +223,10 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         if (!panelRef.current?.contains(e.target as Node)) onClose()
       }}
     >
-      {/* Backdrop — deep blur + violet tint so the page beneath
-          feels far away. */}
-      {/* .aurora-glass-overlay: a full-viewport backdrop blur plus the two
-          120px/100px filter blurs below is the most expensive glass in the
-          app, and it had no Glow = Subtle override. Under data-glow="subtle"
-          the scrim becomes a flat fill and the blobs are dropped. */}
-      <div className="absolute inset-0 bg-[var(--scrim)] backdrop-blur-xl aurora-glass-overlay" aria-hidden="true" />
-
-      {/* Aurora-violet glow blobs behind the palette so the
-          backdrop isn't a flat sheet of blur. Decorative only. */}
-      <div className="stage-palette-blob absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-action-soft blur-[120px] pointer-events-none" aria-hidden="true" />
-      <div className="stage-palette-blob absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-white/5 blur-[100px] pointer-events-none" aria-hidden="true" />
+      {/* The scrim: a flat dark veil, no blur. The page behind a dialog does
+          not scroll under it, so blurring it would cost a full-viewport
+          filter for nothing. */}
+      <div data-palette-scrim="" className="absolute inset-0 bg-[var(--scrim)]" aria-hidden="true" />
 
       {/* Palette panel */}
       <div
@@ -245,7 +237,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         // `stage-palette`: index.css resets the global input treatment inside
         // this panel and draws the focus indicator on the panel itself — see
         // the note on the input below.
-        className="stage-palette relative w-full max-w-[760px] rounded-2xl border border-line bg-surface-raised-2 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden stage-dialog-in"
+        className="stage-palette relative w-full max-w-[760px] rounded-sheet border border-line bg-surface-raised-2 shadow-[shadow:var(--shadow-modal)] overflow-hidden stage-dialog-in"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
@@ -499,7 +491,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               // moment they stopped being buttons.
               className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors cursor-pointer ${
                 i === highlighted
-                  ? 'bg-action-soft border-l-2 border-line-strong'
+                  ? 'bg-white/10 border-l-2 border-ink'
                   : 'border-l-2 border-transparent hover:bg-white/[0.03]'
               }`}
             >

@@ -188,9 +188,10 @@
     --stage-cyan: #22d3ee;
     --stage-star: #facc15;
 
-    /* What .page-tint composites: one wash of the artwork colour in focus
-       (--ambient, transparent until a script sets it). The second and
-       third layers are kept as names because .page-tint lists three. */
+    /* What .page-tint composites: one wash of --ambient, which is
+       transparent (so the layer paints nothing) unless an element sets it.
+       The second and third layers are kept as names because .page-tint
+       lists three. */
     --tint-1: radial-gradient(1100px 700px at 70% -8%, var(--ambient), transparent 62%);
     --tint-2: none;
     --tint-3: none;
@@ -258,9 +259,10 @@
     --fs-body-sm: 14px;
 
     /* Neutral surface system. Surfaces are graphite and carry no brand
-       colour; colour on a page comes from the artwork in focus (--ambient,
-       set per title by script) and the aurora gradient is a signal reserved
-       for the logo, AI attribution and live presence. The primary action
+       colour; colour on a page is meant to come from the artwork in focus
+       (--ambient: transparent here, to be set on the surface that shows a
+       title) and the aurora gradient is a signal reserved for the logo, AI
+       attribution and live presence. The primary action
        and progress are white, which holds its contrast over any artwork.
        Tailwind maps these as surface-*, line, ink-*, ok, warn and the
        chip/art/control/sheet radii (tailwind.config.js). */
@@ -289,9 +291,10 @@
     --radius-sheet: 20px;
   }
 
-  /* Reduce effects (Settings, stored as aurora_prefs.reduce_effects and
-     written to <html data-effects="reduced"> before first paint). The
-     lever for weak or integrated GPUs: backdrop blur over playing video
+  /* Reduce effects: <html data-effects="reduced">, written before first
+     paint by main.tsx from lib/appearance (aurora_prefs.reduce_effects, or
+     a Subtle glow choice stored by an older build, which was the same
+     lever). For weak or integrated GPUs: backdrop blur over playing video
      repaints every frame, so every surface that blurs drops to a flat
      fill here. The rules that honour it sit beside the surfaces they
      change, keyed on the same attribute. */
@@ -469,14 +472,13 @@
     display: none;
   }
 
-  /* The page: flat graphite, no wash. Colour on a page comes from the
-     artwork in focus (--ambient), never from the walls. */
+  /* The page: flat graphite, no wash. */
   .aurora-bg {
     background: var(--surface-page);
   }
-  /* DetailView hero floor — a soft radial of the title's own artwork
-     colour (--ambient) at the bottom-left of the backdrop. Single static
-     element on a non-scrolling hero, so the blur cost is paid once. */
+  /* DetailView hero floor: a soft radial of --ambient at the bottom-left
+     of the backdrop. --ambient is transparent unless the hero sets it, and
+     the gradient is already soft, so this carries no blur filter. */
   .aurora-floor {
     position: absolute;
     left: -10%;
@@ -484,7 +486,6 @@
     bottom: -25%;
     height: 60%;
     background: radial-gradient(55% 100% at 28% 100%, var(--ambient), transparent 70%);
-    filter: blur(46px);
     pointer-events: none;
   }
 
@@ -1344,12 +1345,8 @@ html[data-effects="reduced"] .stage-topnav {
 html[data-effects="reduced"] .stage-pick-pill {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: rgba(59, 19, 90, 0.95);
-  /* Drop the 20px purple bloom too. Every other subtle-mode override in this
-     file kills the halo along with the blur (--glow-halo collapses to a
-     hairline); leaving it meant a user who chose Subtle to stop the glow
-     still got one on the hero pill. */
-  box-shadow: none;
+  background: var(--surface-raised-2);
+    box-shadow: none;
 }
 
 /* Eyebrow above a page/browse title ("MOVIES"). */
@@ -1487,7 +1484,7 @@ html[data-effects="reduced"] .stage-toolbar {
 /* Declared BEFORE the [aria-pressed="true"] rule below, and that order matters.
    Both are (0,2,0) and both set `background` and `color`, so source order
    decides — and it needs to resolve this way round, or hovering the selected
-   pill would strip its purple. Same hazard class as .stage-calcell's; recorded
+   pill would strip its light fill. Same hazard class as .stage-calcell's; recorded
    here too because it happens to be correct by accident of writing order. */
 .stage-fpill:hover {
   background: var(--line);
@@ -1655,13 +1652,8 @@ html[data-effects="reduced"] .stage-toolbar {
      chip sitting next to it in the same flex row. */
   border: 1px solid transparent;
 }
-/* Darkened both stops. The gradient runs 135deg across a ~48x19px chip, so its
-   line spans the whole badge and white text sits across the entire ramp — with
-   the old rgba(216,180,254,.95) light end, the first two-thirds of the badge
-   was 1.84:1 to 3.10:1 and only the last third cleared AA at 9.5px/800. These
-   stops keep the violet→purple direction while holding white above 4.5:1 for
-   the full length, over any artwork: measured 5.16:1 at the light end and
-   10.08:1 at the dark against the worst case (a white poster). */
+/* The AI chip: an opaque raised fill, so its text does not depend on the
+   artwork under it. */
 .stage-cbadge-ai {
   background: var(--surface-raised-2);
   border-color: var(--line-strong);
@@ -1875,7 +1867,7 @@ html[data-effects="reduced"] .stage-toolbar {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.stage-calchip-p { background: rgba(255, 255, 255, 0.231); color: var(--line-strong); }
+.stage-calchip-p { background: var(--ink); color: var(--on-action); }
 
 /* ══ Settings (Aurora Stage Phase 7a) ═════════════════════════════════
    The mockup's .opt — the selected-state chip used by both Appearance
@@ -2806,12 +2798,9 @@ html[data-effects="reduced"] .stage-upnext {
 }
 
 
-/* Phase 6 — Custom scrollbar (Aurora-themed).
-   Replaces the previous bare 6px-track-no-corner scrollbar with a
-   futuristic style: wider on hover (8px → 12px), purple gradient
-   thumb on hover, transparent track that lets the page background
-   show through. Firefox uses `scrollbar-color` which only supports
-   solid colors — we approximate with the same purple. */
+/* Custom scrollbar: a neutral thumb on a transparent track that lets the
+   page show through, a little brighter under the pointer. Firefox uses
+   `scrollbar-color`, which takes solid colours only. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -2821,18 +2810,14 @@ html[data-effects="reduced"] .stage-upnext {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.193),
-    rgba(255, 255, 255, 0.138));
+  background: rgba(255, 255, 255, 0.18);
   border-radius: 10px;
   border: 2px solid transparent;
   background-clip: padding-box;
   transition: background 200ms ease;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.413),
-    rgba(255, 255, 255, 0.303));
+  background: rgba(255, 255, 255, 0.36);
   background-clip: padding-box;
   border: 2px solid transparent;
 }
@@ -3129,7 +3114,7 @@ html[data-effects="reduced"] .stage-upnext {
   transition: color 0.2s;
   flex-shrink: 0;
 }
-.rail-header .rail-see-all:hover { color: var(--line-strong); }
+.rail-header .rail-see-all:hover { color: var(--ink); }
 
 /* ====================================================================
    .media-card-cinema — the new card design used inside .rail-container.

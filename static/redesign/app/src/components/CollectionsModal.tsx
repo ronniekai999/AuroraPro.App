@@ -57,7 +57,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 stage-scrim-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--scrim)] p-4 stage-scrim-in"
       onClick={onClose}
     >
       <div
@@ -86,7 +86,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             onClick={() => setMode('manual')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               mode === 'manual'
-                ? 'text-ink border-b-2 border-line-strong'
+                ? 'text-ink border-b-2 border-ink'
                 : 'text-white/50 hover:text-white/80'
             }`}
           >
@@ -97,7 +97,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             onClick={() => setMode('ai')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               mode === 'ai'
-                ? 'text-ink border-b-2 border-line-strong'
+                ? 'text-ink border-b-2 border-ink'
                 : 'text-white/50 hover:text-white/80'
             }`}
           >

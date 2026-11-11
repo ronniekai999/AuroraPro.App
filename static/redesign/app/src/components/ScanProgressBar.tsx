@@ -119,7 +119,7 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
   // stay pinned together AND the bar's height pushes the page
   // content down naturally.
   return (
-    <div className="bg-surface-raised-2 backdrop-blur-md border-b border-line">
+    <div className="bg-surface-raised-2 border-b border-line">
       {active.map(({ library: lib, status: s }) => {
         const pct = s.total_files > 0
           ? Math.min(100, Math.max(0, (s.scanned_files / s.total_files) * 100))
