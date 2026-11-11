@@ -19,7 +19,7 @@ function fmtMarkerTime(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged, onClose }: {
+export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged, hidden = false }: {
   fileId: number
   fileType: 'media' | 'episode'
   currentSec: number
@@ -27,7 +27,10 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
   // player's timeline and Skip button follow the edit (the caller drops
   // zero-length suppressions).
   onMarkersChanged: (markers: SkipMarker[]) => void
-  onClose: () => void
+  // Closed but kept: on a phone the editor is a sheet over the timeline, so
+  // setting a marker means closing it to scrub and opening it again. The
+  // unsaved draft has to survive that.
+  hidden?: boolean
 }) {
   type Draft = { start_ms: number; end_ms: number; detector?: string }
   const [drafts, setDrafts] = useState<Partial<Record<SkipMarker['kind'], Draft>>>({})
@@ -95,7 +98,9 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
   }
 
   return (
-    <PlayerSheet label="Edit skip markers" anchor="top" onClose={onClose}>
+    // passKeys: the arrow keys keep scrubbing the picture while the editor is
+    // open, which is how a marker's frame is found.
+    <PlayerSheet label="Edit skip markers" anchor="top" hidden={hidden} passKeys>
       <div className="px-3 pt-3 pb-2">
         <h3 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Skip markers</h3>
         {!loaded && <p className="mt-2 text-[14px] text-ink-2">Loading…</p>}

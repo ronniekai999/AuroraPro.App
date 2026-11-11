@@ -161,11 +161,15 @@ interface PickerProps {
   // internal open state was invisible to it and an open picker could fade
   // out mid-read in fullscreen.
   onOpenChange?: (open: boolean) => void
+  // "player": the trigger is one of the player's own bar buttons (48px, no
+  // fill on the picture). Default: a compact trigger with its own fill, for
+  // the party panel's composer and the mini dock.
+  variant?: 'compact' | 'player'
 }
 
 const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
-export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange }: PickerProps) {
+export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange, variant = 'compact' }: PickerProps) {
   const [open, setOpen] = useState(false)
   const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
   const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'
@@ -173,15 +177,29 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
   // in the toggles: every state path — trigger toggle, emoji pick, any
   // future dismiss — reports through one channel.
   useEffect(() => { onOpenChange?.(open) }, [open, onOpenChange])
+  // Escape closes the row of emoji and nothing else. Capture phase, stopped:
+  // the app's own Escape handler is on window and would close the player or
+  // leave the page.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setOpen(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open])
   return (
     <div className="relative flex-none">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="stage-tr-btn grid text-[20px]"
+        className={variant === 'player'
+          ? 'stage-tr-btn grid text-[20px]'
+          : 'w-10 h-10 grid place-items-center rounded-control bg-action-soft text-[18px] hover:bg-white/[0.16] transition-colors'}
         data-open={open || undefined}
         aria-label="Send a reaction"
-        aria-haspopup="true"
         aria-expanded={open}
         title="Send a reaction"
       >

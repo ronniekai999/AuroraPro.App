@@ -8,7 +8,7 @@
 //   - "minimal": "just the film". A lower-third chat ticker, a corner voice
 //     pill and a bottom mini dock (CinematicChatTicker / VoicePill / MiniDock).
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import type { VoiceState } from '@/lib/voice'
@@ -122,13 +122,24 @@ export function PartyPanel({
     setDraft('')
   }
 
-  // The rail tells the page it is open, so a boxed player can leave room for
-  // it instead of sitting underneath (index.css `--theater-rail-space`).
-  useEffect(() => {
+  // The rail tells the page it is open, so the player can leave room for it
+  // instead of sitting underneath (index.css `--theater-rail-space`,
+  // `--theater-rail-cover`). Before paint: as a passive effect a boxed player
+  // drew one frame under the rail.
+  useLayoutEffect(() => {
     if (variant !== 'rail') return
     const el = document.documentElement
     el.dataset.partyRail = 'open'
     return () => { el.removeAttribute('data-party-rail') }
+  }, [variant])
+
+  // The minimal face tells the page its dock is on screen, so the player can
+  // keep its Skip button and Up next card out of the dock's lane.
+  useLayoutEffect(() => {
+    if (variant !== 'minimal') return
+    const el = document.documentElement
+    el.dataset.partyDock = 'open'
+    return () => { el.removeAttribute('data-party-dock') }
   }, [variant])
 
   // ──────────────────────────────────────────────────────────────────
@@ -148,6 +159,7 @@ export function PartyPanel({
           onLeaveVoice={onLeaveVoice}
           onToggleVoiceMute={onToggleVoiceMute}
           selfLabel={selfLabel}
+          selfUserId={currentUserId}
         />
         <MiniDock
           onSendChat={onSendChat}
@@ -315,7 +327,9 @@ export function PartyPanel({
       )}
 
       {/* Who is here. A person's disc carries the aurora ring while they
-          are speaking; the dot beside the name is their playback state. */}
+          are speaking; the line under the name says, in words, where they
+          are in voice and in playback. The two are independent: someone in
+          voice can also be ready, or buffering. */}
       <div className="px-5 pb-3">
         <p className="text-ink-2 text-[12px] font-semibold uppercase tracking-[0.08em] mb-2">
           Watching ({state.participants.length})
@@ -328,9 +342,10 @@ export function PartyPanel({
             const onVoice = isSelf
               ? (voice?.enabled ?? false)
               : !!peerVoice
-            const state_ = speaking
-              ? 'talking'
-              : p.is_buffering ? 'buffering' : onVoice ? 'in voice' : p.ready ? 'ready' : ''
+            const state_ = [
+              speaking ? 'talking' : onVoice ? 'in voice' : '',
+              p.is_buffering ? 'buffering' : p.ready ? 'ready' : '',
+            ].filter(Boolean).join(' · ')
             return (
               <li
                 key={p.user_id}
@@ -343,7 +358,7 @@ export function PartyPanel({
                     {p.username}{p.is_host && <span className="text-ink-2 font-normal"> · host</span>}
                   </span>
                   {state_ && (
-                    <span className={`block text-[12px] leading-tight ${p.is_buffering && !speaking ? 'text-warn' : 'text-ink-2'}`}>
+                    <span className={`block text-[12px] leading-tight ${p.is_buffering ? 'text-warn' : 'text-ink-2'}`}>
                       {state_}
                     </span>
                   )}
@@ -411,7 +426,7 @@ export function PartyPanel({
       )}
 
       {/* Chat */}
-      <div ref={chatRef} className="flex-1 overflow-y-auto px-5 py-2 space-y-3">
+      <div ref={chatRef} className="stage-party-chat flex-1 overflow-y-auto px-5 py-2 space-y-3">
         {state.chat.length === 0 && (
           <p className="text-ink-2 text-[13px] text-center py-8">No messages yet. Say hi!</p>
         )}

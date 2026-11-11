@@ -47,7 +47,9 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
     // The 0.5 fill sits on the video, so faint text here fails AA over a
     // bright frame: see NOT COVERED in scripts/audit-glass-contrast.mjs.
     <div
-      className="aurora-glass-overlay fixed left-1/2 -translate-x-1/2 bottom-[calc(1rem+var(--tabbar-space,0px))] z-[67]
+      // .stage-party-minidock: index.css lifts the dock above the player's
+      // control band while the player is in the window.
+      className="stage-party-minidock aurora-glass-overlay fixed left-1/2 -translate-x-1/2 bottom-[calc(1rem+var(--tabbar-space,0px))] z-[67]
                  inline-flex items-center gap-2 pl-2.5 pr-2.5 py-1.5 rounded-full
                  bg-[rgba(8,6,14,0.5)] backdrop-blur-lg border border-[rgba(220,200,255,0.18)]
                  shadow-[0_8px_30px_rgba(0,0,0,0.45)]"

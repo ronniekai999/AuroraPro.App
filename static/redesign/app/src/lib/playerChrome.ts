@@ -128,6 +128,52 @@ export function speedLockMessage(lock: SpeedLock): string | null {
   return null
 }
 
+/** The longer explanation, shown when a viewer presses the locked control. */
+export function speedLockExplanation(lock: SpeedLock): string | null {
+  if (lock === 'party') {
+    return 'Everyone in a watch party plays at the same speed, so the party keeps you in step. Leave the party to change it.'
+  }
+  if (lock === 'remote') {
+    return 'This is playing on another screen, which plays at normal speed. Stop casting to change it here.'
+  }
+  return null
+}
+
+/** A notice the viewer has to act on. It must stay on screen while it holds,
+ *  whether or not the controls are showing: the bars fade away during
+ *  playback, and a dead session looks exactly like a paused picture. */
+export function noticeNeedsAction(status: string): boolean {
+  return /reload to resume/i.test(status)
+}
+
+/** What the next tap on the picture means, given the taps before it.
+ *
+ *  A first tap is held for one double-tap window: it becomes a single tap
+ *  (toggle playback) only if nothing follows. A second tap inside the window
+ *  makes a double tap, which seeks. From then on every further tap inside the
+ *  window is another seek, so three or four quick taps skip twenty or thirty
+ *  seconds; they never fall back to a single tap and pause. */
+export type TapState = { lastAt: number; seeking: boolean } | null
+export function nextTap(state: TapState, now: number): { action: 'hold' | 'seek'; state: TapState } {
+  if (state !== null && now - state.lastAt <= DOUBLE_TAP_MS) {
+    return { action: 'seek', state: { lastAt: now, seeking: true } }
+  }
+  return { action: 'hold', state: { lastAt: now, seeking: false } }
+}
+
+/** The item a menu key moves focus to, or null when the key is not one a
+ *  menu handles. Arrows wrap; Home and End jump to the ends. */
+export function menuKeyTarget(key: string, current: number, length: number): number | null {
+  if (length === 0) return null
+  switch (key) {
+    case 'ArrowDown': return current < 0 ? 0 : (current + 1) % length
+    case 'ArrowUp': return current < 0 ? length - 1 : (current - 1 + length) % length
+    case 'Home': return 0
+    case 'End': return length - 1
+    default: return null
+  }
+}
+
 /** Picture-in-picture is offered only where the browser can do it for this
  *  element and playback is on this device. While casting the local element is
  *  held paused, so a PiP window would show a frozen frame. */
@@ -207,4 +253,14 @@ export function activeAudioIndex(
   if (decided !== undefined && decided >= 0 && decided < tracks.length) return tracks[decided].index
   const flagged = tracks.find(t => t.default || t.is_default)
   return (flagged ?? tracks[0]).index
+}
+
+/** Where the top of the timeline is, in px up from the bottom of the controls
+ *  band: the band's height less the timeline's offset inside it. `null` while
+ *  the band has no layout (not rendered, or hidden with `display: none`), so
+ *  the caller falls back to the stylesheet's figure instead of publishing 0. */
+export function timelineTopPx(bandHeight: number, timelineOffsetTop: number): number | null {
+  if (!Number.isFinite(bandHeight) || !Number.isFinite(timelineOffsetTop)) return null
+  if (bandHeight <= 0 || timelineOffsetTop < 0 || timelineOffsetTop >= bandHeight) return null
+  return Math.round(bandHeight - timelineOffsetTop)
 }

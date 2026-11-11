@@ -19,6 +19,9 @@ interface Props {
   onToggleVoiceMute?: () => void
   // Label used for the self avatar's initial + a11y ("You" by default).
   selfLabel?: string
+  // The local person's id: what picks their colour, so they are the same
+  // colour here as in the rail's roster and in the chat.
+  selfUserId?: number
 }
 
 export function VoicePill({
@@ -27,6 +30,7 @@ export function VoicePill({
   onLeaveVoice,
   onToggleVoiceMute,
   selfLabel = 'You',
+  selfUserId,
 }: Props) {
   // Render nothing unless the parent wired voice up — same guard shape
   // PartyPanel uses before showing its voice strip.
@@ -58,7 +62,7 @@ export function VoicePill({
   // Self first, then peers in arrival order, capped so the stack stays a
   // pill (a voice mesh is about four people anyway).
   const avatars = [
-    { key: 'self', id: 'self', label: selfLabel, speaking: voice.selfSpeaking, self: true },
+    { key: 'self', id: (selfUserId ?? selfLabel) as number | string, label: selfLabel, speaking: voice.selfSpeaking, self: true },
     ...voice.peers.map(p => ({
       key: `peer-${p.userId}`,
       id: p.userId as number | string,
@@ -111,7 +115,7 @@ export function VoicePill({
           >
             <PersonDisc
               name={a.label}
-              colorKey={a.self ? a.label : a.id}
+              colorKey={a.id}
               size={28}
               speaking={a.speaking}
               surface="var(--surface-raised-2)"

@@ -42,17 +42,21 @@ import {
 } from '@/lib/api'
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
-import { MoreMenu, SheetAction, SpeedMenu, TracksSheet } from './player/PlayerSheets'
+import { MoreMenu, SheetAction, SpeedLockedNote, SpeedMenu, TracksSheet } from './player/PlayerSheets'
 import { SkipMarkerEditor } from './player/SkipMarkerEditor'
 import {
   DOUBLE_TAP_MS,
   activeAudioIndex,
   doubleTapDelta,
   nextPlaybackDetails,
+  nextTap,
+  noticeNeedsAction,
   pipAvailable,
   speedLock,
+  speedLockExplanation,
   statusNotice,
   timelineRanges,
+  type TapState,
 } from '@/lib/playerChrome'
 import { playerSurface } from '@/lib/playerSurface'
 import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
@@ -2155,18 +2159,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
   }, [target])
 
-  // Aurora Stage Phase 7b — report the presented surface so App can dim and
-  // inert the tree behind the theater. Derived, not stored: `target` decides
-  // whether the player is up at all, and minimized/fullscreen are already
-  // state, so a separate mode variable would be a fourth source of truth able
-  // to disagree with the other three.
+  // Report the presented surface so App can make the tree behind the player
+  // inert and lock its scroll. Derived, not stored: `target` decides whether
+  // the player is up at all, and minimized/fullscreen are already state, so a
+  // separate mode variable would be a fourth source of truth able to disagree
+  // with the other three. ('theater' is the name for "in the window", whether
+  // the picture fills it or is boxed beside the party panel.)
   //
   // useLayoutEffect, not useEffect: this runs BEFORE paint. As a passive effect
-  // it always trailed the player's own mount/unmount by one commit, so closing
-  // painted one frame of the app at `opacity: .5, saturate(.7)` with no player
-  // on screen, and opening painted the mirror image. The precedence itself lives
-  // in lib/playerSurface so all eight (target, minimized, fullscreen)
-  // combinations can be asserted without a DOM.
+  // it trailed the player's own mount/unmount by one commit, so for one frame
+  // the page behind was inert with no player on screen, or live under one. The
+  // precedence itself lives in lib/playerSurface so all eight (target,
+  // minimized, fullscreen) combinations can be asserted without a DOM.
   useLayoutEffect(() => {
     onSurfaceChange?.(playerSurface(!!target, minimizedActive, fullscreen))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2177,16 +2181,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // browser-fullscreen races: the UA queues fullscreenchange when the fullscreen
   // element unmounts, but the passive cleanup may have removed the listener
   // first. Lose that race and `fullscreen` stayed true, so the NEXT open
-  // rendered fullscreen chrome (auto-hiding bar, no theater box) in a window
-  // that isn't fullscreen, with <main> neither dimmed nor inert. Pre-existing,
-  // and it fails safe with respect to `inert`, but the visual delta is much
-  // larger now that the non-fullscreen surface is a framed box.
+  // reported 'fullscreen' for a window that is not, leaving <main> live
+  // behind the player, and ignored a party viewer's boxed layout.
   useEffect(() => {
     if (!target) setFullscreen(false)
   }, [target])
 
   // Tell the parent the player has gone for good on unmount, so a stale
-  // 'theater' can't leave <main> dimmed and inert with no player on screen.
+  // 'theater' cannot leave <main> inert with no player on screen.
   useEffect(() => () => onSurfaceChange?.(null), [onSurfaceChange])
 
   useEffect(() => {
@@ -2202,10 +2204,27 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // in browser fullscreen (where the panel is not on screen at all).
   const [boxedPref, setBoxedPref] = useState<boolean>(readBoxedPref)
   useEffect(() => { writeBoxedPref(boxedPref) }, [boxedPref])
-  const boxedActive = !!party && boxedPref && !fullscreen
+  // The same breakpoint the CSS honours the layout from (index.css, Tailwind's
+  // lg). Below it a boxed picture would be a postage stamp beside the panel,
+  // so the layout is neither applied nor offered there.
+  const [wideEnoughToBox, setWideEnoughToBox] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width: 1024px)').matches
+      : true)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const sync = () => setWideEnoughToBox(mq.matches)
+    sync()
+    mq.addEventListener?.('change', sync)
+    return () => mq.removeEventListener?.('change', sync)
+  }, [])
+  const boxedOffered = !!party && !fullscreen && wideEnoughToBox
+  const boxedActive = boxedOffered && boxedPref
   // The party surfaces are rendered by App, outside this component, and read
   // the layout from <html> to place themselves beside the box rather than
-  // over it. Before paint, so they never draw one frame in the other layout.
+  // over it. Before paint, so they never draw one frame in the other layout
+  // (PartyPanel stamps its own half, `data-party-rail`, before paint too).
   useLayoutEffect(() => {
     const el = document.documentElement
     if (!target || minimizedActive) { el.removeAttribute('data-player-layout'); return }
@@ -2234,6 +2253,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const [speed, setSpeed] = useState(1)
   const speedLockNow = speedLock(Boolean(party), remoteActive)
   const speedLocked = speedLockNow !== null
+  const wasSpeedLockedRef = useRef(false)
   const speedFileKey = target ? `${target.fileType}:${target.fileId}` : null
   useEffect(() => {
     setSpeed(1)
@@ -2250,8 +2270,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         vid.playbackRate = 1
       }
       if (speed !== 1) setSpeed(1)
-      if (openMenuRef.current === 'speed') setOpenMenu(null)
+      wasSpeedLockedRef.current = true
       return
+    }
+    if (wasSpeedLockedRef.current) {
+      // The lock has just ended. A party's drift correction can leave the
+      // element at 0.95 or 1.05 when the viewer leaves mid-correction, and
+      // nothing else puts it back; the control would then read "1x" over a
+      // rate that is not, with "Normal" a no-op. Party sync is no longer
+      // running here, so this write cannot fight it.
+      wasSpeedLockedRef.current = false
+      if (vid.playbackRate !== speed) vid.playbackRate = speed
     }
     // Never chosen: leave the element exactly as the stream code left it.
     if (speed === 1 && vid.defaultPlaybackRate === 1) return
@@ -2295,16 +2324,54 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // Double tap to seek (touch). See onSurfaceTap.
   const lastPointerTypeRef = useRef<string>('mouse')
   const tapTimerRef = useRef<number | null>(null)
-  const lastTapAtRef = useRef<number | null>(null)
+  const tapStateRef = useRef<TapState>(null)
   const [tapFlash, setTapFlash] = useState<{ delta: -10 | 10; key: number } | null>(null)
   useEffect(() => {
     if (!tapFlash) return
     const id = window.setTimeout(() => setTapFlash(null), 700)
     return () => window.clearTimeout(id)
   }, [tapFlash])
+  // A tap held for its double-tap window belongs to the title it was made on.
+  // The player is never unmounted (App keeps it mounted and swaps the target),
+  // so "on unmount" would be never: the held tap is dropped when the title
+  // changes or the player closes, or it would pause the next thing played.
   useEffect(() => () => {
     if (tapTimerRef.current !== null) window.clearTimeout(tapTimerRef.current)
-  }, [])
+    tapTimerRef.current = null
+    tapStateRef.current = null
+  }, [speedFileKey])
+
+  // ── Menus ────────────────────────────────────────────────────────────
+  // A menu whose reason to exist has gone closes itself: the marker editor
+  // when the viewer stops being an admin watching alone, the speed menu when
+  // speed locks. Left open it would render nothing, leave "More" reading as
+  // expanded, and pin the bars on screen.
+  const markersAllowed = !!isAdmin && !party
+  useEffect(() => {
+    if (openMenu === 'markers' && !markersAllowed) setOpenMenu(null)
+  }, [openMenu, markersAllowed])
+  // The marker editor stays mounted, hidden, once it has been opened for a
+  // file, so an unsaved draft survives closing it to scrub (on a phone it is
+  // a sheet over the timeline). A new file, or losing the right to edit,
+  // drops it.
+  const [markersFileKey, setMarkersFileKey] = useState<string | null>(null)
+  useEffect(() => {
+    if (openMenu === 'markers' && speedFileKey) setMarkersFileKey(speedFileKey)
+  }, [openMenu, speedFileKey])
+  const markersMounted = markersAllowed && markersFileKey !== null && markersFileKey === speedFileKey
+  // Escape closes the open menu, wherever focus is, and nothing else. In the
+  // capture phase and stopped there: App's own Escape handler is on window
+  // and closes the whole player.
+  useEffect(() => {
+    if (openMenu === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setOpenMenu(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [openMenu])
 
   // ── Cast end-of-life ──────────────────────────────────────────────────
   // The minimized cast widget must end ONLY when the user stops it or the
@@ -6475,7 +6542,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
 
   // Keep the open-menu ref in step with state for the click-outside dismiss
   // and the auto-hide pin.
-  useEffect(() => { openMenuRef.current = openMenu }, [openMenu])
+  useEffect(() => {
+    openMenuRef.current = openMenu
+    // A menu closing has to re-arm the auto-hide: while it was open the timer
+    // was held off, and with no further input (a pick on a touch screen, say)
+    // nothing else would ever start it again and the bars would stay up.
+    if (openMenu === null) showControlsTemporarily()
+  }, [openMenu, showControlsTemporarily])
+  // A notice arriving while the bars are hidden brings them back, since the
+  // title bar is where it is written. (It is also announced, and one that
+  // needs the viewer to act stays on screen: see the render.)
+  useEffect(() => {
+    if (statusNotice(status)) showControlsTemporarily()
+  }, [status, showControlsTemporarily])
 
   // Phase 7 — document-level keyboard shortcuts while the player is
   // open. Space=play/pause, ArrowLeft/Right=seek±10s, ArrowUp/Down
@@ -7042,30 +7121,38 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     toggleLocalPlayback(vid)
   }
 
-  // Touch: a double tap on the left or right half seeks ten seconds. The
-  // first tap's own action (toggle playback) therefore waits one double-tap
-  // window, or a double tap would pause and resume around the seek.
+  // Touch: a double tap on the left or right half seeks ten seconds, and
+  // each further quick tap seeks ten more. The first tap's own action (toggle
+  // playback) therefore waits one double-tap window, or a double tap would
+  // pause and resume around the seek. lib/playerChrome nextTap decides.
   const onSurfaceTap = (clientX: number, rect: { left: number; width: number }) => {
     const now = Date.now()
-    const first = lastTapAtRef.current
-    if (tapTimerRef.current !== null && first !== null && now - first <= DOUBLE_TAP_MS) {
+    const tap = nextTap(tapStateRef.current, now)
+    tapStateRef.current = tap.state
+    if (tapTimerRef.current !== null) {
       window.clearTimeout(tapTimerRef.current)
       tapTimerRef.current = null
-      lastTapAtRef.current = null
-      const delta = doubleTapDelta(clientX, rect)
-      showControlsTemporarily()
-      if (delta !== null) {
-        seekRelative(delta)
-        setTapFlash({ delta, key: now })
-      }
+    }
+    if (tap.action === 'hold') {
+      tapTimerRef.current = window.setTimeout(() => {
+        tapTimerRef.current = null
+        tapStateRef.current = null
+        togglePlaybackFromSurface()
+      }, DOUBLE_TAP_MS)
       return
     }
-    lastTapAtRef.current = now
-    tapTimerRef.current = window.setTimeout(() => {
-      tapTimerRef.current = null
-      lastTapAtRef.current = null
-      togglePlaybackFromSurface()
-    }, DOUBLE_TAP_MS)
+    const delta = doubleTapDelta(clientX, rect)
+    showControlsTemporarily()
+    if (delta === null) return
+    // The flash says "this moved ten seconds", so it is shown only when the
+    // seek is one that will be carried out: a party guest's is refused (with
+    // the reason, in the title bar), and a cast whose anchor is unknown has
+    // no target to seek to. The same two tests seekToRealSec and seekRelative
+    // apply; they are restated here only to decide the flash.
+    const refused = (partyControlsMedia && !!party && !party.isHost) ||
+      (cast.status.connected && recvToAbsSec(cast.remote.currentTime) === null)
+    seekRelative(delta)
+    if (!refused) setTapFlash({ delta, key: now })
   }
 
   const togglePip = () => {
@@ -7155,12 +7242,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   const notice = statusNotice(status)
   const pipOffered = pipAvailable(typeof document === 'undefined' ? null : document, videoElement, remoteActive)
   const tracksOffered = availableAudio.length > 1 || availableSubs.length > 0
-  // Offered on an episode when this viewer may advance: alone, or as the host
-  // of a party that is watching this episode. Never while Chromecasting,
-  // where the receiver's own end-of-media owns the advance (as it does for
-  // the Up next card).
-  const nextEpisodeOffered = target.fileType === 'episode' && !cast.status.connected &&
-    (!party || partyAdvanceHost)
+  // Offered on an episode to a viewer watching alone. Never in a watch party,
+  // host included: advancing a party marks the outgoing episode watched for
+  // the host and moves every guest, which is right at the credits (the Up
+  // next card, with its own wording and conditions) and wrong from a button
+  // that can be pressed two minutes in and looks like the solo one. Never
+  // while Chromecasting either, where the receiver's own end-of-media owns
+  // the advance.
+  const nextEpisodeOffered = target.fileType === 'episode' && !cast.status.connected && !party
   const ranges = timelineRanges(skipMarkers, realDurationSec)
   const chromeHidden = !controlsVisible
 
@@ -7233,7 +7322,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
           // it in the tab ring; `inert` takes it out of the tab order and the
           // a11y tree too (WCAG 2.4.7, 2.4.11).
           inert={chromeHidden || undefined}
-          className={`stage-player-topbar absolute top-0 inset-x-0 z-20 flex items-center gap-2 sm:gap-4 px-3 sm:px-8 pt-3 sm:pt-6 pb-10 transition-opacity duration-200 ${
+          // No horizontal padding utilities here: the bar's side padding is
+          // .stage-player-topbar's (index.css), because its right edge has
+          // to give way to the party rail and a utility on the same element
+          // would win over that rule.
+          className={`stage-player-topbar absolute top-0 inset-x-0 z-20 flex items-center gap-2 sm:gap-4 pt-3 sm:pt-6 pb-10 transition-opacity duration-200 ${
             controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
@@ -7255,7 +7348,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 "Only the party host can seek"). The codec line is not here:
                 it is in Playback details. */}
             {notice && (
-              <p role="status" className="text-ink-2 text-[13px] truncate">{notice}</p>
+              <p className="text-ink-2 text-[13px] truncate" data-player-notice-visible="">{notice}</p>
             )}
           </div>
           {/* While a remote session is live this surface is a REMOTE
@@ -7326,7 +7419,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             <ReactionPicker
               onSend={onSendReaction}
               vertical="down"
-              onOpenChange={(o) => { reactionPickerOpenRef.current = o }}
+              variant="player"
+              onOpenChange={(o) => {
+                reactionPickerOpenRef.current = o
+                // Closing it re-arms the auto-hide it was holding off.
+                if (!o) showControlsTemporarily()
+              }}
             />
           )}
           <button
@@ -7393,6 +7491,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   togglePlaybackFromSurface()
                 }}
               />
+              {/* The notice, said where it can be heard and, when the viewer
+                  has to act on it, kept where it can be seen. The copy in the
+                  title bar lives in chrome that fades away and goes `inert`
+                  during playback, and a live region inside `inert` is not
+                  announced. */}
+              <p role="status" className="sr-only" data-player-notice="">{notice ?? ''}</p>
+              {notice && noticeNeedsAction(notice) && chromeHidden && (
+                <p className="player-float-left absolute top-4 z-[55] max-w-[min(90%,420px)] px-3 py-2 rounded-control bg-surface-raised-2 text-ink text-[14px] shadow-lg" aria-hidden="true">
+                  {notice}
+                </p>
+              )}
               {/* What a double tap did, on the side it was made. */}
               {tapFlash && (
                 <span
@@ -7402,7 +7511,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   data-side={tapFlash.delta < 0 ? 'left' : 'right'}
                 >
                   {tapFlash.delta < 0 ? <RotateCcw size={22} /> : <RotateCw size={22} />}
-                  {tapFlash.delta < 0 ? '10 seconds back' : '10 seconds on'}
+                  {tapFlash.delta < 0 ? 'Back 10 seconds' : 'Forward 10 seconds'}
                 </span>
               )}
               {/* #334: playback auto-started MUTED because the browser
@@ -7421,7 +7530,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     }
                     setAutoStartedMuted(false)
                   }}
-                  className="absolute bottom-44 left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
+                  className="player-lane absolute left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
                 >
                   <VolumeX size={18} />
                   Tap for sound
@@ -7431,7 +7540,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   unaffected; it clears by itself after four seconds. */}
               {castError && (
                 <div
-                  className="absolute top-24 right-3 sm:right-8 z-30 max-w-xs px-3 py-2 rounded-control bg-danger text-white text-[13px] shadow-lg"
+                  className="player-float-right absolute top-24 z-30 max-w-xs px-3 py-2 rounded-control bg-danger text-white text-[13px] shadow-lg"
                   role="status"
                   aria-live="polite"
                 >
@@ -7464,7 +7573,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   aria-keyshortcuts="S"
                   title={`${skipLabel} (S)`}
                   data-skip-pill=""
-                  className="stage-skip-pill absolute left-3 sm:left-8 bottom-44 z-[55] inline-flex"
+                  className="stage-skip-pill player-lane player-float-left absolute z-[55] inline-flex"
                 >
                   {skipLabel}
                 </button>
@@ -7482,7 +7591,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   as a live region every tick would be re-announced. The
                   sr-only line announces it once; the counter is aria-hidden. */}
               {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (!party || partyAdvanceHost) && (
-                <div className="stage-upnext absolute bottom-44 right-3 sm:right-8 z-[55]">
+                <div className="stage-upnext player-lane player-float-right absolute z-[55]">
                   {/* Number-free, so it is announced exactly once; and it
                       carries the blast radius, because the visible "plays for
                       everyone" line is outside this live region. */}
@@ -7532,14 +7641,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {nextUpPhase === 'finale' && (!party || partyAdvanceHost) && (
                 <div
                   role="status"
-                  className="stage-upnext absolute bottom-44 right-3 sm:right-8 z-[55]"
+                  className="stage-upnext player-lane player-float-right absolute z-[55]"
                 >
                   <p className="text-ink text-[15px]">That's the last episode — you're all caught up.</p>
                 </div>
               )}
 
               {/* The menus. An open one pins the chrome (chromePopoverOpen),
-                  so they never need to hide with it. */}
+                  so they never need to hide with it. Each closes on a pick,
+                  on Escape, and on a press on the picture. */}
               {openMenu === 'tracks' && (
                 <TracksSheet
                   audio={availableAudio}
@@ -7560,21 +7670,21 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   onPickSubtitle={(index) => { applySubtitle(index); setOpenMenu(null) }}
                   error={subError}
                   details={playbackDetails}
-                  onClose={() => setOpenMenu(null)}
                 />
               )}
               {openMenu === 'speed' && speedLockNow === null && (
-                <SpeedMenu
-                  rate={speed}
-                  onPick={(rate) => { setSpeed(rate); setOpenMenu(null) }}
-                  onClose={() => setOpenMenu(null)}
-                />
+                <SpeedMenu rate={speed} onPick={(rate) => { setSpeed(rate); setOpenMenu(null) }} />
+              )}
+              {/* A locked speed control still answers a press: with why. */}
+              {openMenu === 'speed' && speedLockNow !== null && (
+                <SpeedLockedNote text={speedLockExplanation(speedLockNow) ?? ''} />
               )}
               {openMenu === 'more' && (
-                <MoreMenu details={playbackDetails} onClose={() => setOpenMenu(null)}>
+                <MoreMenu details={playbackDetails}>
                   {/* The boxed layout exists to sit beside the party panel,
-                      so it is only offered in a party. */}
-                  {party && !fullscreen && (
+                      so it is offered in a party, and only at widths where
+                      it changes anything. */}
+                  {boxedOffered && (
                     <SheetAction
                       icon={boxedPref ? <Expand size={20} /> : <PanelRight size={20} />}
                       label={boxedPref ? 'Fill the window' : 'Show beside the party chat'}
@@ -7584,7 +7694,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   )}
                   {/* Admin only, and never in a party: pausing and scrubbing
                       to fix a marker would drag every guest along. */}
-                  {isAdmin && !party && (
+                  {markersAllowed && (
                     <SheetAction
                       icon={<Scissors size={20} />}
                       label="Edit skip markers"
@@ -7594,13 +7704,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   )}
                 </MoreMenu>
               )}
-              {openMenu === 'markers' && isAdmin && !party && (
+              {markersMounted && (
                 <SkipMarkerEditor
                   fileId={target.fileId}
                   fileType={target.fileType}
                   currentSec={currentSec}
                   onMarkersChanged={(all) => setSkipMarkers(all.filter(m => m.end_ms > m.start_ms))}
-                  onClose={() => setOpenMenu(null)}
+                  hidden={openMenu !== 'markers'}
                 />
               )}
               {/* A subtitle track that failed while its sheet is closed still
@@ -7608,7 +7718,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               {subError && openMenu !== 'tracks' && (
                 <div
                   role="status"
-                  className="absolute bottom-44 left-1/2 -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
+                  className="player-lane absolute left-1/2 -translate-x-1/2 z-[55] px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] whitespace-nowrap pointer-events-none"
                 >
                   {subError}
                 </div>
@@ -7663,7 +7773,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 }}
                 onFullscreenToggle={handleFullscreenToggle}
                 nextEpisode={nextEpisodeOffered ? {
-                  label: partyAdvanceHost ? 'Next episode for everyone in the party' : 'Next episode',
+                  label: 'Next episode',
                   onClick: () => {
                     // Before the credits this is a skip, not a finished
                     // viewing; the playback record must not call it one.
@@ -7679,9 +7789,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 }}
                 pip={pipOffered ? { active: pipActive, onToggle: togglePip } : null}
                 status={partyControlsMedia && party ? (
-                  <span className="ml-3 hidden sm:inline-flex items-center gap-2 text-[13px] text-ink">
-                    <i aria-hidden="true" className="w-2 h-2 rounded-full [background:var(--aurora)]" />
-                    {party.isHost ? 'You are hosting' : 'Following the host'}
+                  <span className="ml-2 sm:ml-3 inline-flex items-center gap-2 text-[13px] text-ink">
+                    {/* The words give way on a phone; the Resync control
+                        never does. It is a guest's only way to snap back to
+                        the host when soft correction has not caught up. */}
+                    <span className="hidden sm:inline-flex items-center gap-2">
+                      <i aria-hidden="true" className="w-2 h-2 rounded-full [background:var(--aurora)]" />
+                      {party.isHost ? 'You are hosting' : 'Following the host'}
+                    </span>
                     {!party.isHost && (
                       <button
                         type="button"
@@ -7691,7 +7806,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                         title="Jump to the host's position"
                       >
                         <RefreshCw size={18} strokeWidth={1.75} />
-                        Resync
+                        <span className="hidden min-[400px]:inline">Resync</span>
                       </button>
                     )}
                   </span>

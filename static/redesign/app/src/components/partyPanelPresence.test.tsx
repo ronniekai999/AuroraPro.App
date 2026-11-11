@@ -62,13 +62,13 @@ const panel = (variant: 'rail' | 'minimal', voice?: VoiceState, currentUserId = 
 const speakingNames = (root: HTMLElement) =>
   [...root.querySelectorAll('[data-speaking]')].map(d => d.closest('li')?.getAttribute('title') ?? '')
 
-afterEach(() => { cleanup(); document.documentElement.removeAttribute('data-party-rail') })
+afterEach(() => { cleanup(); document.documentElement.removeAttribute('data-party-rail'); document.documentElement.removeAttribute('data-party-dock') })
 
 describe('the rail roster', () => {
   it('rings exactly the people who are speaking: a peer by the voice mesh, yourself by your own mic', () => {
     const view = render(panel('rail', voiceOf({ peers: [peer(1, 'priya', true), peer(3, 'dana', false)], selfSpeaking: false })))
     const roster = within(screen.getByRole('complementary', { name: 'Party' })).getByRole('list')
-    expect(speakingNames(roster)).toEqual(['priya (host), talking'])
+    expect(speakingNames(roster)).toEqual(['priya (host), talking · ready'])
     view.rerender(panel('rail', voiceOf({ peers: [peer(1, 'priya', false)], selfSpeaking: true })))
     expect(speakingNames(roster)).toEqual(['jonah, talking'])
   })
@@ -83,8 +83,14 @@ describe('the rail roster', () => {
     expect(screen.getByText('Voice · 1 talking')).toBeInTheDocument()
     expect(screen.getByText('priya is speaking')).toBeInTheDocument()
     // The roster line carries the state as text as well.
-    expect(within(screen.getByRole('list')).getByText('talking')).toBeInTheDocument()
+    expect(within(screen.getByRole('list')).getByText('talking · ready')).toBeInTheDocument()
     expect(within(screen.getByRole('list')).getByText('buffering')).toBeInTheDocument()
+  })
+
+  it('shows voice and playback state together: being in voice does not hide "ready" or "buffering"', () => {
+    render(panel('rail', voiceOf({ peers: [peer(1, 'priya', false), peer(3, 'dana', false)] })))
+    const titles = within(screen.getByRole('list')).getAllByRole('listitem').map(li => li.getAttribute('title'))
+    expect(titles).toEqual(['priya (host), in voice · ready', 'jonah, in voice', 'dana, in voice · buffering'])
   })
 })
 
@@ -109,6 +115,33 @@ describe('the voice pill (minimal face)', () => {
     render(panel('minimal', voiceOf({ enabled: false })))
     expect(within(pill()).getByRole('button', { name: /Join voice/ })).toBeInTheDocument()
     expect(pill().className).toMatch(/\btop-4\b/)
+  })
+})
+
+describe('one person, one colour', () => {
+  const colourOf = (el: Element) => (el.querySelector('span') as HTMLElement).style.background
+  it('you are the same colour in the voice pill as in the rail\'s roster', () => {
+    const voice = voiceOf({ peers: [peer(1, 'priya', false)] })
+    const rail = render(panel('rail', voice))
+    const mine = within(screen.getByRole('list')).getAllByRole('listitem')[1].querySelector('[aria-hidden="true"]')!
+    const railColour = colourOf(mine)
+    expect(railColour).not.toBe('')
+    rail.unmount()
+    render(panel('minimal', voice))
+    const pillDiscs = [...screen.getByRole('img', { name: /^In voice:/ }).querySelectorAll(':scope > span > [aria-hidden="true"]')]
+    expect(colourOf(pillDiscs[0])).toBe(railColour)
+  })
+})
+
+describe('the minimal face tells the page its dock is on screen', () => {
+  it('stamps html[data-party-dock] while the dock is up, and only then', () => {
+    const view = render(panel('minimal'))
+    expect(document.documentElement.dataset.partyDock).toBe('open')
+    expect(document.querySelector('.stage-party-minidock')).not.toBeNull()
+    view.rerender(panel('rail'))
+    expect(document.documentElement.hasAttribute('data-party-dock')).toBe(false)
+    view.unmount()
+    expect(document.documentElement.hasAttribute('data-party-dock')).toBe(false)
   })
 })
 

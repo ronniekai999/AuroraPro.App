@@ -14,6 +14,7 @@ import {
   statusNotice,
   timelineRanges,
   trackLabel,
+  timelineTopPx,
 } from './playerChrome'
 
 const marker = (kind: SkipMarker['kind'], start_ms: number, end_ms: number): SkipMarker =>
@@ -164,5 +165,19 @@ describe('activeAudioIndex', () => {
   })
   it('marks nothing when there are no tracks', () => {
     expect(activeAudioIndex([], 1, 1)).toBeUndefined()
+  })
+})
+
+describe('timelineTopPx', () => {
+  it('is the band height less the timeline offset inside it', () => {
+    expect(timelineTopPx(184, 56)).toBe(128)
+    expect(timelineTopPx(233.6, 63.2)).toBe(170)
+  })
+  it('is null, never 0, while the band has no layout', () => {
+    expect(timelineTopPx(0, 0)).toBeNull()
+    expect(timelineTopPx(184, 184)).toBeNull()
+    expect(timelineTopPx(184, 200)).toBeNull()
+    expect(timelineTopPx(184, -1)).toBeNull()
+    expect(timelineTopPx(Number.NaN, 56)).toBeNull()
   })
 })

@@ -12,12 +12,12 @@
 // The scrub drag is the one exception (local until released, because
 // committing on every pointermove makes hls.js seek on every pixel).
 
-import { useRef, useState, useEffect, type ReactNode } from 'react'
+import { useRef, useState, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import {
-  Captions, Maximize, Minimize, Pause, PictureInPicture2, Play, RotateCcw, RotateCw,
+  Captions, Lock, Maximize, Minimize, Pause, PictureInPicture2, Play, RotateCcw, RotateCw,
   SkipForward, Volume2, VolumeX,
 } from 'lucide-react'
-import { speedLabel, speedLockMessage, type SpeedLock, type TimelineRange } from '@/lib/playerChrome'
+import { speedLabel, speedLockMessage, timelineTopPx, type SpeedLock, type TimelineRange } from '@/lib/playerChrome'
 
 interface PlayerControlsProps {
   playing: boolean
@@ -80,6 +80,37 @@ export function PlayerControls(props: PlayerControlsProps) {
   const [dragging, setDragging] = useState(false)
   const [dragSec, setDragSec] = useState(0)
   const scrubRef = useRef<HTMLDivElement | null>(null)
+  const bandRef = useRef<HTMLDivElement | null>(null)
+
+  // Publish where the top of the timeline really is. The Skip button, the Up
+  // next card, the menus and the party's dock and chat ticker are all placed
+  // from `--player-timeline-top`, and the band's height is not a function of
+  // the window's width alone: the transport row wraps to two when the party
+  // rail narrows it, when a party adds its sync line, and on a phone. The
+  // stylesheet's figure is only the fallback for before this has run.
+  // On <html> because the party's surfaces are rendered outside the player.
+  useLayoutEffect(() => {
+    const band = bandRef.current
+    const scrub = scrubRef.current
+    if (!band || !scrub || typeof ResizeObserver === 'undefined') return
+    const root = document.documentElement
+    const publish = () => {
+      // offsetTop/offsetHeight, not getBoundingClientRect: the player's
+      // opening animation scales the box, and a rect would publish the
+      // scaled number. The band is positioned, so it is the timeline's
+      // offset parent.
+      const px = timelineTopPx(band.offsetHeight, scrub.offsetTop)
+      if (px === null) root.style.removeProperty('--player-timeline-top')
+      else root.style.setProperty('--player-timeline-top', `${px}px`)
+    }
+    publish()
+    const observer = new ResizeObserver(publish)
+    observer.observe(band)
+    return () => {
+      observer.disconnect()
+      root.style.removeProperty('--player-timeline-top')
+    }
+  }, [])
   const [hoverSec, setHoverSec] = useState<number | null>(null)
 
   // While dragging, show the drag position; the seek is committed on release.
@@ -149,7 +180,7 @@ export function PlayerControls(props: PlayerControlsProps) {
       // too, or Tab paints a focus ring on nothing.
       inert={!visible || undefined}
     >
-      <div className="stage-controls-scrim player-band pointer-events-auto">
+      <div ref={bandRef} className="stage-controls-scrim player-band pointer-events-auto">
         {/* Timeline. */}
         <div
           ref={scrubRef}
@@ -217,7 +248,6 @@ export function PlayerControls(props: PlayerControlsProps) {
                 key={`${r.kind}:${r.leftPct}`}
                 className="stage-scrub-range"
                 data-range={r.kind}
-                title={r.label}
                 aria-hidden="true"
                 style={{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }}
               />
@@ -238,20 +268,22 @@ export function PlayerControls(props: PlayerControlsProps) {
           </div>
         </div>
         {/* Range names, under the timeline. Wide screens only: on a phone the
-            ranges are a few pixels apart and the names would collide. */}
-        {labelled.length > 0 && (
-          <div className="relative h-4 mt-1 hidden md:block text-[12px] leading-4 text-ink-2" aria-hidden="true">
-            {labelled.map(r => (
-              <span
-                key={`${r.kind}:${r.leftPct}`}
-                className="absolute whitespace-nowrap"
-                style={{ left: `min(${r.leftPct}%, calc(100% - 56px))` }}
-              >
-                {r.label}
-              </span>
-            ))}
-          </div>
-        )}
+            ranges are a few pixels apart and the names would collide. The row
+            is ALWAYS there from md up, named ranges or not: every rebuild of
+            a session clears the markers and stream info brings them back, and
+            a row that came and went with them moved the whole timeline up and
+            down by its height on each seek past the buffer. */}
+        <div className="relative h-4 mt-1 hidden md:block text-[12px] leading-4 text-ink-2" aria-hidden="true" data-range-labels="">
+          {labelled.map(r => (
+            <span
+              key={`${r.kind}:${r.leftPct}`}
+              className="absolute whitespace-nowrap"
+              style={{ left: `min(${r.leftPct}%, calc(100% - 56px))` }}
+            >
+              {r.label}
+            </span>
+          ))}
+        </div>
 
         {/* Transport row. Wraps on a narrow screen instead of clipping. */}
         <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -338,17 +370,22 @@ export function PlayerControls(props: PlayerControlsProps) {
             <button
               type="button"
               onClick={speed.onToggle}
-              // A locked speed stays on screen, disabled, with the reason as
-              // its name: a control that vanishes in a party reads as a bug,
-              // one that says why does not.
-              disabled={speed.lock !== null}
-              aria-label={speedLocked ?? `Playback speed, ${speedLabel(speed.rate)}`}
-              aria-haspopup={speed.lock === null ? 'dialog' : undefined}
-              aria-expanded={speed.lock === null ? speed.open : undefined}
+              // A locked speed stays on screen and stays pressable: pressing
+              // it says why. `aria-disabled`, not `disabled`, so it keeps its
+              // place in the tab order and a touch reaches it; the name keeps
+              // the visible "1x" in it and adds the reason.
+              aria-disabled={speed.lock !== null || undefined}
+              aria-label={speedLocked
+                ? `Playback speed, ${speedLabel(speed.rate)}. ${speedLocked.replace(/^Playback speed is /, '').replace(/^./, c => c.toUpperCase())}`
+                : `Playback speed, ${speedLabel(speed.rate)}`}
+              aria-haspopup="dialog"
+              aria-expanded={speed.open}
               title={speedLocked ?? 'Playback speed'}
               className="stage-tr-btn stage-tr-btn-text inline-flex tabular-nums"
               data-open={speed.open || undefined}
+              data-locked={speed.lock !== null || undefined}
             >
+              {speed.lock !== null && <Lock size={14} strokeWidth={2} aria-hidden="true" />}
               {speedLabel(speed.rate)}
             </button>
           )}

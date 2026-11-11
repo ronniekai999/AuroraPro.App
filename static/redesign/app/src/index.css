@@ -1917,6 +1917,27 @@ html[data-effects="reduced"] .stage-toolbar {
   --theater-inset-y: 0px;
   --theater-rail-space: 0px;
   --theater-chip-top: 104px;
+  /* How much of the picture's right side the open party rail lies over. The
+     player's bars, menus and floating buttons are held clear of it. */
+  --theater-rail-cover: 0px;
+  /* Where the top of the timeline is, measured up from the bottom of the
+     picture: the band's bottom padding, its transport row or rows, and the
+     timeline itself. Everything that floats above the controls is placed
+     from this one number. PlayerControls measures the band and publishes
+     the real figure on <html> (the transport row wraps to two when the party
+     rail narrows it or a party adds its sync line, which no width query can
+     know); the figures here are the fallback until it has. */
+  --player-timeline-top: 148px;
+  /* Raised by one lane while the party's mini dock is on screen, which takes
+     the lane directly above the timeline. */
+  --player-dock-lift: 0px;
+}
+@media (min-width: 640px) {
+  :root { --player-timeline-top: 160px; }
+}
+/* One transport row from md, plus the row of range names. */
+@media (min-width: 768px) {
+  :root { --player-timeline-top: 128px; }
 }
 /* Boxing is for wide windows. Below lg the party panel covers most of the
    width anyway and a boxed picture would be a postage stamp, so the layout
@@ -1933,6 +1954,24 @@ html[data-effects="reduced"] .stage-toolbar {
   html[data-player-layout="boxed"] .stage-theater {
     border-radius: var(--radius-control);
   }
+}
+/* Picture edge to edge with the party rail open: the rail (340px, 16px from
+   the edge) lies over the picture's right side, and would lie over the bar's
+   right-hand buttons, the transport row's, and every menu they open, including
+   the one that switches to the boxed layout. So the chrome gives way to it.
+   From sm, where the rail is a side panel; on a phone it is the whole screen
+   and there is nothing beside it to keep clear. Not when boxed: there the
+   picture itself has already moved out from under the rail. */
+@media (min-width: 640px) {
+  html[data-player-surface="theater"][data-party-rail]:not([data-player-layout="boxed"]) {
+    --theater-rail-cover: 356px;
+  }
+}
+/* The party's mini dock is on screen (PartyPanel's minimal face stamps
+   `data-party-dock`): it takes the lane right above the timeline, and the
+   Skip button, the Up next card and the chat ticker move up one lane. */
+html[data-player-surface="theater"][data-party-dock] {
+  --player-dock-lift: 60px;
 }
 .stage-theater {
   position: absolute;
@@ -1986,6 +2025,72 @@ html[data-player-surface="theater"] .stage-voice-pill {
 html[data-player-surface="theater"] .stage-party-reactions {
   inset: var(--theater-inset-y) calc(var(--theater-inset-x) + var(--theater-rail-space)) var(--theater-inset-y) var(--theater-inset-x);
 }
+/* The mini dock sits in the lane directly above the timeline, centred on the
+   picture, instead of at the bottom edge where the transport row now is.
+   The chat ticker stacks upward from above the Skip button's lane. */
+html[data-player-surface="theater"] .stage-party-minidock {
+  bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 12px);
+}
+html[data-player-surface="theater"] .stage-party-ticker {
+  bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 92px + var(--player-dock-lift));
+}
+/* A short window (a phone held sideways) has about 130px between the title
+   bar and the timeline: not enough for the chip's row, the dock, the Skip
+   button's lane and a line of chat stacked one above the other. So the dock
+   is not shown there (the chip opens the chat, which has the same reply box
+   and the microphone), the Skip button keeps the lane right above the
+   timeline, and the newest line of chat sits beside the chip, in its row. */
+@media (max-height: 480px) {
+  html[data-player-surface="theater"][data-party-dock] {
+    --player-dock-lift: 0px;
+  }
+  html[data-player-surface="theater"] .stage-party-minidock {
+    display: none;
+  }
+  html[data-player-surface="theater"] .stage-party-ticker {
+    top: calc(var(--theater-inset-y) + var(--theater-chip-top) + 4px);
+    bottom: auto;
+    left: 124px;
+    right: 220px;
+  }
+  html[data-player-surface="theater"] .stage-party-ticker > :not(:last-child) {
+    display: none;
+  }
+  /* One line, cut short: a second line would drop into the Skip button's
+     lane. */
+  html[data-player-surface="theater"] .stage-party-ticker > * {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The rail's fixed parts (header, who is watching, voice, ready, the reply
+     box) are taller than the window, so the whole rail scrolls and the chat
+     keeps a few lines instead of being squeezed to nothing. `html` in the
+     selector: the rail's own `overflow-hidden` utility is emitted later and
+     would win at equal specificity. */
+  html .stage-party-rail {
+    overflow-y: auto;
+  }
+  html .stage-party-rail .stage-party-chat {
+    min-height: 120px;
+    flex-shrink: 0;
+  }
+}
+
+/* Things that float over the picture above the controls: the Skip button,
+   the Up next card, "Tap for sound", a refused cast. One lane above the
+   timeline; left and right keep the page gutter, and the right-hand ones
+   also keep clear of the party rail. */
+.player-lane {
+  bottom: calc(var(--player-timeline-top) + 28px + var(--player-dock-lift));
+}
+.player-float-left { left: 12px; }
+.player-float-right { right: calc(12px + var(--theater-rail-cover)); }
+@media (min-width: 640px) {
+  .player-float-left { left: 32px; }
+  .player-float-right { right: calc(32px + var(--theater-rail-cover)); }
+}
 
 /* Timeline. The 20px row is the hit target; the track, its fills, the marker
    ranges, the knob and the hover readout all position against the track. */
@@ -2001,13 +2106,14 @@ html[data-player-surface="theater"] .stage-party-reactions {
 }
 .stage-scrub:hover .stage-scrub-track,
 .stage-scrub:focus-visible .stage-scrub-track { height: 6px; }
-/* Track 0.36 and buffered 0.6 are over `.stage-controls-scrim`, which pins the
-   backdrop at the timeline's y to between black and 0.035 luminance whatever
-   the frame is doing, so these do not depend on the picture:
-     track vs backdrop      3.13:1 (black frame) · 3.01:1 (white frame)
-     played vs track        4.9:1 and up (the played fill is solid white)
-   Buffered against track is 1.9:1: it is a secondary cue (how far the
-   transcoder has got), not what locates the control or the playhead. */
+/* Track 0.36 and buffered 0.6 are over `.stage-controls-scrim`, which holds
+   0.83 black or more at the timeline's y whatever the frame is doing, so
+   these barely depend on the picture (node scripts/contrast.mjs prints them):
+     track vs backdrop      3.13:1 (black frame) · 3.17:1 (white frame)
+     played vs track        6.71:1 (black frame) · 4.45:1 (white frame)
+   Buffered against track is 3.60:1 on a black frame and 2.68:1 on a white
+   one, short of 3:1: it is a secondary cue (how far the transcoder has got),
+   not what locates the control or the playhead. */
 .stage-scrub-buf {
   position: absolute;
   left: 0;
@@ -2138,6 +2244,9 @@ html[data-player-surface="theater"] .stage-party-reactions {
 /* A locked control (speed in a party) stays readable: --ink-3 is the lightest
    text the scrim's backdrop carries at 4.5:1. */
 .stage-tr-btn:disabled { color: var(--ink-3); cursor: not-allowed; }
+/* Locked (speed in a party): still pressable, to say why, so not dimmed to
+   the point of looking dead; the lock glyph beside the label says the rest. */
+.stage-tr-btn[data-locked] { color: var(--ink-2); }
 .stage-tr-btn-primary {
   width: 56px;
   height: 56px;
@@ -2161,10 +2270,23 @@ html[data-player-surface="theater"] .stage-party-reactions {
    clears the home indicator. */
 .player-band {
   position: relative;
-  padding: 56px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  padding: 56px calc(12px + var(--theater-rail-cover)) calc(12px + env(safe-area-inset-bottom, 0px)) 12px;
 }
 @media (min-width: 640px) {
-  .player-band { padding: 64px 32px 24px; }
+  .player-band { padding: 64px calc(32px + var(--theater-rail-cover)) 24px 32px; }
+}
+/* The title bar's right edge gives way to the party rail the same way. Both
+   sides are set here and neither at the call site: Tailwind's utilities are
+   emitted after this file's rules, so a `px-*` there would win. */
+.stage-player-topbar {
+  padding-left: 12px;
+  padding-right: calc(12px + var(--theater-rail-cover));
+}
+@media (min-width: 640px) {
+  .stage-player-topbar {
+    padding-left: 32px;
+    padding-right: calc(32px + var(--theater-rail-cover));
+  }
 }
 
 /* The band glides as it hides and returns. PlayerControls' root carries
@@ -2235,11 +2357,12 @@ html[data-player-surface="theater"] .stage-party-reactions {
   color: var(--on-action);
   font-weight: 600;
   font-size: 16px;
-  /* The label is fine on any frame (about 19:1). The BOUNDARY is the problem:
-     a white fill against a white frame measures 1.00:1, and 1.4.11 applies to
-     the boundary of a control, not only to its label. 0.42 is the alpha at
-     which the border clears 3:1 at both frame extremes (2.99:1 on black,
-     3.04:1 on white); the drop shadow separates downward only. */
+  /* The label is fine on any frame (19.18:1). The BOUNDARY is the problem: a
+     white fill against a white frame measures 1.00:1, and 1.4.11 applies to
+     the boundary of a control, not only to its label. At 0.42 the border
+     measures 3.04:1 against the fill and against a white frame, which is
+     where it has to carry the edge; on a dark frame the fill itself does
+     (21:1). The drop shadow separates downward only. */
   border: 1px solid rgba(0, 0, 0, 0.42);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
@@ -2250,12 +2373,13 @@ html[data-player-surface="theater"] .stage-party-reactions {
 /* ── The two player scrims ──────────────────────────────────────────────
    The alpha that matters is the one at the TEXT's y, not the one at the stop.
 
-   Top bar. Its content ends about 96px down a bar that is 136px tall with the
-   fade-out padding; the gradient holds 0.72 until 70% (95px), so every line
-   of text sits on at least 0.72 black over arbitrary video:
-     title      white @ 22px/600   9.2:1 on a white frame
-     subtitle   --ink @ 14px       8.4:1
-     notice     --ink-2 @ 13px     4.6:1
+   Top bar. Its text ends about 92px down a bar that is 132px tall with the
+   fade-out padding; the gradient holds 0.72 until 70%, so every line of text
+   sits on at least 0.72 black over arbitrary video. On a white frame, the
+   worst case (node scripts/contrast.mjs prints these):
+     title      white @ 22px/600   9.23:1
+     episode    --ink @ 14px       8.40:1
+     notice     --ink-2 @ 13px     4.55:1
    and better on anything darker. */
 .stage-player-topbar {
   background: linear-gradient(
@@ -2266,10 +2390,10 @@ html[data-player-surface="theater"] .stage-party-reactions {
   );
 }
 /* The control band. The timeline and everything under it sit in the lower
-   two thirds, on 0.86 black or more, which is what makes the timeline's own
-   ratios frame-independent and carries the 15px readout and the 12px range
-   names (--ink-2, 7.6:1 on a white frame). The top third is the fade, and
-   holds nothing. */
+   two thirds, on 0.83 black or more, which is what keeps the timeline's own
+   ratios close to frame-independent and carries the 15px readout (--ink-2,
+   8.79:1 on a white frame) and the 12px range names (--ink-2, 8.15:1). The
+   top third is the fade, and holds nothing. */
 .stage-controls-scrim {
   background: linear-gradient(
     to top,
@@ -2304,8 +2428,8 @@ html[data-player-surface="theater"] .stage-party-reactions {
 .player-sheet {
   position: absolute;
   z-index: 56;
-  right: 32px;
-  bottom: 132px;
+  right: calc(32px + var(--theater-rail-cover));
+  bottom: calc(var(--player-timeline-top) + 4px);
   width: 360px;
   max-width: calc(100% - 64px);
   max-height: min(70%, 560px);
@@ -2321,6 +2445,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   top: 88px;
   bottom: auto;
 }
+.player-sheet[hidden] { display: none; }
 .player-sheet-grip { display: none; }
 .player-sheet-item {
   display: flex;
@@ -2340,7 +2465,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   .player-sheet,
   .player-sheet[data-anchor="top"] {
     left: 0;
-    right: 0;
+    right: var(--theater-rail-cover);
     top: auto;
     bottom: 0;
     width: auto;

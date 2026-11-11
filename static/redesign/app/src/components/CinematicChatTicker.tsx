@@ -161,7 +161,9 @@ export function CinematicChatTicker({
       <div
         aria-hidden="true"
         data-screenshot-exclude="true"
-        className="fixed left-4 right-4 bottom-36 z-[66] flex flex-col items-start gap-1.5 pointer-events-none"
+        // .stage-party-ticker (index.css) lifts it above the player's Skip
+        // button and control band while the player is in the window.
+        className="stage-party-ticker fixed left-4 right-4 bottom-12 z-[66] flex flex-col items-start gap-1.5 pointer-events-none"
       >
         {items.map(item => (
           <div

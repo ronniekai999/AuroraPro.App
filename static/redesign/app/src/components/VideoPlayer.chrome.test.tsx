@@ -89,6 +89,20 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'duration', 'get').mockReturnValue(1000)
   vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(4)
 })
+// The boxed layout is honoured from 1024px; `wide` says which side this
+// "window" is on. jsdom has no layout, so the query is answered here.
+let wide = true
+const mediaListeners = new Set<() => void>()
+function setWide(next: boolean) { wide = next; act(() => { mediaListeners.forEach(fn => fn()) }) }
+beforeEach(() => {
+  wide = true; mediaListeners.clear()
+  vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+    get matches() { return /min-width:\s*1024px/.test(query) ? wide : false },
+    media: query, onchange: null, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    addEventListener: (_: string, fn: () => void) => { mediaListeners.add(fn) },
+    removeEventListener: (_: string, fn: () => void) => { mediaListeners.delete(fn) },
+  }) as unknown as MediaQueryList)
+})
 afterEach(() => {
   cleanup(); vi.useRealTimers(); vi.restoreAllMocks()
   delete (document as unknown as Record<string, unknown>).pictureInPictureEnabled
@@ -132,20 +146,40 @@ describe('playback speed', () => {
     expect(video().playbackRate).toBe(1)
   })
 
-  it.each([['host', true], ['guest', false]])('is locked for a party %s, and the control says so', async (_who, isHost) => {
+  const lockedInParty = () => screen.getByRole('button', { name: 'Playback speed, 1x. Locked to the party' })
+
+  it.each([['host', true], ['guest', false]])('is locked for a party %s; the control stays reachable and says why when pressed', async (_who, isHost) => {
     render(<VideoPlayer target={movie} party={partyOf({ isHost })} onClose={() => {}} />); await bootHls()
-    const btn = screen.getByRole('button', { name: 'Playback speed is locked to the party' })
-    expect(btn).toBeDisabled()
+    const btn = lockedInParty()
+    // Reachable by keyboard and by touch: aria-disabled, never `disabled`.
+    expect(btn).toHaveAttribute('aria-disabled', 'true')
+    expect(btn).not.toBeDisabled()
+    // The name still contains what is printed on it.
+    expect(btn).toHaveTextContent('1x')
     fireEvent.click(btn)
-    expect(screen.queryByRole('dialog', { name: 'Playback speed' })).toBeNull()
-    expect(screen.queryByRole('button', { name: /^Playback speed,/ })).toBeNull()
+    const note = screen.getByRole('dialog', { name: 'Playback speed' })
+    expect(note).toHaveTextContent(/Everyone in a watch party plays at the same speed/)
+    // An explanation, not a choice: no rate can be picked from it.
+    expect(within(note).queryByRole('menuitemradio')).toBeNull()
+    expect(video().playbackRate).toBe(1)
+    expect(screen.queryByRole('button', { name: /^Playback speed, \d[\d.]*x$/ })).toBeNull()
   })
 
   it('is locked in a party room even while this player shows unrelated content', async () => {
     // The room can start controlling this media at any moment; a rate left
     // behind would then be read by the drift loop as drift.
     render(<VideoPlayer target={movie} party={partyOf({ partyMediaItemId: 999 })} onClose={() => {}} />); await bootHls()
-    expect(screen.getByRole('button', { name: 'Playback speed is locked to the party' })).toBeDisabled()
+    expect(lockedInParty()).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('leaving a party mid drift-correction puts the element back at the rate the control shows', async () => {
+    // The drift loop can leave 0.95 or 1.05 behind when the viewer leaves
+    // mid-correction. The control would then read 1x over a rate that is not.
+    const view = render(<VideoPlayer target={movie} party={partyOf({ isHost: false })} onClose={() => {}} />); await bootHls()
+    video().playbackRate = 1.05
+    view.rerender(<VideoPlayer target={movie} onClose={() => {}} />); await settle()
+    expect(speedButton()).toHaveAccessibleName('Playback speed, 1x')
+    expect(video().playbackRate).toBe(1)
   })
 
   it('never writes the element\'s rate in a party when no speed was ever chosen', async () => {
@@ -179,8 +213,10 @@ describe('playback speed', () => {
     const view = render(element()); await bootHls()
     await pickSpeed('1.25x')
     await castAndExpand(view, element)
-    const btn = screen.getByRole('button', { name: 'Playback speed is not available on another screen' })
-    expect(btn).toBeDisabled()
+    const btn = screen.getByRole('button', { name: 'Playback speed, 1x. Not available on another screen' })
+    expect(btn).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(btn)
+    expect(screen.getByRole('dialog', { name: 'Playback speed' })).toHaveTextContent(/playing on another screen/)
     expect(video().playbackRate).toBe(1)
     expect(video().defaultPlaybackRate).toBe(1)
   })
@@ -282,8 +318,46 @@ describe('double tap to seek', () => {
     video().currentTime = 100; fireEvent.timeUpdate(video())
     tap(800); tap(800); await settle()
     expect(video().currentTime).toBe(afterButton)
+    expect(document.querySelector('.player-tap-flash')).toHaveTextContent('Forward 10 seconds')
+    await act(async () => { vi.advanceTimersByTime(DOUBLE_TAP_MS + 1) })
     tap(100); tap(100); await settle()
     expect(video().currentTime).toBe(100)
+    expect(document.querySelector('.player-tap-flash')).toHaveTextContent('Back 10 seconds')
+  })
+
+  it('every further quick tap seeks ten more: an odd count never ends in a pause', async () => {
+    await bootDirect(<VideoPlayer target={movie} onClose={() => {}} />)
+    video().currentTime = 100; fireEvent.timeUpdate(video())
+    play.mockClear()
+    tap(800); tap(800); tap(800); await settle()
+    expect(video().currentTime).toBe(120)
+    await act(async () => { vi.advanceTimersByTime(DOUBLE_TAP_MS * 3) })
+    expect(video().paused).toBe(false)
+    expect(video().currentTime).toBe(120)
+  })
+
+  it('a tap held for its window is dropped when the title changes, instead of pausing the next one', async () => {
+    const view = await bootDirect(<VideoPlayer target={movie} onClose={() => {}} />)
+    tap(800)
+    view.rerender(<VideoPlayer target={otherMovie} onClose={() => {}} />); await settle()
+    fireEvent.canPlay(video()); await settle()
+    const before = video().paused
+    await act(async () => { vi.advanceTimersByTime(DOUBLE_TAP_MS * 3) })
+    expect(video().paused).toBe(before)
+  })
+
+  it('a party host\'s double tap is broadcast to the room exactly as the skip button\'s seek is', async () => {
+    const viaButton = partyOf()
+    const first = await bootDirect(<VideoPlayer target={movie} party={viaButton} onClose={() => {}} />)
+    video().currentTime = 100; fireEvent.timeUpdate(video())
+    fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); fireEvent.seeked(video()); await settle()
+    const sent = vi.mocked(viaButton.requestSeek).mock.calls.map(c => c[0])
+    first.unmount()
+    const viaTap = partyOf()
+    await bootDirect(<VideoPlayer target={movie} party={viaTap} onClose={() => {}} />)
+    video().currentTime = 100; fireEvent.timeUpdate(video())
+    tap(800); tap(800); fireEvent.seeked(video()); await settle()
+    expect(vi.mocked(viaTap.requestSeek).mock.calls.map(c => c[0])).toEqual(sent)
   })
 
   it('does not pause or play: the first tap\'s own action is cancelled by the second', async () => {
@@ -330,7 +404,9 @@ describe('double tap to seek', () => {
     tap(800); tap(800); await settle()
     expect(video().currentTime).toBe(100)
     expect(party.requestSeek).not.toHaveBeenCalled()
-    expect(screen.getByText('Only the party host can seek')).toBeInTheDocument()
+    expect(document.querySelector('[data-player-notice-visible]')).toHaveTextContent('Only the party host can seek')
+    // Nothing moved, so nothing claims it did.
+    expect(document.querySelector('.player-tap-flash')).toBeNull()
   })
 })
 
@@ -358,6 +434,8 @@ describe('the timeline draws the ranges the stream reports', () => {
 
 describe('one Audio and subtitles sheet', () => {
   const open = () => fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+  // A key press where the keyboard's focus is, as a browser delivers it.
+  const press = (key: string) => fireEvent.keyDown(document.activeElement ?? document.body, { key })
 
   it('lists audio and subtitles together, with the current subtitle choice marked', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
@@ -413,20 +491,106 @@ describe('one Audio and subtitles sheet', () => {
     expect(screen.queryByRole('dialog', { name: 'Audio and subtitles' })).toBeNull()
   })
 
-  it('Escape closes the sheet and nothing else', async () => {
+  it.each([
+    ['with focus in the sheet', () => screen.getByRole('dialog', { name: 'Audio and subtitles' })],
+    ['with focus elsewhere in the player', () => screen.getByRole('button', { name: 'Close player' })],
+    ['with focus on the page', () => document.body],
+  ])('Escape closes the sheet and nothing else, %s', async (_where, target) => {
     const onClose = vi.fn()
     const outer = vi.fn()
     window.addEventListener('keydown', outer)
     render(<VideoPlayer target={movie} onClose={onClose} />); await bootHls()
     open()
-    const sheet = screen.getByRole('dialog', { name: 'Audio and subtitles' })
-    expect(sheet).toHaveFocus()
-    fireEvent.keyDown(sheet, { key: 'Escape' })
+    expect(screen.getByRole('dialog', { name: 'Audio and subtitles' })).toHaveFocus()
+    const el = target(); if (el !== document.body) el.focus()
+    fireEvent.keyDown(el, { key: 'Escape' })
     window.removeEventListener('keydown', outer)
     expect(screen.queryByRole('dialog', { name: 'Audio and subtitles' })).toBeNull()
     expect(onClose).not.toHaveBeenCalled()
     // The app's own Escape handler (which closes the player) lives on window.
     expect(outer.mock.calls.filter(([e]) => (e as KeyboardEvent).key === 'Escape')).toHaveLength(0)
+  })
+
+  it('gives focus back to the button that opened it, after a pick and after Escape', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    const trigger = screen.getByRole('button', { name: 'Audio and subtitles' })
+    trigger.focus(); fireEvent.click(trigger)
+    expect(screen.getByRole('dialog', { name: 'Audio and subtitles' })).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Escape' }); await settle()
+    expect(trigger).toHaveFocus()
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'English subs' })); await settle()
+    expect(trigger).toHaveFocus()
+    // And the speed menu to its own button.
+    const speed = speedButton()
+    speed.focus(); fireEvent.click(speed)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '1.25x' })); await settle()
+    expect(speedButton()).toHaveFocus()
+  })
+
+  it('moves between its items with the arrow keys, Home and End, wrapping at the ends', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    open()
+    const items = screen.getAllByRole('menuitemradio')
+    expect(items.map(i => i.textContent)).toEqual(['EnglishAAC 5.1', 'FrenchAAC stereo', 'Off', 'English subs'])
+    press('ArrowDown'); expect(items[0]).toHaveFocus()
+    press('ArrowDown'); press('ArrowDown'); expect(items[2]).toHaveFocus()
+    press('ArrowUp'); expect(items[1]).toHaveFocus()
+    press('End'); expect(items[3]).toHaveFocus()
+    press('ArrowDown'); expect(items[0]).toHaveFocus()
+    press('ArrowUp'); expect(items[3]).toHaveFocus()
+    press('Home'); expect(items[0]).toHaveFocus()
+  })
+
+  it('no key pressed inside it reaches the player\'s shortcuts: no volume change, no seek, no broadcast, no play or pause', async () => {
+    const party = partyOf()
+    render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await bootHls()
+    video().currentTime = 200; fireEvent.timeUpdate(video())
+    video().volume = 0.5
+    const wasPaused = video().paused
+    vi.mocked(party.requestSeek).mockClear(); vi.mocked(party.requestPause).mockClear(); vi.mocked(party.requestPlay).mockClear()
+    open()
+    for (const key of ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'k', 'm', ' ']) press(key)
+    await settle()
+    expect(video().volume).toBe(0.5)
+    expect(video().muted).toBe(false)
+    expect(video().currentTime).toBe(200)
+    expect(video().paused).toBe(wasPaused)
+    expect(party.requestSeek).not.toHaveBeenCalled()
+    expect(party.requestPause).not.toHaveBeenCalled()
+    expect(party.requestPlay).not.toHaveBeenCalled()
+    // The same keys do reach them once the sheet is closed (so the check
+    // above is not passing because the shortcuts are dead in this harness).
+    fireEvent.keyDown(window, { key: 'Escape' }); await settle()
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    fireEvent.keyDown(window, { key: 'ArrowUp' })
+    expect(video().volume).toBeCloseTo(0.55)
+  })
+
+  it('the marker editor is the exception: the arrow keys keep scrubbing while it is open', async () => {
+    await (async () => {
+      vi.mocked(getStreamInfo).mockResolvedValue(info({ stream: { decision: 'direct_play', stream_url: '/file.mp4', duration_ms: 1_000_000, video_codec: 'h264', audio_codec: 'aac', audio_codec_out: 'aac', container: 'mp4' } }))
+      render(<VideoPlayer target={movie} isAdmin onClose={() => {}} />); await settle()
+      fireEvent.canPlay(video()); await settle()
+    })()
+    video().currentTime = 100; fireEvent.timeUpdate(video())
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    fireEvent.keyDown(screen.getByRole('dialog', { name: 'Edit skip markers' }), { key: 'ArrowRight' }); await settle()
+    expect(video().currentTime).toBe(110)
+  })
+
+  it('re-arms the auto-hide when it closes, with no further input', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    open()
+    await act(async () => { vi.advanceTimersByTime(10_000) })
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'English subs' })); await settle()
+    const band = screen.getByRole('slider', { name: 'Seek' }).closest('[data-player-chrome]')!
+    expect(band).not.toHaveAttribute('inert')
+    // Focus went back to the opener by the keyboard-less path, so it does not pin the bars.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    await act(async () => { vi.advanceTimersByTime(3100) })
+    expect(band).toHaveAttribute('inert')
   })
 
   it('a press on the picture closes the sheet without toggling playback', async () => {
@@ -466,13 +630,34 @@ describe('playback details and notices', () => {
     expect(within(screen.getByRole('dialog', { name: 'More' })).getByText('Direct play · H.264 / AAC')).toBeInTheDocument()
   })
 
-  it('shows what the player is doing under the title', async () => {
+  it('shows what the player is doing under the title, and says it where a screen reader can hear it', async () => {
     // Stream info that never answers: the boot stays at its first notice.
     vi.mocked(getStreamInfo).mockReturnValue(new Promise(() => {}))
     render(<VideoPlayer target={movie} onClose={() => {}} />); await settle()
-    const notice = screen.getByRole('status')
-    expect(notice).toHaveTextContent('Loading…')
-    expect(notice.closest('[data-player-chrome]')).toBe(screen.getByRole('heading', { name: 'Movie' }).closest('[data-player-chrome]'))
+    const visible = document.querySelector('[data-player-notice-visible]')!
+    expect(visible).toHaveTextContent('Loading…')
+    expect(visible.closest('[data-player-chrome]')).toBe(screen.getByRole('heading', { name: 'Movie' }).closest('[data-player-chrome]'))
+    // The live region is NOT in the auto-hiding bar: that goes `inert`, and a
+    // live region inside `inert` is never announced.
+    const live = document.querySelector('[data-player-notice]')!
+    expect(live).toHaveAttribute('role', 'status')
+    expect(live).toHaveTextContent('Loading…')
+    expect(live.closest('[data-player-chrome]')).toBeNull()
+    expect(live.closest('[inert]')).toBeNull()
+  })
+
+  it('a notice that arrives while the bars are hidden brings them back', async () => {
+    const party = partyOf({ isHost: false })
+    render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await bootHls()
+    const topBar = screen.getByRole('button', { name: 'Close player' }).closest('[data-player-chrome]')!
+    await act(async () => { vi.advanceTimersByTime(3100) })
+    expect(topBar).toHaveAttribute('inert')
+    // A guest's seek is refused with a notice; the keyboard path does not
+    // itself reveal anything before the refusal.
+    await act(async () => { screen.getByRole('slider', { name: 'Seek', hidden: true }).dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })) })
+    await settle()
+    expect(document.querySelector('[data-player-notice]')).toHaveTextContent('Only the party host can seek')
+    expect(topBar).not.toHaveAttribute('inert')
   })
 })
 
@@ -492,6 +677,45 @@ describe('the overflow menu', () => {
     fireEvent.click(video()); await settle()
     expect(video().paused).toBe(!wasPaused)
     expect(screen.getByRole('dialog', { name: 'Edit skip markers' })).toBeInTheDocument()
+  })
+
+  it('has no menu at all for a viewer with no actions, only the playback details', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    openMore()
+    const sheet = screen.getByRole('dialog', { name: 'More' })
+    expect(within(sheet).queryByRole('menu')).toBeNull()
+    expect(within(sheet).queryByRole('menuitem')).toBeNull()
+    expect(sheet).toHaveTextContent('Playback details')
+  })
+
+  it('keeps an unsaved marker draft across closing the editor to scrub', async () => {
+    render(<VideoPlayer target={movie} isAdmin onClose={() => {}} />); await bootHls()
+    video().currentTime = 42; fireEvent.timeUpdate(video())
+    openMore()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    // By attribute: a hidden element has no accessible name to be found by.
+    const editor = () => document.querySelector<HTMLElement>('[data-player-sheet][aria-label="Edit skip markers"]')!
+    fireEvent.click(within(editor()).getAllByRole('button', { name: 'End = now' })[1])
+    expect(editor()).toHaveTextContent('0:00 to 0:42')
+    fireEvent.keyDown(window, { key: 'Escape' }); await settle()
+    expect(screen.queryByRole('dialog', { name: 'Edit skip markers' })).toBeNull()
+    expect(editor()).toHaveAttribute('hidden')
+    openMore()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    expect(screen.getByRole('dialog', { name: 'Edit skip markers' })).toHaveTextContent('0:00 to 0:42')
+    // Fetched once: reopening did not start over.
+    expect(getAdminSkipMarkers).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes the editor, and stops pinning the bars, when the viewer joins a party with it open', async () => {
+    const view = render(<VideoPlayer target={movie} isAdmin onClose={() => {}} />); await bootHls()
+    openMore()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    view.rerender(<VideoPlayer target={movie} isAdmin party={partyOf()} onClose={() => {}} />); await settle()
+    expect(document.querySelector('[data-player-sheet][aria-label="Edit skip markers"]')).toBeNull()
+    expect(screen.getByRole('button', { name: 'More' })).toHaveAttribute('aria-expanded', 'false')
+    await act(async () => { vi.advanceTimersByTime(3100) })
+    expect(screen.getByRole('slider', { name: 'Seek', hidden: true }).closest('[data-player-chrome]')).toHaveAttribute('inert')
   })
 
   it('does not offer the editor to a member, or to an admin in a party', async () => {
@@ -531,6 +755,35 @@ describe('edge to edge by default, boxed only beside a party', () => {
     expect(document.documentElement.hasAttribute('data-player-layout')).toBe(false)
   })
 
+  it('is neither offered nor applied in a window too narrow for it, and comes back when the window widens', async () => {
+    localStorage.setItem('aurora_player_boxed', '1')
+    wide = false
+    render(<VideoPlayer target={movie} party={partyOf()} onClose={() => {}} />); await bootHls()
+    expect(document.documentElement.dataset.playerLayout).toBe('fill')
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    expect(screen.queryByRole('menuitem', { name: /party chat|Fill the window/ })).toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    setWide(true); await settle()
+    expect(document.documentElement.dataset.playerLayout).toBe('boxed')
+    // The stored choice was not thrown away by the narrow spell.
+    expect(localStorage.getItem('aurora_player_boxed')).toBe('1')
+  })
+
+  it('is not applied in browser fullscreen, where the party panel is not on screen', async () => {
+    localStorage.setItem('aurora_player_boxed', '1')
+    render(<VideoPlayer target={movie} party={partyOf()} onClose={() => {}} />); await bootHls()
+    expect(document.documentElement.dataset.playerLayout).toBe('boxed')
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => surface() })
+    await act(async () => { document.dispatchEvent(new Event('fullscreenchange')) })
+    expect(document.documentElement.dataset.playerLayout).toBe('fill')
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    expect(screen.queryByRole('menuitem', { name: /party chat|Fill the window/ })).toBeNull()
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => null })
+    await act(async () => { document.dispatchEvent(new Event('fullscreenchange')) })
+    expect(document.documentElement.dataset.playerLayout).toBe('boxed')
+    delete (document as unknown as Record<string, unknown>).fullscreenElement
+  })
+
   it('reports the in-window surface to the app either way, so the app behind stays inert', async () => {
     localStorage.setItem('aurora_player_boxed', '1')
     const onSurfaceChange = vi.fn()
@@ -555,6 +808,51 @@ describe('the bars fade away in the window, not only in fullscreen', () => {
   })
 })
 
+describe('where the timeline is, for everything placed above it', () => {
+  // jsdom lays nothing out and has no ResizeObserver; both are supplied so
+  // the test drives the same publish the browser does.
+  const sizes = { band: 184, scrubTop: 56 }
+  let observers: Array<{ fire: () => void; disconnected: boolean }> = []
+  beforeEach(() => {
+    observers = []
+    sizes.band = 184; sizes.scrubTop = 56
+    vi.stubGlobal('ResizeObserver', class {
+      disconnected = false
+      private readonly callback: () => void
+      constructor(callback: () => void) { this.callback = callback; observers.push(this as never) }
+      fire() { this.callback() }
+      observe() {} unobserve() {}
+      disconnect() { this.disconnected = true }
+    })
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('player-band') ? sizes.band : 0
+    })
+    vi.spyOn(HTMLElement.prototype, 'offsetTop', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute('role') === 'slider' && this.getAttribute('aria-label') === 'Seek' ? sizes.scrubTop : 0
+    })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+  const published = () => document.documentElement.style.getPropertyValue('--player-timeline-top')
+
+  it('publishes the measured figure, follows the band when its rows wrap, and withdraws it when the player closes', async () => {
+    const view = render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    expect(published()).toBe('128px')
+    // The transport row wraps to two (the party rail narrows the band).
+    sizes.band = 226
+    act(() => { observers.forEach(o => o.fire()) })
+    expect(published()).toBe('170px')
+    view.unmount()
+    expect(published()).toBe('')
+    expect(observers.every(o => o.disconnected)).toBe(true)
+  })
+
+  it('publishes nothing for a band with no layout, so the stylesheet figure stands', async () => {
+    sizes.band = 0; sizes.scrubTop = 0
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    expect(published()).toBe('')
+  })
+})
+
 describe('next episode', () => {
   it('advances through the same path as the Up next card, forced past the autoplay setting', async () => {
     const onEnded = vi.fn(async () => true)
@@ -575,17 +873,29 @@ describe('next episode', () => {
     expect(screen.queryByRole('button', { name: /^Next episode/ })).toBeNull()
   })
 
-  it('in a party belongs to the host alone, moves the room, and says so', async () => {
+  it.each([['host', true], ['guest', false]])('is not offered to a party %s: advancing a room stays with the Up next card', async (_who, isHost) => {
+    // A party advance marks the outgoing episode watched for the host and
+    // moves every guest. That is right at the credits, where the Up next
+    // card offers it in so many words, and wrong from a transport button
+    // that can be pressed two minutes in.
     const advance = vi.fn(async () => 'advanced' as const)
     const onEnded = vi.fn(async () => true)
-    const host = partyOf({ partyMediaItemId: 3, partyEpisodeId: 31 })
-    const view = render(<VideoPlayer target={episode} party={host} onEnded={onEnded} onPartyAdvance={advance} onClose={() => {}} />); await bootHls()
-    fireEvent.click(screen.getByRole('button', { name: 'Next episode for everyone in the party' })); await settle()
-    expect(advance).toHaveBeenCalledOnce()
-    expect(onEnded).not.toHaveBeenCalled()
-    view.unmount()
-    render(<VideoPlayer target={episode} party={{ ...host, isHost: false }} onEnded={onEnded} onPartyAdvance={advance} onClose={() => {}} />); await bootHls()
+    const party = partyOf({ isHost, partyMediaItemId: 3, partyEpisodeId: 31 })
+    render(<VideoPlayer target={episode} party={party} onEnded={onEnded} onPartyAdvance={advance} onClose={() => {}} />); await bootHls()
+    video().currentTime = 120; fireEvent.timeUpdate(video())
     expect(screen.queryByRole('button', { name: /^Next episode/ })).toBeNull()
+    expect(advance).not.toHaveBeenCalled()
+    expect(onEnded).not.toHaveBeenCalled()
+  })
+
+  it('the host still advances the room from the Up next card, near the end', async () => {
+    const advance = vi.fn(async () => 'advanced' as const)
+    const party = partyOf({ partyMediaItemId: 3, partyEpisodeId: 31 })
+    render(<VideoPlayer target={episode} party={party} onPartyAdvance={advance} onClose={() => {}} />); await bootHls()
+    video().currentTime = 900; fireEvent.timeUpdate(video())
+    expect(screen.queryByRole('button', { name: /^Next episode/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Play for all' })); await settle()
+    expect(advance).toHaveBeenCalledOnce()
   })
 
   it('is not offered while casting, where the receiver owns the end of the episode', async () => {
@@ -593,5 +903,65 @@ describe('next episode', () => {
     const view = render(element()); await bootHls()
     await castAndExpand(view, element)
     expect(screen.queryByRole('button', { name: /^Next episode/ })).toBeNull()
+  })
+})
+
+describe('Resync to host', () => {
+  const tick = { abs_ms: 300_000, server_now_ms: 0, running: true, rev: 1, receivedAtMs: 0 }
+  const guest = (over: Partial<PartySync> = {}) => partyOf({ isHost: false, tickRef: { current: { ...tick, server_now_ms: Date.now() } } as PartySync['tickRef'], ...over })
+
+  it('is a guest\'s control at every width: nothing breakpoint-gated hides it', async () => {
+    render(<VideoPlayer target={movie} party={guest()} onClose={() => {}} />); await bootHls()
+    const btn = screen.getByRole('button', { name: 'Resync to host' })
+    for (let el: HTMLElement | null = btn; el && !el.hasAttribute('data-player-chrome'); el = el.parentElement) {
+      expect(el.className, el.className).not.toMatch(/(^|\s)hidden(\s|$)/)
+    }
+  })
+
+  it('snaps the guest to the host\'s projected position at normal speed, without broadcasting', async () => {
+    const party = guest()
+    render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await bootHls()
+    video().currentTime = 10; video().playbackRate = 1.05
+    vi.mocked(party.requestSeek).mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Resync to host' })); fireEvent.seeked(video()); await settle()
+    expect(video().currentTime).toBeCloseTo(300, 0)
+    expect(video().playbackRate).toBe(1)
+    expect(party.requestSeek).not.toHaveBeenCalled()
+  })
+
+  it('refuses a tick that belongs to another title', async () => {
+    const party = guest({ partyMediaItemId: 999 })
+    render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await bootHls()
+    // The party does not control this media, so the control is not offered at all.
+    expect(screen.queryByRole('button', { name: 'Resync to host' })).toBeNull()
+  })
+
+  it('is not offered to the host, or outside a party', async () => {
+    const view = render(<VideoPlayer target={movie} party={partyOf()} onClose={() => {}} />); await bootHls()
+    expect(screen.queryByRole('button', { name: 'Resync to host' })).toBeNull()
+    view.unmount()
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    expect(screen.queryByRole('button', { name: 'Resync to host' })).toBeNull()
+  })
+})
+
+describe('AirPlay', () => {
+  async function airplaying(node: React.ReactElement) {
+    vi.mocked(getStreamInfo).mockResolvedValue(info({ stream: { decision: 'direct_play', stream_url: '/file.mp4', duration_ms: 1_000_000, video_codec: 'h264', audio_codec: 'aac', audio_codec_out: 'aac', container: 'mp4' } }))
+    const view = render(node); await settle()
+    fireEvent.canPlay(video()); await settle()
+    Object.defineProperty(video(), 'webkitCurrentPlaybackTargetIsWireless', { configurable: true, value: true })
+    await act(async () => { video().dispatchEvent(new Event('webkitcurrentplaybacktargetiswirelesschanged')) })
+    view.rerender(node); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
+    return view
+  }
+
+  it('locks speed and hides picture in picture, as a Chromecast does', async () => {
+    Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: true })
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, writable: true, value: vi.fn(async () => ({})) })
+    await airplaying(<VideoPlayer target={movie} onClose={() => {}} />)
+    expect(screen.getByRole('button', { name: 'Playback speed, 1x. Not available on another screen' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('button', { name: /picture in picture/i })).toBeNull()
   })
 })

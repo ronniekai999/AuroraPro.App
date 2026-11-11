@@ -5,46 +5,75 @@
 //
 // Presentational only. Picking a track calls back into VideoPlayer, which
 // owns what a pick does: an audio pick rebuilds the session, a subtitle pick
-// goes through applySubtitle and its holds.
+// goes through applySubtitle and its holds. VideoPlayer also owns which menu
+// is open, and closes it (a pick, Escape, a press on the picture).
 
-import { useEffect, useRef, type ReactNode } from 'react'
+import { Children, useEffect, useRef, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
 import type { AudioTrack, SubtitleTrack } from '@/lib/streaming'
-import { SPEED_OPTIONS, audioNote, speedLabel, trackLabel } from '@/lib/playerChrome'
+import { SPEED_OPTIONS, audioNote, menuKeyTarget, speedLabel, trackLabel } from '@/lib/playerChrome'
 
-/** The container every player menu shares. Focus moves into it when it opens
- *  and Escape closes it without reaching the app's own Escape handler, which
- *  would close the whole player. */
-export function PlayerSheet({ label, anchor = 'bottom', onClose, children }: {
+/** The container every player menu shares.
+ *
+ *  Focus moves into it when it opens and goes back to the control that opened
+ *  it when it closes; without the second half every pick dropped focus to
+ *  <body> and the next Tab started from the top of the page.
+ *
+ *  Keys: Up, Down, Home and End move between its items (the menu pattern).
+ *  And NO key pressed inside it reaches the player's own shortcuts, where the
+ *  arrows mean volume and seek (for a party host, a seek the whole room
+ *  follows) and Space means play. `passKeys` turns that off for the marker
+ *  editor, where scrubbing with the arrows while it is open is the point.
+ *
+ *  Escape is not handled here: VideoPlayer closes the open menu on Escape
+ *  wherever focus is. */
+export function PlayerSheet({ label, anchor = 'bottom', hidden = false, passKeys = false, children }: {
   label: string
   anchor?: 'bottom' | 'top'
-  onClose: () => void
+  // Kept mounted but out of sight and reach (the marker editor keeps its
+  // unsaved draft across a close).
+  hidden?: boolean
+  passKeys?: boolean
   children: ReactNode
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
+    if (hidden) return
+    const sheet = ref.current
+    const opener = document.activeElement as HTMLElement | null
     // The sheet itself, not its first option: focusing an option would scroll
     // a long subtitle list and announce one item instead of the menu.
-    ref.current?.focus({ preventScroll: true })
-  }, [])
+    sheet?.focus({ preventScroll: true })
+    return () => {
+      // Only when focus is still ours to give back: if the viewer has already
+      // moved it somewhere else, leave it there.
+      const active = document.activeElement
+      const lost = !active || active === document.body || sheet?.contains(active)
+      if (lost && opener?.isConnected) opener.focus({ preventScroll: true })
+    }
+  }, [hidden])
+  const items = () => [...(ref.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])') ?? [])]
   return (
     <div
       ref={ref}
       role="dialog"
       aria-label={label}
       tabIndex={-1}
+      hidden={hidden || undefined}
       data-anchor={anchor}
+      data-player-sheet=""
       className="player-sheet"
       onKeyDown={e => {
-        if (e.key === 'Escape') {
+        if (passKeys || e.key === 'Escape' || e.key === 'Tab') return
+        const list = items()
+        const next = menuKeyTarget(e.key, list.indexOf(document.activeElement as HTMLElement), list.length)
+        if (next !== null) {
           e.preventDefault()
-          e.stopPropagation()
-          onClose()
+          list[next].focus()
         }
+        // Stopped whether or not the menu used the key.
+        e.stopPropagation()
       }}
-      // A click inside the sheet must not reach the video underneath (which
-      // would toggle playback) or the surface's own handlers.
-      onClick={e => e.stopPropagation()}
     >
       {/* The grab line a bottom sheet carries; hidden on the popover form. */}
       <span className="player-sheet-grip" aria-hidden="true" />
@@ -53,8 +82,10 @@ export function PlayerSheet({ label, anchor = 'bottom', onClose, children }: {
   )
 }
 
+// A visual label only. Inside a menu the group it sits in carries the name
+// (aria-label), and a heading is not a valid child of a menu.
 function SheetHeading({ children }: { children: ReactNode }) {
-  return <h3 className="px-3 pt-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">{children}</h3>
+  return <p aria-hidden="true" className="px-3 pt-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">{children}</p>
 }
 
 /** One choice in a group where exactly one is on. */
@@ -82,7 +113,7 @@ function SheetOption({ checked, label, note, onSelect }: {
 export function TracksSheet({
   audio, audioIndex, onPickAudio,
   subtitles, subtitleIndex, onPickSubtitle,
-  error, details, onClose,
+  error, details,
 }: {
   audio: AudioTrack[]
   // The `index` of the track that is playing (lib/playerChrome
@@ -94,11 +125,10 @@ export function TracksSheet({
   onPickSubtitle: (index: number) => void
   error: string | null
   details: string | null
-  onClose: () => void
 }) {
   const activeAudio = audioIndex
   return (
-    <PlayerSheet label="Audio and subtitles" onClose={onClose}>
+    <PlayerSheet label="Audio and subtitles">
       <div role="menu" aria-label="Audio and subtitles">
       {audio.length > 1 && (
         <div role="group" aria-label="Audio">
@@ -144,13 +174,12 @@ export function TracksSheet({
   )
 }
 
-export function SpeedMenu({ rate, onPick, onClose }: {
+export function SpeedMenu({ rate, onPick }: {
   rate: number
   onPick: (rate: number) => void
-  onClose: () => void
 }) {
   return (
-    <PlayerSheet label="Playback speed" onClose={onClose}>
+    <PlayerSheet label="Playback speed">
       <SheetHeading>Speed</SheetHeading>
       <div role="menu" aria-label="Playback speed">
         {SPEED_OPTIONS.map(r => (
@@ -185,18 +214,30 @@ export function SheetAction({ icon, label, note, onSelect }: {
   )
 }
 
-export function MoreMenu({ details, children, onClose }: {
+export function MoreMenu({ details, children }: {
   details: string | null
   children?: ReactNode
-  onClose: () => void
 }) {
+  // `children` is an array even when every action in it is `false`; count
+  // what will actually render, or a viewer with no actions gets an empty menu.
+  const hasActions = Children.toArray(children).length > 0
   return (
-    <PlayerSheet label="More" anchor="top" onClose={onClose}>
-      <SheetHeading>Playback details</SheetHeading>
+    <PlayerSheet label="More" anchor="top">
+      <p className="px-3 pt-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Playback details</p>
       <p className="px-3 pb-2 text-[14px] text-ink">
         {details ?? 'Working out how to play this…'}
       </p>
-      {children && <div role="menu" aria-label="More">{children}</div>}
+      {hasActions && <div role="menu" aria-label="More">{children}</div>}
+    </PlayerSheet>
+  )
+}
+
+/** Why the speed control is locked, for a viewer who pressed it. */
+export function SpeedLockedNote({ text }: { text: string }) {
+  return (
+    <PlayerSheet label="Playback speed">
+      <p className="px-3 pt-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-2">Speed</p>
+      <p className="px-3 pb-3 text-[14px] leading-normal text-ink">{text}</p>
     </PlayerSheet>
   )
 }

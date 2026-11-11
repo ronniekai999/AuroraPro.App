@@ -118,13 +118,16 @@ async function advanceLoadWindow() { await act(async () => { vi.advanceTimersByT
 describe('Cast first-release regressions through VideoPlayer', () => {
   // A double tap is a user seek like any other: while casting it has to reach
   // the receiver through the path the skip button takes, not the frozen local
-  // element. Two fresh casts, one seek each; what reached the receiver must match.
+  // element. Each case is held to the same literal expectation, so neither
+  // depends on the other having run.
   describe('a double tap while casting', () => {
-    const reached: Record<string, unknown[]> = {}
     const receiverCalls = () => [
       ...fake.cast.seek.mock.calls.map(c => ['seek', ...c]),
       ...fake.cast.loadCurrent.mock.calls.map(c => ['load', ...c]),
     ]
+    // The receiver is 50s into a cast anchored at source second 100 (the
+    // token's start_sec), so ten seconds on is source second 160.
+    const TEN_SECONDS_ON = [['load', 160]]
     for (const how of ['skip button', 'double tap'] as const) {
       it(`${how}: seeks the receiver, never the local element`, async () => {
         const { view, element } = await connectedCast()
@@ -138,10 +141,8 @@ describe('Cast first-release regressions through VideoPlayer', () => {
           fireEvent.click(video(), { clientX: 800 })
         }
         await settle(); view.rerender(element()); await settle()
-        reached[how] = receiverCalls()
-        expect(reached[how].length).toBeGreaterThan(0)
+        expect(receiverCalls()).toEqual(TEN_SECONDS_ON)
         expect(video().currentTime).toBe(localBefore)
-        if (how === 'double tap') expect(reached['double tap']).toEqual(reached['skip button'])
       })
     }
   })
