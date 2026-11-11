@@ -19,8 +19,11 @@ import { type Media } from '@/lib/types'
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
 // SearchView — debounced 300ms per keystroke (the semantic path is
 // LLM-routed and not free).
-export default function SearchView({ query, onSelect, libraryIds, onToggleLib }: {
+export default function SearchView({ query, onQueryChange, onSelect, libraryIds, onToggleLib }: {
   query: string
+  // Below md the top bar has no search field, so the page carries its own.
+  // It is the only way to type a query on a phone.
+  onQueryChange?: (q: string) => void
   onSelect: (m: Media) => void
   // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` prop. The
   // cinema card has no hover Play CTA for it to attach to, and the
@@ -83,6 +86,29 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
     // exempt clicks on result cards (a page-level sibling, not a DOM
     // descendant of the search pill) from closing the search.
     <div className="animate-fade-in" data-search-results>
+      {onQueryChange && (
+        // The page's own field, below md only: there the top bar has no
+        // search field, and without this one no query could be typed on a
+        // phone at all. From md up the bar's field is the one field.
+        <div className="mb-6 flex h-12 items-center gap-2.5 rounded-control border border-line-strong bg-surface-raised px-3.5 focus-within:border-white md:hidden">
+          <Icon name="search" size={18} className="flex-none text-ink-2" />
+          <input
+            type="search"
+            enterKeyHint="search"
+            autoFocus
+            value={query}
+            onChange={e => onQueryChange(e.target.value)}
+            placeholder="Search, or describe a mood"
+            aria-label="Search titles"
+            className="h-full min-w-0 flex-1 !border-0 !bg-transparent !p-0 text-base text-ink !shadow-none"
+          />
+          {query && (
+            <button type="button" onClick={() => onQueryChange('')} aria-label="Clear search" className="grid h-9 w-9 flex-none place-items-center rounded-full text-ink-2 hover:bg-white/10 hover:text-ink">
+              <Icon name="x" size={16} />
+            </button>
+          )}
+        </div>
+      )}
       <PageHeader
         // No eyebrow: every other page's kicker names a category the page
         // belongs to ("Curated", "Upcoming"). Search results aren't a
@@ -116,7 +142,7 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
               ? `Searching for "${query}"…`
               : query
                 ? `${results.length} result${results.length === 1 ? '' : 's'} for "${query}"`
-                : 'Type in the search box above to find titles'}
+                : 'Type a title, or describe what you are in the mood for'}
             {error && <span className="block text-red-400 mt-1">{error}</span>}
           </span>
         }

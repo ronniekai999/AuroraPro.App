@@ -3,10 +3,11 @@
 //
 // App polls the active parties once for the whole app (hooks/useActiveParties)
 // and hands the same list to this view, to the nav's presence pill and to
-// Tonight's live strip, so the three can never disagree. Everything here is
+// Tonight, so the three can never disagree. Everything here is
 // for the session's acting profile: App passes empty lists on the render that
 // switches profile, and until the first answer for the new profile lands.
 
+import { useEffect } from 'react'
 import type { ActiveParty, MyPartyInvite } from '@/lib/api'
 import { formatPartyTime } from '@/lib/partyInvites'
 import { isScheduledLobby } from '@/hooks/useActiveParties'
@@ -18,6 +19,8 @@ export interface TogetherViewProps {
   activeParties: ActiveParty[]
   /** False until the first answer for the acting profile has landed. */
   partiesLoaded: boolean
+  /** Nothing has loaded and the last request failed (it is retried). */
+  partiesFailed: boolean
   /** The viewer's open invitations; null until first loaded. */
   invites: MyPartyInvite[] | null
   /** The code of the party the viewer is in, or null. */
@@ -39,9 +42,13 @@ export interface TogetherViewProps {
 }
 
 export default function TogetherView({
-  currentUserId, activeParties, partiesLoaded, invites, inPartyCode,
-  onOpenPartyPanel, onJoinParty, onJoinByCode, onRsvp, onOpenMembers, onBrowse,
+  currentUserId, activeParties, partiesLoaded, partiesFailed, invites, inPartyCode,
+  onOpenPartyPanel, onJoinParty, onJoinByCode, onRsvp, onRefreshInvites, onOpenMembers, onBrowse,
 }: TogetherViewProps) {
+  // The invitations are App's (the notification panel reads the same list),
+  // and App only loads them when that panel opens or a party notification
+  // arrives. This page shows them, so it asks for them when it opens.
+  useEffect(() => { onRefreshInvites() }, [onRefreshInvites])
   const others = activeParties.filter(p => p.host_user_id !== currentUserId)
   const pending = (invites ?? []).filter(i => i.rsvp === 'pending')
   return (
@@ -57,7 +64,9 @@ export default function TogetherView({
       </div>
 
       <h2 className="mt-10 font-display text-[22px] font-semibold text-ink">Happening now</h2>
-      {!partiesLoaded ? (
+      {partiesFailed ? (
+        <p className="mt-3 text-sm text-ink-2" role="status">Couldn&rsquo;t load watch parties. Trying again…</p>
+      ) : !partiesLoaded ? (
         <p className="mt-3 text-sm text-ink-2">Looking for parties…</p>
       ) : others.length === 0 ? (
         <p className="mt-3 text-sm text-ink-2">Nobody is watching together right now.</p>

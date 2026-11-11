@@ -750,9 +750,10 @@ html[data-effects="reduced"] .stage-topnav {
   background: var(--action);
 }
 
-/* The Library's scope row: text links, the current one underlined in ink. */
+/* The Library's scope row: text links, the current one a light pill. No
+   `display` here or on the tab bar below (CASCADE HAZARD, above): the call
+   sites set it, so a responsive utility there can still hide them. */
 .stage-scopebar {
-  display: flex;
   gap: 4px;
   overflow-x: auto;
   scrollbar-width: none;
@@ -769,6 +770,10 @@ html[data-effects="reduced"] .stage-topnav {
   white-space: nowrap;
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+}
+/* A thumb needs 44px; a pointer row can be tighter. */
+@media not all and (min-width: 768px) {
+  .stage-scope { min-height: 44px; }
 }
 .stage-scope:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
 .stage-scope[aria-current="page"] {
@@ -796,7 +801,6 @@ html[data-effects="reduced"] .stage-topnav {
   right: 0;
   bottom: 0;
   z-index: 50;
-  display: flex;
   height: var(--tabbar-space);
   padding: 0 8px env(safe-area-inset-bottom, 0px);
   background: rgba(14, 15, 17, 0.94);
@@ -813,10 +817,6 @@ html[data-effects="reduced"] .stage-tabbar {
   flex: 1 1 0;
   min-width: 0;
   height: var(--tabbar-h);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
   gap: 4px;
   font-size: 12px;
   font-weight: 500;

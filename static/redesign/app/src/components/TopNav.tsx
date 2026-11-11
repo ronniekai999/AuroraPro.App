@@ -15,7 +15,7 @@
 // showsAdminUI verdict). Neither falls back to the account's role or to a
 // remembered profile here.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
@@ -70,6 +70,7 @@ interface IdentityMenuProps {
   onOpenNotifications: () => void
   onOpenMyProfile?: () => void
   onOpenRequests?: () => void
+  requestsLabel: string
   onOpenSettings: () => void
   onOpenAdmin: () => void
   onOpenServer: () => void
@@ -79,7 +80,7 @@ interface IdentityMenuProps {
 function IdentityMenu({
   user, navScope, adminUI, profiles, activeProfileId, notifCount,
   onSelectProfile, onOpenProfilesGate, onManageProfiles, onOpenNotifications,
-  onOpenMyProfile, onOpenRequests, onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel, onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
 }: IdentityMenuProps) {
   const [open, setOpen] = useState(false)
   // The popover stays mounted for its exit fade after `open` flips false.
@@ -87,14 +88,16 @@ function IdentityMenu({
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
-  const profileRefs = useRef<(HTMLButtonElement | null)[]>([])
-
+  const panelId = useId()
+  const profilesLabelId = useId()
   const active = profiles.find(p => p.id === activeProfileId) ?? null
   // The name on the control is the profile the server has bound. With no
   // profile to show (none exist, or the binding is not known yet) it is the
   // account's own name.
   const shownName = active?.name ?? user.username
   const full = navScope === 'full'
+  // A restricted profile's limit rides on the control ("Kids PG").
+  const limitShown = navScope === 'restricted' ? active?.max_age_rating?.trim() || null : null
 
   const close = useCallback((restoreFocus: boolean) => {
     setOpen(false)
@@ -122,9 +125,8 @@ function IdentityMenu({
   useEffect(() => {
     if (!open) return
     const t = window.setTimeout(() => {
-      const current = profileRefs.current.find(el => el?.getAttribute('aria-checked') === 'true')
-      const first = panelRef.current?.querySelector<HTMLElement>('button')
-      ;(current ?? first)?.focus()
+      const panel = panelRef.current
+      ;(panel?.querySelector<HTMLElement>('button[aria-current="true"]') ?? panel?.querySelector<HTMLElement>('button'))?.focus()
     }, 0)
     return () => window.clearTimeout(t)
   }, [open])
@@ -136,25 +138,16 @@ function IdentityMenu({
     if (open && next && rootRef.current && !rootRef.current.contains(next)) setOpen(false)
   }
 
-  // The profile list is a real menu of radio items (one is current, choosing
-  // one is a command): arrows, Home and End move within it. The rows after it
-  // are plain buttons in the tab order, NOT menu items: they are navigation,
-  // and a `menu` role over them would take a screen reader out of browse mode
-  // for a list of links.
-  const onProfilesKeyDown = (e: React.KeyboardEvent) => {
-    const items = profileRefs.current.filter(Boolean) as HTMLButtonElement[]
-    if (items.length === 0) return
-    const i = items.indexOf(document.activeElement as HTMLButtonElement)
-    let next = -1
-    if (e.key === 'ArrowDown') next = i < 0 ? 0 : (i + 1) % items.length
-    else if (e.key === 'ArrowUp') next = i < 0 ? items.length - 1 : (i - 1 + items.length) % items.length
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = items.length - 1
-    if (next < 0) return
-    e.preventDefault()
-    items[next].focus()
-  }
-
+  // NOT a `role="menu"`, and no menu items inside it. The popover is a
+  // disclosure (the control's aria-expanded says so) holding ordinary
+  // buttons in the tab order: a group of profiles, then navigation. A `menu`
+  // role is for a composite widget with its own focus management; over a
+  // list that is mostly navigation it takes a screen reader out of browse
+  // mode, hides the non-interactive text (the group's label, each profile's
+  // facts) from the virtual cursor, and promises arrow keys. The current
+  // profile is marked with aria-current, which plain buttons may carry.
+  // What matters is kept without the role: focus moves in on open, Escape
+  // closes, and focus returns to the control on every way out.
   const run = (fn: (() => void) | undefined) => () => {
     if (!fn) return
     close(true)
@@ -166,14 +159,18 @@ function IdentityMenu({
 
   return (
     <div ref={rootRef} className="relative" onBlurCapture={onBlurCapture}>
+      {/* The control's accessible name is its own content, in reading order:
+          the visible name (and limit) FIRST, so the name contains the visible
+          label and a voice command for what is on screen works; then, for
+          assistive tech only, what it is, whose account it is, and how many
+          notifications are unread, which the bar says nowhere else. */}
       <button
         ref={triggerRef}
         type="button"
         data-identity-trigger=""
         onClick={() => setOpen(o => !o)}
-        aria-haspopup="true"
         aria-expanded={open}
-        aria-label={`Account menu for ${user.username}`}
+        aria-controls={open ? panelId : undefined}
         title={`Signed in as ${user.username}${adminUI ? ' (admin)' : ''}`}
         className="flex h-10 items-center gap-2.5 rounded-full bg-white/[0.08] pl-1.5 pr-2.5 text-ink transition-colors hover:bg-white/[0.14]"
       >
@@ -189,9 +186,13 @@ function IdentityMenu({
           )}
         </span>
         <span data-identity-name="" className="max-w-[120px] truncate text-sm font-semibold">{shownName}</span>
-        {navScope === 'restricted' && active?.max_age_rating?.trim() && (
-          <span className="rounded-chip bg-ink px-1.5 py-0.5 text-xs font-bold text-action-on">{active.max_age_rating.trim()}</span>
+        {limitShown && (
+          <span className="rounded-chip bg-ink px-1.5 py-0.5 text-xs font-bold text-action-on">{limitShown}</span>
         )}
+        <span className="sr-only">
+          {`, account menu${shownName === user.username ? '' : ` for ${user.username}`}`}
+          {notifCount > 0 ? `, ${notifCount} unread notification${notifCount === 1 ? '' : 's'}` : ''}
+        </span>
         <Icon name="chevronDown" size={14} className="flex-none text-ink-2" />
       </button>
 
@@ -200,22 +201,21 @@ function IdentityMenu({
           ref={panelRef}
           aria-label="Account and profiles"
           role="group"
+          id={panelId}
           className={`absolute right-0 top-[calc(100%+8px)] z-[55] w-[344px] max-w-[calc(100vw-32px)] rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-pop-in ${exit.closing ? 'is-closing' : ''}`}
         >
           {profiles.length > 0 && (
             <>
-              <p className="stage-eyebrow px-3 pb-1.5 pt-2.5" aria-hidden="true">Watching as</p>
-              <div role="menu" aria-label="Switch profile" onKeyDown={onProfilesKeyDown}>
-                {profiles.map((p, idx) => {
+              <p className="stage-eyebrow px-3 pb-1.5 pt-2.5" id={profilesLabelId}>Watching as</p>
+              <div role="group" aria-labelledby={profilesLabelId} data-profiles="">
+                {profiles.map(p => {
                   const sel = p.id === activeProfileId
                   return (
                     <button
                       key={p.id}
-                      ref={el => { profileRefs.current[idx] = el }}
                       type="button"
-                      role="menuitemradio"
-                      aria-checked={sel}
-                      tabIndex={sel || (activeProfileId === null && idx === 0) ? 0 : -1}
+                      data-profile={p.id}
+                      aria-current={sel ? 'true' : undefined}
                       onClick={() => {
                         close(true)
                         if (!sel) onSelectProfile(p.id)
@@ -228,6 +228,7 @@ function IdentityMenu({
                         <span className="block truncate text-xs text-ink-2">{profileSummary(p)}</span>
                       </span>
                       {sel && <Icon name="check" size={16} className="flex-none text-ink" />}
+                      {sel && <span className="sr-only">, watching now</span>}
                     </button>
                   )
                 })}
@@ -268,7 +269,7 @@ function IdentityMenu({
           {full && onOpenRequests && (
             <button type="button" onClick={run(onOpenRequests)} className={row}>
               <Icon name="download" size={18} className="flex-none text-ink-2" />
-              My requests
+              {requestsLabel}
             </button>
           )}
           <button type="button" onClick={run(onOpenSettings)} className={row}>
@@ -291,9 +292,15 @@ function IdentityMenu({
           )}
 
           {rule}
-          <button type="button" onClick={run(onSignOut)} className={row}>
+          {/* The server's logout ends EVERY session on the account, on every
+              device. The row says so: it must never read as a per-device
+              sign-out, which does not exist. */}
+          <button type="button" onClick={run(onSignOut)} className={`${row} !h-auto py-2`}>
             <Icon name="log-out" size={18} className="flex-none text-ink-2" />
-            Sign out of this device
+            <span className="leading-tight">
+              <span className="block">Sign out</span>
+              <span className="block text-xs text-ink-2">Signs out every device on this account</span>
+            </span>
           </button>
         </div>
       )}
@@ -338,6 +345,8 @@ export interface TopNavProps {
   onManageProfiles?: () => void
   onOpenMyProfile?: () => void
   onOpenRequests?: () => void
+  /** "My requests", or "Requests" for a session that is listed everyone's. */
+  requestsLabel?: string
   onSignOut: () => void
 }
 
@@ -346,7 +355,7 @@ export function TopNav({
   searchQuery, onSearchQueryChange, onSearchFocus, onSearchClose, searchInputRef,
   presence, onPresenceClick, notifCount, onOpenNotificationsPanel, onOpenServerPanel,
   profiles, activeProfileId, onSelectProfile, onOpenProfilesGate, onManageProfiles,
-  onOpenMyProfile, onOpenRequests, onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onSignOut,
 }: TopNavProps) {
   const destinations = navDestinationsFor(navScope)
   const current = destinationForView(currentView, navScope)
@@ -377,9 +386,10 @@ export function TopNav({
   useEffect(() => {
     if (!searchQuery) return
     const onDocMouseDown = (e: MouseEvent) => {
-      // Below md the field is `display:none` (no offsetParent) and search
-      // lives on its own page, which this ref never covers: without the
-      // guard every tap on that page read as "outside" and wiped the query.
+      // Below md this field is `display:none` (no offsetParent) and the
+      // search page carries its own field, which this ref never covers:
+      // without the guard every tap on that page read as "outside" and
+      // wiped the query.
       if (!searchPillRef.current?.offsetParent) return
       const target = e.target as Node
       if (searchPillRef.current.contains(target)) return
@@ -467,7 +477,7 @@ export function TopNav({
             onClick={onPresenceClick}
             aria-expanded={presence.expanded}
             title={presence.label}
-            className="flex h-10 max-w-[280px] items-center gap-2 rounded-full bg-white/[0.08] px-3.5 text-[13px] font-medium text-ink transition-colors hover:bg-white/[0.14]"
+            className="flex h-11 max-w-[280px] items-center gap-2 rounded-full bg-white/[0.08] px-3.5 text-[13px] font-medium text-ink transition-colors hover:bg-white/[0.14] md:h-10"
           >
             <AuroraDot />
             <span className="truncate lg:hidden">{presence.short}</span>
@@ -489,6 +499,7 @@ export function TopNav({
             onOpenNotifications={onOpenNotificationsPanel}
             onOpenMyProfile={onOpenMyProfile}
             onOpenRequests={onOpenRequests}
+            requestsLabel={requestsLabel}
             onOpenSettings={() => onNavigate('settings')}
             onOpenAdmin={() => onNavigate('admin')}
             onOpenServer={onOpenServerPanel}
@@ -530,7 +541,7 @@ export function BottomTabBar({ currentView, navScope, onNavigate, onPrefetch, li
   const tabs = bottomTabsFor(navScope)
   const current = currentView === 'search' || currentView === 'me' ? currentView : destinationForView(currentView, navScope)
   return (
-    <nav aria-label="Main" className="stage-tabbar md:hidden">
+    <nav aria-label="Main" className="stage-tabbar flex md:hidden">
       {tabs.map(t => {
         const active = current === t.id
         return (
@@ -541,7 +552,7 @@ export function BottomTabBar({ currentView, navScope, onNavigate, onPrefetch, li
             aria-current={active ? 'page' : undefined}
             onClick={() => onNavigate(t.id)}
             onPointerEnter={() => onPrefetch?.(t.id)}
-            className="stage-tabbar-item"
+            className="stage-tabbar-item flex flex-col items-center justify-center"
           >
             {t.id === 'me' ? (
               <span className={`relative rounded-full ${active ? 'shadow-[0_0_0_2px_var(--surface-page),0_0_0_4px_#fff]' : ''}`}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { bottomTabsFor } from './TopNav'
-import { navDestinationsFor } from '@/lib/navScope'
+import { LIBRARY_DESTINATION, navDestinationsFor } from '@/lib/navScope'
 
 // The bar's destinations are lib/navScope's (tested there: three for an
 // unrestricted session, Tonight/Movies/Shows for a restricted one, and never
@@ -12,17 +12,17 @@ const ids = (scope: Parameters<typeof bottomTabsFor>[0]) => bottomTabsFor(scope)
 describe('bottomTabsFor', () => {
   it('gives an unrestricted session Tonight, Library, Search, Together, Me', () => {
     expect(bottomTabsFor('full').map(t => t.label)).toEqual(['Tonight', 'Library', 'Search', 'Together', 'Me'])
-    expect(ids('full')).toEqual(['home', 'library', 'search', 'together', 'me'])
+    expect(ids('full')).toEqual(['home', LIBRARY_DESTINATION, 'search', 'together', 'me'])
   })
 
   it('gives a restricted session Tonight, Movies, Shows, Search, Me: no Together', () => {
     expect(bottomTabsFor('restricted').map(t => t.label)).toEqual(['Tonight', 'Movies', 'Shows', 'Search', 'Me'])
     expect(ids('restricted')).not.toContain('together')
-    expect(ids('restricted')).not.toContain('library')
+    expect(ids('restricted')).not.toContain(LIBRARY_DESTINATION)
   })
 
   it('offers no Together tab while the session is unknown', () => {
-    expect(ids('unknown')).toEqual(['home', 'library', 'search', 'me'])
+    expect(ids('unknown')).toEqual(['home', LIBRARY_DESTINATION, 'search', 'me'])
   })
 
   it('always has Search and Me, with Me last, and never Admin or Requests', () => {

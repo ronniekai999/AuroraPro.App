@@ -91,7 +91,11 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  `counts` lists the profile the session was bound to when each request for
  *  Home's own library count was sent; `activations`, each profile bound;
  *  `profileLists`, how many times the profile list was asked for. */
-function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) {
+function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false } = {}) {
+  // `kidUnrestricted`: the Kid profile has no content limit. A restricted
+  // profile is not shown My Library at all, so a switch on that page is held
+  // to the rule between two profiles that both may open it.
+  const profiles = kidUnrestricted ? PROFILES.map(p => ({ ...p, max_age_rating: undefined })) : PROFILES
   let bound = 1
   const holds = new Map<string, Promise<void>>()
   const counts: number[] = []
@@ -125,9 +129,9 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
-    if (p === '/api/profiles') return json(PROFILES)
+    if (p === '/api/profiles') return json(profiles)
     if (p === '/api/profiles/active') {
-      return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(PROFILES.find(x => x.id === bound))
+      return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(profiles.find(x => x.id === bound))
     }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') {
@@ -206,7 +210,7 @@ const identityName = () => document.querySelector('[data-identity-name]')?.textC
 /** Switches profile through the top bar: the identity control's menu. */
 function pickInTopBar(name: RegExp) {
   fireEvent.click(document.querySelector('[data-identity-trigger]')!)
-  fireEvent.click(screen.getByRole('menuitemradio', { name }))
+  fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name }))
 }
 
 /** Samples the page at every commit. */
@@ -372,12 +376,27 @@ describe('a profile switch never commits the new name over the previous profileâ
   })
 
   it('on My Library', async () => {
+    // Between two profiles that may both open My Library: a restricted
+    // profile is not shown the page at all (the next case).
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
     const commits = renderApp('/library')
     await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
     switchToKid()
     await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
     expect(kidOverParent(commits)).toBe(0)
     expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
+  })
+
+  it('on My Library, into a restricted profile: the page goes with the switch', async () => {
+    const commits = renderApp('/library')
+    await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
+    switchToKid()
+    // A restricted profile sees Tonight, Movies and Shows: it lands on Tonight.
+    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    expect(kidOverParent(commits)).toBe(0)
+    expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
+    expect(kid(commits).length).toBeGreaterThan(0)
   })
 
   it('on an open title the new profile may not see', async () => {

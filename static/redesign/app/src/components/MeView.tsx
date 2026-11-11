@@ -22,6 +22,8 @@ export interface MeViewProps {
   onOpenNotifications: () => void
   onOpenMyProfile?: () => void
   onOpenRequests?: () => void
+  /** "My requests", or "Requests" for a session that is listed everyone's. */
+  requestsLabel?: string
   onOpenSettings: () => void
   onOpenAdmin: () => void
   onOpenServer: () => void
@@ -31,23 +33,25 @@ export interface MeViewProps {
 export default function MeView({
   user, navScope, adminUI, profiles, activeProfileId, notifCount,
   onSelectProfile, onManageProfiles, onOpenNotifications,
-  onOpenMyProfile, onOpenRequests, onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
 }: MeViewProps) {
   const active = profiles.find(p => p.id === activeProfileId) ?? null
   const others = profiles.filter(p => p.id !== activeProfileId)
   const full = navScope === 'full'
   const limit = (p: Profile) => p.max_age_rating?.trim()
 
-  const rows: { key: string; label: string; icon: string; onClick: () => void; badge?: number; quiet?: boolean }[] = [
+  const rows: { key: string; label: string; icon: string; onClick: () => void; badge?: number; note?: string }[] = [
     { key: 'notifications', label: 'Notifications', icon: 'bell', onClick: onOpenNotifications, badge: notifCount },
     ...(full && onOpenMyProfile ? [{ key: 'profile', label: 'Your profile', icon: 'user', onClick: onOpenMyProfile }] : []),
-    ...(full && onOpenRequests ? [{ key: 'requests', label: 'My requests', icon: 'download', onClick: onOpenRequests }] : []),
+    ...(full && onOpenRequests ? [{ key: 'requests', label: requestsLabel, icon: 'download', onClick: onOpenRequests }] : []),
     { key: 'settings', label: 'Settings', icon: 'settings', onClick: onOpenSettings },
     ...(adminUI ? [
       { key: 'admin', label: 'Admin', icon: 'shield', onClick: onOpenAdmin },
       { key: 'server', label: 'Server status', icon: 'server', onClick: onOpenServer },
     ] : []),
-    { key: 'signout', label: 'Sign out of this device', icon: 'log-out', onClick: onSignOut, quiet: true },
+    // The server's logout ends every session on the account, on every
+    // device; there is no per-device sign-out, and the row must not imply one.
+    { key: 'signout', label: 'Sign out', icon: 'log-out', onClick: onSignOut, note: 'Signs out every device on this account' },
   ]
 
   return (
@@ -93,10 +97,13 @@ export default function MeView({
             key={r.key}
             type="button"
             onClick={r.onClick}
-            className={`flex min-h-14 w-full items-center gap-3 border-b border-line text-left text-base transition-colors last:border-b-0 hover:bg-white/[0.04] ${r.quiet ? 'text-ink-2' : 'text-ink'}`}
+            className="flex min-h-14 w-full items-center gap-3 border-b border-line py-2 text-left text-base text-ink transition-colors last:border-b-0 hover:bg-white/[0.04]"
           >
             <Icon name={r.icon} size={20} className="flex-none text-ink-2" />
-            <span className="flex-1">{r.label}</span>
+            <span className="flex-1 leading-tight">
+              <span className="block">{r.label}</span>
+              {r.note && <span className="block text-[13px] text-ink-2">{r.note}</span>}
+            </span>
             {!!r.badge && r.badge > 0 && (
               <span className="h-[22px] min-w-[22px] rounded-full bg-action px-[7px] text-center text-[13px] font-bold leading-[22px] text-action-on">
                 {r.badge > 99 ? '99+' : r.badge}<span className="sr-only"> unread</span>

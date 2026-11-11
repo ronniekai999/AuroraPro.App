@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { Profile } from './api'
 import {
   destinationForView,
+  LIBRARY_DESTINATION,
   hiddenFromRestricted,
   isLibraryView,
   libraryScopesFor,
+  mayRenderHidden,
   navDestinationsFor,
   navScopeFor,
   profileSummary,
@@ -49,7 +51,7 @@ describe('navScopeFor', () => {
 describe('navDestinationsFor', () => {
   it('gives an unrestricted session Tonight, Library and Together', () => {
     expect(navDestinationsFor('full').map(d => [d.id, d.label])).toEqual([
-      ['home', 'Tonight'], ['library', 'Library'], ['together', 'Together'],
+      ['home', 'Tonight'], [LIBRARY_DESTINATION, 'Library'], ['together', 'Together'],
     ])
   })
 
@@ -61,7 +63,7 @@ describe('navDestinationsFor', () => {
 
   it('offers nothing a restricted session lacks while the session is unknown', () => {
     const ids = navDestinationsFor('unknown').map(d => d.id)
-    expect(ids).toEqual(['home', 'library'])
+    expect(ids).toEqual(['home', LIBRARY_DESTINATION])
     expect(ids).not.toContain('together')
   })
 
@@ -95,6 +97,19 @@ describe('library scopes', () => {
     expect(libraryScopesFor('unknown').map(s => s.id)).toEqual(['movies', 'shows'])
   })
 
+  it('gives the Library destination an id no view has, so the My Library scope is not mistaken for it', () => {
+    // The scope ids ARE view ids (and URL segments). The destination id must
+    // be none of them: 'library' is My Library's.
+    const viewIds = libraryScopesFor('full').map(s => s.id as string)
+    expect(viewIds).toContain('library')
+    expect(viewIds).not.toContain(LIBRARY_DESTINATION)
+    for (const scope of ['full', 'restricted', 'unknown'] as const) {
+      for (const d of navDestinationsFor(scope)) {
+        if (d.label === 'Library') expect(d.id).toBe(LIBRARY_DESTINATION)
+      }
+    }
+  })
+
   it('knows every scope view, offered or not', () => {
     for (const v of ['movies', 'shows', 'collections', 'library', 'calendar']) expect(isLibraryView(v)).toBe(true)
     for (const v of ['home', 'together', 'requests', 'settings', 'detail']) expect(isLibraryView(v)).toBe(false)
@@ -104,8 +119,8 @@ describe('library scopes', () => {
 describe('destinationForView', () => {
   it('marks Library for each of its scopes', () => {
     for (const v of ['movies', 'shows', 'collections', 'library', 'calendar']) {
-      expect(destinationForView(v, 'full')).toBe('library')
-      expect(destinationForView(v, 'unknown')).toBe('library')
+      expect(destinationForView(v, 'full')).toBe(LIBRARY_DESTINATION)
+      expect(destinationForView(v, 'unknown')).toBe(LIBRARY_DESTINATION)
     }
   })
 
@@ -131,9 +146,48 @@ describe('destinationForView', () => {
 })
 
 describe('hiddenFromRestricted', () => {
-  it('covers Together, requests, members and the profile page, and not the catalog', () => {
-    for (const v of ['together', 'requests', 'members', 'member', 'profile']) expect(hiddenFromRestricted(v)).toBe(true)
-    for (const v of ['home', 'movies', 'shows', 'detail', 'search', 'settings', 'me']) expect(hiddenFromRestricted(v)).toBe(false)
+  it('covers everything but Tonight, Movies, Shows, search, a title, Settings and the account page', () => {
+    for (const v of ['together', 'requests', 'members', 'member', 'profile', 'collections', 'library', 'calendar']) {
+      expect(hiddenFromRestricted(v), v).toBe(true)
+    }
+    for (const v of ['home', 'movies', 'shows', 'detail', 'search', 'settings', 'me', 'device']) {
+      expect(hiddenFromRestricted(v), v).toBe(false)
+    }
+  })
+
+  it('covers every Library scope a restricted session is not offered', () => {
+    const offered = libraryScopesFor('restricted').map(s => s.id as string)
+    for (const s of libraryScopesFor('full')) {
+      expect(hiddenFromRestricted(s.id), s.id).toBe(!offered.includes(s.id))
+    }
+  })
+})
+
+describe('mayRenderHidden', () => {
+  const startup = (settled: boolean, askingForProfile = false) => ({ settled, askingForProfile })
+
+  it('always renders for a session known to be unrestricted', () => {
+    expect(mayRenderHidden('full', startup(false))).toBe(true)
+    expect(mayRenderHidden('full', startup(true, true))).toBe(true)
+  })
+
+  it('never renders for a session known to be restricted', () => {
+    for (const st of [startup(false), startup(true), startup(true, true)]) {
+      expect(mayRenderHidden('restricted', st)).toBe(false)
+    }
+  })
+
+  it('does not render while startup has yet to say who the session is', () => {
+    expect(mayRenderHidden('unknown', startup(false))).toBe(false)
+    expect(mayRenderHidden('unknown', startup(false, true))).toBe(false)
+  })
+
+  it('does not render while the app is asking which profile this is', () => {
+    expect(mayRenderHidden('unknown', startup(true, true))).toBe(false)
+  })
+
+  it('renders once startup has settled and nothing can answer the question, so nobody is locked out', () => {
+    expect(mayRenderHidden('unknown', startup(true, false))).toBe(true)
   })
 })
 

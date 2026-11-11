@@ -19,7 +19,7 @@ export function LibraryScopeBar({ current, navScope, onNavigate, onPrefetch }: L
   // restricted session reaches Movies and Shows from the bar itself.
   if (navScope === 'restricted') return null
   return (
-    <nav aria-label="Library" className="stage-gutter stage-scopebar">
+    <nav aria-label="Library" className="stage-gutter stage-scopebar flex">
       {scopes.map(s => (
         <button
           key={s.id}

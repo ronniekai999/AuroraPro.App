@@ -110,6 +110,63 @@ describe('useActiveParties', () => {
     expect(result.current.parties).toHaveLength(1)
   })
 
+  it('forgets the list when disabled, so re-enabling for the same owner starts from nothing', async () => {
+    // Parent to Kid and back: the Kid's session disables the poll. The
+    // Parent's list from before must not reappear until it is asked again.
+    listActiveParties.mockResolvedValueOnce([party({ media_title: 'Old' })])
+    const again = deferred()
+    listActiveParties.mockReturnValueOnce(again.promise)
+    const { result, rerender } = renderHook(({ on }) => useActiveParties({ enabled: on, ownerKey: '1:parent' }), {
+      initialProps: { on: true },
+    })
+    await flush()
+    expect(result.current.parties).toHaveLength(1)
+    rerender({ on: false })
+    await flush()
+    rerender({ on: true })
+    expect(result.current.parties).toEqual([])
+    expect(result.current.loaded).toBe(false)
+    await act(async () => { again.resolve([party({ media_title: 'New' })]) })
+    expect(result.current.parties.map(p => p.media_title)).toEqual(['New'])
+  })
+
+  it('holds the poll while paused, keeps the list, and asks once when the hold ends', async () => {
+    listActiveParties.mockResolvedValue([party()])
+    const { result, rerender } = renderHook(({ paused }) => useActiveParties({ enabled: true, ownerKey: '1:1', paused }), {
+      initialProps: { paused: false },
+    })
+    await flush()
+    rerender({ paused: true })
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS * 3) })
+    expect(listActiveParties).toHaveBeenCalledTimes(1)
+    expect(result.current.parties).toHaveLength(1)
+    rerender({ paused: false })
+    await flush()
+    expect(listActiveParties).toHaveBeenCalledTimes(2)
+  })
+
+  it('says when the first request failed, and stops saying so once one succeeds', async () => {
+    listActiveParties.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([])
+    const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))
+    await flush()
+    expect(result.current.loaded).toBe(false)
+    expect(result.current.failed).toBe(true)
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS) })
+    await flush()
+    expect(result.current.loaded).toBe(true)
+    expect(result.current.failed).toBe(false)
+  })
+
+  it('does not report a failure while it still has a list to show', async () => {
+    listActiveParties.mockResolvedValueOnce([party()]).mockRejectedValueOnce(new Error('offline'))
+    const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))
+    await flush()
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS) })
+    await flush()
+    expect(result.current.failed).toBe(false)
+    expect(result.current.parties).toHaveLength(1)
+  })
+
   it('reload asks again without waiting for the interval', async () => {
     listActiveParties.mockResolvedValue([])
     const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))

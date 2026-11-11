@@ -9,9 +9,15 @@
 //     and scope it now belongs to, and the new URLs open theirs;
 //   - the destinations and scopes a session is offered follow the profile the
 //     SERVER has bound, not the one this browser remembers;
-//   - a session known to act as a restricted profile is not shown Together,
-//     requests or the profile page even when it opens their URL, and a session
-//     whose profile is not known yet is not bounced anywhere.
+//   - a session known to act as a restricted profile sees Tonight, Movies and
+//     Shows: Together, requests, the member pages, the profile page,
+//     Collections, My Library and Upcoming are not RENDERED for it on any
+//     commit (the redirect runs after a commit, so the page itself is held
+//     back), nor while startup has yet to say who the session is, nor while
+//     the picker is asking; and a session whose profile cannot be learned at
+//     all is not locked out of them;
+//   - a phone, which has no search field in its bar, can still type a query
+//     and get the results page.
 
 import { Profiler, useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -27,17 +33,27 @@ const USER = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' 
 /** `bound`: the profile the server says this session acts as (an activation
  *  rebinds it, as the server does). `bindingUnreadable`: GET
  *  /api/profiles/active fails every time. `parentLocked`: the Parent profile
- *  has a PIN, so nothing re-selects it without one. */
-function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false } = {}) {
+ *  has a PIN, so nothing re-selects it without one. `listFails`: GET
+ *  /api/profiles fails every time. `role`: the account's role. `hold(key)`
+ *  keeps one answer back until the returned release is called; the keys are
+ *  `binding` (GET /api/profiles/active) and `parties-<bound profile>`. */
+function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false, listFails = false, role = 'user' } = {}) {
   const parent = { ...PARENT, has_pin: parentLocked }
+  const me = { ...USER, role }
+  const holds = new Map<string, Promise<void>>()
+  const searches: string[] = []
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
-    const p = new URL(input, 'http://localhost').pathname
+    const url = new URL(input, 'http://localhost')
+    const p = url.pathname
+    const asked = bound
+    const held = holds.get(p === '/api/profiles/active' ? 'binding' : p === '/api/parties/active' ? `parties-${asked}` : '')
+    if (held) await held
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
-    if (p === '/api/auth/me') return json(USER)
-    if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
-    if (p === '/api/profiles') return json([parent, KID])
+    if (p === '/api/auth/me') return json(me)
+    if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
+    if (p === '/api/profiles') return listFails ? json({ error: 'unavailable' }, 503) : json([parent, KID])
     if (p === '/api/profiles/active') return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(bound === 1 ? parent : KID)
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') {
@@ -48,7 +64,17 @@ function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false
     if (p === '/api/media/recent') return json({ data: [] })
     if (p === '/api/media') return json({ data: [], page: 1, per_page: 1, total_items: 0, total_pages: 1 })
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
-    if (p === '/api/parties/active') return json({ parties: [] })
+    // One live party hosted by someone else, named for the profile asked for.
+    if (p === '/api/parties/active') {
+      return json({ parties: [{
+        code: `P${asked}`, host_user_id: 9, party_name: '', media_title: asked === 1 ? 'Parentonly Party' : 'Kidonly Party', media_poster: '',
+        participant_count: 3, max_participants: 0, is_playing: true, started_at: NOW,
+      }] })
+    }
+    if (p === '/api/media/search') {
+      searches.push(url.searchParams.get('q') ?? '')
+      return json([{ id: 501, library_id: 1, type: 'movie', title: 'Found By Search', year: 2020, rating: 7, overview: '', added_at: NOW, updated_at: NOW }])
+    }
     if (p === '/api/auth/oauth/links') return json({ linked: [], available: [], hasPassword: true, canUnlinkAny: false })
     if (p === '/api/me/gamification') {
       return json({ xp: { xp: 0, level: 1, current_streak: 0, longest_streak: 0, total_watches: 0, next_level_total: 100, prev_level_total: 0 }, unlocked: [], achievement_catalog: [] })
@@ -58,6 +84,14 @@ function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false
   vi.stubGlobal('WebSocket', class { readyState = 3; close() {} send() {} addEventListener() {} removeEventListener() {} })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
+  return {
+    searches,
+    hold(key: string) {
+      let release!: () => void
+      holds.set(key, new Promise<void>(done => { release = done }))
+      return () => { holds.delete(key); release() }
+    },
+  }
 }
 
 // The router's current pathname, recorded after each commit.
@@ -67,16 +101,33 @@ function Where() {
   useEffect(() => { where.path = pathname }, [pathname])
   return null
 }
-/** Renders the App at a URL. Returns what the bar offered at every commit:
- *  its destinations, and the name on the identity control. */
-function renderAt(at: string, { remembered }: { remembered?: number } = {}) {
+interface Commit {
+  /** The bar's destinations. */
+  destinations: (string | null)[]
+  /** The name on the identity control: who the app says is watching. */
+  identity: string | null
+  /** The page a restricted session is not shown that is on screen, if any
+   *  (App marks each with data-hidden-page), whatever it renders. */
+  hidden: string | null
+  /** The presence pill's text. */
+  pill: string | null
+}
+
+/** Renders the App at a URL, sampling the page at every commit. */
+function renderAt(at: string, { remembered, role = 'user' }: { remembered?: number; role?: string } = {}) {
   localStorage.clear()
-  localStorage.setItem('aurora_user', JSON.stringify(USER))
+  localStorage.setItem('aurora_user', JSON.stringify({ ...USER, role }))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
   if (remembered) localStorage.setItem('aurora_active_profile_id', String(remembered))
-  const commits: { destinations: (string | null)[]; identity: string | null }[] = []
+  const commits: Commit[] = []
   const onRender = () => {
-    if (document.querySelector('header.stage-topnav')) commits.push({ destinations: destinations(), identity: identity() })
+    if (!document.querySelector('header.stage-topnav')) return
+    commits.push({
+      destinations: destinations(),
+      identity: identity(),
+      hidden: document.querySelector('[data-hidden-page]')?.getAttribute('data-hidden-page') ?? null,
+      pill: document.querySelector('[data-presence]')?.textContent ?? null,
+    })
   }
   render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[at]}><App /><Where /></MemoryRouter></Profiler>)
   return commits
@@ -87,6 +138,17 @@ const destinations = () => [...bar().querySelectorAll('.stage-tab')].map(b => b.
 const currentDestination = () => bar().querySelector('.stage-tab[aria-current="page"]')?.textContent ?? null
 const currentScope = () => document.querySelector('.stage-scope[aria-current="page"]')?.textContent ?? null
 const identity = () => document.querySelector('[data-identity-name]')?.textContent ?? null
+const hiddenPage = () => document.querySelector('[data-hidden-page]')?.getAttribute('data-hidden-page') ?? null
+const pickInTopBar = (name: RegExp) => {
+  fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+  fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name }))
+}
+/** The pages a restricted session is not shown, by URL, and the name App
+ *  marks each with. */
+const HIDDEN: [string, string][] = [
+  ['/together', 'together'], ['/requests', 'requests'], ['/members', 'members'], ['/user/someone', 'member'],
+  ['/profile', 'profile'], ['/collections', 'collections'], ['/library', 'library'], ['/calendar', 'calendar'], ['/upcoming', 'calendar'],
+]
 /** Wait for the startup profile load: the bar names the bound profile. */
 const settled = (name: string) => waitFor(() => expect(identity()).toBe(name), { timeout: 5000 })
 
@@ -125,7 +187,8 @@ describe('every old tab URL still opens its page, in its new place', () => {
     expect(where.path).toBe('/requests')
     expect(currentDestination()).toBeNull()
     expect(destinations()).not.toContain('Requests')
-    await screen.findByRole('heading', { name: 'Requests' }, { timeout: 10_000 })
+    // A member's own requests, and the heading says so.
+    await screen.findByRole('heading', { name: 'My requests' }, { timeout: 10_000 })
   })
 
   it('/together is the Together hub', async () => {
@@ -146,18 +209,33 @@ describe('every old tab URL still opens its page, in its new place', () => {
 describe('moving between places', () => {
   beforeEach(() => stubServer())
 
-  it('the Library destination opens Movies, and the scope row moves between scopes by their old URLs', async () => {
+  it('the Library destination opens Movies, and EVERY scope in the row opens its own page at its old URL', async () => {
     renderAt('/')
     await settled('Parent')
     fireEvent.click(within(bar() as HTMLElement).getByRole('button', { name: 'Library' }))
     await waitFor(() => expect(where.path).toBe('/movies'))
-    const scopes = screen.getByRole('navigation', { name: 'Library' })
-    expect([...scopes.querySelectorAll('button')].map(b => b.textContent)).toEqual(['Movies', 'TV Shows', 'Collections', 'My Library', 'Upcoming'])
-    fireEvent.click(within(scopes).getByRole('button', { name: 'Upcoming' }))
-    await waitFor(() => expect(where.path).toBe('/calendar'))
-    expect(currentScope()).toBe('Upcoming')
-    fireEvent.click(within(screen.getByRole('navigation', { name: 'Library' })).getByRole('button', { name: 'Collections' }))
-    await waitFor(() => expect(where.path).toBe('/collections'))
+    const scopes = () => screen.getByRole('navigation', { name: 'Library' })
+    expect([...scopes().querySelectorAll('button')].map(b => b.textContent)).toEqual(['Movies', 'TV Shows', 'Collections', 'My Library', 'Upcoming'])
+    // Each one, from each of the others' pages, in an order that leaves and
+    // returns to Movies. My Library is the one whose id the Library
+    // destination once shared: a click on it went nowhere.
+    for (const [label, url] of [
+      ['My Library', '/library'], ['Upcoming', '/calendar'], ['Collections', '/collections'],
+      ['TV Shows', '/shows'], ['My Library', '/library'], ['Movies', '/movies'],
+    ]) {
+      fireEvent.click(within(scopes()).getByRole('button', { name: label }))
+      await waitFor(() => expect(where.path).toBe(url), { timeout: 5000 })
+      await waitFor(() => expect(currentScope()).toBe(label))
+      expect(currentDestination()).toBe('Library')
+    }
+  })
+
+  it('the Library destination, pressed while inside Library, stays on the scope it is on', async () => {
+    renderAt('/library')
+    await settled('Parent')
+    fireEvent.click(within(bar() as HTMLElement).getByRole('button', { name: 'Library' }))
+    expect(where.path).toBe('/library')
+    expect(currentScope()).toBe('My Library')
   })
 
   it('the Library destination returns to the scope last looked at', async () => {
@@ -228,14 +306,51 @@ describe('what a session is offered follows the profile the server has bound', (
     expect(screen.queryByRole('button', { name: 'Admin' })).toBeNull()
   })
 
-  it.each(['/together', '/requests', '/members', '/profile'])('sends a restricted session that opens %s to Tonight', async (url) => {
+  it.each(HIDDEN)('never renders %s for a restricted session, and sends it to Tonight', async (url) => {
     stubServer({ bound: 2 })
-    renderAt(url, { remembered: 2 })
+    const commits = renderAt(url, { remembered: 2 })
     await settled('Kid')
     await waitFor(() => expect(where.path).toBe('/'), { timeout: 5000 })
     await waitFor(() => expect(currentDestination()).toBe('Tonight'))
-    expect(screen.queryByRole('heading', { name: 'Together' })).toBeNull()
+    // Not on any commit: before the binding was read, on the commit that
+    // learned it, or after.
+    expect(commits.length).toBeGreaterThan(0)
+    expect(commits.filter(c => c.hidden !== null)).toEqual([])
+    expect(hiddenPage()).toBeNull()
   })
+
+  it.each(HIDDEN)('renders %s for an unrestricted session, but not before the server has said who it is', async (url, name) => {
+    const server = stubServer({ bound: 1 })
+    // Hold the binding back: startup has not settled, the session is unknown.
+    const release = server.hold('binding')
+    const commits = renderAt(url, { remembered: 1 })
+    await waitFor(() => expect(commits.length).toBeGreaterThan(2))
+    expect(identity()).toBe('ronnie')
+    expect(commits.filter(c => c.hidden !== null)).toEqual([])
+    release()
+    await settled('Parent')
+    // Not vacuous: the same page does render once the session is known.
+    await waitFor(() => expect(hiddenPage()).toBe(name), { timeout: 10_000 })
+    expect(where.path).toBe(url)
+    // And never under any name but the Parent's.
+    expect(commits.filter(c => c.hidden !== null && c.identity !== 'Parent')).toEqual([])
+  })
+
+  it.each([['/collections', 'collections'], ['/together', 'together'], ['/requests', 'requests'], ['/members', 'members'], ['/library', 'library']])(
+    'takes %s off the screen on the very commit that switches into a restricted profile', async (url, name) => {
+      stubServer({ bound: 1 })
+      const commits = renderAt(url, { remembered: 1 })
+      await settled('Parent')
+      await waitFor(() => expect(hiddenPage()).toBe(name), { timeout: 10_000 })
+      pickInTopBar(/Kid/)
+      await settled('Kid')
+      await waitFor(() => expect(where.path).toBe('/'), { timeout: 5000 })
+      // No commit shows the Kid's name with the page still up, not even the
+      // one before the redirect effect ran.
+      expect(commits.filter(c => c.identity === 'Kid' && c.hidden !== null)).toEqual([])
+      expect(commits.some(c => c.identity === 'Kid')).toBe(true)
+    },
+  )
 
   it('leaves an unrestricted session where it asked to be', async () => {
     stubServer({ bound: 1 })
@@ -244,7 +359,7 @@ describe('what a session is offered follows the profile the server has bound', (
     expect(where.path).toBe('/together')
   })
 
-  it('offers nothing extra, and bounces nobody, while the binding cannot be read', async () => {
+  it('offers nothing extra, renders no hidden page, and bounces nobody, while the picker is asking who this is', async () => {
     // This browser remembers the Parent, an unrestricted profile. It is
     // locked, so startup cannot re-select it through the server (an unlocked
     // one would be, and that is a confirmed binding, not a guess).
@@ -257,6 +372,136 @@ describe('what a session is offered follows the profile the server has bound', (
     expect(identity()).toBe('ronnie')
     expect(commits.filter(c => c.destinations.includes('Together'))).toEqual([])
     expect(commits.filter(c => c.identity === 'Parent')).toEqual([])
+    // The page behind the picker is not rendered, and the URL is kept for
+    // when the pick answers the question.
+    expect(commits.filter(c => c.hidden !== null)).toEqual([])
     expect(where.path).toBe('/requests')
+  })
+
+  it('does not lock an unrestricted user out when the picker answers the question', async () => {
+    stubServer({ bindingUnreadable: true, bound: 1 })
+    const commits = renderAt('/requests')
+    const picker = await screen.findByRole('dialog', { name: "Who's watching?" }, { timeout: 10_000 })
+    expect(hiddenPage()).toBeNull()
+    fireEvent.click(within(picker).getByRole('radio', { name: /Parent/ }))
+    await settled('Parent')
+    await waitFor(() => expect(hiddenPage()).toBe('requests'), { timeout: 10_000 })
+    expect(where.path).toBe('/requests')
+    expect(commits.filter(c => c.hidden !== null && c.identity !== 'Parent')).toEqual([])
+  })
+
+  it('does not lock anyone out when the profile list cannot be loaded at all: nothing on screen could answer the question', async () => {
+    stubServer({ listFails: true, bound: 1 })
+    const commits = renderAt('/together')
+    // Startup settles with nothing learned. No picker can open (there is no
+    // list to pick from), so the page renders: the server still answers for
+    // whatever profile it has bound.
+    await waitFor(() => expect(hiddenPage()).toBe('together'), { timeout: 10_000 })
+    expect(identity()).toBe('ronnie')
+    // The bar still offers no way in, and no parties are polled for a
+    // session whose profile is unknown.
+    expect(destinations()).toEqual(['Tonight', 'Library'])
+    expect(commits.filter(c => c.pill !== null)).toEqual([])
+    expect(where.path).toBe('/together')
+  })
+})
+
+describe('the admin entries, in the whole app', () => {
+  it('shows an admin acting as an unrestricted profile the Admin and Server status rows, and "Requests" for everyone\'s', async () => {
+    stubServer({ bound: 1, role: 'admin' })
+    renderAt('/', { remembered: 1, role: 'admin' })
+    await settled('Parent')
+    expect(destinations()).toEqual(['Tonight', 'Library', 'Together'])
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    const menu = within(screen.getByRole('group', { name: 'Account and profiles' }))
+    expect(menu.getByRole('button', { name: 'Admin' })).toBeTruthy()
+    expect(menu.getByRole('button', { name: 'Server status' })).toBeTruthy()
+    // An admin is listed every member's requests, and the entry says so.
+    expect(menu.getByRole('button', { name: 'Requests' })).toBeTruthy()
+    expect(menu.queryByRole('button', { name: 'My requests' })).toBeNull()
+    fireEvent.click(menu.getByRole('button', { name: 'Requests' }))
+    await screen.findByRole('heading', { name: 'Requests' }, { timeout: 10_000 })
+  })
+
+  it('shows the same admin account none of them while its session acts as a restricted profile, on any commit', async () => {
+    stubServer({ bound: 2, role: 'admin' })
+    const commits = renderAt('/', { remembered: 2, role: 'admin' })
+    await settled('Kid')
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    const menu = within(screen.getByRole('group', { name: 'Account and profiles' }))
+    for (const name of ['Admin', 'Server status', 'Requests', 'My requests']) expect(menu.queryByRole('button', { name })).toBeNull()
+    expect(commits.filter(c => c.destinations.includes('Together') || c.destinations.includes('Admin'))).toEqual([])
+  })
+
+  it('does not show them before the server has said which profile an admin\'s session acts as', async () => {
+    const server = stubServer({ bound: 1, role: 'admin' })
+    const release = server.hold('binding')
+    renderAt('/', { remembered: 1, role: 'admin' })
+    await waitFor(() => expect(document.querySelector('[data-identity-trigger]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    const menu = within(screen.getByRole('group', { name: 'Account and profiles' }))
+    expect(menu.queryByRole('button', { name: 'Admin' })).toBeNull()
+    expect(menu.queryByRole('button', { name: 'Server status' })).toBeNull()
+    release()
+    await settled('Parent')
+  })
+})
+
+describe('the live-party list belongs to the profile it was asked for', () => {
+  it('never shows one profile\'s party under another\'s name, though both may watch together', async () => {
+    // Two unrestricted profiles, so the poll runs for both and only the
+    // owner key stands between one's list and the other's name.
+    const second = { ...KID, name: 'Second', max_age_rating: '' }
+    const server = stubServer({ bound: 1 })
+    const realFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+      const p = new URL(input, 'http://localhost').pathname
+      const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+      if (p === '/api/profiles') return json([PARENT, second])
+      if (p === '/api/profiles/active') {
+        const r = await realFetch(input, init)
+        const body = await r.json() as { id: number }
+        return json(body.id === 2 ? second : PARENT)
+      }
+      return realFetch(input, init)
+    })
+    const commits = renderAt('/', { remembered: 1 })
+    await settled('Parent')
+    await waitFor(() => expect(document.querySelector('[data-presence]')?.textContent).toContain('Parentonly Party'), { timeout: 5000 })
+    // The second profile's own list is slow to arrive: the Parent's list is
+    // all there is in state when the switch commits.
+    const release = server.hold('parties-2')
+    pickInTopBar(/Second/)
+    await settled('Second')
+    expect(commits.filter(c => c.identity === 'Second' && c.pill?.includes('Parentonly'))).toEqual([])
+    expect(document.querySelector('[data-presence]')).toBeNull()
+    release()
+    await waitFor(() => expect(document.querySelector('[data-presence]')?.textContent).toContain('Kidonly Party'), { timeout: 5000 })
+    expect(commits.filter(c => c.identity === 'Second' && c.pill?.includes('Parentonly'))).toEqual([])
+  })
+})
+
+describe('search on a phone, whose bar has no search field', () => {
+  it('the Search tab opens the results page, whose own field takes the query and gets results', async () => {
+    const server = stubServer()
+    renderAt('/')
+    await settled('Parent')
+    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    await waitFor(() => expect(where.path).toBe('/search'))
+    // The page's own field: not the bar's (the bar's is hidden below md).
+    const page = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-results]')
+      expect(el).not.toBeNull()
+      return el!
+    }, { timeout: 10_000 })
+    const field = within(page).getByRole('searchbox', { name: 'Search titles' })
+    fireEvent.change(field, { target: { value: 'cozy mystery' } })
+    await within(page).findByText('Found By Search', undefined, { timeout: 10_000 })
+    expect(server.searches).toContain('cozy mystery')
+    // Clearing the page's field stays on the page; it does not jump home.
+    fireEvent.click(within(page).getByRole('button', { name: 'Clear search' }))
+    expect(where.path).toBe('/search')
+    expect((within(page).getByRole('searchbox', { name: 'Search titles' }) as HTMLInputElement).value).toBe('')
+    expect(document.querySelector('nav.stage-tabbar [aria-current="page"]')?.getAttribute('data-nav')).toBe('search')
   })
 })

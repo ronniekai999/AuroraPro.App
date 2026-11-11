@@ -128,8 +128,11 @@ const STATUS_LABELS: Record<string, string> = {
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
 // RequestsView — submitted requests with status. Includes an inline
 // TMDB search + create dialog.
-export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
+export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false }: { everyone?: boolean; requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'>('all')
+  // The server lists every member's requests to a session with the admin
+  // powers and only the caller's own to anyone else; the page says which.
+  const heading = everyone ? 'Requests' : 'My requests'
   // Inline TMDB search + create dialog.
   const [createOpen, setCreateOpen] = useState(false)
   // The composer stays mounted for its exit fade after createOpen flips false.
@@ -187,7 +190,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   if (requests === null) {
     return (
       <div className="animate-fade-in">
-        <PageHeader title="Requests" sub="Loading requests…" />
+        <PageHeader title={heading} sub="Loading requests…" />
       </div>
     )
   }
@@ -197,8 +200,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   return (
     <div className="animate-fade-in">
       <PageHeader
-        title="Requests"
-        sub={`${requests.length} total`}
+        title={heading}
+        sub={everyone ? `${requests.length} from every member` : `${requests.length} total`}
         action={newRequestButton}
       />
 

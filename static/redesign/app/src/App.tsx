@@ -28,7 +28,6 @@ import {
   type EngagementRailUI,
   type FollowedWatch,
   getGamificationStats,
-  listActiveParties,
   type ActiveParty,
   type GamificationStats,
   listContinueWatching,
@@ -112,7 +111,7 @@ import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
 import { LibraryScopeBar } from '@/components/LibraryScopeBar'
-import { hiddenFromRestricted, isLibraryView, libraryScopesFor, navScopeFor } from '@/lib/navScope'
+import { LIBRARY_DESTINATION, hiddenFromRestricted, isLibraryView, libraryScopesFor, mayRenderHidden, navScopeFor } from '@/lib/navScope'
 import { settingsPaneFromPath, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
 import { partyPresence, useActiveParties } from '@/hooks/useActiveParties'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
@@ -172,10 +171,12 @@ const VIEW_LOADERS = {
 } as const
 // Destination or view id → chunk. Home is eager (no entry); movies and shows
 // share the browse chunk; detail/member are never reached from the nav. The
-// Library destination warms the browse chunk, where it lands by default.
+// Library destination ('catalog') warms the browse chunk, where it lands by
+// default; 'library' is the My Library scope's own view.
 const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   admin: 'admin', collections: 'collections', calendar: 'calendar',
   settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
+  [LIBRARY_DESTINATION]: 'browse',
   library: 'library', search: 'search', members: 'members',
   together: 'together', profile: 'profile', me: 'me',
 }
@@ -873,6 +874,10 @@ interface HomeViewProps {
   pickCount?: number
   libraryTotal?: number | null
   onOpenParty?: () => void
+  // parties — the account's active watch parties from App's one poll, or
+  //   undefined for a session that is not offered Together (the card and
+  //   anything else about parties is then left out).
+  parties?: ActiveParty[]
   // onJoinParty — join a specific active party by code (Watch-together card);
   // same path as PartyHubModal's onJoin (join by code, open the party panel).
   onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
@@ -908,7 +913,7 @@ function coreHomeRails(recent: Media[], movies: Media[], shows: Media[]): NonNul
   ]
 }
 
-function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, parties, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1462,10 +1467,14 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
       {effectiveRails.length > 0 && (
         <>
           <YourWeekBand />
-          {/* Keyed by profile: its list is filtered by the acting profile's
-              ceiling, and a switch would otherwise keep the previous
-              profile's parties up until the next 15-second poll. */}
-          <WatchTogetherCard key={`watch-together-${activeProfileId}`} onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
+          {/* Not for a restricted or unknown session, which is offered no way
+              to watch together (parties is undefined then). The list is the
+              one App polls for the whole app, already empty on the commit
+              that switches profile; the key drops the card's own joining
+              state with it. */}
+          {parties && (
+            <WatchTogetherCard key={`watch-together-${activeProfileId}`} parties={parties} onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
+          )}
         </>
       )}
       <div className="h-16" />
@@ -1568,26 +1577,15 @@ function YourWeekBand() {
 // "friend presence coming soon" copy. Aurora is a single household, so
 // active parties (not a friend graph) are the honest "who's watching
 // together right now" signal. Polls /api/parties/active; non-fatal.
-function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
+function WatchTogetherCard({ parties, onStartParty, onJoinParty, currentUserId }: {
+  /** The account's active parties, from App's one poll (useActiveParties). */
+  parties: ActiveParty[]
   onStartParty?: () => void
   onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
   currentUserId?: number
 }) {
-  const [parties, setParties] = useState<ActiveParty[]>([])
   const [joining, setJoining] = useState<string | null>(null)
   const [joinError, setJoinError] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const ac = new AbortController()
-    const load = () => {
-      listActiveParties(ac.signal)
-        .then((list) => { if (!cancelled) setParties(list) })
-        .catch(() => { /* non-fatal — fall back to the start CTA */ })
-    }
-    load()
-    const id = window.setInterval(load, 15000)
-    return () => { cancelled = true; ac.abort(); window.clearInterval(id) }
-  }, [])
   // Don't offer to "join" a party you're already hosting.
   const joinable = parties.filter((p) => p.host_user_id !== currentUserId)
   // Scheduled-not-started parties are in /api/parties/active by design
@@ -2127,6 +2125,14 @@ function BrowseLoadingState({ title }: { title: string }) {
 
 /* ─────────────────────── MAIN APP ─────────────────────── */
 
+/** Marks a page a restricted session is not shown (lib/navScope
+ *  hiddenFromRestricted). It adds no box of its own (`contents`); it exists
+ *  so a test can hold EVERY commit to "no such page is on screen", whatever
+ *  the page itself renders. */
+function HiddenPage({ name, children }: { name: string; children: React.ReactNode }) {
+  return <div data-hidden-page={name} className="contents">{children}</div>
+}
+
 // QA BUG-001 — URL → view mapping for direct loads / browser
 // back-forward / bookmarks. The BrowserRouter basename is "/v2"
 // (set in main.tsx), so useLocation().pathname returns the path
@@ -2432,14 +2438,6 @@ export default function App() {
   // the binding is read it is 'unknown', which offers nothing a restricted
   // profile lacks (no Together, no requests) and restyles nothing.
   const navScope = navScopeFor(profiles, profilesLoaded, activeProfileId)
-  // The account's active watch parties, polled once for the whole app and
-  // read by the nav's presence pill and the Together hub. Only for a session
-  // that is offered Together, and keyed by user and acting profile: the hook
-  // returns nothing on the render that switches profile.
-  const activeParties = useActiveParties({
-    enabled: !!user && navScope === 'full',
-    ownerKey: `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`,
-  })
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2567,6 +2565,17 @@ export default function App() {
   // Cmd+K from opening the palette (z-200) on top of the gate (z-85).
   const [profilesGateOpen, setProfilesGateOpen] = useState(false)
   const theaterActive = playerSurface === 'theater'
+  // The account's active watch parties, polled once for the whole app and
+  // read by the nav's presence pill and the Together hub. Only for a session
+  // that is offered Together, and keyed by user and acting profile: the hook
+  // returns nothing on the render that switches profile.
+  const activeParties = useActiveParties({
+    enabled: !!user && navScope === 'full',
+    ownerKey: `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`,
+    // Not while the player is open (minimized counts as closed: the page is
+    // back on screen then).
+    paused: playerSurface === 'theater' || playerSurface === 'fullscreen',
+  })
 
   // Stamp the surface on <html> so CSS can react to it. This is what gates the
   // watch-party surfaces' theater rules (IMPLEMENTATION_PLAN §D5) — they are
@@ -3111,11 +3120,14 @@ export default function App() {
       navigate('/')
     }
   }, [user, actingRestricted, adminUI, location.pathname, navigate])
-  // A session KNOWN to act as a restricted profile is not offered Together,
-  // requests, the member pages or the profile page, so opening one by URL
-  // lands on Tonight. Presentation only (the server enforces the limit), and
-  // only once the profile is known: 'unknown' redirects nothing, or a parent's
-  // deep link would bounce home during startup.
+  // A session KNOWN to act as a restricted profile sees Tonight, Movies and
+  // Shows: opening Together, requests, a member page, the profile page,
+  // Collections, My Library or Upcoming by URL lands on Tonight, and so does
+  // switching into such a profile while on one. Presentation only (the
+  // server enforces the limit), and only once the profile is known:
+  // 'unknown' redirects nothing, or a parent's deep link would bounce home
+  // during startup. The pages themselves are also kept from rendering
+  // (hiddenOk, below): this effect runs after the commit.
   useEffect(() => {
     if (user && navScope === 'restricted' && hiddenFromRestricted(pathToView(location.pathname))) {
       navigate('/', { replace: true })
@@ -3346,11 +3358,10 @@ export default function App() {
     if (isLibraryView(view)) lastLibraryScopeRef.current = view
   }, [view])
   const handleNavigate = useCallback((dest: string) => {
-    // The phone tab bar's Search tab opens the search dialog over the page
-    // it is on; search is a surface, not a place to be.
-    if (dest === 'search') { setPaletteOpen(true); return }
     let v = dest
-    if (dest === 'library') {
+    // The Library DESTINATION, whose id is no view's: 'library' itself is
+    // the My Library scope and navigates there like any other view.
+    if (dest === LIBRARY_DESTINATION) {
       const offered = libraryScopesFor(navScope).map(sc => sc.id as string)
       // Already somewhere in Library: the destination is "reset this page".
       v = isLibraryView(view) ? view : offered.includes(lastLibraryScopeRef.current) ? lastLibraryScopeRef.current : 'movies'
@@ -6435,13 +6446,28 @@ export default function App() {
       ? { label: livePresence.label, short: livePresence.short }
       : null
   const settingsPane: SettingsPane | null = settingsPaneFromPath(location.pathname)
+  // Whether a page a restricted session is not shown may render on THIS
+  // commit (lib/navScope.mayRenderHidden): never for a restricted session,
+  // not while startup has yet to say who the session is, and not while the
+  // picker is up asking. The redirect runs in an effect, after the commit,
+  // so each such page is guarded where it mounts as well.
+  const hiddenOk = mayRenderHidden(navScope, { settled: profilesSettled, askingForProfile: profilesGateForced && activeProfileId === null })
+  // Something neutral in the page's place until it may render. Nothing for
+  // a restricted session: it is about to be sent to Tonight.
+  const hiddenPending = hiddenFromRestricted(view) && !hiddenOk && navScope !== 'restricted'
+  // A session with the admin powers is listed every member's requests, so
+  // its page and menu entry are "Requests"; everyone else's are their own.
+  const requestsLabel = adminUI ? 'Requests' : 'My requests'
+  // What the phone's top bar calls the page. A restricted session's bar
+  // says "Shows", so its page does too.
+  const pageTitle = view === 'requests' ? requestsLabel
+    : view === 'shows' && navScope === 'restricted' ? 'Shows'
+      : PAGE_TITLES[view] ?? ''
 
   return (
     <div className="min-h-screen bg-surface-page aurora-bg">
-      {/* 2026-07-25 (Aurora Stage Phase 2) — the 240px <Sidebar> and its
-          mobile drawer + hamburger (QA BUG-012) are gone; <TopNav> below
-          owns navigation at every breakpoint, with its own menu sheet
-          below md carrying the drawer's role. */}
+      {/* Navigation is <TopNav> at every width, plus <BottomTabBar> below md,
+          where the bar's destinations, search and the account page live. */}
 
       <ServerPanel
         open={serverOpen}
@@ -6555,7 +6581,7 @@ export default function App() {
             adminUI={adminUI}
             navScope={navScope}
             currentView={view}
-            pageTitle={PAGE_TITLES[view] ?? ''}
+            pageTitle={pageTitle}
             onNavigate={handleNavigate}
             onPrefetch={prefetchView}
             searchQuery={searchQuery}
@@ -6591,6 +6617,7 @@ export default function App() {
             onManageProfiles={() => navigate(settingsPath('profiles'))}
             onOpenMyProfile={() => handleNavigate('profile')}
             onOpenRequests={() => handleNavigate('requests')}
+            requestsLabel={requestsLabel}
             onSignOut={() => { void handleLogout() }}
           />
         </div>{/* /sticky stack */}
@@ -6603,7 +6630,7 @@ export default function App() {
             edge-to-edge hero and pad their own sections with .stage-gutter
             instead (Phase 4 added home/movies/shows to what was just
             `detail`). Everything else keeps the standard page pad. */}
-        {isLibraryView(view) && (
+        {isLibraryView(view) && (!hiddenFromRestricted(view) || hiddenOk) && (
           <LibraryScopeBar current={view} navScope={navScope} onNavigate={handleNavigate} onPrefetch={prefetchView} />
         )}
         <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
@@ -6669,6 +6696,7 @@ export default function App() {
               }
               // Opens the existing Watch Party hub (same as the top bar).
               onOpenParty={() => setPartyJoinPrompt(true)}
+              parties={navScope === 'full' ? activeParties.parties : undefined}
               // Join a specific active party (Watch-together card) — same path
               // as PartyHubModal's onJoin: join by code, then open the panel.
               onJoinParty={(code) => party.join(code).then((r) => {
@@ -6781,8 +6809,9 @@ export default function App() {
               }
             </ViewSuspense>
           )}
-          {view === 'library' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {hiddenPending && <ViewFallback />}
+          {view === 'library' && hiddenOk && (
+            <HiddenPage name="library"><ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
                 library={profileSwitchPending ? NO_MEDIA : library}
                 loading={profileSwitchPending || !libraryLoaded}
@@ -6793,7 +6822,7 @@ export default function App() {
                 // the LibraryView CW grid (mirrors home CW rail).
                 onPlayContinue={handlePlayContinue}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
@@ -6875,7 +6904,17 @@ export default function App() {
           )}
           {view === 'search' && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <SearchView key={`profile-${activeProfileId}`} query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />
+              <SearchView
+                key={`profile-${activeProfileId}`}
+                query={searchQuery}
+                // The page's own field, shown below md, where the top bar
+                // has none. It only sets the query: unlike the bar's field,
+                // clearing it does not leave the page it is on.
+                onQueryChange={setSearchQuery}
+                onSelect={handleSelect}
+                libraryIds={libraryIds}
+                onToggleLib={handleToggleLib}
+              />
             </ViewSuspense>
           )}
           {view === 'settings' && (
@@ -6916,7 +6955,7 @@ export default function App() {
               />
             </ViewSuspense>
           )}
-          {view === 'member' && (() => {
+          {view === 'member' && hiddenOk && (() => {
             // Social phase 1 — /user/:username. The username lives in the
             // URL (parsed fresh each render, like the detail view's id);
             // the lazy view fetches its own data, so a stale username can't
@@ -6926,7 +6965,7 @@ export default function App() {
             // lags a popstate by one frame.
             const uname = memberUsernameFromPath(location.pathname)
             return uname ? (
-              <ViewSuspense fallback={<ViewFallback />}>
+              <HiddenPage name="member"><ViewSuspense fallback={<ViewFallback />}>
                 {/* key: remount per username so profile A's in-flight
                     fetches (connections, follow toggle) can't write into
                     profile B's freshly-seeded state (PR-429 review). */}
@@ -6936,11 +6975,11 @@ export default function App() {
                   onSelect={handleSelect}
                   onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 />
-              </ViewSuspense>
+              </ViewSuspense></HiddenPage>
             ) : null
           })()}
-          {view === 'together' && navScope !== 'restricted' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'together' && hiddenOk && (
+            <HiddenPage name="together"><ViewSuspense fallback={<ViewFallback />}>
               <TogetherView
                 // Remount per profile: the view may hold its own state, and
                 // nothing of one profile's may show under another's name.
@@ -6948,6 +6987,7 @@ export default function App() {
                 currentUserId={user.id}
                 activeParties={activeParties.parties}
                 partiesLoaded={activeParties.loaded}
+                partiesFailed={activeParties.failed}
                 invites={profileSwitchPending ? null : myPartyInvites}
                 inPartyCode={party.state.code ?? null}
                 onOpenPartyPanel={() => setPartyPanelOpen(true)}
@@ -6963,10 +7003,10 @@ export default function App() {
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 onBrowse={() => handleNavigate('library')}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
-          {view === 'profile' && navScope !== 'restricted' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'profile' && hiddenOk && (
+            <HiddenPage name="profile"><ViewSuspense fallback={<ViewFallback />}>
               <MyProfileView
                 key={`profile:${activeProfileId}`}
                 user={user}
@@ -6975,7 +7015,7 @@ export default function App() {
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 onOpenSettings={() => handleNavigate('settings')}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {view === 'me' && (
             <ViewSuspense fallback={<ViewFallback />}>
@@ -6991,6 +7031,7 @@ export default function App() {
                 onOpenNotifications={() => { setNotifOpen(true); setServerOpen(false) }}
                 onOpenMyProfile={() => handleNavigate('profile')}
                 onOpenRequests={() => handleNavigate('requests')}
+                requestsLabel={requestsLabel}
                 onOpenSettings={() => handleNavigate('settings')}
                 onOpenAdmin={() => handleNavigate('admin')}
                 onOpenServer={() => { setServerOpen(true); setNotifOpen(false) }}
@@ -6998,14 +7039,14 @@ export default function App() {
               />
             </ViewSuspense>
           )}
-          {view === 'members' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'members' && hiddenOk && (
+            <HiddenPage name="members"><ViewSuspense fallback={<ViewFallback />}>
               <MembersView
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 currentUsername={user.username}
                 onToast={addToast}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* Not before the startup profile load settles
               (catalogProfileSettled): it fetches on mount, and a fresh
@@ -7015,9 +7056,9 @@ export default function App() {
               the binding cannot be read or the profile list fails, and the
               view then mounts under whatever the server has bound, as the
               catalog does. */}
-          {view === 'collections' && !catalogProfileSettled && <ViewFallback />}
-          {view === 'collections' && catalogProfileSettled && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'collections' && hiddenOk && !catalogProfileSettled && <ViewFallback />}
+          {view === 'collections' && hiddenOk && catalogProfileSettled && (
+            <HiddenPage name="collections"><ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
                 key={`profile-${activeProfileId}-${adminUI}`}
                 isAdmin={adminUI}
@@ -7059,11 +7100,11 @@ export default function App() {
                   description: m.overview ?? '',
                 })}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* Phase 6 — Calendar view (upcoming TV episodes). */}
-          {view === 'calendar' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'calendar' && hiddenOk && (
+            <HiddenPage name="calendar"><ViewSuspense fallback={<ViewFallback />}>
               <CalendarView
                 key={`profile-${activeProfileId}`}
                 onOpenMedia={(id) => {
@@ -7082,11 +7123,12 @@ export default function App() {
                 currentUserId={user.id}
                 onJoinParty={code => void handleJoinInviteParty(code)}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
-          {view === 'requests' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'requests' && hiddenOk && (
+            <HiddenPage name="requests"><ViewSuspense fallback={<ViewFallback />}>
               <RequestsView
+                everyone={adminUI}
                 requests={requestsList}
                 onRequestSubmitted={(r) => {
                   // Not loaded yet (or dropped on a switch): leave it to the
@@ -7106,7 +7148,7 @@ export default function App() {
                   setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
                 }}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* security — gate the mount on role, not just the view string.
               The sidebar link is admin-only, but typing /admin would otherwise

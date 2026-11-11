@@ -32,8 +32,14 @@ export function navScopeFor(profiles: Profile[], profilesLoaded: boolean, active
   return isRestrictedProfile(acting) ? 'restricted' : 'full'
 }
 
+/** The Library destination's id. Deliberately NOT a view id: My Library's
+ *  view is 'library', and a destination that shared the id made the My
+ *  Library scope unreachable (a click on it read as "go to Library, where
+ *  you already are"). */
+export const LIBRARY_DESTINATION = 'catalog'
+
 export interface NavDestination {
-  /** A view id, or 'library' for the Library group. */
+  /** A view id, or LIBRARY_DESTINATION for the Library group. */
   id: string
   label: string
   icon: string
@@ -72,7 +78,7 @@ export function navDestinationsFor(scope: NavScope): NavDestination[] {
   if (scope === 'restricted') {
     return [tonight, { id: 'movies', label: 'Movies', icon: 'movie' }, { id: 'shows', label: 'Shows', icon: 'tv' }]
   }
-  const library: NavDestination = { id: 'library', label: 'Library', icon: 'library' }
+  const library: NavDestination = { id: LIBRARY_DESTINATION, label: 'Library', icon: 'library' }
   if (scope === 'unknown') return [tonight, library]
   return [tonight, library, { id: 'together', label: 'Together', icon: 'users' }]
 }
@@ -82,15 +88,45 @@ export function navDestinationsFor(scope: NavScope): NavDestination[] {
 export function destinationForView(view: string, scope: NavScope): string | null {
   if (view === 'home') return 'home'
   if (scope === 'restricted') return view === 'movies' || view === 'shows' ? view : null
-  if (isLibraryView(view)) return 'library'
+  if (isLibraryView(view)) return LIBRARY_DESTINATION
   if (view === 'together' || view === 'members' || view === 'member') return scope === 'full' ? 'together' : null
   return null
 }
 
-/** Views a restricted session is not offered; opening one by URL lands on
- *  Tonight instead. Only acted on once the session is KNOWN restricted. */
+/** Pages a restricted session is not shown: Together and the member pages,
+ *  requests, the profile page, and every Library scope but Movies and Shows
+ *  (Collections, My Library, Upcoming). A restricted session sees Tonight,
+ *  Movies and Shows, with search, a title's own page, Settings and the
+ *  account page; saving a title to My Library still works from a card. */
 export function hiddenFromRestricted(view: string): boolean {
   return view === 'together' || view === 'requests' || view === 'members' || view === 'member' || view === 'profile'
+    || view === 'collections' || view === 'library' || view === 'calendar'
+}
+
+/**
+ * Whether a page hiddenFromRestricted may be RENDERED for this session, on
+ * this commit. The redirect that sends a restricted session to Tonight runs
+ * in an effect, after the commit, so the page itself must not render either:
+ *
+ * - 'full': yes.
+ * - 'restricted': never. The commit that switches into a restricted profile
+ *   already has this scope, so the page is gone on that very commit.
+ * - 'unknown', before the startup profile load has settled: no. The session
+ *   may turn out to be a restricted one, and its bookmarked /together must
+ *   not show and then bounce. It settles in moments.
+ * - 'unknown', after startup has settled: it could not be learned which
+ *   profile this session acts as. If the app is ASKING (the picker is up,
+ *   because the binding could not be read): no, the pick will answer it.
+ *   Otherwise (the profile list itself failed to load, or the bound profile
+ *   is not in it) nothing on screen can answer it, and an unrestricted
+ *   user must not be locked out of these pages for the life of the tab, so:
+ *   yes. The server still answers every request for the profile it has
+ *   bound; the bar still offers no way in.
+ */
+export function mayRenderHidden(scope: NavScope, startup: { settled: boolean; askingForProfile: boolean }): boolean {
+  if (scope === 'full') return true
+  if (scope === 'restricted') return false
+  return startup.settled && !startup.askingForProfile
 }
 
 /** One line of facts about a profile, for a switcher row: "Default · locked

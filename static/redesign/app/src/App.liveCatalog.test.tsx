@@ -18,7 +18,7 @@
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App'
 
@@ -121,7 +121,7 @@ function renderApp(path: string) {
 function goTo(label: 'Home' | 'Movies') {
   const tab = label === 'Home'
     ? document.querySelector('header .stage-tab[data-nav="home"]')
-    : document.querySelector('header .stage-tab[data-nav="movies"]') ?? document.querySelector('header .stage-tab[data-nav="library"]')
+    : document.querySelector('header .stage-tab[data-nav="movies"]') ?? document.querySelector('header .stage-tab[data-nav="catalog"]')
   if (!tab) throw new Error(`no ${label} destination in the top bar`)
   fireEvent.click(tab)
 }
@@ -325,7 +325,7 @@ function renderSampled(path: string) {
 }
 function pickProfile(name: RegExp) {
   fireEvent.click(document.querySelector('[data-identity-trigger]')!)
-  fireEvent.click(screen.getByRole('menuitemradio', { name }))
+  fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name }))
 }
 
 

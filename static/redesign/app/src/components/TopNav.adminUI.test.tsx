@@ -49,7 +49,10 @@ function props(over: Partial<TopNavProps> = {}): TopNavProps {
     ...over,
   }
 }
-const openMenu = () => fireEvent.click(screen.getByRole('button', { name: 'Account menu for owner' }))
+const trigger = () => document.querySelector<HTMLButtonElement>('[data-identity-trigger]')!
+const openMenu = () => fireEvent.click(trigger())
+const profileRows = () => within(screen.getByRole('group', { name: 'Watching as' })).getAllByRole('button')
+const profileRow = (name: RegExp) => within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name })
 const menu = () => within(screen.getByRole('group', { name: 'Account and profiles' }))
 const destinations = () => within(screen.getByRole('navigation', { name: 'Main' })).getAllByRole('button').map(b => b.textContent)
 
@@ -64,7 +67,7 @@ describe('TopNav admin controls', () => {
     expect(screen.getAllByRole('button', { name: /^Admin/ })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: /^Server status$/i })).toHaveLength(1)
     expect(menu().getByRole('button', { name: 'Admin' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Account menu for owner' }).getAttribute('title')).toBe('Signed in as owner (admin)')
+    expect(trigger().getAttribute('title')).toBe('Signed in as owner (admin)')
   })
 
   it('hides all of them from an admin account whose session acts as a restricted profile', () => {
@@ -75,7 +78,7 @@ describe('TopNav admin controls', () => {
     // The rest of the menu is still there.
     expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
     // The role is not advertised either.
-    expect(screen.getByRole('button', { name: 'Account menu for owner' }).getAttribute('title')).toBe('Signed in as owner')
+    expect(trigger().getAttribute('title')).toBe('Signed in as owner')
   })
 
   it('follows adminUI, not the role and not the scope', () => {
@@ -129,17 +132,54 @@ describe('TopNav destinations by session', () => {
     const onNavigate = vi.fn()
     render(<TopNav {...props({ onNavigate })} />)
     for (const name of ['Library', 'Together', 'Tonight']) fireEvent.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('button', { name }))
-    expect(onNavigate.mock.calls.map(c => c[0])).toEqual(['library', 'together', 'home'])
+    expect(onNavigate.mock.calls.map(c => c[0])).toEqual(['catalog', 'together', 'home'])
   })
 })
 
 describe('the identity control', () => {
   it('is the one control that names who is watching, and there is no second avatar or profile chip', () => {
     render(<TopNav {...props()} />)
-    const trigger = screen.getByRole('button', { name: 'Account menu for owner' })
-    expect(trigger.querySelector('[data-identity-name]')?.textContent).toBe('Parent')
+    expect(trigger().querySelector('[data-identity-name]')?.textContent).toBe('Parent')
     expect(document.querySelectorAll('[data-identity-trigger]')).toHaveLength(1)
     expect(screen.queryByTitle(/^Switch profile/)).toBeNull()
+  })
+
+  it('is named by what it shows, then what it is: the visible profile name leads its accessible name', () => {
+    // The visible text is the PROFILE's name, so the accessible name must
+    // contain it (label in name): a voice command for what is on screen
+    // works, and a screen reader hears who is watching, then what this is.
+    render(<TopNav {...props()} />)
+    expect(screen.getByRole('button', { name: /^Parent, account menu for owner$/ })).toBe(trigger())
+  })
+
+  it('carries a restricted profile\'s limit in the same name, as it is on screen', () => {
+    render(<TopNav {...props({ adminUI: false, navScope: 'restricted', activeProfileId: 2 })} />)
+    expect(screen.getByRole('button', { name: /^Kid ?PG, account menu for owner$/ })).toBe(trigger())
+  })
+
+  it('says how many notifications are unread in its name, since nothing else in the bar does', () => {
+    const { rerender } = render(<TopNav {...props({ notifCount: 3 })} />)
+    expect(screen.getByRole('button', { name: /^Parent, account menu for owner, 3 unread notifications$/ })).toBe(trigger())
+    rerender(<TopNav {...props({ notifCount: 1 })} />)
+    expect(trigger().textContent).toContain('1 unread notification')
+    expect(trigger().textContent).not.toContain('1 unread notifications')
+    rerender(<TopNav {...props({ notifCount: 0 })} />)
+    expect(trigger().textContent).not.toMatch(/unread/)
+  })
+
+  it('is a disclosure of ordinary buttons: no menu role anywhere, and the control says what it opens', () => {
+    render(<TopNav {...props()} />)
+    expect(trigger().getAttribute('aria-haspopup')).toBeNull()
+    expect(trigger().getAttribute('aria-expanded')).toBe('false')
+    openMenu()
+    expect(trigger().getAttribute('aria-expanded')).toBe('true')
+    const panel = screen.getByRole('group', { name: 'Account and profiles' })
+    expect(trigger().getAttribute('aria-controls')).toBe(panel.id)
+    for (const role of ['menu', 'menuitem', 'menuitemradio', 'menuitemcheckbox']) {
+      expect(document.querySelectorAll(`[role="${role}"]`), role).toHaveLength(0)
+    }
+    // Every row is reachable by Tab: none is taken out of the tab order.
+    for (const b of within(panel).getAllByRole('button')) expect(b.tabIndex).toBe(0)
   })
 
   it('shows the account name when no profile is bound, never a remembered one', () => {
@@ -147,41 +187,26 @@ describe('the identity control', () => {
     expect(document.querySelector('[data-identity-name]')?.textContent).toBe('owner')
   })
 
-  it('lists the profiles as radio items with what each is, and switches on choosing another', () => {
+  it('lists the profiles with what each is, marks the current one, and switches on choosing another', () => {
     const onSelectProfile = vi.fn()
     render(<TopNav {...props({ onSelectProfile })} />)
     openMenu()
-    const rows = within(screen.getByRole('menu', { name: 'Switch profile' })).getAllByRole('menuitemradio')
-    expect(rows.map(r => r.getAttribute('aria-checked'))).toEqual(['true', 'false'])
+    const rows = profileRows()
+    expect(rows.map(r => r.getAttribute('aria-current'))).toEqual(['true', null])
     expect(rows[0].textContent).toContain('Default · locked with a PIN')
+    expect(rows[0].textContent).toContain('watching now')
     expect(rows[1].textContent).toContain('Up to PG')
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Kid/ }))
+    fireEvent.click(profileRow(/Kid/))
     expect(onSelectProfile).toHaveBeenCalledWith(2)
     // Choosing closes the menu.
-    expect(screen.getByRole('button', { name: 'Account menu for owner' }).getAttribute('aria-expanded')).toBe('false')
+    expect(trigger().getAttribute('aria-expanded')).toBe('false')
   })
 
   it('does not ask for a switch when the current profile is chosen again', () => {
     const onSelectProfile = vi.fn()
     render(<TopNav {...props({ onSelectProfile })} />)
     openMenu()
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Parent/ }))
-    expect(onSelectProfile).not.toHaveBeenCalled()
-  })
-
-  it('moves between profiles with the arrow keys without choosing one', () => {
-    const onSelectProfile = vi.fn()
-    render(<TopNav {...props({ onSelectProfile })} />)
-    openMenu()
-    const list = screen.getByRole('menu', { name: 'Switch profile' })
-    const [first, second] = within(list).getAllByRole('menuitemradio')
-    first.focus()
-    fireEvent.keyDown(list, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(second)
-    fireEvent.keyDown(list, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(first)
-    fireEvent.keyDown(list, { key: 'End' })
-    expect(document.activeElement).toBe(second)
+    fireEvent.click(profileRow(/Parent/))
     expect(onSelectProfile).not.toHaveBeenCalled()
   })
 
@@ -189,9 +214,8 @@ describe('the identity control', () => {
     render(<TopNav {...props()} />)
     openMenu()
     fireEvent.keyDown(document, { key: 'Escape' })
-    const trigger = screen.getByRole('button', { name: 'Account menu for owner' })
-    expect(trigger.getAttribute('aria-expanded')).toBe('false')
-    expect(document.activeElement).toBe(trigger)
+    expect(trigger().getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(trigger())
   })
 
   it('offers an unrestricted session notifications, profile, requests, settings and sign out', () => {
@@ -201,7 +225,7 @@ describe('the identity control', () => {
     render(<TopNav {...props({ adminUI: false, notifCount: 3, onOpenRequests, onOpenNotificationsPanel, onSignOut })} />)
     openMenu()
     expect(menu().getByRole('button', { name: /^Notifications/ }).textContent).toContain('3')
-    for (const name of ['Your profile', 'My requests', 'Settings', 'Manage profiles', 'Full picker', 'Sign out of this device']) {
+    for (const name of ['Your profile', 'My requests', 'Settings', 'Manage profiles', 'Full picker', /^Sign out/]) {
       expect(menu().getByRole('button', { name })).toBeTruthy()
     }
     fireEvent.click(menu().getByRole('button', { name: 'My requests' }))
@@ -210,8 +234,16 @@ describe('the identity control', () => {
     fireEvent.click(menu().getByRole('button', { name: /^Notifications/ }))
     expect(onOpenNotificationsPanel).toHaveBeenCalledTimes(1)
     openMenu()
-    fireEvent.click(menu().getByRole('button', { name: 'Sign out of this device' }))
+    fireEvent.click(menu().getByRole('button', { name: /^Sign out/ }))
     expect(onSignOut).toHaveBeenCalledTimes(1)
+  })
+
+  it('never calls sign-out a per-device action: it ends every session on the account', () => {
+    render(<TopNav {...props()} />)
+    openMenu()
+    const row = menu().getByRole('button', { name: /^Sign out/ })
+    expect(row.textContent).toContain('Signs out every device on this account')
+    expect(row.textContent).not.toMatch(/this device/i)
   })
 
   it.each(['restricted', 'unknown'] as const)('offers a %s session no requests, profile page or profile management', (navScope) => {
@@ -220,17 +252,23 @@ describe('the identity control', () => {
     for (const name of ['My requests', 'Your profile', 'Manage profiles']) expect(menu().queryByRole('button', { name })).toBeNull()
     // Still there: switching (the server asks for a PIN where one is set),
     // notifications, settings, sign out.
-    for (const name of [/^Notifications/, 'Settings', 'Full picker', 'Sign out of this device']) {
+    for (const name of [/^Notifications/, 'Settings', 'Full picker', /^Sign out/]) {
       expect(menu().getByRole('button', { name })).toBeTruthy()
     }
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(2)
+    expect(profileRows()).toHaveLength(2)
+  })
+
+  it('calls the requests entry "Requests" for a session that is listed everyone\'s', () => {
+    render(<TopNav {...props({ requestsLabel: 'Requests' })} />)
+    openMenu()
+    expect(menu().getByRole('button', { name: 'Requests' })).toBeTruthy()
+    expect(menu().queryByRole('button', { name: 'My requests' })).toBeNull()
   })
 
   it('shows a restricted profile its limit on the control', () => {
     render(<TopNav {...props({ adminUI: false, navScope: 'restricted', activeProfileId: 2 })} />)
-    const trigger = screen.getByRole('button', { name: 'Account menu for owner' })
-    expect(trigger.textContent).toContain('Kid')
-    expect(trigger.textContent).toContain('PG')
+    expect(trigger().textContent).toContain('Kid')
+    expect(trigger().textContent).toContain('PG')
   })
 })
 
@@ -258,18 +296,18 @@ describe('BottomTabBar', () => {
 
   it('gives each session its five (or four) tabs', () => {
     bar('full')
-    expect(labels()).toEqual(['home', 'library', 'search', 'together', 'me'])
+    expect(labels()).toEqual(['home', 'catalog', 'search', 'together', 'me'])
     cleanup()
     bar('restricted')
     expect(labels()).toEqual(['home', 'movies', 'shows', 'search', 'me'])
     cleanup()
     bar('unknown')
-    expect(labels()).toEqual(['home', 'library', 'search', 'me'])
+    expect(labels()).toEqual(['home', 'catalog', 'search', 'me'])
   })
 
   it('marks the current tab, treating every Library scope as Library', () => {
     bar('full', { currentView: 'calendar' })
-    expect(screen.getByRole('navigation', { name: 'Main' }).querySelector('[aria-current="page"]')?.getAttribute('data-nav')).toBe('library')
+    expect(screen.getByRole('navigation', { name: 'Main' }).querySelector('[aria-current="page"]')?.getAttribute('data-nav')).toBe('catalog')
     cleanup()
     bar('full', { currentView: 'me' })
     expect(screen.getByRole('navigation', { name: 'Main' }).querySelector('[aria-current="page"]')?.getAttribute('data-nav')).toBe('me')
