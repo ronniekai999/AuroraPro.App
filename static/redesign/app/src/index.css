@@ -3282,6 +3282,11 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 
 /* The caption: one line of title, one line of facts, on the page. */
 .media-card-cinema .card-caption {
+  /* Positioned so it paints above the poster's shadow: the poster is
+     positioned (its actions are absolute), and a positioned box's shadow
+     paints over later in-flow content, which dimmed the caption under a
+     hovered card. */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
