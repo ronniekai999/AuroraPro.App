@@ -3227,6 +3227,10 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
    Play and Add, which a keyboard never reaches, are also out of the
    accessibility tree until they are drawn (visibility). More stays
    focusable, since it is the keyboard's way to the menu. */
+/* The scrim is black, not the page ink: it sits on artwork. It is strong
+   enough at the buttons' top edge (about 60% up) that the white Play disc
+   keeps 3:1 against white artwork; audit-glass-contrast measures it there,
+   and reads the declarations below, so no comment sits between them. */
 .media-card-cinema .card-actions {
   position: absolute;
   inset: auto 0 0 0;
@@ -3236,9 +3240,6 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   gap: 8px;
   height: 96px;
   padding: 10px;
-  /* Black, not the page ink: it sits on artwork. Strong enough at the
-     buttons' top edge (56% up) that the white Play disc keeps 3:1 against
-     white artwork (audit-glass-contrast measures it there). */
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0.5) 60%, rgba(0, 0, 0, 0) 100%);
   opacity: 0;
   pointer-events: none;

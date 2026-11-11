@@ -1133,9 +1133,55 @@ const SURFACES = [
     px: 18,
     on: () => { const f = cssColor('.media-card-cinema .card-act-play', 'background'); return [over(f.rgb, f.a, W)] },
   },
+  {
+    // The Play disc itself is white, so on white artwork the only thing
+    // that sets it apart is the scrim behind the buttons. A control's
+    // boundary needs 3:1 (1.4.11). Judged at the disc's TOP edge, where the
+    // scrim is weakest, with and without a progress bar under it.
+    what: 'card Play disc edge on white art (non-text)', where: `${CSS} (.media-card-cinema .card-actions)`,
+    color: () => cssColor('.media-card-cinema .card-act-play', 'background').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act-play', 'background').a,
+    px: 44, nonText: true,
+    on: () => scrimAtPlayTop().map(a => over([0, 0, 0], a, W)),
+  },
 ]
 
-const need = s => (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5
+/** The alpha of the actions scrim behind the top edge of the Play disc, for
+ *  each of the layer's two layouts (plain, and lifted clear of a progress
+ *  bar). Read from the layer's own rule: its height, its padding, the
+ *  disc's height and the gradient's stops, which must be black at some alpha
+ *  and run bottom to top, or this dies instead of measuring something else. */
+function scrimAtPlayTop() {
+  const layer = '.media-card-cinema .card-actions'
+  const px = (sel, prop) => {
+    const m = cssValue(sel, prop).match(/^([\d.]+)px$/)
+    if (!m) throw new Error(`audit: ${sel} ${prop} is not a px length this audit can place the Play disc with`)
+    return Number(m[1])
+  }
+  const h = px(layer, 'height'), disc = px('.media-card-cinema .card-act', 'height')
+  const pads = [px(layer, 'padding'), px(`${layer}.has-progress`, 'padding-bottom')]
+  const g = cssValue(layer, 'background').match(/^linear-gradient\(0deg,\s*(.+)\)$/)
+  if (!g) throw new Error(`audit: ${layer}'s background is no longer one bottom-to-top linear-gradient — model it, do not pass`)
+  const parts = g[1].split(/,(?![^(]*\))/).map(t => t.trim())
+  const stops = parts.map(t => {
+    const m = t.match(/^rgba\(0,\s*0,\s*0,\s*([\d.]+)\)\s+([\d.]+)%$/)
+    if (!m) throw new Error(`audit: ${layer}'s scrim stop "${t}" is not black at an alpha with a % position — model it, do not pass`)
+    return [Number(m[2]) / 100, Number(m[1])]
+  })
+  if (stops.length < 2 || stops.some((st, i) => i > 0 && st[0] < stops[i - 1][0])) throw new Error(`audit: ${layer}'s scrim stops are out of order`)
+  const at = t => {
+    if (t <= stops[0][0]) return stops[0][1]
+    for (let i = 1; i < stops.length; i++) {
+      const [p0, a0] = stops[i - 1], [p1, a1] = stops[i]
+      if (t <= p1) return a0 + (a1 - a0) * ((t - p0) / (p1 - p0))
+    }
+    return stops[stops.length - 1][1]
+  }
+  return pads.map(pad => at((pad + disc) / h))
+}
+
+// A control's boundary (1.4.11) needs 3:1; text needs 4.5:1 unless it is large.
+const need = s => (s.nonText || s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5
 const resolve = v => (typeof v === 'function' ? v() : v)
 
 let fails = 0
