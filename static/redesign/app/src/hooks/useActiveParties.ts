@@ -13,6 +13,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { listActiveParties, type ActiveParty } from '@/lib/api'
 
 export const ACTIVE_PARTIES_POLL_MS = 15_000
+/** A request out longer than this is given up on, and the next tick asks
+ *  again. Short of it, a tick does not ask while one is out. */
+export const ACTIVE_PARTIES_STALE_MS = 60_000
 
 const NONE: ActiveParty[] = []
 
@@ -64,15 +67,24 @@ export function useActiveParties({ enabled, ownerKey, paused = false }: UseActiv
     if (!enabled || paused) return
     let cancelled = false
     const ac = new AbortController()
+    // When this effect's request went out, while it is still out. A tick
+    // that asked again regardless numbered a new request before the last
+    // answer had landed, so a server slower than the interval had every
+    // answer discarded as stale and nothing ever loaded.
+    let outSince: number | null = null
     const load = () => {
       const mine = ++seq.current
+      outSince = Date.now()
+      const settle = () => { if (mine === seq.current) outSince = null }
       listActiveParties(ac.signal)
         .then(list => {
+          settle()
           if (cancelled || mine !== seq.current) return
           setStored({ owner: ownerKey, parties: list })
           setFailedFor(null)
         })
         .catch(() => {
+          settle()
           // Non-fatal: keep what we have, and the next tick asks again. But
           // say so, or a first request that fails reads as loading for ever.
           if (cancelled || mine !== seq.current) return
@@ -81,7 +93,13 @@ export function useActiveParties({ enabled, ownerKey, paused = false }: UseActiv
     }
     load()
     // A hidden tab does not poll; it asks once when it is shown again.
-    const tick = () => { if (!document.hidden) load() }
+    const tick = () => {
+      if (document.hidden) return
+      // One request at a time, unless the one out has been out too long to
+      // wait for (the latest-wins number then drops it if it ever answers).
+      if (outSince !== null && Date.now() - outSince < ACTIVE_PARTIES_STALE_MS) return
+      load()
+    }
     const id = window.setInterval(tick, ACTIVE_PARTIES_POLL_MS)
     document.addEventListener('visibilitychange', tick)
     return () => {

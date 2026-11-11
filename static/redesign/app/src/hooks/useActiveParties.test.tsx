@@ -6,7 +6,7 @@ import type { ActiveParty } from '@/lib/api'
 const listActiveParties = vi.fn<(signal?: AbortSignal) => Promise<ActiveParty[]>>()
 vi.mock('@/lib/api', () => ({ listActiveParties: (s?: AbortSignal) => listActiveParties(s) }))
 
-const { ACTIVE_PARTIES_POLL_MS, isScheduledLobby, partyPresence, useActiveParties } = await import('./useActiveParties')
+const { ACTIVE_PARTIES_POLL_MS, ACTIVE_PARTIES_STALE_MS, isScheduledLobby, partyPresence, useActiveParties } = await import('./useActiveParties')
 
 const party = (over: Partial<ActiveParty> = {}): ActiveParty => ({
   code: 'ABC123', host_user_id: 7, party_name: '', media_title: 'Night Train', media_poster: '',
@@ -99,6 +99,49 @@ describe('useActiveParties', () => {
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
     expect(listActiveParties).toHaveBeenCalledTimes(2)
     hidden.mockRestore()
+  })
+
+  // A server slower than the poll interval. Every tick used to number a new
+  // request before the last answer landed, so each answer was dropped as
+  // stale and the list never loaded.
+  it('still loads when every answer takes longer than the poll interval', async () => {
+    const SLOW_MS = 20_000
+    listActiveParties.mockImplementation(() => new Promise(done => { setTimeout(() => done([party()]), SLOW_MS) }))
+    const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))
+    // The interval passes with the first answer still out: no second request.
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS) })
+    expect(listActiveParties).toHaveBeenCalledTimes(1)
+    expect(result.current.loaded).toBe(false)
+    await act(async () => { vi.advanceTimersByTime(SLOW_MS - ACTIVE_PARTIES_POLL_MS) })
+    await flush()
+    expect(result.current.loaded).toBe(true)
+    expect(result.current.parties.map(p => p.code)).toEqual(['ABC123'])
+    // And the poll goes on: the next tick, with nothing out, asks again.
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS) })
+    expect(listActiveParties).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up on a request that never answers and asks again', async () => {
+    listActiveParties.mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue([party()])
+    const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_STALE_MS - ACTIVE_PARTIES_POLL_MS) })
+    expect(listActiveParties).toHaveBeenCalledTimes(1)
+    await act(async () => { vi.advanceTimersByTime(ACTIVE_PARTIES_POLL_MS) })
+    await flush()
+    expect(listActiveParties).toHaveBeenCalledTimes(2)
+    expect(result.current.loaded).toBe(true)
+  })
+
+  it('a reload asks at once even with a request out, and the newer answer wins', async () => {
+    const first = deferred()
+    const second = deferred()
+    listActiveParties.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const { result } = renderHook(() => useActiveParties({ enabled: true, ownerKey: '1:1' }))
+    act(() => result.current.reload())
+    expect(listActiveParties).toHaveBeenCalledTimes(2)
+    await act(async () => { second.resolve([party({ media_title: 'Newer' })]) })
+    await act(async () => { first.resolve([party({ media_title: 'Older' })]) })
+    expect(result.current.parties.map(p => p.media_title)).toEqual(['Newer'])
   })
 
   it('keeps the last list when a poll fails', async () => {
