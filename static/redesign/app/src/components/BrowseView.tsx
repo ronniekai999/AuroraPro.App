@@ -293,8 +293,8 @@ export default function BrowseView({
           // it to the edges directly ends that.
           className="absolute inset-x-0 top-0 h-[360px] pointer-events-none overflow-hidden"
         >
-          <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-purple-500/[0.08] blur-3xl" />
-          <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.05] blur-3xl" />
+          <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-white/5 blur-3xl" />
+          <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-white/5 blur-3xl" />
         </div>
       )}
 
@@ -303,9 +303,9 @@ export default function BrowseView({
           no-backdrop path (fresh library, or a filter with no art yet). */}
       {!heroMedia && (
       <div className="stage-gutter relative pt-8 mb-5">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
-          <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-purple-300" />
-          <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-line mb-3">
+          <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-ink" />
+          <span className="text-ink text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
         </div>
         {/* PageHeader's title scale (text-3xl → --fs-page at md), so this
             fallback heading matches My Library / Search / Requests. */}
@@ -511,7 +511,7 @@ export default function BrowseView({
                 {/* The button's own text is the announcement; the glyph
                     is decorative here, so the Spinner's role="status" is
                     overridden to keep it out of the accessibility tree. */}
-                <Spinner className="size-3.5 text-purple-200" role="presentation" aria-hidden="true" aria-label={undefined} />
+                <Spinner className="size-3.5 text-ink" role="presentation" aria-hidden="true" aria-label={undefined} />
                 Loading…
               </>
             ) : (

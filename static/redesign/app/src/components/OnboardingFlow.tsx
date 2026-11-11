@@ -22,16 +22,6 @@ import {
   type ReferralOption,
 } from '@/lib/referral'
 import { nextRadioIndex } from '@/lib/radiogroup'
-import {
-  FONT_OPTIONS,
-  GLOW_OPTIONS,
-  applyFont,
-  applyGlow,
-  currentFont,
-  currentGlow,
-  type FontChoice,
-  type GlowChoice,
-} from '@/lib/appearance'
 import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
 
 interface OnboardingFlowProps {
@@ -161,8 +151,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     setAge((prev) => (ageTouched ? prev : ageForRating(profile.max_age_rating)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.id])
-  const [font, setFont] = useState<FontChoice>(() => currentFont())
-  const [glow, setGlow] = useState<GlowChoice>(() => currentGlow())
 
   // --- taste grid (reuses the existing onboarding endpoints) ---
   const [grid, setGrid] = useState<UIMedia[]>([])
@@ -389,29 +377,11 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   }
   const goTo = (s: Step) => {
     setError(null)
-    // 2026-07-25 (Aurora Stage Phase 0 follow-up) — commit the appearance
-    // choices when leaving the "style" step, even if the user never tapped
-    // a chip.
-    //
-    // Why this matters: the chips seed from currentFont()/currentGlow() and
-    // render the seeded one as SELECTED (ring + check badge), but applyFont
-    // was only ever called from onClick. A user who liked what "Make it
-    // yours" showed them and pressed Continue therefore left with NO
-    // font_choice stored at all — even though the UI told them they had
-    // chosen. That was invisible until the default flipped nova → eclipse:
-    // those users would silently become Bricolage users despite having
-    // "picked" Nova. Persisting the accepted default closes the one hole in
-    // the flip's non-destructiveness.
-    if (step === 'style') {
-      applyFont(font)
-      applyGlow(glow)
-    }
     setStep(s)
   }
   const next = () => {
     if (!canAdvance()) return
-    // Commit the referral on the way OUT of its step, mirroring how the style
-    // step commits appearance on leave. Back does NOT submit — reversing out of
+    // Commit the referral on the way OUT of its step. Back does NOT submit — reversing out of
     // a step shouldn't record an answer the user was still considering.
     if (step === 'referral') submitReferralChoice()
     const n = nextStep(machine, step)
@@ -599,7 +569,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           {step === 'avatar' && renderAvatar()}
           {step === 'name' && renderName()}
           {step === 'age' && renderAge()}
-          {step === 'style' && renderStyle()}
           {step === 'titles' && renderTitles()}
           {step === 'referral' && renderReferral()}
           {step === 'welcome' && renderWelcome()}
@@ -636,7 +605,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     if (step === 'avatar') return 'Tap a nebula — change it anytime'
     if (step === 'referral') return 'Arrow keys move between options'
     if (step === 'titles') return `Pick at least ${minPicks} — more is better`
-    if (step === 'style') return 'Applies live, everywhere'
     return ''
   }
 
@@ -784,90 +752,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           <span>80</span>
         </div>
       </div>
-    )
-  }
-
-  function renderStyle() {
-    return (
-      <>
-        <Eyebrow>Make it yours</Eyebrow>
-        <h1 className="font-display text-[clamp(1.9rem,4vw,2.8rem)] font-bold tracking-tight text-white">
-          Set the mood.
-        </h1>
-        <p className="mt-3 max-w-md text-[0.95rem] leading-relaxed text-white/55">
-          Your typeface and glow apply instantly — across this whole experience and the app.
-        </p>
-
-        <div className="mt-7 text-[0.72rem] uppercase tracking-[0.16em] text-white/50">Typeface</div>
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {FONT_OPTIONS.map((f) => {
-            const sel = font === f.id
-            return (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => {
-                  setFont(f.id)
-                  applyFont(f.id)
-                }}
-                className={
-                  'glass-card relative rounded-2xl p-4 text-left transition-ui ' +
-                  (sel ? 'ring-2 ring-[#a855f7]/70' : '')
-                }
-              >
-                {sel && (
-                  <span className="absolute right-3 top-3 grid h-5 w-5 place-items-center rounded-full bg-[#a855f7]">
-                    <CheckIcon className="h-3 w-3" />
-                  </span>
-                )}
-                <div className="text-[1.3rem] font-bold text-white" style={{ fontFamily: f.font }}>
-                  Aurora Pro
-                </div>
-                <div className="mt-0.5 text-[0.72rem] text-white/50">{f.label} · {f.desc}</div>
-                <div className="mt-2 text-[0.8rem] text-white/60" style={{ fontFamily: f.font }}>
-                  The quick stream brings stories to life.
-                </div>
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="mt-6 text-[0.72rem] uppercase tracking-[0.16em] text-white/50">Glow style</div>
-        <div className="mt-3 grid grid-cols-3 gap-3">
-          {GLOW_OPTIONS.map((g) => {
-            const sel = glow === g.id
-            return (
-              <button
-                key={g.id}
-                type="button"
-                onClick={() => {
-                  setGlow(g.id)
-                  applyGlow(g.id)
-                }}
-                className={
-                  'glass-card rounded-2xl p-4 text-center transition-ui ' +
-                  (sel ? 'ring-2 ring-[#a855f7]/70' : '')
-                }
-              >
-                <div
-                  className="mx-auto mb-3 h-10 w-10 rounded-full"
-                  style={{
-                    background: 'radial-gradient(circle at 40% 35%, #fff, #a855f7 60%, #7e22ce)',
-                    boxShadow:
-                      g.id === 'subtle'
-                        ? '0 0 0 1px rgba(255,255,255,.18), 0 0 10px rgba(255,255,255,.12)'
-                        : g.id === 'heavy'
-                          ? '0 0 0 1px rgba(220,200,255,.6), 0 0 36px rgba(168,85,247,.8), 0 0 70px rgba(255,255,255,.25)'
-                          : '0 0 0 1px rgba(220,200,255,.4), 0 0 22px rgba(168,85,247,.5), 0 0 44px rgba(255,255,255,.1)',
-                  }}
-                />
-                <div className="text-[0.88rem] font-semibold text-white">{g.label}</div>
-                <div className="mt-0.5 text-[0.66rem] text-white/50">{g.desc}</div>
-              </button>
-            )
-          })}
-        </div>
-      </>
     )
   }
 

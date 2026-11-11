@@ -252,7 +252,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
               {items.length} title{items.length === 1 ? '' : 's'}
               {c?.description && <span className="block mt-1">{c.description}</span>}
               {c?.kind === 'ai' && c.prompt && (
-                <span className="block mt-1 text-purple-300/80 text-xs italic">
+                <span className="block mt-1 text-ink text-xs italic">
                   ✨ AI-curated from: "{c.prompt}"
                 </span>
               )}
@@ -405,7 +405,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                   className="absolute inset-0 z-[2] w-full h-full flex flex-col justify-end items-start text-left px-[17px] pb-[14px] rounded-[15px]"
                 >
                   <span className="font-display text-[16.5px] font-bold text-white truncate max-w-full">{c.name}</span>
-                  <span className="text-[11.5px] text-white/65 mt-0.5">
+                  <span className="text-xs text-white/65 mt-0.5">
                     {c.item_count || 0} title{c.item_count === 1 ? '' : 's'}
                   </span>
                 </button>

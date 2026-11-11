@@ -267,14 +267,14 @@ describe('referralOptionsFromSummary', () => {
 describe('buildSteps', () => {
   it('omits the referral step when the server says not pending', () => {
     const m = buildSteps({ referralPending: false, taste: true })
-    expect(m.order).toEqual(['avatar', 'name', 'age', 'style', 'titles', 'welcome', 'loading'])
-    expect(m.inputs).toHaveLength(5)
+    expect(m.order).toEqual(['avatar', 'name', 'age', 'titles', 'welcome', 'loading'])
+    expect(m.inputs).toHaveLength(4)
   })
 
   it('inserts referral between titles and welcome, and counts it', () => {
     const m = buildSteps({ referralPending: true, taste: true })
-    expect(m.order).toEqual(['avatar', 'name', 'age', 'style', 'titles', 'referral', 'welcome', 'loading'])
-    expect(m.inputs).toHaveLength(6)
+    expect(m.order).toEqual(['avatar', 'name', 'age', 'titles', 'referral', 'welcome', 'loading'])
+    expect(m.inputs).toHaveLength(5)
     expect(m.inputs[m.inputs.length - 1]).toBe('referral')
   })
 

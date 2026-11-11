@@ -26,24 +26,16 @@ import {
 import { oauthProviderLabel } from '@/lib/oauth'
 import {
   AUDIO_LANGUAGE_OPTIONS,
-  FONT_OPTIONS,
-  GLOW_OPTIONS,
   MAX_STREAM_BITRATE_OPTIONS,
-  applyFont,
-  applyGlow,
   applyMaxStreamBps,
   applyPreferredAudioLanguage,
   applyPreferredQuality,
-  currentFont,
-  currentGlow,
   currentMaxStreamBps,
   currentPreferredAudioLanguage,
   currentPreferredQuality,
   readPrefsSnapshot,
   writePrefs,
   type AudioLanguageChoice,
-  type FontChoice,
-  type GlowChoice,
   type QualityChoice,
 } from '@/lib/appearance'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
@@ -116,22 +108,13 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
     }
   })
 
-  // Appearance + quality dials are real React state now, sourced from the
-  // shared helpers rather than read out of a cached prefs blob (Aurora Stage
-  // Phase 7a). Previously each was read from `rawRef.current` and written with
-  // its own inline localStorage call, and a `setSettings(s => ({...s}))` was
-  // fired purely to force a re-render because ref mutations are invisible to
-  // React. Actual state makes the re-render automatic and the three encodings
-  // of the typeface default collapse to one.
+  // The quality dial is real React state, sourced from the shared helpers
+  // rather than read out of a cached prefs blob.
   // Radio refs, so arrow-key movement can put real focus on the newly checked
   // option — the roving tabIndex alone changes which button is REACHABLE, not
   // which one is focused.
-  const glowRefs = useRef<Partial<Record<GlowChoice, HTMLButtonElement | null>>>({})
-  const fontRefs = useRef<Partial<Record<FontChoice, HTMLButtonElement | null>>>({})
   const toneRefs = useRef<Record<number, HTMLButtonElement | null>>({})
 
-  const [fontChoice, setFontChoice] = useState<FontChoice>(currentFont)
-  const [glowChoice, setGlowChoice] = useState<GlowChoice>(currentGlow)
   const [quality, setQuality] = useState<QualityChoice>(currentPreferredQuality)
   // Delivery preferences (September 2026 playback pass): both are read at
   // play time by lib/streaming.ts, so a change here applies to the next play.
@@ -151,8 +134,8 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   // `{...mountTimeSnapshot, ...settings}` and silently reverted the volume.
   //
   // Reading at write time fixes that for every key OUTSIDE `settings`, and makes
-  // applyFont/applyGlow (which do their own read-modify-write) safe to call from
-  // the handlers below. It does NOT protect the six keys `settings` itself owns:
+  // the appearance accessors (which do their own read-modify-write) safe to call
+  // from the handlers below. It does NOT protect the six keys `settings` itself owns:
   // those come from a mount-time snapshot, so a future second writer of
   // `autoplay`/`hdr`/`subtitleLang`/… would still be clobbered by the next
   // toggle. No live bug — the three writers' key sets are disjoint today — but
@@ -224,124 +207,9 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
           screen left roughly half the viewport empty while the user scrolled
           past nine cards.
           `items-start` matters: grid items stretch to the row's height by
-          default, so a short card (Quality) beside a tall one (Appearance)
+          default, so a short card (Quality) beside a tall one (Avatar)
           would grow a panel of empty glass to match it. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-        {/* Appearance — Glow Style picker. Writes
-            aurora_prefs.glow_intensity and live-updates <html data-glow>
-            so panels/cards reflow their border + halo immediately.
-            Default ("aurora") is the unprefixed :root token set in
-            index.css; only "subtle" and "heavy" set the attribute. */}
-        {/* md:col-span-2 — the glow row is 3-up and the typeface row 2x2, so
-            this card needs the full width to avoid four chips of two words
-            each wrapping. */}
-        <div className="glass-panel rounded-2xl p-6 md:col-span-2">
-          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
-            <Icon name="eye" size={18} className="text-purple-400" />
-            Appearance
-          </h2>
-          <div className="space-y-3">
-            <div>
-              <p className="text-white/80 text-sm font-medium">Glow Style</p>
-              <p className="text-white/55 text-xs">Border and halo around panels, cards, and the hero.</p>
-            </div>
-            {/* GLOW_OPTIONS from lib/appearance, not a literal list. The copy
-                is the shared copy; the only thing lost is the "(default)"
-                suffix, which the shared list omits because the onboarding
-                "Make it yours" step renders the same options and calling one
-                "default" there is meaningless. */}
-            {/* Arrow keys + one tab stop, via the shared radiogroup helper.
-                All four radiogroups on this page previously left every option a
-                separate tab stop with the arrows dead — see lib/radiogroup. */}
-            <div
-              role="radiogroup"
-              aria-label="Glow style"
-              className="grid grid-cols-3 gap-3"
-              // Inline event handler rather than a factory that takes a focus
-              // callback: react-hooks/refs flags PASSING a ref-reading function
-              // as an argument during render, while a ref read inside an event
-              // handler is exactly what the rule permits. The movement
-              // arithmetic still lives in the tested nextRadioIndex.
-              onKeyDown={e => {
-                const ids = GLOW_OPTIONS.map(o => o.id)
-                const n = nextRadioIndex(e.key, Math.max(0, ids.indexOf(glowChoice)), ids.length)
-                if (n === null) return
-                e.preventDefault()
-                applyGlow(ids[n]); setGlowChoice(ids[n])
-                glowRefs.current[ids[n]]?.focus()
-              }}
-            >
-              {GLOW_OPTIONS.map(opt => {
-                const active = glowChoice === opt.id
-                return (
-                  <button
-                    key={opt.id}
-                    ref={el => { glowRefs.current[opt.id] = el }}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    tabIndex={active ? 0 : -1}
-                    onClick={() => { applyGlow(opt.id); setGlowChoice(opt.id) }}
-                    className="stage-opt text-left"
-                  >
-                    <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
-                    <p className="text-white/55 text-xs mt-0.5">{opt.desc}</p>
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* Typeface. FONT_OPTIONS + applyFont + currentFont from
-                lib/appearance — the consolidation deferred from Phase 0.
-                Previously this radiogroup carried its OWN copy of the four
-                options, its own default fallback, and its own
-                remove-attribute-when-default branch, duplicating applyFont()
-                exactly. That made three independent encodings of "which system
-                is the default" (here, appearance.ts, and the pre-paint shim in
-                main.tsx), of which only appearance.ts was under test — so a
-                drift between them would have been invisible. Two remain, and
-                main.tsx consumes ATTRIBUTED_FONTS from the same module.
-
-                Each chip still previews its own display face via opt.font. */}
-            <div className="pt-1">
-              <p className="text-white/80 text-sm font-medium">Typeface</p>
-              <p className="text-white/55 text-xs">Display and body fonts used across the app.</p>
-            </div>
-            <div
-              role="radiogroup"
-              aria-label="Typeface"
-              className="grid grid-cols-2 gap-3"
-              onKeyDown={e => {
-                const ids = FONT_OPTIONS.map(o => o.id)
-                const n = nextRadioIndex(e.key, Math.max(0, ids.indexOf(fontChoice)), ids.length)
-                if (n === null) return
-                e.preventDefault()
-                applyFont(ids[n]); setFontChoice(ids[n])
-                fontRefs.current[ids[n]]?.focus()
-              }}
-            >
-              {FONT_OPTIONS.map(opt => {
-                const active = fontChoice === opt.id
-                return (
-                  <button
-                    key={opt.id}
-                    ref={el => { fontRefs.current[opt.id] = el }}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    tabIndex={active ? 0 : -1}
-                    onClick={() => { applyFont(opt.id); setFontChoice(opt.id) }}
-                    className="stage-opt text-left"
-                  >
-                    <p className={`text-base font-semibold ${active ? 'text-white' : 'text-white/80'}`} style={{ fontFamily: opt.font }}>{opt.label}</p>
-                    <p className="text-white/55 text-xs mt-0.5">{opt.desc}</p>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-
         {/* Avatar — per-profile animated nebula. Optimistic localAvatar flips the
             selection instantly; onAvatarChange persists via PUT /api/profiles/:id
             and refreshes the profile list so the switcher + account menu update. */}

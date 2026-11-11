@@ -275,13 +275,29 @@ function parseColor(str) {
 }
 
 /** A declaration's value from a named CSS rule, or die loudly. */
+/** Substitute every `var(--token)` in a declaration value with the token's own
+ *  declared value, recursively. The surfaces are written as tokens
+ *  (`background: var(--surface-raised)`), and a model that could not follow one
+ *  would have to repeat the colour here as a literal, which is the stale-copy
+ *  failure this file's header exists to prevent. Dies if a token is not
+ *  declared EXACTLY once in index.css (two declarations would mean a scoped
+ *  override this audit does not model) or has a fallback argument. */
+function resolveVars(value, seen = []) {
+  return value.replace(/var\(\s*(--[\w-]+)\s*(,[^)]*)?\)/g, (_, name, fallback) => {
+    if (fallback) throw new Error(`audit: var(${name}${fallback}) carries a fallback; this audit reads the token only — model it`)
+    if (seen.includes(name)) throw new Error(`audit: ${name} refers to itself (${[...seen, name].join(' -> ')})`)
+    const all = [...css.matchAll(new RegExp(String.raw`(?:^|[\n;{])\s*${name}\s*:\s*([^;]+);`, 'g'))]
+    if (all.length !== 1) throw new Error(`audit: ${name} is declared ${all.length} times in ${CSS}; this audit reads exactly one — the audit is out of date, not passing`)
+    return resolveVars(all[0][1].trim(), [...seen, name])
+  })
+}
 function cssValue(selector, prop) {
   const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const rule = css.match(new RegExp(String.raw`(?:^|\n)\s*${esc}\s*\{([\s\S]*?)\n\s*\}`))
   if (!rule) throw new Error(`audit: rule ${selector} not found in ${CSS} — the audit is out of date, not passing`)
   const m = rule[1].match(new RegExp(String.raw`(?:^|;|\{)\s*${prop}\s*:\s*([\s\S]*?);`))
   if (!m) throw new Error(`audit: ${selector} no longer sets ${prop} — the audit is out of date, not passing`)
-  return m[1].replace(/\s+/g, ' ').trim()
+  return resolveVars(m[1].replace(/\s+/g, ' ').trim())
 }
 
 /** EVERY background layer's representative colour, bottom-layer LAST.
@@ -424,7 +440,7 @@ function cssPx(selector) {
 function rootToken(name) {
   const m = css.match(new RegExp(String.raw`\n\s*${name.replace(/[-]/g, '\\-')}\s*:\s*([^;]+);`))
   if (!m) throw new Error(`audit: ${name} is not defined in ${CSS} — the audit is out of date, not passing`)
-  return parseColor(m[1])
+  return parseColor(resolveVars(m[1].trim()))
 }
 
 /** The text colour an element's OWN tag sets: `text-white/NN`, or a token via
@@ -439,22 +455,42 @@ function twText(file, anchor) {
   throw new Error(`audit: no text-white/N or text-[color:var(--…)] on the element anchored by "${anchor}" in ${file}`)
 }
 
-/** An arbitrary-colour fill on an element's own tag: `bg-[#rrggbb]/NN`. */
+/** The fill on an element's own tag, in one of the three forms the app writes
+ *  one in: `bg-[#rrggbb]/NN`; `bg-[var(--token)]`, read from the token
+ *  (which may itself be an rgba()); or a neutral-system utility
+ *  (`bg-surface-raised-2`), followed through tailwind.config.js to its token.
+ *  Exactly one fill may be present: two would leave CSS order, not this
+ *  reader, deciding which paints. */
 function twFill(file, anchor) {
-  const m = tagOf(file, anchor).match(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)/)
-  if (!m) throw new Error(`audit: no bg-[#…]/N on the element anchored by "${anchor}" in ${file}`)
-  return { rgb: hex(m[1]), a: Number(m[2]) / 100 }
+  const tag = tagOf(file, anchor)
+  const found = []
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)(?=[\s"'`}])/g))
+    found.push({ rgb: hex(m[1]), a: Number(m[2]) / 100 })
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[var\((--[\w-]+)\)\](?=[\s"'`}])/g))
+    found.push(rootToken(m[1]))
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-(surface-(?:page|raised-2|raised))(?=[\s"'`}])/g)) {
+    const [group, ...rest] = m[1].split('-')
+    const mapped = twConfig.theme?.extend?.colors?.[group]?.[rest.join('-')]
+    const v = typeof mapped === 'string' && mapped.match(/^var\((--[\w-]+)\)$/)
+    if (!v) throw new Error(`audit: tailwind maps ${m[1]} to ${mapped}, not a var(--token) — the audit is out of date, not passing`)
+    found.push(rootToken(v[1]))
+  }
+  if (found.length !== 1) throw new Error(`audit: the element anchored by "${anchor}" in ${file} carries ${found.length} fills this audit can read (bg-[#…]/N, bg-[var(--token)] or bg-surface-*); it needs exactly one`)
+  return found[0]
 }
 
-// The page ink, derived from the app root's own utility rather than from CSS:
-// `.aurora-bg` sets only the radial tint layers, and the opaque base is
-// `bg-[#050505]` on the root element in App.tsx. Reading the wrong one is how a
-// backdrop model ends up off by the whole base colour, so this dies if the
-// utility moves rather than defaulting.
+// The page ink, derived from the app root's own utility rather than assumed:
+// the root element in App.tsx carries `bg-surface-page`, which Tailwind maps
+// to the --surface-page token. Reading the wrong base is how a backdrop model
+// ends up off by the whole base colour, so this dies if the utility moves off
+// the root or stops meaning that token, rather than defaulting.
 const INK = (() => {
-  const m = read('src/App.tsx').match(/min-h-screen bg-\[(#[0-9a-fA-F]{3,8})\]/)
-  if (!m) throw new Error('audit: app root no longer carries min-h-screen bg-[#…] — the audit is out of date, not passing')
-  return hex(m[1])
+  if (!/min-h-screen bg-surface-page[\s"]/.test(read('src/App.tsx')))
+    throw new Error('audit: app root no longer carries min-h-screen bg-surface-page — the audit is out of date, not passing')
+  const mapped = twConfig.theme?.extend?.colors?.surface?.page
+  if (mapped !== 'var(--surface-page)')
+    throw new Error(`audit: tailwind maps surface-page to ${mapped}, not var(--surface-page) — the audit is out of date, not passing`)
+  return rootToken('--surface-page').rgb
 })()
 
 // Panel fills, each named by the rule that owns it.
@@ -462,10 +498,10 @@ const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
 // The page itself (Stage refresh, RS). The home rails used to sit on a glass
 // shelf (`.rail-container`'s fill, read here as RAIL and measured by nothing);
-// the shelf is gone, so their header text sits on `.aurora-bg` — three radial
-// tints over its own #050505 base. backgroundLayers keeps every tint at its
-// full stop, i.e. the lightest point of each, which is the worst case for
-// light text.
+// the shelf is gone, so their header text sits on `.aurora-bg`, which is the
+// flat page colour. Read from the rule all the same: if it ever gains a
+// layer, backgroundLayers keeps each at its full stop, i.e. its lightest
+// point, which is the worst case for light text.
 const PAGE = backgroundLayers(cssValue('.aurora-bg', 'background'))
 
 /** Composite layered fills onto the ink and return EVERY backdrop the element can
@@ -562,13 +598,13 @@ const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 // a design decision rather than a contrast fix.
 
 const FLOOR_SURFACES = {
-  'page ink #050505': [INK],
-  '.aurora-bg (page tints)': stack(PAGE),
+  'page ink --surface-page': [INK],
+  '.aurora-bg (the page)': stack(PAGE),
   '.glass-panel on the page': stack(backgroundLayers(cssValue('.glass-panel', 'background')), PAGE),
   '.glass-card on the page': stack(backgroundLayers(cssValue('.glass-card', 'background')), PAGE),
   '.glass-card:hover on the page': stack(backgroundLayers(cssValue('.glass-card:hover', 'background')), PAGE),
-  'panel ink --surface-1': [rootToken('--surface-1').rgb],
-  'raised panel --surface-2': [rootToken('--surface-2').rgb],
+  'raised --surface-raised': [rootToken('--surface-raised').rgb],
+  'raised-2 --surface-raised-2': [rootToken('--surface-raised-2').rgb],
 }
 const THEME = require('tailwindcss/resolveConfig')(twConfig).theme
 const OPACITY_STEPS = Object.keys(THEME.opacity).map(Number).sort((a, b) => a - b)
@@ -593,7 +629,7 @@ const EXEMPT = [
     why: 'the notification panel\'s icon-only close button' },
   { file: 'src/App.tsx', anchor: "stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40'", kind: 'non-text',
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
-  { file: 'src/App.tsx', anchor: 'text-white/35 text-[10px]">ⓘ</span>', kind: 'non-text',
+  { file: 'src/App.tsx', anchor: 'text-white/35 text-xs">ⓘ</span>', kind: 'non-text',
     why: 'the glyph that marks a stat tile as having a hover hint' },
   // ── companion, browse ──
   { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
@@ -898,10 +934,10 @@ const SURFACES = [
   //    composites deep, which is exactly the case eyeballing gets wrong. ──
   {
     what: 'vibe bar "↵ Search" chip', where: `${APP} (.convo-search)`,
-    color: () => hex('#f3e8ff'),                                   // purple-100
-    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-purple-100'),
-    px: 11,
-    on: () => stack(CONVO).map(bg => over(hex('#a855f7'), twAlpha(APP, 'aria-label="Search"', 'bg-purple-500'), bg)),
+    color: W,
+    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-white'),
+    px: 12,
+    on: () => stack(CONVO).map(bg => over(W, twAlpha(APP, 'aria-label="Search"', 'bg-white'), bg)),
   },
   // ── The search palette. ──
   {

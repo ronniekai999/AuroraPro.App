@@ -306,7 +306,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                         setSubmitting(null)
                       }
                     }}
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-3 py-1.5 bg-action hover:bg-white/90 text-action-on rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {submitting === r.tmdb_id ? 'Submitting…' : 'Request'}
                   </button>

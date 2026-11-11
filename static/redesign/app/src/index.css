@@ -1,10 +1,9 @@
-/* Self-hosted variable fonts (latin). Replaces the Google Fonts CDN
-   @import so type renders even when the deploy environment can't reach
-   fonts.googleapis.com (the silent CDN-fallback-to-system-sans failure
-   mode). One variable .woff2 per family covers every weight we use
-   (300–800); the browser only fetches the families referenced by the
-   active data-font system. The seven families back the four typeface
-   systems users pick in Settings → Appearance → Typeface. */
+/* Self-hosted variable fonts (latin). Self-hosted so type renders even
+   when the deploy environment cannot reach a font CDN. One typeface system:
+   Bricolage Grotesque for display, Inter for everything else. The Bricolage
+   file carries three axes (optical size 12-96, width 75-100, weight
+   200-800); `font-stretch` must be declared as a range here or the browser
+   will not let `font-stretch` reach the width axis. */
 @font-face {
   font-family: 'Inter';
   font-style: normal;
@@ -13,46 +12,12 @@
   src: url('./fonts/inter.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Inter Tight';
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-  src: url('./fonts/inter-tight.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Space Grotesk';
-  font-style: normal;
-  font-weight: 300 700;
-  font-display: swap;
-  src: url('./fonts/space-grotesk.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Sora';
-  font-style: normal;
-  font-weight: 100 800;
-  font-display: swap;
-  src: url('./fonts/sora.woff2') format('woff2');
-}
-@font-face {
   font-family: 'Bricolage Grotesque';
   font-style: normal;
   font-weight: 200 800;
+  font-stretch: 75% 100%;
   font-display: swap;
   src: url('./fonts/bricolage-grotesque.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-  src: url('./fonts/outfit.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Plus Jakarta Sans';
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url('./fonts/plus-jakarta-sans.woff2') format('woff2');
 }
 
 @tailwind base;
@@ -61,81 +26,57 @@
 
 @layer base {
   :root {
-    --background: 0 0% 2%;
-    --foreground: 0 0% 100%;
-    --card: 0 0% 6.7%;
-    --card-foreground: 0 0% 100%;
-    --popover: 0 0% 6.7%;
-    --popover-foreground: 0 0% 100%;
-    --primary: 270 91% 65%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 8%;
-    --secondary-foreground: 0 0% 100%;
-    --muted: 0 0% 12%;
-    --muted-foreground: 0 0% 60%;
-    --accent: 270 91% 65%;
-    --accent-foreground: 0 0% 100%;
+    /* The shadcn/Tailwind HSL triplets (consumed as hsl(var(--x)), so they
+       must stay triplets). Each one is a neutral-system colour written as
+       HSL: page #0e0f11, raised #17181b, raised-2 #202226, line #2a2c31,
+       ink #f4f4f5, ink-3 #9a9da5. --primary is the white action; --accent
+       is the hover fill of menus and select rows, not a brand colour. */
+    --background: 220 10% 6%;
+    --foreground: 240 5% 96%;
+    --card: 225 8% 10%;
+    --card-foreground: 240 5% 96%;
+    --popover: 220 9% 14%;
+    --popover-foreground: 240 5% 96%;
+    --primary: 0 0% 100%;
+    --primary-foreground: 220 10% 6%;
+    --secondary: 225 8% 10%;
+    --secondary-foreground: 240 5% 96%;
+    --muted: 220 9% 14%;
+    --muted-foreground: 224 6% 63%;
+    --accent: 220 9% 14%;
+    --accent-foreground: 240 5% 96%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 14%;
-    --input: 0 0% 14%;
-    --ring: 270 91% 65%;
-    --radius: 0.625rem;
+    --border: 223 8% 18%;
+    --input: 222 8% 25%;
+    --ring: 0 0% 100%;
+    --radius: 0.75rem;
 
-    /* 2026-06-17 (a11y quick-win) — secondary text token for content
-       that must clear WCAG AA (>=4.5:1). Formalizes the
-       rgba(220, 220, 232, 0.65) color the media-card meta already uses
-       (.media-card-cinema .card-overlay .co-meta below) so table headers,
-       timestamps, and hints share one source of truth instead of
-       dropping to text-white/40 (~3.9:1, fails AA). */
-    --text-secondary: rgba(220, 220, 232, 0.65);
+    /* Secondary text that must clear WCAG AA (>=4.5:1) on every surface
+       step. Kept as a name because table headers, timestamps and hints
+       read it; it is the same colour as --ink-2. */
+    --text-secondary: #b4b6bc;
 
-    /* Typeface system tokens — drive body + display type everywhere
-       (body, .font-display, .holo-text all read these vars). Default
-       (no data-font attribute) is "ECLIPSE": Bricolage Grotesque display
-       + Inter body. Users override via Settings → Appearance → Typeface,
-       which writes data-font="nova" | "current" | "halo" on <html>.
-
-       2026-07-25 (Aurora Stage Phase 0) — the attribute-less default
-       moved from NOVA (Sora + Inter Tight) to ECLIPSE. Option B's
-       editorial art direction is built on the Bricolage/Inter pairing,
-       and Bricolage is what carries the oversized display sizes below.
-       NOVA is unchanged and still selectable — it just became an
-       ATTRIBUTED system (html[data-font="nova"]) instead of the bare
-       :root set. Users who explicitly picked Nova keep it: the choice is
-       persisted as aurora_prefs.font_choice regardless of whether an
-       attribute was written, so applyFont()/the main.tsx pre-paint shim
-       can still tell "explicitly chose Nova" from "never chose". */
+    /* One typeface system: Bricolage Grotesque for display, Inter for
+       everything else (body, .font-display and Tailwind's font-sans all
+       read these). */
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
 
-    /* Glow theme tokens — drive the white/purple edge + halo on
-       .glass-panel, .glass-card, and .media-card. Default is
-       "Aurora" (white border, purple-tinted halo). Users override
-       via Settings → Appearance → Glow Style, which writes
-       data-glow="subtle" | "heavy" on <html>.
-       Every halo, in all three styles, leads with --glass-lip (Stage refresh,
-       G1): the 1px top highlight that makes a dark panel read as lit glass. It
-       is an inset shadow, so it paints under a card's poster and only shows on
-       surfaces whose own fill is visible at the top edge. */
-    --glow-border: rgba(220, 200, 255, 0.22);
-    --glow-border-strong: rgba(220, 200, 255, 0.45);
-    --glow-halo:
-      var(--glass-lip),
-      0 0 0 1px rgba(220, 200, 255, 0.14),
-      0 0 28px rgba(168, 85, 247, 0.12),
-      0 0 56px rgba(255, 255, 255, 0.05);
-    --glow-halo-strong:
-      var(--glass-lip),
-      0 0 0 1px rgba(220, 200, 255, 0.25),
-      0 0 34px rgba(168, 85, 247, 0.20),
-      0 0 72px rgba(255, 255, 255, 0.08);
+    /* Edge and elevation for raised surfaces (.glass-panel, .glass-card
+       and the rules that share them). One level: a hairline and a soft
+       dark shadow, no coloured halo. The names predate the neutral
+       system and are still read by many rules. */
+    --glow-border: var(--line);
+    --glow-border-strong: var(--line-strong);
+    --glow-halo: 0 8px 24px rgba(0, 0, 0, 0.35);
+    --glow-halo-strong: 0 12px 32px rgba(0, 0, 0, 0.45);
 
     /* ============================================================
        Aurora Stage design tokens
        ============================================================
        The mockup's :root is otherwise identical to the tokens above
-       (#050505 bg, --glow-border, --glow-halo == the mockup's --halo);
+       (#0e0f11 bg, --glow-border, --glow-halo == the mockup's --halo);
        these are the genuinely new ones. Palette tokens are prefixed
        `--stage-` because the bare names the mockup uses (--primary,
        --cyan) are ALREADY TAKEN here by the shadcn/Tailwind HSL
@@ -223,86 +164,47 @@
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
     --fs-rail: 1.25rem;       /* rail titles, 20px (Stage refresh, R1) */
 
-    /* Leading is PER TYPEFACE, not per size. Overrides live with the
-       html[data-font] blocks below; this is the "one list to re-check when a
-       user switches typeface system" Phase 0's token comment promised.
-
-       DERIVATION — and a correction. Earlier revisions of this comment
-       justified 0.94/0.96 with clearance figures ("+2.9px for Bricolage")
-       computed from the CONTENT AREA (OS/2 sTypoAscender − sTypoDescender,
-       which is what USE_TYPO_METRICS selects: Bricolage 1.200em, Sora and
-       Outfit 1.260em, Space Grotesk 1.276em). Those numbers were wrong,
-       because the content area is not what collides. Two stacked lines
-       collide when the line-height is smaller than the INK SPAN — the real
-       glyph bounding box, max yMax to min yMin — and every one of these
-       faces draws well inside its content area.
-
-       Re-measured off the woff2 tables with fontTools, instancing each
-       variable font at the weight the display type actually renders
-       (font-extrabold = 800; Space Grotesk's wght axis stops at 700, so the
-       browser clamps and 700 is what to measure), over the mixed-case +
-       digits + punctuation set a title uses:
-
-         eclipse  Bricolage @800   ink span 0.962em
-         nova     Sora       @800  ink span 1.001em
-         halo     Outfit     @800  ink span 0.985em
-         current  Space Grotesk @700  ink span 1.002em
-
-       Clearance = (line-height − ink span) × size, so the requirement is
-       size-INDEPENDENT (both terms are em) — which is why --lh-hero and
-       --lh-detail come out equal per face today even though they are separate
-       tokens. Against those spans the shipped values were: Bricolage 0.94 =
-       −1.85px at 84px and 0.96 = −0.13px at 64px, i.e. touching, not the
-       "+2.9px" and "clears comfortably" claimed. Sora and Space Grotesk at
-       1.0 were −0.08/−0.17px. Only Outfit had real margin (+1.30px).
-
-       The values below add ≈1px of clearance at the largest size each token
-       reaches. They stay under or near 1.0 on purpose — the tight display
-       leading is the design.
-
-       KNOWN AND ACCEPTED: an accented capital (Á, Ö) directly beneath a
-       descender still interlocks. Closing that needs 1.15–1.28em depending
-       on the face, which would abandon the editorial leading entirely, so it
-       is a deliberate trade rather than an oversight. The plain worst case —
-       a descender under a full-height capital — is what these clear. */
+    /* Display leading. Two stacked lines collide when the line-height is
+       smaller than the INK SPAN (the real glyph bounding box, max yMax to
+       min yMin), not the content area. Bricolage Grotesque at weight 800
+       has an ink span of 0.962em (measured off the font tables over the
+       mixed-case, digits and punctuation set a title uses), so 0.98 leaves
+       about 1px of clearance at the largest size and stays tight on
+       purpose. Known and accepted: an accented capital directly beneath a
+       descender still interlocks; clearing that needs 1.15em or more. */
     --lh-hero: 0.98;
     --lh-detail: 0.98;
 
-    /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
-       token and stays untouched.) */
-    --card-bg: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
+    /* Card surface for panels that are not artwork. (`--card` is the
+       shadcn triplet of the same colour.) */
+    --card-bg: var(--surface-raised);
 
-    /* Palette, for the Stage primitives further down. Same hexes the app
-       already uses inline; named so the primitives don't re-litter them. */
-    --stage-purple: #A855F7;
-    --stage-purple-2: #7C3AED;
+    /* The aurora signal's three stops and the star-rating yellow, for the
+       few rules that need one stop rather than the gradient (--aurora).
+       Signal only: the logo, AI attribution, live presence. */
+    --stage-purple: #a855f7;
+    --stage-purple-2: #7c3aed;
     --stage-purple-lt: #d8b4fe;
-    --stage-cyan: #22D3EE;
+    --stage-cyan: #22d3ee;
     --stage-star: #facc15;
 
-    /* Backdrop tint — the three radial washes .page-tint composites. Each
-       page overrides them (Phase 2 drives them off the current backdrop's
-       dominant color); these defaults are the mockup's home screen. */
-    --tint-1: radial-gradient(1100px 700px at 70% -8%, rgba(124, 58, 237, 0.22), transparent 62%);
-    --tint-2: radial-gradient(800px 600px at -5% 40%, rgba(30, 27, 75, 0.50), transparent 60%);
-    --tint-3: radial-gradient(900px 700px at 105% 85%, rgba(14, 116, 144, 0.10), transparent 55%);
+    /* What .page-tint composites: one wash of the artwork colour in focus
+       (--ambient, transparent until a script sets it). The second and
+       third layers are kept as names because .page-tint lists three. */
+    --tint-1: radial-gradient(1100px 700px at 70% -8%, var(--ambient), transparent 62%);
+    --tint-2: none;
+    --tint-3: none;
 
     /* ============================================================
        Polish pass — motion, radius and surface tokens.
        ============================================================
-       Before these, index.css carried 34 distinct transition durations, 7
-       easings and 22 border radii, and Tailwind's utilities (150ms,
-       cubic-bezier(.4,0,.2,1)) ran on a different curve from the
-       hand-written rules (0.15s/0.18s `ease`) — so a CSS-styled pill and a
-       utility-styled pill next to it eased differently. tailwind.config.js
-       points its transition defaults at the same two tokens.
        Durations: fast for hover/focus colour, base for reveals and fades,
-       slow for the card lift. Radii: sm thumbs, md controls/toasts, lg cards,
-       xl shelves, pill for round buttons. `--radius` (10px) stays the
-       shadcn token the live dialog/select read; do not merge them.
-       --surface-1 names the de-facto panel ink (#0a0a0f, 20 arbitrary
-       Tailwind classes) — NOT the #050505 page ink, which stays literal on
-       the app root and hero because two audits anchor on it. */
+       slow for the card lift. tailwind.config.js points its transition
+       defaults at the same tokens so utilities and hand-written rules
+       ease alike. Radii: the --r-* steps map onto the four shape radii
+       (chip 4, art 8, control 12, sheet 20); pill is for the primary
+       action and filter chips. --surface-1 and --surface-2 are older
+       names for the raised steps. */
     --dur-fast: 150ms;
     --dur-base: 220ms;
     --dur-slow: 350ms;
@@ -321,10 +223,10 @@
        ghost button family; an inset shadow paints under content, so on a
        poster card it sits beneath the art and changes nothing. */
     --glass-lip: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    --r-sm: 8px;
-    --r-md: 12px;
-    --r-lg: 14px;
-    --r-xl: 18px;
+    --r-sm: var(--radius-art);
+    --r-md: var(--radius-control);
+    --r-lg: var(--radius-control);
+    --r-xl: var(--radius-sheet);
     /* The largest step (Stage refresh, G2): the PIN and Previously dialogs,
        which had 24px and 28px literals. index.css snapped its off-scale radii
        (9, 11, 13, 15, 16px) to the nearest step in the same pass, and wrote
@@ -332,29 +234,28 @@
        small-control step the tabs, small buttons and fields share), the
        sub-8px chip and track radii, the player's, and .density-toggle's 11px,
        which is its 8px buttons plus its 3px padding so the corners nest. */
-    --r-2xl: 24px;
+    --r-2xl: var(--radius-sheet);
     --r-pill: 999px;
     /* Elevation (G2). Popovers (the avatar menu, the phone menu sheet, the
        server and notification panels) and modal cards were Tailwind's
-       shadow-2xl — black at 0.25, close to invisible on #050505 — or a
+       shadow-2xl — black at 0.25, close to invisible on #0e0f11 — or a
        one-off literal. Both carry the glass lip (G1). Used through
        `shadow-[shadow:var(--shadow-pop)]`: the `shadow:` hint is required,
        because Tailwind 3 compiles a bare `shadow-[var(--x)]` as a shadow
        COLOUR (measured), which silently draws nothing. */
     --shadow-pop: var(--glass-lip), 0 18px 48px -12px rgba(0, 0, 0, 0.7);
     --shadow-modal: var(--glass-lip), 0 28px 90px rgba(0, 0, 0, 0.65);
-    --surface-1: #0a0a0f;
-    --surface-2: #14121e;
+    --surface-1: var(--surface-raised);
+    --surface-2: var(--surface-raised-2);
     /* Small-end type. The display scale above stops at --fs-rail (20px);
        everything smaller was 217 arbitrary `text-[Npx]` utilities across
        ten values including half-pixels. These four name the clusters
-       (labels 10, captions 11, meta 12.5, small body 13.5). Adopted where
-       index.css set the same literals; the TSX utilities are migrated only
-       where they cluster, not swept. */
-    --fs-label: 10px;
-    --fs-caption: 11px;
-    --fs-meta: 12.5px;
-    --fs-body-sm: 13.5px;
+       (labels, captions, meta, small body). No text is set below 12px, so
+       the two smallest names share the floor. */
+    --fs-label: 12px;
+    --fs-caption: 12px;
+    --fs-meta: 13px;
+    --fs-body-sm: 14px;
 
     /* Neutral surface system. Surfaces are graphite and carry no brand
        colour; colour on a page comes from the artwork in focus (--ambient,
@@ -388,106 +289,25 @@
     --radius-sheet: 20px;
   }
 
-  html[data-glow="subtle"] {
-    --glow-border: rgba(255, 255, 255, 0.10);
-    --glow-border-strong: rgba(255, 255, 255, 0.18);
-    --glow-halo:
-      var(--glass-lip),
-      0 0 0 1px rgba(255, 255, 255, 0.06),
-      0 0 14px rgba(255, 255, 255, 0.04);
-    --glow-halo-strong:
-      var(--glass-lip),
-      0 0 0 1px rgba(255, 255, 255, 0.12),
-      0 0 18px rgba(255, 255, 255, 0.08);
-  }
-
-  html[data-glow="heavy"] {
-    --glow-border: rgba(220, 200, 255, 0.40);
-    --glow-border-strong: rgba(220, 200, 255, 0.65);
-    --glow-halo:
-      var(--glass-lip),
-      0 0 0 1px rgba(220, 200, 255, 0.28),
-      0 0 32px rgba(168, 85, 247, 0.30),
-      0 0 64px rgba(255, 255, 255, 0.12);
-    --glow-halo-strong:
-      var(--glass-lip),
-      0 0 0 1px rgba(220, 200, 255, 0.50),
-      0 0 48px rgba(168, 85, 247, 0.40),
-      0 0 96px rgba(255, 255, 255, 0.18);
-  }
-
-  /* Typeface systems — see Settings → Appearance → Typeface. The
-     default (ECLIPSE: Bricolage Grotesque + Inter) lives in the :root
-     tokens above; these blocks override per the user's choice. "current"
-     is the original Space Grotesk + Inter pairing (labelled "Classic" in
-     UI). */
-  html[data-font="current"] {
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Space Grotesk', 'Inter', sans-serif;
-    /* Ink span 1.002em at wght 700 (the axis maximum — font-extrabold clamps
-       to it). The largest span of the four faces, so it needs the loosest
-       leading; 1.0 left it at −0.17px. See the derivation in :root. */
-    --lh-hero: 1.02;
-    --lh-detail: 1.02;
-  }
-
-  /* NOVA — the pre-Aurora-Stage default. Now an attributed system so the
-     :root set can carry Eclipse; values are byte-for-byte what :root held
-     before, so an explicit Nova user sees no change. */
-  html[data-font="nova"] {
-    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Sora', 'Inter Tight', sans-serif;
-    /* Ink span 1.001em at wght 800 vs Bricolage's 0.962em — 1.0 left this at
-       −0.08px, and :root's 0.98 would be worse. See the derivation in :root. */
-    --lh-hero: 1.02;
-    --lh-detail: 1.02;
-  }
-
-  /* ECLIPSE is the attribute-less default (see :root). This block is kept
-     so an explicit data-font="eclipse" — a stale attribute from before
-     the default flip, or a deliberate write — still resolves to the same
-     pairing instead of silently falling through to whatever :root holds
-     next. It is intentionally redundant, not dead. */
-  html[data-font="eclipse"] {
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
-  }
-
-  html[data-font="halo"] {
-    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
-    /* Ink span 0.985em at wght 800 — the roomiest of the four faces, and the
-       only one whose shipped value was already positive (+1.30px at 84px). 1.0
-       is kept as-is rather than inheriting :root's 0.98, which would be
-       −0.42px. See the derivation in :root. */
-    --lh-hero: 1;
-    --lh-detail: 1;
-  }
-
-  /* Cinematic watch-party overlay — reduce-transparency / blur budget.
-     The minimal-mode overlay surfaces (VoicePill, MiniDock, the floating
-     rail card) layer backdrop-blur over PLAYING video, which repaints
-     continuously — the exact per-frame re-composite cost flagged for the
-     media-card badge (deep-debug Bug 25). Users on weak / integrated GPUs
-     already have a lever: Settings → Appearance → Glow = Subtle
-     (data-glow="subtle"). For any .aurora-glass-overlay surface that ALSO
-     drops the backdrop blur for a flat fill — same readable look, zero
-     per-frame blur. Default ("aurora") and "heavy" keep the glass. */
-  html[data-glow="subtle"] .aurora-glass-overlay {
+  /* Reduce effects (Settings, stored as aurora_prefs.reduce_effects and
+     written to <html data-effects="reduced"> before first paint). The
+     lever for weak or integrated GPUs: backdrop blur over playing video
+     repaints every frame, so every surface that blurs drops to a flat
+     fill here. The rules that honour it sit beside the surfaces they
+     change, keyed on the same attribute. */
+  html[data-effects="reduced"] .aurora-glass-overlay {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-    background: rgba(10, 8, 16, 0.92) !important;
-  }
-  /* The ⌘K palette's decorative filter-blur blobs (SearchPalette). A
-     120px Gaussian over a 700px disc is GPU work with no information in
-     it; Subtle drops them along with the scrim's backdrop blur. */
-  html[data-glow="subtle"] .stage-palette-blob {
-    display: none;
+    background: var(--surface-raised) !important;
   }
 
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
+    /* Times and counts must not jitter as they change, so numerals are
+       tabular everywhere body text is set; display type opts back out
+       (.font-display) because a title's "1917" should space like text. */
+    font-variant-numeric: tabular-nums;
     overflow-x: hidden;
     /* Reserve the classic scrollbar's width whether or not it is showing.
        `overflow-x: hidden` above computes `overflow-y: auto`, which the UA
@@ -511,42 +331,43 @@
 @layer utilities {
   .font-display {
     font-family: var(--font-display);
+    font-variant-numeric: normal;
   }
 
+  /* Raised panel and raised interactive card. Flat fills on the raised
+     step: blur is kept for chrome that content scrolls under (the nav
+     bar, the player controls), and these sit in the page. The names
+     predate the neutral system. */
   .glass-panel {
-    background: rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--glow-border);
-    box-shadow: var(--glow-halo);
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
   }
 
   .glass-card {
-    background: rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glow-border);
-    box-shadow: var(--glow-halo);
-    /* The three properties :hover changes — not `all`, which also animated
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    /* The two properties :hover changes — not `all`, which also animated
        any incidental layout change (padding, width) on these cards. */
-    transition: background-color var(--dur-slow) var(--ease-standard),
-                border-color var(--dur-slow) var(--ease-standard),
-                box-shadow var(--dur-slow) var(--ease-standard);
+    transition: background-color var(--dur-fast) var(--ease-standard),
+                border-color var(--dur-fast) var(--ease-standard);
   }
 
   .glass-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: var(--glow-border-strong);
-    box-shadow: var(--glow-halo-strong);
+    background: var(--surface-raised-2);
+    border-color: var(--line-strong);
   }
 
+  /* Elevation for artwork that floats (a poster on a dialog). The name
+     predates the neutral system; it is a soft dark shadow, not a glow. */
   .glow-purple {
-    box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   }
 
   /* Phase D — conversational "mood box": a focal, on-brand search pill that
      invites natural-language discovery. A violet→cyan gradient ring + soft halo
      (the same palette as the rest of the UI) that intensifies on hover/focus
      and breathes gently to draw the eye. Honors prefers-reduced-motion and
-     calms down under data-glow="subtle". */
+     calms down under Reduce effects. */
   .convo-search {
     position: relative;
     /* Rounded-rect, not a full pill: a full pill's semicircular end caps swept
@@ -556,10 +377,10 @@
     border-radius: var(--r-xl);
     background:
       linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
-      linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
+      linear-gradient(100deg, rgba(255, 255, 255, 0.385), rgba(255, 255, 255, 0.22) 48%, rgba(34, 211, 238, 0.6)) border-box;
     border: 1.5px solid transparent;
     box-shadow:
-      0 8px 28px -10px rgba(124, 58, 237, 0.4),
+      0 8px 28px -10px rgba(0, 0, 0, 0.4),
       0 0 20px -6px rgba(34, 211, 238, 0.25);
     transition: box-shadow var(--dur-slow) var(--ease-standard);
   }
@@ -583,7 +404,7 @@
     position: absolute;
     inset: -3px;
     border-radius: calc(var(--r-xl) + 3px); /* tracks the bar radius + the 3px inset */
-    background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
+    background: linear-gradient(100deg, rgba(255, 255, 255, 0.248), rgba(34, 211, 238, 0.4));
     filter: blur(16px);
     opacity: 0.28;
     z-index: -1;
@@ -591,7 +412,7 @@
   }
   .convo-search:hover {
     box-shadow:
-      0 10px 32px -10px rgba(124, 58, 237, 0.55),
+      0 10px 32px -10px rgba(0, 0, 0, 0.5),
       0 0 26px -4px rgba(34, 211, 238, 0.4);
   }
   /* TWO-TONE focus ring, and the second tone is the load-bearing half.
@@ -622,11 +443,7 @@
      wrapper nulls the global input treatment at (0,3,1), so deleting this rule
      leaves the field with no focus indicator at all. */
   .convo-search:focus-within {
-    box-shadow:
-      0 0 0 2px rgba(216, 180, 254, 0.95),
-      0 0 0 4px rgba(5, 5, 5, 0.9),
-      0 12px 38px -10px rgba(124, 58, 237, 0.65),
-      0 0 32px -2px rgba(34, 211, 238, 0.5);
+    box-shadow: 0 0 0 2px #ffffff, 0 0 0 5px rgba(14, 15, 17, 0.9);
   }
   .convo-search:focus-within::before {
     opacity: 0.55;
@@ -636,7 +453,7 @@
     0%, 100% { opacity: 0.2; }
     50% { opacity: 0.42; }
   }
-  html[data-glow="subtle"] .convo-search::before {
+  html[data-effects="reduced"] .convo-search::before {
     opacity: 0.14;
     animation: none;
   }
@@ -652,16 +469,13 @@
     display: none;
   }
 
+  /* The page: flat graphite, no wash. Colour on a page comes from the
+     artwork in focus (--ambient), never from the walls. */
   .aurora-bg {
-    background:
-      radial-gradient(ellipse 80% 60% at 20% 40%, rgba(168, 85, 247, 0.08) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(216, 180, 254, 0.05) 0%, transparent 50%),
-      radial-gradient(ellipse 50% 40% at 50% 80%, rgba(107, 33, 168, 0.06) 0%, transparent 50%),
-      #050505;
+    background: var(--surface-page);
   }
-
-  /* DetailView hero glow floor — a soft purple radial at the bottom-left of
-     the backdrop, giving the editorial hero its "shine". Single static
+  /* DetailView hero floor — a soft radial of the title's own artwork
+     colour (--ambient) at the bottom-left of the backdrop. Single static
      element on a non-scrolling hero, so the blur cost is paid once. */
   .aurora-floor {
     position: absolute;
@@ -669,7 +483,7 @@
     right: -10%;
     bottom: -25%;
     height: 60%;
-    background: radial-gradient(55% 100% at 28% 100%, rgba(168, 85, 247, 0.28), transparent 70%);
+    background: radial-gradient(55% 100% at 28% 100%, var(--ambient), transparent 70%);
     filter: blur(46px);
     pointer-events: none;
   }
@@ -790,12 +604,12 @@
   pointer-events: none;
   background-image:
     radial-gradient(1.5px 1.5px at 12% 22%, #fff, transparent),
-    radial-gradient(1px 1px at 34% 8%, #e9d5ff, transparent),
+    radial-gradient(1px 1px at 34% 8%, #fff, transparent),
     radial-gradient(1.5px 1.5px at 58% 18%, #fff, transparent),
-    radial-gradient(1px 1px at 76% 34%, #a5f3fc, transparent),
+    radial-gradient(1px 1px at 76% 34%, #fff, transparent),
     radial-gradient(1.5px 1.5px at 88% 12%, #fff, transparent),
     radial-gradient(1px 1px at 46% 30%, #fff, transparent),
-    radial-gradient(1px 1px at 24% 42%, #c4b5fd, transparent),
+    radial-gradient(1px 1px at 24% 42%, #fff, transparent),
     radial-gradient(1.5px 1.5px at 68% 44%, #fff, transparent);
 }
 
@@ -825,9 +639,9 @@
   /* Bottom stop 0.62 → 0.72. Everything in this bar is white-on-transparent
      (0.62 tab labels, 0.5 control icons, the search placeholder), and since
      Phase 4 made the hero full-bleed the bar's lower half sits over artwork
-     rather than over #050505. Darkening the stop lifts all of them at once
+     rather than over #0e0f11. Darkening the stop lifts all of them at once
      and is invisible against a dark backdrop, which is the common case. */
-  background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.72));
+  background: linear-gradient(180deg, rgba(14, 15, 17, 0.85), rgba(14, 15, 17, 0.72));
   backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   /* box-shadow only. The base fill is a gradient (background-color is
@@ -843,7 +657,7 @@
    the base rule is untouched (audit-glass-contrast reads it). Toggled by
    TopNav from a passive scroll listener. */
 .stage-topnav[data-scrolled] {
-  background: rgba(5, 5, 5, 0.94);
+  background: rgba(14, 15, 17, 0.94);
   backdrop-filter: blur(12px);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
 }
@@ -859,7 +673,7 @@
   bottom: -1px;
   height: 1px;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.5) 26%, rgba(34, 211, 238, 0.4) 74%, transparent);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.275) 26%, rgba(34, 211, 238, 0.4) 74%, transparent);
   opacity: 0;
   transition: opacity var(--dur-slow) var(--ease-standard);
 }
@@ -876,10 +690,10 @@
      cap this is byte-identical to what shipped. */
   .stage-topnav { padding: 0 max(30px, (100% - var(--page-max)) / 2); }
 }
-html[data-glow="subtle"] .stage-topnav {
+html[data-effects="reduced"] .stage-topnav {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: #050505;
+  background: #0e0f11;
 }
 
 .stage-tab {
@@ -914,7 +728,7 @@ html[data-glow="subtle"] .stage-topnav {
 .stage-tab[aria-selected="true"] {
   color: #fff;
   font-weight: 600;
-  background: rgba(168, 85, 247, 0.14);
+  background: rgba(255, 255, 255, 0.077);
 }
 /* Gradient underline on the active tab — the top-nav counterpart of the
    sidebar's 3px left bar (.nav-link-item.active::before). */
@@ -927,8 +741,7 @@ html[data-glow="subtle"] .stage-topnav {
   bottom: 3px;
   height: 2px;
   border-radius: 2px;
-  background: linear-gradient(90deg, var(--stage-purple), var(--stage-cyan));
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+  background: var(--action);
   animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
 }
 /* The underline grows in from its centre when a tab becomes active (Stage
@@ -951,8 +764,8 @@ html[data-glow="subtle"] .stage-topnav {
 }
 /* Inset so the scrolling strip can't clip it — see .stage-tabstrip. */
 .stage-tab:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px rgba(216, 180, 254, 0.9);
+  outline: 2px solid #ffffff;
+  outline-offset: -2px;
 }
 /* Admin marker on the Admin tab. */
 .stage-tab-adm {
@@ -966,9 +779,9 @@ html[data-glow="subtle"] .stage-topnav {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--stage-purple-lt);
-  background: rgba(168, 85, 247, 0.16);
-  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.088);
+  border: 1px solid rgba(255, 255, 255, 0.193);
 }
 
 /* Tab strip. Between md and xl the eight tabs don't fit, so the strip
@@ -1039,9 +852,9 @@ html[data-glow="subtle"] .stage-topnav {
    just look tinted. rgba(216,180,254,.9) is ~7.5:1 on the bar; the ring
    adds a second, non-colour-dependent cue. */
 .stage-navsearch:focus-within {
-  border-color: rgba(216, 180, 254, 0.9);
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.28);
+  border-color: #ffffff;
+  background: var(--surface-raised-2);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
 }
 /* The global `input:not([type="range"])` rule in this file sets padding,
    background, border and radius; the nav input must opt out or the pill
@@ -1098,7 +911,7 @@ html[data-glow="subtle"] .stage-topnav {
 .stage-navsearch kbd {
   flex: none;
   font-family: var(--font-sans);
-  font-size: 10.5px;
+  font-size: 12px;
   color: rgba(255, 255, 255, 0.5);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -1149,14 +962,14 @@ html[data-glow="subtle"] .stage-topnav {
   .stage-iconbtn:active { transform: none; }
 }
 .stage-iconbtn[aria-expanded="true"] {
-  background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.5);
-  color: #e9d5ff;
+  background: rgba(255, 255, 255, 0.088);
+  border-color: rgba(255, 255, 255, 0.275);
+  color: var(--ink);
 }
 .stage-iconbtn:focus-visible {
-  outline: none;
-  border-color: rgba(216, 180, 254, 0.8);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
 
 /* Standard page gutter. Replaces the global `p-8` that App's content
@@ -1265,15 +1078,15 @@ html[data-glow="subtle"] .stage-topnav {
 /* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────
    The mockup's defining move: edge to edge, no radius, no border, and an
    oversized display title. The scrim is two layers — a left-to-right sweep
-   for the text column and a bottom fade that lands on EXACTLY #050505 so
+   for the text column and a bottom fade that lands on EXACTLY #0e0f11 so
    there is no seam where the hero ends and the rails begin. */
 .stage-hero-scrim {
   position: absolute;
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(5, 5, 5, 0.95) 0%, rgba(5, 5, 5, 0.72) 40%, rgba(5, 5, 5, 0.15) 72%, rgba(5, 5, 5, 0.35) 100%),
-    linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
+    linear-gradient(90deg, rgba(14, 15, 17, 0.95) 0%, rgba(14, 15, 17, 0.72) 40%, rgba(14, 15, 17, 0.15) 72%, rgba(14, 15, 17, 0.35) 100%),
+    linear-gradient(0deg, #0e0f11 2%, rgba(14, 15, 17, 0.25) 30%, transparent 55%);
 }
 /* The words change with the art (Stage refresh, H2). HeroSection keys the
    reason, genre line, title, description and the compact "Featured" line on
@@ -1311,7 +1124,7 @@ html[data-glow="subtle"] .stage-topnav {
 
 /* Top feather (Stage refresh, H1). The backdrop used to start on a hard line
    right under the greeting; this lets the art rise out of the page instead,
-   the same #050505 the bottom fade lands on. A fixed 72px, not a percentage,
+   the same #0e0f11 the bottom fade lands on. A fixed 72px, not a percentage,
    so the full hero (480-680px) and the 250px browse band lose the same strip
    of artwork. It is a child of the scrim, so it paints over both layers above
    and under the corner vignette. It only darkens, so it can only raise the
@@ -1322,7 +1135,7 @@ html[data-glow="subtle"] .stage-topnav {
   position: absolute;
   inset: 0 0 auto;
   height: 72px;
-  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0.55) 45%, transparent 100%);
+  background: linear-gradient(180deg, #0e0f11 0%, rgba(14, 15, 17, 0.55) 45%, transparent 100%);
 }
 
 /* Transient-overlay menu items get a ring on plain :focus, not only on
@@ -1339,7 +1152,7 @@ html[data-glow="subtle"] .stage-topnav {
    to `[role="menuitem"]` so nothing else in the app inherits the behaviour.
    The offset is negative for the same clipping reason the TopNav rows use one. */
 [role="menuitem"]:focus {
-  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline: 2px solid #ffffff;
   outline-offset: -2px;
 }
 
@@ -1486,20 +1299,20 @@ html[data-glow="subtle"] .stage-topnav {
    `box-shadow`, which the call site's utilities otherwise own at (0,1,0). The
    query's caret is the second cue. */
 .stage-palette:focus-within {
-  border-color: rgba(216, 180, 254, 0.7);
-  box-shadow: 0 0 0 1px rgba(216, 180, 254, 0.25), 0 20px 80px -10px rgba(168, 85, 247, 0.45);
+  border-color: rgba(255, 255, 255, 0.7);
+  box-shadow: 0 20px 80px -10px rgba(0, 0, 0, 0.6);
 }
 
 /* See the note at its call site in HeroSection. Starts at the hero's own opaque
    ink so there is no step at the boundary, and fades out over its own height so
    `.aurora-bg`'s radials arrive gradually.
-   The top stop is #050505 because that is what BOTH the hero section's own
+   The top stop is #0e0f11 because that is what BOTH the hero section's own
    background and the vertical scrim's final stop resolve to — if either of those
-   changes, this has to change with them, which is why all three say #050505
+   changes, this has to change with them, which is why all three say #0e0f11
    literally rather than one of them reading a token the others do not. */
 .stage-hero-seam {
   pointer-events: none;
-  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0) 100%);
+  background: linear-gradient(180deg, #0e0f11 0%, rgba(14, 15, 17, 0) 100%);
 }
 .stage-hero-match-veil {
   position: absolute;
@@ -1507,9 +1320,9 @@ html[data-glow="subtle"] .stage-topnav {
   pointer-events: none;
   background: radial-gradient(
     closest-side,
-    rgba(5, 5, 5, 0.72) 0%,
-    rgba(5, 5, 5, 0.72) 72%,
-    rgba(5, 5, 5, 0) 100%
+    rgba(14, 15, 17, 0.72) 0%,
+    rgba(14, 15, 17, 0.72) 72%,
+    rgba(14, 15, 17, 0) 100%
   );
 }
 
@@ -1522,13 +1335,13 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
-  color: #f5d0fe;
-  background: rgba(88, 28, 135, 0.5);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.275);
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(216, 180, 254, 0.4);
-  box-shadow: 0 0 20px rgba(168, 85, 247, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.35);
 }
-html[data-glow="subtle"] .stage-pick-pill {
+html[data-effects="reduced"] .stage-pick-pill {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: rgba(59, 19, 90, 0.95);
@@ -1541,10 +1354,10 @@ html[data-glow="subtle"] .stage-pick-pill {
 
 /* Eyebrow above a page/browse title ("MOVIES"). */
 .stage-eyebrow {
-  font-size: 11.5px;
+  font-size: 12px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: var(--stage-purple-lt);
+  color: var(--ink);
   font-weight: 700;
 }
 
@@ -1573,7 +1386,7 @@ html:has(.stage-toolbar) {
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(5, 5, 5, 0.92) 0%, rgba(5, 5, 5, 0.55) 45%, rgba(5, 5, 5, 0.15) 75%, rgba(5, 5, 5, 0.4) 100%),
+    linear-gradient(90deg, rgba(14, 15, 17, 0.92) 0%, rgba(14, 15, 17, 0.55) 45%, rgba(14, 15, 17, 0.15) 75%, rgba(14, 15, 17, 0.4) 100%),
     /* Vertical ramp, restrengthened. The first cut of this file replaced two
        inline gradient divs with one element and, in doing so, WEAKENED the
        bottom fade (0.2 at 38% against the old pair's 0.49) — the file's own
@@ -1587,7 +1400,7 @@ html:has(.stage-toolbar) {
        bought. At the badge row that is 0.285–0.478 alpha against the old
        0.082–0.168. Combined with the left ramp (0.725 at the text column's
        x on a 1280px viewport) the effective floor there goes 0.748 → 0.803. */
-    linear-gradient(0deg, #050505 3%, rgba(5, 5, 5, 0.55) 38%, rgba(5, 5, 5, 0.15) 62%, transparent 78%);
+    linear-gradient(0deg, #0e0f11 3%, rgba(14, 15, 17, 0.55) 38%, rgba(14, 15, 17, 0.15) 62%, transparent 78%);
 }
 
 /* NOTE — the hero↔rail overlap is expressed with Tailwind utilities at the
@@ -1616,14 +1429,14 @@ html:has(.stage-toolbar) {
   z-index: 30;
   padding-top: 14px;
   padding-bottom: 14px;
-  background: linear-gradient(180deg, rgba(5, 5, 5, 0.92), rgba(5, 5, 5, 0.78));
+  background: linear-gradient(180deg, rgba(14, 15, 17, 0.92), rgba(14, 15, 17, 0.78));
   backdrop-filter: blur(18px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
-html[data-glow="subtle"] .stage-toolbar {
+html[data-effects="reduced"] .stage-toolbar {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: #050505;
+  background: #0e0f11;
 }
 /* Not sticky on phones. Below md the toolbar wraps to two rows (the sort
    group's ~184px doesn't fit beside the density toggle in ~284px), so
@@ -1661,13 +1474,13 @@ html[data-glow="subtle"] .stage-toolbar {
   font-size: var(--fs-meta);
   font-weight: 500;
   white-space: nowrap;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--surface-raised-2);
+  border: 1px solid transparent;
   /* 0.7 not the mockup's --text-2: at 12.5px this is normal text, and
      these pills sit on the page background rather than on artwork, so
-     0.7 over #050505 is 8.6:1. Kept explicit so a future page tint
+     0.7 over #0e0f11 is 8.6:1. Kept explicit so a future page tint
      can't quietly erode it. */
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--ink-2);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
@@ -1676,29 +1489,29 @@ html[data-glow="subtle"] .stage-toolbar {
    decides — and it needs to resolve this way round, or hovering the selected
    pill would strip its purple. Same hazard class as .stage-calcell's; recorded
    here too because it happens to be correct by accident of writing order. */
-.stage-fpill:hover { background: rgba(255, 255, 255, 0.09); color: rgba(255, 255, 255, 0.9); }
+.stage-fpill:hover {
+  background: var(--line);
+  color: var(--ink);
+}
 /* aria-pressed, not a class: these are toggle buttons, so the selected
    state has to be in the accessibility tree anyway. Driving the style off
    the same attribute means the two can never disagree — the failure mode
    where a pill looks active to sighted users and reads inactive to a
    screen reader is structurally impossible here. */
 .stage-fpill[aria-pressed="true"] {
-  background: rgba(168, 85, 247, 0.16);
-  /* 0.8, not the mockup's 0.5. The selected border is the load-bearing state
-     indicator here (the two fills are only 1.08:1 apart), so WCAG 1.4.11 wants
-     3:1 against the page: 0.5 gives 2.02:1, 0.8 gives 3.60:1. The 500→600
-     weight step below is the non-colour cue that keeps 1.4.1 satisfied. */
-  border-color: rgba(168, 85, 247, 0.8);
-  color: #e9d5ff;
+  background: var(--ink);
+  /* Selected is a light fill with dark text: a state the eye reads without
+     relying on a border, and the weight step is the non-colour cue. */
+  color: var(--on-action);
   font-weight: 600;
 }
 .stage-fpill:focus-visible {
-  outline: none;
-  border-color: rgba(216, 180, 254, 0.8);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
 .stage-fpill .c {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
   background: rgba(255, 255, 255, 0.12);
   border-radius: 999px;
@@ -1707,7 +1520,9 @@ html[data-glow="subtle"] .stage-toolbar {
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
-.stage-fpill[aria-pressed="true"] .c { background: rgba(168, 85, 247, 0.35); }
+.stage-fpill[aria-pressed="true"] .c {
+  background: rgba(14, 15, 17, 0.14);
+}
 
 /* ── Request rows ─────────────────────────────────────────────────────
    The mockup's .req: a 70×105 poster beside a stacked info column. */
@@ -1738,7 +1553,7 @@ html[data-glow="subtle"] .stage-toolbar {
    The fill/border/text triple per status is why these are classes rather
    than Tailwind — three coordinated values that must move together. */
 .stage-stb {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.05em;
   padding: 4px 10px;
@@ -1774,9 +1589,9 @@ html[data-glow="subtle"] .stage-toolbar {
    escaping. Every other colour family here (.stage-stb-*, .stage-cbadge-*,
    .stage-calchip-p) already works this way. */
 .stage-typetag-4k {
-  background: rgba(168, 85, 247, 0.15);
-  border-color: rgba(192, 132, 252, 0.4);
-  color: #e9d5ff;
+  background: rgba(255, 255, 255, 0.083);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--ink);
 }
 
 /* ── Collection cards ─────────────────────────────────────────────────
@@ -1789,7 +1604,7 @@ html[data-glow="subtle"] .stage-toolbar {
   height: 118px;
   border-radius: var(--r-lg);
   overflow: hidden;
-  border: 1px solid rgba(220, 200, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   background: #0b0b12;
   cursor: pointer;
   /* `transform` deliberately NOT transitioned: nothing sets it, so it was a
@@ -1798,7 +1613,7 @@ html[data-glow="subtle"] .stage-toolbar {
      and z-[3] badge row resolve against each other. */
   transition: border-color var(--dur-fast) var(--ease-standard);
 }
-.stage-colcard:hover { border-color: rgba(168, 85, 247, 0.5); }
+.stage-colcard:hover { border-color: rgba(255, 255, 255, 0.275); }
 /* NO `outline: none` here — this rule used to have it, and that made focus
    WORSE than not writing the rule at all. The app has an unlayered
    `:focus-visible { outline: 2px solid rgba(168,85,247,.75) }` floor further
@@ -1808,8 +1623,9 @@ html[data-glow="subtle"] .stage-toolbar {
    Keeping the floor and adding the border/glow as a SUPPLEMENTARY cue is the
    whole intent. Same correction applied to .stage-calcell below. */
 .stage-colcard:focus-visible {
-  border-color: rgba(216, 180, 254, 0.9);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.3);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
 /* The mockup's ramp, restored.
    An earlier version raised the far-edge stop from 0.1 to 0.55 and justified it
@@ -1825,10 +1641,10 @@ html[data-glow="subtle"] .stage-toolbar {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(90deg, rgba(5, 5, 5, 0.9) 0%, rgba(5, 5, 5, 0.35) 70%, rgba(5, 5, 5, 0.1) 100%);
+  background: linear-gradient(90deg, rgba(14, 15, 17, 0.9) 0%, rgba(14, 15, 17, 0.35) 70%, rgba(14, 15, 17, 0.1) 100%);
 }
 .stage-cbadge {
-  font-size: 9.5px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.05em;
   padding: 3px 8px;
@@ -1847,9 +1663,9 @@ html[data-glow="subtle"] .stage-toolbar {
    the full length, over any artwork: measured 5.16:1 at the light end and
    10.08:1 at the dark against the worst case (a white poster). */
 .stage-cbadge-ai {
-  background: linear-gradient(135deg, rgba(147, 51, 234, 0.96), rgba(88, 28, 135, 0.96));
-  border-color: rgba(216, 180, 254, 0.45);
-  color: #fff;
+  background: var(--surface-raised-2);
+  border-color: var(--line-strong);
+  color: var(--ink);
 }
 .stage-cbadge-pub {
   background: rgba(8, 47, 54, 0.85);
@@ -1863,19 +1679,20 @@ html[data-glow="subtle"] .stage-toolbar {
   gap: 8px;
   height: 44px;
   border-radius: var(--r-md);
-  border: 1px dashed rgba(168, 85, 247, 0.45);
-  background: rgba(168, 85, 247, 0.06);
-  color: var(--stage-purple-lt);
+  border: 1px dashed rgba(255, 255, 255, 0.248);
+  background: rgba(255, 255, 255, 0.033);
+  color: var(--ink);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
-.stage-newcol:hover { background: rgba(168, 85, 247, 0.14); border-color: rgba(168, 85, 247, 0.75); }
+.stage-newcol:hover { background: rgba(255, 255, 255, 0.077); border-color: rgba(255, 255, 255, 0.413); }
 .stage-newcol:focus-visible {
-  outline: none;
   border-style: solid;
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.3);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
 
 /* ── Segmented control (List ⇄ Month) ─────────────────────────────────
@@ -1887,7 +1704,7 @@ html[data-glow="subtle"] .stage-toolbar {
 }
 .stage-seg > button {
   padding: 6px 12px;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
   color: rgba(255, 255, 255, 0.62);
   background: rgba(255, 255, 255, 0.04);
@@ -1903,14 +1720,14 @@ html[data-glow="subtle"] .stage-toolbar {
    cue that survives a monochrome display, and the inset top rule gives a third
    that survives both. */
 .stage-seg > button[aria-pressed="true"] {
-  background: var(--stage-purple-2);
-  color: #fff;
+  background: var(--ink);
+  color: var(--on-action);
   font-weight: 700;
-  box-shadow: inset 0 2px 0 0 rgba(216, 180, 254, 0.9);
 }
 .stage-seg > button:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px rgba(216, 180, 254, 0.9);
+  outline: 2px solid #ffffff;
+  outline-offset: -3px;
+  box-shadow: inset 0 0 0 5px var(--surface-page);
 }
 
 /* ── Calendar ─────────────────────────────────────────────────────────
@@ -1920,14 +1737,14 @@ html[data-glow="subtle"] .stage-toolbar {
   gap: 9px;
   font-size: 12px;
   font-weight: 700;
-  color: #e9d5ff;
+  color: var(--ink);
 }
 .stage-caldate .today {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.06em;
-  background: var(--stage-purple-2);
-  color: #fff;
+  background: var(--action);
+  color: var(--on-action);
   padding: 2px 7px;
   border-radius: 5px;
   text-transform: uppercase;
@@ -1943,13 +1760,13 @@ html[data-glow="subtle"] .stage-toolbar {
 }
 .stage-calrow:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.1); }
 .stage-eptag {
-  font-size: 9.5px;
+  font-size: 12px;
   font-weight: 800;
   padding: 3px 7px;
   border-radius: 6px;
-  background: rgba(168, 85, 247, 0.2);
-  border: 1px solid rgba(168, 85, 247, 0.4);
-  color: #e9d5ff;
+  background: rgba(255, 255, 255, 0.11);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: var(--ink);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -1997,12 +1814,13 @@ html[data-glow="subtle"] .stage-toolbar {
 }
 /* Hover on a cell that HAS state deepens it rather than replacing it. Both are
    (0,2,0) and both follow the base states, so these win on order. */
-.stage-calcell-today:hover { background: rgba(168, 85, 247, 0.22); }
-.stage-calcell-sel:hover { background: rgba(168, 85, 247, 0.32); }
+.stage-calcell-today:hover { background: rgba(255, 255, 255, 0.121); }
+.stage-calcell-sel:hover { background: rgba(255, 255, 255, 0.176); }
 /* No `outline: none` — see the .stage-colcard note above. */
 .stage-calcell:focus-visible {
-  border-color: rgba(216, 180, 254, 0.9);
-  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.3);
+  outline: 2px solid #ffffff;
+  outline-offset: -3px;
+  box-shadow: inset 0 0 0 5px var(--surface-page);
 }
 /* Leading/trailing days from the adjacent months.
    NOT `opacity`, which is what this started as. Two problems with dimming the
@@ -2021,8 +1839,8 @@ html[data-glow="subtle"] .stage-toolbar {
   border-color: rgba(255, 255, 255, 0.035);
 }
 .stage-calcell-today {
-  border-color: rgba(168, 85, 247, 0.6);
-  background: rgba(168, 85, 247, 0.14);
+  border-color: rgba(255, 255, 255, 0.33);
+  background: rgba(255, 255, 255, 0.077);
   color: #fff;
   font-weight: 700;
 }
@@ -2033,8 +1851,8 @@ html[data-glow="subtle"] .stage-toolbar {
    nothing on screen. There is a check for exactly this in the built CSS; if
    you reorder these two, it fails. */
 .stage-calcell-sel {
-  border-color: rgba(168, 85, 247, 0.85);
-  background: rgba(168, 85, 247, 0.24);
+  border-color: rgba(255, 255, 255, 0.468);
+  background: rgba(255, 255, 255, 0.132);
   color: #fff;
   font-weight: 700;
 }
@@ -2046,7 +1864,7 @@ html[data-glow="subtle"] .stage-toolbar {
    `!important` overrides. That is the tell that the primitive is wrong, not
    the call site.) */
 .stage-calchip {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1.35;
   padding: 1px 4px;
@@ -2057,7 +1875,7 @@ html[data-glow="subtle"] .stage-toolbar {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.stage-calchip-p { background: rgba(168, 85, 247, 0.42); color: #f3e8ff; }
+.stage-calchip-p { background: rgba(255, 255, 255, 0.231); color: var(--line-strong); }
 
 /* ══ Settings (Aurora Stage Phase 7a) ═════════════════════════════════
    The mockup's .opt — the selected-state chip used by both Appearance
@@ -2160,7 +1978,7 @@ html[data-glow="subtle"] .stage-toolbar {
   /* Fades in under the opening theater (Stage refresh, P2). */
   animation: veilIn 260ms var(--ease-standard) backwards;
 }
-html[data-glow="subtle"] .stage-dim-veil {
+html[data-effects="reduced"] .stage-dim-veil {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: rgba(3, 3, 5, 0.92);
@@ -2650,7 +2468,7 @@ html[data-player-surface="theater"] .stage-party-reactions {
   border: 1px solid var(--glow-border-strong);
   box-shadow: var(--glow-halo-strong), 0 24px 60px rgba(0, 0, 0, 0.65);
 }
-html[data-glow="subtle"] .stage-upnext {
+html[data-effects="reduced"] .stage-upnext {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: #0c0a14;
@@ -2671,9 +2489,9 @@ html[data-glow="subtle"] .stage-upnext {
   gap: 6px;
   font-size: var(--fs-caption);
   font-weight: 700;
-  color: #f5d0fe;
-  background: rgba(168, 85, 247, 0.16);
-  border: 1px solid rgba(168, 85, 247, 0.4);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.088);
+  border: 1px solid rgba(255, 255, 255, 0.22);
   padding: 3px 9px;
   border-radius: 999px;
   vertical-align: middle;
@@ -2693,98 +2511,93 @@ html[data-glow="subtle"] .stage-upnext {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
-  height: 46px;
-  padding: 0 24px;
-  border-radius: var(--r-md);
+  gap: 8px;
+  height: 44px;
+  padding: 0 22px;
+  border-radius: var(--radius-control);
   border: 1px solid transparent;
   font-weight: 600;
-  font-size: 14.5px;
+  font-size: 15px;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
+  transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
-/* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
-   scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
-   three `!important`s to undo three hard-coded values. Same argument as
-   .stage-typetag-4k. */
+/* Size step. A size class rather than `!h-9 !px-4 !text-[13px]` at the call
+   site, which needed three `!important`s to undo three hard-coded values. */
 .stage-btn-sm {
   height: 36px;
   padding: 0 16px;
   font-size: 13px;
-  border-radius: 10px;
 }
-/* Round variant for the hero / detail / Load-More CTAs, which were
-   rounded-full bespoke Tailwind buttons. Declared AFTER .stage-btn-sm on
-   purpose: equal specificity, and -sm sets its own 10px radius. */
+/* Round variant, for a secondary that sits beside the primary pill. Declared
+   AFTER .stage-btn-sm on purpose: equal specificity. */
 .stage-btn-pill {
   border-radius: var(--r-pill);
 }
 .stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.stage-btn:not(:disabled):hover { transform: translateY(-1px); }
-/* Press feedback. Buttons had hover and focus states and nothing for the
-   click itself; a 2% settle is the smallest tactile cue that reads. */
-/* .97 over 90ms (Stage refresh, T1): the press lands fast and is felt; the
-   release eases back on the base transition above. */
-.stage-btn:not(:disabled):active { transform: translateY(0) scale(0.97); transition-duration: 90ms; }
+/* Press feedback: a 3% settle over 90ms is the smallest tactile cue that
+   reads; the release eases back on the base transition above. */
+.stage-btn:not(:disabled):active { transform: scale(0.97); transition-duration: 90ms; }
+/* The global two-tone ring, restated because the variants below are (0,1,0)
+   rules later in the file and one of them sets box-shadow. */
 .stage-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
+/* The primary action: white, dark text, always a pill. White holds its
+   contrast over any artwork, which a brand colour cannot promise. */
 .stage-btn-primary {
-  background: linear-gradient(135deg, var(--stage-purple), var(--stage-purple-2));
-  color: #fff;
-  box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
+  background: var(--action);
+  color: var(--on-action);
+  border-radius: var(--r-pill);
 }
-/* The glow brightens under the pointer (T1). `:not(:focus-visible)` because
-   this is (0,4,0) and would otherwise REPLACE the focus ring that
-   .stage-btn:focus-visible draws with box-shadow at (0,2,0) whenever a focused
-   button is also hovered. */
-.stage-btn-primary:not(:disabled):not(:focus-visible):hover {
-  box-shadow: 0 10px 34px rgba(168, 85, 247, 0.6), inset 0 0 0 1px rgba(216, 180, 254, 0.5);
-}
+.stage-btn-primary:not(:disabled):hover { background: rgba(255, 255, 255, 0.9); }
+/* Secondary: a quiet fill. No blur: it reads on the page and on a scrim
+   alike, and blur is kept for chrome that content scrolls under. */
 .stage-btn-ghost {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(8px);
-  /* G1. .stage-btn:focus-visible (0,2,0) replaces this with its ring while
-     focused, which is the intent: the ring is the indicator. */
-  box-shadow: var(--glass-lip);
+  background: var(--action-soft);
+  color: var(--ink);
 }
+.stage-btn-ghost:not(:disabled):hover { background: rgba(255, 255, 255, 0.16); }
+/* Tertiary: text only. */
 .stage-btn-quiet {
   background: transparent;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--ink-2);
   font-weight: 500;
 }
-.stage-btn-quiet:hover { color: #fff; }
-/* Ghost's toggled-on state (the hero's "✓ In My List"): the purple tint
-   the deleted .stage-pill.is-on carried, as a modifier here so a caller
-   does not need `!important` utilities to beat .stage-btn-ghost's fill. */
+.stage-btn-quiet:hover { color: var(--ink); }
+/* Outlined: transparent with a strong hairline. */
+.stage-btn-outline {
+  background: transparent;
+  color: var(--ink-2);
+  border-color: var(--line-strong);
+}
+.stage-btn-outline:not(:disabled):hover { background: var(--action-soft); color: var(--ink); }
+/* Secondary's toggled-on state (the hero's "In My List"): a stronger fill,
+   as a modifier here so a caller does not need `!important` utilities to
+   beat .stage-btn-ghost's. */
 .stage-btn-ghost.is-on {
-  background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.5);
-  color: #e9d5ff;
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--ink);
 }
-.stage-btn-ghost.is-on:hover { background: rgba(168, 85, 247, 0.24); }
-/* Destructive tertiary (the detail rail's "Not interested"). */
+.stage-btn-ghost.is-on:hover { background: rgba(255, 255, 255, 0.24); }
+/* Destructive tertiary (the detail page's "Not interested"). */
 .stage-btn-danger {
-  background: rgba(239, 68, 68, 0.06);
-  border-color: rgba(239, 68, 68, 0.2);
-  color: rgba(252, 165, 165, 0.9);
+  background: rgba(248, 113, 113, 0.08);
+  color: var(--danger-ink);
 }
-.stage-btn-danger:hover { background: rgba(239, 68, 68, 0.14); color: #fecaca; }
+.stage-btn-danger:hover { background: rgba(248, 113, 113, 0.16); }
+/* Destructive primary: the confirm button of a destructive dialog. */
+.stage-btn-destructive {
+  background: var(--danger);
+  color: #ffffff;
+}
+.stage-btn-destructive:not(:disabled):hover { filter: brightness(1.12); }
 
-/* Removed with the dead CSS (UI polish pass): .stage-pill (+ .is-on /
-   aria states), .stage-badge, .stage-qb / -4k / -hdr / -hd and
-   .stage-btn-white. All were Phase 0 primitives ported 1:1 from the mockup
-   that no later phase consumed — the filter pills shipped as .stage-fpill,
-   the chips as .card-badge and .badge-glass. */
-
-/* Reduced motion — the lift on hover and the settle on press are decorative. */
+/* Reduced motion — the settle on press is decorative. */
 @media (prefers-reduced-motion: reduce) {
   .stage-btn { transition: none; }
-  .stage-btn:not(:disabled):hover,
   .stage-btn:not(:disabled):active { transform: none; }
 }
 
@@ -2802,33 +2615,19 @@ html[data-glow="subtle"] .stage-upnext {
   font-size: 13px;
   font-weight: 500;
   line-height: 1;
-  color: rgba(255, 255, 255, 0.85);
-  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+  background-color: var(--surface-raised);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 10px center;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
-.stage-select:hover { background-color: rgba(255, 255, 255, 0.08); color: #fff; }
-.stage-select option { background: var(--surface-1); color: #fff; }
+.stage-select:hover { background-color: var(--surface-raised-2); }
+.stage-select option { background: var(--surface-raised-2); color: var(--ink); }
 
-/* Glow = Subtle honours the blur budget the same way .aurora-glass-overlay
-   does (see the html[data-glow="subtle"] note above): the Stage primitives
-   that layer backdrop-blur drop it for a flat fill. */
-html[data-glow="subtle"] .stage-btn-ghost,
-html[data-glow="subtle"] .badge-glass {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
-/* No replacement fill for .badge-glass: it deliberately has NO background
-   of its own — every call site supplies one as a Tailwind `bg-<colour>/<alpha>`
-   utility — and this selector is (0,2,0), so adding `background` here would
-   beat all of them and repaint sixteen differently-coloured chips (4K
-   purple, status ambers/emeralds, the admin role pill) a uniform grey.
-   Dropping the blur is the whole of the blur budget's ask; the fills are
-   already opaque enough to stand without it. */
+/* Chips carry no blur: each call site supplies an opaque-enough fill. */
 
 /* Toast entrance (Stage refresh, D3): rises 14px into the place it rests,
    instead of travelling the whole width of the screen in from the right. */
@@ -3023,8 +2822,8 @@ html[data-glow="subtle"] .badge-glass {
 }
 ::-webkit-scrollbar-thumb {
   background: linear-gradient(135deg,
-    rgba(168, 85, 247, 0.35),
-    rgba(217, 70, 239, 0.25));
+    rgba(255, 255, 255, 0.193),
+    rgba(255, 255, 255, 0.138));
   border-radius: 10px;
   border: 2px solid transparent;
   background-clip: padding-box;
@@ -3032,8 +2831,8 @@ html[data-glow="subtle"] .badge-glass {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(135deg,
-    rgba(168, 85, 247, 0.75),
-    rgba(217, 70, 239, 0.55));
+    rgba(255, 255, 255, 0.413),
+    rgba(255, 255, 255, 0.303));
   background-clip: padding-box;
   border: 2px solid transparent;
 }
@@ -3043,7 +2842,7 @@ html[data-glow="subtle"] .badge-glass {
 /* Firefox (limited support for full theming) */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(168, 85, 247, 0.45) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.248) transparent;
 }
 
 /* ====================================================================
@@ -3083,14 +2882,13 @@ html[data-glow="subtle"] .badge-glass {
   left: 0;
   right: 0;
   height: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--track);
   z-index: 2;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #A855F7, #D8B4FE);
-  box-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
+  background: var(--action);
   transition: width var(--dur-slow) var(--ease-standard);
 }
 
@@ -3171,7 +2969,7 @@ html[data-glow="subtle"] .badge-glass {
   color: #fff;
 }
 .rail-paddle:focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.8);
+  outline: 2px solid #ffffff;
   outline-offset: 2px;
 }
 .rail-paddle-left {
@@ -3223,10 +3021,10 @@ html[data-glow="subtle"] .badge-glass {
    No shelf (Stage refresh, RS). It used to be a glass frame — fill,
    glow border, halo, 14px backdrop blur, 18-22px padding — around every
    rail, so Home was a stack of 5-10 boxes, each full-width and ~400px
-   tall, and the heaviest blur on the page (Glow = Subtle had to flatten
+   tall, and the heaviest blur on the page (Reduce effects had to flatten
    it). The cards already carry their own halo; the rails now sit on the
    page, aligned to the same gutter as the hero, and the spacing between
-   them does the grouping. Nothing to override under Glow = Subtle, so
+   them does the grouping. Nothing to override under Reduce effects, so
    that rule went with it. audit-glass-contrast measures the rail header
    on the page background (.aurora-bg) instead of on the shelf.
    ==================================================================== */
@@ -3260,9 +3058,9 @@ html[data-glow="subtle"] .badge-glass {
   border: 1px solid transparent;
 }
 .rail-header .rail-icon[data-tint="purple"] {
-  background: rgba(168, 85, 247, 0.18);
-  border-color: rgba(168, 85, 247, 0.4);
-  color: #d8b4fe;
+  background: rgba(255, 255, 255, 0.099);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--ink);
 }
 .rail-header .rail-icon[data-tint="teal"] {
   background: rgba(45, 212, 191, 0.16);
@@ -3285,9 +3083,9 @@ html[data-glow="subtle"] .badge-glass {
   color: #fda4af;
 }
 .rail-header .rail-icon[data-tint="indigo"] {
-  background: rgba(99, 102, 241, 0.16);
-  border-color: rgba(99, 102, 241, 0.4);
-  color: #a5b4fc;
+  background: rgba(255, 255, 255, 0.088);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--ink);
 }
 /* The display face at --fs-rail (Stage refresh, R1). Rail titles were body
    Inter at 16.8px/600 while --fs-rail (21px) sat unused, so the one heading
@@ -3317,7 +3115,7 @@ html[data-glow="subtle"] .badge-glass {
 .rail-header .rail-spacer {
   flex: 1;
   height: 1px;
-  background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.135) 0%, rgba(255, 255, 255, 0.03) 100%);
 }
 /* See All takes the secondary-text token, not white at 0.4 (Stage refresh,
    RS): that was about 3.7:1 and never measured, because nothing audited the
@@ -3331,7 +3129,7 @@ html[data-glow="subtle"] .badge-glass {
   transition: color 0.2s;
   flex-shrink: 0;
 }
-.rail-header .rail-see-all:hover { color: #d8b4fe; }
+.rail-header .rail-see-all:hover { color: var(--line-strong); }
 
 /* ====================================================================
    .media-card-cinema — the new card design used inside .rail-container.
@@ -3386,8 +3184,6 @@ html[data-glow="subtle"] .badge-glass {
    :focus-visible outline is deliberately left in place on top of this. Not
    behind the hover query: keyboard focus is not a pointer state. */
 .media-card-cinema:focus-visible {
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong);
   transform: translateY(-4px);
 }
 .media-card-cinema .poster-wrap {
@@ -3464,7 +3260,7 @@ html[data-glow="subtle"] .badge-glass {
        cannot tell an off-screen or never-requested image from a slow one, so
        the bound is what stops the off-screen ones; a poster still pending after
        that shows the card's flat fill, as before C2;
-     - Glow = Subtle (html[data-glow="subtle"], the weak-GPU setting) drops it.
+     - Reduce effects (html[data-effects="reduced"], the weak-GPU setting) drops it.
    `::before`, not `::after`: positioned and first in tree order, it paints over
    the pending (transparent) <img> but under the card's badges and text. The
    wrap is already `position: relative`; the card's `overflow: hidden` clips the
@@ -3474,7 +3270,7 @@ html[data-glow="subtle"] .badge-glass {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.07) 50%, rgba(216, 180, 254, 0) 70%);
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0) 30%, rgba(255, 255, 255, 0.053) 50%, rgba(255, 255, 255, 0) 70%);
   transform: translateX(-100%);
   animation: posterSweep 1.6s var(--ease-standard) 3;
 }
@@ -3482,7 +3278,7 @@ html[data-glow="subtle"] .badge-glass {
   from { transform: translateX(-100%); }
   to { transform: translateX(100%); }
 }
-html[data-glow="subtle"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
+html[data-effects="reduced"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
   content: none;
 }
 /* Detail tabs move instead of jumping (Stage refresh, DT3). DetailView keys
@@ -3525,7 +3321,7 @@ img.stage-img-fade:not([data-loaded]) {
    no main-thread paint; the first cut animated `background-position`, which
    repainted every tile every frame. It stays infinite because a skeleton only
    exists while its data is loading — the settled no-pick hero, which used to be
-   one, is a static card again (HeroSection). Glow = Subtle drops it.
+   one, is a static card again (HeroSection). Reduce effects drops it.
    Its containing block and clip come from a ZERO-specificity rule, so a call
    site's own `absolute` (the hero skeleton's ring disc) or `overflow-*`
    utility still wins: a plain `.stage-skel { position: relative }`, unlayered
@@ -3535,15 +3331,14 @@ img.stage-img-fade:not([data-loaded]) {
   overflow: hidden;
 }
 .stage-skel {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: var(--surface-raised);
 }
 .stage-skel::before {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(100deg, rgba(216, 180, 254, 0) 30%, rgba(216, 180, 254, 0.06) 50%, rgba(216, 180, 254, 0) 70%);
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0) 30%, rgba(255, 255, 255, 0.045) 50%, rgba(255, 255, 255, 0) 70%);
   transform: translateX(-100%);
   animation: skelSweep 1.6s var(--ease-standard) infinite;
 }
@@ -3551,7 +3346,7 @@ img.stage-img-fade:not([data-loaded]) {
   from { transform: translateX(-100%); }
   to { transform: translateX(100%); }
 }
-html[data-glow="subtle"] .stage-skel::before {
+html[data-effects="reduced"] .stage-skel::before {
   content: none;
 }
 /* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
@@ -3603,11 +3398,11 @@ html[data-glow="subtle"] .stage-skel::before {
   position: absolute;
   inset: -7px;
 }
-.media-card-cinema .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
+.media-card-cinema .lib-badge:hover { background: rgba(255, 255, 255, 0.413); transform: scale(1.06); }
 .media-card-cinema .lib-badge.in-lib {
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  border-color: rgba(220, 200, 255, 0.6);
-  box-shadow: 0 0 12px rgba(168, 85, 247, 0.45);
+  background: var(--action);
+  border-color: transparent;
+  color: var(--on-action);
 }
 /* 2028-05-28 (deep-debug Bug D) — destructive hover cue when the badge is
    already in the in-lib state. Without this, the generic .lib-badge:hover
@@ -3645,18 +3440,21 @@ html[data-glow="subtle"] .stage-skel::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, rgba(216, 180, 254, 0.85), rgba(168, 85, 247, 0.85));
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.637), rgba(255, 255, 255, 0.468));
   border: 1px solid rgba(255, 255, 255, 0.35);
   color: #fffbe6;
-  box-shadow: 0 0 14px rgba(216, 180, 254, 0.5);
+  box-shadow: 0 0 14px rgba(0, 0, 0, 0.5);
   z-index: 3;
   /* Interactive now (was pointer-events:none) so a touch/click focuses it
      and reveals the reason; cursor hints it's actionable. */
   cursor: pointer;
   transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
-.media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(216, 180, 254, 0.7); }
-.media-card-cinema .ai-gem:focus-visible { outline: 2px solid rgba(216, 180, 254, 0.95); outline-offset: 2px; }
+.media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(255, 255, 255, 0.525); }
+.media-card-cinema .ai-gem:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
 /* svg ignores pointer events so the click always lands on the button. */
 .media-card-cinema .ai-gem svg { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.55)); pointer-events: none; }
 
@@ -3722,7 +3520,7 @@ html[data-glow="subtle"] .stage-skel::before {
 }
 .media-card-cinema .reason-text {
   margin: 0;
-  font-size: 0.72rem;
+  font-size: 12px;
   font-style: italic;
   line-height: 1.34;
   color: rgba(238, 232, 252, 0.97);
@@ -3813,7 +3611,7 @@ html[data-glow="subtle"] .stage-skel::before {
 }
 .media-card-cinema .card-overlay .co-meta {
   margin-top: 5px;
-  font-size: 0.72rem;
+  font-size: 12px;
   font-weight: 400;
   /* See the AA note above — this is the same token the shelf used. */
   color: var(--text-secondary);
@@ -3961,7 +3759,7 @@ html[data-glow="subtle"] .stage-skel::before {
 }
 .media-card-cinema .progress-bar .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #a855f7, #d8b4fe);
+  background: var(--action);
 }
 
 /* 2026-05-27 — Resume pill (one-click resume from Continue Watching
@@ -3993,11 +3791,11 @@ html[data-glow="subtle"] .stage-skel::before {
   gap: 4px;
   padding: 4px 9px;
   border-radius: 9999px;
-  background: linear-gradient(135deg, #6366f1, #4338ca);
-  border: 1px solid rgba(165, 180, 252, 0.5);
-  box-shadow: 0 4px 12px rgba(67, 56, 202, 0.5);
-  color: rgba(255, 255, 255, 0.96);
-  font-size: 0.7rem;
+  background: var(--action);
+  border: 1px solid transparent;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  color: var(--on-action);
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
@@ -4014,7 +3812,7 @@ html[data-glow="subtle"] .stage-skel::before {
   transform: translateY(0);
 }
 .media-card-cinema .resume-pill:hover {
-  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.65);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
   transform: translateY(0) scale(1.04);
 }
 .media-card-cinema .resume-pill:focus-visible {
@@ -4036,201 +3834,128 @@ html[data-glow="subtle"] .stage-skel::before {
   gap: 6px;
   padding: 4px 10px;
   border-radius: 9999px;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 600;
-  backdrop-filter: blur(10px);
 }
 
 /* Input styling.
    Exclude range sliders: this box treatment (padding/border/background)
    applies inside the slider's content box, shrinking the track so the
-   thumb can't reach the ends — e.g. the player's volume slider couldn't
-   reach max ("doesn't go all the way to the right"). Range inputs keep
-   their native rendering + Tailwind `accent-*`. Text inputs, selects,
-   textareas, and checkboxes are unaffected. */
+   thumb can't reach the ends. Range inputs keep their native rendering. */
 input:not([type="range"]), select, textarea {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  color: #fff;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  color: var(--ink);
   padding: 12px 16px;
-  font-size: 0.9rem;
-  /* Only what the focus rule below changes. `all` on EVERY input, select and
-     textarea in the app also animated padding/width/height whenever a field
-     was resized or re-laid-out. */
+  font-size: 0.9375rem;
+  /* Only what the focus rule below changes: `all` also animated
+     padding/width/height whenever a field was resized. */
   transition: background-color var(--dur-base) var(--ease-standard),
               border-color var(--dur-base) var(--ease-standard),
               box-shadow var(--dur-base) var(--ease-standard);
 }
 
-/* Focus treatment for EVERY input/select/textarea in the app. Phase 8 rewrote
-   the three values, because this rule is load-bearing in a way its previous
-   form did not survive contact with a measurement.
+/* Focus treatment for EVERY input/select/textarea in the app, and the ONLY
+   focus indicator a text field has: the rule after the global ring below
+   exempts fields from the outline. So the border is what must clear SC
+   1.4.11's 3:1 against the field's own fill (audit-focus-indicators.mjs,
+   Check 2, measures it on every surface step); the soft halo around it is
+   not the indicator and is not relied on.
 
-   The rule below it exempts inputs from the global :focus-visible outline, on
-   the stated grounds that "their own border + box-shadow focus treatment already
-   provides the indicator". That makes THIS the only focus indicator any input in
-   the app has — and resolved against the built stylesheet (scripts/resolve-focus.mjs)
-   it wins for background/border-color/box-shadow at (0,2,1) over every
-   call-site `focus:bg-*` / `focus:border-*` Tailwind utility at (0,2,0), so it is
-   also the only one that MATTERS.
-   ((0,2,1), NOT the (0,3,1) first written here and in the Phase 8 commit message:
-   that figure came out of scripts/resolve-focus.mjs, whose specificity function
-   was double-counting `:not()` arguments. The note at the top of .stage-navsearch
-   in this same file had the correct (0,2,1) for this exact selector 2300 lines
-   earlier, so the file contradicted itself. The conclusion holds — (0,2,1) still
-   beats (0,2,0) — but the margin is one TYPE unit, not a whole class column, so a
-   (0,3,0) selector matching an input would really win where the inflated figure
-   said otherwise. The resolver now self-tests against a table of tricky
-   selectors and refuses to run if any is wrong.) Measured at the old values:
-       focus border rgba(168,85,247,.5) vs the field's fill   1.99:1
-       background shift .05 -> .08                            1.07:1
-       3px ring rgba(168,85,247,.1) vs the panel              1.09:1
-   Against SC 1.4.11's 3:1 that is not a focus indicator, it is a tint. Every
-   text field in Aurora — search, admin forms, bug report, party chat, join code —
-   was keyboard-focusable with no perceivable focus state.
-
-   The new values are not invented: they are exactly what
-   `.stage-navsearch:focus-within` already uses, and that rule's own comment
-   explains why ("this is the ONLY focus indicator for the field — so it has to
-   clear SC 1.4.11's 3:1, not just look tinted"). One author got this right for
-   one field; the global rule never got the same treatment. Now measured:
-       focus border rgba(216,180,254,.9) vs field fill   7.07–8.27:1
-       vs the resting border (i.e. the CHANGE)           5.70–6.82:1
-   across the three panel darks the app actually uses.
-   The 3px halo is raised .1 -> .28 to match, but it is NOT the indicator and is
-   not relied on — at 1.35–1.42:1 against the panel it is a glow, and the border
-   is what carries the requirement.
-
-   ⚠️ `:not([hidden])` on the select/textarea branches is NOT decoration. Written
-   as a bare `select:focus, textarea:focus` those branches score (0,1,1), which
-   LOSES to a call-site `focus:border-*` at (0,2,0) — so while the `input`
-   branch at (0,2,1) did override every call site, textareas did not, and
-   BugReportModal's Description field and CollectionsModal's textarea kept their
-   own `focus:border-purple-500/60` at 2.19–2.37:1 with no outline floor either.
-   The first version of this fix claimed all nine call sites were overridden;
-   that was true for inputs and false for textareas, which is exactly the kind of
-   thing "the rule is at higher specificity" hides when you check one example.
-   `:not([hidden])` is always true for a field a user can focus and lifts both
-   branches to (0,2,1), level with `input`.
-
-   Note also that `input[type="range"]` is deliberately outside this rule AND
-   outside the exemption below, so range inputs are the one control that still
-   receives the global outline. That is intentional but imperfect: on
-   OnboardingFlow's slider the outline traces the 6px track rather than the thumb. */
+   Resolved against the built stylesheet (scripts/resolve-focus.mjs) this
+   wins for background/border-color/box-shadow at (0,2,1) over every
+   call-site `focus:bg-*` / `focus:border-*` utility at (0,2,0).
+   `:not([hidden])` on the select/textarea branches is NOT decoration: a
+   bare `select:focus, textarea:focus` scores (0,1,1) and LOSES to those
+   utilities. It is always true for a field a user can focus and lifts
+   both branches level with `input`. */
 input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
 select:not([hidden]):focus,
 textarea:not([hidden]):focus {
   outline: none;
-  border-color: rgba(216, 180, 254, 0.9);
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.28);
+  border-color: #ffffff;
+  background: var(--surface-raised-2);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
 }
 
-/* 0.5, the faint-text floor (audit-glass-contrast.mjs): this styles every
-   input without a placeholder class, and many of those placeholders carry
-   information ("4 digits", "leave empty to keep the stored key"). 0.35 was
-   about 3:1 on a field's own fill; 0.5 holds 4.5:1 up to the focused fill. */
+/* ink-3, the lightest colour allowed for text: many placeholders carry
+   information ("4 digits", "leave empty to keep the stored key"). */
 input::placeholder, textarea::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ink-3);
 }
 
-/* 2026-06-17 (a11y quick-win) — visible keyboard focus indicator for
-   the interactive elements that had no focus style app-wide (only
-   .media-list-row / .ai-gem / .resume-pill / inputs had one). Targets
-   buttons, links, role=button/switch/menuitem/tab/option divs, and
-   anything with tabindex (the cards). :focus-visible = keyboard focus
-   only, so mouse clicks stay ring-free.
+/* The keyboard focus ring, two-tone so it reads on every surface: a white
+   ring two pixels off the control, inside a dark band. On the page the dark
+   band disappears and the white ring carries it; over bright artwork or
+   beside the white primary action the dark band is what separates the ring
+   from what is behind it. :focus-visible = keyboard focus only, so mouse
+   clicks stay ring-free.
 
-   ⚠️ CORRECTED in Phase 8. This rule is genuinely useful but it is NOT the
-   guaranteed floor its previous comment claimed. That comment read: "unlayered
-   CSS beats @layer rules in the cascade, so this outline renders even where a
-   Tailwind `focus:outline-none` utility (in @layer utilities) would otherwise
-   suppress it. That makes it a true a11y floor — focus is ALWAYS visibly
-   indicated". Both sentences are false, for one reason:
-
-   TAILWIND 3 EMITS NO NATIVE CASCADE LAYERS. Its `@layer utilities` is a
-   build-time grouping directive that PostCSS expands and discards; the built
-   stylesheet contains zero `@layer` at-rules (asserted by
-   scripts/resolve-focus.mjs on every run). Layer precedence therefore never
-   enters the cascade at all, and the comparison falls through to specificity —
-   where `.focus\:outline-none:focus` at (0,2,0) beats this rule's (0,1,0), and
-   is later in source order as well. Resolved against the real output, a focused
-   `<button class="focus:outline-none">` with no ring gets
-   `outline: 2px solid transparent`: no visible focus indicator.
-   (Tailwind 4 does use native layers, so this reasoning would need revisiting
-   with that upgrade — it would then be true.)
-
-   This is the fourth instance of the same shape in this project, and the reason
-   the other three survived review: a comment asserting the floor was
-   unconditional made `focus:outline-none` look free to write anywhere.
-
-   What is actually true:
-   - For controls with NO opt-out utility, this rule is the indicator, and it
-     measures 3.02:1 against a field fill and 3.24:1 against the page — it
-     clears 1.4.11.
-   - Elements with a designed ring (`focus-visible:ring-*`) show that ring AND
-     this outline: a bolder double indicator, still accessible.
-   - Anything carrying `focus:outline-none` or `focus-visible:outline-none`
-     SUPPRESSES this, and must supply its own indicator meeting 3:1. That is now
-     enforced by scripts/audit-focus-indicators.mjs rather than assumed.
-   - Inputs are exempted below and rely on the `:focus` rule above, whose values
-     Phase 8 had to rewrite — see the note there. */
+   This is a floor, not a guarantee. TAILWIND 3 EMITS NO NATIVE CASCADE
+   LAYERS (the built stylesheet contains zero `@layer` at-rules, asserted by
+   scripts/resolve-focus.mjs on every run), so the comparison with a
+   call-site utility falls through to specificity, where
+   `.focus\:outline-none:focus` at (0,2,0) beats this rule's (0,1,0).
+   - A control with no opt-out utility gets this ring.
+   - A control with a designed ring (`focus-visible:ring-*`, or a rule of
+     its own that sets box-shadow) keeps that in place of the dark band and
+     still gets the white outline.
+   - Anything carrying `focus:outline-none` / `focus-visible:outline-none`
+     SUPPRESSES the outline and must supply its own indicator meeting 3:1,
+     which scripts/audit-focus-indicators.mjs enforces.
+   --focus-band is the dark band alone, for rules that set their own
+   box-shadow and want to keep both tones. */
+:root { --focus-band: 0 0 0 6px var(--surface-page); }
 :focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline: 2px solid #ffffff;
   outline-offset: 2px;
+  box-shadow: var(--focus-band);
 }
-/* Inputs/selects/textareas keep their own border + box-shadow focus treatment
-   (above) — don't stack a ring on top of it.
-   This exemption is why that rule's values are load-bearing: at (0,2,1) it wins
-   over the (0,1,0) floor for every input in the app, so if the treatment above
-   is weak, NOTHING indicates focus on a text field. It was weak (1.99:1) until
-   Phase 8 measured it. Do not soften those values without re-running
-   scripts/audit-focus-indicators.mjs. */
+/* Inputs/selects/textareas keep their own border + halo treatment (above):
+   don't stack a ring on top of it. This exemption is why that rule's values
+   are load-bearing. */
 input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   outline: none;
 }
 /* Checkboxes and radios are excluded from BOTH the treatment above and this
-   exemption, so they keep the global :focus-visible outline — which for them is
-   the only thing that can work. Blink's AdjustCheckboxStyle discards `border`
-   and `padding` on a native checkbox, so the treatment's near-white border-color
-   never rendered on one; all they got was the 3px halo, which measures 1.38–1.42:1
-   against the panel — the exact value the note above calls "a glow … NOT the
-   indicator". Raising it from .1 to .28 made eight of them (admin toggles,
-   request and collection forms) render a hard-edged 19x19 purple block behind a
-   13px box, on mouse click as well as keyboard, while still having no 3:1
-   indicator. The floor's 2px outline at 3.24:1 is both correct and better looking. */
+   exemption, so they keep the global ring, which for them is the only thing
+   that can work: Blink discards `border` and `padding` on a native checkbox,
+   so a border-colour indicator never renders on one. */
 
-/* Toggle switch */
+/* Toggle switch. On is the white action colour with a dark handle; off is
+   a neutral track with a light handle. */
 .toggle {
   width: 48px;
   height: 26px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--line-strong);
   border-radius: 13px;
   position: relative;
   cursor: pointer;
-  transition: background-color var(--dur-slow) var(--ease-standard);
+  transition: background-color var(--dur-base) var(--ease-standard);
 }
 
 .toggle.active {
-  background: #A855F7;
+  background: var(--action);
 }
 
 .toggle-handle {
   width: 22px;
   height: 22px;
-  background: white;
+  background: var(--ink);
   border-radius: 50%;
   position: absolute;
   top: 2px;
   left: 2px;
-  transition: transform 0.3s var(--ease-standard);
+  transition: transform var(--dur-base) var(--ease-standard),
+              background-color var(--dur-base) var(--ease-standard);
 }
 
 .toggle.active .toggle-handle {
   transform: translateX(22px);
+  background: var(--on-action);
 }
 
 /* .status-dot (+ .online / .offline / .processing) and the legacy card's
@@ -4252,43 +3977,36 @@ textarea:focus-visible {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--line);
 }
 
 .data-table td {
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--line);
   font-size: 0.875rem;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--ink-2);
 }
 
 .data-table tr:hover td {
   background: rgba(255, 255, 255, 0.02);
 }
 
-/* Toast (Stage refresh, D3). Aurora's glass instead of a neutral #111 card:
-   the card gradient, the glow border, the glass lip, and a soft glow tinted by
-   the toast's type (Toast.tsx stamps data-type). The message is white/80 on a
-   near-opaque dark fill, so the text contrast does not depend on what is behind. */
+/* Toast: an opaque raised-2 card with a hairline and a dark shadow, so the
+   message contrast does not depend on what is behind it. The type is
+   carried by the icon and its colour (Toast.tsx), not by a tinted glow. */
 .toast {
-  background: linear-gradient(180deg, rgba(28, 25, 42, 0.94), rgba(14, 12, 22, 0.96));
-  backdrop-filter: blur(20px);
-  border: 1px solid var(--glow-border);
+  background: var(--surface-raised-2);
+  border: 1px solid var(--line-strong);
   padding: 12px 14px 12px 12px;
-  border-radius: var(--r-lg);
+  border-radius: var(--radius-control);
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow:
-    var(--glass-lip),
-    0 18px 44px -12px rgba(0, 0, 0, 0.75),
-    0 0 30px -10px var(--toast-glow, rgba(168, 85, 247, 0.45));
+  box-shadow: 0 18px 44px -12px rgba(0, 0, 0, 0.75);
   /* forwards: holds the "to" frame so a re-render can never snap the toast
      back to its "from" (the same defence .animate-fade-in has). */
   animation: toastIn 320ms var(--ease-emphasized) forwards;
 }
-.toast[data-type="success"] { --toast-glow: rgba(16, 185, 129, 0.4); }
-.toast[data-type="error"] { --toast-glow: rgba(239, 68, 68, 0.4); }
 
 /* ====================================================================
    LIBRARY HYBRID REDESIGN (2026-05-31) — Movies / TV Shows browse page.
@@ -4312,7 +4030,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(0deg, rgba(5, 5, 5, 0.55), rgba(5, 5, 5, 0.05) 55%, transparent);
+  background: linear-gradient(0deg, rgba(14, 15, 17, 0.55), rgba(14, 15, 17, 0.05) 55%, transparent);
   opacity: 0;
   transition: opacity var(--dur-base) var(--ease-standard);
   pointer-events: none;
@@ -4371,7 +4089,7 @@ textarea:focus-visible {
 .media-card-cinema .card-badge {
   padding: 3px 7px;
   border-radius: 6px;
-  font-size: 0.62rem;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   line-height: 1;
@@ -4385,8 +4103,8 @@ textarea:focus-visible {
 }
 .media-card-cinema .card-badge.is-quality {
   color: #f5edff;
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.85), rgba(126, 34, 206, 0.85));
-  border-color: rgba(220, 200, 255, 0.5);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.468), rgba(255, 255, 255, 0.468));
+  border-color: rgba(255, 255, 255, 0.375);
 }
 /* HDR badge — amber accent, distinct from 4K's purple and the neutral
    maturity rating. The JSX makes is-hdr and is-quality mutually exclusive
@@ -4407,23 +4125,23 @@ textarea:focus-visible {
   padding: 7px 15px;
   border-radius: 9999px;
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--ink-2);
+  background: var(--surface-raised-2);
+  border: 1px solid transparent;
   transition: color 0.15s, background 0.15s, border-color 0.15s;
   cursor: pointer;
   flex: none;
 }
 .genre-chip:hover {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+  background: var(--line);
 }
 .genre-chip.is-active {
-  color: #fff;
-  background: rgba(168, 85, 247, 0.18);
-  border-color: rgba(168, 85, 247, 0.45);
+  color: var(--on-action);
+  background: var(--ink);
+  font-weight: 600;
 }
 .density-toggle {
   background: rgba(255, 255, 255, 0.04);
@@ -4444,9 +4162,8 @@ textarea:focus-visible {
 }
 .density-btn:hover { color: #fff; }
 .density-btn.is-active {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.4);
+  color: var(--on-action);
+  background: var(--ink);
 }
 
 /* ── List view (density = list) ────────────────────────────────────
@@ -4470,7 +4187,7 @@ textarea:focus-visible {
   padding: 12px 18px;
 }
 .media-list-head {
-  font-size: 0.66rem;
+  font-size: 12px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.5); /* column labels: 0.4 was ~3.7:1 */
@@ -4487,7 +4204,7 @@ textarea:focus-visible {
   transition: background 0.15s;
 }
 .media-list-row:last-child { border-bottom: none; }
-.media-list-row:hover { background: rgba(168, 85, 247, 0.07); }
+.media-list-row:hover { background: rgba(255, 255, 255, 0.039); }
 /* 0.75 alpha, matching the global :focus-visible floor, not the 0.6 this shipped
    at. At (0,2,0) this rule REPLACES the (0,1,0) floor rather than adding to it,
    so the lower alpha was a silent downgrade for list rows only: 2.45:1 against
@@ -4495,7 +4212,7 @@ textarea:focus-visible {
    were unaffected — so the two card layouts had different focus contrast and
    only one of them passed 1.4.11. The negative offset is kept (the row clips). */
 .media-list-row:focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline: 2px solid #ffffff;
   outline-offset: -2px;
 }
 .media-list-row .mlr-thumb {
@@ -4510,7 +4227,7 @@ textarea:focus-visible {
   height: 58px;
   border-radius: var(--r-sm);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(160deg, rgba(168, 85, 247, 0.22), rgba(14, 12, 22, 0.9));
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.121), rgba(14, 12, 22, 0.9));
 }
 .media-list-row .mlr-thumb-img {
   position: absolute;
@@ -4535,7 +4252,7 @@ textarea:focus-visible {
   margin-top: 4px;
 }
 .media-list-row .mlr-tag {
-  font-size: 0.6rem;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   padding: 1px 6px;
@@ -4544,9 +4261,9 @@ textarea:focus-visible {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 .media-list-row .mlr-tag.is-quality {
-  color: #e9d5ff;
-  border-color: rgba(168, 85, 247, 0.45);
-  background: rgba(168, 85, 247, 0.12);
+  color: var(--ink);
+  border-color: rgba(255, 255, 255, 0.248);
+  background: rgba(255, 255, 255, 0.066);
 }
 .media-list-row .mlr-tag.is-hdr {
   color: #fde68a;
@@ -4560,7 +4277,7 @@ textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.media-list-row .mlr-genre { color: rgba(216, 180, 254, 0.75); }
+.media-list-row .mlr-genre { color: rgba(255, 255, 255, 0.562); }
 .media-list-row .mlr-star {
   display: inline-flex;
   align-items: center;
@@ -4582,14 +4299,14 @@ textarea:focus-visible {
   cursor: pointer;
 }
 .media-list-row .mlr-add:hover {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
+  color: var(--on-action);
+  background: var(--action);
   border-color: transparent;
 }
 .media-list-row .mlr-add.in-lib {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  border-color: rgba(220, 200, 255, 0.6);
+  color: var(--on-action);
+  background: var(--action);
+  border-color: transparent;
 }
 .media-list-row .mlr-add.in-lib:hover {
   background: linear-gradient(135deg, #f87171, #b91c1c);

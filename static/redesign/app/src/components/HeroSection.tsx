@@ -253,17 +253,17 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
             <div className="flex-none">
               <h2 className="sr-only">Welcome to Aurora</h2>
               <p className="inline-flex items-center gap-2 text-[color:var(--text-secondary)] text-xs">
-                <Icon name="sparkle" size={13} className="text-purple-300" /> Loading your featured content…
+                <Icon name="sparkle" size={13} className="text-ink" /> Loading your featured content…
               </p>
             </div>
           )}
         />
       ) : (
-        <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
+        <section className={`relative w-full overflow-hidden bg-gradient-to-br from-surface-raised via-surface-raised to-surface-page flex items-center justify-center ${
           compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
         }`}>
           <div className="text-center px-8">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-action-soft border border-line mb-4">
               <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
                 <defs>
                   <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
@@ -309,8 +309,8 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
       // other sections opt back in via .stage-gutter.
       className={
         compact
-          ? 'relative w-full h-[250px] overflow-hidden bg-[#050505]'
-          : 'relative w-full h-[62vh] min-h-[480px] max-h-[680px] overflow-hidden bg-[#050505]'
+          ? 'relative w-full h-[250px] overflow-hidden bg-surface-page'
+          : 'relative w-full h-[62vh] min-h-[480px] max-h-[680px] overflow-hidden bg-surface-page'
       }
       onMouseMove={(e) => {
         if (!parallaxOn.current) return
@@ -356,7 +356,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
           backdrop still feels on-brand. */}
       <div
         aria-hidden="true"
-        className="absolute inset-0 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]"
+        className="absolute inset-0 bg-gradient-to-br from-surface-raised via-surface-raised to-surface-page"
       />
       {/* Backdrop — two layers, see the `layers` state above. The previous
           single <img key={src}> remounted on every rotation: the old frame
@@ -427,7 +427,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
       <div
         className="absolute inset-0 pointer-events-none"
         style={{
-          background: 'radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)',
+          background: 'radial-gradient(ellipse 42% 48% at 100% 0%, rgba(14,15,17,0.72), transparent 70%)',
         }}
       />
 
@@ -523,7 +523,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
         {/* `relative` is load-bearing, not cosmetic — it lifts this out of the
             static flex-item paint step and above .stage-hero-match-veil. See the
             note on the veil above. */}
-        <span className="relative text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
+        <span className="relative text-xs tracking-[0.14em] uppercase text-ink font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
       </div>
       )}
 
@@ -596,11 +596,11 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
                 <Icon name="sparkle" size={13} /> Aurora picked this for you
               </span>
             ) : isCatalogFallback ? (
-              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
+              <span className="badge-glass bg-white/5 text-ink border border-line">
                 <Icon name="clock" size={12} /> Recently Added
               </span>
             ) : (
-              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
+              <span className="badge-glass bg-white/5 text-ink border border-line">
                 <Icon name="star" size={12} /> Featured
               </span>
             )}
@@ -624,9 +624,9 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p key={`reason-${hero.id}`} className="stage-hero-swap text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow max-sm:line-clamp-2">{reason}</p>
+            <p key={`reason-${hero.id}`} className="stage-hero-swap text-ink text-sm italic mb-2 max-w-lg drop-shadow max-sm:line-clamp-2">{reason}</p>
           ) : personalization?.coldStart ? (
-            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
+            <p className="text-ink text-xs italic mb-2 max-w-md">
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
             </p>
           ) : null}
@@ -746,7 +746,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
                 // needs the extra bottom padding and overflow clip that the
                 // family's fixed height would collide with. Purple, not
                 // indigo — it is the same primary action as Play.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-ui duration-200 motion-safe:hover:scale-105 glow-purple max-sm:flex-1 max-sm:justify-center max-sm:px-4"
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-action hover:bg-white/90 text-action-on rounded-full font-medium transition-ui duration-200 motion-safe:hover:scale-105 glow-purple max-sm:flex-1 max-sm:justify-center max-sm:px-4"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >
@@ -840,7 +840,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
             // shrink-0: without its label its min-content is one 15px glyph,
             // and the column beside it (min-w-0, max-content basis) squeezed
             // it to a sliver. With the label it never shrank below the text.
-            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/75 hover:text-white text-sm transition-colors whitespace-nowrap shrink-0 max-sm:h-[46px] max-sm:w-[46px] max-sm:justify-center max-sm:p-0"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-white/10 border border-white/[0.06] hover:border-line-strong text-white/75 hover:text-white text-sm transition-colors whitespace-nowrap shrink-0 max-sm:h-[46px] max-sm:w-[46px] max-sm:justify-center max-sm:p-0"
           >
             <span className="max-sm:sr-only">Not tonight</span> <Icon name="refresh" size={15} className="max-sm:hidden" /><Icon name="skipForward" size={15} className="sm:hidden" />
           </button>
@@ -848,7 +848,7 @@ export function HeroSection({ hero: heroProp, loading = false, onPlay, onInfo, r
       </div>
     </section>
     {/* The seam ramp (Phase 11.4).
-        The app root is `bg-[#050505] aurora-bg`, and `.aurora-bg` composites three
+        The app root is `bg-surface-page aurora-bg`, and `.aurora-bg` composites three
         purple radials at alpha 0.05-0.08 OVER that base. The hero paints its own
         opaque #050505 on top of them, so the page immediately below the hero is
         #050505-plus-tint while the hero's last row of pixels is flat #050505 — a

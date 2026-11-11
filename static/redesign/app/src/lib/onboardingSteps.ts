@@ -11,7 +11,7 @@
 // Building them from one function also makes the machine testable without a
 // DOM, which the flow has never had.
 
-export type Step = 'avatar' | 'name' | 'age' | 'style' | 'titles' | 'referral' | 'welcome' | 'loading'
+export type Step = 'avatar' | 'name' | 'age' | 'titles' | 'referral' | 'welcome' | 'loading'
 
 export interface StepMachine {
   /** Full navigation order, including the terminal welcome/loading steps. */
@@ -38,7 +38,7 @@ export interface BuildStepsOptions {
   taste: boolean
 }
 
-const TASTE_INPUT_STEPS: readonly Step[] = ['avatar', 'name', 'age', 'style', 'titles']
+const TASTE_INPUT_STEPS: readonly Step[] = ['avatar', 'name', 'age', 'titles']
 
 export function buildSteps({ referralPending, taste }: BuildStepsOptions): StepMachine {
   if (!taste) {

@@ -24,8 +24,7 @@
 // page is served over HTTP, not setContent: the built CSS points its @font-face
 // rules at absolute /v2/assets/ URLs, which an about:blank page cannot resolve —
 // the first version of this script measured every case in the fallback font
-// without knowing it. It now fails if any web font errors, and runs once per
-// typeface the Settings page offers.
+// without knowing it. It now fails if any web font errors.
 //
 // MUTATION-TESTED: each of these, applied ALONE to the fix, turns this check red —
 // `.rail-title` back to nowrap, or losing overflow-wrap or min-width; the subtitle losing
@@ -88,13 +87,6 @@ const OVERLAY = classesOf(CARD, 'card-overlay')
 const BADGES = classesOf(CARD, 'card-badges')
 const RESUME = classesOf(CARD, 'resume-pill')
 const POSTER_WRAP = classesOf(CARD, 'poster-wrap')
-// Settings' typefaces: the attribute-less default plus every `data-font` value.
-// Read from appearance.ts so a new typeface is measured without editing this.
-const FONTS = [null, ...JSON.parse(
-  (fs.readFileSync(path.join(APP, 'src/lib/appearance.ts'), 'utf8').match(/ATTRIBUTED_FONTS[^=]*=\s*(\[[^\]]*\])/) ??
-    (() => { throw new Error('verify-mobile: could not read ATTRIBUTED_FONTS from appearance.ts — this check is out of date') })())[1]
-    .replace(/'/g, '"'))]
-
 const SUBTITLE = 'Hand-picked by Aurora for your taste'
 // [title, AI chip, subtitle, See All]
 const RAILS = [
@@ -156,10 +148,10 @@ const cardHtml = CARD_WIDTHS.flatMap(w => [[META, `${w}`], [META_LONE, `${w} lon
   </div>`).join('')
 
 const ORIGIN = 'http://aurora.probe'
-// The typeface rides on the served <html>, NOT set after load: setting it from
-// script and then awaiting document.fonts.ready resolved before style recalc had
-// even requested the new face, so every "typeface" pass silently measured Inter.
-const htmlFor = font => `<!doctype html><html lang="en"${font ? ` data-font="${font}"` : ''}><head><meta charset="utf-8">
+// The app has one typeface system (Bricolage Grotesque display, Inter body),
+// so one pass per width measures every face a viewer can see. The page fails
+// below if either face errors or the measured text resolves to a fallback.
+const PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/v2/assets/${cssFile}"><style>body{margin:0}</style></head><body>
 <div class="stage-gutter" id="rails">${railHtml}</div>
@@ -169,8 +161,7 @@ const htmlFor = font => `<!doctype html><html lang="en"${font ? ` data-font="${f
 const browser = await chromium.launch({ executablePath: EXE })
 let problems = 0
 const fail = msg => { console.log(`   *** ${msg}`); problems++ }
-for (const font of FONTS) {
-  console.log(`\n══ typeface: ${font ?? 'default (no data-font)'}`)
+{
   for (const width of [320, 360, 390, 430, 767, 1440]) {
     // isMobile: a phone browser WIDENS the layout viewport to fit overflowing
     // content (the 407px symptom) where a desktop viewport would just scroll, so
@@ -178,7 +169,7 @@ for (const font of FONTS) {
     const ctx = await browser.newContext({ viewport: { width, height: 900 }, isMobile: true, hasTouch: true })
     await ctx.route(`${ORIGIN}/**`, route => {
       const p = new URL(route.request().url()).pathname
-      if (p === '/') return route.fulfill({ body: htmlFor(font), contentType: 'text/html' })
+      if (p === '/') return route.fulfill({ body: PAGE_HTML, contentType: 'text/html' })
       const f = path.join(ASSETS, path.basename(p))
       if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
         const type = f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream'

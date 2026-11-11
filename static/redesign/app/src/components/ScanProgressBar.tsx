@@ -119,7 +119,7 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
   // stay pinned together AND the bar's height pushes the page
   // content down naturally.
   return (
-    <div className="bg-[#0a0a0f]/90 backdrop-blur-md border-b border-purple-500/30">
+    <div className="bg-surface-raised-2 backdrop-blur-md border-b border-line">
       {active.map(({ library: lib, status: s }) => {
         const pct = s.total_files > 0
           ? Math.min(100, Math.max(0, (s.scanned_files / s.total_files) * 100))
@@ -134,7 +134,7 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
                 toolbar, both drawers, DetailRail) steps with it. */}
             <div className="flex items-center justify-between gap-3 mb-1 h-4">
               <span className="text-white/80 text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">
-                Scanning <strong className="text-purple-200">{lib.name}</strong>
+                Scanning <strong className="text-ink">{lib.name}</strong>
                 {s.total_files > 0 && (
                   <span className="text-white/50 ml-2">
                     {s.scanned_files.toLocaleString()} / {s.total_files.toLocaleString()}
@@ -143,7 +143,7 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
                 )}
               </span>
               {s.current_file && (
-                <span className="text-white/50 text-[10px] truncate max-w-[40%]" title={s.current_file}>
+                <span className="text-white/50 text-xs truncate max-w-[40%]" title={s.current_file}>
                   {/* Audit L4 — server already passes the basename;
                       the extra split is harmless but unnecessary. */}
                   {s.current_file}
@@ -152,7 +152,7 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
             </div>
             <div className="h-1 bg-white/[0.06] rounded-full overflow-hidden">
               <div
-                className="h-full bg-purple-500 transition-[width] duration-500"
+                className="h-full bg-action transition-[width] duration-500"
                 style={{ width: `${pct}%` }}
               />
             </div>
