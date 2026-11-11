@@ -38,7 +38,6 @@ import {
   searchMedia,
   createQuickParty,
   sendPartyInvites,
-  listMyPartyInvites,
   rsvpPartyInvite,
   schedulePartyStart,
   type MyPartyInvite,
@@ -115,6 +114,7 @@ import { LibraryScopeBar } from '@/components/LibraryScopeBar'
 import { LIBRARY_DESTINATION, hiddenFromRestricted, isLibraryView, libraryScopesFor, mayRenderHidden, navScopeFor } from '@/lib/navScope'
 import { settingsPaneFromPath, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
 import { partyPresence, useActiveParties } from '@/hooks/useActiveParties'
+import { usePartyInvites } from '@/hooks/usePartyInvites'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
 import { usePanelDismiss } from '@/hooks/usePanelDismiss'
@@ -2663,12 +2663,13 @@ export default function App() {
   // and when a live party notification arrives; RSVP flips optimistically.
   // Declared here, before useRealtime, whose onNotification references
   // refreshMyPartyInvites.
-  const [myPartyInvites, setMyPartyInvites] = useState<MyPartyInvite[] | null>(null)
-  const refreshMyPartyInvites = useCallback(() => {
-    listMyPartyInvites()
-      .then(setMyPartyInvites)
-      .catch(() => { /* non-fatal — bell rows degrade to plain lines */ })
-  }, [])
+  // The list belongs to the user and acting profile it was asked for
+  // (usePartyInvites): it is null for anyone else, so a sign-out, an expired
+  // session or a profile switch never shows one session's invitations to the
+  // next, and a late answer for the previous one is dropped.
+  const {
+    invites: myPartyInvites, refresh: refreshMyPartyInvites, patch: patchMyPartyInvites,
+  } = usePartyInvites(user ? `${user.id}:${activeProfileId ?? 'none'}` : null)
   useEffect(() => {
     if (notifOpen) refreshMyPartyInvites()
   }, [notifOpen, refreshMyPartyInvites])
@@ -2678,8 +2679,7 @@ export default function App() {
     // already in flight when the user clicked can't leave a stale pressed
     // state (2026-08 review) — the follow-up fetch converges on the
     // server's answer.
-    setMyPartyInvites(prev =>
-      prev ? prev.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)) : prev)
+    patchMyPartyInvites(list => list.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)))
     rsvpPartyInvite(inviteId, rsvp)
       .then(() => refreshMyPartyInvites())
       .catch(err => {
@@ -2690,7 +2690,7 @@ export default function App() {
           type: 'error',
         }])
       })
-  }, [refreshMyPartyInvites, nextToastId])
+  }, [refreshMyPartyInvites, patchMyPartyInvites, nextToastId])
 
   // Join a party from a bell row / calendar chip — in-app, not a new tab.
   const handleJoinInviteParty = useCallback(async (code: string) => {
