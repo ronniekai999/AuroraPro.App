@@ -31,8 +31,8 @@ import App from './App'
 // The player is replaced by a marker that says what it was asked to play.
 vi.mock('@/components/VideoPlayer', async (original) => ({
   ...(await original<typeof import('@/components/VideoPlayer')>()),
-  VideoPlayer: ({ target }: { target: { mediaItemId: number; resumePositionMs?: number } | null }) =>
-    target ? <div data-test-player data-media={target.mediaItemId} data-resume={target.resumePositionMs ?? 0} /> : null,
+  VideoPlayer: ({ target }: { target: { mediaItemId: number; resumePositionMs?: number; episodeId?: number; seasonNumber?: number } | null }) =>
+    target ? <div data-test-player data-media={target.mediaItemId} data-resume={target.resumePositionMs ?? 0} data-episode={target.episodeId ?? ''} data-season={target.seasonNumber ?? ''} /> : null,
 }))
 
 const NOW = '2026-10-01T00:00:00Z'
@@ -44,6 +44,9 @@ const item = (id: number, title: string, type = 'movie') => ({
 const HALF = item(301, 'Half Watched')
 const FRESH = item(303, 'Never Started')
 const SHOW = item(302, 'Harbor Lights', 'show')
+// A show part-way through two episodes at once, and one with Specials.
+const TWO = item(304, 'Two Episodes', 'show')
+const SPECIALS = item(305, 'Has Specials', 'show')
 const FOUND = item(401, 'Found By Search')
 const SAVED = item(501, 'Saved Title')
 const COLLECTED = item(601, 'In A Collection')
@@ -65,7 +68,7 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) return json([{ media_item_id: SAVED.id, title: SAVED.title, type: 'movie', year: 2020 }])
     if (p === '/api/me/hero') return json({ picks: [], slate_token: 's' })
-    if (p === '/api/media/recent') return json({ data: [HALF, FRESH, SHOW] })
+    if (p === '/api/media/recent') return json({ data: [HALF, FRESH, SHOW, SPECIALS] })
     if (p === '/api/media') {
       const type = url.searchParams.get('type')
       const data = type === 'show' ? [SHOW] : [HALF, FRESH]
@@ -73,7 +76,21 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     }
     if (p === '/api/media/search') return json([FOUND])
     if (p === '/api/progress/continue') {
-      return json([{ media_item_id: HALF.id, title: HALF.title, type: 'movie', year: 2020, position_ms: 600_000, duration_ms: 6_000_000, percent_complete: 10 }])
+      return json([
+        { media_item_id: HALF.id, title: HALF.title, type: 'movie', year: 2020, position_ms: 600_000, duration_ms: 6_000_000, percent_complete: 10 },
+        { media_item_id: TWO.id, episode_id: 3041, season_number: 1, episode_number: 1, title: TWO.title, type: 'show', year: 2020, position_ms: 300_000, duration_ms: 3_000_000, percent_complete: 10 },
+        { media_item_id: TWO.id, episode_id: 3042, season_number: 1, episode_number: 2, title: TWO.title, type: 'show', year: 2020, position_ms: 900_000, duration_ms: 3_000_000, percent_complete: 30 },
+      ])
+    }
+    if (p === `/api/media/${TWO.id}/seasons/1/episodes`) {
+      return json([3041, 3042].map((id, i) => ({ id, season_id: 1, media_item_id: TWO.id, episode_number: i + 1, files: [{ id: id + 5000, resolution: '1080p' }] })))
+    }
+    // Season 0 is listed first, as the lowest number.
+    if (p === `/api/media/${SPECIALS.id}/seasons`) return json([{ id: 50, media_item_id: SPECIALS.id, season_number: 0 }, { id: 51, media_item_id: SPECIALS.id, season_number: 1 }])
+    const specials = p.match(new RegExp(`^/api/media/${SPECIALS.id}/seasons/(\\d)/episodes$`))
+    if (specials) {
+      const season = Number(specials[1])
+      return json([{ id: 3050 + season, season_id: 50 + season, media_item_id: SPECIALS.id, episode_number: 1, files: [{ id: 8050 + season, resolution: '1080p' }] }])
     }
     if (p === '/api/collections') return json([{ id: 7, owner_user_id: 1, name: 'Rainy Day', kind: 'manual', is_public: false, item_count: 1 }])
     if (p === '/api/collections/7') return json({ collection: { id: 7, owner_user_id: 1, name: 'Rainy Day', kind: 'manual', is_public: false }, items: [COLLECTED] })
@@ -154,6 +171,31 @@ describe('every page that draws a card gives it the menu', () => {
     expect(rows.some(r => r.startsWith('Resume'))).toBe(true)
   })
 
+  // A show can have a card per episode there. The menu opened from a card
+  // resumes THAT card's episode, as its own Play does, not the first record
+  // found for the show.
+  it('My Library\'s Continue Watching resumes the card\'s own episode from its menu', async () => {
+    renderAt('/library')
+    const mores = await screen.findAllByRole('button', { name: 'More actions for Two Episodes' }, find)
+    expect(mores).toHaveLength(2)
+    fireEvent.click(mores[1])
+    const menu = await screen.findByRole('menu', { name: 'Actions for Two Episodes' }, find)
+    fireEvent.click(within(menu).getAllByRole('menuitem')[0])
+    await waitFor(() => expect(document.querySelector('[data-test-player]')).not.toBeNull(), find)
+    const player = document.querySelector('[data-test-player]')!
+    expect(player.getAttribute('data-episode')).toBe('3042')
+    expect(player.getAttribute('data-resume')).toBe('900000')
+  })
+
+  it('and the first card\'s menu resumes the first', async () => {
+    renderAt('/library')
+    const mores = await screen.findAllByRole('button', { name: 'More actions for Two Episodes' }, find)
+    fireEvent.click(mores[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Two Episodes' }, find)).getAllByRole('menuitem')[0])
+    await waitFor(() => expect(document.querySelector('[data-test-player]')).not.toBeNull(), find)
+    expect(document.querySelector('[data-test-player]')!.getAttribute('data-episode')).toBe('3041')
+  })
+
   it('Search results', async () => {
     renderAt('/')
     fireEvent.change(await screen.findByRole('searchbox', {}, find).catch(() => screen.getByPlaceholderText(/Search/)), { target: { value: 'found' } })
@@ -220,6 +262,20 @@ describe('Watch together, from a card', () => {
     expect(server.parties[0]).toMatchObject({ media_item_id: SHOW.id, episode_id: 3022 })
   })
 
+  it('starts a show with Specials on its first regular episode, and says it is working meanwhile', async () => {
+    const server = renderAt('/')
+    const { menu } = await openMenu('Has Specials', await rail('Recently Added'))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Watch together' }))
+    // Nothing else changes on screen while the episodes are read.
+    await screen.findByText(/Getting "Has Specials" ready to watch together/, {}, find)
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const buttons = within(composer).getAllByRole('button')
+    fireEvent.click(buttons[buttons.length - 1])
+    await waitFor(() => expect(server.parties).toHaveLength(1), find)
+    expect(server.parties[0]).toMatchObject({ media_item_id: SPECIALS.id, episode_id: 3051 })
+    expect(server.asks).not.toContain(`/api/media/${SPECIALS.id}/seasons/0/episodes`)
+  })
+
   it('starts a movie\'s party with no episode, and reads none', async () => {
     const server = renderAt('/')
     const { menu } = await openMenu('Never Started', await rail('Recently Added'))
@@ -256,6 +312,16 @@ describe('Play on the poster and the menu agree', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find))[0])
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.getAttribute('data-resume')).toBe('600000')
+  })
+
+  // Season 0 is Specials: the lowest number, and not where a show starts.
+  it('starts a show nobody has begun on season 1, not on a Special', async () => {
+    renderAt('/')
+    const recent = await rail('Recently Added')
+    fireEvent.click(await within(recent).findByRole('button', { name: 'Play Has Specials' }, find))
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    expect(player()!.getAttribute('data-season')).toBe('1')
+    expect(player()!.getAttribute('data-episode')).toBe('3051')
   })
 
   it('plays a title with no position from the start', async () => {

@@ -15,7 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { ContextMenu, PRESS_RELEASE_GRACE_MS } from './ContextMenu'
+import { ContextMenu, PRESS_HOLD_CAP_MS, PRESS_RELEASE_GRACE_MS } from './ContextMenu'
 
 const items = [{ label: 'Play', onClick: () => {} }, { label: 'Add to My Library', onClick: () => {} }]
 
@@ -73,6 +73,34 @@ describe('a menu opened by a press that is still held', () => {
     expect(onClose).not.toHaveBeenCalled()
     fireEvent.pointerUp(scrim(), touch(14))
     act(() => { vi.advanceTimersByTime(PRESS_RELEASE_GRACE_MS) })
+    fireEvent.mouseDown(scrim())
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  // A release can go unseen: a native dialog takes the screen, the page goes
+  // to the background mid-touch. The menu must not wait for it for ever; a
+  // phone's sheet has no Escape key to fall back on.
+  it('stops waiting for a lift it never sees, and closes for a press outside after the cap', () => {
+    const onClose = openMidPress(17)
+    act(() => { vi.advanceTimersByTime(PRESS_HOLD_CAP_MS - 1) })
+    fireEvent.mouseDown(scrim())
+    expect(onClose).not.toHaveBeenCalled()
+    act(() => { vi.advanceTimersByTime(1) })
+    fireEvent.mouseDown(scrim())
+    expect(onClose).toHaveBeenCalledTimes(1)
+    // The touch is released for the tests that follow.
+    fireEvent.pointerUp(document.body, touch(17))
+  })
+
+  it('forgets a touch whose release it never saw once the page is hidden, so the next menu is not held by it', () => {
+    fireEvent.pointerDown(document.body, touch(18))
+    const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    fireEvent(document, new Event('visibilitychange'))
+    hidden.mockRestore()
+    // No pointerup for 18 was ever dispatched.
+    const onClose = vi.fn()
+    render(<ContextMenu x={100} y={200} items={items} onClose={onClose} title="Kestrel" />)
+    settle()
     fireEvent.mouseDown(scrim())
     expect(onClose).toHaveBeenCalledTimes(1)
   })

@@ -27,7 +27,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
   onToggleLib: (m: Media) => void
   // The card menu (right click, More, a long press). It is how a keyboard
   // or a phone removes a title from here or resumes one.
-  onCardContext: (e: MouseEvent, m: Media) => void
+  // `own`: the Continue Watching record a card stands for, so the menu's
+  // Resume is that card's record and not another episode of the show.
+  onCardContext: (e: MouseEvent, m: Media, own?: ContinueWatchingItem) => void
   // A card's on-poster Play: resumes when the viewer has a position in the
   // title (App decides); resumableIds says which cards that is.
   onCardPlay?: (m: Media) => void
@@ -164,12 +166,13 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
               // render and click does not dispatch a stale position. Below
               // the resume threshold it falls back to the card's Play.
               const resumable = !!onPlayContinue && isResumable(c)
+              // This card's record as it is now.
+              const own = () => continueItemsRef.current.find(
+                x => x.media_item_id === c.media_item_id && x.episode_id === c.episode_id,
+              )
               const play = resumable
                 ? () => {
-                    const latest = continueItemsRef.current.find(
-                      x => x.media_item_id === c.media_item_id
-                        && x.episode_id === c.episode_id,
-                    )
+                    const latest = own()
                     if (latest && isResumable(latest)) onPlayContinue(latest)
                   }
                 : onCardPlay
@@ -181,7 +184,8 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
                   libraryIds={libraryIds}
                   onToggleLib={onToggleLib}
                   subtitle={sub}
-                  onCardContext={onCardContext}
+                  // The menu resumes the same record Play does.
+                  onCardContext={(e, item) => onCardContext(e, item, own() ?? c)}
                   onPlay={play}
                   resumable={resumable}
                 />

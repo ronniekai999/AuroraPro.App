@@ -207,8 +207,6 @@ export default function BrowseView({
   // not the render-time closure. Otherwise a mid-hover refresh (another
   // device advanced position_ms) could dispatch a stale record. Keep a
   // ref in sync and read it inside the click handler.
-  const continueItemsRef = useRef(continueItems)
-  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
   // Phase 5.3 final QA — pill identifier above the page headline.
   // "TV Shows" and "Movies" pages both use the same pattern. Built
   // from the page title for now; could be derived from view if we

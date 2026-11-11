@@ -86,7 +86,7 @@ import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
-import { resolvePartyEpisodeId } from '@/lib/partyEpisode'
+import { regularSeasonsFirst, resolvePartyEpisodeId } from '@/lib/partyEpisode'
 import {
   isPlaybackResolutionCurrent,
   partyPlayerDismissalKeyOnClose,
@@ -1374,7 +1374,9 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
           <p className="sr-only" role="status">Loading your library…</p>
           <RailSkeleton aspect="landscape" count={5} />
           <RailSkeleton />
-          <RailSkeleton />
+          {/* The third rail is usually the recommender's, which has a line
+              under its title. */}
+          <RailSkeleton subtitle />
         </div>
       )}
       {effectiveRails.map((rail, i) => {
@@ -3403,7 +3405,10 @@ export default function App() {
         const seasonsRaw = await getSeasons(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         if (seasonsRaw.length === 0) throw new Error('No seasons available')
-        const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
+        // Season 1 before season 0: Specials have the lowest number and are
+        // not where a show starts. (They are still played when the show has
+        // nothing else.)
+        const seasons = regularSeasonsFirst(seasonsRaw)
         const firstSeason = seasons[0]
         const episodesRaw = await getEpisodes(m.id, firstSeason.season_number, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
@@ -4037,6 +4042,10 @@ export default function App() {
     showsRefreshAcRef.current?.abort()
     showsRefreshAcRef.current = null
     setContinueItems([])
+    // The ref too, now: it is what a card's Play reads at click time, and it
+    // would otherwise hold the previous profile's records until the next
+    // commit's effects.
+    continueItemsRef.current = []
     convoGenRef.current++
     setConvoQuery('')
     setConvoResults([])
@@ -5719,18 +5728,34 @@ export default function App() {
   // first playable one, which is read here because a card has no episode
   // list. The same choice the title page's Party action makes. Dropped when
   // the profile changed while the episodes were being read.
-  const actingProfileRef = useRef(activeProfileId)
-  useEffect(() => { actingProfileRef.current = activeProfileId }, [activeProfileId])
+  // The party handler as it is now, not as it was when a menu opened: the
+  // episodes can take a moment, and "already in a party" is judged then.
+  const handleStartPartyRef = useRef(handleStartParty)
+  useEffect(() => { handleStartPartyRef.current = handleStartParty }, [handleStartParty])
+  // One lookup at a time. It is abandoned when the viewer moves on (another
+  // page, another profile, another lookup), so the composer never opens over
+  // a page they have left or for a profile the session no longer is.
+  const partyLookupRef = useRef<AbortController | null>(null)
+  useEffect(() => () => { partyLookupRef.current?.abort(); partyLookupRef.current = null }, [location.pathname, activeProfileId])
   const startPartyFromCard = useCallback(async (m: Media, resume: ContinueWatchingItem | undefined) => {
-    const asProfile = actingProfileRef.current
+    partyLookupRef.current?.abort()
+    const lookup = new AbortController()
+    partyLookupRef.current = lookup
+    // A show with nothing to resume needs its episodes read first; say so,
+    // since nothing else on screen changes until the composer opens.
+    const reads = m.type === 'show' && !(resume?.type === 'show' && resume.episode_id)
+    if (reads) setToasts(prev => [...prev, { id: nextToastId(), message: `Getting "${m.title}" ready to watch together…`, type: 'info' }])
     try {
-      const episodeId = await resolvePartyEpisodeId(m, resume)
-      if (actingProfileRef.current !== asProfile) return
-      handleStartParty(m, episodeId)
+      const episodeId = await resolvePartyEpisodeId(m, resume, lookup.signal)
+      if (lookup.signal.aborted) return
+      handleStartPartyRef.current(m, episodeId)
     } catch {
+      if (lookup.signal.aborted) return
       setToasts(prev => [...prev, { id: nextToastId(), message: `Could not read the episodes of "${m.title}". Open its page to start a party.`, type: 'error' }])
+    } finally {
+      if (partyLookupRef.current === lookup) partyLookupRef.current = null
     }
-  }, [handleStartParty, nextToastId])
+  }, [nextToastId])
 
   // The card menu: what a right click, a card's More button, the context-menu
   // key and a long press all open (ContextMenu). Everything a card can do is
@@ -5741,10 +5766,17 @@ export default function App() {
   // below) never changes identity: it used to depend on continueItems,
   // libraryIds and half a dozen handlers, so every Continue Watching refresh
   // or party change re-rendered every memoised card on Home and the grids.
-  const buildCardMenu = (e: React.MouseEvent, m: Media) => {
+  //
+  // `own` is the card's own Continue Watching record, when the card stands
+  // for one (My Library's Continue Watching grid has a card per episode of a
+  // show): the menu's Resume must be that record, as the card's Play is, not
+  // the first one found for the title.
+  const buildCardMenu = (e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => {
     e.preventDefault()
     const failed = (err: unknown) => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
-    const resume = continueItems.find(c => c.media_item_id === m.id && isResumable(c))
+    const resume = own && own.media_item_id === m.id && isResumable(own)
+      ? own
+      : continueItems.find(c => c.media_item_id === m.id && isResumable(c))
     const saved = libraryIds.has(m.id)
     const items: MediaContextItem[] = []
     if (resume) {
@@ -5820,7 +5852,7 @@ export default function App() {
   }
   const buildCardMenuRef = useRef(buildCardMenu)
   useEffect(() => { buildCardMenuRef.current = buildCardMenu })
-  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => buildCardMenuRef.current(e, m), [])
+  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => buildCardMenuRef.current(e, m, own), [])
   // A profile switch closes the menu: it holds the previous profile's Resume
   // record and closures over its id (Add, the thumbs, Mark as watched), so a
   // pick made after a switch, one made in another tab included, would act
@@ -6112,6 +6144,10 @@ export default function App() {
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setContinueItems([])
+    // The ref too, now: it is what a card's Play reads at click time, and it
+    // would otherwise hold the previous profile's records until the next
+    // commit's effects.
+    continueItemsRef.current = []
     convoGenRef.current++
     setConvoQuery('')
     setConvoResults([])
@@ -6960,7 +6996,7 @@ export default function App() {
                 onSelect={handleSelect}
                 onCardContext={openCardContextMenu}
                 onCardPlay={playOrResume}
-                resumableIds={resumableIds}
+                resumableIds={profileSwitchPending ? undefined : resumableIds}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}
               />

@@ -128,14 +128,30 @@ export function HeroSkeleton({ compact = false, title, aside }: { compact?: bool
  *  gap, each with its caption. The row mirrors .rail-scroll's padding and the
  *  -4px margin that puts its first card on the gutter. It is clipped rather
  *  than scrolled: there is nothing to scroll to. */
-export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poster' | 'landscape'; count?: number }) {
+export function RailSkeleton({ aspect = 'poster', count = 8, subtitle = false }: {
+  aspect?: 'poster' | 'landscape'
+  count?: number
+  /** The rail this stands for has a line under its title (a recommender
+   *  rail's "Picked by Aurora"): without it the rail lands one line taller
+   *  than its skeleton and everything below it jumps. */
+  subtitle?: boolean
+}) {
   const tile = aspect === 'landscape' ? 'w-[256px]' : 'w-[176px]'
   const art = aspect === 'landscape' ? 'aspect-video' : 'aspect-[2/3]'
   return (
     <section className="rail-container" aria-hidden="true">
       {/* The title line: 22px at 1.2 leading, then the header's 8px margin. */}
-      <div className="mb-2 flex h-[26px] items-center">
-        <SkeletonBlock className="h-5 w-44 rounded-chip" />
+      {/* With a subtitle: the header's 6px gap, then its 13px line at 18px
+          leading, before the same 8px margin. */}
+      <div className={subtitle ? 'mb-2 flex flex-col gap-1.5' : 'mb-2'}>
+        <div className="flex h-[26px] items-center">
+          <SkeletonBlock className="h-5 w-44 rounded-chip" />
+        </div>
+        {subtitle && (
+          <div className="flex h-[18px] items-center">
+            <SkeletonBlock className="h-3 w-64 max-w-full rounded-chip" />
+          </div>
+        )}
       </div>
       <div className="-mx-1 flex gap-5 overflow-hidden px-1 pb-3 pt-2">
         {Array.from({ length: count }).map((_, i) => (

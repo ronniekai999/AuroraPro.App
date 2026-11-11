@@ -94,12 +94,24 @@ const touchesDown = new Set<number>()
  *  may still arrive. They are sent in the same task or within the legacy
  *  ~300ms tap delay. */
 export const PRESS_RELEASE_GRACE_MS = 500
+/** The longest a menu waits for the touch that opened it to lift. A release
+ *  can go unseen (a native dialog taking the screen, the page going to the
+ *  background mid-touch), and a menu that waited for ever would never close
+ *  for a press outside again; on a phone the sheet has no Escape key. */
+export const PRESS_HOLD_CAP_MS = 4000
 if (typeof window !== 'undefined') {
   const down = (e: PointerEvent) => { if (e.pointerType === 'touch') touchesDown.add(e.pointerId) }
   const up = (e: PointerEvent) => { touchesDown.delete(e.pointerId) }
   window.addEventListener('pointerdown', down, true)
   window.addEventListener('pointerup', up, true)
   window.addEventListener('pointercancel', up, true)
+  // A touch whose release this page never saw is not still down: when the
+  // page is hidden or loses the window, forget them all, so a later menu
+  // does not open believing a finger is on the screen.
+  const forget = () => { touchesDown.clear() }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') forget() })
+  window.addEventListener('blur', forget)
+  window.addEventListener('pagehide', forget)
 }
 
 /**
@@ -214,10 +226,12 @@ export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Pro
     // outside. See the note at touchesDown.
     const held = new Set(touchesDown)
     // Outside presses count from this time on: at once for a menu no touch
-    // was holding, else from the grace after the last such touch lifts.
-    let listenFrom = held.size > 0 ? Infinity : 0
+    // was holding, else from the grace after the last such touch lifts, and
+    // in any case once the cap has passed, so a release that is never seen
+    // cannot leave the menu deaf to them.
+    let listenFrom = held.size > 0 ? performance.now() + PRESS_HOLD_CAP_MS : 0
     const onRelease = (e: PointerEvent) => {
-      if (held.delete(e.pointerId) && held.size === 0) listenFrom = performance.now() + PRESS_RELEASE_GRACE_MS
+      if (held.delete(e.pointerId) && held.size === 0) listenFrom = Math.min(listenFrom, performance.now() + PRESS_RELEASE_GRACE_MS)
     }
     const onClick = (e: MouseEvent) => {
       if (performance.now() < listenFrom) return
