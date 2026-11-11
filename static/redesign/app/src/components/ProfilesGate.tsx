@@ -1,23 +1,28 @@
-// "Who's watching?" — the full-page profile stage (Aurora Stage Phase 7b, D7).
+// "Who's watching?": the full-page profile picker.
 //
-// Mockup screen 02. A self-gating overlay, the same shape as TasteOnboardingGate:
-// the host renders it unconditionally and it decides whether to appear. That
-// keeps the policy (lib/profileGate) in one place instead of spread across the
-// host's render conditions.
+// A self-gating overlay, the same shape as TasteOnboardingGate: the host
+// renders it unconditionally and it decides whether to appear. That keeps the
+// policy (lib/profileGate) in one place instead of spread across the host's
+// render conditions.
 //
-// D7 policy: first visit per device, then remembered; skipped entirely when
-// there is only one profile; openable on demand from the switcher.
+// Policy: first visit per device, then remembered; skipped entirely when
+// there is only one profile; openable on demand from the identity menu.
 //
-// NOT a route. It is an overlay, so it composites over whatever page you were on
-// and needs no router change, no history entry, and no answer to "what happens
-// if someone bookmarks /profiles while signed out". The mockup draws it at a URL;
-// the behaviour it depicts is a gate, and a gate is what this is.
+// NOT a route. It is an overlay, so it composites over whatever page you were
+// on and needs no router change, no history entry, and no answer to "what
+// happens if someone bookmarks /profiles while signed out".
+//
+// Each profile says what it is: its own colour or chosen avatar, a lock when
+// it needs a PIN, and its rating limit, so a child's profile is never
+// mistaken for a parent's.
 
 import { useEffect, useRef, useState } from 'react'
 import type { Profile } from '@/lib/api'
+import { Lock, Plus } from 'lucide-react'
 import { ProfileAvatar } from './ProfileAvatar'
-import { Icon } from './Icon'
-import { maturityLeanLabel } from '@/lib/maturity'
+import { AuroraWordmark } from './AuroraWordmark'
+import { AuroraMark } from './TopNav'
+import { profileSummary } from '@/lib/navScope'
 import { hasSeenProfileGate, markProfileGateSeen, shouldShowProfileGate } from '@/lib/profileGate'
 import { nextRadioIndex } from '@/lib/radiogroup'
 import { lockBodyScroll } from '@/lib/scrollLock'
@@ -51,6 +56,9 @@ interface ProfilesGateProps {
    */
   onOpenChange?: (open: boolean) => void
 }
+
+// 136px on a wide window; two tiles side by side must fit a 320px phone.
+const PICKER_AVATAR = 120
 
 export function ProfilesGate({
   profiles, activeProfileId, onSelect, onAddProfile, ready, forced = false, onDismiss,
@@ -172,14 +180,14 @@ export function ProfilesGate({
     <div
       ref={rootRef}
       // z-85, not z-70. TasteOnboardingGate renders OnboardingFlow at z-[80]
-      // with an opaque `bg-[#07060c]`, and both gates self-gate independently —
+      // with an opaque fill, and both gates self-gate independently —
       // so on a first visit where the STORED active profile hasn't onboarded
       // (the "existing users get prompted once at next login" cohort, on a
       // >=2-profile server) both mounted and the taste flow covered the picker.
       // Render order had this right and z-index inverted it; the comment at the
       // call site claimed the outcome the z-index was preventing. Pick who you
       // are first, then onboard that profile.
-      className="fixed inset-0 z-[85] aurora-bg"
+      className="fixed inset-0 z-[85] bg-surface-page"
       role="dialog"
       aria-modal="true"
       aria-label="Who's watching?"
@@ -213,39 +221,24 @@ export function ProfilesGate({
         }
       }}
     >
-      {/* Same starfield + wash the sign-in screen uses; this is the other
-          "before you're in the app" surface and they should read as a pair.
-
-          These sit OUTSIDE the scroller, and that placement is load-bearing.
-          Both are `position: absolute; inset: 0` primitives, so their containing
-          block is the nearest positioned ancestor's PADDING box — when that was
-          the scroller itself, they were sized to one viewport and scrolled away
-          with the content. On a 375px screen with 8 profiles the picker is
-          ~1260px tall, so ~600px of tail rendered on bare `aurora-bg`: no stars,
-          no wash, visibly a different surface from the top of the same page.
-          Making the root the positioned box and the scroller a child fixes it
-          without touching either primitive (both set `position`, so a call-site
-          `fixed` utility could not win against them anyway — see the CASCADE
-          HAZARD note in index.css). */}
-      <div className="stage-stars" aria-hidden="true" />
-      <div className="page-tint" aria-hidden="true" />
-
-      <div className="absolute inset-0 z-[1] overflow-y-auto">
-      <div className="min-h-full flex flex-col items-center justify-center px-6 py-16">
-        <h1 className="font-display font-extrabold text-white text-3xl md:type-browse text-center">
+      <div className="absolute inset-0 overflow-y-auto">
+      <div className="min-h-full flex flex-col px-4 sm:px-12 pb-10">
+        <div className="h-16 flex-none flex items-center gap-2.5" aria-hidden="true">
+          <AuroraMark />
+          <AuroraWordmark decorative ink="#F4F4F5" className="h-[15px] w-auto" />
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center gap-10 sm:gap-14 py-6">
+        <h1 className="font-display font-extrabold text-ink text-[36px] sm:text-[56px] leading-none tracking-[-0.02em] text-center">
           Who&rsquo;s watching?
         </h1>
-        <p className="text-white/65 text-sm md:text-base mt-3 text-center max-w-[46ch]">
-          Pick a profile — your taste, watchlists and progress travel with you.
-        </p>
 
         {/* role="radiogroup": exactly one profile ends up active, and the
             keyboard contract is the radiogroup one (arrows move and select, the
-            set is one tab stop) — the same helper Settings' dials use. */}
+            set is one tab stop), the same helper Settings' choices use. */}
         <div
           role="radiogroup"
           aria-label="Profiles"
-          className="mt-10 flex flex-wrap items-start justify-center gap-6 md:gap-9"
+          className="flex flex-wrap items-start justify-center gap-x-4 gap-y-8 sm:gap-10"
           // Arrows MOVE AND CHECK: they advance highlightId, the checked radio,
           // and focus follows. The first version only called .focus(), and
           // that was a real keyboard-reachability failure (WCAG 2.1.1): with
@@ -266,7 +259,7 @@ export function ProfilesGate({
             )
             if (n === null) return
             e.preventDefault()
-            // Selection only — NOT pick(), which switches profiles, marks the
+            // Selection only, NOT pick(), which switches profiles, marks the
             // gate seen and dismisses it. Arrowing must not commit and close.
             setHighlightId(profiles[n].id)
             itemRefs.current[n]?.focus()
@@ -274,8 +267,7 @@ export function ProfilesGate({
         >
           {profiles.map((p, i) => {
             const sel = p.id === highlightId
-            const sub = [p.is_default ? 'Default' : null, p.has_pin ? 'Locked' : null, maturityLeanLabel(p.maturity_pref)]
-              .filter(Boolean).join(' · ')
+            const limit = p.max_age_rating?.trim()
             return (
               <button
                 key={p.id}
@@ -285,32 +277,52 @@ export function ProfilesGate({
                 aria-checked={sel}
                 tabIndex={sel ? 0 : -1}
                 // Not disabled while a pick is pending: disabling the focused
-                // orb would blur it, and focus would return to <body>, outside
+                // tile would blur it, and focus would return to <body>, outside
                 // the gate's Tab trap, when a PIN prompt over it is cancelled.
                 // pick() ignores a second click instead.
                 onClick={() => { void pick(p.id) }}
-                // The lift is `.stage-orb`, not `hover:scale-[1.04]
-                // focus-visible:scale-[1.04]`: those two sat outside every one
-                // of the file's prefers-reduced-motion blocks (WCAG 2.3.3), and
-                // a primitive that owns the transform can own the opt-out too.
-                className="stage-orb group flex w-[132px] flex-col items-center gap-3 rounded-2xl p-2 text-center"
+                // The lift is `.stage-orb`, not scale utilities: a primitive
+                // that owns the transform can own the reduced-motion opt-out.
+                className="stage-orb group flex w-[148px] sm:w-[168px] flex-col items-center gap-4 rounded-sheet p-2 text-center"
               >
-                {/* 118px orbs, the mockup's size. The ring is the selected cue
-                    and it survives a monochrome display, unlike a colour shift
-                    on a radial-gradient orb. */}
-                <ProfileAvatar
-                  avatarUrl={p.avatar_url}
-                  name={p.name}
-                  size={118}
-                  className={
-                    sel
-                      ? 'ring-[3px] ring-purple-300/90 ring-offset-4 ring-offset-[#050505]'
-                      : 'ring-2 ring-white/10 group-hover:ring-white/30'
-                  }
-                />
-                <span className="min-w-0 w-full">
-                  <span className="block truncate font-display text-[15px] font-bold text-white">{p.name}</span>
-                  <span className="block truncate text-[11.5px] text-white/60">{sub || 'Profile'}</span>
+                <span className="relative">
+                  {/* The ring is the selected cue: white on graphite, so it
+                      survives a monochrome display and does not depend on the
+                      avatar's own colour. */}
+                  <ProfileAvatar
+                    avatarUrl={p.avatar_url}
+                    name={p.name}
+                    colorKey={p.id}
+                    size={PICKER_AVATAR}
+                    className={
+                      sel
+                        ? 'ring-2 ring-ink ring-offset-[3px] ring-offset-surface-page'
+                        : 'ring-0 group-hover:ring-2 group-hover:ring-ink-2 group-hover:ring-offset-[3px] group-hover:ring-offset-surface-page'
+                    }
+                  />
+                  {/* Decorative: the line under the name says both in words. */}
+                  {limit && (
+                    <span
+                      aria-hidden="true"
+                      data-profile-limit=""
+                      className="absolute -right-1.5 -bottom-1.5 h-8 px-2.5 rounded-full bg-ink text-action-on text-[13px] font-bold leading-[26px] border-[3px] border-surface-page"
+                    >
+                      {limit}
+                    </span>
+                  )}
+                  {p.has_pin && (
+                    <span
+                      aria-hidden="true"
+                      data-profile-lock=""
+                      className={`absolute bottom-0.5 h-9 w-9 rounded-full bg-ink text-action-on grid place-items-center border-[3px] border-surface-page ${limit ? 'left-0.5' : 'right-0.5'}`}
+                    >
+                      <Lock size={16} strokeWidth={2.25} />
+                    </span>
+                  )}
+                </span>
+                <span className="min-w-0 w-full flex flex-col gap-0.5">
+                  <span className="block truncate text-[20px] font-semibold text-ink">{p.name}</span>
+                  <span className="block text-[13px] leading-snug text-ink-2">{profileSummary(p)}</span>
                 </span>
               </button>
             )
@@ -318,43 +330,35 @@ export function ProfilesGate({
 
         </div>
 
-        {/* Dashed Add-Profile tile — the mockup's `.orb.add`. It is an ACTION,
-            not a choice, so it is a plain button and it lives OUTSIDE the
-            radiogroup element. It used to be a DOM child of it while a comment
-            claimed it was "outside the radiogroup semantically" — but ARIA takes
-            the DOM at its word: a `radiogroup` owns only `radio` children, and a
-            plain button inside one is both an invalid child and a second tab
-            stop in a set documented as having exactly one. Wrapped so it keeps
-            flowing on the same visual line as the orbs. */}
-        <div className="mt-6 flex flex-wrap items-start justify-center gap-6 md:gap-9">
+        {/* Add profile is an ACTION, not a choice, so it is a plain button and
+            it lives OUTSIDE the radiogroup element: ARIA takes the DOM at its
+            word, a `radiogroup` owns only `radio` children, and a plain button
+            inside one is both an invalid child and a second tab stop in a set
+            documented as having exactly one. */}
+        <div className="flex flex-wrap items-center justify-center gap-3">
           {/* Not while no profile is active: leaving for Settings would
               leave the gate without a pick (see dismissable). */}
           {onAddProfile && activeProfileId !== null && (
             <button
               type="button"
               onClick={() => { onAddProfile(); dismiss() }}
-              className="flex w-[132px] flex-col items-center gap-3 rounded-2xl p-2 text-center text-white/55 transition-colors hover:text-white/85"
+              className="h-11 px-4 inline-flex items-center gap-2 rounded-control bg-action-soft text-ink text-[15px] font-semibold hover:brightness-125 transition-[filter]"
             >
-              <span className="grid h-[118px] w-[118px] place-items-center rounded-full border-2 border-dashed border-white/25 bg-white/[0.04]">
-                <Icon name="plus" size={34} />
-              </span>
-              <span>
-                <span className="block font-display text-[15px] font-bold">Add profile</span>
-                <span className="block text-[11.5px] text-white/50">Taste onboarding in Settings</span>
-              </span>
+              <Plus size={18} aria-hidden="true" />
+              Add profile
+            </button>
+          )}
+          {dismissable && (
+            <button
+              type="button"
+              onClick={dismiss}
+              className="h-11 px-4 rounded-control text-ink-2 hover:text-ink text-[15px] font-semibold transition-colors"
+            >
+              Keep watching as {profiles.find(p => p.id === activeProfileId)?.name ?? 'current profile'}
             </button>
           )}
         </div>
-
-        {dismissable && (
-          <button
-            type="button"
-            onClick={dismiss}
-            className="stage-btn stage-btn-sm stage-btn-quiet mt-10"
-          >
-            Keep watching as {profiles.find(p => p.id === activeProfileId)?.name ?? 'current profile'}
-          </button>
-        )}
+        </div>
       </div>
       </div>
     </div>

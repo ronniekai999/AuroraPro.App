@@ -57,7 +57,7 @@ export default function MeView({
   return (
     <div className="mx-auto max-w-[560px] animate-fade-in">
       <header className="flex items-center gap-3.5 pt-2">
-        <ProfileAvatar avatarUrl={active?.avatar_url} name={active?.name ?? user.username} size={64} />
+        <ProfileAvatar avatarUrl={active?.avatar_url} name={active?.name ?? user.username} colorKey={active?.id} size={64} />
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-display text-[28px] font-bold leading-tight tracking-[-0.015em] text-ink">{active?.name ?? user.username}</h1>
           <p className="truncate text-[13px] text-ink-2">{active ? profileSummary(active) : `Signed in as ${user.username}`}</p>
@@ -74,7 +74,7 @@ export default function MeView({
               aria-label={`Switch to ${p.name}${limit(p) ? `, up to ${limit(p)}` : ''}${p.has_pin ? ', locked with a PIN' : ''}`}
               className="flex min-h-16 min-w-[64px] flex-1 flex-col items-center justify-start gap-1 rounded-art px-1 py-1.5 text-center text-xs leading-tight text-ink-2 transition-colors hover:bg-white/[0.08]"
             >
-              <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} size={36} />
+              <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} colorKey={p.id} size={36} />
               <span className="line-clamp-2 max-w-full break-words">{p.name}{limit(p) ? ` · ${limit(p)}` : ''}</span>
             </button>
           ))}

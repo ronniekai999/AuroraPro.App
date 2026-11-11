@@ -175,7 +175,7 @@ function IdentityMenu({
         className="flex h-10 items-center gap-2.5 rounded-full bg-white/[0.08] pl-1.5 pr-2.5 text-ink transition-colors hover:bg-white/[0.14]"
       >
         <span className="relative flex-none">
-          <ProfileAvatar avatarUrl={active?.avatar_url} name={shownName} size={28} />
+          <ProfileAvatar avatarUrl={active?.avatar_url} name={shownName} colorKey={active?.id} size={28} />
           {notifCount > 0 && (
             <span
               aria-hidden="true"
@@ -222,7 +222,7 @@ function IdentityMenu({
                       }}
                       className={`flex h-[52px] w-full items-center gap-3 rounded-art px-3 text-left transition-colors hover:bg-white/[0.08] ${sel ? 'bg-white/[0.08]' : ''}`}
                     >
-                      <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} size={32} />
+                      <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} colorKey={p.id} size={32} />
                       <span className="min-w-0 flex-1 leading-tight">
                         <span className="block truncate text-[15px] font-semibold text-ink">{p.name}</span>
                         <span className="block truncate text-xs text-ink-2">{profileSummary(p)}</span>
@@ -557,7 +557,7 @@ export function BottomTabBar({ currentView, navScope, onNavigate, onPrefetch, li
           >
             {t.id === 'me' ? (
               <span className={`relative rounded-full ${active ? 'shadow-[0_0_0_2px_var(--surface-page),0_0_0_4px_#fff]' : ''}`}>
-                <ProfileAvatar avatarUrl={activeProfile?.avatar_url} name={activeProfile?.name ?? username} size={24} />
+                <ProfileAvatar avatarUrl={activeProfile?.avatar_url} name={activeProfile?.name ?? username} colorKey={activeProfile?.id} size={24} />
                 {notifCount > 0 && (
                   <span aria-hidden="true" className="absolute -right-1.5 -top-1 h-2.5 w-2.5 rounded-full border-2 border-surface-page bg-action" />
                 )}

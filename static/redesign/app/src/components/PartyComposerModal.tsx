@@ -416,7 +416,7 @@ export function PartyComposerModal({
                     aria-label={`Remove ${shownName} (${m.username}) from the invite list`}
                     className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full bg-purple-600/20 border border-purple-500/40 text-white/90 text-xs hover:bg-purple-600/30 transition-colors"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={18} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} colorKey={m.user_id} size={18} />
                     <span className="max-w-[9rem] truncate">{shownName}</span>
                     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className="w-3 h-3 flex-none">
                       <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
@@ -488,7 +488,7 @@ export function PartyComposerModal({
                     aria-pressed={on}
                     className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-white/[0.04] transition-colors"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={32} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} colorKey={m.user_id} size={32} />
                     <span className="min-w-0 flex-1">
                       <span className="block text-white/90 text-sm truncate">{shownName}</span>
                       <span className="block text-white/50 text-[11px] truncate">

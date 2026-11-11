@@ -31,6 +31,19 @@ describe('ProfilePinDialog', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
+  // The four boxes are a drawing of the one field: they must show how many
+  // digits it holds and never the digits themselves.
+  it('draws the one field as four boxes that fill as digits are typed, without showing them', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn(() => new Promise<void>(() => {}))} onCancel={vi.fn()} />)
+    const cells = () => [...document.querySelectorAll('[data-pin-cell]')].map(c => c.getAttribute('data-pin-cell'))
+    expect(cells()).toEqual(['empty', 'empty', 'empty', 'empty'])
+    expect(document.querySelectorAll('input')).toHaveLength(1)
+    fireEvent.change(screen.getByLabelText('Profile PIN'), { target: { value: '47' } })
+    expect(cells()).toEqual(['filled', 'filled', 'empty', 'empty'])
+    const drawn = document.querySelector('[data-pin-cells]')!.textContent ?? ''
+    expect(drawn).not.toMatch(/[0-9]/)
+  })
+
   it('shows the refusal and clears the field for another try', async () => {
     const onSubmit = vi.fn(async () => { throw refusal('profile_pin_invalid') })
     render(<ProfilePinDialog profile={kid} onSubmit={onSubmit} onCancel={vi.fn()} />)

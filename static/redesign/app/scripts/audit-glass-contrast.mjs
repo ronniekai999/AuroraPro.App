@@ -734,8 +734,6 @@ const EXEMPT = [
     why: 'the invite\'s icon-only close button' },
   { file: 'src/components/PartyShareCardModal.tsx', anchor: 'className="text-white/40 hover:text-white/80 text-sm transition-colors"', kind: 'non-text',
     why: 'the share card\'s icon-only "✕" close button' },
-  { file: 'src/components/ProfileSwitcher.tsx', anchor: 'strokeWidth="2.5" className="text-white/40" aria-hidden="true">', kind: 'non-text',
-    why: 'the chevron that shows the profile button opens a menu' },
   // ── requests, search, top bar ──
   { file: 'src/components/RequestsView.tsx', anchor: "r.media_type === 'tv' ? 'tv' : 'film'} size={20} className=\"text-white/25\" />", kind: 'decorative',
     why: 'the glyph a search result shows where its poster is missing; the title and "TV"/"Movie" are beside it' },

@@ -61,7 +61,29 @@ describe('ProfilesGate', () => {
   it('labels a locked profile', () => {
     renderGate(() => true)
     expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent('Locked')
+    expect(screen.getByRole('radio', { name: /Profile 2/ }).querySelector('[data-profile-lock]')).not.toBeNull()
     expect(screen.getByRole('radio', { name: /Profile 3/ })).not.toHaveTextContent('Locked')
+    expect(screen.getByRole('radio', { name: /Profile 3/ }).querySelector('[data-profile-lock]')).toBeNull()
+  })
+
+  // A child's profile must not look like a parent's: the limit is on the
+  // avatar and in words, and a profile without one says so.
+  it('says each profile\u2019s rating limit, in words and on the avatar', () => {
+    const kid: Profile = { ...profiles[2], name: 'Kid', max_age_rating: 'PG' }
+    render(<ProfilesGate profiles={[profiles[0], profiles[1], kid]} activeProfileId={1} onSelect={() => true} ready forced />)
+    const kidTile = screen.getByRole('radio', { name: /Kid/ })
+    expect(kidTile).toHaveTextContent('Up to PG')
+    expect(kidTile.querySelector('[data-profile-limit]')?.textContent).toBe('PG')
+    const parent = screen.getByRole('radio', { name: /Profile 1/ })
+    expect(parent.querySelector('[data-profile-limit]')).toBeNull()
+    expect(parent).not.toHaveTextContent('Up to')
+  })
+
+  it('gives profiles without a chosen avatar different colours', () => {
+    renderGate(() => true)
+    const discs = [...document.querySelectorAll<HTMLElement>('[data-profile-avatar="initial"]')]
+    expect(discs.length).toBe(profiles.length)
+    expect(new Set(discs.map(d => d.style.background)).size).toBe(profiles.length)
   })
 
   // Opened by hand, the gate can be left for the profile already active.

@@ -78,7 +78,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
                   onClick={() => onOpenMember(m.username)}
                   className="flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg"
                 >
-                  <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={48} />
+                  <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} colorKey={m.user_id} size={48} />
                   <span className="min-w-0">
                     <span className="block text-white text-sm font-medium truncate">{shownName}{isMe && <span className="text-white/50 font-normal"> (you)</span>}</span>
                     <span className="block text-white/50 text-xs truncate">@{m.username}</span>
