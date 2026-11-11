@@ -119,8 +119,9 @@ export function PartyPanel({
     // Not until it is in the document: it mounts a render after the flag.
     if (!leaveConfirmUp) return
     const opener = leaveButtonRef.current
+    const dialog = leaveDialogRef.current
     // The safe answer first: the first button is always "Keep watching".
-    leaveDialogRef.current?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
+    dialog?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
     // Escape closes the confirm and nothing else. Capture phase, stopped:
     // the app's own Escape handler is on window and would close the player.
     const onKey = (e: KeyboardEvent) => {
@@ -134,7 +135,7 @@ export function PartyPanel({
       // Back to the leave button, unless focus has already gone somewhere
       // of the viewer's choosing (or the panel is going away with it).
       const active = document.activeElement
-      const ours = !active || active === document.body || !!leaveDialogRef.current?.contains(active)
+      const ours = !active || active === document.body || !!dialog?.contains(active)
       if (ours && opener?.isConnected) opener.focus({ preventScroll: true })
     }
   }, [leaveConfirmUp])
