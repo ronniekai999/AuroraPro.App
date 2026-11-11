@@ -27,7 +27,7 @@
 // a `role="menu"` without arrow-key support is a WORSE widget than a plain div,
 // because the screen reader stops offering its own navigation in exchange.
 
-import { Fragment, useEffect, useId, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 
 export interface MediaContextItem {
   label: string
@@ -244,13 +244,24 @@ export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Pro
   const [sheet] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 767px)').matches)
   // Keep the popover on screen: 280px wide, 44px rows, 13px per group rule,
   // 8px padding top and bottom.
-  // The reason wraps at about 36 characters a line (13px text, 18px lines).
-  const reasonPx = reason ? Math.ceil(('Picked by Aurora: '.length + reason.length) / 36) * 18 + 14 : 0
+  // The reason wraps at about 30 characters a line (13px text, 18px lines).
+  // An estimate for the first layout; the measured height corrects it below.
+  const reasonPx = reason ? Math.ceil(('Picked by Aurora: '.length + reason.length) / 30) * 18 + 14 : 0
   const height = items.length * ROW_PX + items.filter((it, i) => it.group && i > 0).length * RULE_PX + 16 + reasonPx
   const maxX = typeof window !== 'undefined' ? window.innerWidth - MENU_W_PX - 8 : x
   const maxY = typeof window !== 'undefined' ? window.innerHeight - height - 8 : y
   const clampedX = Math.min(x, Math.max(8, maxX))
   const clampedY = Math.min(y, Math.max(8, maxY))
+
+  // The height above is arithmetic. What was drawn is measured before the
+  // first paint, and a menu that would run off the bottom (a long reason
+  // wraps to more lines than estimated) is lifted to fit.
+  const [liftedY, setLiftedY] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (sheet || !ref.current) return
+    const box = ref.current.getBoundingClientRect()
+    if (box.height > 0 && box.bottom > window.innerHeight - 8) setLiftedY(Math.max(8, window.innerHeight - box.height - 8))
+  }, [sheet, clampedY])
 
   const move = (delta: number) => {
     const n = items.length
@@ -270,7 +281,7 @@ export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Pro
       className={sheet
         ? 'fixed inset-x-0 bottom-0 z-[100] max-h-[80vh] overflow-y-auto rounded-t-sheet bg-surface-raised-2 p-2 pb-[calc(8px+env(safe-area-inset-bottom,0px))] shadow-[0_-24px_64px_rgba(0,0,0,0.6)] stage-sheet-in'
         : 'fixed z-[100] w-[280px] rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-fade-in'}
-      style={sheet ? undefined : { left: clampedX, top: clampedY }}
+      style={sheet ? undefined : { left: clampedX, top: liftedY ?? clampedY }}
       onKeyDown={e => {
         // Handled here rather than per item so the contract lives in one place.
         //
