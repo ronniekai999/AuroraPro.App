@@ -355,6 +355,37 @@
     --fs-caption: 11px;
     --fs-meta: 12.5px;
     --fs-body-sm: 13.5px;
+
+    /* Neutral surface system. Surfaces are graphite and carry no brand
+       colour; colour on a page comes from the artwork in focus (--ambient,
+       set per title by script) and the aurora gradient is a signal reserved
+       for the logo, AI attribution and live presence. The primary action
+       and progress are white, which holds its contrast over any artwork.
+       Tailwind maps these as surface-*, line, ink-*, ok, warn and the
+       chip/art/control/sheet radii (tailwind.config.js). */
+    --surface-page: #0e0f11;
+    --surface-raised: #17181b;
+    --surface-raised-2: #202226;
+    --line: #2a2c31;
+    --line-strong: #3a3d44;
+    --scrim: rgba(6, 7, 8, 0.72);
+    --ink: #f4f4f5;
+    --ink-2: #b4b6bc;
+    --ink-3: #9a9da5;
+    --action: #ffffff;
+    --on-action: #0e0f11;
+    --action-soft: rgba(255, 255, 255, 0.1);
+    --track: rgba(255, 255, 255, 0.22);
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --danger: #b91c1c;
+    --danger-ink: #f87171;
+    --aurora: linear-gradient(135deg, #a855f7 0%, #7c3aed 55%, #22d3ee 100%);
+    --ambient: transparent;
+    --radius-chip: 4px;
+    --radius-art: 8px;
+    --radius-control: 12px;
+    --radius-sheet: 20px;
   }
 
   html[data-glow="subtle"] {

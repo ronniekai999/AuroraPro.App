@@ -61,6 +61,33 @@ module.exports = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Neutral surface system (index.css :root). Literal colours, so
+        // these take no `/<alpha>` modifier.
+        surface: {
+          page: "var(--surface-page)",
+          raised: "var(--surface-raised)",
+          "raised-2": "var(--surface-raised-2)",
+        },
+        line: {
+          DEFAULT: "var(--line)",
+          strong: "var(--line-strong)",
+        },
+        ink: {
+          DEFAULT: "var(--ink)",
+          2: "var(--ink-2)",
+          3: "var(--ink-3)",
+        },
+        action: {
+          DEFAULT: "var(--action)",
+          soft: "var(--action-soft)",
+          on: "var(--on-action)",
+        },
+        ok: "var(--ok)",
+        warn: "var(--warn)",
+        danger: {
+          DEFAULT: "var(--danger)",
+          ink: "var(--danger-ink)",
+        },
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",
@@ -78,6 +105,10 @@ module.exports = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
         xs: "calc(var(--radius) - 6px)",
+        chip: "var(--radius-chip)",
+        art: "var(--radius-art)",
+        control: "var(--radius-control)",
+        sheet: "var(--radius-sheet)",
       },
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
