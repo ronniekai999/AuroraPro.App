@@ -144,6 +144,24 @@ describe('the identity control', () => {
     expect(screen.queryByTitle(/^Switch profile/)).toBeNull()
   })
 
+  // With several profiles on a short window the panel ran off the bottom of
+  // the screen, under a bar that does not scroll, and Settings and Sign out
+  // could not be reached. jsdom lays nothing out, so this pins the rule that
+  // prevents it; the layout itself is checked by rendering (1280x520, six
+  // profiles).
+  it('opens a panel no taller than the window under the bar, which scrolls', () => {
+    render(<TopNav {...props()} />)
+    fireEvent.click(trigger())
+    const panel = screen.getByRole('group', { name: 'Account and profiles' })
+    const classes = panel.className.split(/\s+/)
+    const cap = classes.find(c => c.startsWith('max-h-['))
+    expect(cap, 'a height limit').toBeTruthy()
+    // Relative to the viewport, less the bar.
+    expect(cap).toMatch(/100dvh/)
+    expect(cap).toMatch(/--chrome-h/)
+    expect(classes).toContain('overflow-y-auto')
+  })
+
   it('is named by what it shows, then what it is: the visible profile name leads its accessible name', () => {
     // The visible text is the PROFILE's name, so the accessible name must
     // contain it (label in name): a voice command for what is on screen

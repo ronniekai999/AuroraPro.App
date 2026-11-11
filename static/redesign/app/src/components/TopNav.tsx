@@ -202,7 +202,10 @@ function IdentityMenu({
           aria-label="Account and profiles"
           role="group"
           id={panelId}
-          className={`absolute right-0 top-[calc(100%+8px)] z-[55] w-[344px] max-w-[calc(100vw-32px)] rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-pop-in ${exit.closing ? 'is-closing' : ''}`}
+          // Never taller than the window under the bar, and it scrolls: with
+          // several profiles on a short screen the rows below them (Settings,
+          // Sign out) ran off the bottom and could not be reached.
+          className={`absolute right-0 top-[calc(100%+8px)] z-[55] w-[344px] max-w-[calc(100vw-32px)] max-h-[calc(100dvh-var(--chrome-h,64px)-16px)] overflow-y-auto overscroll-contain rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-pop-in ${exit.closing ? 'is-closing' : ''}`}
         >
           {profiles.length > 0 && (
             <>
