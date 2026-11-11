@@ -195,6 +195,17 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
   useEffect(() => () => {
     if (reportedOpenRef.current) onOpenChangeRef.current?.(false)
   }, [])
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  // Closing takes the emoji buttons out of the document. When one of them
+  // had focus (a keyboard pick, Escape from inside the row), focus would fall
+  // to <body>; it goes back to the trigger. Focus that is somewhere else is
+  // left where it is.
+  const close = () => {
+    const hadFocus = !!popoverRef.current?.contains(document.activeElement)
+    setOpen(false)
+    if (hadFocus) triggerRef.current?.focus({ preventScroll: true })
+  }
   // Escape closes the row of emoji and nothing else. Capture phase, stopped:
   // the app's own Escape handler is on window and would close the player or
   // leave the page.
@@ -203,7 +214,7 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       e.stopPropagation()
-      setOpen(false)
+      close()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -211,6 +222,7 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
   return (
     <div className="relative flex-none">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen(o => !o)}
         className={variant === 'player'
@@ -225,6 +237,7 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
       </button>
       {open && (
         <div
+          ref={popoverRef}
           role="group"
           aria-label="Send a reaction"
           className={`absolute ${popoverV} ${popoverAnchor} bg-surface-raised-2 rounded-control shadow-[0_24px_64px_rgba(0,0,0,0.6)] p-2 flex flex-wrap justify-center gap-1 w-[min(90vw,288px)] z-20`}
@@ -233,7 +246,7 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
             <button
               key={e}
               type="button"
-              onClick={() => { onSend(e); setOpen(false) }}
+              onClick={() => { onSend(e); close() }}
               className="w-12 h-12 grid place-items-center text-2xl rounded-control hover:bg-action-soft transition-colors"
               aria-label={`React with ${e}`}
             >

@@ -920,6 +920,44 @@ describe('menus and the things around the player', () => {
     fake.cast.status = { ...fake.cast.status, connected: false }
   })
 
+  // The picker keeps its own open state, so closing the player's menus does
+  // not close it: left open in a minimised player it swallowed the next
+  // Escape pressed anywhere and kept the party's surfaces hidden.
+  it('closes the reaction picker too when it minimises', async () => {
+    const element = () => <VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Send a reaction' }))
+    expect(document.documentElement.hasAttribute('data-player-menu')).toBe(true)
+    fake.cast.status = { ...fake.cast.status, connected: true }
+    view.rerender(element()); await settle()
+    expect(document.documentElement.hasAttribute('data-player-menu')).toBe(false)
+    const reachedApp = vi.fn()
+    window.addEventListener('keydown', reachedApp)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    window.removeEventListener('keydown', reachedApp)
+    expect(reachedApp).toHaveBeenCalledTimes(1)
+    fake.cast.status = { ...fake.cast.status, connected: false }
+  })
+
+  // The error screen draws no menus. One left "open" behind it kept the
+  // party's dock, ticker and voice pill hidden for as long as the error stood.
+  it('closes an open menu, and the picker, when a fatal error replaces the picture', async () => {
+    for (const open of ['More', 'Send a reaction']) {
+      const view = render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+      fireEvent.click(screen.getByRole('button', { name: open }))
+      expect(document.documentElement.hasAttribute('data-player-menu'), open).toBe(true)
+      await act(async () => { fake.hls.at(-1)!.emit('ERROR', { fatal: true, type: 'otherError', details: 'internalException' }) }); await settle()
+      expect(screen.getByText(/Playback failed/)).toBeInTheDocument()
+      expect(document.documentElement.hasAttribute('data-player-menu'), open).toBe(false)
+      const reachedApp = vi.fn()
+      window.addEventListener('keydown', reachedApp)
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      window.removeEventListener('keydown', reachedApp)
+      expect(reachedApp, open).toHaveBeenCalledTimes(1)
+      view.unmount()
+    }
+  })
+
   // A dead session looks exactly like a paused picture once the bars fade.
   it('keeps a notice the viewer must act on in view after the bars have gone', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()

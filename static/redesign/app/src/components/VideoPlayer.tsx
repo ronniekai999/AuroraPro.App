@@ -2367,6 +2367,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   useEffect(() => {
     if (minimized) setOpenMenu(null)
   }, [minimized])
+  // Nor behind the error screen, which draws no menus: one left "open"
+  // there keeps the party's dock, ticker and voice pill hidden, makes the
+  // first Escape close something invisible, and leaves More reading as
+  // expanded.
+  useEffect(() => {
+    if (errorMsg) setOpenMenu(null)
+  }, [errorMsg])
   // Escape closes the open menu, wherever focus is, and nothing else. In the
   // capture phase and stopped there: App's own Escape handler is on window
   // and closes the whole player.
@@ -7443,6 +7450,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               auto-hide so the row cannot fade mid-choice. */}
           {onSendReaction && (
             <ReactionPicker
+              // A picker left open inside a minimised player, or behind the
+              // error screen, would keep its Escape listener (swallowing the
+              // next Escape pressed anywhere in the app) and keep the party's
+              // surfaces hidden. A new key closes it: it starts closed.
+              key={`${minimized ? 'minimised' : 'up'}:${errorMsg ? 'error' : 'ok'}`}
               onSend={onSendReaction}
               vertical="down"
               variant="player"
