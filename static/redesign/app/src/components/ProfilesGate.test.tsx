@@ -79,6 +79,24 @@ describe('ProfilesGate', () => {
     expect(parent).not.toHaveTextContent('Up to')
   })
 
+  // Ids are a server-wide serial: 1 and 10 land on the same colour by
+  // themselves. Within one account they must not.
+  it('gives two profiles different colours even when their ids alone would share one', () => {
+    render(<ProfilesGate profiles={[profile(1), profile(10)]} activeProfileId={1} onSelect={() => true} ready forced />)
+    const discs = [...document.querySelectorAll<HTMLElement>('[data-profile-avatar="initial"]')]
+    expect(discs).toHaveLength(2)
+    expect(discs[0].style.background).not.toBe(discs[1].style.background)
+  })
+
+  it('says "no limit" for every profile that has none, a default or locked one included', () => {
+    const kid: Profile = { ...profile(3), name: 'Kid', max_age_rating: 'PG', has_pin: true }
+    render(<ProfilesGate profiles={[profiles[0], profiles[1], kid]} activeProfileId={1} onSelect={() => true} ready forced />)
+    expect(screen.getByRole('radio', { name: /Profile 1/ })).toHaveTextContent('Default · no limit')
+    expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent('Locked with a PIN · no limit')
+    expect(screen.getByRole('radio', { name: /Kid/ })).toHaveTextContent('Locked with a PIN · up to PG')
+    expect(screen.getByRole('radio', { name: /Kid/ })).not.toHaveTextContent(/no limit/i)
+  })
+
   it('gives profiles without a chosen avatar different colours', () => {
     renderGate(() => true)
     const discs = [...document.querySelectorAll<HTMLElement>('[data-profile-avatar="initial"]')]

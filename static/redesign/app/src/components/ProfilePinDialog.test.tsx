@@ -44,6 +44,45 @@ describe('ProfilePinDialog', () => {
     expect(drawn).not.toMatch(/[0-9]/)
   })
 
+  // The field is invisible, so its caret is too: moved off the end, the next
+  // digit would be filed in front of the others and a wrong PIN submitted,
+  // spending one of five attempts.
+  it('keeps the caret at the end of the invisible field, whatever tries to move it', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn(() => new Promise<void>(() => {}))} onCancel={vi.fn()} />)
+    const field = screen.getByLabelText('Profile PIN') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '12' } })
+    for (const move of ['select', 'click', 'keyUp', 'focus'] as const) {
+      field.setSelectionRange(0, 0)
+      fireEvent[move](field)
+      expect([field.selectionStart, field.selectionEnd], move).toEqual([2, 2])
+    }
+    // The keys that only move a caret are refused outright.
+    for (const key of ['ArrowLeft', 'Home', 'ArrowUp']) expect(fireEvent.keyDown(field, { key }), key).toBe(false)
+    expect(fireEvent.keyDown(field, { key: '3' })).toBe(true)
+    expect(fireEvent.keyDown(field, { key: 'Backspace' })).toBe(true)
+  })
+
+  it('is a numeric password field: the digits are hidden by the field, not only by its being invisible', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn()} onCancel={vi.fn()} />)
+    const field = screen.getByLabelText('Profile PIN')
+    expect(field).toHaveAttribute('type', 'password')
+    expect(field).toHaveAttribute('inputmode', 'numeric')
+    expect(field).toHaveAttribute('maxlength', '4')
+  })
+
+  // The boxes are the only visible sign of the field. An empty one is drawn
+  // by its edge alone; scripts/verify-control-edges.mjs holds that edge to
+  // 3:1 against the dialog and the box's own fill, from the token values.
+  it('draws an empty box with the edge the contrast check measures, not the hairline', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn()} onCancel={vi.fn()} />)
+    const empty = [...document.querySelectorAll('[data-pin-cell="empty"]')]
+    expect(empty).toHaveLength(4)
+    // The first is where the next digit goes and carries the focus edge.
+    for (const cell of empty.slice(1)) {
+      expect([...cell.classList].filter(c => /^border-[a-z]/.test(c))).toEqual(['border-ink-3'])
+    }
+  })
+
   it('shows the refusal and clears the field for another try', async () => {
     const onSubmit = vi.fn(async () => { throw refusal('profile_pin_invalid') })
     render(<ProfilePinDialog profile={kid} onSubmit={onSubmit} onCancel={vi.fn()} />)

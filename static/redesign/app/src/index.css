@@ -555,9 +555,7 @@
       `hover:`, `focus-visible:` and `aria-*:` all land after this block; it is
       only the plain unprefixed utility that loses. If you need per-breakpoint
       control over anything in that list, flatten the selector rather than
-      reaching for `!`. (A live example of the plain-utility case:
-      ProfileSwitcher writes `!text-[10px]` on `.stage-eyebrow`, and the `!` is
-      load-bearing — a plain `text-[10px]` there silently does nothing.)
+      reaching for `!`.
 
    3. Correction 1 cuts the other way too, and this one is a BUG SHAPE rather
       than a convenience. A call-site VARIANT utility at (0,2,0) or higher also
@@ -1368,6 +1366,19 @@ html:has(.stage-toolbar) {
    `lg:sticky` at equal specificity — sticky won only because Tailwind hoists
    its variants later in the file. That is the same ordering trap the CASCADE
    HAZARD note above describes; keeping the overlap in one system removes it. */
+
+/* The profile unlock prompt's two fields. The app's global
+   `input:not([type="range"])` rule is (0,1,1), unlayered and later in this
+   file, so it outranks any utility on an input and any rule here that is not
+   more specific; these are (0,2,1) and up. 16px keeps a phone from zooming the page
+   when the field takes focus (the global size is 15px); the error border is
+   the field's own sign that the last try was refused. */
+input.profile-unlock-field:not([type="range"]) {
+  font-size: 16px;
+}
+input.profile-unlock-field[aria-invalid="true"]:not(:focus) {
+  border-color: var(--danger-ink);
+}
 
 /* ── Browse toolbar, now sticky ─────────────────────────────────────
    The toolbar was deliberately left in-flow with a comment explaining why:

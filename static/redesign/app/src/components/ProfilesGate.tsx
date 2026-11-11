@@ -16,13 +16,13 @@
 // it needs a PIN, and its rating limit, so a child's profile is never
 // mistaken for a parent's.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Profile } from '@/lib/api'
 import { Lock, Plus } from 'lucide-react'
 import { ProfileAvatar } from './ProfileAvatar'
 import { AuroraWordmark } from './AuroraWordmark'
-import { AuroraMark } from './TopNav'
 import { profileSummary } from '@/lib/navScope'
+import { setAccountProfileIds } from '@/lib/profileColors'
 import { hasSeenProfileGate, markProfileGateSeen, shouldShowProfileGate } from '@/lib/profileGate'
 import { nextRadioIndex } from '@/lib/radiogroup'
 import { lockBodyScroll } from '@/lib/scrollLock'
@@ -57,8 +57,19 @@ interface ProfilesGateProps {
   onOpenChange?: (open: boolean) => void
 }
 
-// 136px on a wide window; two tiles side by side must fit a 320px phone.
+// One size at every width. A 390px phone fits two 148px tiles to a row; a
+// 320px one fits one.
 const PICKER_AVATAR = 120
+
+/** The line under a profile's name. The limit is always part of it, "No
+ *  limit" included: whether a profile is restricted is the fact a parent
+ *  reads this screen for, so a default or locked profile without a limit
+ *  says so too. (The tone lean the line once carried is a preference, not a
+ *  limit, and is not shown here.) */
+function pickerSummary(p: Pick<Profile, 'is_default' | 'has_pin' | 'max_age_rating'>): string {
+  const line = profileSummary(p)
+  return p.max_age_rating?.trim() || line === 'No limit' ? line : `${line} · no limit`
+}
 
 export function ProfilesGate({
   profiles, activeProfileId, onSelect, onAddProfile, ready, forced = false, onDismiss,
@@ -85,6 +96,15 @@ export function ProfilesGate({
   //
   // On Home an unrelated 9s hero-rotation interval re-rendered the tree and the
   // gate closed "eventually", which is exactly why this survived a manual pass.
+  // The account's profile ids, for the avatars' colours: every avatar in the
+  // app reads its colour from this set (lib/profileColors), so no two of the
+  // account's profiles share one. This component is mounted whenever someone
+  // is signed in, whether or not the picker shows. Before paint, so no avatar
+  // is drawn in a colour it is about to lose.
+  const profileIdsKey = profiles.map(p => p.id).join(',')
+  useLayoutEffect(() => {
+    setAccountProfileIds(profileIdsKey ? profileIdsKey.split(',').map(Number) : [])
+  }, [profileIdsKey])
   const [seen, setSeen] = useState(() => hasSeenProfileGate())
   // The radio the keyboard has moved to. Arrowing used to call onSelect on
   // every press, which made it a real profile switch; switches now go through
@@ -103,9 +123,7 @@ export function ProfilesGate({
   // Captures the opener first and restores it on close — every dismissal path
   // (pick, Add-Profile, Escape, the keep-watching button) unmounts the gate
   // along with the focused element, and React does not relocate focus, so all
-  // four used to drop it to <body> (WCAG 2.4.3). ProfileSwitcher was fixed for
-  // exactly this last phase and hands focus over correctly; the gate was
-  // dropping it on the floor.
+  // four used to drop it to <body> (WCAG 2.4.3).
   useEffect(() => {
     if (!open) return
     setHighlightId(activeProfileId)
@@ -115,7 +133,7 @@ export function ProfilesGate({
     return () => {
       window.clearTimeout(t)
       // Only if the opener is still in the document — it may have unmounted
-      // (e.g. the switcher menu that launched us closed behind the gate).
+      // (e.g. the identity menu that launched us closed behind the gate).
       if (opener && opener.isConnected) opener.focus()
     }
     // Deliberately keyed on `open` only: re-running when activeProfileId
@@ -224,7 +242,6 @@ export function ProfilesGate({
       <div className="absolute inset-0 overflow-y-auto">
       <div className="min-h-full flex flex-col px-4 sm:px-12 pb-10">
         <div className="h-16 flex-none flex items-center gap-2.5" aria-hidden="true">
-          <AuroraMark />
           <AuroraWordmark decorative ink="#F4F4F5" className="h-[15px] w-auto" />
         </div>
         <div className="flex-1 flex flex-col items-center justify-center gap-10 sm:gap-14 py-6">
@@ -322,7 +339,7 @@ export function ProfilesGate({
                 </span>
                 <span className="min-w-0 w-full flex flex-col gap-0.5">
                   <span className="block truncate text-[20px] font-semibold text-ink">{p.name}</span>
-                  <span className="block text-[13px] leading-snug text-ink-2">{profileSummary(p)}</span>
+                  <span className="block text-[13px] leading-snug text-ink-2">{pickerSummary(p)}</span>
                 </span>
               </button>
             )

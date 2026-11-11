@@ -69,6 +69,18 @@ export function ProfilePinDialog({
 
   const ready = mode === 'pin' ? /^[0-9]{4}$/.test(value) : value.length > 0
 
+  // The PIN field is invisible (the boxes are its picture), so its caret is
+  // too. Left to move, a Left or Home, or a tap on the first box, would file
+  // the next digit in front of the ones already typed: "12", Home, "34"
+  // submits 3412 and spends one of five attempts before a lockout. The caret
+  // stays at the end, where the boxes show it.
+  const pinCaretToEnd = (el: HTMLInputElement) => {
+    const end = el.value.length
+    if (el.selectionStart !== end || el.selectionEnd !== end) {
+      try { el.setSelectionRange(end, end) } catch { /* not selectable in this state */ }
+    }
+  }
+
   const submit = async (v: string) => {
     if (busy) return
     setBusy(true)
@@ -130,8 +142,12 @@ export function ProfilePinDialog({
                     <span
                       key={i}
                       data-pin-cell={i < value.length ? 'filled' : 'empty'}
+                      // The boxes are the only visible sign of the field, so
+                      // an empty one's edge has to be seen: --ink-3, which is
+                      // 5.87:1 on the dialog and 6.54:1 on the box's own fill
+                      // (the hairline token is 1.46:1 and 1.63:1).
                       className={`grid h-[68px] w-14 sm:w-16 place-items-center rounded-control bg-surface-raised text-[28px] leading-none text-ink ${
-                        active ? 'border-2 border-ink' : error ? 'border border-danger-ink' : 'border border-line-strong'
+                        active ? 'border-2 border-ink' : error ? 'border border-danger-ink' : 'border border-ink-3'
                       }`}
                     >
                       {i < value.length ? '\u2022' : ''}
@@ -155,15 +171,24 @@ export function ProfilePinDialog({
                 disabled={busy}
                 aria-invalid={!!error}
                 aria-describedby={error ? 'profile-unlock-error' : undefined}
-                onFocus={() => setFocused(true)}
+                onFocus={e => { setFocused(true); pinCaretToEnd(e.currentTarget) }}
                 onBlur={() => setFocused(false)}
+                onSelect={e => pinCaretToEnd(e.currentTarget)}
+                onKeyUp={e => pinCaretToEnd(e.currentTarget)}
+                onClick={e => pinCaretToEnd(e.currentTarget)}
+                onKeyDown={e => {
+                  // The keys that only move a caret have nothing to move.
+                  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) e.preventDefault()
+                }}
                 onChange={e => {
                   const digits = e.target.value.replace(/[^0-9]/g, '').slice(0, 4)
                   setValue(digits)
                   if (digits.length === 4) void submit(digits)
                 }}
-                // 16px so a phone does not zoom the page when it focuses.
-                className="absolute inset-0 h-full w-full cursor-text rounded-control text-[16px] opacity-0"
+                // Its text size (16px, so a phone does not zoom the page when
+                // it focuses) is set by `.profile-unlock-field` in index.css:
+                // the app's global input rule outranks a utility here.
+                className="profile-unlock-field absolute inset-0 h-full w-full cursor-text opacity-0"
               />
             </div>
           ) : (
@@ -188,7 +213,10 @@ export function ProfilePinDialog({
               aria-invalid={!!error}
               aria-describedby={error ? 'profile-unlock-error' : undefined}
               onChange={e => setValue(e.target.value)}
-              className={`mt-6 h-12 w-full rounded-control bg-surface-raised px-4 text-[16px] text-ink focus:outline-none focus-visible:border-ink border ${error ? 'border-danger-ink' : 'border-line-strong'}`}
+              // Fill, border, radius and padding are the app's global input
+              // style; `.profile-unlock-field` adds the 16px text and the
+              // error border, which a utility here could not.
+              className="profile-unlock-field mt-6 h-12 w-full"
             />
           )}
 
@@ -218,7 +246,8 @@ export function ProfilePinDialog({
             type="button"
             onClick={() => setMode(m => (m === 'pin' ? 'password' : 'pin'))}
             disabled={busy}
-            className="mt-5 rounded-chip text-[14px] text-ink-2 underline underline-offset-2 hover:text-ink"
+            // 44px tall: it is the way back in when the PIN is forgotten.
+            className="mt-2 min-h-11 px-2 inline-flex items-center rounded-chip text-[14px] text-ink-2 underline underline-offset-2 hover:text-ink"
           >
             {mode === 'pin' ? 'Forgot the PIN? Use the account password' : 'Use the PIN instead'}
           </button>

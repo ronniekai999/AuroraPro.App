@@ -1,15 +1,20 @@
 import { NebulaAvatar, parseNebula } from './NebulaAvatar'
 import { personColor, personInitial } from '@/lib/personColor'
+import { useProfileColorKey } from '@/lib/profileColors'
 
 interface ProfileAvatarProps {
   /** A profile's avatar_url: a "nebula:<id>" id, an http(s) image URL, or empty. */
   avatarUrl?: string | null
   /** Name used for the initial when there is no nebula or image. */
   name?: string
-  /** What picks the disc's colour when there is no nebula or image: the
-   *  profile's or member's id where the caller has one, so the same profile
-   *  is the same colour on every screen. Falls back to the name. */
+  /** A PROFILE's id (or, with none, nothing: the name is used). It picks the
+   *  disc's colour when there is no nebula or image, from the account's own
+   *  set (lib/profileColors), so no two profiles on one account share a
+   *  colour and a profile is the same colour on every screen. */
   colorKey?: number | string
+  /** A MEMBER's user id, for another account's avatar. Used as it is, which
+   *  is also that person's colour in a watch party's roster and chat. */
+  memberKey?: number
   /** Diameter in px (default 40). */
   size?: number
   className?: string
@@ -21,7 +26,8 @@ interface ProfileAvatarProps {
  * or the name's initial on a disc of that profile's own colour, so profiles
  * without a chosen avatar are still told apart at a glance.
  */
-export function ProfileAvatar({ avatarUrl, name, colorKey, size = 40, className = '' }: ProfileAvatarProps) {
+export function ProfileAvatar({ avatarUrl, name, colorKey, memberKey, size = 40, className = '' }: ProfileAvatarProps) {
+  const profileSlot = useProfileColorKey(typeof colorKey === 'number' ? colorKey : undefined)
   const nb = parseNebula(avatarUrl)
   if (nb) return <NebulaAvatar nebula={nb} size={size} className={className} />
 
@@ -44,7 +50,7 @@ export function ProfileAvatar({ avatarUrl, name, colorKey, size = 40, className 
         height: size,
         // Never below the 12px floor, however small the disc.
         fontSize: Math.max(12, Math.round(size * 0.42)),
-        background: isUrl ? 'var(--surface-raised-2)' : personColor(colorKey ?? name ?? ''),
+        background: isUrl ? 'var(--surface-raised-2)' : personColor(memberKey ?? profileSlot ?? colorKey ?? name ?? ''),
       }}
     >
       {isUrl ? <img src={avatarUrl!} alt="" className="h-full w-full object-cover" /> : personInitial(name)}

@@ -192,7 +192,7 @@ export default function UserProfileView({ username, onSelect, onCardContext, onO
 
       <div className="glass-panel rounded-2xl p-6 md:p-8">
         <div className="flex flex-col sm:flex-row gap-6 items-start">
-          <ProfileAvatar avatarUrl={profile.avatar_url} name={shownName} colorKey={profile.user_id} size={96} />
+          <ProfileAvatar avatarUrl={profile.avatar_url} name={shownName} memberKey={profile.user_id} size={96} />
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-4">
               <h2 className="text-white text-xl font-semibold truncate">{shownName}</h2>
@@ -292,7 +292,7 @@ export default function UserProfileView({ username, onSelect, onCardContext, onO
                     onClick={() => onOpenMember?.(m.username)}
                     className="flex items-center gap-3 min-w-0 text-left rounded-lg px-2 py-1.5 hover:bg-white/[0.05] transition-colors"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} colorKey={m.user_id} size={32} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} memberKey={m.user_id} size={32} />
                     <span className="min-w-0">
                       <span className="block text-white/85 text-sm truncate">{m.display_name || m.username}</span>
                       <span className="block text-white/50 text-xs truncate">@{m.username}</span>
