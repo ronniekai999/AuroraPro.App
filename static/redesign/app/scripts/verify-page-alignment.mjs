@@ -221,23 +221,19 @@ for (const r of out) {
     console.log(`   *** admintb content ${r.admintb.left}..${r.admintb.right} != ${ref.left}..${ref.right}`)
     problems++
   }
-  // 5. The TOP NAV, which is a fifth page system and was missed entirely by the
-  //    first version of this phase. Its inset is deliberately 18px tighter than
-  //    the page gutter below the cap, and must converge with it above — otherwise
-  //    the tabs sit at x=30 while every page they navigate to starts at x=320.
-  // Read, not restated — the same reason CAP/GUTTER/MOBILE are. This was left as a
-  // literal in the commit that removed the others, and it is the value this phase
-  // actually changed, so editing the CSS produced "expected 30" blaming the
-  // stylesheet when the script was the stale side.
-  const NAV_INSET = num(/\.stage-topnav\s*\{\s*padding:\s*0\s*max\((\d+)px/, "the nav's inset")
-  const NAV_MOBILE = MOBILE
-  const navExpected = r.mqWidth < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
-  if (Math.abs(r.nav.left - navExpected) > 0.5) {
-    console.log(`   *** nav inset is ${r.nav.left}, expected ${navExpected}`)
-    problems++
+  // 5. The TOP NAV, which is a fifth page system. It shares the page's own
+  //    horizontal padding, so its content must start on the same line as the
+  //    page's at EVERY width: phones, desktops and past the cap. (It used to
+  //    keep an inset of its own, 18px tighter than the gutter below the cap,
+  //    and only had to converge above it.) The declaration is read from the
+  //    built CSS as well as measured: a literal that happened to equal the
+  //    gutter at the widths tried here would pass the measurement and drift
+  //    the day the gutter changes.
+  if (!/\.stage-topnav\{[^}]*padding:0 var\(--page-pad-x\)/.test(css)) {
+    throw new Error("verify: .stage-topnav no longer sets padding: 0 var(--page-pad-x) in the built CSS — this check is out of date, not passing")
   }
-  if (vw > CAP + 2 * GUTTER && Math.abs(r.nav.left - ref.left) > 0.5) {
-    console.log(`   *** past the cap the nav (${r.nav.left}) must track the page (${ref.left})`)
+  if (Math.abs(r.nav.left - ref.left) > 0.5 || Math.abs(r.nav.right - ref.right) > 0.5) {
+    console.log(`   *** the nav (${r.nav.left} .. ${r.nav.right}) must track the page (${ref.left} .. ${ref.right})`)
     problems++
   }
 

@@ -110,7 +110,11 @@ import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, re
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
-import { TopNav } from '@/components/TopNav'
+import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
+import { LibraryScopeBar } from '@/components/LibraryScopeBar'
+import { hiddenFromRestricted, isLibraryView, libraryScopesFor, navScopeFor } from '@/lib/navScope'
+import { settingsPaneFromPath, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
+import { partyPresence, useActiveParties } from '@/hooks/useActiveParties'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
 import { usePanelDismiss } from '@/hooks/usePanelDismiss'
@@ -162,13 +166,18 @@ const VIEW_LOADERS = {
   member: () => import('@/components/UserProfileView'),
   members: () => import('@/components/MembersView'),
   device: () => import('@/components/DeviceApprovalView'),
+  together: () => import('@/components/TogetherView'),
+  profile: () => import('@/components/MyProfileView'),
+  me: () => import('@/components/MeView'),
 } as const
-// Nav tab id → chunk. Home is eager (no entry); movies and shows share the
-// browse chunk; detail/member are never reached from a tab.
+// Destination or view id → chunk. Home is eager (no entry); movies and shows
+// share the browse chunk; detail/member are never reached from the nav. The
+// Library destination warms the browse chunk, where it lands by default.
 const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   admin: 'admin', collections: 'collections', calendar: 'calendar',
   settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
   library: 'library', search: 'search', members: 'members',
+  together: 'together', profile: 'profile', me: 'me',
 }
 const prefetched = new Set<keyof typeof VIEW_LOADERS>()
 function prefetchView(view: string): void {
@@ -245,6 +254,11 @@ const UserProfileView = lazy(VIEW_LOADERS.member)
 // browse surfaces; this is an occasional destination like Settings).
 const MembersView = lazy(VIEW_LOADERS.members)
 const DeviceApprovalView = lazy(VIEW_LOADERS.device)
+// The Together hub, the viewer's own profile page, and the phone's account
+// page ("Me"), each loaded on first visit.
+const TogetherView = lazy(VIEW_LOADERS.together)
+const MyProfileView = lazy(VIEW_LOADERS.profile)
+const MeView = lazy(VIEW_LOADERS.me)
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -2137,6 +2151,19 @@ const VIEW_BY_PATH: Record<string, string> = {
   '/search': 'search',
   '/members': 'members',
   '/device': 'device',
+  // Upcoming is the calendar's name as a scope of Library; both URLs render it.
+  '/upcoming': 'calendar',
+  '/together': 'together',
+  '/profile': 'profile',
+  '/me': 'me',
+}
+
+// What the phone's top bar calls each page.
+const PAGE_TITLES: Record<string, string> = {
+  home: 'Tonight', movies: 'Movies', shows: 'TV Shows', collections: 'Collections',
+  library: 'My Library', calendar: 'Upcoming', together: 'Together', members: 'Members',
+  member: 'Member', requests: 'My requests', settings: 'Settings', admin: 'Admin',
+  search: 'Search', profile: 'Your profile', me: 'Me', detail: '', device: 'Pair a device',
 }
 
 // titleIdFromPath extracts the media id from a /title/:id pathname, or
@@ -2400,6 +2427,19 @@ export default function App() {
   // personalized content does.
   const adminUI = showsAdminUI(user ? user.role : undefined, profiles, profilesLoaded, activeProfileId)
   const actingRestricted = activeProfileId !== null && isRestrictedProfile(profiles.find(p => p.id === activeProfileId))
+  // What the navigation offers this session (lib/navScope). Like adminUI it
+  // follows the profile the server has bound, never a remembered one: until
+  // the binding is read it is 'unknown', which offers nothing a restricted
+  // profile lacks (no Together, no requests) and restyles nothing.
+  const navScope = navScopeFor(profiles, profilesLoaded, activeProfileId)
+  // The account's active watch parties, polled once for the whole app and
+  // read by the nav's presence pill and the Together hub. Only for a session
+  // that is offered Together, and keyed by user and acting profile: the hook
+  // returns nothing on the render that switches profile.
+  const activeParties = useActiveParties({
+    enabled: !!user && navScope === 'full',
+    ownerKey: `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`,
+  })
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -3071,6 +3111,16 @@ export default function App() {
       navigate('/')
     }
   }, [user, actingRestricted, adminUI, location.pathname, navigate])
+  // A session KNOWN to act as a restricted profile is not offered Together,
+  // requests, the member pages or the profile page, so opening one by URL
+  // lands on Tonight. Presentation only (the server enforces the limit), and
+  // only once the profile is known: 'unknown' redirects nothing, or a parent's
+  // deep link would bounce home during startup.
+  useEffect(() => {
+    if (user && navScope === 'restricted' && hiddenFromRestricted(pathToView(location.pathname))) {
+      navigate('/', { replace: true })
+    }
+  }, [user, navScope, location.pathname, navigate])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
@@ -3289,7 +3339,22 @@ export default function App() {
     syncAppBadge(realtimeUserId == null ? 0 : unreadCount)
   }, [unreadCount, realtimeUserId])
 
-  const handleNavigate = useCallback((v: string) => {
+  // The Library destination opens the scope last looked at in this tab
+  // (Movies the first time). Only a scope the session is offered is used.
+  const lastLibraryScopeRef = useRef('movies')
+  useEffect(() => {
+    if (isLibraryView(view)) lastLibraryScopeRef.current = view
+  }, [view])
+  const handleNavigate = useCallback((dest: string) => {
+    // The phone tab bar's Search tab opens the search dialog over the page
+    // it is on; search is a surface, not a place to be.
+    if (dest === 'search') { setPaletteOpen(true); return }
+    let v = dest
+    if (dest === 'library') {
+      const offered = libraryScopesFor(navScope).map(sc => sc.id as string)
+      // Already somewhere in Library: the destination is "reset this page".
+      v = isLibraryView(view) ? view : offered.includes(lastLibraryScopeRef.current) ? lastLibraryScopeRef.current : 'movies'
+    }
     // QA 2026-05-25 — clicking the *current* view's nav item should
     // act as "reset to list" for views with internal drill-down
     // state. Bump a per-view nonce so child components can listen
@@ -3336,7 +3401,7 @@ export default function App() {
     if (!playerRemoteActiveRef.current) closePlayer(true)
     rememberScroll(location.key)
     navigate(`/${v}`)
-  }, [view, navigate, closePlayer, location.key])
+  }, [view, navigate, closePlayer, location.key, navScope])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -6359,6 +6424,18 @@ export default function App() {
     return <AuthView onLogin={(u) => setUser(u)} />
   }
 
+  // The nav's presence pill. In a party, it is that party; otherwise the
+  // most watched party someone else is running, if any. The list is empty
+  // for a session not offered Together and on a profile switch's first
+  // commit (useActiveParties), so the pill cannot name another profile's.
+  const livePresence = partyPresence(activeParties.parties, user.id)
+  const navPresence: NavPresence | null = party.state.code
+    ? { label: 'In a watch party', short: 'In a party', expanded: partyPanelOpen }
+    : livePresence.label && livePresence.short
+      ? { label: livePresence.label, short: livePresence.short }
+      : null
+  const settingsPane: SettingsPane | null = settingsPaneFromPath(location.pathname)
+
   return (
     <div className="min-h-screen bg-surface-page aurora-bg">
       {/* 2026-07-25 (Aurora Stage Phase 2) — the 240px <Sidebar> and its
@@ -6462,7 +6539,7 @@ export default function App() {
 
           `inert={x || undefined}` rather than `inert={x}` so the attribute is
           absent, not `inert="false"` — the HTML attribute is presence-based. */}
-      <main className={`min-h-screen ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
+      <main className={`min-h-screen stage-shell ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
         {/* Sticky stack: scan bar + nav in one sticky container so the
             scan bar contributes its height to flow and both pin together
             on scroll. The bar stays ABOVE the nav, as in the mockup. */}
@@ -6476,7 +6553,9 @@ export default function App() {
           <TopNav
             user={user}
             adminUI={adminUI}
+            navScope={navScope}
             currentView={view}
+            pageTitle={PAGE_TITLES[view] ?? ''}
             onNavigate={handleNavigate}
             onPrefetch={prefetchView}
             searchQuery={searchQuery}
@@ -6491,47 +6570,27 @@ export default function App() {
             onSearchFocus={() => setSearchOpen(true)}
             onSearchClose={closeSearch}
             searchInputRef={searchInputRef}
-            onOpenPalette={() => setPaletteOpen(true)}
-            // Party — M10 Phase 4. Click opens the panel if already in a
-            // party, otherwise prompts for a code to join.
-            partyActive={!!party.state.code}
-            partyLabel={party.state.code ? `In party ${party.state.code}` : 'Join a watch party'}
-            onPartyClick={() => {
-              if (party.state.code) {
-                setPartyPanelOpen(o => !o)
-              } else {
-                setPartyJoinPrompt(true)
-              }
+            presence={navPresence}
+            onPresenceClick={() => {
+              // In a party: the pill is that party, and toggles its panel.
+              // Otherwise it is other people's, and leads to Together.
+              if (party.state.code) setPartyPanelOpen(o => !o)
+              else handleNavigate('together')
             }}
-            partyPanelOpen={partyPanelOpen}
-            serverOpen={serverOpen}
-            onToggleServer={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
-            notifOpen={notifOpen}
-            onToggleNotifications={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
-            // Force-open variants for the avatar dropdown's rows. A row
-            // labelled "Notifications" must never CLOSE the panel because it
-            // happened to already be open — below md that dropdown is the
-            // only surface for these, with no icon state to explain it.
+            // The identity menu's rows force-open their panel: a row
+            // labelled "Notifications" must never CLOSE it because it
+            // happened to be open already.
             onOpenServerPanel={() => { setServerOpen(true); setNotifOpen(false) }}
             onOpenNotificationsPanel={() => { setNotifOpen(true); setServerOpen(false) }}
-            // Social phase 1 — "My Profile" dropdown row. Path nav (not a
-            // view id): the member page is keyed by username in the URL,
-            // same pattern as /title/:id.
-            onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
-            // Social phase 2 — the member directory. A real view id, so it
-            // rides handleNavigate like Settings does from this menu.
-            onOpenMembers={() => handleNavigate('members')}
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}
             onSelectProfile={id => { void switchProfile(id) }}
-            // The dashed Add-Profile row routes here rather than duplicating
-            // the create form in the menu — SettingsView's
-            // ProfilesAndWatchlistsCard already owns creation plus the taste
-            // onboarding it kicks off.
-            onAddProfile={() => handleNavigate('settings')}
             onOpenProfilesGate={() => setProfilesGateForced(true)}
-            avatarUrl={profiles.find(p => p.id === activeProfileId)?.avatar_url}
+            // Profile creation and limits live in Settings' profiles pane.
+            onManageProfiles={() => navigate(settingsPath('profiles'))}
+            onOpenMyProfile={() => handleNavigate('profile')}
+            onOpenRequests={() => handleNavigate('requests')}
             onSignOut={() => { void handleLogout() }}
           />
         </div>{/* /sticky stack */}
@@ -6544,6 +6603,9 @@ export default function App() {
             edge-to-edge hero and pad their own sections with .stage-gutter
             instead (Phase 4 added home/movies/shows to what was just
             `detail`). Everything else keeps the standard page pad. */}
+        {isLibraryView(view) && (
+          <LibraryScopeBar current={view} navScope={navScope} onNavigate={handleNavigate} onPrefetch={prefetchView} />
+        )}
         <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
@@ -6819,6 +6881,8 @@ export default function App() {
           {view === 'settings' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <SettingsView
+                pane={settingsPane}
+                onPaneChange={(pane) => navigate(settingsPath(pane))}
                 user={user}
                 onLogout={handleLogout}
                 onToast={addToast}
@@ -6875,6 +6939,65 @@ export default function App() {
               </ViewSuspense>
             ) : null
           })()}
+          {view === 'together' && navScope !== 'restricted' && (
+            <ViewSuspense fallback={<ViewFallback />}>
+              <TogetherView
+                // Remount per profile: the view may hold its own state, and
+                // nothing of one profile's may show under another's name.
+                key={`together:${activeProfileId}`}
+                currentUserId={user.id}
+                activeParties={activeParties.parties}
+                partiesLoaded={activeParties.loaded}
+                invites={profileSwitchPending ? null : myPartyInvites}
+                inPartyCode={party.state.code ?? null}
+                onOpenPartyPanel={() => setPartyPanelOpen(true)}
+                onJoinParty={async (code) => {
+                  const r = await party.join(code)
+                  if (r.ok) { setPartyPanelOpen(true); activeParties.reload() }
+                  return r
+                }}
+                onJoinByCode={() => setPartyJoinPrompt(true)}
+                onRsvp={handleInviteRsvp}
+                onRefreshInvites={refreshMyPartyInvites}
+                onOpenMembers={() => handleNavigate('members')}
+                onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                onBrowse={() => handleNavigate('library')}
+              />
+            </ViewSuspense>
+          )}
+          {view === 'profile' && navScope !== 'restricted' && (
+            <ViewSuspense fallback={<ViewFallback />}>
+              <MyProfileView
+                key={`profile:${activeProfileId}`}
+                user={user}
+                activeProfile={profileSwitchPending ? null : profiles.find(p => p.id === activeProfileId) ?? null}
+                profileKnown={personalProfileReady && !profileSwitchPending}
+                onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                onOpenSettings={() => handleNavigate('settings')}
+              />
+            </ViewSuspense>
+          )}
+          {view === 'me' && (
+            <ViewSuspense fallback={<ViewFallback />}>
+              <MeView
+                user={user}
+                navScope={navScope}
+                adminUI={adminUI}
+                profiles={profiles}
+                activeProfileId={activeProfileId}
+                notifCount={unreadCount}
+                onSelectProfile={id => { void switchProfile(id) }}
+                onManageProfiles={() => navigate(settingsPath('profiles'))}
+                onOpenNotifications={() => { setNotifOpen(true); setServerOpen(false) }}
+                onOpenMyProfile={() => handleNavigate('profile')}
+                onOpenRequests={() => handleNavigate('requests')}
+                onOpenSettings={() => handleNavigate('settings')}
+                onOpenAdmin={() => handleNavigate('admin')}
+                onOpenServer={() => { setServerOpen(true); setNotifOpen(false) }}
+                onSignOut={() => { void handleLogout() }}
+              />
+            </ViewSuspense>
+          )}
           {view === 'members' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <MembersView
@@ -7009,6 +7132,16 @@ export default function App() {
             </p>
           )}
         </div>
+        <BottomTabBar
+          currentView={view}
+          navScope={navScope}
+          onNavigate={handleNavigate}
+          onPrefetch={prefetchView}
+          live={navPresence !== null}
+          notifCount={unreadCount}
+          activeProfile={profiles.find(p => p.id === activeProfileId) ?? null}
+          username={user.username}
+        />
       </main>
 
       {/* Video Player */}

@@ -115,9 +115,14 @@ function renderApp(path: string) {
   return { commits, on: () => { sampling = true } }
 }
 
-function goTo(label: string) {
-  const tab = [...document.querySelectorAll('button.stage-tab')].find(b => b.textContent?.startsWith(label))
-  if (!tab) throw new Error(`no ${label} tab`)
+/** Navigates through the top bar. Home is the Tonight destination; Movies is
+ *  where the Library destination lands (its first scope), or a destination of
+ *  its own for a restricted session. */
+function goTo(label: 'Home' | 'Movies') {
+  const tab = label === 'Home'
+    ? document.querySelector('header .stage-tab[data-nav="home"]')
+    : document.querySelector('header .stage-tab[data-nav="movies"]') ?? document.querySelector('header .stage-tab[data-nav="library"]')
+  if (!tab) throw new Error(`no ${label} destination in the top bar`)
   fireEvent.click(tab)
 }
 
@@ -306,7 +311,7 @@ function stubProfiles() {
   }
 }
 
-const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null
+const label = () => document.querySelector('[data-identity-name]')?.textContent ?? null
 /** Renders `path`, recording at every commit the profile the top bar names
  *  and whose titles are on the page. */
 function renderSampled(path: string) {
@@ -319,7 +324,7 @@ function renderSampled(path: string) {
   return commits
 }
 function pickProfile(name: RegExp) {
-  fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
+  fireEvent.click(document.querySelector('[data-identity-trigger]')!)
   fireEvent.click(screen.getByRole('menuitemradio', { name }))
 }
 

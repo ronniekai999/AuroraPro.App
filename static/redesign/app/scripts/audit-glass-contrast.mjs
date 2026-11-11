@@ -569,6 +569,19 @@ const INK = (() => {
 // Panel fills, each named by the rule that owns it.
 const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
+// What the top bar's text can sit on. Unscrolled, the bar is over the page
+// itself. Scrolled, content passes under it and the [data-scrolled] fill is
+// all that stands between the text and that content: judged over a white
+// frame, the worst there is for light text. The bar must be a single flat
+// colour there, or this model is not the one to trust.
+const NAV_SCROLLED = (() => {
+  const layers = backgroundLayers(cssValue('.stage-topnav[data-scrolled]', 'background'))
+  if (layers.length !== 1 || layers[0].length !== 1) throw new Error('audit: .stage-topnav[data-scrolled] is no longer one flat fill — model it, do not pass')
+  return layers[0][0]
+})()
+const onNavBar = () => [INK, over(NAV_SCROLLED.rgb, NAV_SCROLLED.a, W)]
+const onNavField = () => onNavBar().flatMap(base =>
+  [...NAVSEARCH].reverse().reduce((bgs, stops) => bgs.flatMap(bg => stops.map(st => over(st.rgb, st.a, bg))), [base]))
 // The page itself (Stage refresh, RS). The home rails used to sit on a glass
 // shelf (`.rail-container`'s fill, read here as RAIL and measured by nothing);
 // the shelf is gone, so their header text sits on `.aurora-bg`, which is the
@@ -742,10 +755,6 @@ const EXEMPT = [
     why: 'the dots between the key legend\'s entries' },
   { file: 'src/components/SearchView.tsx', anchor: '<Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
     why: 'the illustration above "No results found"' },
-  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={16} className="text-white/35 flex-none" />', kind: 'non-text',
-    why: 'the magnifier that marks the phone sheet\'s field as search' },
-  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={15} className="text-white/35 flex-none" />', kind: 'non-text',
-    why: 'the magnifier that marks the top bar\'s field as search' },
   // ── member pages, voice, the match tool ──
   { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="user" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
     why: 'the illustration above a member page\'s error message' },
@@ -992,7 +1001,11 @@ const SURFACES = [
     color: W, alpha: () => twAlpha(APP, 'aria-label="Clear search"', 'text-white'),
     px: 12, on: () => stack(CONVO),
   },
-  // ── The nav search pill. Same shape, different fill. ──
+  // ── The top bar. Its search field is where "describe a mood" lives, so
+  //    its placeholder is the text this script was first written for. The
+  //    bar is translucent and content scrolls under it, so each surface is
+  //    judged on the page AND on the scrolled bar over a white frame
+  //    (onNavBar / onNavField). ──
   {
     what: 'nav search input text', where: `${CSS} (.stage-navsearch input)`,
     // cssValue escapes the selector itself — passing it pre-escaped double-escapes
@@ -1000,7 +1013,35 @@ const SURFACES = [
     // failure rather than a skip.
     color: () => parseColor(cssValue('.stage-navsearch input:not([type="range"])', 'color')).rgb,
     alpha: () => parseColor(cssValue('.stage-navsearch input:not([type="range"])', 'color')).a,
-    px: 12.5, on: () => stack(NAVSEARCH),
+    px: 14, on: onNavField,
+  },
+  {
+    what: 'nav search placeholder', where: `${CSS} (.stage-navsearch input::placeholder)`,
+    color: () => parseColor(cssValue('.stage-navsearch input::placeholder', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-navsearch input::placeholder', 'color')).a,
+    px: 14, on: onNavField,
+  },
+  {
+    what: 'nav search "⌘K" hint', where: `${CSS} (.stage-navsearch kbd)`,
+    color: () => parseColor(cssValue('.stage-navsearch kbd', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-navsearch kbd', 'color')).a,
+    px: 12,
+    // The hint has a fill of its own on top of the field's.
+    on: () => onNavField().flatMap(bg => backgroundLayers(cssValue('.stage-navsearch kbd', 'background'))[0].map(st => over(st.rgb, st.a, bg))),
+  },
+  {
+    what: 'nav destination, idle', where: `${CSS} (.stage-tab)`,
+    color: () => parseColor(cssValue('.stage-tab', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-tab', 'color')).a,
+    px: 15, on: onNavBar,
+  },
+  {
+    what: 'phone tab bar label, idle', where: `${CSS} (.stage-tabbar-item)`,
+    color: () => parseColor(cssValue('.stage-tabbar-item', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-tabbar-item', 'color')).a,
+    px: 12,
+    // The tab bar's own fill over a white frame: content scrolls under it too.
+    on: () => { const bar = parseColor(cssValue('.stage-tabbar', 'background')); return [over(bar.rgb, bar.a, W)] },
   },
   // ── The bar's submit chip: text on a tint on the bar on the ink. Three
   //    composites deep, which is exactly the case eyeballing gets wrong. ──

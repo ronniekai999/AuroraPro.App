@@ -155,6 +155,14 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
+    // One live party, hosted by someone else, that only the Parent may be
+    // shown (the server judges a party's title against the session's limit).
+    if (p === '/api/parties/active') {
+      return json({ parties: asked === 1 ? [{
+        code: 'PARTY1', host_user_id: 9, party_name: '', media_title: 'Parentonly Party', media_poster: '',
+        participant_count: 3, max_participants: 0, is_playing: true, started_at: NOW,
+      }] : [] })
+    }
     return json([])
   })
   // The event socket, and two browser APIs App's layout uses that jsdom lacks.
@@ -191,6 +199,16 @@ interface Commit {
   parentTotal: boolean
 }
 
+/** The name on the top bar's identity control: the profile the app says it
+ *  is acting as. It is the one place the bar names a profile. */
+const identityName = () => document.querySelector('[data-identity-name]')?.textContent ?? null
+
+/** Switches profile through the top bar: the identity control's menu. */
+function pickInTopBar(name: RegExp) {
+  fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+  fireEvent.click(screen.getByRole('menuitemradio', { name }))
+}
+
 /** Samples the page at every commit. */
 function renderApp(path: string) {
   const commits: Commit[] = []
@@ -199,7 +217,7 @@ function renderApp(path: string) {
     const named = [...document.querySelectorAll('[aria-label], img[alt], [title]')]
       .map(el => `${el.getAttribute('aria-label') ?? ''} ${el.getAttribute('alt') ?? ''} ${el.getAttribute('title') ?? ''}`)
     commits.push({
-      label: document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null,
+      label: identityName(),
       parentTitles: `${text} ${named.join(' ')}`.includes('Parentonly'),
       parentCount: text.includes('2 titles worth your time'),
       // The skeleton keeps this heading too, but only for assistive tech.
@@ -214,8 +232,7 @@ function renderApp(path: string) {
 }
 
 function switchToKid() {
-  fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-  fireEvent.click(screen.getByRole('menuitemradio', { name: /Kid/ }))
+  pickInTopBar(/Kid/)
 }
 
 /** The commits that showed the Kid profile's name over a Parent-only title. */
@@ -251,6 +268,20 @@ describe('a profile switch never commits the new name over the previous profileâ
     expect(kid(commits).filter(c => !c.railsOrSkeleton)).toEqual([])
   })
 
+  it('in the top bar: the live-presence pill', async () => {
+    const commits = renderApp('/')
+    const pill = () => document.querySelector('[data-presence]')?.textContent ?? null
+    // Not vacuous: the bar named the Parent's live party under the Parent's name.
+    await waitFor(() => expect(pill()).toContain('3 watching Parentonly Party'), { timeout: 5000 })
+    expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
+
+    switchToKid()
+    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    expect(kidOverParent(commits)).toBe(0)
+    // A restricted session is not shown other people's parties at all.
+    expect(pill()).toBeNull()
+  })
+
   it.each([['Movies', '/movies'], ['TV Shows', '/shows']])('on the %s grid', async (_name, path) => {
     const commits = renderApp(path)
     await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
@@ -283,7 +314,7 @@ describe('a profile switch never commits the new name over the previous profileâ
     'drops a first %s page that was in flight, and asks again', async (_name, path, type) => {
       const release = server.hold(`${type}-p1-1`)
       const commits = renderApp(path)
-      const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent
+      const label = identityName
       await waitFor(() => expect(label()).toBe('Parent'), { timeout: 5000 })
       switchToKid()
       await waitFor(() => expect(label()).toBe('Kid'), { timeout: 5000 })
@@ -319,7 +350,7 @@ describe('a profile switch never commits the new name over the previous profileâ
       server = stubServer({ homeCountFails: true })
       const commits = renderApp(path)
       await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
-      fireEvent.click([...document.querySelectorAll('button.stage-tab')].find(b => b.textContent === 'Home')!)
+      fireEvent.click(document.querySelector('header .stage-tab[data-nav="home"]')!)
       // Not vacuous: the fallback did put the Parent's total in the greeting.
       await waitFor(() => expect(document.body.textContent).toMatch(/\b37 titles in your library/), { timeout: 5000 })
       switchToKid()
@@ -466,8 +497,7 @@ describe('Homeâ€™s library count is the acting profileâ€™s', () => {
     const release = server.hold('count-1')
     // Every commit from the click back on, until the Parent's new answer.
     const since = commits.length
-    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Parent/ }))
+    pickInTopBar(/Parent/)
     await waitFor(() => expect(server.counts).toEqual([1, 2, 1]), { timeout: 5000 })
     expect(commits[commits.length - 1].label).toBe('Parent')
     await new Promise(done => setTimeout(done, 100))

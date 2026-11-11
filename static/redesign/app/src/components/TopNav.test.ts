@@ -1,50 +1,51 @@
 import { describe, expect, it } from 'vitest'
-import { navTabsFor } from './TopNav'
+import { bottomTabsFor } from './TopNav'
+import { navDestinationsFor } from '@/lib/navScope'
 
-// Aurora Stage Phase 2 — the nav swap must not change WHERE you can go.
-// The sidebar's eight destinations, their ids, their order, and the admin
-// gate are the contract the rest of App depends on: handleNavigate, the
-// VIEW_BY_PATH popstate sync, and every deep link key off these ids. A
-// typo'd id ('tvshows' for 'shows') would render a tab that navigates
-// nowhere, which is exactly the kind of thing a chrome rewrite drops.
-//
-// Pure function, no DOM — jsdom isn't in devDependencies (see
-// lib/appearance.test.ts for the same constraint).
+// The bar's destinations are lib/navScope's (tested there: three for an
+// unrestricted session, Tonight/Movies/Shows for a restricted one, and never
+// Admin or Requests). What is pinned here is how the phone tab bar arranges
+// them around its two fixed tabs.
 
-const EXPECTED_VIEWER = ['home', 'movies', 'shows', 'collections', 'calendar', 'library', 'requests']
+const ids = (scope: Parameters<typeof bottomTabsFor>[0]) => bottomTabsFor(scope).map(t => t.id)
 
-describe('navTabsFor', () => {
-  it('gives a viewer the seven non-admin destinations, in sidebar order', () => {
-    expect(navTabsFor('user').map(t => t.id)).toEqual(EXPECTED_VIEWER)
+describe('bottomTabsFor', () => {
+  it('gives an unrestricted session Tonight, Library, Search, Together, Me', () => {
+    expect(bottomTabsFor('full').map(t => t.label)).toEqual(['Tonight', 'Library', 'Search', 'Together', 'Me'])
+    expect(ids('full')).toEqual(['home', 'library', 'search', 'together', 'me'])
   })
 
-  it('appends Admin for admins and nothing else', () => {
-    expect(navTabsFor('admin').map(t => t.id)).toEqual([...EXPECTED_VIEWER, 'admin'])
+  it('gives a restricted session Tonight, Movies, Shows, Search, Me: no Together', () => {
+    expect(bottomTabsFor('restricted').map(t => t.label)).toEqual(['Tonight', 'Movies', 'Shows', 'Search', 'Me'])
+    expect(ids('restricted')).not.toContain('together')
+    expect(ids('restricted')).not.toContain('library')
   })
 
-  it('treats an unknown or missing role as non-admin', () => {
-    // The server enforces /api/admin/* independently, but a client-side
-    // fail-open would still render a tab that 403s on every request.
-    expect(navTabsFor(undefined).map(t => t.id)).toEqual(EXPECTED_VIEWER)
-    expect(navTabsFor('').map(t => t.id)).toEqual(EXPECTED_VIEWER)
-    expect(navTabsFor('moderator').map(t => t.id)).toEqual(EXPECTED_VIEWER)
-    expect(navTabsFor('Admin').map(t => t.id)).toEqual(EXPECTED_VIEWER)
+  it('offers no Together tab while the session is unknown', () => {
+    expect(ids('unknown')).toEqual(['home', 'library', 'search', 'me'])
   })
 
-  it('marks only the Admin tab with the admin badge flag', () => {
-    expect(navTabsFor('admin').filter(t => t.admin).map(t => t.id)).toEqual(['admin'])
-  })
-
-  it('gives every tab a label and an icon', () => {
-    for (const tab of navTabsFor('admin')) {
-      expect(tab.label, `${tab.id} label`).toBeTruthy()
-      expect(tab.icon, `${tab.id} icon`).toBeTruthy()
+  it('always has Search and Me, with Me last, and never Admin or Requests', () => {
+    for (const scope of ['full', 'restricted', 'unknown'] as const) {
+      const t = ids(scope)
+      expect(t).toContain('search')
+      expect(t[t.length - 1]).toBe('me')
+      expect(t).not.toContain('admin')
+      expect(t).not.toContain('requests')
     }
   })
 
-  it('returns a fresh array each call so a caller cannot mutate the source', () => {
-    const first = navTabsFor('admin')
-    first.pop()
-    expect(navTabsFor('admin')).toHaveLength(8)
+  it('holds every top-bar destination for the same session, in the same order', () => {
+    for (const scope of ['full', 'restricted', 'unknown'] as const) {
+      const dest = navDestinationsFor(scope).map(d => d.id)
+      expect(ids(scope).filter(id => dest.includes(id))).toEqual(dest)
+    }
+  })
+
+  it('gives every tab a label and an icon', () => {
+    for (const t of bottomTabsFor('full')) {
+      expect(t.label).toBeTruthy()
+      expect(t.icon).toBeTruthy()
+    }
   })
 })

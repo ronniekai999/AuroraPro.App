@@ -15,6 +15,7 @@ import { getPushConfig, sendPushTest } from '@/lib/api'
 import { PageHeader } from '@/components/PageHeader'
 import { MATURITY_OPTIONS, type MaturityPref } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
+import type { SettingsPane } from '@/lib/settingsPanes'
 import { type Toast } from '@/components/Toast'
 import {
   Select,
@@ -82,6 +83,12 @@ interface SettingsViewProps {
   /** Called after a change to profiles App also holds (a PIN set or removed),
    *  so its copy, which decides whether a switch prompts, is re-read. */
   onProfilesChanged?: () => void
+  /** The pane the URL names (/settings/<pane>), or null for /settings. App
+   *  owns the URL; see lib/settingsPanes. Not read yet: the panes are still
+   *  to be built. */
+  pane?: SettingsPane | null
+  /** Ask App to show another pane (it navigates to that pane's URL). */
+  onPaneChange?: (pane: SettingsPane) => void
 }
 export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, profileKnown = false, onMaturityChange, onAvatarChange, onOpenMyProfile, onProfilesChanged }: SettingsViewProps = {}) {
   // Phase E2c content-tone dial. Optimistic local override so the chip flips

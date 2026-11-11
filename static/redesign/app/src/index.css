@@ -614,82 +614,44 @@
     radial-gradient(1.5px 1.5px at 68% 44%, #fff, transparent);
 }
 
-/* ── Chrome: the slim top navigation (Phase 2) ──────────────────────── */
-/* Replaces the 240px sidebar. Height is --topnav-h so every sticky offset
-   under it (browse toolbar, admin tab strip) tracks one value. z-index 50:
-   above page content and the sticky sub-toolbars (40), below the drawers
-   (45 is intentionally *under* the nav so the nav's own triggers stay
-   clickable — see ServerPanel/NotificationPanel), the palette, the party
-   panel, modals, and the player (60+). */
+/* ── Chrome: the top bar and the phone tab bar ───────────────────────── */
+/* The bar is --topnav-h tall, and every sticky offset under it tracks that
+   token. z-index 50s: above page content and the sticky sub-toolbars (40),
+   below the palette, the party panel, modals and the player (60+). */
 .stage-topnav {
   position: relative;
   /* z-index is load-bearing, not decoration. `backdrop-filter` below makes
-     this bar a stacking context, so the avatar dropdown inside it paints
-     atomically at the BAR's level — not at its own z-[55]. Without a
-     z-index here the bar sits at level 0 among its siblings in App's
-     sticky wrapper, which puts it (and the dropdown) UNDER the mobile
-     sheet's scrim (48) and panel (49): the dropdown became invisible and
-     unclickable, and below md it is the only route to Settings /
-     Notifications / Sign out. 51 clears both. */
+     this bar a stacking context, so the identity menu inside it paints
+     atomically at the BAR's level, not at its own z-[55]. Without a z-index
+     here the bar sits at level 0 among its siblings in App's sticky wrapper. */
   z-index: 51;
   display: flex;
   align-items: center;
   gap: 12px;
   height: var(--topnav-h);
-  padding: 0 18px;
-  /* Bottom stop 0.62 → 0.72. Everything in this bar is white-on-transparent
-     (0.62 tab labels, 0.5 control icons, the search placeholder), and since
-     Phase 4 made the hero full-bleed the bar's lower half sits over artwork
-     rather than over #0e0f11. Darkening the stop lifts all of them at once
-     and is invisible against a dark backdrop, which is the common case. */
-  background: linear-gradient(180deg, rgba(14, 15, 17, 0.85), rgba(14, 15, 17, 0.72));
+  padding: 0 var(--page-pad-x);
+  /* Translucent so artwork reads through at the top of a page, and blurred
+     because content scrolls under it: one of the two places blur belongs.
+     The label contrast argument rests on this fill being at least 0.72 of
+     the page ink over anything. */
+  background: linear-gradient(180deg, rgba(14, 15, 17, 0.9), rgba(14, 15, 17, 0.72));
   backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  /* box-shadow only. The base fill is a gradient (background-color is
-     transparent under it), so transitioning background-color to the
-     scrolled fill would ramp from TRANSPARENT and show content through
-     the bar for the duration. The fill swaps instantly; the shadow eases. */
-  transition: box-shadow var(--dur-base) var(--ease-standard);
+  -webkit-backdrop-filter: blur(20px);
+  transition: background-color var(--dur-base) var(--ease-standard);
 }
-/* Once the page has scrolled the bar sits over content, not the hero: it
-   firms up to a near-solid fill with a hairline shadow so the boundary
-   reads, and the blur radius can drop. Strictly DARKER than the base rule
-   above, so the tab-label contrast argument at .stage-tab only improves;
-   the base rule is untouched (audit-glass-contrast reads it). Toggled by
-   TopNav from a passive scroll listener. */
+/* Once the page has scrolled, the bar firms up to a near-solid fill with a
+   hairline, so the boundary reads over content. Strictly DARKER than the
+   base rule. Toggled by TopNav from a passive scroll listener. */
 .stage-topnav[data-scrolled] {
   background: rgba(14, 15, 17, 0.94);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 0 var(--line);
 }
-/* Aurora hairline (Stage refresh, N4). Once content scrolls under the bar its
-   bottom edge picks up a faint purple-to-cyan line, fading in over the grey
-   border — the same pair the active-tab underline uses. Opacity only, so there
-   is no motion to still. Absolute against the bar's own `position: relative`. */
-.stage-topnav::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.275) 26%, rgba(34, 211, 238, 0.4) 74%, transparent);
-  opacity: 0;
-  transition: opacity var(--dur-slow) var(--ease-standard);
-}
-.stage-topnav[data-scrolled]::after { opacity: 1; }
+/* The bar shares the page's own horizontal padding (--page-pad-x, set on
+   .stage-topnav above), so the logo sits on the same line as everything
+   under it at every width, phones and past the ultra-wide cap included
+   (scripts/verify-page-alignment.mjs asserts it). */
 @media (min-width: 768px) {
-  /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
-     and the first version of the phase missed it: at a flat 30px the logo and nav
-     tabs sat at x=30 while every page they navigate to started at x=320 — a 290px
-     stair-step at 2560 and 730px at 3440, the same defect class the phase exists
-     to remove, one level up.
-     `max()` against 30px rather than reading --page-pad-x, deliberately: the nav's
-     inset is a deliberate 18px tighter than the page gutter, and adopting the
-     token would shift it at EVERY width instead of only past the cap. Below the
-     cap this is byte-identical to what shipped. */
-  .stage-topnav { padding: 0 max(30px, (100% - var(--page-max)) / 2); }
+  .stage-topnav { gap: 28px; }
 }
 html[data-effects="reduced"] .stage-topnav {
   backdrop-filter: none;
@@ -697,43 +659,35 @@ html[data-effects="reduced"] .stage-topnav {
   background: #0e0f11;
 }
 
+/* A destination in the bar. Current is a soft fill and full-strength text
+   (two cues: fill and weight), not an underline. */
 .stage-tab {
-  position: relative;
-  padding: 9px 13px;
-  border-radius: 10px;
-  font-size: var(--fs-body-sm);
+  flex: none;
+  padding: 8px 14px;
+  border-radius: var(--radius-art);
+  font-size: 15px;
   font-weight: 500;
-  line-height: 1;
+  line-height: 1.5;
+  color: var(--ink-2);
   white-space: nowrap;
-  /* 0.55 → 0.62. At 13.5px this is normal text, so WCAG 1.4.3 wants 4.5:1.
-     Over the nav's own dark fill it was fine (6.26:1), but the bar is
-     translucent and since Phase 4 it sits over the full-bleed hero — against
-     a bright frame the effective background rose and the inactive labels
-     measured 3.02:1. This plus darkening the bar's lower gradient stop (see
-     .stage-topnav) gets the pathological pure-white-artwork case to 4.52:1,
-     i.e. passing even there; over the ordinary dark page it is 7.77:1.
-     Both halves are needed — the label alone does not reach 4.5. */
-  color: rgba(255, 255, 255, 0.62);
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
-.stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
-/* Two active selectors, one treatment (Aurora Stage Phase 7a).
-   aria-current="page" is right for the TOP NAV, where a tab is a link to a
-   route. aria-selected is right for the ADMIN tab strip, where a tab switches
-   a panel in place — that is a genuine tabs widget, and `current page` would
-   claim thirteen of them are separate pages. Sharing the visual is the point:
-   the mockup draws both with the same gradient underline, so the two systems
-   read as one language even though their semantics differ. */
-.stage-tab[aria-current="page"],
-.stage-tab[aria-selected="true"] {
-  color: #fff;
+.stage-tab:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.stage-tab[aria-current="page"] {
+  color: #ffffff;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.077);
+  background: rgba(255, 255, 255, 0.12);
 }
-/* Gradient underline on the active tab — the top-nav counterpart of the
-   sidebar's 3px left bar (.nav-link-item.active::before). */
-.stage-tab[aria-current="page"]::after,
+/* The same class is the tab of an in-page tab strip (the admin page's), whose
+   selected state is aria-selected and carries an ink underline that grows in
+   from its centre. Kept here so the two stay one rule family. */
+.stage-tab[aria-selected="true"] {
+  position: relative;
+  color: #ffffff;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+}
 .stage-tab[aria-selected="true"]::after {
   content: '';
   position: absolute;
@@ -745,11 +699,6 @@ html[data-effects="reduced"] .stage-topnav {
   background: var(--action);
   animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
 }
-/* The underline grows in from its centre when a tab becomes active (Stage
-   refresh, N1). It plays only when the pseudo-element starts to exist — i.e. on
-   activation — not on re-renders. The detail page's tab underline is a real
-   <span> (DetailTabs) and opts in with .stage-tabline. Ends at `transform: none`,
-   so nothing is held afterwards. */
 .stage-tabline {
   animation: stageTabLine var(--dur-enter) var(--ease-emphasized);
 }
@@ -757,185 +706,197 @@ html[data-effects="reduced"] .stage-topnav {
   from { transform: scaleX(0.25); opacity: 0; }
   to { transform: none; opacity: 1; }
 }
-/* Same selectors as the rules above, so specificity cannot let the grow win. */
 @media (prefers-reduced-motion: reduce) {
-  .stage-tab[aria-current="page"]::after,
   .stage-tab[aria-selected="true"]::after,
   .stage-tabline { animation: none; }
 }
-/* Inset so the scrolling strip can't clip it — see .stage-tabstrip. */
 .stage-tab:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: -2px;
+  box-shadow: none;
 }
-/* Admin marker on the Admin tab. */
-.stage-tab-adm {
-  margin-left: 5px;
-  padding: 1px 5px;
-  border-radius: 5px;
-  /* The mockup draws this at 8.5px (≈6.4pt), below any practical
-     legibility floor — and the same class is reused in the mobile sheet's
-     15px rows, where 8.5px reads as an artefact. */
-  font-size: var(--fs-label);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.088);
-  border: 1px solid rgba(255, 255, 255, 0.193);
-}
-
-/* Tab strip. Between md and xl the eight tabs don't fit, so the strip
-   scrolls horizontally (TopNav scrolls the active tab into view on
-   change) and edge masks signal there's more. Below md the strip is
-   replaced by the menu sheet. */
+/* A horizontally scrolling strip of .stage-tab. No `display`: the call site
+   sets it (see the CASCADE HAZARD note above). */
 .stage-tabstrip {
-  /* No `display` — see the CASCADE HAZARD note above. The call site sets
-     `hidden md:flex`; declaring display:flex here made `hidden` lose. */
   align-items: center;
   gap: 2px;
   overflow-x: auto;
-  /* `overflow-x: auto` makes overflow-y compute from visible to auto, so
-     this box clips vertically too — and the tabs are exactly as tall as
-     it is. Without breathing room that clips away the active tab's
-     underline glow AND the focus ring. Pad the clip box out and pull the
-     same amount back off the margin, so nothing shifts in the bar. */
+  /* `overflow-x: auto` makes overflow-y compute to auto as well, so this box
+     clips vertically too, and the tabs are exactly as tall as it is. Pad the
+     clip box out and pull the same amount back off the margin so the focus
+     ring and the underline are not clipped and nothing shifts. */
   padding-block: 10px;
   margin-block: -10px;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  /* Fade the overflowing edges so a clipped tab reads as "scrollable"
-     rather than as a rendering glitch. Ramp kept SHORT (6px): at 14px the
-     leading tab — which at md–lg is left-aligned and often the active one
-     — sat far enough into the ramp to composite down to ~2.3:1, failing
-     contrast on a tab that isn't even clipped. */
+  /* Fade the overflowing edges so a clipped tab reads as "scrollable". The
+     ramp is SHORT (6px): at 14px the leading tab composited down to ~2.3:1. */
   mask-image: linear-gradient(90deg, transparent 0, #000 6px, #000 calc(100% - 6px), transparent 100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 6px, #000 calc(100% - 6px), transparent 100%);
 }
 .stage-tabstrip::-webkit-scrollbar { display: none; }
-/* NOTE: the strip stays a scroll container at EVERY width. An earlier
-   version switched to `overflow-x: visible` at xl (1280px) on the
-   assumption the eight tabs fit there — they don't. The tabs are
-   `white-space: nowrap`, so their min-content width (~700px for an admin)
-   can't shrink, and at 1280px the fixed chrome (brand + a 196px search
-   pill + four 38px controls + the profile chip) leaves ~545px. With
-   overflow visible and `justify-center` the surplus escaped in BOTH
-   directions and painted over the wordmark and the search field — on
-   1280×800 and 1366×768, two of the most common laptop sizes. Scrolling
-   degrades gracefully; visible overflow does not.
 
-   Centering is likewise deferred to 2xl (1536px), where the tabs actually
-   fit — `justify-content: center` on an overflowing scroller makes the
-   leading items unreachable, so it must only apply when there's slack. */
-
-/* Search pill in the nav. Wraps a real <input> (not a button) so the
-   type-to-search-results flow the header had is preserved verbatim; the
-   ⌘K chip is a hint that the palette is also available. */
-.stage-navsearch {
-  /* No `display` — see the CASCADE HAZARD note above. */
-  align-items: center;
-  gap: 9px;
-  height: 36px;
-  /* Without this the pill's min-content floor (~85px) can push the bar
-     wider than the viewport; `body { overflow-x: hidden }` would then clip
-     the right cluster rather than scroll to it. */
-  min-width: 0;
-  padding: 0 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  transition: border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+/* A restricted (children's) session: three larger destinations, and the
+   current one is the light fill with dark text, the strongest cue there is. */
+.stage-topnav[data-nav-scope="restricted"] .stage-tab {
+  padding: 10px 18px;
+  border-radius: var(--radius-control);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
 }
-/* `all: unset` on the input (below) strips its own border and background,
-   so the global input:focus treatment has nothing to paint and the global
-   :focus-visible outline exempts inputs. That leaves this as the ONLY
-   focus indicator for the field — so it has to clear SC 1.4.11's 3:1, not
-   just look tinted. rgba(216,180,254,.9) is ~7.5:1 on the bar; the ring
-   adds a second, non-colour-dependent cue. */
+.stage-topnav[data-nav-scope="restricted"] .stage-tab[aria-current="page"] {
+  color: var(--on-action);
+  background: var(--action);
+}
+
+/* The Library's scope row: text links, the current one underlined in ink. */
+.stage-scopebar {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-top: 16px;
+}
+.stage-scopebar::-webkit-scrollbar { display: none; }
+.stage-scope {
+  flex: none;
+  padding: 8px 12px;
+  border-radius: var(--radius-art);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink-2);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+}
+.stage-scope:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.stage-scope[aria-current="page"] {
+  color: var(--on-action);
+  font-weight: 600;
+  background: var(--ink);
+}
+
+/* The phone tab bar. Fixed to the bottom edge and padded by the device's
+   safe area, so its targets clear the home indicator. --tabbar-h is the
+   bar's own height WITHOUT the safe area. Anything that floats at the
+   bottom (the mini dock, the bug-report button, toasts) and the page's own
+   bottom padding add --tabbar-space: the bar plus the safe area on phones,
+   the safe area alone from md up, where there is no bar. */
+:root {
+  --tabbar-h: 56px;
+  --tabbar-space: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  :root { --tabbar-space: env(safe-area-inset-bottom, 0px); }
+}
+.stage-tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  display: flex;
+  height: var(--tabbar-space);
+  padding: 0 8px env(safe-area-inset-bottom, 0px);
+  background: rgba(14, 15, 17, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 -1px 0 var(--line);
+}
+html[data-effects="reduced"] .stage-tabbar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #0e0f11;
+}
+.stage-tabbar-item {
+  flex: 1 1 0;
+  min-width: 0;
+  height: var(--tabbar-h);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.stage-tabbar-item[aria-current="page"] { color: #ffffff; font-weight: 600; }
+/* The ring sits inside the item so the bar's edge cannot clip it. */
+.stage-tabbar-item:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: -4px;
+  border-radius: var(--radius-control);
+  box-shadow: none;
+}
+/* The page leaves room for the bar on phones. */
+.stage-shell { padding-bottom: var(--tabbar-space); }
+
+/* ── The nav search field ─────────────────────────────────────────────
+   The field resets the global input treatment (the input inside is bare)
+   and draws the focus indicator on itself with :focus-within, which is
+   therefore the ONLY focus indicator the field has and must clear 3:1
+   (audit-focus-indicators.mjs, Checks 3 and 4). */
+.stage-navsearch {
+  flex: 0 1 320px;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+}
 .stage-navsearch:focus-within {
   border-color: #ffffff;
   background: var(--surface-raised-2);
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
 }
-/* The global `input:not([type="range"])` rule in this file sets padding,
-   background, border and radius; the nav input must opt out or the pill
-   breaks. The `:not([type="range"])` here is NOT redundant — it is the
-   whole point. `.stage-navsearch input` is (0,1,1), exactly TIED with that
-   global rule, which is declared LATER in this file and therefore won
-   every longhand: `all: unset` expanded to declarations that each lost
-   individually, and the input kept its 12px/16px padding, its own border
-   and radius, and a second nested focus ring inside the pill. Adding the
-   :not() takes this to (0,2,1) and it actually applies. */
 .stage-navsearch input:not([type="range"]) {
-  all: unset;
   flex: 1;
   min-width: 0;
-  font-family: inherit;
-  color: rgba(255, 255, 255, 0.92);
-  /* 16px below lg so iOS/iPadOS Safari doesn't zoom the viewport on focus
-     (it zooms any focused input under 16px); the designed 12.5px applies
-     from lg, where a touch keyboard is not the primary input. */
-  font-size: 16px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 14px;
+  color: var(--ink);
 }
-@media (min-width: 1024px) {
-  .stage-navsearch input:not([type="range"]) { font-size: var(--fs-meta); }
-}
-/* `all: unset` above only resets the BASE state, so on focus the global rule
-   re-applied its own background and a 3px ring, drawing a second ring nested
-   inside the pill's :focus-within treatment. The pill is the focus indicator;
-   the input inside it must stay invisible.
-
-   This comment used to say the global focus rule "is (0,2,1) — tied with the
-   rule above" and that "(0,2,2) here settles it". Both figures were wrong, and
-   the conclusion stopped being true at some point without anyone noticing. The
-   global rule is now
-     input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus
-   at (0,4,1) — the checkbox/radio exclusions each add a class unit — while this
-   selector, before the three `:not()`s were added to match, scored (0,3,1) and
-   LOST. Machine-checked with the same resolver scripts/resolve-focus.mjs uses,
-   whose own self-tests pin `input:not([type="range"]):focus` at (0,2,1); that
-   is the figure this comment was quoting, from before the rule grew.
-
-   (0,5,1) now. audit-focus-indicators.mjs Check 4 compares these two rules and
-   fails if this one does not outrank the global — the regression was invisible
-   precisely because nothing re-derived the comparison when the global changed. */
+.stage-navsearch input::placeholder { color: var(--ink-2); }
+/* (0,5,1): outranks the global input :focus rule at (0,4,1), which would
+   otherwise paint a second border and fill inside the field. */
 .stage-navsearch input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
 .stage-navsearch input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
   outline: none;
   background: transparent;
   box-shadow: none;
 }
-/* --text-secondary, not a hand-tuned alpha of it: rgba(220,220,232,0.42)
-   is that token's exact RGB dialled down to ~3.3:1, which is the very
-   failure the token was introduced to fix (see its :root comment). */
-.stage-navsearch input::placeholder { color: var(--text-secondary); }
 .stage-navsearch kbd {
   flex: none;
-  font-family: var(--font-sans);
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
   padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: rgba(255, 255, 255, 0.1);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
 }
-/* Replaces the ⌘K kbd hint once there's a query to clear (both the
-   desktop pill and the mobile drawer's duplicate field). */
 .stage-navsearch-clear {
   flex: none;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 999px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ink-2);
   transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
-.stage-navsearch-clear:hover,
-.stage-navsearch-clear:focus-visible {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.85);
-}
+.stage-navsearch-clear:hover { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
 
 /* Circular icon control in the nav right cluster (party, bell, menu). */
 .stage-iconbtn {

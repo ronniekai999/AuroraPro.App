@@ -490,7 +490,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   hand-written SQL can, and a restricted session cannot
   repair it, so refusing there would leave the account, and on a one-admin
   install the server, with no admin at all. Its restricted sessions keep the
-  admin powers. The web app shows its Admin tab, admin controls, scan bar
+  admin powers. The web app shows its Admin entry, admin controls, scan bar
   and server panel only once the session is known to act as an unrestricted
   profile, or the account has none, or none without a limit
   (`showsAdminUI`); on `/admin` until then it says it is checking, or that it

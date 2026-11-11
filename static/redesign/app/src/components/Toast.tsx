@@ -29,7 +29,7 @@ export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove
     // toast column; that flipped the natural "launcher in corner,
     // toasts stack above" pattern users expect. Now the launcher
     // owns the corner and toasts respect it.
-    <div className="fixed bottom-[5.5rem] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
+    <div className="fixed bottom-[calc(5.5rem+var(--tabbar-space,0px))] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
       {toasts.map(t => (
         <ToastItem key={t.id} t={t} onRemove={onRemove} />
       ))}
