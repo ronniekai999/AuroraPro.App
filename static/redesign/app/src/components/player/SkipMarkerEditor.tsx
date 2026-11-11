@@ -6,7 +6,7 @@
 // analyser will not re-add it and the player never shows it); "Auto" deletes
 // the row and queues fresh detection.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { deleteSkipMarker, getAdminSkipMarkers, putSkipMarker, type SkipMarker } from '@/lib/api'
 import { PlayerSheet } from './PlayerSheets'
 
@@ -41,30 +41,67 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
-  const seedFromServer = useCallback((markers: SkipMarker[]) => {
-    const next: Partial<Record<SkipMarker['kind'], Draft>> = {}
-    for (const m of markers) {
-      next[m.kind] = { start_ms: m.start_ms, end_ms: m.end_ms, detector: m.detector }
-    }
-    setDrafts(next)
+  // The kinds with an edit that has not been saved. A write answers with the
+  // file's whole marker list; taking all of it would throw away what the
+  // admin has set on the OTHER kinds and not saved yet (set the intro's end,
+  // then turn the recap off: the intro's end was gone).
+  const dirtyRef = useRef(new Set<SkipMarker['kind']>())
+  // What the server says, laid over the drafts: every kind takes the server's
+  // value except the unsaved ones, and `written`, the kind this answer is
+  // for, always takes it.
+  const applyServer = useCallback((markers: SkipMarker[], written: SkipMarker['kind'] | null) => {
+    if (written) dirtyRef.current.delete(written)
+    const keep = new Set(dirtyRef.current)
+    setDrafts(prev => {
+      const next: Partial<Record<SkipMarker['kind'], Draft>> = {}
+      for (const m of markers) {
+        next[m.kind] = { start_ms: m.start_ms, end_ms: m.end_ms, detector: m.detector }
+      }
+      for (const kind of keep) {
+        if (prev[kind]) next[kind] = prev[kind]
+      }
+      return next
+    })
   }, [])
+
+  // The file this editor is for, and whether it is still mounted. A write
+  // answers after an await; by then the player may have moved to the next
+  // file (or closed), and handing it the previous file's markers would draw
+  // them on the wrong timeline. Hidden is not gone: an editor that is merely
+  // put away still takes its answers.
+  const fileKey = `${fileType}:${fileId}`
+  const fileKeyRef = useRef(fileKey)
+  const aliveRef = useRef(true)
+  useLayoutEffect(() => { fileKeyRef.current = fileKey })
+  useEffect(() => {
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
+  const stillFor = (key: string) => aliveRef.current && fileKeyRef.current === key
 
   // The FULL list, suppressions included: stream info carries only the
   // markers a viewer is shown.
   useEffect(() => {
     const ac = new AbortController()
+    // A new file starts clean: no drafts, no edits, nothing pending.
+    dirtyRef.current = new Set()
+    setDrafts({})
+    setLoaded(false)
+    setBusy(false)
+    setErr(null)
     getAdminSkipMarkers(fileId, fileType, ac.signal)
-      .then(markers => { seedFromServer(markers); setLoaded(true) })
+      .then(markers => { applyServer(markers, null); setLoaded(true) })
       .catch(e => {
         if (e instanceof DOMException && e.name === 'AbortError') return
         setErr('Failed to load markers')
         setLoaded(true)
       })
     return () => ac.abort()
-  }, [fileId, fileType, seedFromServer])
+  }, [fileId, fileType, applyServer])
 
   const setNow = (kind: SkipMarker['kind'], field: 'start_ms' | 'end_ms') => {
     const nowMs = Math.max(0, Math.round(currentSec * 1000))
+    dirtyRef.current.add(kind)
     setDrafts(prev => {
       const d = prev[kind] ?? { start_ms: 0, end_ms: 0 }
       return { ...prev, [kind]: { ...d, [field]: nowMs } }
@@ -72,31 +109,35 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
   }
 
   const write = async (kind: SkipMarker['kind'], startMs: number, endMs: number) => {
+    const key = fileKey
     setBusy(true)
     setErr(null)
     try {
       const markers = await putSkipMarker(fileId, fileType, { kind, start_ms: startMs, end_ms: endMs })
-      seedFromServer(markers)
+      if (!stillFor(key)) return
+      applyServer(markers, kind)
       onMarkersChanged(markers)
     } catch {
-      setErr('Save failed')
+      if (stillFor(key)) setErr('Save failed')
     } finally {
-      setBusy(false)
+      if (stillFor(key)) setBusy(false)
     }
   }
 
   const redetect = async (kind: SkipMarker['kind']) => {
+    const key = fileKey
     setBusy(true)
     setErr(null)
     try {
       await deleteSkipMarker(fileId, fileType, kind)
       const markers = await getAdminSkipMarkers(fileId, fileType)
-      seedFromServer(markers)
+      if (!stillFor(key)) return
+      applyServer(markers, kind)
       onMarkersChanged(markers)
     } catch {
-      setErr('Update failed')
+      if (stillFor(key)) setErr('Update failed')
     } finally {
-      setBusy(false)
+      if (stillFor(key)) setBusy(false)
     }
   }
 
@@ -123,7 +164,8 @@ export function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChange
           const suppressed = !!d && d.start_ms === 0 && d.end_ms === 0 && d.detector === 'manual'
           const invalid = !!d && d.end_ms < d.start_ms
           return (
-            <div key={kind} className="py-3 border-t border-line first:border-t-0">
+            // A named group: the five buttons read the same for every kind.
+            <div key={kind} role="group" aria-label={kind} className="py-3 border-t border-line first:border-t-0">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[15px] text-ink capitalize">{kind}</span>
                 <span className="text-[13px] text-ink-2 tabular-nums">
