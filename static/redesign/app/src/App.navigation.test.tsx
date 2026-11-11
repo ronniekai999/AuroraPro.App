@@ -251,13 +251,14 @@ describe('moving between places', () => {
     await waitFor(() => expect(where.path).toBe('/shows'))
   })
 
-  it('Together\'s "pick something" goes to the Library destination, which on a session that has not browsed yet is Movies', async () => {
-    // The Library destination's id is not My Library's view id; a caller
-    // that passed the view id always landed on the saved list. The
-    // destination opens the library scope last used (My Library included,
-    // if that was it), and Movies when none has been.
-    renderAt('/together')
+  // The button's job is to browse the catalog. The Library destination
+  // opens the library scope last used, which can be My Library: a saved
+  // list, possibly empty, is not where to pick something from.
+  it('Together\'s "pick something" goes to Movies, even when the last library scope was My Library', async () => {
+    renderAt('/library')
     await settled('Parent')
+    await waitFor(() => expect(currentScope()).toBe('My Library'), { timeout: 5000 })
+    fireEvent.click(document.querySelector('header .stage-tab[data-nav="together"]')!)
     fireEvent.click(await screen.findByRole('button', { name: 'Pick something to watch together' }, { timeout: 10_000 }))
     await waitFor(() => expect(where.path).toBe('/movies'), { timeout: 5000 })
     expect(currentScope()).toBe('Movies')

@@ -7096,7 +7096,10 @@ export default function App() {
                 onRefreshInvites={refreshMyPartyInvites}
                 onOpenMembers={() => handleNavigate('members')}
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
-                onBrowse={() => handleNavigate(LIBRARY_DESTINATION)}
+                // To the catalog, by name. The Library destination opens the
+                // library scope last used, which can be My Library: a saved
+                // list, possibly empty, is not where to pick something from.
+                onBrowse={() => handleNavigate('movies')}
               />
             </ViewSuspense></HiddenPage>
           )}
