@@ -68,7 +68,7 @@ export function GridSkeleton({ count = 12, className }: { count?: number; classN
 export function HeroSkeleton({ compact = false, title, aside }: { compact?: boolean; title?: ReactNode; aside?: ReactNode }) {
   return (
     <section className={cn(
-      'relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]',
+      'relative w-full overflow-hidden bg-gradient-to-br from-surface-raised via-surface-raised to-surface-page',
       compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]',
     )}>
       {!compact && (
@@ -145,7 +145,7 @@ export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poste
 export function DetailSkeleton() {
   return (
     <div aria-hidden="true">
-      <div className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden bg-gradient-to-br from-purple-950/30 via-[#0a0a0f] to-[#050505]">
+      <div className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden bg-surface-raised">
         <div className="absolute bottom-7 left-[var(--page-pad-x)] right-[var(--page-pad-x)] max-md:left-[18px] max-md:right-[18px] space-y-4">
           <SkeletonBlock className="h-4 w-24 rounded-md" />
           <SkeletonBlock className="h-12 w-[min(560px,80%)] rounded-lg" />

@@ -168,6 +168,22 @@ const lineAt = (src, i) => src.slice(0, i).split('\n').length
 // (`w-1/7`) or a line-height (`text-sm/13`). The `opacity-N` family is checked
 // the same way, with `opacity-0` as the sibling that must compile. Comments are
 // skipped: a class in a comment styles nothing.
+//
+// BRACKETED MODIFIERS ARE CHECKED TOO (`X/[0.97]`, `X/[38%]`). On a literal
+// colour they always compile, which is why this check first looked only at
+// bare `/N`. On a colour the theme maps to a CSS variable they never do: the
+// neutral system's keys (surface-*, line*, ink*, action*, ok, warn, danger*)
+// are plain `var(--token)` strings, Tailwind cannot put an alpha on one, and it
+// emits NO rule for any `/<alpha>` form of them. `bg-surface-raised/[0.97]`
+// shipped exactly that way: the phone menu sheet had no background at all.
+//
+// So two things hold a token colour to "no modifier", and either alone fails
+// the run with the file and line:
+//   - the oracle, now asked about every `/…` modifier, numeric or bracketed;
+//   - a direct rule (`tokenColourModifiers`): any class whose colour is one
+//     the config maps to `var(--…)` and which carries a modifier. It reads the
+//     names from tailwind.config.js rather than restating them, and does not
+//     depend on what Tailwind happens to emit for such a class.
 
 const twConfig = loadConfig(path.join(APP_DIR, 'tailwind.config.js'))
 
@@ -218,12 +234,47 @@ function classesIn(src, keep) {
   return placed.sort((a, b) => a.index - b.index)
 }
 
+// `X/N` or `X/[…]`: a modifier after the LAST slash, numeric or bracketed.
+const MODIFIER = /^(.+)\/(\d+|\[[^\]/\s]+\])$/
+
+/** The theme colours the config maps to a bare `var(--token)`, as the names a
+ *  class would carry: `surface-raised-2`, `line`, `ink-3`, `action-on`… A
+ *  nested key named DEFAULT is the group's own name. */
+function tokenColourNames() {
+  const names = []
+  const walk = (obj, prefix) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const name = k === 'DEFAULT' ? prefix : (prefix ? `${prefix}-${k}` : k)
+      if (typeof v === 'string') { if (/^var\(--[\w-]+\)$/.test(v.trim())) names.push(name) }
+      else if (v && typeof v === 'object') walk(v, name)
+    }
+  }
+  walk(twConfig.theme?.extend?.colors ?? {}, '')
+  return names
+}
+const TOKEN_COLOURS = tokenColourNames()
+if (TOKEN_COLOURS.length < 10) throw new Error(`audit: only ${TOKEN_COLOURS.length} theme colours map to var(--token) in tailwind.config.js; the neutral system should — the audit is out of date, not passing`)
+// Longest name first, so `line-strong` is not read as `line` followed by junk.
+const TOKEN_COLOUR_MODIFIER = new RegExp(
+  String.raw`^(?:[^\s:]+:)*!?-?[a-z][a-z-]*-(?:${[...TOKEN_COLOURS].sort((a, b) => b.length - a.length).join('|')})\/.+$`)
+
+/** Every class in `texts` that puts a modifier on a token-mapped colour, on
+ *  any utility prefix and under any variant, as { where, line, token }. */
+function tokenColourModifiers(texts) {
+  const uses = []
+  for (const { where, text } of texts) {
+    for (const { token, index } of classesIn(text, t => TOKEN_COLOUR_MODIFIER.test(t)))
+      uses.push({ where, line: lineAt(text, index), token })
+  }
+  return uses
+}
+
 /** Every dead modifier in `texts` ({ where, text } pairs), as { where, line, token }. */
 async function deadModifiers(texts) {
   const uses = []
   for (const { where, text } of texts) {
-    for (const { token, index } of classesIn(text, t => /\/\d+$/.test(t) || OPACITY_UTILITY.test(t))) {
-      const mod = token.match(/^(.+)\/(\d+)$/)
+    for (const { token, index } of classesIn(text, t => MODIFIER.test(t) || OPACITY_UTILITY.test(t))) {
+      const mod = token.match(MODIFIER)
       const op = token.match(OPACITY_UTILITY)
       if (mod) uses.push({ where, line: lineAt(text, index), token, base: mod[1] })
       else if (op) uses.push({ where, line: lineAt(text, index), token, base: `${op[1]}0` })
@@ -238,7 +289,9 @@ async function deadModifiers(texts) {
 // If an upgrade starts compiling one of the DEAD probes (Tailwind 4 accepts any
 // number), this fails and says so instead of reporting on a changed premise.
 const MOD_PROBE = {
-  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97'],
+  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97',
+    // Token-mapped colours: dead with ANY modifier, numeric or bracketed.
+    'bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]'],
   live: ['bg-[#0a0a0f]/95', 'bg-[#0a0a0f]/[0.97]', 'hover:text-white/40', 'w-1/2', 'text-sm/6', 'opacity-95', 'text-white/[38%]'],
   ignored: ['/v2/assets/12', '2026-10/25', 'a/b/40'],
   // Shapes a whitespace split got wrong, each holding one dead class.
@@ -258,11 +311,31 @@ let staticFails = 0
     console.log(`  *** known-answer probe: expected exactly [${want}] dead, got [${got}] — the oracle or its premise has changed`)
     staticFails++
   }
+  // The direct rule's own known answers: every token-colour class in the
+  // probe that carries a modifier, and none of the others (a literal colour
+  // with a modifier, a token colour without one, a path).
+  const TOKEN_PROBE = {
+    flagged: ['bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]',
+      'from-surface-raised-2/40', 'placeholder:text-ink-3/70', '!bg-danger/20', 'text-ok/90', 'border-warn/[0.3]', 'ring-offset-line/50'],
+    clean: ['bg-surface-raised', 'text-ink-2', 'border-line-strong', 'bg-white/[0.08]', 'bg-[#0a0a0f]/95', 'text-white/50', 'src/lib/ink/2', 'bg-action-soft'],
+  }
+  const tokenProbe = tokenColourModifiers([{ where: 'probe', text: [...TOKEN_PROBE.flagged, ...TOKEN_PROBE.clean].join(' ') }])
+    .map(u => u.token).sort().join(' ')
+  if (tokenProbe !== [...TOKEN_PROBE.flagged].sort().join(' ')) {
+    console.log(`  *** known-answer probe (token colours): expected exactly [${[...TOKEN_PROBE.flagged].sort().join(' ')}], got [${tokenProbe}]`)
+    staticFails++
+  }
   const files = uiSources()
-  const dead = await deadModifiers(files.map(f => ({ where: f, text: code(f) })))
-  for (const u of dead) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
-  console.log(`  ${dead.length} dead modifier(s) across ${files.length} files.\n`)
-  staticFails += dead.length
+  const texts = files.map(f => ({ where: f, text: code(f) }))
+  const dead = await deadModifiers(texts)
+  const onToken = tokenColourModifiers(texts)
+  const key = u => `${u.where}:${u.line}:${u.token}`
+  const tokenKeys = new Set(onToken.map(key))
+  for (const u of onToken) console.log(`  ${u.where}:${u.line}  ${u.token}  — a token-mapped colour takes no opacity modifier (Tailwind emits no rule); use the plain utility, or bg-[var(--token)] / a literal with the alpha you mean`)
+  for (const u of dead) if (!tokenKeys.has(key(u))) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
+  const total = new Set([...dead, ...onToken].map(key)).size
+  console.log(`  ${total} dead modifier(s) across ${files.length} files (${onToken.length} on token-mapped colours: ${TOKEN_COLOURS.join(', ')}).\n`)
+  staticFails += total
 }
 
 /** rgba()/rgb()/#hex -> { rgb: [0..1 x3], a }. */
@@ -275,13 +348,29 @@ function parseColor(str) {
 }
 
 /** A declaration's value from a named CSS rule, or die loudly. */
+/** Substitute every `var(--token)` in a declaration value with the token's own
+ *  declared value, recursively. The surfaces are written as tokens
+ *  (`background: var(--surface-raised)`), and a model that could not follow one
+ *  would have to repeat the colour here as a literal, which is the stale-copy
+ *  failure this file's header exists to prevent. Dies if a token is not
+ *  declared EXACTLY once in index.css (two declarations would mean a scoped
+ *  override this audit does not model) or has a fallback argument. */
+function resolveVars(value, seen = []) {
+  return value.replace(/var\(\s*(--[\w-]+)\s*(,[^)]*)?\)/g, (_, name, fallback) => {
+    if (fallback) throw new Error(`audit: var(${name}${fallback}) carries a fallback; this audit reads the token only — model it`)
+    if (seen.includes(name)) throw new Error(`audit: ${name} refers to itself (${[...seen, name].join(' -> ')})`)
+    const all = [...css.matchAll(new RegExp(String.raw`(?:^|[\n;{])\s*${name}\s*:\s*([^;]+);`, 'g'))]
+    if (all.length !== 1) throw new Error(`audit: ${name} is declared ${all.length} times in ${CSS}; this audit reads exactly one — the audit is out of date, not passing`)
+    return resolveVars(all[0][1].trim(), [...seen, name])
+  })
+}
 function cssValue(selector, prop) {
   const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const rule = css.match(new RegExp(String.raw`(?:^|\n)\s*${esc}\s*\{([\s\S]*?)\n\s*\}`))
   if (!rule) throw new Error(`audit: rule ${selector} not found in ${CSS} — the audit is out of date, not passing`)
   const m = rule[1].match(new RegExp(String.raw`(?:^|;|\{)\s*${prop}\s*:\s*([\s\S]*?);`))
   if (!m) throw new Error(`audit: ${selector} no longer sets ${prop} — the audit is out of date, not passing`)
-  return m[1].replace(/\s+/g, ' ').trim()
+  return resolveVars(m[1].replace(/\s+/g, ' ').trim())
 }
 
 /** EVERY background layer's representative colour, bottom-layer LAST.
@@ -424,7 +513,7 @@ function cssPx(selector) {
 function rootToken(name) {
   const m = css.match(new RegExp(String.raw`\n\s*${name.replace(/[-]/g, '\\-')}\s*:\s*([^;]+);`))
   if (!m) throw new Error(`audit: ${name} is not defined in ${CSS} — the audit is out of date, not passing`)
-  return parseColor(m[1])
+  return parseColor(resolveVars(m[1].trim()))
 }
 
 /** The text colour an element's OWN tag sets: `text-white/NN`, or a token via
@@ -439,22 +528,42 @@ function twText(file, anchor) {
   throw new Error(`audit: no text-white/N or text-[color:var(--…)] on the element anchored by "${anchor}" in ${file}`)
 }
 
-/** An arbitrary-colour fill on an element's own tag: `bg-[#rrggbb]/NN`. */
+/** The fill on an element's own tag, in one of the three forms the app writes
+ *  one in: `bg-[#rrggbb]/NN`; `bg-[var(--token)]`, read from the token
+ *  (which may itself be an rgba()); or a neutral-system utility
+ *  (`bg-surface-raised-2`), followed through tailwind.config.js to its token.
+ *  Exactly one fill may be present: two would leave CSS order, not this
+ *  reader, deciding which paints. */
 function twFill(file, anchor) {
-  const m = tagOf(file, anchor).match(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)/)
-  if (!m) throw new Error(`audit: no bg-[#…]/N on the element anchored by "${anchor}" in ${file}`)
-  return { rgb: hex(m[1]), a: Number(m[2]) / 100 }
+  const tag = tagOf(file, anchor)
+  const found = []
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)(?=[\s"'`}])/g))
+    found.push({ rgb: hex(m[1]), a: Number(m[2]) / 100 })
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[var\((--[\w-]+)\)\](?=[\s"'`}])/g))
+    found.push(rootToken(m[1]))
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-(surface-(?:page|raised-2|raised))(?=[\s"'`}])/g)) {
+    const [group, ...rest] = m[1].split('-')
+    const mapped = twConfig.theme?.extend?.colors?.[group]?.[rest.join('-')]
+    const v = typeof mapped === 'string' && mapped.match(/^var\((--[\w-]+)\)$/)
+    if (!v) throw new Error(`audit: tailwind maps ${m[1]} to ${mapped}, not a var(--token) — the audit is out of date, not passing`)
+    found.push(rootToken(v[1]))
+  }
+  if (found.length !== 1) throw new Error(`audit: the element anchored by "${anchor}" in ${file} carries ${found.length} fills this audit can read (bg-[#…]/N, bg-[var(--token)] or bg-surface-*); it needs exactly one`)
+  return found[0]
 }
 
-// The page ink, derived from the app root's own utility rather than from CSS:
-// `.aurora-bg` sets only the radial tint layers, and the opaque base is
-// `bg-[#050505]` on the root element in App.tsx. Reading the wrong one is how a
-// backdrop model ends up off by the whole base colour, so this dies if the
-// utility moves rather than defaulting.
+// The page ink, derived from the app root's own utility rather than assumed:
+// the root element in App.tsx carries `bg-surface-page`, which Tailwind maps
+// to the --surface-page token. Reading the wrong base is how a backdrop model
+// ends up off by the whole base colour, so this dies if the utility moves off
+// the root or stops meaning that token, rather than defaulting.
 const INK = (() => {
-  const m = read('src/App.tsx').match(/min-h-screen bg-\[(#[0-9a-fA-F]{3,8})\]/)
-  if (!m) throw new Error('audit: app root no longer carries min-h-screen bg-[#…] — the audit is out of date, not passing')
-  return hex(m[1])
+  if (!/min-h-screen bg-surface-page[\s"]/.test(read('src/App.tsx')))
+    throw new Error('audit: app root no longer carries min-h-screen bg-surface-page — the audit is out of date, not passing')
+  const mapped = twConfig.theme?.extend?.colors?.surface?.page
+  if (mapped !== 'var(--surface-page)')
+    throw new Error(`audit: tailwind maps surface-page to ${mapped}, not var(--surface-page) — the audit is out of date, not passing`)
+  return rootToken('--surface-page').rgb
 })()
 
 // Panel fills, each named by the rule that owns it.
@@ -462,10 +571,10 @@ const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
 // The page itself (Stage refresh, RS). The home rails used to sit on a glass
 // shelf (`.rail-container`'s fill, read here as RAIL and measured by nothing);
-// the shelf is gone, so their header text sits on `.aurora-bg` — three radial
-// tints over its own #050505 base. backgroundLayers keeps every tint at its
-// full stop, i.e. the lightest point of each, which is the worst case for
-// light text.
+// the shelf is gone, so their header text sits on `.aurora-bg`, which is the
+// flat page colour. Read from the rule all the same: if it ever gains a
+// layer, backgroundLayers keeps each at its full stop, i.e. its lightest
+// point, which is the worst case for light text.
 const PAGE = backgroundLayers(cssValue('.aurora-bg', 'background'))
 
 /** Composite layered fills onto the ink and return EVERY backdrop the element can
@@ -507,16 +616,15 @@ const ONB_INK = (() => {
 // because this script measures ONLY the surfaces listed in SURFACES below and
 // the palette was never listed — the same structural blind spot this file's
 // header describes for the on-art audit and the vibe bar. Modelled, bottom-up:
-// the page's `.aurora-bg` (its tints show through both translucent layers),
-// the full-viewport scrim, then the panel's own fill; the scrim and panel are
-// read from the component. NOT modelled: the two decorative blobs between the
-// scrim and the panel, and whatever view is on screen beneath the scrim (hero
-// art, a backdrop, video). The panel passes about 10% of the blobs, and the
-// scrim and panel together about 1.5% of the view beneath; at full strength
-// that costs the near-threshold text about 0.06 (6.45 → ~6.39).
+// the page's `.aurora-bg`, the full-viewport scrim, then the panel's own fill;
+// the scrim and panel are read from the component. NOT modelled: whatever
+// view is on screen beneath the scrim (hero art, a backdrop, video). That is
+// sound only while the panel's fill is opaque, which is asserted below: a
+// translucent panel would let the view beneath reach the text.
 const PAL = 'src/components/SearchPalette.tsx'
-const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
+const PAL_SCRIM = [[twFill(PAL, 'data-palette-scrim')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
+if (PAL_PANEL[0][0].a !== 1) throw new Error(`audit: the palette panel's fill is no longer opaque (alpha ${PAL_PANEL[0][0].a}); the view beneath the scrim would show through the text's backdrop — model it, do not pass`)
 const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 
 // ── 1. Faint white text, everywhere, against a computed floor ────────────────
@@ -562,13 +670,13 @@ const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 // a design decision rather than a contrast fix.
 
 const FLOOR_SURFACES = {
-  'page ink #050505': [INK],
-  '.aurora-bg (page tints)': stack(PAGE),
+  'page ink --surface-page': [INK],
+  '.aurora-bg (the page)': stack(PAGE),
   '.glass-panel on the page': stack(backgroundLayers(cssValue('.glass-panel', 'background')), PAGE),
   '.glass-card on the page': stack(backgroundLayers(cssValue('.glass-card', 'background')), PAGE),
   '.glass-card:hover on the page': stack(backgroundLayers(cssValue('.glass-card:hover', 'background')), PAGE),
-  'panel ink --surface-1': [rootToken('--surface-1').rgb],
-  'raised panel --surface-2': [rootToken('--surface-2').rgb],
+  'raised --surface-raised': [rootToken('--surface-raised').rgb],
+  'raised-2 --surface-raised-2': [rootToken('--surface-raised-2').rgb],
 }
 const THEME = require('tailwindcss/resolveConfig')(twConfig).theme
 const OPACITY_STEPS = Object.keys(THEME.opacity).map(Number).sort((a, b) => a - b)
@@ -593,7 +701,7 @@ const EXEMPT = [
     why: 'the notification panel\'s icon-only close button' },
   { file: 'src/App.tsx', anchor: "stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40'", kind: 'non-text',
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
-  { file: 'src/App.tsx', anchor: 'text-white/35 text-[10px]">ⓘ</span>', kind: 'non-text',
+  { file: 'src/App.tsx', anchor: 'text-white/35 text-xs">ⓘ</span>', kind: 'non-text',
     why: 'the glyph that marks a stat tile as having a hover hint' },
   // ── companion, browse ──
   { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
@@ -898,10 +1006,10 @@ const SURFACES = [
   //    composites deep, which is exactly the case eyeballing gets wrong. ──
   {
     what: 'vibe bar "↵ Search" chip', where: `${APP} (.convo-search)`,
-    color: () => hex('#f3e8ff'),                                   // purple-100
-    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-purple-100'),
-    px: 11,
-    on: () => stack(CONVO).map(bg => over(hex('#a855f7'), twAlpha(APP, 'aria-label="Search"', 'bg-purple-500'), bg)),
+    color: W,
+    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-white'),
+    px: 12,
+    on: () => stack(CONVO).map(bg => over(W, twAlpha(APP, 'aria-label="Search"', 'bg-white'), bg)),
   },
   // ── The search palette. ──
   {
@@ -913,7 +1021,7 @@ const SURFACES = [
     what: 'palette "Esc" hint', where: `${PAL} (header kbd)`,
     color: () => twText(PAL, 'uppercase tracking-wider text-[color:').rgb,
     alpha: () => twText(PAL, 'uppercase tracking-wider text-[color:').a,
-    px: 10, on: onPalette,
+    px: 12, on: onPalette,
   },
   {
     what: 'palette empty-state line', where: `${PAL} (empty query)`,
@@ -930,7 +1038,7 @@ const SURFACES = [
     what: 'palette key legend', where: `${PAL} (empty query)`,
     color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
     alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
-    px: 11, on: onPalette,
+    px: 12, on: onPalette,
   },
   {
     what: 'palette no-match line', where: `${PAL} (no results)`,

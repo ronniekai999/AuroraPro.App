@@ -223,18 +223,10 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         if (!panelRef.current?.contains(e.target as Node)) onClose()
       }}
     >
-      {/* Backdrop — deep blur + violet tint so the page beneath
-          feels far away. */}
-      {/* .aurora-glass-overlay: a full-viewport backdrop blur plus the two
-          120px/100px filter blurs below is the most expensive glass in the
-          app, and it had no Glow = Subtle override. Under data-glow="subtle"
-          the scrim becomes a flat fill and the blobs are dropped. */}
-      <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl aurora-glass-overlay" aria-hidden="true" />
-
-      {/* Aurora-violet glow blobs behind the palette so the
-          backdrop isn't a flat sheet of blur. Decorative only. */}
-      <div className="stage-palette-blob absolute top-[10vh] left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full bg-purple-600/[0.12] blur-[120px] pointer-events-none" aria-hidden="true" />
-      <div className="stage-palette-blob absolute top-[30vh] left-[20%] w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.08] blur-[100px] pointer-events-none" aria-hidden="true" />
+      {/* The scrim: a flat dark veil, no blur. The page behind a dialog does
+          not scroll under it, so blurring it would cost a full-viewport
+          filter for nothing. */}
+      <div data-palette-scrim="" className="absolute inset-0 bg-[var(--scrim)]" aria-hidden="true" />
 
       {/* Palette panel */}
       <div
@@ -245,7 +237,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         // `stage-palette`: index.css resets the global input treatment inside
         // this panel and draws the focus indicator on the panel itself — see
         // the note on the input below.
-        className="stage-palette relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden stage-dialog-in"
+        className="stage-palette relative w-full max-w-[760px] rounded-sheet border border-line bg-surface-raised-2 shadow-[shadow:var(--shadow-modal)] overflow-hidden stage-dialog-in"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
@@ -276,13 +268,13 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
       >
         {/* Glow rim accent */}
         <div
-          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-purple-400/60 to-transparent pointer-events-none"
+          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent pointer-events-none"
           aria-hidden="true"
         />
 
         {/* Search input */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-white/[0.06]">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-purple-300 flex-shrink-0">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink flex-shrink-0">
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
@@ -359,7 +351,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           )}
           {/* text-[color:var(--text-secondary)] (6.45:1 on this panel), not white/40 (3.77:1). Same for
               every secondary line below; see audit-glass-contrast. */}
-          <kbd className="text-[10px] uppercase tracking-wider text-[color:var(--text-secondary)] border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
+          <kbd className="text-xs uppercase tracking-wider text-[color:var(--text-secondary)] border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
         </div>
 
         {/* Results */}
@@ -405,14 +397,14 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               nothing here is interactive, and the copy is unchanged. */}
           {!query.trim() && (
             <div className="px-5 py-10 text-center">
-              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-purple-400/20 bg-purple-500/10 text-purple-300" aria-hidden="true">
+              <span className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-[var(--r-md)] border border-line bg-white/5 text-ink" aria-hidden="true">
                 <Icon name="search" size={20} />
               </span>
               <p className="font-display text-white/90 text-base font-semibold tracking-tight">Start typing to search your library.</p>
               <p className="text-[color:var(--text-secondary)] text-xs mt-2">
-                Try <span className="text-purple-300">a title</span>, <span className="text-purple-300">an actor</span>, or <span className="text-purple-300">a vibe</span> like "rainy night noir".
+                Try <span className="text-ink">a title</span>, <span className="text-ink">an actor</span>, or <span className="text-ink">a vibe</span> like "rainy night noir".
               </p>
-              <div className="mt-6 flex items-center justify-center gap-2 text-[color:var(--text-secondary)] text-[11px]">
+              <div className="mt-6 flex items-center justify-center gap-2 text-[color:var(--text-secondary)] text-xs">
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">↑</kbd>
                 <kbd className="border border-white/10 rounded px-1.5 py-0.5 font-mono">↓</kbd>
                 <span>navigate</span>
@@ -428,7 +420,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
           {query.trim() && loading && results.length === 0 && (
             <div className="px-5 py-8 flex items-center justify-center gap-3">
-              <span className="w-3 h-3 rounded-full border-2 border-purple-300 border-t-transparent animate-spin" />
+              <span className="w-3 h-3 rounded-full border-2 border-line-strong border-t-transparent animate-spin" />
               <span className="text-white/50 text-sm">Searching…</span>
             </div>
           )}
@@ -499,7 +491,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               // moment they stopped being buttons.
               className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors cursor-pointer ${
                 i === highlighted
-                  ? 'bg-purple-500/15 border-l-2 border-purple-400'
+                  ? 'bg-white/10 border-l-2 border-ink'
                   : 'border-l-2 border-transparent hover:bg-white/[0.03]'
               }`}
             >
@@ -530,7 +522,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
                 // aria-hidden: this glyph is a visual echo of aria-selected, and
                 // without it the option's accessible name gained a trailing "⏎"
                 // that a reader announced as "return" on exactly one row.
-                <kbd aria-hidden="true" className="text-[10px] uppercase tracking-wider text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
+                <kbd aria-hidden="true" className="text-xs uppercase tracking-wider text-ink border border-line rounded px-1.5 py-0.5 font-mono">⏎</kbd>
               )}
             </div>
           ))}

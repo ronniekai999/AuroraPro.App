@@ -437,7 +437,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
         {/* Brand block. lg:text-left / text-center so it reads as a heading
             above the card on narrow screens and as a facing panel on wide. */}
         <div className="flex-1 min-w-0 text-center lg:text-left">
-          <div className="inline-flex items-center justify-center w-[84px] h-[84px] rounded-[26px] bg-purple-600/20 border border-purple-500/30 mb-5">
+          <div className="inline-flex items-center justify-center w-[84px] h-[84px] rounded-[26px] bg-action-soft border border-line mb-5">
             <svg width="52" height="52" viewBox="0 0 36 36" fill="none">
               <defs>
                 <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
@@ -467,7 +467,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               finding a fourth input; saying so up front is the difference
               between "why can't I sign up" and "I need to ask for a code". */}
           {isRegister && inviteRequired && (
-            <p className="text-purple-200/80 text-xs mt-4 inline-flex items-start gap-2 max-w-[42ch] mx-auto lg:mx-0">
+            <p className="text-ink text-xs mt-4 inline-flex items-start gap-2 max-w-[42ch] mx-auto lg:mx-0">
               <Icon name="key" size={13} className="mt-0.5 shrink-0" />
               {/* "Signing up with a password needs a code", not a flat "this
                   server is invite-only". An admin can set
@@ -562,7 +562,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 motion-safe:hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed motion-safe:disabled:hover:scale-100 flex items-center justify-center gap-2"
+            className="w-full mt-6 py-3 bg-action hover:bg-white/90 text-action-on rounded-xl font-medium transition-ui duration-200 motion-safe:hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed motion-safe:disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
             {submitting ? (
               <>
@@ -623,7 +623,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             <button
               type="button"
               onClick={() => { setIsRegister(!isRegister); setError(null) }}
-              className="text-purple-400 hover:text-purple-300 text-sm transition-colors"
+              className="text-ink-2 hover:text-ink text-sm transition-colors"
             >
               {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
             </button>
@@ -951,7 +951,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
         <div className="min-w-0">
           <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
             Good {greetWord},{' '}
-            <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
+            <span className="text-ink">{firstName}</span>
           </h1>
           <div className="text-white/60 text-sm mt-1.5 flex items-center gap-2 flex-wrap">
             <span>{weekday} {dayPart}</span>
@@ -996,7 +996,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
               onClick={onSurprise}
               title="Surprise me — play a random recommended title"
               aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/[0.12] hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-action-soft hover:bg-white/20 border border-line text-ink hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
             >
               <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
             </button>
@@ -1048,7 +1048,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
           stacking context and cannot contain it. Remove `z-20` and the halo
           re-parents to the nearest ancestor that is one, and negative-z descendants
           paint BEFORE in-flow block backgrounds: the halo goes behind the app
-          shell's opaque `bg-[#050505]` and disappears. Worse under
+          shell's opaque `bg-surface-page` and disappears. Worse under
           `prefers-reduced-motion`, where `.animate-fade-in { animation: none
           !important }` stops the HomeView root being a stacking context at all, so
           the halo lands behind the root div's `.aurora-bg` — invisible, for exactly
@@ -1234,7 +1234,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
           was wrong, and it is the one thing in this block that was: "Phase 4 made
           the hero's bottom scrim land on #050505, so there is no visible edge."
           True of the INSIDE of the hero, and it is not what the bar pulled away
-          from. The app root is `bg-[#050505] aurora-bg`, and `.aurora-bg` composites
+          from. The app root is `bg-surface-page aurora-bg`, and `.aurora-bg` composites
           three purple radials at α 0.05–0.08 OVER that base; the hero paints its own
           opaque #050505 on top of them. So the hero's bottom edge is a step from
           flat #050505 to #050505-plus-tint — computed at roughly 6–10 sRGB levels,
@@ -1263,7 +1263,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
       {onConversationalSearch && (
         <div className="stage-gutter relative z-20 mt-2 mb-8">
           <div className="convo-search flex items-center">
-            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
+            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-ink pointer-events-none" />
             <input
               value={convoText}
               onChange={e => setConvoText(e.target.value)}
@@ -1314,9 +1314,9 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             <button
               onClick={() => onConversationalSearch(convoText)}
               aria-label="Search"
-              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/30 border border-purple-400/25 hover:border-purple-400/45 px-2.5 py-1.5 text-[11px] font-semibold text-purple-100/90 hover:text-white transition-colors"
+              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 border border-line hover:border-line-strong px-2.5 py-1.5 text-xs font-semibold text-white/90 hover:text-white transition-colors"
             >
-              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
+              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-xs leading-none">↵</kbd>
               <span className="hidden sm:inline">Search</span>
             </button>
           </div>
@@ -1336,10 +1336,10 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
         // No cap, matching the bar it stands in for. Any cap here is a layout jump
         // on every query, which is exactly what this row had when the two disagreed.
         <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8">
-          <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
-          <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
-          <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
-          <div className="relative z-10 flex items-center gap-2 text-purple-200 text-sm font-medium animate-pulse">
+          <div className="aurora-pulse-blob w-24 h-24 bg-white/15 -left-10 -top-2" style={{ animationDelay: '0s' }} />
+          <div className="aurora-pulse-blob w-32 h-32 bg-white/15 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
+          <div className="aurora-pulse-blob w-28 h-28 bg-white/15 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
+          <div className="relative z-10 flex items-center gap-2 text-ink text-sm font-medium animate-pulse">
             <Icon name="sparkle" size={14} />
             Sensing the vibe...
           </div>
@@ -1497,22 +1497,22 @@ function YourWeekBand() {
   return (
     <>
       <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="barChart" size={17} className="text-purple-300" />
+        <Icon name="barChart" size={17} className="text-ink" />
         <h3 className="text-[16.5px] font-semibold">Your week</h3>
         <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
       </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-purple-500/[0.08] to-white/[0.02] flex flex-col lg:flex-row items-stretch">
-        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-purple-500/[0.14] blur-[60px] pointer-events-none" aria-hidden="true" />
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-surface-raised flex flex-col lg:flex-row items-stretch">
+        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-action-soft blur-[60px] pointer-events-none" aria-hidden="true" />
         {/* Lead: level + XP bar (real) */}
         <div className="relative px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[210px] border-b lg:border-b-0 lg:border-r border-white/[0.08]">
-          <span className="inline-flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold">
+          <span className="inline-flex items-center gap-2 text-xs tracking-[0.14em] uppercase text-ink font-semibold">
             <Icon name="zap" size={13} /> Level {xp ? xp.level : '—'}
           </span>
           <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
           <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
-            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
+            <span className="block h-full bg-action transition-[width] duration-700" style={{ width: `${pct}%` }} />
           </span>
-          <span className="text-[11px] text-white/50 mt-1">
+          <span className="text-xs text-white/50 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
           </span>
         </div>
@@ -1521,20 +1521,20 @@ function YourWeekBand() {
           {/* Hrs + titles finished this week — real, from watch_progress.completed_at. */}
           <div className="px-5 py-5 flex flex-col gap-1.5">
             <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
+            <span className="text-xs text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-ink" /> Watched this week</span>
           </div>
           <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
             <span className="font-display text-[28px] font-bold leading-none">{wkTitles != null ? wkTitles : '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
+            <span className="text-xs text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-ink" /> Titles finished</span>
           </div>
           {/* Day streak — REAL from xp.current_streak / longest_streak */}
           <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
             <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-white/60 font-medium font-sans">days</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
+            <span className="text-xs text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
           </div>
           <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
             <span className="font-display text-[21px] font-bold leading-none">{stats?.top_genre || '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
+            <span className="text-xs text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-ink" /> Your top genre</span>
           </div>
         </div>
       </div>
@@ -1599,24 +1599,24 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
   return (
     <>
       <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="users" size={17} className="text-purple-300" />
+        <Icon name="users" size={17} className="text-ink" />
         <h3 className="text-[16.5px] font-semibold">Watch together</h3>
         {liveCount > 0 && (
-          <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
+          <span className="text-xs font-semibold text-ink bg-action-soft border border-line rounded-full px-2 py-0.5">
             {liveCount} live now
           </span>
         )}
         <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
       </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] px-6 py-5">
-        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-surface-raised px-6 py-5">
+        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-action-soft blur-[64px] pointer-events-none" aria-hidden="true" />
 
         {joinable.length > 0 ? (
           <div className="relative flex flex-col gap-2.5">
             {joinable.slice(0, 3).map((p) => (
               <div key={p.code} className="flex items-center gap-3.5 flex-wrap">
-                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex-none overflow-hidden">
-                  <Icon name="users" size={20} className="text-indigo-300" />
+                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-action-soft border border-line flex-none overflow-hidden">
+                  <Icon name="users" size={20} className="text-ink" />
                   {p.media_poster ? (
                     <img
                       src={posterURL(p.media_poster, 'w154')}
@@ -1643,7 +1643,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                 <button
                   onClick={() => handleJoin(p.code)}
                   disabled={!onJoinParty || joining !== null}
-                  className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
+                  className="px-4 py-2 rounded-xl bg-action-soft hover:bg-white/20 disabled:opacity-50 disabled:cursor-default text-ink border border-line-strong font-semibold text-[13.5px] transition-colors flex-none"
                 >
                   {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
                 </button>
@@ -1651,18 +1651,18 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
             ))}
             {joinError && <div className="text-[12px] text-rose-300/90 mt-0.5">{joinError}</div>}
             {onStartParty && (
-              <button onClick={onStartParty} className="self-start text-[12.5px] text-indigo-200/80 hover:text-white mt-1 transition-colors">
+              <button onClick={onStartParty} className="self-start text-[12.5px] text-ink hover:text-white mt-1 transition-colors">
                 or start your own watch party →
               </button>
             )}
           </div>
         ) : (
           <div className="relative flex items-center gap-5 flex-wrap">
-            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
-              <Icon name="users" size={26} className="text-indigo-300" />
+            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-action-soft border border-line flex-none">
+              <Icon name="users" size={26} className="text-ink" />
             </div>
             <div className="relative flex-1 min-w-[200px]">
-              <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
+              <div className="text-xs tracking-[0.14em] uppercase text-ink font-semibold flex items-center gap-2">
                 <Icon name="users" size={13} /> Watch parties
               </div>
               <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
@@ -1672,7 +1672,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
               {onStartParty && (
                 <button
                   onClick={onStartParty}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-action-soft hover:bg-white/20 text-ink border border-line-strong font-semibold transition-colors"
                 >
                   <Icon name="users" size={16} /> Start a watch party
                 </button>
@@ -1776,7 +1776,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1809,7 +1809,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
               <div className="min-w-0">
                 <p className="text-white/50 text-xs flex items-center gap-1">
                   {stat.label}
-                  {stat.hint && <span className="text-white/35 text-[10px]">ⓘ</span>}
+                  {stat.hint && <span className="text-white/35 text-xs">ⓘ</span>}
                 </p>
                 <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
@@ -1936,7 +1936,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -1961,12 +1961,12 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
             ? partyInvites.find(i => i.party_code === partyCode)
             : undefined
           const inviteGone = n.type === 'party_invite' && partyCode && partyInvites && !invite
-          const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-purple-400' : 'bg-emerald-400'
+          const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-action' : 'bg-emerald-400'
           const isUnread = unreadSnapshot.has(n.id)
           return (
             <div
               key={n.id}
-              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-purple-500/[0.05]' : ''}`}
+              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-white/5' : ''}`}
             >
               <span
                 className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${dot}`}
@@ -2023,7 +2023,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                         <button
                           type="button"
                           onClick={() => onJoinParty(partyCode)}
-                          className="px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                          className="px-2.5 py-1 rounded-md text-xs font-medium bg-action-soft border border-line-strong text-ink hover:bg-white/20 transition-colors"
                         >
                           {invite.started_at || !invite.scheduled_start_at ? 'Join' : 'Open lobby'}
                         </button>
@@ -2038,14 +2038,14 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   <button
                     type="button"
                     onClick={() => onJoinParty(partyCode)}
-                    className="mt-2 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                    className="mt-2 px-2.5 py-1 rounded-md text-xs font-medium bg-action-soft border border-line-strong text-ink hover:bg-white/20 transition-colors"
                   >
                     Join
                   </button>
                 )}
                 <p className="text-white/50 text-xs mt-1">
                   {fmtRel(n.created_at)}
-                  {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
+                  {isUnread && <span className="ml-1.5 text-ink font-medium">· New</span>}
                 </p>
               </div>
             </div>
@@ -6360,7 +6360,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#050505] aurora-bg">
+    <div className="min-h-screen bg-surface-page aurora-bg">
       {/* 2026-07-25 (Aurora Stage Phase 2) — the 240px <Sidebar> and its
           mobile drawer + hamburger (QA BUG-012) are gone; <TopNav> below
           owns navigation at every breakpoint, with its own menu sheet
@@ -7235,7 +7235,7 @@ export default function App() {
       {partyInviteOpen && partyPanelOpen && party.state.code &&
         party.state.hostUserId === user.id && partyVariant === 'rail' && (
         <div
-          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm motion-safe:animate-fade-in"
+          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-[var(--scrim)] motion-safe:animate-fade-in"
           onClick={() => setPartyInviteOpen(false)}
         >
           <div onClick={e => e.stopPropagation()} className="w-full max-w-sm">
@@ -7302,7 +7302,7 @@ export default function App() {
       )}
 
       {addToListMedia && activeProfileId && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
+        <div className="fixed inset-0 z-[70] bg-[var(--scrim)] flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>

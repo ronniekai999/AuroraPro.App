@@ -92,6 +92,21 @@ const css = fs.readFileSync(SRC_CSS, 'utf8')
 const heroRaw = fs.readFileSync(SRC_HERO, 'utf8')
 const hero = codeOnly(heroRaw)
 
+const PAGE_INK_HEX = (() => {
+  const all = [...css.matchAll(/\n\s*--surface-page\s*:\s*([^;]+);/g)]
+  if (all.length !== 1) throw new Error(`audit: --surface-page is defined ${all.length} times in ${SRC_CSS}; this audit reads exactly one — the audit is out of date, not passing`)
+  const v = all[0][1].trim().toLowerCase()
+  if (!/^#[0-9a-f]{6}$/.test(v)) throw new Error(`audit: --surface-page is ${v}, not a #rrggbb this audit can composite — model it, do not pass`)
+  return v
+})()
+const PAGE_INK_RGB = [1, 3, 5].map(i => parseInt(PAGE_INK_HEX.slice(i, i + 2), 16))
+/** True for the page ink written as its hex or as rgb()/rgba() of its channels. */
+function isPageInk(col) {
+  if (col.toLowerCase() === PAGE_INK_HEX) return true
+  const m = col.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,[^)]*)?\)$/i)
+  return !!m && PAGE_INK_RGB.every((c, i) => Number(m[i + 1]) === c)
+}
+
 /** Pull a declaration's value out of a named rule, or die loudly. */
 function cssValue(selector, prop) {
   const rule = css.match(new RegExp(String.raw`\n${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*\{([\s\S]*?)\n\}`))
@@ -111,11 +126,13 @@ function parseLinearStops(value, which) {
   const stops = []
   for (const m of chosen.matchAll(/(rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|transparent)\s*([\d.]+)%/g)) {
     const col = m[1]
-    // heroBackdrop composites #050505 at each stop's alpha and never reads the
-    // stop's colour, so a layer that changed hue would be measured as ink.
-    // Refuse it instead of reporting a figure for a colour that is not there.
-    if (col !== 'transparent' && !/^(#050505|rgba\(\s*5\s*,\s*5\s*,\s*5\s*,[^)]*\))$/i.test(col))
-      throw new Error(`audit: a hero scrim stop is ${col}; this audit composites #050505 only — model the new colour, do not pass`)
+    // heroBackdrop composites the page ink at each stop's alpha and never
+    // reads the stop's colour, so a layer that changed hue would be measured
+    // as ink. Refuse it instead of reporting a figure for a colour that is
+    // not there. The ink is --surface-page (read below, hoisted): a stop must
+    // be that colour, as its hex or as rgba() of the same three channels.
+    if (col !== 'transparent' && !isPageInk(col))
+      throw new Error(`audit: a hero scrim stop is ${col}; this audit composites the page ink ${PAGE_INK_HEX} only — model the new colour, do not pass`)
     let a
     if (col === 'transparent') a = 0
     else if (col.startsWith('rgba')) a = Number(col.match(/[\d.]+/g)[3] ?? 1)
@@ -181,7 +198,8 @@ const inertShadow = util => {
 // allowlist, not a list of the dangerous: a review found a list of those
 // missing mask-image, custom properties and infinite animations.
 const SAFE = new RegExp('^(?:' + [
-  'font-family|line-height|letter-spacing|word-spacing|text-transform|text-align|text-wrap|white-space|text-overflow',
+  // font-variant-numeric and font-stretch pick glyph forms and the width axis; neither changes a colour or a size.
+  'font-family|font-variant-numeric|font-stretch|line-height|letter-spacing|word-spacing|text-transform|text-align|text-wrap|white-space|text-overflow',
   'display|overflow(?:-[xy])?|-webkit-line-clamp|-webkit-box-orient|cursor|pointer-events|user-select',
   '(?:padding|margin)(?:-(?:top|right|bottom|left|inline|block)(?:-(?:start|end))?)?|(?:min-|max-)?(?:width|height)',
   'gap|row-gap|column-gap|flex(?:-(?:grow|shrink|basis|direction|wrap))?|align-(?:items|self|content)|justify-(?:content|items|self)',
@@ -515,8 +533,8 @@ function parseColor(str, ctx) {
 }
 
 /** A colour utility's value (`white/75`, `purple-100/85`, `[#0a0a0f]/95`,
- *  `[color:var(--text-secondary)]`) as { rgb, a }. Dies on anything it cannot
- *  turn into a colour (`current`, a theme colour behind a CSS variable). */
+ *  `[color:var(--text-secondary)]`, `ink-2`) as { rgb, a }. Dies on anything
+ *  it cannot turn into a colour (`current`, an HSL-triplet theme colour). */
 function twColor(value, token) {
   let depth = 0, cut = -1
   for (let i = 0; i < value.length; i++) {
@@ -532,8 +550,19 @@ function twColor(value, token) {
   else if (/^\[(#[0-9a-fA-F]{3,8}|rgba?\([^\]]*\))\]$/.test(name)) col = parseColor(name.slice(1, -1).replace(/_/g, ' '), token)
   else {
     const t = themeColor(name)
-    if (!t || !/^#[0-9a-fA-F]{3,8}$/.test(t)) throw new Error(`audit: ${token} is not a colour this audit can resolve${t ? ` (${t})` : ''}`)
-    col = parseColor(t, token)
+    // The neutral system's colours are mapped as `var(--token)` (surface-*,
+    // ink-*, line, action…). Follow one to its :root declaration, which must
+    // be unique and a plain colour. No `/alpha` on these: Tailwind cannot
+    // apply one to a var() string, so a modifier there paints something this
+    // reader would get wrong.
+    const viaToken = typeof t === 'string' && t.match(/^var\((--[\w-]+)\)$/)
+    if (viaToken) {
+      if (cut >= 0) throw new Error(`audit: ${token} puts an opacity modifier on a colour mapped to ${t}; Tailwind cannot apply it — the audit is out of date, not passing`)
+      col = parseColor(rootToken(viaToken[1]), token)
+    } else {
+      if (!t || !/^#[0-9a-fA-F]{3,8}$/.test(t)) throw new Error(`audit: ${token} is not a colour this audit can resolve${t ? ` (${t})` : ''}`)
+      col = parseColor(t, token)
+    }
   }
   return { rgb: col.rgb, a: col.a * mod }
 }
@@ -788,7 +817,11 @@ function hexColor(h, ctx) {
 }
 const hex = h => hexColor(h).rgb
 const W = [1, 1, 1], K = [0, 0, 0]
-const INK = hex('#050505')
+// The page ink is the --surface-page token, not a literal repeated here: the
+// scrims fade INTO the page, so the token moving without the scrim stops (or
+// the reverse) must stop this audit, which parseLinearStops enforces through
+// isPageInk. The token must be a plain #rrggbb for that comparison.
+const INK = hex(PAGE_INK_HEX)
 
 // Interpolate a stop list [[position 0..1, alpha], ...] at t.
 const rampA = (stops, t) => {
@@ -934,13 +967,16 @@ for (const cls of ['stage-hero-scrim', 'stage-hero-match-veil']) {
 
 // The corner vignette is an INLINE style on its own div — which is why a grep of
 // index.css never found it:
-//   radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)
+//   radial-gradient(ellipse 42% 48% at 100% 0%, rgba(<page ink>,0.72), transparent 70%)
 // It predates Phase 8 and exists for exactly this widget; its own comment says
 // so ("on a backdrop that's bright in this corner … the white score number +
 // ring vanished"). Radii are 42% of width and 48% of height, centred on the
 // TOP-RIGHT corner, ramping to transparent at 70% along the ray.
 const cornerDecl = layerBackground(LAYER_ELS[5]).match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at 100% 0%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
 if (!cornerDecl) throw new Error(`audit: the top-right corner vignette is no longer in ${SRC_HERO} in the expected form`)
+// Composited as page ink below (cornerAlpha feeds over(INK, ...)), so the
+// vignette's colour has to be the page ink, not merely have an alpha.
+if (!isPageInk(`rgba(${cornerDecl[3]})`)) throw new Error(`audit: the top-right corner vignette is rgba(${cornerDecl[3]}), not the page ink ${PAGE_INK_HEX} this audit composites — model the new colour, do not pass`)
 const CORNER = {
   rx: Number(cornerDecl[1]) / 100,
   ry: Number(cornerDecl[2]) / 100,
@@ -1021,7 +1057,9 @@ function heroBackdrop(x, yFromBottom, frame) {
 // while the audit still credited 0.72.
 const VEIL = (() => {
   const v = cssValue('.stage-hero-match-veil', 'background')
-  const m = v.match(/^radial-gradient\(\s*closest-side,\s*rgba\(\s*5,\s*5,\s*5,\s*([\d.]+)\)\s+0%,\s*rgba\(\s*5,\s*5,\s*5,\s*([\d.]+)\)\s+72%,\s*rgba\(\s*5,\s*5,\s*5,\s*0\)\s+100%\s*\)$/)
+  // The veil is composited as page ink, so its three stops must BE page ink.
+  const ink = PAGE_INK_RGB.map(c => String.raw`\s*${c}`).join(',')
+  const m = v.match(new RegExp(String.raw`^radial-gradient\(\s*closest-side,\s*rgba\(${ink},\s*([\d.]+)\)\s+0%,\s*rgba\(${ink},\s*([\d.]+)\)\s+72%,\s*rgba\(${ink},\s*0\)\s+100%\s*\)$`))
   if (!m || m[1] !== m[2]) throw new Error('audit: .stage-hero-match-veil is no longer a closest-side radial plateau, flat to 72% — model its shape, do not pass')
   return Number(m[1])
 })()

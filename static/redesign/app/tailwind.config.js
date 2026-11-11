@@ -19,10 +19,8 @@ module.exports = {
     extend: {
       fontFamily: {
         // Map the `font-sans` utility (and Tailwind's preflight base
-        // font) to the active typeface system so EVERY element — not
-        // just `body` / `.font-display` — follows Settings → Appearance
-        // → Typeface. `--font-sans` is defined on :root in index.css and
-        // swapped via the data-font attribute. (.font-display stays a
+        // font) to --font-sans (index.css :root) so EVERY element, not
+        // just `body`, is set in the body face. (.font-display stays a
         // bespoke utility on `--font-display`; intentionally not mapped
         // here so it doesn't collide with that class.)
         sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],

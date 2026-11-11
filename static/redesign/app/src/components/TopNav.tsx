@@ -257,14 +257,14 @@ function AvatarMenu({
             ? `Account menu for ${user.username}, ${notifCount} unread notification${notifCount === 1 ? '' : 's'}`
             : `Account menu for ${user.username}`
         }
-        className="relative block rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        className="relative block rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
       >
         <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={38} />
         {/* Unread count doubles as the bell badge below md, where the
             standalone bell is hidden. */}
         {notifCount > 0 && (
           <span
-            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-purple-600 border-2 border-[#050505] text-[10px] font-bold text-white grid place-items-center md:hidden"
+            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-action border-2 border-surface-page text-xs font-bold text-action-on grid place-items-center md:hidden"
             aria-hidden="true"
           >
             {notifCount > 9 ? '9+' : notifCount}
@@ -282,14 +282,14 @@ function AvatarMenu({
           // Tab, and a focus landing on a node 150ms from unmount would
           // drop to <body>.
           inert={exit.closing || undefined}
-          className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-[shadow:var(--shadow-pop)] z-[55] overflow-hidden animate-pop-in origin-top-right${exit.closing ? ' is-closing' : ''}`}
+          className={`absolute right-0 mt-2 w-60 rounded-xl bg-surface-raised-2 border border-white/[0.06] shadow-[shadow:var(--shadow-pop)] z-[55] overflow-hidden animate-pop-in origin-top-right${exit.closing ? ' is-closing' : ''}`}
         >
           <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
             <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5">
               {showAdmin ? (
                 <>
-                  <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
+                  <span className="px-1.5 py-0.5 rounded bg-action-soft text-ink text-xs font-semibold uppercase tracking-wide">Admin</span>
                   Account
                 </>
               ) : 'Account'}
@@ -339,7 +339,7 @@ function AvatarMenu({
             <Icon name="bell" size={14} className="text-white/50" />
             Notifications
             {notifCount > 0 && (
-              <span className="ml-auto min-w-[19px] h-[19px] px-1.5 rounded-full bg-purple-600 text-[10.5px] font-bold text-white grid place-items-center">
+              <span className="ml-auto min-w-[19px] h-[19px] px-1.5 rounded-full bg-action text-xs font-bold text-action-on grid place-items-center">
                 {notifCount}
               </span>
             )}
@@ -485,7 +485,7 @@ function MobileSheet({
           menu button that closes this, the avatar, search — stay lit and
           tappable, the way the old drawer kept its hamburger reachable. */}
       <div
-        className={`fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden stage-scrim-in${closing ? ' is-closing' : ''}`}
+        className={`fixed left-0 right-0 bottom-0 bg-[var(--scrim)] z-[48] md:hidden stage-scrim-in${closing ? ' is-closing' : ''}`}
         style={{ top: 'var(--chrome-h, var(--topnav-h))' }}
         onClick={onClose}
         aria-hidden="true"
@@ -498,7 +498,7 @@ function MobileSheet({
         aria-label="Menu"
         // inert during the exit fade — see AvatarMenu.
         inert={closing || undefined}
-        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/[0.97] backdrop-blur-xl border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
+        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-surface-raised-2 border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
         style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >
         {/* Real search field, not a shortcut to the palette. The palette
@@ -560,7 +560,7 @@ function MobileSheet({
                 onClick={() => { onNavigate(tab.id); onClose() }}
                 className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[15px] transition-colors ${
                   active
-                    ? 'bg-purple-500/15 text-white font-semibold'
+                    ? 'bg-action-soft text-white font-semibold'
                     : 'text-white/70 hover:bg-white/[0.05] hover:text-white'
                 }`}
               >
@@ -782,7 +782,7 @@ export function TopNav({
         type="button"
         onClick={() => go('home')}
         aria-label="Aurora Pro — go to home"
-        className="flex items-center gap-2.5 flex-none rounded-lg px-1 py-1 -mx-1 hover:bg-white/[0.03] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        className="flex items-center gap-2.5 flex-none rounded-lg px-1 py-1 -mx-1 hover:bg-white/[0.03] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
       >
         <span className="flex-none drop-shadow-[0_0_10px_rgba(168,85,247,0.45)]">
           <AuroraMark />
@@ -874,7 +874,7 @@ export function TopNav({
           <Icon name="users" size={17} />
           {partyActive && (
             <span
-              className="absolute -top-px -right-px w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-[#050505] shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+              className="absolute -top-px -right-px w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-surface-page shadow-[0_0_8px_rgba(16,185,129,0.8)]"
               aria-hidden="true"
             />
           )}
@@ -920,7 +920,7 @@ export function TopNav({
             <Icon name="bell" size={17} />
             {notifCount > 0 && (
               <span
-                className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-purple-600 border-2 border-[#050505] text-[10px] font-bold text-white grid place-items-center"
+                className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-action border-2 border-surface-page text-xs font-bold text-action-on grid place-items-center"
                 aria-hidden="true"
               >
                 {notifCount > 9 ? '9+' : notifCount}

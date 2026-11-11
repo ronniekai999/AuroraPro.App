@@ -437,21 +437,21 @@ function PartyCalRow({ entry, onJoinParty }: { entry: PartyCalEntry; onJoinParty
     <button
       type="button"
       onClick={onJoinParty ? () => onJoinParty(entry.code) : undefined}
-      className="stage-calrow w-full text-left flex items-center !border-purple-500/35 bg-purple-600/[0.07]"
+      className="stage-calrow w-full text-left flex items-center !border-line bg-white/5"
       title={`Open the watch-party lobby (code ${entry.code})`}
     >
-      <span className="w-[44px] h-[44px] rounded-md flex-shrink-0 bg-purple-600/20 border border-purple-500/40 flex items-center justify-center" aria-hidden="true">
-        <Icon name="play" size={16} className="text-purple-200" />
+      <span className="w-[44px] h-[44px] rounded-md flex-shrink-0 bg-action-soft border border-line-strong flex items-center justify-center" aria-hidden="true">
+        <Icon name="play" size={16} className="text-ink" />
       </span>
       <span className="flex-1 min-w-0">
         <span className="flex items-center gap-2.5 flex-wrap">
-          <span className="stage-eptag !bg-purple-500/20 !text-purple-100">Watch party</span>
+          <span className="stage-eptag !bg-action-soft !text-ink">Watch party</span>
           <span className="text-white text-sm font-semibold min-w-0 truncate">{entry.title}</span>
         </span>
         <span className="block text-white/50 text-xs mt-1">{sub}</span>
       </span>
       {onJoinParty && (
-        <span className="flex-none px-3 py-1.5 rounded-lg bg-purple-600/25 border border-purple-500/50 text-purple-100 text-xs font-medium">
+        <span className="flex-none px-3 py-1.5 rounded-lg bg-action-soft border border-line-strong text-ink text-xs font-medium">
           Open lobby
         </span>
       )}
@@ -488,7 +488,7 @@ function EpisodeRow({ ep, onOpenMedia }: { ep: UpcomingEpisode; onOpenMedia: (id
             // Em-dash lead-in, matching the mockup's "— The Undertow": the
             // episode title reads as a continuation of the show title rather
             // than as a second, competing heading.
-            <span className="text-white/60 text-[11.5px] min-w-0 truncate">— {ep.episode_title}</span>
+            <span className="text-white/60 text-xs min-w-0 truncate">— {ep.episode_title}</span>
           )}
         </div>
         {ep.overview && (
@@ -672,7 +672,7 @@ function GridView({
           ISO/Europe). Audit L2. */}
       <div className="stage-calmonth grid text-center">
         {WEEKDAY_LABELS_ROTATED.map((label) => (
-          <div key={label} className="text-white/60 text-[9.5px] font-bold uppercase tracking-wider py-1">
+          <div key={label} className="text-white/60 text-xs font-bold uppercase tracking-wider py-1">
             {label}
           </div>
         ))}
@@ -727,7 +727,7 @@ function GridView({
                     has anything — a party-only day must not render blank
                     on a phone (2026-08 review). */}
                 {(hasEpisodes || cellParties.length > 0) && (
-                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length + cellParties.length}</span>
+                  <span className="text-xs text-ink font-bold">{cellEpisodes.length + cellParties.length}</span>
                 )}
               </div>
               {/* Episode chips — up to 3, then "+N more".
@@ -745,7 +745,7 @@ function GridView({
                 {cellParties.slice(0, 2).map(p => (
                   <div
                     key={p.code}
-                    className="stage-calchip stage-calchip-p block !border-purple-400/60"
+                    className="stage-calchip stage-calchip-p block !border-line-strong"
                     title={`Watch party — ${p.title} · ${partyClock(p.startIso)}`}
                   >
                     ▶ {partyClock(p.startIso)} {p.title}
@@ -769,7 +769,7 @@ function GridView({
                   const shown = Math.min(cellEpisodes.length, cellParties.length > 0 ? 2 : 3)
                   const hidden = cellEpisodes.length - shown + Math.max(0, cellParties.length - 2)
                   return hidden > 0 ? (
-                    <div className="text-[9.5px] text-white/55 pl-1">
+                    <div className="text-xs text-white/55 pl-1">
                       +{hidden} more
                     </div>
                   ) : null

@@ -102,10 +102,10 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
         <GridSkeleton className="mb-12" />
       ) : library.length === 0 ? (
         <div className="text-center py-16">
-          <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
+          <Icon name="library" size={48} className="mx-auto text-ink-3 mb-4" />
           <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
           <p className="text-white/50 text-sm max-w-md mx-auto">
-            Use the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left of any title to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
+            Use the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white/15 border border-line-strong text-white text-xs font-bold align-middle mx-0.5">+</span> in the top-left of any title to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>
         </div>
       ) : filteredLibrary.length === 0 ? (
@@ -134,7 +134,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       {continueItems.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-4">
-            <Icon name="clock" size={18} className="text-purple-300" />
+            <Icon name="clock" size={18} className="text-ink" />
             {/* .type-section (--fs-section, 24px) rather than text-xl, so this
                 secondary head sits on the same display scale as every other
                 section head in the app instead of one arbitrary step below. */}

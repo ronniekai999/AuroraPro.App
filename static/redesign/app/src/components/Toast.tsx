@@ -80,7 +80,7 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
       <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
         t.type === 'success' ? 'bg-emerald-500/10 text-emerald-400' :
         t.type === 'error' ? 'bg-red-500/10 text-red-400' :
-        'bg-purple-500/10 text-purple-400'
+        'bg-white/5 text-ink-2'
       }`}>
         <Icon name={t.type === 'success' ? 'check' : t.type === 'error' ? 'x' : 'info'} size={16} />
       </div>

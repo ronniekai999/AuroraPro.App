@@ -212,7 +212,7 @@ describe('SearchPalette — outside click', () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     const { container } = render(<SearchPalette open onClose={onClose} onSelect={() => {}} />)
-    const backdrop = container.querySelector('.backdrop-blur-xl')
+    const backdrop = container.querySelector('[data-palette-scrim]')
     expect(backdrop).not.toBeNull()
     await user.click(backdrop as Element)
     expect(onClose).toHaveBeenCalled()

@@ -147,7 +147,7 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <h2 className="rail-title">{title}</h2>
             {aiPick && (
-              <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
+              <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-xs font-bold tracking-[0.08em] uppercase">
                 <Icon name="sparkle" size={10} className="text-yellow-300" /> AI Pick
               </span>
             )}

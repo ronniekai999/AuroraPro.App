@@ -183,7 +183,7 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
       // unmounts it on onClose, and keyboardWidgets.test asserts onClose has
       // fired by the time Escape's keydown returns — so a delayed unmount
       // would change tested behaviour for a 150ms fade.
-      className="fixed z-[100] min-w-[200px] bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-2xl py-1 animate-fade-in"
+      className="fixed z-[100] min-w-[200px] bg-surface-raised-2 border border-white/[0.08] rounded-lg shadow-2xl py-1 animate-fade-in"
       style={{ left: clampedX, top: clampedY }}
       onKeyDown={e => {
         // Handled here rather than per item so the contract lives in one place.

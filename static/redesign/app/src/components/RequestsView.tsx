@@ -205,7 +205,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       {/* Phase 4.6 — TMDB search + create dialog. Small modal so
           users don't lose scroll position in the requests list. */}
       {createExit.mounted && (
-        <div className={`fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 pt-20 stage-scrim-in${createExit.closing ? ' is-closing' : ''}`} onClick={() => setCreateOpen(false)}>
+        <div className={`fixed inset-0 z-[70] bg-[var(--scrim)] flex items-start justify-center p-4 pt-20 stage-scrim-in${createExit.closing ? ' is-closing' : ''}`} onClick={() => setCreateOpen(false)}>
           <div className="w-full max-w-xl bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[80vh] flex flex-col overscroll-contain stage-dialog-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-white text-lg font-semibold">Request a Movie or TV Show</h2>
@@ -306,7 +306,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                         setSubmitting(null)
                       }
                     }}
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-3 py-1.5 bg-action hover:bg-white/90 text-action-on rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {submitting === r.tmdb_id ? 'Submitting…' : 'Request'}
                   </button>
