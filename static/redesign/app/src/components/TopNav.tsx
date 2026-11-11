@@ -318,7 +318,8 @@ export interface TopNavProps {
   /** App's showsAdminUI verdict. The Admin and Server status rows follow it
    *  and nothing else: the account's role alone never shows them. */
   adminUI: boolean
-  /** Takes a destination id ('home', 'library', 'together', 'movies'…). */
+  /** Takes a destination id (lib/navScope: 'home', 'catalog' for Library,
+   *  'together', 'movies'…) or a view id ('settings', 'admin'). */
   onNavigate: (v: string) => void
   /** Warm a destination's code on hover or focus of its link. */
   onPrefetch?: (v: string) => void

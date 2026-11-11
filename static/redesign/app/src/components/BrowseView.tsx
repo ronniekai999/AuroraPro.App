@@ -439,7 +439,7 @@ export default function BrowseView({
           preview). List uses MediaListRow for a dense, scannable
           table. */}
       {density === 'grid' ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+        <div className="poster-grid">
           {filtered.map((item) => (
             <MediaCardCinema
               key={item.id}
@@ -448,9 +448,8 @@ export default function BrowseView({
               onCardContext={onCardContext}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib}
+              onPlay={onPlay}
               showLength
-              showBadges
-              hoverPreview
             />
           ))}
         </div>

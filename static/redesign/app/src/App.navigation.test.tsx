@@ -42,11 +42,14 @@ function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false
   const me = { ...USER, role }
   const holds = new Map<string, Promise<void>>()
   const searches: string[] = []
+  // Every path asked for, in order.
+  const asks: string[] = []
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
+    asks.push(p)
     const asked = bound
     const held = holds.get(p === '/api/profiles/active' ? 'binding' : p === '/api/parties/active' ? `parties-${asked}` : '')
     if (held) await held
@@ -86,6 +89,7 @@ function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false
   vi.stubGlobal('scrollTo', () => {})
   return {
     searches,
+    asks,
     hold(key: string) {
       let release!: () => void
       holds.set(key, new Promise<void>(done => { release = done }))
@@ -247,6 +251,16 @@ describe('moving between places', () => {
     await waitFor(() => expect(where.path).toBe('/shows'))
   })
 
+  it('Together\'s "pick something" goes to the catalog (Movies), not to My Library', async () => {
+    // The Library destination's id is not My Library's view id; a caller
+    // that passed the view id landed on the saved list.
+    renderAt('/together')
+    await settled('Parent')
+    fireEvent.click(await screen.findByRole('button', { name: 'Pick something to watch together' }, { timeout: 10_000 }))
+    await waitFor(() => expect(where.path).toBe('/movies'), { timeout: 5000 })
+    expect(currentScope()).toBe('Movies')
+  })
+
   it('My requests and Your profile open from the identity menu', async () => {
     renderAt('/')
     await settled('Parent')
@@ -304,6 +318,21 @@ describe('what a session is offered follows the profile the server has bound', (
     expect(screen.queryByRole('button', { name: 'My requests' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Your profile' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Admin' })).toBeNull()
+  })
+
+  it('does not ask the server for the requests list on behalf of a restricted session that opens /requests', async () => {
+    const server = stubServer({ bound: 2 })
+    renderAt('/requests', { remembered: 2 })
+    await settled('Kid')
+    await waitFor(() => expect(where.path).toBe('/'), { timeout: 5000 })
+    expect(server.asks.filter(p => p === '/api/requests')).toEqual([])
+  })
+
+  it('does ask for it for an unrestricted session, once the session is known', async () => {
+    const server = stubServer({ bound: 1 })
+    renderAt('/requests', { remembered: 1 })
+    await settled('Parent')
+    await waitFor(() => expect(server.asks.filter(p => p === '/api/requests')).toHaveLength(1), { timeout: 5000 })
   })
 
   it.each(HIDDEN)('never renders %s for a restricted session, and sends it to Tonight', async (url) => {
@@ -495,6 +524,8 @@ describe('search on a phone, whose bar has no search field', () => {
       return el!
     }, { timeout: 10_000 })
     const field = within(page).getByRole('searchbox', { name: 'Search titles' })
+    // The tab was just pressed: the field takes focus, so typing can start.
+    await waitFor(() => expect(document.activeElement).toBe(field))
     fireEvent.change(field, { target: { value: 'cozy mystery' } })
     await within(page).findByText('Found By Search', undefined, { timeout: 10_000 })
     expect(server.searches).toContain('cozy mystery')
@@ -503,5 +534,21 @@ describe('search on a phone, whose bar has no search field', () => {
     expect(where.path).toBe('/search')
     expect((within(page).getByRole('searchbox', { name: 'Search titles' }) as HTMLInputElement).value).toBe('')
     expect(document.querySelector('nav.stage-tabbar [aria-current="page"]')?.getAttribute('data-nav')).toBe('search')
+  })
+
+  it('does not take focus when the page is opened any other way, so Back from a title does not reopen the keyboard', async () => {
+    stubServer()
+    renderAt('/search')
+    await settled('Parent')
+    const page = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-results]')
+      expect(el).not.toBeNull()
+      return el!
+    }, { timeout: 10_000 })
+    const field = within(page).getByRole('searchbox', { name: 'Search titles' })
+    expect(document.activeElement).not.toBe(field)
+    // Pressing the tab while already on the page does focus it.
+    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    await waitFor(() => expect(document.activeElement).toBe(field))
   })
 })

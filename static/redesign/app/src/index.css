@@ -162,7 +162,7 @@
     --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
     --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
-    --fs-rail: 1.25rem;       /* rail titles, 20px (Stage refresh, R1) */
+    --fs-rail: 1.375rem;      /* rail titles, 22px */
 
     /* Display leading. Two stacked lines collide when the line-height is
        smaller than the INK SPAN (the real glyph bounding box, max yMax to
@@ -2853,6 +2853,16 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 .stage-dialog-in {
   animation: dialogIn var(--dur-enter) var(--ease-emphasized) backwards;
 }
+/* A bottom sheet rises from the screen's edge. `backwards`, like the dialog
+   card: a held `to { transform: none }` would leave the sheet a containing
+   block for anything fixed inside it. */
+@keyframes sheetIn {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+.stage-sheet-in {
+  animation: sheetIn var(--dur-enter) var(--ease-emphasized) backwards;
+}
 
 /* Menus open from the button that owns them (Stage refresh, N2): the avatar
    menu, the phone menu sheet and the server / notification panels scale up
@@ -2952,36 +2962,17 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 }
 
 /* ====================================================================
-   Media cards
+   Rails and cards
    --------------------------------------------------------------------
-   .media-card             — original card (legacy callers, in-place
-                              usages outside the main home rails)
-   .media-card-cinema      — 2026-05-27 redesign: poster + designed
-                              "shelf" below for title/meta/reason, with
-                              stronger always-on purple halo + bigger
-                              jewel-tone corner badges. Used by the home
-                              MediaRail. Same external API as the legacy
-                              card (renders an <img>, optional progress,
-                              optional reason caption) so the rest of
-                              the home-rail flow doesn't change.
-   .rail-container         — wraps a whole rail (title + cards). No frame
-                              since the Stage refresh (RS): the rail sits
-                              on the page, with a decorative header row
-                              whose divider line runs from the title to
-                              See All.
+   A poster is a poster: nothing is painted on the artwork at rest. The
+   title and one line of facts sit in a caption underneath, on the page,
+   so their contrast never depends on the art. The only marks that go on
+   the art are ones that inform: a white progress bar. Play, Add and More
+   appear on the poster under a pointer or keyboard focus; on a touch
+   screen, More is always there (and a long press opens the same menu).
    ==================================================================== */
 
-/* .media-card (the pre-cinema card: ::before scrim, -8px lift, 1.08 image
-   zoom) and .holo-text — REMOVED (UI polish pass). Neither had a consumer;
-   every card surface renders .media-card-cinema below. */
-
-/* Sidebar nav link */
-/* .nav-link-item — REMOVED 2026-07-25 (Aurora Stage Phase 2).
-   This was the sidebar nav row (including the 3px purple left bar on
-   .active). The sidebar is gone; the top-nav equivalent is .stage-tab,
-   whose active state uses a gradient underline instead. */
-
-/* Progress bar */
+/* Progress: a white fill on a translucent track, at the art's foot. */
 .progress-bar {
   position: absolute;
   bottom: 0;
@@ -2991,7 +2982,6 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   background: var(--track);
   z-index: 2;
 }
-
 .progress-fill {
   height: 100%;
   background: var(--action);
@@ -3001,65 +2991,47 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 /* Rail scroll container */
 .rail-scroll {
   display: flex;
-  /* Out by its own 4px inline padding (Stage refresh, RS), so the first card's
-     edge lands on the page gutter with the rail title and the hero text above
-     it, while the padding still holds the focus ring the scroll box would
-     otherwise clip. The shelf used to absorb the 4px offset in its own
-     padding; on the page it read as a stagger. */
+  /* Out by its own 4px inline padding, so the first card's edge lands on
+     the page gutter with the rail title above while a focused card still
+     has room for its ring inside the scroll clip. */
   margin-inline: -4px;
-  /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
-  gap: 18px;
+  gap: 20px;
   overflow-x: auto;
-  /* proximity, not mandatory: mandatory forced a snap at the end of EVERY
-     trackpad and touch gesture, which is the "rail fights my scroll"
-     feel, and it yanked the paddles' 90%-of-width page to the nearest
-     card edge after the smooth scroll had already stopped. Proximity keeps
-     the alignment when a gesture ends near a boundary and lets a free
-     scroll rest where it stopped; the paddles now page by whole cards
-     (MediaRail) so both agree. */
   scroll-snap-type: x proximity;
-  /* A horizontal swipe past either end no longer chains into the
-     browser's back/forward gesture. */
   overscroll-behavior-x: contain;
-  /* Snapped card sits inside the 4px inline padding, not on the edge. */
   scroll-padding-inline: 4px;
-  padding: 8px 4px;
+  /* Top and bottom room for the focus ring (2px offset, 2px ring, 2px
+     band) and the poster's shadow, which the scroll clip would cut. */
+  padding: 8px 4px 12px;
   -webkit-overflow-scrolling: touch;
 }
-
-/* Rail paddles — hover/focus-revealed chevrons that page the rail for
-   mouse users (the scrollbar is hidden and a vertical wheel scrolls the
-   page, so without these anything past the first viewport-width of
-   cards is unreachable without a trackpad/touch). Hidden by default;
-   revealed while the rail is hovered or a paddle has keyboard focus.
-   Touch devices never hover — swiping already works there. */
+.rail-scroll > * {
+  scroll-snap-align: start;
+  flex-shrink: 0;
+}
 .rail-scroll-wrap {
   position: relative;
 }
+/* Paddles: pointer-only page buttons at the rail's ends. Keyboard users
+   reach every card by Tab; the paddles show on focus all the same. */
 .rail-paddle {
   position: absolute;
-  top: 50%;
+  /* Centred on the poster, not on the card: the caption is below it. */
+  top: calc(8px + var(--rail-art-h, 264px) / 2);
   transform: translateY(-50%);
   z-index: 5;
-  width: 36px;
-  height: 68px;
+  width: 40px;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--r-md);
-  background: rgba(10, 8, 18, 0.78);
-  border: 1px solid var(--glow-border);
-  color: rgba(255, 255, 255, 0.85);
+  border-radius: var(--radius-control);
+  background: rgba(14, 15, 17, 0.86);
+  color: var(--ink);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  transition: opacity var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
-/* Keyboard reveal is unconditional; the hover reveal is gated on a real
-   hover-capable pointer, because iOS Safari and Android Chrome apply :hover
-   on tap and hold it until the next tap — a tapped rail kept both paddles
-   up over its cards. Same trap this file documents for .card-overlay. */
 .rail-paddle:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -3070,45 +3042,12 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
     pointer-events: auto;
   }
 }
-.rail-paddle:hover {
-  background: rgba(30, 24, 48, 0.92);
-  color: #fff;
-}
-.rail-paddle:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-}
-.rail-paddle-left {
-  left: -8px;
-}
-.rail-paddle-right {
-  right: -8px;
-}
-
-.rail-scroll > * {
-  scroll-snap-align: start;
-  flex-shrink: 0;
-}
-
-/* Edge fades (Stage refresh, R2). With the shelf gone a rail's clipped edge
-   was a hard cut through a card on the page; now the side with more cards
-   behind it fades, and only that side — MediaRail mirrors its paddle state
-   onto the wrap as data-can-left / data-can-right, so the first card at rest
-   is never faded and a rail that fits has no mask at all.
-   22px: the 18px card gap plus the scroll box's 4px padding, i.e. the strip
-   past a card that ends flush with the gap. The first cut faded 40px, which
-   at 1440px reached 18px into the sixth card, fully visible and fully
-   clickable. No width fits every viewport (where the overflow card starts
-   depends on the width): measured, this one overlaps no fully visible card
-   at 1280, 1440 or 1920, and at any width it can reach at most 22px into one.
-   The mask is on the scroll box, so it stays put while the cards scroll under
-   it; the paddles are the wrap's other children and are never masked. It is
-   dropped while a card inside has keyboard focus, so the focus ring on a card
-   at the edge is never faded out: that rule comes second and ties on
-   specificity ((0,3,0) each), so source order is what keeps it winning.
-   The whole thing sits in @supports selector(:has(*)): the drop needs :has(),
-   and a browser without it would keep the fade over a focused edge card's
-   ring. Without :has() a rail gets no fade at all, the hard cut it had. */
+.rail-paddle:hover { background: var(--surface-raised-2); }
+.rail-paddle-left { left: -8px; }
+.rail-paddle-right { right: -8px; }
+/* The edge where more cards wait fades out, driven by the same
+   data-can-* state the paddles use. Lifted while a card inside has
+   keyboard focus, or the mask would dim its ring. */
 @supports selector(:has(*)) {
   .rail-scroll-wrap[data-can-left] .rail-scroll { --rail-fade-l: 22px; }
   .rail-scroll-wrap[data-can-right] .rail-scroll { --rail-fade-r: 22px; }
@@ -3122,271 +3061,317 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   }
 }
 
-/* ====================================================================
-   .rail-container — wraps a whole home rail (header + cards).
-   No shelf (Stage refresh, RS). It used to be a glass frame — fill,
-   glow border, halo, 14px backdrop blur, 18-22px padding — around every
-   rail, so Home was a stack of 5-10 boxes, each full-width and ~400px
-   tall, and the heaviest blur on the page (Reduce effects had to flatten
-   it). The cards already carry their own halo; the rails now sit on the
-   page, aligned to the same gutter as the hero, and the spacing between
-   them does the grouping. Nothing to override under Reduce effects, so
-   that rule went with it. audit-glass-contrast measures the rail header
-   on the page background (.aurora-bg) instead of on the shelf.
-   ==================================================================== */
 .rail-container {
-  /* 40px, up from 28 (Stage refresh, R1): with no shelf edge to separate
-     them, the space between rails is what groups each title with its row. */
-  margin-bottom: 40px;
+  margin-bottom: 36px;
 }
+/* A rail's header is its title, and nothing else competes with it: no icon
+   tile, no rule. When the rail has a "see all", the title IS that link.
+   Under it, at most one line: a plain subtitle, or the AI attribution
+   (aurora dot + "Picked by Aurora"), said once here and not on every card. */
 .rail-header {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 14px;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-width: 0;
 }
-/* 2026-05-27 — Per-rail icon chip with tint variants. The base rule
-   handles ONLY layout (size, shape, alignment); each [data-tint=...]
-   block owns its own colors. railIconFor() always resolves to a tint
-   so the data-tint attribute is present on every render — there's no
-   "naked" fallback to worry about.
-   Adding a new tint = one block here + one entry in railIconFor(). */
-.rail-header .rail-icon {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--r-sm);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Border thickness comes from the base rule; tint blocks override
-     background + border-color + color. */
-  border: 1px solid transparent;
-}
-.rail-header .rail-icon[data-tint="purple"] {
-  background: rgba(255, 255, 255, 0.099);
-  border-color: rgba(255, 255, 255, 0.22);
-  color: var(--ink);
-}
-.rail-header .rail-icon[data-tint="teal"] {
-  background: rgba(45, 212, 191, 0.16);
-  border-color: rgba(45, 212, 191, 0.4);
-  color: #5eead4;
-}
-.rail-header .rail-icon[data-tint="amber"] {
-  background: rgba(245, 158, 11, 0.16);
-  border-color: rgba(245, 158, 11, 0.4);
-  color: #fcd34d;
-}
-.rail-header .rail-icon[data-tint="pink"] {
-  background: rgba(236, 72, 153, 0.16);
-  border-color: rgba(236, 72, 153, 0.4);
-  color: #f9a8d4;
-}
-.rail-header .rail-icon[data-tint="rose"] {
-  background: rgba(244, 63, 94, 0.16);
-  border-color: rgba(244, 63, 94, 0.4);
-  color: #fda4af;
-}
-.rail-header .rail-icon[data-tint="indigo"] {
-  background: rgba(255, 255, 255, 0.088);
-  border-color: rgba(255, 255, 255, 0.22);
-  color: var(--ink);
-}
-/* The display face at --fs-rail (Stage refresh, R1). Rail titles were body
-   Inter at 16.8px/600 while --fs-rail (21px) sat unused, so the one heading
-   that repeats down the whole of Home was the least designed type on it.
-   20px, the size the refresh was drawn at, one step under the old 21px token
-   that nothing consumed. Titles wrap (see below), and verify-mobile-layout
-   renders a long one at phone widths in each of the four typefaces, failing
-   on any overrun. */
 .rail-header .rail-title {
+  /* Titles are user- and LLM-written (the conversational rail's title is
+     the query that was typed), so they wrap, and an unbroken word breaks
+     rather than widening the page. */
+  margin: 0;
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--font-display);
   font-size: var(--fs-rail);
-  font-weight: 700;
+  font-weight: 650;
   line-height: 1.2;
-  letter-spacing: -0.012em;
-  color: rgba(255, 255, 255, 0.95);
-  /* Wraps rather than `nowrap`. With nowrap a title wider than its column
-     (phones, long "Because you watched …" / LLM rail names) overflowed the
-     rail, and the page with it — the layout viewport grew past the device
-     width. Wrapping only engages once the header is genuinely out of room:
-     the title column's flex basis is still its one-line max-content width,
-     so desktop headers render exactly as before. min-width + break-word
-     cover a single word longer than the column. */
-  min-width: 0;
-  overflow-wrap: break-word;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
 }
-/* Divider line that fills the space between title and the See-All chevron. */
-.rail-header .rail-spacer {
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.135) 0%, rgba(255, 255, 255, 0.03) 100%);
-}
-/* See All takes the secondary-text token, not white at 0.4 (Stage refresh,
-   RS): that was about 3.7:1 and never measured, because nothing audited the
-   shelf it sat on. audit-glass-contrast now measures it on the page. */
 .rail-header .rail-see-all {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--text-secondary);
-  font-size: 0.8rem;
-  transition: color 0.2s;
-  flex-shrink: 0;
-}
-.rail-header .rail-see-all:hover { color: var(--ink); }
-
-/* ====================================================================
-   .media-card-cinema — the new card design used inside .rail-container.
-   Same outer shape semantics as .media-card (rounded box, poster fills
-   most of it, hover lift) but with:
-     - Always-on purple halo so cards read as "luminous" against the
-       rail's dark glass — the legacy .media-card only glows on hover.
-     - Designed shelf below the poster instead of bare text — title,
-       star+year+genre meta, and (when present) the LLM "reason"
-       caption.
-     - Larger top-corner badges so they read on a glance without a
-       hover, and with a jewel-toned diamond for the AI-matched signal.
-   ==================================================================== */
-.media-card-cinema {
-  position: relative;
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
-  border: 1px solid var(--glow-border);
-  box-shadow: var(--glow-halo);
-  /* Lift on the entrance curve (Stage refresh, C1): 280ms emphasized instead of
-     350ms standard, so the card answers the pointer at once and settles. */
-  transition: transform var(--dur-enter) var(--ease-emphasized),
-              box-shadow var(--dur-enter) var(--ease-emphasized),
-              border-color var(--dur-base) var(--ease-standard);
+  max-width: 100%;
+  text-align: left;
+  border-radius: var(--radius-chip);
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
   cursor: pointer;
 }
-/* The glow strengthens on any :hover (a stuck glow on touch is harmless);
-   the LIFT and the poster scale are gated on a hover-capable pointer, so a
-   tapped card on a phone does not stay raised until the next tap. */
-.media-card-cinema:hover {
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong);
+/* The chevron is the only sign the title is a link, so it is not left to
+   hover: quiet at rest, full ink under the pointer or focus. */
+.rail-header .rail-see-all .rail-chev {
+  flex: none;
+  color: var(--ink-3);
+  transition: color var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
 }
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover {
-    transform: translateY(-4px);
-  }
-  /* Press settle. Hover-capable pointers only: on touch, :active fires at the
-     start of a swipe across the rail, so every card under the thumb would
-     shrink while the user scrolls. `:not(:has(button:active))` keeps the card
-     still while the lib badge, AI gem or Resume pill inside it is pressed —
-     those are their own controls. Without :has() support the rule is dropped
-     and the card simply has no press state. */
-  .media-card-cinema:active:not(:has(button:active)) {
-    transform: translateY(-2px) scale(0.985);
-    transition-duration: 110ms;
-  }
+.rail-header .rail-see-all:hover .rail-chev,
+.rail-header .rail-see-all:focus-visible .rail-chev {
+  color: var(--ink);
+  transform: translateX(2px);
 }
-/* Keyboard parity (C1). A focused card used to get only the outline floor while
-   a hovered one lifted and lit up; now both read the same. The global
-   :focus-visible outline is deliberately left in place on top of this. Not
-   behind the hover query: keyboard focus is not a pointer state. */
+.rail-header .rail-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ink-2);
+}
+.rail-header .rail-sub .rail-sub-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* The aurora dot sits on the first line's x-height, not its baseline. */
+.rail-header .rail-sub .rail-dot {
+  flex: none;
+  align-self: flex-start;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--aurora);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-header .rail-see-all .rail-chev { transition: none; }
+  .rail-header .rail-see-all:hover .rail-chev,
+  .rail-header .rail-see-all:focus-visible .rail-chev { transform: none; }
+}
+
+/* ── The card ─────────────────────────────────────────────────────── */
+.media-card-cinema {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  cursor: pointer;
+  /* The card is the focusable thing, but the ring belongs on the poster:
+     a ring round poster-plus-caption reads as a box. */
+  outline: none;
+}
 .media-card-cinema:focus-visible {
-  transform: translateY(-4px);
+  outline: none;
+  box-shadow: none;
+}
+.media-card-cinema:focus-visible .poster-wrap {
+  box-shadow: 0 0 0 2px var(--surface-page), 0 0 0 4px #ffffff, 0 0 0 6px var(--surface-page);
 }
 .media-card-cinema .poster-wrap {
   position: relative;
-  /* 2026-07-25 (Aurora Stage Phase 3) — the 8px inset frame and this
-     element's own radius are gone: the art now fills the card edge to
-     edge, with metadata over it instead of on a shelf below.
-     
-     This RETIRES deep-debug Bug 22 rather than re-solving it. That bug was
-     a stair-step where the image's 9px corners clipped against the wrap's
-     flat bottom corners; with no padding and no radius on the image, the
-     card's own `border-radius: 14px; overflow: hidden` is the single
-     rounding authority and there are no two radii to disagree. Do not
-     reintroduce a radius on .poster-img without restoring one here. */
+  border-radius: var(--radius-art);
+  overflow: hidden;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  transition: box-shadow var(--dur-base) var(--ease-standard);
 }
-/* The no-poster placeholder shares .poster-img for its box (so grid
-   alignment doesn't shift when real art lands) but needs to CENTER its
-   glyph. It cannot do that with Tailwind utilities at the call site:
-   `.media-card-cinema .poster-img` is (0,2,0) and `.flex` is (0,1,0), so
-   the img rule wins regardless of order and `flex items-center` were
-   silently dead — the icon sat top-left on every posterless item.
-
-   COMPOUND SELECTOR, not a separate class: the first attempt at this fix
-   used `.media-card-cinema .poster-placeholder`, which is ALSO (0,2,0) —
-   equal to the .poster-img rule and declared before it, so `display: block`
-   still won and `place-items: center` was still inert. Verifying only
-   against `.flex` missed the sibling rule 90 bytes further down. Qualifying
-   with .poster-img makes this (0,3,0) so declaration order stops mattering
-   at all. */
-.media-card-cinema .poster-img.poster-placeholder {
-  display: grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.03);
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .poster-wrap {
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  }
 }
 .media-card-cinema .poster-img {
   display: block;
   width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  /* No radius — the card clips. See the .poster-wrap note above.
-     Emphasized timings (Stage refresh, C2): the decode fade and the 1.04 → 1
-     settle below arrive together, then the slower transform finishes the move. */
-  transition: transform 0.7s var(--ease-emphasized), opacity 420ms var(--ease-emphasized);
 }
-/* Fade-in on decode: invisible until the <img> sets data-loaded (see
-   MediaCardCinema). `img.` is load-bearing — the no-art placeholder is a
-   <div class="poster-img poster-placeholder"> that never fires onLoad, and
-   a bare `.poster-img:not([data-loaded])` would hide every posterless card
-   forever. A transition, not an animation, so audit-reduced-motion Check 1b
-   does not apply; the reduced-motion block still stills it. */
+.media-card-cinema .poster-img.poster-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-raised);
+}
+/* Art fades in once it has decoded, over the raised fill. `img.` so the
+   placeholder <div>, which never fires onLoad, cannot match. */
+.media-card-cinema img.poster-img {
+  transition: opacity 320ms var(--ease-standard);
+}
 .media-card-cinema img.poster-img:not([data-loaded]) {
   opacity: 0;
-  /* Starts a touch large and settles as it fades in (C2). (0,3,1), so it also
-     outranks the (0,3,0) hover scale while the art is still in flight. A cache
-     hit is marked loaded by the ref callback before first paint, so it never
-     plays this. */
-  transform: scale(1.04);
 }
-/* Loading sheen (C2). The decode fade used to start from the card's flat fill,
-   so a slow poster read as an empty box. While the <img> is pending its wrap
-   carries a slow lavender sweep, and the art fades in over it. `:has()` keys it
-   to the image's own state, so the posterless placeholder (a <div>, never
-   pending) and a loaded card have none. Without :has() support the rule is
-   dropped and the old fade remains.
 
-   COST, measured after a review. The first cut animated the wrap's
-   `background-position`, which repaints on the main thread every frame, and ran
-   it `infinite`: a lazy poster in an off-screen rail position is never
-   requested, so it never loads, so its sheen never stopped — 16-51 of them on an
-   idle Home, ~350ms of main-thread time every 3s. Now:
-     - the band is a `::before` moved by `transform`, which the compositor
-       animates without main-thread paints;
-     - it sweeps 3 times (~5s) and then rests off the left edge, invisible. CSS
-       cannot tell an off-screen or never-requested image from a slow one, so
-       the bound is what stops the off-screen ones; a poster still pending after
-       that shows the card's flat fill, as before C2;
-     - Reduce effects (html[data-effects="reduced"], the weak-GPU setting) drops it.
-   `::before`, not `::after`: positioned and first in tree order, it paints over
-   the pending (transparent) <img> but under the card's badges and text. The
-   wrap is already `position: relative`; the card's `overflow: hidden` clips the
-   band while it waits off the edge. */
-.media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
-  content: "";
+/* The actions on the art: Play, Add and More over a short dark scrim at
+   the poster's foot. Hidden at rest. Shown under a pointer, and whenever
+   focus is on the card or inside it. The layer itself takes no clicks, so
+   everywhere but the buttons a click still opens the title. */
+.media-card-cinema .card-actions {
   position: absolute;
-  inset: 0;
+  inset: auto 0 0 0;
+  z-index: 3;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 96px;
+  padding: 10px;
+  /* Black, not the page ink: it sits on artwork, and the buttons carry
+     their own fills, so this only has to settle the art behind them. */
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0) 100%);
+  opacity: 0;
   pointer-events: none;
-  background: linear-gradient(100deg, rgba(255, 255, 255, 0) 30%, rgba(255, 255, 255, 0.053) 50%, rgba(255, 255, 255, 0) 70%);
-  transform: translateX(-100%);
-  animation: posterSweep 1.6s var(--ease-standard) 3;
+  transition: opacity var(--dur-fast) var(--ease-standard);
 }
-@keyframes posterSweep {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(100%); }
+/* With progress showing, the buttons clear the bar. */
+.media-card-cinema .card-actions.has-progress { padding-bottom: 14px; }
+.media-card-cinema:focus-visible .card-actions,
+.media-card-cinema:focus-within .card-actions {
+  opacity: 1;
 }
-html[data-effects="reduced"] .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before {
-  content: none;
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .card-actions { opacity: 1; }
 }
+/* The fill is opaque enough to hold a white glyph over white artwork
+   (audit-glass-contrast measures it there). */
+.media-card-cinema .card-act {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(14, 15, 17, 0.78);
+  color: #ffffff;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
+}
+.media-card-cinema .card-act:hover { background: rgba(14, 15, 17, 0.94); }
+.media-card-cinema .card-act:active { transform: scale(0.94); }
+.media-card-cinema .card-act-play {
+  background: var(--action);
+  color: var(--on-action);
+}
+.media-card-cinema .card-act-play:hover { background: rgba(255, 255, 255, 0.9); }
+.media-card-cinema .card-act-more { margin-left: auto; }
+/* A narrow card (the compact grid, a two-up phone grid) has no room for
+   three 44px targets in a row: the buttons shrink, and on the narrowest
+   Add drops out (it is in the menu More opens). They never overlap and
+   never leave the poster; scripts/verify-mobile-layout.mjs measures it. */
+@container card (max-width: 167px) {
+  .media-card-cinema .card-act { width: 36px; height: 36px; }
+  .media-card-cinema .card-actions { gap: 6px; padding: 8px; }
+}
+@container card (max-width: 139px) {
+  .media-card-cinema .card-act:not(.card-act-play):not(.card-act-more) { display: none; }
+}
+.media-card-cinema .poster-wrap { container: card / inline-size; }
+/* Touch screens have no hover. More is always there, alone, so the poster
+   stays clean and nothing is reachable only by a gesture; Play and Add are
+   in the menu it opens. No scrim: the button's own fill carries it. */
+@media (hover: none) {
+  .media-card-cinema .card-actions {
+    opacity: 1;
+    height: auto;
+    background: none;
+  }
+  .media-card-cinema .card-act:not(.card-act-more) { display: none; }
+  .media-card-cinema .card-act-more { width: 36px; height: 36px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-card-cinema .poster-wrap,
+  .media-card-cinema img.poster-img,
+  .media-card-cinema .card-actions,
+  .media-card-cinema .card-act { transition: none; }
+  .media-card-cinema .card-act:active { transform: none; }
+}
+
+/* The caption: one line of title, one line of facts, on the page. */
+.media-card-cinema .card-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.media-card-cinema .cc-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ONE line, load-bearing: captions in a rail or a grid row must be the
+   same height or the row's posters stop lining up. The row is a wrapping
+   flex box exactly one line tall with its overflow clipped, so a token
+   that does not fit wraps to a second line and vanishes WHOLE, taking its
+   own separator with it (each token carries the dot that precedes it).
+   A token alone on the row cannot wrap away, so it ellipsizes instead
+   (.co-txt). scripts/verify-mobile-layout.mjs measures all of this. */
+.media-card-cinema .co-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0;
+  height: 16px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-3);
+}
+.media-card-cinema .co-meta .co-tok {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 16px;
+  white-space: nowrap;
+}
+.media-card-cinema .co-meta .co-tok .sep {
+  flex: none;
+  padding: 0 5px;
+}
+.media-card-cinema .co-meta .co-txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-card-cinema .co-meta .star {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+.media-card-cinema .co-meta .star svg { color: var(--stage-star); }
+/* The saved mark: a small tick at the head of the facts line. */
+.media-card-cinema .co-meta .co-saved {
+  display: inline-flex;
+  flex: none;
+  margin-right: 6px;
+  color: var(--ink-2);
+}
+/* The poster grid every content grid shares. Columns are as many as fit
+   at the comfortable width (compact: more, smaller posters), so the grid
+   needs no breakpoint ladder; a phone always gets at least two (three when
+   compact), because one 300px poster per row is not a grid. */
+.poster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 32px 20px;
+}
+.poster-grid.is-compact {
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 24px 16px;
+}
+@media (max-width: 479px) {
+  .poster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 12px; }
+  .poster-grid.is-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 10px; }
+}
+
+/* The children's presentation: larger captions under larger posters. */
+.media-card-cinema.is-large .cc-title { font-size: 18px; }
+.media-card-cinema.is-large .co-meta { font-size: 15px; height: 20px; line-height: 20px; }
+.media-card-cinema.is-large .co-meta .co-tok { height: 20px; }
+@media (forced-colors: active) {
+  .media-card-cinema .card-act { border: 1px solid ButtonText; }
+}
+
 /* Detail tabs move instead of jumping (Stage refresh, DT3). DetailView keys
    the tab panel's content on the active tab, so a switch fades it up 6px.
    `backwards`, not `both` or `forwards`: a held `to { transform: none }`
@@ -3418,11 +3403,9 @@ img.stage-img-fade:not([data-loaded]) {
 @media (prefers-reduced-motion: reduce) {
   img.stage-img-fade { transition: none; }
 }
-/* Skeleton tile (Stage refresh, L1) — SkeletonBlock's surface and motion. A
-   slow lavender sweep, the look of the poster sheen above, over the neutral 3%
-   fill the tiles always had, replacing Tailwind's animate-pulse opacity throb.
-   No radius and no display here (CASCADE HAZARD): call sites pass `rounded-*`
-   and size utilities.
+/* Skeleton tile: SkeletonBlock's surface and motion. A slow, faint sweep
+   over the raised fill. No radius and no display here (CASCADE HAZARD): call
+   sites pass `rounded-*` and size utilities.
    The sweep is a `::before` moved by `transform`, so the compositor runs it with
    no main-thread paint; the first cut animated `background-position`, which
    repainted every tile every frame. It stays infinite because a skeleton only
@@ -3454,483 +3437,6 @@ img.stage-img-fade:not([data-loaded]) {
 }
 html[data-effects="reduced"] .stage-skel::before {
   content: none;
-}
-/* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
-   own 9px corners clipped against the wrap's edge. Phase 3 removed the
-   image's radius entirely (the card is the sole clipping authority), so
-   that specific artifact can no longer occur — 1.02 is kept because the
-   lift (translateY on the parent) does most of the work and a bigger scale
-   just costs texture sharpness. Hover-capable pointers only — see the
-   lift above. */
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .poster-img { transform: scale(1.02); }
-}
-
-/* Larger "+" / library badge — sits in poster top-left. Filled
-   purple when item is in the user's library, dark glass otherwise.
-   2026-05-27 (deep-debug Bug 25) — dropped backdrop-filter:blur. The
-   home view typically renders 5+ rails × 15+ visible cards = 80+
-   backdrop-filter layers, each forcing a re-composite on every scroll
-   /hover/resize frame. Profiling showed observable FPS drops on weak
-   integrated graphics. The badge is 30px on top of a poster — the
-   "frosted glass" effect was invisible at that size. A flat dark fill
-   (rgba 0.7) reads identically while costing nothing to render. (The
-   rail-container's own blur, once per rail, went with the shelf in the
-   Stage refresh.) */
-.media-card-cinema .lib-badge {
-  position: absolute;
-  top: 14px;
-  left: 14px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(10, 8, 18, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  transition: background 0.2s, border-color 0.2s, transform 0.2s;
-  z-index: 3;
-  cursor: pointer;
-}
-/* Hit-area expanders. Both corner controls draw at 30x30, under the 44px
-   WCAG 2.5.5 target; a pseudo-element 7px outside the box takes the tap
-   without changing what is painted. Both buttons are position:absolute,
-   so the inset resolves against their own box. */
-.media-card-cinema .lib-badge::before,
-.media-card-cinema .ai-gem::before {
-  content: '';
-  position: absolute;
-  inset: -7px;
-}
-.media-card-cinema .lib-badge:hover { background: rgba(255, 255, 255, 0.413); transform: scale(1.06); }
-.media-card-cinema .lib-badge.in-lib {
-  background: var(--action);
-  border-color: transparent;
-  color: var(--on-action);
-}
-/* 2028-05-28 (deep-debug Bug D) — destructive hover cue when the badge is
-   already in the in-lib state. Without this, the generic .lib-badge:hover
-   rule (purple translucent fill) overrides the in-lib gradient on hover
-   and gives a misleading "add" signal even though the click will remove
-   the title from the library. The .in-lib qualifier raises specificity
-   above the generic rule and recolors to red so the destructive action
-   reads clearly. */
-.media-card-cinema .lib-badge.in-lib:hover {
-  background: linear-gradient(135deg, #f87171, #b91c1c);
-  border-color: rgba(255, 200, 200, 0.6);
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
-  transform: scale(1.06);
-}
-
-/* AI-matched diamond — jewel-style top-right badge + reveal control.
-   Only renders when the recommender attached an LLM reason (item.reason).
-   2026-06-04 — promoted from a decorative div to a real <button>: it is
-   the always-on "AI-picked" signal AND the affordance that surfaces the
-   reason — hover the card (desktop), tab to it (keyboard) or tap it
-   (touch), all of which reveal the .reason-scrim below via the card's
-   :hover / :focus-within. */
-.media-card-cinema .ai-gem {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  /* 2026-05-27 (deep-debug Bug 20) — sized to match the lib-badge
-     diameter (30px) so the top corners read symmetric. Previously 26x26
-     looked visibly smaller than the 30x30 lib-badge for no design
-     reason. */
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: var(--r-sm);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.637), rgba(255, 255, 255, 0.468));
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  color: #fffbe6;
-  box-shadow: 0 0 14px rgba(0, 0, 0, 0.5);
-  z-index: 3;
-  /* Interactive now (was pointer-events:none) so a touch/click focuses it
-     and reveals the reason; cursor hints it's actionable. */
-  cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
-}
-.media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(255, 255, 255, 0.525); }
-.media-card-cinema .ai-gem:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-}
-/* svg ignores pointer events so the click always lands on the button. */
-.media-card-cinema .ai-gem svg { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.55)); pointer-events: none; }
-
-/* Reveal-on-intent reason scrim — the full LLM reason faded up over the
-   poster bottom on card :hover / :focus-within. Replaces the old always-on
-   truncated shelf caption (.reason) and the native title= tooltip: the
-   reason is now fully readable (≤80-char sentence, ~3 lines) on intent,
-   themed to match the cinematic UI, and works on touch via the gem. */
-.media-card-cinema .reason-scrim {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* z:2 — below the z:3 corner controls (lib badge / gem) so they stay
-     visible and clickable while the scrim is up; same layer as the
-     hover-preview play scrim. */
-  z-index: 2;
-  padding: 26px 12px 12px;
-  /* Dense ramp so near-white .reason-text clears WCAG AA even over bright
-     poster art (snowy backdrops, white logos). The knee at 60% keeps the
-     bottom 1–2 lines on ~0.9+ alpha; the top line of a 3-line reason sits
-     ~0.69 alpha, which still composites dark enough vs near-white to clear
-     4.5:1 (~6:1 worst case over pure white). The previous thinner ramp
-     failed AA for 2–3 line reasons over bright art. */
-  background: linear-gradient(to top, rgba(8, 6, 16, 0.96) 0%, rgba(8, 6, 16, 0.9) 60%, rgba(8, 6, 16, 0) 100%);
-  opacity: 0;
-  transform: translateY(6px);
-  transition: opacity var(--dur-base) var(--ease-standard), transform var(--dur-base) var(--ease-standard);
-  /* never intercept the card's click-to-detail: the reveal is driven by
-     the CARD's :hover / :focus-within, not by hovering the scrim itself. */
-  pointer-events: none;
-}
-/* focus-within (keyboard, and the gem's tap-to-focus on touch) reveals on
-   every device; :hover only where hover is real, so a tapped card does not
-   keep the reason up over its title until the next tap. */
-.media-card-cinema:focus-within .reason-scrim {
-  opacity: 1;
-  transform: translateY(0);
-}
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .reason-scrim {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-/* 2026-06-05 (Home redesign) — AI cards now carry BOTH a reveal-on-hover
-   .reason-scrim AND the quality/maturity .card-badges, which share the
-   poster-bottom-left corner and overlap when the reason reveals. Fade the
-   badges out while the reason is up so the rating chip doesn't sit on top
-   of the reason text. The `.reason-scrim ~` combinator scopes this to
-   cards that actually have a reason — badge-only cards (no scrim) keep
-   their badges on hover. */
-.media-card-cinema .reason-scrim ~ .card-badges {
-  transition: opacity var(--dur-base) var(--ease-standard);
-}
-.media-card-cinema:focus-within .reason-scrim ~ .card-badges {
-  opacity: 0;
-}
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .reason-scrim ~ .card-badges {
-    opacity: 0;
-  }
-}
-.media-card-cinema .reason-text {
-  margin: 0;
-  font-size: 12px;
-  font-style: italic;
-  line-height: 1.34;
-  color: rgba(238, 232, 252, 0.97);
-  /* the full ≤80-char reason fits ~3 lines at the 206px rail width; the
-     clamp guards the rare longer string without spilling over the art. */
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
-}
-@media (prefers-reduced-motion: reduce) {
-  /* The card lift and poster scale were the only card motion this block
-     did not cover. Later in the file than the hover rules at equal
-     specificity, so these win. */
-  .media-card-cinema { transition: none; }
-  .media-card-cinema:hover,
-  .media-card-cinema:focus-visible { transform: none; }
-  /* Its own rule: a browser without :has() drops a whole selector list that
-     contains one, which took the hover and focus nulls above down with it. */
-  .media-card-cinema:active:not(:has(button:active)) { transform: none; }
-  .media-card-cinema:hover .poster-img,
-  .media-card-cinema img.poster-img:not([data-loaded]) { transform: none; }
-  .media-card-cinema .poster-img { transition: none; }
-  /* The loading sheen stops, resting off the edge; the pending wrap is just
-     the card's own fill. The SAME selector as the rule it nulls, not a shorter
-     `.poster-wrap` one: the `:has(…)` argument makes that rule (0,4,2), so a
-     shorter null here would lose and the sheen would keep running.
-     audit-reduced-motion matches class names, not specificity, and reported the
-     shorter form as covered. */
-  .media-card-cinema .poster-wrap:has(> img.poster-img:not([data-loaded]))::before { animation: none; }
-  .media-card-cinema .ai-gem { transition: none; }
-  .media-card-cinema .ai-gem:hover { transform: none; }
-  .media-card-cinema .reason-scrim { transform: none; transition: opacity var(--dur-base) var(--ease-standard); }
-}
-
-/* ── Card overlay: title + meta ON the art (Aurora Stage Phase 3) ──
-   Replaces `.shelf`, which sat below the poster inside the card chrome.
-
-   THE SCRIM IS AN ACCESSIBILITY MECHANISM, NOT A GRADIENT. This text sits
-   over arbitrary poster art — snowy backdrops, white logos, blown-out
-   skies — so the ramp below is the one already proven for `.reason-scrim`
-   (dense, knee at 60%), which exists because that surface hit exactly this
-   problem. `.co-meta` keeps --text-secondary, the token introduced when
-   the old shelf meta measured ~4.47:1 and missed AA (deep-debug Bug 17);
-   over this scrim's ≥0.9 alpha floor it composites well clear of 4.5:1.
-   If you lighten the ramp, re-measure both lines first.
-
-   `padding-top: 34px` is part of the mechanism, not spacing: it parks the
-   whole text block at or below the gradient's 60% knee, where alpha is
-   still ≥0.89. Measured over a pure-white poster that gives the title
-   ~15.9:1 and the meta ~6.1:1. Drop the padding to 12px and the title's top
-   edge rides up to ~0.81 of the box, alpha ~0.43 — about 2.8:1, a hard AA
-   failure. (It also self-corrects the right way: taller content pushes the
-   text DOWN the ramp, raising alpha.) */
-.media-card-cinema .card-overlay {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* z:1 — under the corner controls and the reason scrim (z:2/3), above
-     the art. */
-  z-index: 1;
-  padding: 34px 13px 12px;
-  background: linear-gradient(
-    to top,
-    rgba(6, 5, 12, 0.94) 0%,
-    rgba(6, 5, 12, 0.9) 60%,
-    rgba(6, 5, 12, 0) 100%
-  );
-  /* The gradient layer must not swallow hits — but .co-title opts back IN
-     below, because pointer-events inherits and its native title= tooltip
-     is the only way to read a truncated title. */
-  pointer-events: none;
-}
-.media-card-cinema .card-overlay .co-title {
-  /* Re-enable hit-testing so the tooltip fires. A click here still bubbles
-     to the card root's onSelect, so click-to-detail is unaffected. */
-  pointer-events: auto;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.97);
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-}
-.media-card-cinema .card-overlay .co-meta {
-  margin-top: 5px;
-  font-size: 12px;
-  font-weight: 400;
-  /* See the AA note above — this is the same token the shelf used. */
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  column-gap: 5px;
-  /* ONE VISIBLE LINE is load-bearing, not a style choice. The overlay is
-     anchored to the card bottom and grows UPWARD, while .card-badges and
-     .resume-pill clear it via fixed offsets. A taller row pushes the title
-     up INTO the badges, which are z:3 against the overlay's z:1 — opaque
-     "4K" chips painting over the title, at rest, no hover needed. Measured
-     at real Inter metrics a full row does not fit even on desktop: at 1440px
-     (6-up, ~179px of content) "★ 9.5 · 2008 · 2h 55m · Comedy" overflows,
-     and on a phone's two-up grid (~130–165px cards) far sooner.
-
-     This used to be `flex-wrap: nowrap`, which did not deliver it: each
-     token was its own flex item that shrank and then wrapped its OWN text,
-     so at ~165px "2h 16m" broke into "2h" / "16m", the row grew a line and
-     the title slid under the badges on nearly every card in the phone grid.
-
-     So the row WRAPS — whole tokens only (.co-tok is nowrap, and carries
-     the dot that precedes it) — into a box exactly one line tall that clips
-     everything below. A token that does not fit moves to the hidden second
-     line and vanishes whole with its separator: "★ 9.2 · 1999" on a narrow
-     card, never "2h 1" cut mid-glyph and never a trailing "·". The first
-     token cannot wrap away (a flex line always takes its first item), so a
-     row too narrow even for that ellipsizes it instead (.co-txt below).
-     The card's aria-label carries the full meta, so nothing is lost to a
-     screen reader either way. */
-  flex-wrap: wrap;
-  line-height: 1.5;
-  height: 1.5em;
-  min-width: 0;
-  overflow: hidden;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-}
-/* min-width:0 is what lets a token ALONE on the row shrink to it (and its
-   .co-txt ellipsize) rather than overrun. Line breaking still uses each token's
-   full max-content width, so a token that does not fit wraps away whole. */
-.media-card-cinema .card-overlay .co-meta .co-tok {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  white-space: nowrap;
-}
-/* overflow:hidden also zeroes this flex item's automatic minimum size, so it
-   needs no min-width of its own to shrink. */
-.media-card-cinema .card-overlay .co-meta .co-txt {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.media-card-cinema .card-overlay .co-meta .star {
-  color: #facc15;
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-/* 0.45, not 0.3: at 0.3 the dots measured 2.71:1 over the scrim on a bright
-   poster — under even the 3:1 non-text floor — and the row read as
-   "8.5 2008 Crime" run together. 0.45 is ~4:1 and still recedes. */
-.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }
-
-/* The reason scrim occupies the same corner, so when it reveals the
-   permanent title/meta fades out rather than being printed over.
-
-   SCOPED WITH `~`, exactly like .card-badges below — and for the reason
-   that rule's own comment gives. Unscoped (as first shipped) this fired on
-   every card, and only AI-picked cards have a .reason-scrim to swap IN: on
-   Movies, TV, My Library, Search, Collections and Continue Watching the
-   title and meta simply blanked to bare art. `:focus-within` matches the
-   card itself (it is role="button" tabIndex=0), so it also erased the
-   label of the exact card a keyboard user had tabbed onto. */
-.media-card-cinema .reason-scrim ~ .card-overlay {
-  transition: opacity var(--dur-base) var(--ease-standard);
-}
-/* :hover ONLY, and only where hover is real.
-   
-   No `:focus-within`: it matches the card itself (role="button" tabIndex=0),
-   so it hid the label of the very card a keyboard user had tabbed onto. It
-   also STICKS — clicking the + badge leaves focus on that button, so the
-   title stayed hidden indefinitely after the pointer left. Dropping it
-   costs little: the reason scrim carries its own ~0.9-alpha backdrop, so a
-   focused reason-card's title sits behind it rather than competing.
-   
-   The hover query guards the touch equivalent: iOS Safari and Android
-   Chrome apply :hover on tap and hold it until you tap elsewhere, which
-   would leave a tapped card's title blanked. This file already documents
-   that trap for .resume-pill ("no :hover on touch", deep-debug C1) — this
-   is the first place it needed a media query. */
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .reason-scrim ~ .card-overlay {
-    opacity: 0;
-  }
-}
-
-/* Forced colors (Windows High Contrast). The UA drops any non-url()
-   `background-image`, so the scrim — the entire mechanism keeping this text
-   legible — is suppressed, while the poster <img> survives. That is a real
-   regression from moving the text onto the art: the old shelf sat on the
-   card's own background and fell back to Canvas. Give both on-art text
-   layers an explicit opaque backdrop, and stop hiding the title (a
-   crossfade between two layers is meaningless once both are Canvas).
-
-   This is the first forced-colors block in the file; there was no existing
-   handling to be consistent with.
-
-   ORDER MATTERS: this block must stay AFTER the @media (hover: hover) fade
-   above. Neither media query contributes specificity, so the later
-   `opacity: 1` here is the only thing that beats the `opacity: 0` there.
-   Placed before it — as first written — the fade won and the title still
-   vanished in forced-colors mode. Caught by checking the BUILT css, not the
-   source; the source read correctly either way. */
-@media (forced-colors: active) {
-  .media-card-cinema .card-overlay,
-  .media-card-cinema .reason-scrim {
-    background-color: Canvas;
-  }
-  .media-card-cinema:hover .reason-scrim ~ .card-overlay {
-    opacity: 1;
-  }
-}
-
-/* Progress bar — shared shape with the legacy card so existing CSS
-   logic keeps working. Positioned in the poster wrap (above the
-   shelf) the same way the legacy card uses it. */
-.media-card-cinema .progress-bar {
-  position: absolute;
-  bottom: 0;
-  /* Inset 6px, not flush: at 3px above the bottom edge the card's 14px
-     corner radius clips ~4.7px horizontally at each end, so a title at 2%
-     progress drew entirely inside the clipped corner and read as no
-     progress at all. Starting past the curve makes every percentage
-     visible. (The pre-Phase-3 bar was inset 8px and had the same issue for
-     a different reason.) */
-  left: 6px;
-  right: 6px;
-  /* Above .card-overlay (z:1) so a partly-watched card keeps showing
-     progress under the title block. */
-  z-index: 2;
-  height: 3px;
-  background: rgba(255, 255, 255, 0.14);
-  overflow: hidden;
-}
-.media-card-cinema .progress-bar .progress-fill {
-  height: 100%;
-  background: var(--action);
-}
-
-/* 2026-05-27 — Resume pill (one-click resume from Continue Watching
-   cards). Bottom-right of the poster, above the 3px progress bar
-   (positioned at bottom: 14px). Hidden until card hover/focus so it
-   doesn't compete with the poster art on first paint. Click on pill
-   resumes; click on card opens detail (event.stopPropagation in JSX
-   prevents both from firing).
-
-   Deep-debug C1 — `pointer-events: none` on the base + `auto` on the
-   visible states is critical for touch devices: without it, the
-   invisible pill intercepts taps on the bottom-right of the card
-   and silently fires Resume instead of opening detail (no :hover on
-   touch). Mirrors the established .card-actions pattern in this
-   file. Adds outline on :focus-visible (deep-debug H1) so keyboard
-   users get a distinct ring on top of the dark indigo gradient. */
-.media-card-cinema .resume-pill {
-  position: absolute;
-  /* Clears the on-art title block. This offset only earns its keep because
-     the overlay fade is SCOPED to reason-cards: Continue-Watching cards
-     (the only ones given an onResume) carry a subtitle and no reason, so
-     hovering shows the pill and the title block AT THE SAME TIME. Measured
-     from the card bottom the title box ends ~52px up, hence 58. */
-  bottom: 58px;
-  right: 10px;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 9px;
-  border-radius: 9999px;
-  background: var(--action);
-  border: 1px solid transparent;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
-  color: var(--on-action);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(2px);
-  transition: opacity var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
-}
-.media-card-cinema:hover .resume-pill,
-.media-card-cinema:focus-within .resume-pill,
-.media-card-cinema .resume-pill:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-}
-.media-card-cinema .resume-pill:hover {
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
-  transform: translateY(0) scale(1.04);
-}
-.media-card-cinema .resume-pill:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-}
-/* Reduced motion — drop the slide-in but keep the fade. */
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .resume-pill {
-    transform: none;
-    transition: opacity var(--dur-fast) var(--ease-standard);
-  }
 }
 
 /* Badge */
@@ -4112,114 +3618,6 @@ textarea:focus-visible {
   /* forwards: holds the "to" frame so a re-render can never snap the toast
      back to its "from" (the same defence .animate-fade-in has). */
   animation: toastIn 320ms var(--ease-emphasized) forwards;
-}
-
-/* ====================================================================
-   LIBRARY HYBRID REDESIGN (2026-05-31) — Movies / TV Shows browse page.
-   All rules below are scoped to opt-in classes/props so the 5 OTHER
-   surfaces that render <MediaCardCinema> (home rails, library, search,
-   collections, Continue Watching) are visually unchanged. Tokens mirror
-   the existing card (--glow-border, purple #a855f7, gold #facc15).
-   ==================================================================== */
-
-/* ── Card: cinematic hover preview (browse grid only) ──────────────
-   Decorative scrim + center play glyph that fades in on card hover or
-   keyboard focus. pointer-events:none so it never intercepts clicks on
-   the lib/resume buttons stacked above it — the card's own onClick
-   (open detail) is what fires. Lives inside .poster-wrap, which is
-   position:relative — the CARD ROOT does the clipping since Phase 3 moved
-   overflow:hidden off the wrap. */
-.media-card-cinema .card-hover-preview {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(0deg, rgba(14, 15, 17, 0.55), rgba(14, 15, 17, 0.05) 55%, transparent);
-  opacity: 0;
-  transition: opacity var(--dur-base) var(--ease-standard);
-  pointer-events: none;
-}
-.media-card-cinema:focus-within .card-hover-preview {
-  opacity: 1;
-}
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .card-hover-preview {
-    opacity: 1;
-  }
-}
-.media-card-cinema .card-hover-preview .chp-play {
-  width: 48px;
-  height: 48px;
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.95);
-  color: #0a0a0a;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transform: translateY(4px) scale(0.86);
-  transition: transform 0.25s var(--ease-standard);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
-}
-.media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
-.media-card-cinema:focus-within .card-hover-preview .chp-play {
-  transform: translateY(0) scale(1);
-}
-@media (hover: hover) and (pointer: fine) {
-  .media-card-cinema:hover .card-hover-preview .chp-play {
-    transform: translateY(0) scale(1);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .card-hover-preview { transition: opacity var(--dur-base) var(--ease-standard); }
-  .media-card-cinema .card-hover-preview .chp-play { transform: none; transition: none; }
-}
-
-/* ── Card: quality / maturity badges (browse grid only) ────────────
-   Bottom-left of the poster (top corners belong to the lib badge + AI
-   gem). First chip (quality, e.g. 4K) gets the purple accent; the rest
-   (maturity) stay neutral glass. z-index 3 = same layer as lib badge,
-   above the hover scrim (z-2). */
-.media-card-cinema .card-badges {
-  position: absolute;
-  left: 12px;
-  /* Clears the .card-overlay text block below it (Phase 3 moved title +
-     meta onto the art; at 14px the chips landed on top of the title). */
-  bottom: 62px;
-  z-index: 3;
-  display: flex;
-  gap: 6px;
-  pointer-events: none;
-}
-.media-card-cinema .card-badge {
-  padding: 3px 7px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.9);
-  background: rgba(10, 8, 18, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  /* No backdrop-filter. This is the same per-badge blur deep-debug Bug 25
-     removed from .lib-badge: with showBadges on Browse it was hundreds of
-     4px blur layers over poster art, re-composited on every scroll frame,
-     for a tint the 0.72 fill already reads identically at 10px type. */
-}
-.media-card-cinema .card-badge.is-quality {
-  color: #f5edff;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.468), rgba(255, 255, 255, 0.468));
-  border-color: rgba(255, 255, 255, 0.375);
-}
-/* HDR badge — amber accent, distinct from 4K's purple and the neutral
-   maturity rating. The JSX makes is-hdr and is-quality mutually exclusive
-   (an HDR chip never also carries is-quality, even at index 0), so this
-   stands alone. */
-.media-card-cinema .card-badge.is-hdr {
-  color: #fff7e6;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.85), rgba(180, 83, 9, 0.85));
-  border-color: rgba(253, 224, 138, 0.5);
 }
 
 /* ── Browse toolbar: genre chips + density toggle ──────────────────── */
@@ -4598,7 +3996,8 @@ textarea:focus-visible {
      opacity 0 or transform, so stilled they rest at their author style. */
   .stage-scrim-in,
   .stage-scrim-in.is-closing,
-  .stage-dialog-in {
+  .stage-dialog-in,
+  .stage-sheet-in {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than

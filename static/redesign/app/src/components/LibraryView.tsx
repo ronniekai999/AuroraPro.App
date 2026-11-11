@@ -117,7 +117,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
         // always a "remove" — MediaCardCinema renders the filled-purple
         // ✓ state because libraryIds.has(m.id) is always true. The
         // click on the badge triggers onToggleLib which fires the remove.
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5 mb-12">
+        <div className="poster-grid mb-12">
           {filteredLibrary.map((m) => (
             <MediaCardCinema
               key={m.id}
@@ -141,7 +141,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
             <h2 className="text-white font-display font-bold type-section">Continue Watching</h2>
             <span className="text-white/50 text-sm">({continueItems.length})</span>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+          <div className="poster-grid">
             {continueItems.map(c => {
               const m = mapContinueToMedia(c)
               const sub = c.type === 'show' && c.season_number && c.episode_number

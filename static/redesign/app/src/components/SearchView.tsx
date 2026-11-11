@@ -19,11 +19,18 @@ import { type Media } from '@/lib/types'
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
 // SearchView — debounced 300ms per keystroke (the semantic path is
 // LLM-routed and not free).
-export default function SearchView({ query, onQueryChange, onSelect, libraryIds, onToggleLib }: {
+export default function SearchView({ query, onQueryChange, focusNonce, takeFocus, onSelect, libraryIds, onToggleLib }: {
   query: string
   // Below md the top bar has no search field, so the page carries its own.
   // It is the only way to type a query on a phone.
   onQueryChange?: (q: string) => void
+  // The page's field takes focus when the Search tab is pressed, and only
+  // then: `takeFocus` answers (once) whether that just happened, and
+  // `focusNonce` changes on each press so a press while the page is already
+  // open is seen too. Mounting for any other reason (Back from a title, a
+  // reload) leaves the keyboard down.
+  focusNonce?: number
+  takeFocus?: () => boolean
   onSelect: (m: Media) => void
   // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` prop. The
   // cinema card has no hover Play CTA for it to attach to, and the
@@ -42,6 +49,10 @@ export default function SearchView({ query, onQueryChange, onSelect, libraryIds,
   // Track the most-recent query the user typed so a late-resolving
   // response from a stale query doesn't overwrite the current results.
   const lastQueryRef = useRef<string>('')
+  const fieldRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (takeFocus?.()) fieldRef.current?.focus()
+  }, [focusNonce, takeFocus])
 
   useEffect(() => {
     lastQueryRef.current = query
@@ -95,7 +106,7 @@ export default function SearchView({ query, onQueryChange, onSelect, libraryIds,
           <input
             type="search"
             enterKeyHint="search"
-            autoFocus
+            ref={fieldRef}
             value={query}
             onChange={e => onQueryChange(e.target.value)}
             placeholder="Search, or describe a mood"
@@ -162,7 +173,7 @@ export default function SearchView({ query, onQueryChange, onSelect, libraryIds,
       ) : (
         // 2028-05-28 — Search results converted to <MediaCardCinema/>
         // for consistency with the rest of the app.
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+        <div className="poster-grid">
           {results.map(item => (
             <MediaCardCinema
               key={item.id}

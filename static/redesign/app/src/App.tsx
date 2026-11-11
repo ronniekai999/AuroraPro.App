@@ -778,15 +778,14 @@ interface HomeViewProps {
     seeAllTarget?: { view: 'movies' | 'shows'; sortBy?: 'rating' | 'recent' | 'title' | 'year' }
     // 2026-06-05 (Home redesign C/D) — optional presentation hints.
     //  • subtitle    — one-line "why it's here" under the rail title.
-    //  • aiPick      — show the "✨ AI PICK" chip (recommender rails).
-    //  • showBadges  — render 4K/HDR quality chips on the cards.
+    //  • aiPick      — the recommender built this rail: its header carries
+    //    the "Picked by Aurora" attribution, once, with the subtitle after it.
     //  • cardSubtitles — per-card subtitle override keyed by media id
     //    (Continue Watching uses it for "S2E4 · 23m left"); derived in
     //    the Home render where the source ContinueWatchingItem is in
     //    scope, since Media alone can't reconstruct the remaining time.
     subtitle?: string
     aiPick?: boolean
-    showBadges?: boolean
     cardSubtitles?: Record<number, string>
   }[]
   // App-level navigation callback so HomeView can request a route
@@ -894,21 +893,19 @@ interface HomeViewProps {
 }
 // Home's catalog rails: Recently Added, Top Rated Movies, Top Rated Shows.
 // Built in one place for the full Home load and the live catalog refresh.
-// 2026-06-05 (Home redesign D) — every Home rail card opts into quality
-// badges (showBadges) so 4K/HDR chips show. Core rails get neither the "AI
-// PICK" chip nor a "why it's here" subtitle — only the recommender-driven
-// rails do (spliced in by recomposeHomeRails).
+// Core rails get neither the AI attribution nor a "why it's here" subtitle:
+// only the recommender-driven rails do (spliced in by recomposeHomeRails).
 function coreHomeRails(recent: Media[], movies: Media[], shows: Media[]): NonNullable<HomeViewProps['rails']> {
   return [
     // Recently Added blends movies + shows so the See All can't honestly map
     // to a single browse page — leave the affordance off rather than pick one
     // arbitrarily.
-    { title: 'Recently Added', items: recent, aspect: 'poster' as const, showBadges: true },
+    { title: 'Recently Added', items: recent, aspect: 'poster' as const },
     // Top Rated rails map cleanly to /movies and /shows with sortBy=rating,
     // so the See All button takes the user to the full Top Rated catalog.
-    { title: 'Top Rated Movies', items: movies, aspect: 'poster' as const, showBadges: true,
+    { title: 'Top Rated Movies', items: movies, aspect: 'poster' as const,
       seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
-    { title: 'Top Rated Shows', items: shows, aspect: 'poster' as const, showBadges: true,
+    { title: 'Top Rated Shows', items: shows, aspect: 'poster' as const,
       seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
   ]
 }
@@ -1447,6 +1444,7 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             // First rail's first row sits at the hero fold: fetch it eagerly.
             eagerCount={i === 0 ? 6 : 0}
             onSelect={onSelect}
+            onPlay={onPlay}
             aspect={rail.aspect}
             onCardContext={onCardContext}
             libraryIds={libraryIds}
@@ -1455,7 +1453,6 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             resolveResume={resolveResume}
             subtitle={rail.subtitle}
             aiPick={rail.aiPick}
-            showBadges={rail.showBadges}
             cardSubtitleFor={cardSubtitleFor}
           />
         )
@@ -2447,74 +2444,6 @@ export default function App() {
 
   // Phase 5.2 parity — right-click context menu state.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string } | null>(null)
-  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => {
-    e.preventDefault()
-    const items: MediaContextItem[] = [
-      { label: 'Mark as Watched', onClick: () => {
-        void markWatched(m.id, { profile_id: activeProfileId ?? undefined }).then((res) => {
-          const id = nextToastId()
-          setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
-          // Surface achievement unlocks from the server's gamification
-          // engine. One toast per unlock so they sequence cleanly.
-          if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
-            for (const def of res.achievements_unlocked) {
-              const tid = nextToastId()
-              setToasts(prev => [...prev, { id: tid, message: `${def.icon} Achievement unlocked: ${def.title} (+${def.xp_reward} XP)`, type: 'success' }])
-            }
-          }
-          // Refresh continue rail so the now-watched item drops off.
-          setRetryNonce(n => n + 1)
-        }).catch(err => {
-          window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
-        })
-      }},
-      { label: 'Clear Progress', tone: 'danger', onClick: () => {
-        void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
-          const id = nextToastId()
-          setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
-          setRetryNonce(n => n + 1)
-        }).catch(err => {
-          window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
-        })
-      }},
-      // Phase D — steerable thumbs. 👍 feeds the taste vector; 👎 excludes the
-      // title from every rec surface. Both invalidate server-side; on 👎 we also
-      // optimistically drop the card from the home rails (no costly LLM rebuild).
-      { label: '👍 More like this', onClick: () => {
-        const removed = removedFromHomeRef.current
-        void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
-          // A 👍 after a 👎 lets the title back onto Home at the next refresh.
-          removed.delete(m.id)
-          setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
-        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
-      }},
-      { label: '👎 Not interested', tone: 'danger', onClick: () => {
-        const removed = removedFromHomeRef.current
-        void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
-          setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
-          removed.add(m.id)
-          setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
-          // Also drop it from a pinned conversational rail, if one is showing.
-          setConvoResults(prev => prev.filter(it => it.id !== m.id))
-        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
-      }},
-    ]
-    if (profiles.length > 0) {
-      items.push({ label: 'Add to Watchlist…', onClick: () => setAddToListMedia(m) })
-    }
-    if (adminUI) {
-      items.push({ label: 'Refresh Metadata', onClick: () => { void handleRefreshMetadata(m) } })
-    }
-    // anchorFor, not raw clientX/clientY. A keyboard-opened context menu
-    // (Shift+F10 or the Menu key, both of which fire a real `contextmenu` event
-    // on the focused card) reports 0/0, so this used to pin the menu to the
-    // viewport's top-left corner — open, but detached from the card it acts on.
-    // `title` feeds the menu's accessible name — every item label is a bare verb
-    // ("Mark as Watched"), and the menu opens from a grid of dozens of cards.
-    setContextMenu({ ...anchorFor(e), items, title: m.title })
-  // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, user, activeProfileId, adminUI])
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
   // Phase 6 — Collections modal open state. Triggered by the
@@ -2565,6 +2494,12 @@ export default function App() {
   // Cmd+K from opening the palette (z-200) on top of the gate (z-85).
   const [profilesGateOpen, setProfilesGateOpen] = useState(false)
   const theaterActive = playerSurface === 'theater'
+  // Whether a page a restricted session is not shown may render on THIS
+  // commit (lib/navScope.mayRenderHidden): never for a restricted session,
+  // not while startup has yet to say who the session is, and not while the
+  // picker is up asking. The redirect runs in an effect, after the commit,
+  // so each such page is guarded where it mounts as well.
+  const hiddenOk = mayRenderHidden(navScope, { settled: profilesSettled, askingForProfile: profilesGateForced && activeProfileId === null })
   // The account's active watch parties, polled once for the whole app and
   // read by the nav's presence pill and the Together hub. Only for a session
   // that is offered Together, and keyed by user and acting profile: the hook
@@ -3357,7 +3292,21 @@ export default function App() {
   useEffect(() => {
     if (isLibraryView(view)) lastLibraryScopeRef.current = view
   }, [view])
+  // The search page's own field (phones) takes focus only when the Search
+  // tab was just pressed. Not on every mount: coming Back to the page from
+  // a title would reopen the keyboard over the results.
+  const searchFieldFocusRef = useRef(false)
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0)
+  const takeSearchFieldFocus = useCallback(() => {
+    const wanted = searchFieldFocusRef.current
+    searchFieldFocusRef.current = false
+    return wanted
+  }, [])
   const handleNavigate = useCallback((dest: string) => {
+    if (dest === 'search') {
+      searchFieldFocusRef.current = true
+      setSearchFocusNonce(n => n + 1)
+    }
     let v = dest
     // The Library DESTINATION, whose id is no view's: 'library' itself is
     // the My Library scope and navigates there like any other view.
@@ -4345,7 +4294,7 @@ export default function App() {
             title: 'From People You Follow',
             items: followingRailRef.current.map(mapFollowedToMedia),
             aspect: 'poster' as const,
-            showBadges: true,
+           
             subtitle: 'Recently watched by members you follow',
             cardSubtitles: followingRailRef.current.reduce<Record<number, string>>(
               (acc, w) => { acc[w.id] = followedWatchSubtitle(w); return acc }, {}),
@@ -4354,15 +4303,15 @@ export default function App() {
       ...discoverRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: r.description || 'Hand-picked by Aurora for your taste' })),
+          aiPick: true, subtitle: r.description || undefined })),
       ...anchorRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' })),
+          aiPick: true, subtitle: 'more like the titles you finished' })),
       ...engagementRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: r.description || 'Built from what Aurora viewers actually finish' })),
+          aiPick: true, subtitle: r.description || 'what viewers here actually finish' })),
     ]
     if (personalized.length === 0) { setHomeRails(core); return }
     // Splice personalized rails between Recently Added (index 0) and the Top
@@ -5782,6 +5731,84 @@ export default function App() {
     setPartyComposer({ media: m, episodeId })
   }, [party.state.code, nextToastId])
 
+  // The card menu: what a right click, a card's More button, the context-menu
+  // key and a long press all open (ContextMenu). Everything a card can do is
+  // here, so nothing is reachable only by one of those gestures.
+  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => {
+    e.preventDefault()
+    const failed = (err: unknown) => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
+    const resume = continueItems.find(c => c.media_item_id === m.id && isResumable(c))
+    const saved = libraryIds.has(m.id)
+    const items: MediaContextItem[] = []
+    if (resume) {
+      const left = formatRemaining(resume.position_ms, resume.duration_ms)
+      items.push({ label: left ? `Resume · ${left}` : 'Resume', primary: true, onClick: () => { void handlePlayContinue(resume) } })
+      // A movie restarts from zero. A show's "start" is not this episode's,
+      // so the title page, which lists the episodes, is where to choose.
+      if (m.type === 'movie') items.push({ label: 'Play from the start', onClick: () => { void handlePlay(m) } })
+    } else {
+      items.push({ label: 'Play', primary: true, onClick: () => { void handlePlay(m) } })
+    }
+    // Watching together is not offered to a restricted profile.
+    if (navScope === 'full') items.push({ label: 'Watch together', onClick: () => handleStartParty(m) })
+    items.push(
+      { label: saved ? 'Remove from My Library' : 'Add to My Library', group: true, onClick: () => handleToggleLib(m) },
+    )
+    if (profiles.length > 0) {
+      items.push({ label: 'Add to a list…', onClick: () => setAddToListMedia(m) })
+    }
+    items.push(
+      { label: 'Mark as watched', onClick: () => {
+        void markWatched(m.id, { profile_id: activeProfileId ?? undefined }).then((res) => {
+          const id = nextToastId()
+          setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
+          // Phase 5.7 — XP / achievement toast (stacked, not replacing).
+          if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
+            for (const def of res.achievements_unlocked) {
+              const tid = nextToastId()
+              setToasts(prev => [...prev, { id: tid, message: `${def.icon} Achievement unlocked: ${def.title} (+${def.xp_reward} XP)`, type: 'success' }])
+            }
+          }
+          setRetryNonce(n => n + 1)
+        }).catch(failed)
+      }},
+      { label: 'Clear my progress', tone: 'danger', onClick: () => {
+        void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
+          const id = nextToastId()
+          setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
+          setRetryNonce(n => n + 1)
+        }).catch(failed)
+      }},
+      // Feedback to the recommender (the thumbs).
+      { label: 'More like this', group: true, ai: true, onClick: () => {
+        // The removal set of the owner the menu was opened under (see
+        // removedFromHomeRef): a switch before the answer replaces it.
+        const removed = removedFromHomeRef.current
+        void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
+          // A thumbs-up undoes an earlier thumbs-down (one row per title).
+          removed.delete(m.id)
+          setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
+        }).catch(failed)
+      }},
+      { label: 'Not interested', ai: true, onClick: () => {
+        const removed = removedFromHomeRef.current
+        void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
+          setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
+          // Drop it from Home at once (it would vanish on the next rec
+          // refresh anyway) and keep it out of later rail recomposes.
+          removed.add(m.id)
+          setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
+          setConvoResults(prev => prev.filter(it => it.id !== m.id))
+        }).catch(failed)
+      }},
+    )
+    if (adminUI) {
+      items.push({ label: 'Refresh metadata', group: true, note: 'Admin', onClick: () => { void handleRefreshMetadata(m) } })
+    }
+    setContextMenu({ ...anchorFor(e), items, title: m.title })
+  }, [profiles, activeProfileId, adminUI, navScope, continueItems, libraryIds, handlePlay, handlePlayContinue, handleToggleLib, handleStartParty, handleRefreshMetadata, nextToastId])
+
+
   // The composer's launch sequence: create (live or scheduled) → send
   // invites → join as host → open the panel. Returns {ok,error} so the
   // modal can stay open with an inline error on failure. Toast copy
@@ -6247,7 +6274,7 @@ export default function App() {
     // Phase D — conversational discovery: when a vibe search is
     // active, pin its results as the first rail.
     const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
-      ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
+      ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, subtitle: 'for what you described' }]
       : []
     if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
     const base = homeRails ?? []
@@ -6392,7 +6419,10 @@ export default function App() {
   // default before the startup re-selection moves the session is not shown.
   // A fetch in flight across a change of profile is dropped with it.
   useEffect(() => {
-    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled) return
+    // Not for a session the page is not rendered for (hiddenOk): a restricted
+    // session that opens /requests is sent to Tonight by an effect, and must
+    // not have asked for the list first.
+    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled || !hiddenOk) return
     let cancelled = false
     const ac = new AbortController()
     listRequests(ac.signal)
@@ -6403,7 +6433,7 @@ export default function App() {
         setRequestsList([])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, requestsList, catalogProfileSettled, requestsKey])
+  }, [user, view, requestsList, catalogProfileSettled, requestsKey, hiddenOk])
 
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
@@ -6446,12 +6476,6 @@ export default function App() {
       ? { label: livePresence.label, short: livePresence.short }
       : null
   const settingsPane: SettingsPane | null = settingsPaneFromPath(location.pathname)
-  // Whether a page a restricted session is not shown may render on THIS
-  // commit (lib/navScope.mayRenderHidden): never for a restricted session,
-  // not while startup has yet to say who the session is, and not while the
-  // picker is up asking. The redirect runs in an effect, after the commit,
-  // so each such page is guarded where it mounts as well.
-  const hiddenOk = mayRenderHidden(navScope, { settled: profilesSettled, askingForProfile: profilesGateForced && activeProfileId === null })
   // Something neutral in the page's place until it may render. Nothing for
   // a restricted session: it is about to be sent to Tonight.
   const hiddenPending = hiddenFromRestricted(view) && !hiddenOk && navScope !== 'restricted'
@@ -6911,6 +6935,8 @@ export default function App() {
                 // has none. It only sets the query: unlike the bar's field,
                 // clearing it does not leave the page it is on.
                 onQueryChange={setSearchQuery}
+                focusNonce={searchFocusNonce}
+                takeFocus={takeSearchFieldFocus}
                 onSelect={handleSelect}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}
@@ -7001,7 +7027,7 @@ export default function App() {
                 onRefreshInvites={refreshMyPartyInvites}
                 onOpenMembers={() => handleNavigate('members')}
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
-                onBrowse={() => handleNavigate('library')}
+                onBrowse={() => handleNavigate(LIBRARY_DESTINATION)}
               />
             </ViewSuspense></HiddenPage>
           )}

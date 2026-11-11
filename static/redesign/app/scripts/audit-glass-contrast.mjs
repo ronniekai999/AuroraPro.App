@@ -725,8 +725,6 @@ const EXEMPT = [
     why: 'the bullet between the page subtitle and its count' },
   { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
     why: 'the attachment\'s icon-only "×" remove button' },
-  { file: 'src/components/MediaCardCinema.tsx', anchor: 'aria-hidden="true" className="text-white/20">', kind: 'decorative',
-    why: 'the film glyph a card shows where its poster is missing; the title is on the card' },
   { file: 'src/components/MembersView.tsx', anchor: '<Icon name="users" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
     why: 'the illustration above the members list\'s error message' },
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
@@ -787,8 +785,6 @@ const EXEMPT = [
   { file: 'src/components/admin/AdminView.tsx', anchor: 'mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span>', kind: 'non-text',
     why: 'the same glyph on the Memory figure' },
   // ── index.css ──
-  { file: 'src/index.css', anchor: '.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }', kind: 'non-text',
-    why: 'the dots between a card\'s meta items, set at 0.45 for 3:1 over the scrim on a bright poster (see the rule)' },
 ]
 
 const EXEMPT_KINDS = { decorative: null, placeholder: null, disabled: null, deferred: null, 'non-text': 'large', large: 'large' }
@@ -1083,7 +1079,9 @@ const SURFACES = [
     color: () => twText(PAL, '{m.year > 0 &&').rgb, alpha: () => twText(PAL, '{m.year > 0 &&').a,
     px: 12, on: onPalette,
   },
-  // ── The home rail header, on the page now that the shelf is gone (RS). ──
+  // ── A rail's header, on the page: its title (which is also the "see all"
+  //    link when the rail has one, so there is no separate link text), the
+  //    one line under it, and the chevron that marks the title as a link. ──
   {
     what: 'rail title', where: `${CSS} (.rail-header .rail-title)`,
     color: () => cssColor('.rail-header .rail-title', 'color').rgb,
@@ -1091,16 +1089,49 @@ const SURFACES = [
     px: cssPx('.rail-header .rail-title'), on: () => stack(PAGE),
   },
   {
-    what: 'rail subtitle', where: `${RAIL_TSX} (rail header)`,
-    color: () => twText(RAIL_TSX, 'break-words">{subtitle}').rgb,
-    alpha: () => twText(RAIL_TSX, 'break-words">{subtitle}').a,
-    px: 12, on: () => stack(PAGE),
+    what: 'rail subtitle / AI attribution', where: `${CSS} (.rail-header .rail-sub)`,
+    color: () => cssColor('.rail-header .rail-sub', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-sub', 'color').a,
+    px: cssPx('.rail-header .rail-sub'), on: () => stack(PAGE),
   },
   {
-    what: 'rail "See All"', where: `${CSS} (.rail-header .rail-see-all)`,
-    color: () => cssColor('.rail-header .rail-see-all', 'color').rgb,
-    alpha: () => cssColor('.rail-header .rail-see-all', 'color').a,
-    px: cssPx('.rail-header .rail-see-all'), on: () => stack(PAGE),
+    // An icon, which needs only 3:1, held to the text threshold all the same:
+    // it is the one sign that the title can be pressed.
+    what: 'rail "see all" chevron, at rest', where: `${CSS} (.rail-header .rail-see-all .rail-chev)`,
+    color: () => cssColor('.rail-header .rail-see-all .rail-chev', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-see-all .rail-chev', 'color').a,
+    px: 18, on: () => stack(PAGE),
+  },
+  // ── A card's caption sits on the page, under the art, never on it. ──
+  {
+    what: 'card caption title', where: `${CSS} (.media-card-cinema .cc-title)`,
+    color: () => cssColor('.media-card-cinema .cc-title', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .cc-title', 'color').a,
+    px: cssPx('.media-card-cinema .cc-title'), on: () => stack(PAGE),
+  },
+  {
+    what: 'card caption facts', where: `${CSS} (.media-card-cinema .co-meta)`,
+    color: () => cssColor('.media-card-cinema .co-meta', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .co-meta', 'color').a,
+    px: cssPx('.media-card-cinema .co-meta'), on: () => stack(PAGE),
+  },
+  // ── The only things drawn ON a poster: the action buttons. Their glyphs
+  //    are judged on the button's own fill over a WHITE poster, the worst
+  //    artwork for a dark translucent fill (a snowy backdrop, a white logo);
+  //    the scrim behind the buttons is not credited. ──
+  {
+    what: 'card action glyph (Add, More) over white art', where: `${CSS} (.media-card-cinema .card-act)`,
+    color: () => cssColor('.media-card-cinema .card-act', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act', 'color').a,
+    px: 20,
+    on: () => { const f = cssColor('.media-card-cinema .card-act', 'background'); return [over(f.rgb, f.a, W)] },
+  },
+  {
+    what: 'card Play glyph on its white button', where: `${CSS} (.media-card-cinema .card-act-play)`,
+    color: () => cssColor('.media-card-cinema .card-act-play', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act-play', 'color').a,
+    px: 18,
+    on: () => { const f = cssColor('.media-card-cinema .card-act-play', 'background'); return [over(f.rgb, f.a, W)] },
   },
 ]
 

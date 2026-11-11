@@ -1,7 +1,9 @@
-// Aurora V2 — right-click context menu on media cards.
-// Phase 5.2 parity port of V1's `showContextMenu`. Anchors at the
-// cursor, closes on Escape / outside-click. Caller decides which
-// items to expose (admin gates the Refresh-Metadata item).
+// The card menu: what a right click, a card's More button, the context-menu
+// key and a long press all open. Anchored at the pointer (or under the
+// control that opened it) on a wide screen; a bottom sheet on a phone, where
+// there is no pointer position worth anchoring to and the rows need to be
+// reachable by a thumb. Closes on Escape or a click outside. The caller
+// decides which items to offer (admin gates Refresh metadata).
 //
 // Phase 9 — made keyboard-operable. This was a WCAG 2.1.1 (Level A) failure, and
 // not a marginal one: four of its items — Mark as Watched, Clear Progress, "More
@@ -25,14 +27,22 @@
 // a `role="menu"` without arrow-key support is a WORSE widget than a plain div,
 // because the screen reader stops offering its own navigation in exchange.
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 
 export interface MediaContextItem {
   label: string
-  // 'danger' tints red (e.g. Clear Progress). 'admin' is just a hint
-  // for the caller — not rendered differently here.
+  // 'danger' sets the label in the destructive text colour.
   tone?: 'default' | 'danger'
   onClick: () => void
+  // Starts a new group: a rule is drawn above this item.
+  group?: boolean
+  // The first action of the menu (Resume, Play): set in semibold.
+  primary?: boolean
+  // Feedback to the recommender: marked with the aurora dot, the one sign
+  // for "Aurora is involved".
+  ai?: boolean
+  // A quiet word at the row's end ("Admin").
+  note?: string
 }
 
 interface Props {
@@ -114,6 +124,10 @@ export function anchorFor(e: {
   return { x: e.clientX, y: e.clientY }
 }
 
+const MENU_W_PX = 280
+const ROW_PX = 44
+const RULE_PX = 13
+
 export function ContextMenu({ x, y, items, onClose, title }: Props) {
   const ref = useRef<HTMLDivElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
@@ -159,10 +173,16 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
   }, [onClose])
 
   // Clamp to viewport so the menu never overflows the right/bottom edge.
-  const maxX = typeof window !== 'undefined' ? window.innerWidth - 220 : x
-  const maxY = typeof window !== 'undefined' ? window.innerHeight - items.length * 36 - 16 : y
-  const clampedX = Math.min(x, Math.max(0, maxX))
-  const clampedY = Math.min(y, Math.max(0, maxY))
+  // A phone gets a bottom sheet. Decided once, when the menu opens: a
+  // rotation mid-menu is not worth re-laying it out under the user's thumb.
+  const [sheet] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 767px)').matches)
+  // Keep the popover on screen: 280px wide, 44px rows, 13px per group rule,
+  // 8px padding top and bottom.
+  const height = items.length * ROW_PX + items.filter((it, i) => it.group && i > 0).length * RULE_PX + 16
+  const maxX = typeof window !== 'undefined' ? window.innerWidth - MENU_W_PX - 8 : x
+  const maxY = typeof window !== 'undefined' ? window.innerHeight - height - 8 : y
+  const clampedX = Math.min(x, Math.max(8, maxX))
+  const clampedY = Math.min(y, Math.max(8, maxY))
 
   const move = (delta: number) => {
     const n = items.length
@@ -173,18 +193,15 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
     itemRefs.current[next]?.focus()
   }
 
-  return (
+  const menu = (
     <div
       ref={ref}
       role="menu"
       aria-label={title ? `Actions for ${title}` : 'Media actions'}
-      // Enter animation only. It was the one popover in the app that simply
-      // appeared. No exit: this menu's close contract is synchronous — App
-      // unmounts it on onClose, and keyboardWidgets.test asserts onClose has
-      // fired by the time Escape's keydown returns — so a delayed unmount
-      // would change tested behaviour for a 150ms fade.
-      className="fixed z-[100] min-w-[200px] bg-surface-raised-2 border border-white/[0.08] rounded-lg shadow-2xl py-1 animate-fade-in"
-      style={{ left: clampedX, top: clampedY }}
+      className={sheet
+        ? 'fixed inset-x-0 bottom-0 z-[100] max-h-[80vh] overflow-y-auto rounded-t-sheet bg-surface-raised-2 p-2 pb-[calc(8px+env(safe-area-inset-bottom,0px))] shadow-[0_-24px_64px_rgba(0,0,0,0.6)] stage-sheet-in'
+        : 'fixed z-[100] w-[280px] rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-fade-in'}
+      style={sheet ? undefined : { left: clampedX, top: clampedY }}
       onKeyDown={e => {
         // Handled here rather than per item so the contract lives in one place.
         //
@@ -230,24 +247,38 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
         }
       }}
     >
+      {sheet && title && (
+        <p className="truncate px-3 pb-2 pt-2.5 text-[13px] font-semibold text-ink-2" aria-hidden="true">{title}</p>
+      )}
       {items.map((it, i) => (
-        <button
-          key={i}
-          ref={el => { itemRefs.current[i] = el }}
-          type="button"
-          role="menuitem"
-          tabIndex={i === active ? 0 : -1}
-          onFocus={() => setActive(i)}
-          onClick={() => { it.onClick(); onClose() }}
-          className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-            it.tone === 'danger'
-              ? 'text-red-300 hover:bg-red-500/10'
-              : 'text-white/85 hover:bg-white/[0.06]'
-          }`}
-        >
-          {it.label}
-        </button>
+        <Fragment key={i}>
+          {it.group && i > 0 && <div className="mx-3 my-1.5 h-px bg-line-strong" role="separator" />}
+          <button
+            ref={el => { itemRefs.current[i] = el }}
+            type="button"
+            role="menuitem"
+            tabIndex={i === active ? 0 : -1}
+            onFocus={() => setActive(i)}
+            onClick={() => { it.onClick(); onClose() }}
+            className={`flex h-11 w-full items-center gap-2.5 rounded-art px-3 text-left text-[15px] transition-colors hover:bg-white/[0.08] ${
+              it.tone === 'danger' ? 'text-danger-ink' : 'text-ink'
+            } ${it.primary ? 'font-semibold' : ''}`}
+          >
+            {it.ai && <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full [background:var(--aurora)]" />}
+            <span className="min-w-0 flex-1 truncate">{it.label}</span>
+            {it.note && <span className="flex-none text-xs text-ink-3">{it.note}</span>}
+          </button>
+        </Fragment>
       ))}
     </div>
+  )
+  if (!sheet) return menu
+  // The sheet's scrim. A click on it is "outside" to the listener above, so
+  // it closes the menu; it only has to dim the page and block it.
+  return (
+    <>
+      <div className="fixed inset-0 z-[99] bg-[var(--scrim)] stage-scrim-in" aria-hidden="true" />
+      {menu}
+    </>
   )
 }

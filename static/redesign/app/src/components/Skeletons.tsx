@@ -35,17 +35,29 @@ export function SkeletonBlock({ className }: { className?: string }) {
   )
 }
 
-/** The poster-grid skeleton — the same column ladder every content grid
- *  uses (`grid-cols-2 sm:3 md:4 lg:5 xl:6 gap-5`), so the real grid lands
- *  on top of it without a column or gutter shift. */
-export function GridSkeleton({ count = 12, className }: { count?: number; className?: string }) {
+/** A card's caption while it loads: two bars in exactly the space the real
+ *  caption takes (10px gap, a 14px/1.4 title line, 2px, a 16px facts line),
+ *  so the row does not change height when the cards arrive. */
+function CaptionSkeleton() {
   return (
-    <div
-      aria-hidden="true"
-      className={cn('grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5', className)}
-    >
+    <div className="mt-2.5 h-[38px]">
+      <SkeletonBlock className="mt-[3px] h-3.5 w-3/4 rounded-chip" />
+      <SkeletonBlock className="mt-1.5 h-3 w-1/2 rounded-chip" />
+    </div>
+  )
+}
+
+/** The poster-grid skeleton: the same grid every content grid uses
+ *  (.poster-grid), each tile a poster with its caption, so the real grid
+ *  lands on top of it without a column, gutter or row-height shift. */
+export function GridSkeleton({ count = 12, className, compact = false }: { count?: number; className?: string; compact?: boolean }) {
+  return (
+    <div aria-hidden="true" className={cn('poster-grid', compact && 'is-compact', className)}>
       {Array.from({ length: count }).map((_, i) => (
-        <SkeletonBlock key={i} className="aspect-[2/3]" />
+        <div key={i}>
+          <SkeletonBlock className="aspect-[2/3] rounded-art" />
+          <CaptionSkeleton />
+        </div>
       ))}
     </div>
   )
@@ -111,23 +123,26 @@ export function HeroSkeleton({ compact = false, title, aside }: { compact?: bool
   )
 }
 
-/** A home rail's shape: the rail's wrapper (.rail-container, which has no
- *  shelf since the Stage refresh), a header line where the icon + title sit,
- *  and a row of card-sized tiles at the rail's real card widths (206px poster
- *  / 336px landscape) and 18px gap. The row mirrors .rail-scroll's 4px inline
- *  padding and the -4px margin that puts its first card on the gutter. It is
- *  clipped rather than scrolled — nothing to scroll to. */
+/** A rail's shape: its wrapper, a title line, and a row of card-sized tiles
+ *  at the rail's real card widths (176px poster, 256px landscape) and 20px
+ *  gap, each with its caption. The row mirrors .rail-scroll's padding and the
+ *  -4px margin that puts its first card on the gutter. It is clipped rather
+ *  than scrolled: there is nothing to scroll to. */
 export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poster' | 'landscape'; count?: number }) {
-  const tile = aspect === 'landscape' ? 'w-[336px] aspect-video' : 'w-[206px] aspect-[2/3]'
+  const tile = aspect === 'landscape' ? 'w-[256px]' : 'w-[176px]'
+  const art = aspect === 'landscape' ? 'aspect-video' : 'aspect-[2/3]'
   return (
     <section className="rail-container" aria-hidden="true">
-      <div className="flex items-center gap-3.5 mb-3.5">
-        <SkeletonBlock className="h-7 w-7 rounded-lg" />
-        <SkeletonBlock className="h-5 w-44 rounded-md" />
+      {/* The title line: 22px at 1.2 leading, then the header's 8px margin. */}
+      <div className="mb-2 flex h-[26px] items-center">
+        <SkeletonBlock className="h-5 w-44 rounded-chip" />
       </div>
-      <div className="flex gap-[18px] overflow-hidden -mx-1 px-1 py-2">
+      <div className="-mx-1 flex gap-5 overflow-hidden px-1 pb-3 pt-2">
         {Array.from({ length: count }).map((_, i) => (
-          <SkeletonBlock key={i} className={cn('shrink-0 rounded-[var(--r-lg)]', tile)} />
+          <div key={i} className={cn('shrink-0', tile)}>
+            <SkeletonBlock className={cn('rounded-art', art)} />
+            <CaptionSkeleton />
+          </div>
         ))}
       </div>
     </section>
