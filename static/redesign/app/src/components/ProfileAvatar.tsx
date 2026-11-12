@@ -2,23 +2,31 @@ import { NebulaAvatar, parseNebula } from './NebulaAvatar'
 import { personColor, personInitial } from '@/lib/personColor'
 import { useProfileColorKey } from '@/lib/profileColors'
 
-interface ProfileAvatarProps {
+interface ProfileAvatarBase {
   /** A profile's avatar_url: a "nebula:<id>" id, an http(s) image URL, or empty. */
   avatarUrl?: string | null
   /** Name used for the initial when there is no nebula or image. */
   name?: string
+  /** Diameter in px (default 40). */
+  size?: number
+  className?: string
+}
+// One key or the other, never both: both are numbers, and a member's user id
+// passed as a profile's would be looked up among the account's profiles and
+// quietly coloured as one of them.
+type ProfileAvatarProps = ProfileAvatarBase & ({
   /** A PROFILE's id (or, with none, nothing: the name is used). It picks the
    *  disc's colour when there is no nebula or image, from the account's own
    *  set (lib/profileColors), so no two profiles on one account share a
    *  colour and a profile is the same colour on every screen. */
   colorKey?: number | string
+  memberKey?: undefined
+} | {
   /** A MEMBER's user id, for another account's avatar. Used as it is, which
    *  is also that person's colour in a watch party's roster and chat. */
-  memberKey?: number
-  /** Diameter in px (default 40). */
-  size?: number
-  className?: string
-}
+  memberKey: number
+  colorKey?: undefined
+})
 
 /**
  * ProfileAvatar renders a profile's avatar in one place: the animated nebula

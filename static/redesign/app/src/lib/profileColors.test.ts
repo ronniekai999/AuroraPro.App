@@ -26,6 +26,15 @@ describe('assignProfileSlots', () => {
     for (const id of [4, 7, 15, 22]) expect(grown.get(id), `profile ${id}`).toBe(before.get(id))
   })
 
+  // The documented limit of that stability: a profile that was pushed off
+  // its own slot goes back to it when the profile that pushed it is deleted.
+  it('can recolour a profile that had been displaced, when the one that displaced it goes', () => {
+    const before = assignProfileSlots([1, 10, 11])
+    expect([before.get(1), before.get(10), before.get(11)]).toEqual([1, 2, 3])
+    const after = assignProfileSlots([1, 11])
+    expect([after.get(1), after.get(11)]).toEqual([1, 2])
+  })
+
   it('does not depend on the order the ids are given in', () => {
     expect([...assignProfileSlots([10, 1, 19])]).toEqual([...assignProfileSlots([1, 10, 19])])
   })

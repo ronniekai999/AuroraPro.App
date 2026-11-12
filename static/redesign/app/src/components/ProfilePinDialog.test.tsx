@@ -62,6 +62,25 @@ describe('ProfilePinDialog', () => {
     expect(fireEvent.keyDown(field, { key: 'Backspace' })).toBe(true)
   })
 
+  // Select all and type (or paste) is a way of replacing the digits.
+  it('leaves a selection of the whole value alone, so typing over it replaces it', () => {
+    render(<ProfilePinDialog profile={kid} onSubmit={vi.fn(() => new Promise<void>(() => {}))} onCancel={vi.fn()} />)
+    const field = screen.getByLabelText('Profile PIN') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '12' } })
+    field.setSelectionRange(0, 2)
+    for (const after of ['select', 'keyUp'] as const) {
+      fireEvent[after](field)
+      expect([field.selectionStart, field.selectionEnd], after).toEqual([0, 2])
+    }
+    // A partial selection, or a caret in the middle, still goes to the end.
+    field.setSelectionRange(0, 1)
+    fireEvent.select(field)
+    expect([field.selectionStart, field.selectionEnd]).toEqual([2, 2])
+    // And a modified arrow is the browser's, not this field's to refuse.
+    expect(fireEvent.keyDown(field, { key: 'ArrowLeft', altKey: true })).toBe(true)
+    expect(fireEvent.keyDown(field, { key: 'ArrowLeft' })).toBe(false)
+  })
+
   it('is a numeric password field: the digits are hidden by the field, not only by its being invisible', () => {
     render(<ProfilePinDialog profile={kid} onSubmit={vi.fn()} onCancel={vi.fn()} />)
     const field = screen.getByLabelText('Profile PIN')

@@ -5,7 +5,10 @@
 // can be seen.
 //
 // Each entry names a control, the class its edge is drawn with and the
-// surfaces it meets. The classes are READ FROM THE SOURCE: an entry whose
+// surfaces it meets. What this script checks about the class is only that the
+// file still uses it; that it is on the control itself is pinned by that
+// control's own unit test (for the PIN boxes, ProfilePinDialog.test.tsx),
+// which is the stronger of the two. The classes are READ FROM THE SOURCE: an entry whose
 // class is no longer there fails as out of date, not as passing. The colours
 // are the token values in index.css.
 

@@ -14,11 +14,17 @@
 import { useSyncExternalStore } from 'react'
 import { PERSON_COLORS } from './personColor'
 
-/** A palette slot for each profile id. Stable, not positional: walking the
- *  ids in order, each takes `id % 9` unless an earlier profile already holds
- *  it, and then the next free slot. So a profile that collided with nobody
- *  keeps its colour whatever is added or removed around it. With more than
- *  nine profiles the tenth onwards must repeat a colour. */
+/** A palette slot for each profile id. Walking the ids in order, each takes
+ *  `id % 9` unless an earlier profile already holds it, and then the next
+ *  free slot.
+ *
+ *  How stable that is: a profile sitting on its own `id % 9` keeps its colour
+ *  whatever is added or removed around it. One that was pushed off its own
+ *  slot can move when an earlier profile is deleted: with 1, 10 and 11 the
+ *  slots are 1, 2 and 3 (10 is pushed to 2, which is 11's own, so 11 takes
+ *  3); delete 10 and 11 goes back to 2. Nothing is stored, so that is the
+ *  price of colours that need no migration and are the same on every device.
+ *  With more than nine profiles the tenth onwards must repeat a colour. */
 export function assignProfileSlots(ids: readonly number[]): Map<number, number> {
   const n = PERSON_COLORS.length
   const slots = new Map<number, number>()

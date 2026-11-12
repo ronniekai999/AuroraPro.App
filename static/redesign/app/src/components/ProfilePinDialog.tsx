@@ -73,9 +73,13 @@ export function ProfilePinDialog({
   // too. Left to move, a Left or Home, or a tap on the first box, would file
   // the next digit in front of the ones already typed: "12", Home, "34"
   // submits 3412 and spends one of five attempts before a lockout. The caret
-  // stays at the end, where the boxes show it.
+  // stays at the end, where the boxes show it. A selection of the WHOLE value
+  // is left alone: select all and type (or paste) replaces the digits, which
+  // is what was asked for; collapsing it made "12", select all, "5678" append
+  // to "1256" and submit that.
   const pinCaretToEnd = (el: HTMLInputElement) => {
     const end = el.value.length
+    if (end > 0 && el.selectionStart === 0 && el.selectionEnd === end) return
     if (el.selectionStart !== end || el.selectionEnd !== end) {
       try { el.setSelectionRange(end, end) } catch { /* not selectable in this state */ }
     }
@@ -178,6 +182,10 @@ export function ProfilePinDialog({
                 onClick={e => pinCaretToEnd(e.currentTarget)}
                 onKeyDown={e => {
                   // The keys that only move a caret have nothing to move.
+                  // Only bare ones: with a modifier they are the browser's
+                  // (Alt+Left is Back) or a selection, which is handled
+                  // above.
+                  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
                   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) e.preventDefault()
                 }}
                 onChange={e => {

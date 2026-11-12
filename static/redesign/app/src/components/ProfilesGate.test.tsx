@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import type { Profile } from '@/lib/api'
 import { ProfilesGate } from './ProfilesGate'
+import { ProfileAvatar } from './ProfileAvatar'
+import { PERSON_COLORS } from '@/lib/personColor'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `Profile ${id}`, is_default: id === 1, created_at: '', updated_at: '', ...extra,
@@ -86,6 +88,27 @@ describe('ProfilesGate', () => {
     const discs = [...document.querySelectorAll<HTMLElement>('[data-profile-avatar="initial"]')]
     expect(discs).toHaveLength(2)
     expect(discs[0].style.background).not.toBe(discs[1].style.background)
+  })
+
+  // The identity menu, the tab bar and the PIN prompt are not handed the
+  // account's list: they take their colours from what the picker publishes,
+  // whether or not the picker itself is showing.
+  it('colours an avatar drawn elsewhere from the same set, even while the picker is closed', () => {
+    localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+    const { container } = render(
+      <>
+        <ProfilesGate profiles={[profile(1), profile(10)]} activeProfileId={1} onSelect={() => true} ready />
+        <ProfileAvatar name="Profile 1" colorKey={1} />
+        <ProfileAvatar name="Profile 10" colorKey={10} />
+      </>,
+    )
+    expect(screen.queryByRole('dialog', { name: "Who's watching?" })).toBeNull()
+    const [one, ten] = [...container.querySelectorAll<HTMLElement>('[data-profile-avatar="initial"]')]
+    // 1 and 10 are both 1 modulo nine; 10 is moved to the next free colour.
+    expect(one.style.background).not.toBe(ten.style.background)
+    const swatch = (hex: string) => { const el = document.createElement('i'); el.style.background = hex; return el.style.background }
+    expect(one.style.background).toBe(swatch(PERSON_COLORS[1]))
+    expect(ten.style.background).toBe(swatch(PERSON_COLORS[2]))
   })
 
   it('says "no limit" for every profile that has none, a default or locked one included', () => {

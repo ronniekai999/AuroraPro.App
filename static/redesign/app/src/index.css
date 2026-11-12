@@ -1376,7 +1376,11 @@ html:has(.stage-toolbar) {
 input.profile-unlock-field:not([type="range"]) {
   font-size: 16px;
 }
-input.profile-unlock-field[aria-invalid="true"]:not(:focus) {
+/* The refused state owns the border while the field has focus too: a
+   refusal puts focus straight back in the field, so otherwise the person
+   retyping never sees it. Four `:not()`s to outrank the global focus rule
+   (0,4,1), which sets the border white; its ring (a box-shadow) stays. */
+input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]) {
   border-color: var(--danger-ink);
 }
 
