@@ -6,6 +6,7 @@ import type { Profile } from '@/lib/api'
 import { ProfilesGate } from './ProfilesGate'
 import { ProfileAvatar } from './ProfileAvatar'
 import { PERSON_COLORS } from '@/lib/personColor'
+import { setAccountProfileIds } from '@/lib/profileColors'
 
 const profile = (id: number, extra: Partial<Profile> = {}): Profile => ({
   id, user_id: 1, name: `Profile ${id}`, is_default: id === 1, created_at: '', updated_at: '', ...extra,
@@ -20,7 +21,10 @@ function deferred() {
 }
 
 describe('ProfilesGate', () => {
-  beforeEach(() => { localStorage.clear() })
+  // The colour set is module state that outlives a render: emptied, so a
+  // test about what the picker publishes cannot pass on what an earlier test
+  // left there.
+  beforeEach(() => { localStorage.clear(); setAccountProfileIds([]) })
 
   const renderGate = (onSelect: (id: number) => boolean | Promise<boolean>) =>
     render(<ProfilesGate profiles={profiles} activeProfileId={1} onSelect={onSelect} ready />)
@@ -114,8 +118,11 @@ describe('ProfilesGate', () => {
   it('says "no limit" for every profile that has none, a default or locked one included', () => {
     const kid: Profile = { ...profile(3), name: 'Kid', max_age_rating: 'PG', has_pin: true }
     render(<ProfilesGate profiles={[profiles[0], profiles[1], kid]} activeProfileId={1} onSelect={() => true} ready forced />)
-    expect(screen.getByRole('radio', { name: /Profile 1/ })).toHaveTextContent('Default · no limit')
-    expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent('Locked with a PIN · no limit')
+    // The whole line, so a fact stated twice fails too.
+    const line = (name: RegExp) => screen.getByRole('radio', { name }).querySelector('[data-profile-summary]')?.textContent
+    expect(line(/Profile 1/)).toBe('Default · no limit')
+    expect(line(/Profile 2/)).toBe('Locked with a PIN · no limit')
+    expect(line(/Kid/)).toBe('Locked with a PIN · up to PG')
     expect(screen.getByRole('radio', { name: /Kid/ })).toHaveTextContent('Locked with a PIN · up to PG')
     expect(screen.getByRole('radio', { name: /Kid/ })).not.toHaveTextContent(/no limit/i)
   })

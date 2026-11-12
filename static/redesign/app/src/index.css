@@ -1619,6 +1619,12 @@ input.profile-unlock-field:not([type="range"]) {
 input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]) {
   border-color: var(--danger-ink);
 }
+/* Refused AND focused has to show both facts, and the white border was the
+   only sign of focus a field has. So focus moves outside the red border: a
+   2px white ring, a 2px gap of the prompt's own surface from it. */
+input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]):focus {
+  box-shadow: 0 0 0 2px var(--surface-raised-2), 0 0 0 4px #ffffff;
+}
 
 /* Episode rows: the whole row lights up, and its title underlines, so the
    target is obvious without a play button on every line. */

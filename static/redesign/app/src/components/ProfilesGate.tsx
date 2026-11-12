@@ -61,16 +61,6 @@ interface ProfilesGateProps {
 // 320px one fits one.
 const PICKER_AVATAR = 120
 
-/** The line under a profile's name. The limit is always part of it, "No
- *  limit" included: whether a profile is restricted is the fact a parent
- *  reads this screen for, so a default or locked profile without a limit
- *  says so too. (The tone lean the line once carried is a preference, not a
- *  limit, and is not shown here.) */
-function pickerSummary(p: Pick<Profile, 'is_default' | 'has_pin' | 'max_age_rating'>): string {
-  const line = profileSummary(p)
-  return p.max_age_rating?.trim() || line === 'No limit' ? line : `${line} · no limit`
-}
-
 export function ProfilesGate({
   profiles, activeProfileId, onSelect, onAddProfile, ready, forced = false, onDismiss,
   onOpenChange,
@@ -339,7 +329,7 @@ export function ProfilesGate({
                 </span>
                 <span className="min-w-0 w-full flex flex-col gap-0.5">
                   <span className="block truncate text-[20px] font-semibold text-ink">{p.name}</span>
-                  <span className="block text-[13px] leading-snug text-ink-2">{pickerSummary(p)}</span>
+                  <span data-profile-summary="" className="block text-[13px] leading-snug text-ink-2">{profileSummary(p)}</span>
                 </span>
               </button>
             )
