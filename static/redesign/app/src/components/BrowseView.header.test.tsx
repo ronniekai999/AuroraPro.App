@@ -251,7 +251,14 @@ describe('a list row\'s actions', () => {
     fireEvent.contextMenu(row('Bravo'))
     expect(calls.menu).toHaveBeenCalledTimes(1)
     expect(calls.menu.mock.calls[0][1]).toBe(items[1])
-    expect(row('Bravo')).toHaveAttribute('aria-keyshortcuts', 'Shift+F10')
+    // The menu key fires on what has the focus: the title's button, which
+    // is also what names the shortcut.
+    const title = within(row('Bravo')).getByRole('button', { name: /^Bravo/ })
+    expect(title).toHaveAttribute('aria-keyshortcuts', 'Shift+F10')
+    fireEvent.contextMenu(title)
+    expect(calls.menu).toHaveBeenCalledTimes(2)
+    expect(calls.menu.mock.calls[1][1]).toBe(items[1])
+    expect(calls.select).not.toHaveBeenCalled()
   })
 
   it('opens the menu on a long press, and the finger lifting does not also open the title', () => {
@@ -286,18 +293,42 @@ describe('a list row\'s actions', () => {
     // A mouse held down has its own right click.
     fireEvent(row('Alpha'), Object.assign(new MouseEvent('pointerdown', { bubbles: true }), { pointerType: 'mouse' }))
     act(() => { vi.advanceTimersByTime(1000) })
-    // A press that starts on one of the row's buttons is that button's.
+    // A press that starts on one of the row's actions is that button's.
     touch(screen.getByRole('button', { name: 'More actions for Alpha' }), 'pointerdown')
     act(() => { vi.advanceTimersByTime(1000) })
     expect(calls.menu).not.toHaveBeenCalled()
+    // The title is a button too, and most of what a finger lands on: a
+    // long press there is the row's.
+    touch(within(row('Alpha')).getByRole('button', { name: /^Alpha/ }), 'pointerdown')
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(calls.menu).toHaveBeenCalledTimes(1)
   })
 
-  it('opens the title on Enter or Space on the row, and on a click', () => {
+  it('opens the title from its button (Enter and Space are a button\'s click) and from a click anywhere on the row', () => {
     const { calls, row } = list()
-    fireEvent.keyDown(row('Alpha'), { key: 'Enter' })
-    fireEvent.keyDown(row('Alpha'), { key: ' ' })
-    fireEvent.click(row('Alpha'))
-    expect(calls.select).toHaveBeenCalledTimes(3)
+    const title = within(row('Alpha')).getByRole('button', { name: /^Alpha/ })
+    expect(title.tagName).toBe('BUTTON')
+    expect(title.tabIndex).toBe(0)
+    fireEvent.click(title)
+    expect(calls.select).toHaveBeenCalledTimes(1)
     expect(calls.select).toHaveBeenLastCalledWith(items[0])
+    fireEvent.click(row('Alpha').querySelector('.mlr-year')!)
+    expect(calls.select).toHaveBeenCalledTimes(2)
+  })
+
+  // Children of a button are presentational to assistive tech: a More
+  // button inside one can be dropped from the accessibility tree while it
+  // stays in the tab order. The row is a plain container, its title is the
+  // button, and the actions sit beside it.
+  it('nests nothing interactive inside a button', () => {
+    const { row } = list()
+    for (const r of [row('Alpha'), row('Bravo')]) {
+      expect(r.getAttribute('role')).toBeNull()
+      expect(r.hasAttribute('tabindex')).toBe(false)
+      expect(r.querySelectorAll('button button, [role="button"] button, button [tabindex]')).toHaveLength(0)
+      // Title, Play, Add, More: four buttons, each a child of the row's cells.
+      expect(within(r).getAllByRole('button')).toHaveLength(4)
+      expect(r.querySelector('.mlr-main')!.contains(r.querySelector('.mlr-more'))).toBe(false)
+    }
   })
 })

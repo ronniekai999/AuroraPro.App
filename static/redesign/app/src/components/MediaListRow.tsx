@@ -112,8 +112,10 @@ export function MediaListRow({
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     suppressClick.current = false
     if (e.pointerType !== 'touch' || !onCardContext) return
-    // A press that starts on one of the row's own buttons is that button's.
-    if ((e.target as Element).closest?.('button')) return
+    // A press that starts on one of the row's actions is that button's.
+    // (The title is a button too, and most of what a finger lands on: a
+    // press there is the row's.)
+    if ((e.target as Element).closest?.('.mlr-acts')) return
     cancelPress()
     const el = e.currentTarget
     const { clientX, clientY } = e
@@ -134,8 +136,14 @@ export function MediaListRow({
   }
 
   return (
-    // role/tabIndex so the whole row is keyboard-activatable like the
-    // card (which is a clickable div). Enter/Space open detail.
+    // The row is a plain container: the title is the button (what a
+    // keyboard and a screen reader open the title with), and Play, Add and
+    // More are its siblings. The whole row used to be `role="button"` with
+    // those three inside it, and the children of a button are presentational:
+    // More, the keyboard's way to the menu, could be dropped from the
+    // accessibility tree while it stayed in the tab order. A click anywhere
+    // on the row still opens the title (a pointer's convenience; the
+    // button's own click arrives here too).
     <div
       className="media-list-row group"
       data-media-id={item.id}
@@ -149,62 +157,21 @@ export function MediaListRow({
       onPointerUp={cancelPress}
       onPointerCancel={cancelPress}
       onPointerLeave={cancelPress}
-      role="button"
-      tabIndex={0}
-      // Phase 10 — announce that a context menu exists.
-      //
-      // Phase 9 established that the menu IS keyboard-reachable (browsers fire a
-      // real `contextmenu` for Shift+F10 and the Menu key on a focused element) and
-      // concluded "the trigger was never the problem". True for SC 2.1.1 —
-      // operability — and beside the point for discoverability: four of that menu's
-      // items have NO other route anywhere in the app, and nothing told a
-      // screen-reader user they were there. Being reachable by a shortcut you have
-      // no way to learn about is not much better than being unreachable.
-      //
-      // `aria-keyshortcuts`, and NOT `aria-haspopup`. The first version used
-      // haspopup alone, and a review showed that is the attribute ARIA's own
-      // authoring note argues against in exactly this situation: "If there is no
-      // visual indication that an element will trigger a popup, authors are advised
-      // to consider whether use of aria-haspopup is necessary, and avoid using it
-      // when it's not." This card has no chevron, no ellipsis, no affordance — that
-      // absence is the whole premise.
-      //
-      // It was also misleading in practice. `aria-haspopup` describes what the
-      // element's ACTIVATION opens, and activating a card opens the detail view,
-      // not the menu; the menu comes from `contextmenu` (Shift+F10 / Menu key /
-      // right-click). And NVDA maps the state to the literal string "subMenu", so
-      // the announcement read "…, button, subMenu" — "this is inside a menu and
-      // opens a submenu", which is not what is true.
-      //
-      // `aria-keyshortcuts` names the mechanism instead of gesturing at it, is
-      // announced by both NVDA and JAWS, and is precisely what closes the gap:
-      // four of that menu's items have no other route in the app, and the problem
-      // was never operability, it was that nobody could learn the shortcut.
-      // Gated on the handler actually being wired. `onCardContext` is optional and
-      // four call sites omit it — LibraryView (twice), SearchView and
-      // CollectionsView — so advertising the shortcut unconditionally taught it on
-      // three surfaces where pressing it does nothing at all. Measured: 7 of 7 cards
-      // on My Library carried it, and Shift+F10 produced no menu. MediaRail and
-      // BrowseView already thread `onCardContext ? … : undefined`; this matches.
-      aria-keyshortcuts={onCardContext ? 'Shift+F10' : undefined}
-      onKeyDown={(e) => {
-        // Don't activate the row when a nested control (the lib-add
-        // button) has focus — that would double-fire (open detail AND
-        // toggle the library). Only activate when the row itself is
-        // the event target.
-        if (e.target !== e.currentTarget) return
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSelect()
-        }
-      }}
       title={item.title}
     >
-      {/* The title cell: a small poster and the title. The thumb's own
-          fill is its placeholder while the image loads lazily, and what
-          shows when a title has no artwork. */}
-      <div className="mlr-main">
-        <div className="mlr-thumb" aria-hidden="true">
+      {/* The title cell: a small poster and the title, and the row's one
+          tab stop besides More. The thumb's own fill is its placeholder
+          while the image loads lazily, and what shows when a title has no
+          artwork.
+
+          `aria-keyshortcuts`, not `aria-haspopup`: activating this opens
+          the title, and the menu comes from the context-menu key (Shift+F10,
+          the Menu key, a right click), which nothing on screen says. Naming
+          the shortcut is what tells a screen-reader user it is there;
+          haspopup would describe what ACTIVATION opens, and NVDA reads it
+          as "subMenu". Only where the menu is wired. */}
+      <button type="button" className="mlr-main" aria-keyshortcuts={onCardContext ? 'Shift+F10' : undefined}>
+        <span className="mlr-thumb" aria-hidden="true">
           {item.poster && (
             <img
               src={item.poster}
@@ -214,15 +181,15 @@ export function MediaListRow({
               decoding="async"
             />
           )}
-        </div>
-        <div className="mlr-text">
-          <div className="mlr-title">{item.title}</div>
+        </span>
+        <span className="mlr-text">
+          <span className="mlr-title">{item.title}</span>
           {/* A phone's row has room for the title and little else: the
               year, the rating and the viewer's place go under it there,
               and their columns are not drawn (index.css). */}
-          {sub && <div className="mlr-sub">{sub}</div>}
-        </div>
-      </div>
+          {sub && <span className="mlr-sub">{sub}</span>}
+        </span>
+      </button>
 
       <div className="mlr-cell mlr-genre">{item.genre || '—'}</div>
       <div className="mlr-cell mlr-length">{item.duration || '—'}</div>
@@ -243,11 +210,11 @@ export function MediaListRow({
         )}
       </div>
 
-      {/* What a card offers, on a row. Play and Add are pointer
-          conveniences and stay out of the tab order (and are not drawn on
-          a touch screen, index.css); More, which IS in the tab order,
-          opens the menu that holds both. Each stops the click from also
-          opening the title. */}
+      {/* What a card offers, on a row, beside the title's button and never
+          inside it. Play and Add are pointer conveniences and stay out of
+          the tab order (and are not drawn on a touch screen, index.css);
+          More, which IS in the tab order, opens the menu that holds both.
+          Each stops the click from also opening the title. */}
       <div className="mlr-acts">
         {onPlay && (
           <button

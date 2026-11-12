@@ -203,6 +203,10 @@ const LIB_JUMPBAR = classesOf(CONTROLS, 'stage-gutter stage-jumpbar')
 const LIB_JUMP = classesOf(CONTROLS, 'stage-jump flex')
 const COL_NEW = classesOf(COLLECTIONS, 'stage-btn stage-btn-sm stage-btn-ghost stage-hit44')
 const COL_DELETE = classesOf(COLLECTIONS, 'stage-colcard-delete')
+const COL_BACK = classesOf(COLLECTIONS, 'stage-colback')
+mustHave(COLLECTIONS, 'className="mb-10 mt-4 flex flex-col gap-2.5"')
+const LIB_SORT = classesOf(CONTROLS, 'stage-browse-sort')
+mustHave(CONTROLS, 'className="stage-select"')
 mustHave(CONTROLS, 'className="stage-seg-btn"')
 mustHave(CONTROLS, 'className="stage-jump-btn"')
 mustHave(CONTROLS, "className={touch ? 'genre-chip is-touch' : 'genre-chip'}")
@@ -226,6 +230,7 @@ const libHtml = `
        carries both sets at once. -->
   <div class="${LIB_ROW}" style="margin-top:16px">
     <div class="stage-libhead-tools flex items-center">
+      <label class="${LIB_SORT}"><span>Sort</span><select class="stage-select" aria-label="Sort titles" data-lib-btn="Sort" data-lib-min="768"><option>Title, A to Z</option></select></label>
       <div class="${LIB_SEG}">${['Comfortable', 'Compact', 'List'].map(n => libBtn('stage-seg-btn', n[0], 768)).join('')}</div>
       ${libBtn(COL_NEW, 'New collection')}
     </div>
@@ -236,7 +241,9 @@ const libHtml = `
        own layer, as there: its bottom margin is negative, and what follows
        must not be laid over its last row. -->
   <div class="${LIB_JUMPBAR}" style="position:relative;top:0"><div class="${LIB_JUMP}">${['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map(l => libBtn('stage-jump-btn', l, 768)).join('')}</div></div>
-  <div class="stage-gutter" style="margin-top:40px"><div style="position:relative;width:280px;height:60px">${libBtn(COL_DELETE, 'Delete')}</div></div>`
+  <div class="stage-gutter" style="margin-top:40px"><div style="position:relative;width:280px;height:60px">${libBtn(COL_DELETE, 'Delete')}</div></div>
+  <!-- A collection's own page: the way back, above its title. -->
+  <div class="stage-gutter" style="margin-top:40px"><div>${libBtn(COL_BACK, 'Back to collections')}<div class="mb-10 mt-4 flex flex-col gap-2.5"><h1 class="stage-coltitle">Space, but make it sad</h1></div></div></div>`
 
 const smallHtml = `
   <section class="tonight-live" data-small="live">
@@ -618,7 +625,7 @@ for (const touch of [true, false]) {
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`Library control "${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}) at ${width}px, under the 44px a touch target needs`)
       if (touch && b.opacity !== '1') fail(`Library control "${b.name}" is at opacity ${b.opacity} on a touch screen, which has no hover to show it`)
     }
-    if (r.lib.length !== 5 + 3 + 3 + 1 + 3 + 27 + 1) fail(`the Library controls probe found ${r.lib.length} controls, expected 43 — this check is out of date`)
+    if (r.lib.length !== 5 + 3 + 1 + 3 + 1 + 3 + 27 + 1 + 1) fail(`the Library controls probe found ${r.lib.length} controls, expected 45 — this check is out of date`)
     for (const rail of r.rails) {
       if (rail.worst > rail.contentRight + 0.5) fail(`rail ${rail.i}: header reaches ${rail.worst}, past the rail's content edge ${rail.contentRight}`)
       if (rail.spilling.length) fail(`rail ${rail.i}: text overruns its box in ${rail.spilling.join(', ')}`)

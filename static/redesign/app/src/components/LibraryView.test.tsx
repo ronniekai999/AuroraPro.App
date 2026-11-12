@@ -75,12 +75,12 @@ describe('My Library', () => {
     expect(titles()).toEqual(['Alpha', 'Charlie'])
     expect(within(kind).getByRole('button', { name: /^Movies/ })).toHaveAttribute('aria-pressed', 'true')
     // The page's live region says what the choice did.
-    expect(count()).toBe('2 Movies of 4 saved for Morgan')
+    expect(count()).toBe('2 movies of 4 saved for Morgan')
     expect(document.querySelector('[data-library-count]')).toHaveAttribute('role', 'status')
     // Anime is a show here, as it is everywhere else.
     fireEvent.click(within(kind).getByRole('button', { name: /^TV Shows/ }))
     expect(titles()).toEqual(['Bravo', 'Delta'])
-    expect(count()).toBe('2 TV Shows of 4 saved for Morgan')
+    expect(count()).toBe('2 TV shows of 4 saved for Morgan')
     fireEvent.click(within(kind).getByRole('button', { name: /^All/ }))
     expect(count()).toBe('4 saved for Morgan')
   })
@@ -89,8 +89,11 @@ describe('My Library', () => {
     render(view({ library: [m(1, 'Alpha')] }))
     fireEvent.click(screen.getByRole('button', { name: /^TV Shows/ }))
     expect(screen.getByText('No TV shows saved.')).toBeInTheDocument()
-    expect(count()).toBe('0 TV Shows of 1 saved for Morgan')
+    expect(count()).toBe('0 TV shows of 1 saved for Morgan')
     expect(titles()).toEqual([])
+    // One of a kind is said as one.
+    fireEvent.click(screen.getByRole('button', { name: /^Movies/ }))
+    expect(count()).toBe('1 movie of 1 saved for Morgan')
   })
 
   it('has no kind control, and says how to save, when nothing is saved', () => {

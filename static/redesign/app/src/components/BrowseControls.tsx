@@ -157,6 +157,23 @@ export function LetterStrip({ states, pending, progress, missing, onJump }: {
     seen?.observe(el)
     return () => { seen?.disconnect(); root.style.removeProperty('--jumpbar-h') }
   }, [])
+  // The strip can go while a letter has the focus: a catalog update takes
+  // the list past what a jump may load, and the strip is no longer drawn.
+  // Focus would fall to the page, and the next Tab would start from the top
+  // of the document. It goes to the list instead: the first title still on
+  // screen under the strip, else the first there is. (A layout effect's
+  // cleanup runs while the strip is still in the document, so what has the
+  // focus can still be asked.)
+  useLayoutEffect(() => {
+    const el = bar.current
+    return () => {
+      if (!el || !el.contains(document.activeElement)) return
+      const under = el.getBoundingClientRect().bottom
+      const stops = [...document.querySelectorAll<HTMLElement>('[data-browse-layout] button:not([tabindex="-1"]), [data-browse-layout] [tabindex="0"]')]
+      const next = stops.find(b => b.getBoundingClientRect().top >= under && under > 0) ?? stops[0]
+      next?.focus({ preventScroll: true })
+    }
+  }, [])
   // The letter that holds the tab stop: the one last used, while it can
   // still be pressed, else the first that can.
   const [held, setHeld] = useState<string | null>(null)

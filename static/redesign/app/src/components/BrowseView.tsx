@@ -82,12 +82,10 @@ export default function BrowseView({
           ))}
         </div>
       ) : (
-        // Visually-tabular list of clickable rows. Deliberately NOT
-        // role="table": the rows are buttons (click → detail), and a
-        // table whose rows are buttons is a broken a11y tree. The header
-        // is decorative (aria-hidden) — each row carries its own
-        // accessible name via the row's title + the +/✓ button's
-        // aria-label.
+        // Visually-tabular list of rows. Deliberately NOT role="table":
+        // a row is a title button and its actions, not cells to read
+        // across. The header is decorative (aria-hidden); a row's title
+        // button and its actions each carry their own name.
         <div className="media-list" data-browse-layout="list">
           <div className="media-list-head" aria-hidden="true">
             <span>Title</span>

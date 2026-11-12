@@ -107,7 +107,7 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  answered for; `searches`, the profile each search was asked under and
  *  how it was asked for (`literal`: by title; `semantic`: by description,
  *  which costs the server a model call). */
-function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false } = {}) {
+function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false, activationFails = false } = {}) {
   // `kidUnrestricted`: the Kid profile has no content limit. A restricted
   // profile is not shown My Library at all, so a switch on that page is held
   // to the rule between two profiles that both may open it.
@@ -119,6 +119,8 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
    *  server answered it for (`movie-p2-1`). */
   const gridAsks: string[] = []
   const activations: number[] = []
+  /** Each activation the server refused (`activationFails`). */
+  const refusals: number[] = []
   const heroPools: number[] = []
   // Profiles whose own list ("My Library") the server fails to answer for.
   const listFails = new Set<number>()
@@ -160,6 +162,9 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') {
+      // `activationFails`: the server refuses, binds nothing, and the tab
+      // ends its switch on the profile it already showed.
+      if (activationFails) { refusals.push(Number(activate[1])); return json({ error: 'unavailable' }, 503) }
       bound = Number(activate[1])
       activations.push(bound)
       // 'activated' holds the ANSWER back after the server has bound: the
@@ -223,6 +228,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     counts,
     gridAsks,
     activations,
+    refusals,
     heroPools,
     searches,
     /** From now on the server fails to answer for this profile's own list. */
@@ -553,6 +559,36 @@ describe('a profile switch never commits the new name over the previous profileâ
       // The Kid's own Load More is not left spinning: the Parent's handler no
       // longer owns the loading flag, so only the switch's reset clears it.
       expect(screen.getByRole('button', { name: 'Load 1 more' })).toBeEnabled()
+    })
+
+  // The other half of that guard. A switch that ends on the profile already
+  // shown (here: the server refuses the activation) resets nothing and
+  // aborts nothing, so a page asked for before it is still out when it ends.
+  // The server may have answered that page for a profile bound in between,
+  // so it is dropped, though here it was right; the viewer asks again.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'drops a %s Load More answered after a switch that ended where it began, and lets it be asked again', async (_name, path, type) => {
+      server = stubServer({ activationFails: true })
+      renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const release = server.hold(`${type}-p2-1`)
+      fireEvent.click(screen.getByRole('button', { name: /^Load \d+ more$/ }))
+      switchToKid()
+      await waitFor(() => expect(server.refusals).toEqual([2]), { timeout: 5000 })
+      // The switch is over, on the Parent: a press asks again (below), which
+      // it would not while one was out.
+      await waitFor(() => expect(identityName()).toBe('Parent'))
+      await new Promise(done => setTimeout(done, 300))
+      release()
+      await new Promise(done => setTimeout(done, 200))
+      expect(screen.queryAllByText('Parentonly Page Two')).toEqual([])
+      // Not left spinning, and the page can be asked for again.
+      const more = screen.getByRole('button', { name: /^Load \d+ more$/ })
+      expect(more).toBeEnabled()
+      fireEvent.click(more)
+      await screen.findAllByText('Parentonly Page Two', undefined, { timeout: 5000 })
+      // (The stub lists a page when it answers it: the dropped one, and this.)
+      expect(server.gridAsks.filter(a => a === `${type}-p2-1`)).toHaveLength(2)
     })
 
   // The window a switch opens: the server has bound the Kid, and the tab

@@ -413,6 +413,43 @@ describe('the A to Z strip', () => {
     vi.restoreAllMocks()
   })
 
+  // The strip is gone once the list no longer fits: a catalog update can do
+  // that while a letter holds the keyboard's focus, and focus must not fall
+  // to the page (the next Tab would start from the top of the document).
+  it('hands the focus to the list when a catalog update takes the list past the strip\'s limit', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const titles = Array.from({ length: 500 }, (_, i) => film(`Film ${String(i + 1).padStart(4, '0')}`, i))
+    renderMovies(titles)
+    await screen.findByText('Film 0001', undefined, find)
+    const f = await letter('F')
+    f.focus()
+    expect(document.activeElement).toBe(f)
+    titles.push(film('Film 0501', 500))
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0), find)
+    scanAdded()
+    await waitFor(() => expect(document.querySelector('[data-letter-strip]')).toBeNull(), { timeout: 12_000 })
+    expect(count()).toMatch(/^501 movies/)
+    expect(focusedCard()).toBe('Film 0001')
+    vi.restoreAllMocks()
+  })
+
+  // Focus that is somewhere else stays where it is.
+  it('leaves the focus alone when the strip goes and no letter had it', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const titles = Array.from({ length: 500 }, (_, i) => film(`Film ${String(i + 1).padStart(4, '0')}`, i))
+    renderMovies(titles)
+    await screen.findByText('Film 0001', undefined, find)
+    await strip()
+    const sort = screen.getByRole('combobox', { name: 'Sort titles' })
+    sort.focus()
+    titles.push(film('Film 0501', 500))
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0), find)
+    scanAdded()
+    await waitFor(() => expect(document.querySelector('[data-letter-strip]')).toBeNull(), { timeout: 12_000 })
+    expect(document.activeElement).toBe(sort)
+    vi.restoreAllMocks()
+  })
+
   it('stops when a page cannot be loaded, and can be asked again', async () => {
     const server = renderMovies()
     await screen.findByText('12 Bells', undefined, find)

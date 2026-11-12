@@ -1972,6 +1972,14 @@ input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="c
   color: var(--ink-2);
 }
 /* A collection's own page: its name, at the size of a title. */
+/* The collection page's way back. Tailwind gives it 44px below md, where
+   every screen is taken for a phone; a tablet is wider than that and still
+   a finger. `button.`: a responsive utility (`md:min-h-0`) is emitted at
+   the END of the stylesheet, after every rule here, so a rule of the same
+   weight loses to it (a plain utility is emitted before, and loses). */
+@media (pointer: coarse) {
+  button.stage-colback { min-height: 44px; }
+}
 .stage-coltitle {
   font-family: var(--font-display);
   font-size: 56px;
@@ -3123,6 +3131,11 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 }
 .stage-select:hover { background-color: var(--surface-raised-2); }
 .stage-select option { background: var(--surface-raised-2); color: var(--ink); }
+/* A touch screen at the widths the sort is drawn at is a tablet: a 44px
+   target there (the box itself: a select has no pseudo-element to extend). */
+@media (pointer: coarse) {
+  .stage-select { height: 44px; }
+}
 
 /* Chips carry no blur: each call site supplies an opaque-enough fill. */
 
@@ -4313,19 +4326,26 @@ textarea:focus-visible {
 }
 .media-list-row:hover { background: var(--surface-raised); }
 .media-list-row:hover .mlr-title { text-decoration: underline; }
-/* At (0,2,0) this rule REPLACES the global :focus-visible floor at (0,1,0)
-   rather than adding to it, so it restates the floor's full white (a lower
-   alpha here once left list rows at 2.45:1 where grid cards had 3.19:1).
-   The negative offset keeps the ring inside the row. */
-.media-list-row:focus-visible {
+/* The row's focus is its title button's. At (0,3,0) this rule REPLACES the
+   global :focus-visible floor at (0,1,0) rather than adding to it, so it
+   restates the floor's full white (a lower alpha here once left list rows
+   at 2.45:1 where grid cards had 3.19:1). The negative offset keeps the
+   ring inside the row. */
+.media-list-row .mlr-main:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: -2px;
 }
+/* The title's button: the row's height, so its ring frames the cell. */
 .media-list-row .mlr-main {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 0;
+  height: 100%;
+  padding: 0 8px 0 0;
+  border-radius: var(--radius-chip);
+  text-align: left;
+  cursor: pointer;
 }
 .media-list-row .mlr-thumb {
   /* The fill is the placeholder while the image loads lazily, and what

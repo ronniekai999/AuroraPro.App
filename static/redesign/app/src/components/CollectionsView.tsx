@@ -245,7 +245,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
           // The Library header has a "Collections" too (the scope's name):
           // this one says where it goes.
           aria-label="Back to collections"
-          className="inline-flex min-h-[44px] items-center gap-1.5 text-sm font-medium text-ink-2 hover:text-ink md:min-h-0"
+          className="stage-colback inline-flex min-h-[44px] items-center gap-1.5 text-sm font-medium text-ink-2 hover:text-ink md:min-h-0"
         >
           <Icon name="arrowLeft" size={14} />
           Collections

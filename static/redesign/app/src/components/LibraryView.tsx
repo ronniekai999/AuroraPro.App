@@ -64,9 +64,11 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       else if (m.type === 'show' || m.type === 'anime') shows++
     }
     return [
-      { value: 'all', label: 'All', count: library.length },
-      { value: 'movie', label: 'Movies', count: movies },
-      { value: 'show', label: 'TV Shows', count: shows },
+      // `one` and `many`: the kind as a sentence says it ("2 TV shows of 4
+      // saved"), where the control's label is a name and keeps its capitals.
+      { value: 'all', label: 'All', one: '', many: '', count: library.length },
+      { value: 'movie', label: 'Movies', one: 'movie', many: 'movies', count: movies },
+      { value: 'show', label: 'TV Shows', one: 'TV show', many: 'TV shows', count: shows },
     ] as const
   }, [library])
   const shown = kinds.find(k => k.value === filter)!
@@ -90,7 +92,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
           {loading && library.length === 0 ? '' : <>
             {/* The line is the page's live region: with a kind chosen it
                 says how many of them are showing, out of all that is saved. */}
-            {filter !== 'all' && `${shown.count.toLocaleString()} ${shown.label} of `}
+            {filter !== 'all' && `${shown.count.toLocaleString()} ${shown.count === 1 ? shown.one : shown.many} of `}
             {library.length.toLocaleString()} saved
             {/* A name can be a hundred characters: it is cut with an
                 ellipsis, and whole in the title. */}
