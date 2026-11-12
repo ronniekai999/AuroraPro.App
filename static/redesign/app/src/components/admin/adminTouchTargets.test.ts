@@ -4,6 +4,10 @@
 // rendered check of them, so this reads the sources: a small button added
 // without the class fails here.
 //
+// It is a lint of source lines, not a measurement. It does not see a class
+// list split across lines, a class held in a variable, a small control that
+// is not a `stage-btn-sm`, or an admin control in a file not listed here.
+//
 // Sources arrive through Vite's `?raw` (see lib/adminTileLabels.test.ts for
 // why not node:fs).
 import adminView from './AdminView.tsx?raw'

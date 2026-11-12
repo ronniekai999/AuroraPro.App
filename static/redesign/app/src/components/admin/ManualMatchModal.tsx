@@ -30,15 +30,18 @@ import { useReturnFocus } from '@/lib/returnFocus'
 // here (its request is aborted and a late answer changes nothing), but the
 // server may have saved it all the same, so the caller is told, and reads
 // what it shows again instead of assuming either way.
-export default function ManualMatchModal({ target, onClose, onMatched }: {
+export default function ManualMatchModal({ target, onClose, onMatched, fallbackFocus }: {
   target: ServerMediaItem
   /** `matchInFlight`: the dialog was closed while a match was being sent.
    *  It may or may not have been saved: read again what the page shows. */
   onClose: (matchInFlight?: boolean) => void
   onMatched: () => void
+  /** Where the focus goes when what opened the dialog is gone by the time
+   *  it closes (a list's row that the match removed). */
+  fallbackFocus?: () => HTMLElement | null | undefined
 }) {
   const ids = useId()
-  const returnFocus = useReturnFocus()
+  const returnFocus = useReturnFocus(fallbackFocus)
   const isShow = target.type === 'show'
   const [q, setQ] = useState(target.title)
   const [results, setResults] = useState<MatchSearchResult[]>([])

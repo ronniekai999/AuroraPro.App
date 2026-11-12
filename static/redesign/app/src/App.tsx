@@ -5314,13 +5314,22 @@ export default function App() {
     setIdentifyTarget(null)
     if (!matchInFlight || !id) return
     // Closed while a match was still being sent: the server may have saved
-    // it or not. The title is read again and shows which; nothing is
-    // claimed either way.
-    void getMedia(id)
+    // it or not, and may still be at it. Nothing is claimed either way.
+    // The title is read now, and again after a wait, since a read that
+    // comes before the server has finished shows the old details.
+    const read = () => void getMedia(id)
       // Only onto the title it was read for: the person may have moved on.
       .then(detail => setDetailItem(shown => (shown && shown.id === id ? detail : shown)))
       .catch(() => { /* the page keeps what it has */ })
-  }, [identifyTarget])
+    read()
+    window.setTimeout(read, 4000)
+    const tid = nextToastId()
+    setToasts(prev => [...prev, {
+      id: tid,
+      message: 'The dialog was closed while the match was still being sent, so it may or may not have been saved. This page is read again now and once more in a few seconds.',
+      type: 'info',
+    }])
+  }, [identifyTarget, nextToastId])
   const handleIdentifyMatched = useCallback(async () => {
     const id = identifyTarget?.id
     setIdentifyTarget(null)

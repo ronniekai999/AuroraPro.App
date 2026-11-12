@@ -8,7 +8,7 @@
 // uses it (the global manual-identify overlay) and must not pull this
 // chunk to get it.
 
-import { useState, useEffect, useCallback, useId, useRef } from 'react'
+import { useState, useEffect, useCallback, useId, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
@@ -1354,6 +1354,10 @@ function AdminSessionsTab() {
   )
 }
 
+/** How long after a dialog closed on a match in flight the list is read a
+ *  second time: long enough for a server that was a moment from done. */
+const REREAD_AFTER_MS = 4000
+
 function AdminFlaggedTab() {
   const [items, setItems] = useState<ServerMediaItem[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1362,24 +1366,33 @@ function AdminFlaggedTab() {
   // What the last match did, said in the list's status line. The dialog
   // closes and the row leaves the list, so without it nothing says a match
   // was saved.
-  const [said, setSaid] = useState('')
+  // `sure` is a match the server confirmed. Anything else is said in plain
+  // ink: the colour of success on "may or may not have been saved" reads as
+  // success.
+  const [said, setSaid] = useState<{ text: string; sure: boolean }>({ text: '', sure: false })
   // The same words twice in a row (two items with one title) are still two
   // things said: a status line whose text does not change is not read out
   // again, so the repeat differs by a trailing space.
-  const say = (text: string) => setSaid(prev => (prev === text ? `${text}\u00a0` : text))
+  const say = (text: string, sure: boolean) => setSaid(prev => ({ text: prev.text === text ? `${text}\u00a0` : text, sure }))
   const listRef = useRef<HTMLDivElement | null>(null)
-  // The item just matched. Closing the dialog gives the focus back to that
-  // item's Match button; the reload that follows takes the row away, and
-  // the list takes the focus then, when the row has gone and the focus with
-  // it. Checked after each change of the list, since only a commit removes
-  // the row.
-  const matchedId = useRef<number | null>(null)
+  // After a read of the list that followed a match of `id`. Closing the
+  // dialog gives the focus back to that item's Match button; the read then
+  // takes the row away, and the list takes the focus when the row has gone
+  // and the focus with it. It is asked once per such read, when the read
+  // has landed, so nothing is left set to move the focus at some later
+  // reload.
+  const [handBack, setHandBack] = useState<{ id: number } | null>(null)
+  const itemsRef = useRef(items)
+  useLayoutEffect(() => { itemsRef.current = items }, [items])
   useEffect(() => {
-    const id = matchedId.current
-    if (id === null || !items || items.some(it => it.id === id)) return
-    matchedId.current = null
+    if (!handBack) return
+    const now = itemsRef.current
+    if (!now || now.some(it => it.id === handBack.id)) return
     if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus()
-  }, [items])
+  }, [handBack])
+  // The second read after the dialog was closed on a match in flight.
+  const rereadTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current) }, [])
   // 2026-05-26 — AI re-matcher job status. Polled while a job is
   // active so the operator sees live progress; falls back to
   // single-shot fetch when no job is running. acceptingId tracks the
@@ -1483,7 +1496,9 @@ function AdminFlaggedTab() {
 
   return (
     <div className="bg-surface-raised rounded-control p-5">
-      <div className="flex items-start justify-between gap-4 mb-3">
+      {/* The words over the button on a phone: side by side there, the
+          words were a narrow column beside it. */}
+      <div className="mb-3 flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
         <div className="min-w-0">
           <p className="text-ink-2 text-sm">
             Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
@@ -1542,7 +1557,7 @@ function AdminFlaggedTab() {
         </div>
       )}
 
-      <p role="status" className={said ? 'mb-2 text-sm text-ok' : 'sr-only'}>{said}</p>
+      <p role="status" className={said.text ? `mb-2 text-sm leading-snug ${said.sure ? 'text-ok' : 'text-ink'}` : 'sr-only'}>{said.text}</p>
       {err && <p className="text-danger-ink text-sm">{err}</p>}
       {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
       {/* Takes the focus when the row that had it leaves the list. The
@@ -1613,21 +1628,30 @@ function AdminFlaggedTab() {
       {matchTarget && (
         <ManualMatchModal
           target={matchTarget}
+          // The row a match was made from leaves with the next read. If
+          // that read lands before the dialog has gone, the button it would
+          // give the focus back to is not there any more: the list is.
+          fallbackFocus={() => listRef.current}
           onClose={matchInFlight => {
-            const title = matchTarget.title
+            const { id, title } = matchTarget
             setMatchTarget(null)
             if (!matchInFlight) return
             // Closed on a match that was still being sent: the server may
-            // have saved it or not. Nothing is claimed; the list is read
-            // again and shows which.
-            say(`The dialog was closed while the match for ${title} was still being sent, so it may or may not have been saved. This list has been read again.`)
-            void reload()
+            // have saved it or not, and may still be at it. Nothing is
+            // claimed. The list is read now, and again after a wait, since
+            // a read that comes before the server has finished shows the
+            // item still flagged.
+            say(`The dialog was closed while the match for ${title} was still being sent, so it may or may not have been saved. This list is read again now and once more in a few seconds: a match that was saved can take a moment to show.`, false)
+            const read = () => void reload().then(() => setHandBack({ id }))
+            read()
+            if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current)
+            rereadTimer.current = window.setTimeout(read, REREAD_AFTER_MS)
           }}
           onMatched={() => {
-            matchedId.current = matchTarget.id
+            const { id, title } = matchTarget
             setMatchTarget(null)
-            say(`Matched ${matchTarget.title}.`)
-            void reload()
+            say(`Matched ${title}.`, true)
+            void reload().then(() => setHandBack({ id }))
           }}
         />
       )}

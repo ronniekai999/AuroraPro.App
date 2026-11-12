@@ -43,9 +43,9 @@ describe('Playback health', () => {
     expect(tile('Wait for the first picture')).toHaveTextContent('One start in twenty took 6.2 s or longer.')
     // A share that is not zero never reads "0%".
     expect(tile('Time spent buffering')).toHaveTextContent('under 1%')
-    expect(tile('Time spent buffering')).toHaveTextContent('in the playbacks that reported how they ended')
+    expect(tile('Time spent buffering')).toHaveTextContent('in the playbacks that sent a last report. It also reads 0% when those playbacks watched nothing.')
     expect(tile('Playback that failed')).toHaveTextContent('2%')
-    expect(tile('Playback that failed')).toHaveTextContent('Of the playbacks that reached a picture and reported how they ended.')
+    expect(tile('Playback that failed')).toHaveTextContent('Of the playbacks that reached a picture and sent a last report. A page the browser set aside sends one with its ending unknown, and is counted as not failed.')
     expect(tile('Never reported an ending')).toHaveTextContent('10%')
     expect(tile('Never reported an ending')).toHaveTextContent('Of the 90 playbacks old enough to have ended.')
   })
@@ -54,9 +54,12 @@ describe('Playback health', () => {
     render(<PlaybackHealth />)
     const table = await screen.findByRole('table', { name: 'How each was delivered' })
     const rows = within(table).getAllByRole('row').slice(1).map(r => r.textContent)
-    expect(rows[0]).toMatch(/^Played as it is.*850\.9 s2\.1 s$/)
+    // Each row's slow-start figure says what it is by that row's own
+    // count: one in twenty of 85, the slowest of 7.
+    expect(rows[0]).toMatch(/^Played as it is.*850\.9 s2\.1 sone in twenty$/)
     expect(rows[1]).toMatch(/^Repackaged.*42\.5 sNot measured$/)
-    expect(rows[2]).toMatch(/^Converted.*74\.8 s12 s$/)
+    expect(rows[2]).toMatch(/^Converted.*74\.8 s12 sthe slowest of 7$/)
+    expect(within(table).getByRole('columnheader', { name: 'Slowest starts' })).toBeInTheDocument()
     expect(within(table).queryByText(/direct_play|direct_stream|transcode/)).toBeNull()
   })
 
@@ -73,7 +76,7 @@ describe('Playback health', () => {
       const figures = within(row).getAllByRole('cell').map(c => c.textContent)
       expect(blocks[i].textContent?.startsWith(name)).toBe(true)
       expect(within(blocks[i]).getAllByRole('definition').map(d => d.textContent)).toEqual(figures)
-      expect(within(blocks[i]).getAllByRole('term').map(d => d.textContent)).toEqual(['Playbacks', 'Usual wait', 'One in twenty waited'])
+      expect(within(blocks[i]).getAllByRole('term').map(d => d.textContent)).toEqual(['Playbacks', 'Usual wait', 'Slowest starts'])
     })
   })
 
@@ -147,7 +150,7 @@ describe('Playback health', () => {
     render(<PlaybackHealth />)
     await screen.findByText('How things played')
     expect(tile('Playback that failed')).toHaveTextContent('0%')
-    expect(tile('Playback that failed')).toHaveTextContent('reported how they ended')
+    expect(tile('Playback that failed')).toHaveTextContent('sent a last report')
     expect(tile('Time spent buffering')).toHaveTextContent('0%')
     expect(screen.queryByText('Not measured yet')).toBeNull()
   })
@@ -169,14 +172,20 @@ describe('Playback health', () => {
 
   // "One start in twenty" of five starts is no start at all.
   it('does not speak of one start in twenty when there were only a few', async () => {
-    api.getPlaybackHealth.mockResolvedValue(summary({ sessions: 5 }))
+    api.getPlaybackHealth.mockResolvedValue(summary({ sessions: 5, by_decision: [
+      { decision: 'direct_play', count: 3, p50_first_frame_ms: 900, p95_first_frame_ms: 2100 },
+      { decision: 'transcode', count: 2, p50_first_frame_ms: 4800, p95_first_frame_ms: 6200 },
+    ] }))
     render(<PlaybackHealth />)
     await screen.findByText('How things played')
     expect(tile('Wait for the first picture')).toHaveTextContent('The slowest start took about 6.2 s; with 5 playbacks that is one start, not a pattern.')
     expect(screen.queryByText(/One start in twenty/)).toBeNull()
     const table = screen.getByRole('table', { name: 'How each was delivered' })
-    expect(within(table).getByRole('columnheader', { name: 'Slowest waited about' })).toBeInTheDocument()
-    expect(within(table).queryByRole('columnheader', { name: 'One in twenty waited' })).toBeNull()
+    expect(within(table).getAllByRole('row').slice(1).map(r => r.textContent)).toEqual([
+      expect.stringMatching(/2\.1 sthe slowest of 3$/),
+      expect.stringMatching(/6\.2 sthe slowest of 2$/),
+    ])
+    expect(within(table).queryByText('one in twenty')).toBeNull()
   })
 
   it('tells a title the device could have played from one with no reason recorded', async () => {

@@ -165,6 +165,39 @@ describe('ManualMatchModal', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  // A list's row leaves when its item is matched, and can be gone before the
+  // dialog is: the caller says where the focus goes then.
+  it('gives the focus to the caller\'s fallback when what opened it has gone by the time it closes', async () => {
+    const user = userEvent.setup()
+    function Rows() {
+      const [open, setOpen] = useState(false)
+      const [matched, setMatched] = useState(false)
+      return (
+        <div>
+          <ul id="rows" tabIndex={-1}>
+            {!matched && <li><button type="button" onClick={() => setOpen(true)}>Identify</button></li>}
+          </ul>
+          {open && (
+            <ManualMatchModal
+              target={FILM}
+              fallbackFocus={() => document.getElementById('rows')}
+              onClose={() => setOpen(false)}
+              // The row goes in the same commit as the dialog.
+              onMatched={() => { setMatched(true); setOpen(false) }}
+            />
+          )}
+        </div>
+      )
+    }
+    render(<Rows />)
+    await user.click(screen.getByRole('button', { name: 'Identify' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(await within(dialog).findByRole('button', { name: 'Match Kestrel (2019), from TMDB' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Identify' })).toBeNull()
+    await waitFor(() => expect(document.getElementById('rows')).toHaveFocus())
+  })
+
   it('tells the caller nothing was in flight when it is closed at rest, also after a refused match', async () => {
     const user = userEvent.setup()
     manualMatch.mockRejectedValueOnce(new Error('TMDB did not answer'))

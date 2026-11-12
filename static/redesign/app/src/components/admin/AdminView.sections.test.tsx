@@ -86,22 +86,106 @@ describe('Flagged items and the match dialog', () => {
     expect(within(list()).getByText(/Nothing flagged/)).toBeInTheDocument()
   })
 
-  // A match closed on may or may not have been saved. The page claims
-  // neither: it reads the list again, which shows which.
-  it('reads the list again, and claims no outcome, when the dialog is closed while a match is being sent', async () => {
+  // A match closed on may or may not have been saved, and the server may
+  // still be at it. The page claims neither, in words or in colour: it reads
+  // the list now, and once more after a wait, since a read that comes before
+  // the server has finished shows the item still flagged.
+  it('reads the list now and again after a wait, and claims no outcome, when the dialog is closed while a match is being sent', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel')])
+      api.manualMatch.mockReturnValue(new Promise(() => {}))
+      await openSection(user, 'Flagged items')
+      await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
+      const dialog = await screen.findByRole('dialog')
+      await user.click(await within(dialog).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+      expect(api.listFlaggedItems).toHaveBeenCalledTimes(1)
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await waitFor(() => expect(api.listFlaggedItems).toHaveBeenCalledTimes(2))
+      const line = screen.getAllByRole('status').find(el => el.textContent)!
+      expect(line.textContent).toBe('The dialog was closed while the match for Kestrel was still being sent, so it may or may not have been saved. This list is read again now and once more in a few seconds: a match that was saved can take a moment to show.')
+      // Not in the colour of a match that was saved.
+      expect(line.className).not.toMatch(/text-ok/)
+      expect(screen.queryByText(/^Matched /)).toBeNull()
+      // The server finishes the match after the first read; the second
+      // read shows it, and the list takes the focus the row's button had.
+      await waitFor(() => expect(within(list()).getByRole('button', { name: 'Match Kestrel' })).toHaveFocus())
+      api.listFlaggedItems.mockResolvedValue([])
+      expect(api.listFlaggedItems).toHaveBeenCalledTimes(2)
+      await act(async () => { vi.advanceTimersByTime(4000) })
+      expect(api.listFlaggedItems).toHaveBeenCalledTimes(3)
+      await waitFor(() => expect(within(list()).queryByRole('button', { name: 'Match Kestrel' })).toBeNull())
+      await waitFor(() => expect(list()).toHaveFocus())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says a saved match in the colour of success', async () => {
     const user = userEvent.setup()
-    api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel')])
-    api.manualMatch.mockReturnValue(new Promise(() => {}))
+    api.listFlaggedItems.mockResolvedValueOnce([flagged(1, 'Kestrel')]).mockResolvedValue([])
+    await openSection(user, 'Flagged items')
+    await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
+    await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getAllByRole('status').find(el => el.textContent)!.className).toMatch(/text-ok/)
+  })
+
+  // The list takes the focus for the read that followed the match, and for
+  // no later one. A matched item that is still flagged at that read keeps
+  // its row and the focus; when a later read (the AI sweep's poll here)
+  // takes the row away, the focus is not moved for someone who has since
+  // put it elsewhere.
+  it('does not move the focus at a later read for a match whose row stayed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel')])
+      // A sweep is running: the list is read again every five seconds.
+      api.getAIRematchStatus.mockResolvedValue({ enabled: true, job: { started_at: '2026-01-01T00:00:00Z', total: 4, processed: 1, matched: 0, suggested: 0, failed: 0 } })
+      await openSection(user, 'Flagged items')
+      const match = await within(list()).findByRole('button', { name: 'Match Kestrel' })
+      await user.click(match)
+      await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      // Still flagged at the read that followed: the row and its button stay.
+      await waitFor(() => expect(within(list()).getByRole('button', { name: 'Match Kestrel' })).toHaveFocus())
+      const reads = api.listFlaggedItems.mock.calls.length
+      // The person moves on (a tap on the page): the focus is on nothing.
+      ;(document.activeElement as HTMLElement).blur()
+      expect(document.body).toHaveFocus()
+      api.listFlaggedItems.mockResolvedValue([])
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      await waitFor(() => expect(api.listFlaggedItems.mock.calls.length).toBeGreaterThan(reads))
+      await waitFor(() => expect(within(list()).queryByRole('button', { name: 'Match Kestrel' })).toBeNull())
+      await act(async () => {})
+      expect(document.body).toHaveFocus()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The read after a match can land before the dialog has gone. The button
+  // that opened it is then not there to take the focus back: the list is.
+  it('gives the focus to the list when the row that opened the dialog has gone before the dialog closes', async () => {
+    const user = userEvent.setup()
+    api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel'), flagged(2, 'Wren')])
+    let landMatch: () => void = () => {}
+    api.manualMatch.mockImplementationOnce(() => new Promise<void>(resolve => { landMatch = resolve }))
     await openSection(user, 'Flagged items')
     await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
     const dialog = await screen.findByRole('dialog')
     await user.click(await within(dialog).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
-    expect(api.listFlaggedItems).toHaveBeenCalledTimes(1)
-    await user.keyboard('{Escape}')
+    // While the match is out the list is read (the sweep's poll, another
+    // tab): the item is gone from it before the dialog is.
+    api.listFlaggedItems.mockResolvedValue([flagged(2, 'Wren')])
+    api.getAIRematchStatus.mockResolvedValue({ enabled: true })
+    await act(async () => { landMatch() })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    await waitFor(() => expect(api.listFlaggedItems).toHaveBeenCalledTimes(2))
-    expect(said()).toEqual(['The dialog was closed while the match for Kestrel was still being sent, so it may or may not have been saved. This list has been read again.'])
-    expect(screen.queryByText(/^Matched /)).toBeNull()
+    await waitFor(() => expect(within(list()).queryByRole('button', { name: 'Match Kestrel' })).toBeNull())
+    await waitFor(() => expect(list()).toHaveFocus())
   })
 
   it('reads nothing again when the dialog is closed with no match out', async () => {

@@ -14,6 +14,11 @@
 //   two shares as 0 when no report has arrived, with nothing to tell that 0
 //   from a measured one. The page can tell in one case, and says "Not
 //   measured yet" in every other: see `ended`.
+// - Two things it cannot tell at all, and so says in the tiles' own words:
+//   a page that went into the browser's back/forward cache writes a
+//   provisional last report with its ending unknown, which counts as a
+//   report and as not failed; and reports whose playbacks watched nothing
+//   leave the buffering share at 0 like a measured one.
 
 import { useEffect, useId, useState } from 'react'
 import { getPlaybackHealth, type PlaybackHealthSummary } from '@/lib/api'
@@ -48,6 +53,17 @@ const REASON: Record<string, string> = {
 /** Fewer starts than this, and "one in twenty" describes no start at all:
  *  the slowest of a handful is one playback, not a pattern. */
 const ENOUGH_FOR_ONE_IN_TWENTY = 20
+
+/** What the slow-start figure of one delivery is: of that delivery's own
+ *  playbacks, however many there were in all. */
+const slowOf = (n: number) => (n < ENOUGH_FOR_ONE_IN_TWENTY ? `the slowest of ${n.toLocaleString()}` : 'one in twenty')
+
+/** A delivery's slow-start figure with what it is, or that there is none. */
+function SlowStart({ ms, of }: { ms: number | null | undefined; of: number }) {
+  const wait = seconds(ms)
+  if (wait === null) return <>Not measured</>
+  return <>{wait}<span className="block text-xs font-normal text-ink-2">{slowOf(of)}</span></>
+}
 
 /** A wait in seconds: one decimal under ten, whole above. */
 export function seconds(ms: number | null | undefined): string | null {
@@ -117,8 +133,9 @@ export function PlaybackHealth() {
   const ended = !!s && s.settled_sessions > 0 && s.abandoned_ratio < 1
   const failedMeasured = !!s && (ended || s.error_rate > 0)
   const bufferingMeasured = !!s && (ended || s.rebuffer_ratio > 0)
+  // By the count of all playbacks: the summary does not say how many of
+  // them had their wait measured.
   const fewStarts = !!s && s.sessions < ENOUGH_FOR_ONE_IN_TWENTY
-  const slowestLabel = fewStarts ? 'Slowest waited about' : 'One in twenty waited'
 
   return (
     <div>
@@ -178,14 +195,14 @@ export function PlaybackHealth() {
               label="Time spent buffering"
               value={bufferingMeasured ? percent(s.rebuffer_ratio) : 'Not measured yet'}
               note={bufferingMeasured
-                ? 'Of the time watched, the share spent waiting for the picture to come back, in the playbacks that reported how they ended.'
+                ? 'Of the time watched, the share spent waiting for the picture to come back, in the playbacks that sent a last report. It also reads 0% when those playbacks watched nothing.'
                 : 'This comes with a playback’s last report, and none has arrived for this period as far as these numbers show.'}
             />
             <Tile
               label="Playback that failed"
               value={failedMeasured ? percent(s.error_rate) : 'Not measured yet'}
               note={failedMeasured
-                ? 'Of the playbacks that reached a picture and reported how they ended.'
+                ? 'Of the playbacks that reached a picture and sent a last report. A page the browser set aside sends one with its ending unknown, and is counted as not failed.'
                 : 'This comes with a playback’s last report, and none has arrived for this period as far as these numbers show.'}
             />
             <Tile
@@ -221,8 +238,8 @@ export function PlaybackHealth() {
                       <dd className="mt-0.5 text-[15px] tabular-nums text-ink">{seconds(d.p50_first_frame_ms) ?? 'Not measured'}</dd>
                     </div>
                     <div>
-                      <dt className="text-ink-2">{slowestLabel}</dt>
-                      <dd className="mt-0.5 text-[15px] tabular-nums text-ink">{seconds(d.p95_first_frame_ms) ?? 'Not measured'}</dd>
+                      <dt className="text-ink-2">Slowest starts</dt>
+                      <dd className="mt-0.5 text-[15px] tabular-nums text-ink"><SlowStart ms={d.p95_first_frame_ms} of={d.count} /></dd>
                     </div>
                   </dl>
                 </li>
@@ -242,7 +259,7 @@ export function PlaybackHealth() {
                   <th scope="col" className="py-3 pl-5 pr-2 font-semibold">Delivery</th>
                   <th scope="col" className="px-2 py-3 text-right font-semibold">Playbacks</th>
                   <th scope="col" className="px-2 py-3 text-right font-semibold">Usual wait</th>
-                  <th scope="col" className="py-3 pl-2 pr-5 text-right font-semibold">{slowestLabel}</th>
+                  <th scope="col" className="py-3 pl-2 pr-5 text-right font-semibold">Slowest starts</th>
                 </tr>
               </thead>
               <tbody>
@@ -256,7 +273,7 @@ export function PlaybackHealth() {
                       </th>
                       <td className="px-2 py-3 text-right tabular-nums text-ink">{d.count.toLocaleString()}</td>
                       <td className="px-2 py-3 text-right tabular-nums text-ink">{seconds(d.p50_first_frame_ms) ?? 'Not measured'}</td>
-                      <td className="py-3 pl-2 pr-5 text-right tabular-nums text-ink">{seconds(d.p95_first_frame_ms) ?? 'Not measured'}</td>
+                      <td className="py-3 pl-2 pr-5 text-right tabular-nums text-ink"><SlowStart ms={d.p95_first_frame_ms} of={d.count} /></td>
                     </tr>
                   )
                 })}
