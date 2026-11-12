@@ -1,0 +1,10 @@
+{
+  "sha": "365df4c44932640e9ae91284f943a3598be9bcaa",
+  "verdict": "lows-only",
+  "summary": "Admin (four commits: the grouped menu and Playback health, every section restyled with the match dialog rebuilt, and the fix round), two passes with the server's admin handlers and the playback QoE query read: fix-first (the sticky menu under the scan bars; a Requests badge counting the wrong requests; a match in flight that could not be closed; 0% shown for unmeasured shares; an overflow at 320px; 36px touch targets; a line colour as a fill), then lows-only. Open lows: the uncertain-outcome line is drawn in success green; after a close mid-match the re-read can come too early and the detail page says nothing; focus can drop to the body when the matched row leaves; a stale matchedId; the flagged header is squeezed on a phone; 'one in twenty' wording keys on the total, not the row; two Playback health caveats in the copy.",
+  "reviewer": "fresh-context-agent-afa77048",
+  "findings": "7",
+  "diff_digest": "b0bec476c1d3bca2018e294205970cd41138df933255bdafd65bfd48d8c0de5e",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T18:26:44Z"
+}
