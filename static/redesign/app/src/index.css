@@ -437,7 +437,7 @@
       CANNOT override a rule that is more specific — no matter where it sits.
       That makes every property set by a descendant or attribute selector
       here permanently unreachable from a call site except via `!important`.
-      Currently that applies to `.stage-fpill .c` (0,2,0), `.stage-caldate .today` (0,2,0),
+      Currently that applies to `.stage-caldate .today` (0,2,0),
       `.stage-opt:hover` / `[aria-checked="true"]` / `:focus-visible` (0,2,0),
       and `.stage-tab[aria-selected="true"]` plus its `::after` (0,2,0 / 0,2,1).
       Nothing collides today because those call sites carry no competing
@@ -2428,140 +2428,6 @@ input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="c
    so responsive variants still work. Where a primitive NEEDS to be a flex
    or grid container to mean anything (.stage-calmonth, .stage-seg) it is
    marked and the call site supplies the display utility. */
-
-/* ── Filter pills ─────────────────────────────────────────────────────
-   The mockup's .fpill, shared by Requests and My Library, which until now
-   carried two near-identical copies of the same Tailwind soup. The count
-   chip is a child class rather than a separate component so the
-   selected-state colour shift can be expressed once, here. */
-.stage-fpill {
-  align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
-  font-size: var(--fs-meta);
-  font-weight: 500;
-  white-space: nowrap;
-  background: var(--surface-raised-2);
-  border: 1px solid transparent;
-  /* 0.7 not the mockup's --text-2: at 12.5px this is normal text, and
-     these pills sit on the page background rather than on artwork, so
-     0.7 over #0e0f11 is 8.6:1. Kept explicit so a future page tint
-     can't quietly erode it. */
-  color: var(--ink-2);
-  cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
-}
-/* Declared BEFORE the [aria-pressed="true"] rule below, and that order matters.
-   Both are (0,2,0) and both set `background` and `color`, so source order
-   decides — and it needs to resolve this way round, or hovering the selected
-   pill would strip its light fill. Same hazard class as .stage-calcell's; recorded
-   here too because it happens to be correct by accident of writing order. */
-.stage-fpill:hover {
-  background: var(--line);
-  color: var(--ink);
-}
-/* aria-pressed, not a class: these are toggle buttons, so the selected
-   state has to be in the accessibility tree anyway. Driving the style off
-   the same attribute means the two can never disagree — the failure mode
-   where a pill looks active to sighted users and reads inactive to a
-   screen reader is structurally impossible here. */
-.stage-fpill[aria-pressed="true"] {
-  background: var(--ink);
-  /* Selected is a light fill with dark text: a state the eye reads without
-     relying on a border, and the weight step is the non-colour cue. */
-  color: var(--on-action);
-  font-weight: 600;
-}
-.stage-fpill:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-  box-shadow: var(--focus-band);
-}
-.stage-fpill .c {
-  font-size: 12px;
-  font-weight: 700;
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-  padding: 2px 7px;
-  min-width: 20px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.stage-fpill[aria-pressed="true"] .c {
-  background: rgba(14, 15, 17, 0.14);
-}
-
-/* ── Request rows ─────────────────────────────────────────────────────
-   The mockup's .req: a 70×105 poster beside a stacked info column. */
-.stage-req {
-  border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
-}
-.stage-req:hover { background: rgba(255, 255, 255, 0.045); border-color: rgba(255, 255, 255, 0.12); }
-.stage-req-poster {
-  position: relative;
-  width: 70px;
-  height: 105px;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #12101c;
-}
-
-/* Status badges. The five status colours are the app's EXISTING palette,
-   moved here verbatim from RequestsView's inline map — amber pending,
-   orange pending-approval, blue processing, emerald available, red failed.
-   The mockup's own .stb happens to agree with all five, which is why this
-   is a relocation and not a recolour: the semantics of "processing" are
-   the server's, not the mockup's, and the plan calls for keeping them.
-
-   The fill/border/text triple per status is why these are classes rather
-   than Tailwind — three coordinated values that must move together. */
-.stage-stb {
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  padding: 4px 10px;
-  border-radius: 999px;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.stage-stb-pending    { background: rgba(245, 158, 11, 0.16); border: 1px solid rgba(245, 158, 11, 0.5); color: #fcd34d; }
-.stage-stb-approval   { background: rgba(249, 115, 22, 0.16); border: 1px solid rgba(249, 115, 22, 0.5); color: #fdba74; }
-.stage-stb-processing { background: rgba(59, 130, 246, 0.16); border: 1px solid rgba(59, 130, 246, 0.5); color: #93c5fd; }
-.stage-stb-available  { background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(16, 185, 129, 0.5); color: #6ee7b7; }
-.stage-stb-failed     { background: rgba(239, 68, 68, 0.16);  border: 1px solid rgba(239, 68, 68, 0.5);  color: #fca5a5; }
-
-/* Media-kind tag ("MOVIE" / "TV") — neutral, so it reads as a category
-   rather than competing with the status badge beside it. */
-.stage-typetag {
-  font-size: var(--fs-label);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  color: rgba(255, 255, 255, 0.75);
-  text-transform: uppercase;
-}
-/* 4K variant. This started life at the call site as
-   `stage-typetag !text-purple-200 !border-purple-400/40 !bg-purple-500/15` —
-   three `!important`s, because .stage-typetag sets colour, border and
-   background at (0,1,0) in this unlayered block and plain utilities lose. By
-   the same rule this phase applied to .stage-calchip, three `!` at a call site
-   means the primitive is missing a variant, not that the call site needs
-   escaping. Every other colour family here (.stage-stb-*, .stage-calchip-p)
-   already works this way. */
-.stage-typetag-4k {
-  background: rgba(255, 255, 255, 0.083);
-  border-color: rgba(255, 255, 255, 0.22);
-  color: var(--ink);
-}
 
 /* ── Collection cards ─────────────────────────────────────────────────
    118px band with up to four member posters behind a left-to-right scrim.
