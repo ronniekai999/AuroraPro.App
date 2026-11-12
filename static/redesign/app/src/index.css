@@ -2898,7 +2898,7 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   color: var(--ink-2);
   font-weight: 500;
 }
-.stage-btn-quiet:hover { color: var(--ink); }
+.stage-btn-quiet:where(:not(:disabled):not([aria-disabled="true"])):hover { color: var(--ink); }
 /* Outlined: transparent with a strong hairline. */
 .stage-btn-outline {
   background: transparent;
@@ -2913,13 +2913,13 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   background: rgba(255, 255, 255, 0.18);
   color: var(--ink);
 }
-.stage-btn-ghost.is-on:hover { background: rgba(255, 255, 255, 0.24); }
+.stage-btn-ghost.is-on:where(:not(:disabled):not([aria-disabled="true"])):hover { background: rgba(255, 255, 255, 0.24); }
 /* Destructive tertiary (the detail page's "Not interested"). */
 .stage-btn-danger {
   background: rgba(248, 113, 113, 0.08);
   color: var(--danger-ink);
 }
-.stage-btn-danger:hover { background: rgba(248, 113, 113, 0.16); }
+.stage-btn-danger:where(:not(:disabled):not([aria-disabled="true"])):hover { background: rgba(248, 113, 113, 0.16); }
 /* Destructive primary: the confirm button of a destructive dialog. */
 .stage-btn-destructive {
   background: var(--danger);

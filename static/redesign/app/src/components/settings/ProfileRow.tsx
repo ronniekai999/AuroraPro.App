@@ -7,7 +7,7 @@
 // off, and when the server still refuses (another device got there first)
 // shows that refusal under the row instead of losing it in a toast.
 
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
@@ -462,10 +462,18 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
   // The facts as they are NOW, for Save to read after its wait: whether this
   // device watches as this profile, and whether this control is still on the
   // page. What Save saw when it was pressed can be out of date by then.
+  // Set as the commit lands, not after paint: Save's continuation can run
+  // in between, and must not read the commit before.
   const actingNow = useRef(acting)
-  useEffect(() => { actingNow.current = acting }, [acting])
+  useLayoutEffect(() => { actingNow.current = acting }, [acting])
   const mounted = useRef(true)
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  // The limit this control last wrote, until the row shows it. The reload
+  // after a write can stall, and the row then still shows the old limit
+  // with Save beside it; the next Save reads the new one, and must know it
+  // was written here and not on another device.
+  const lastWrote = useRef<string | null>(null)
+  useLayoutEffect(() => { if (lastWrote.current === stored) lastWrote.current = null }, [stored])
   const dirty = draft !== stored
   const loosens = loosensLimit(stored, draft)
   // Limiting the profile this session acts as takes these controls away
@@ -475,10 +483,11 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
 
   const save = async () => {
     setAsking(false)
+    const writing = draft
     const ok = await run(
-      () => updateProfile(profile.id, { max_age_rating: draft }),
+      () => updateProfile(profile.id, { max_age_rating: writing }).then(() => { lastWrote.current = writing }),
       `The limit for ${name} could not be changed.`,
-      draft === NO_LIMIT ? `${name} has no limit now` : `${name} is limited: ${limitPhrase(draft)}`,
+      writing === NO_LIMIT ? `${name} has no limit now` : `${name} is limited: ${limitPhrase(writing)}`,
     )
     // Refused: back to what the server has.
     if (!ok) setDraft(stored)
@@ -488,6 +497,9 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
   }
   const pressSave = async () => {
     if (!dirty || waiting) return
+    // Read now: the list Save is about to read can reach this row, and
+    // clear the record, before Save's own wait is over.
+    const wroteHere = lastWrote.current
     // Whether this choice loosens the limit is a question about what the
     // server has NOW. Another device may have tightened it since this row
     // was drawn, and judged against the old value a looser limit would go
@@ -520,7 +532,11 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
     if (!now) return
     const nowStored = limitOptionValue(now.max_age_rating)
     if (nowStored !== stored) {
-      setStopped(`The limit for ${name} was changed on another device a moment ago, so nothing was saved. It is now: ${limitPhrase(nowStored)}. Choose again if that is not what you want.`)
+      // This row shows a limit the server no longer has. When the server's
+      // is the one this control wrote, the row is behind its own write.
+      setStopped(nowStored === wroteHere
+        ? `The limit for ${name} was already saved from this device. It is now: ${limitPhrase(nowStored)}. Choose again if that is not what you want.`
+        : `The limit for ${name} was changed on another device a moment ago, so nothing was saved. It is now: ${limitPhrase(nowStored)}. Choose again if that is not what you want.`)
       focusSelect()
       return
     }

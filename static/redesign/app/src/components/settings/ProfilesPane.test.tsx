@@ -420,6 +420,63 @@ describe('managing profiles, from a profile without a limit', () => {
     }
   })
 
+  // The reload after a write can stall. The row then still shows the old
+  // limit with Save beside it, and the next Save finds on the server the
+  // limit this row itself wrote: that is not "another device".
+  it('does not blame another device for the limit this row wrote when its reload stalled', async () => {
+    await open()
+    pick('Kid', 'TV-G')
+    vi.useFakeTimers()
+    try {
+      // Save's own read, then the reload after the write, which never answers.
+      api.listProfiles.mockResolvedValueOnce([parent, kid, sam])
+      api.listProfiles.mockReturnValueOnce(new Promise(() => {}))
+      fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+      await act(async () => {})
+      expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' })
+      await act(async () => { vi.advanceTimersByTime(LIMIT_CHECK_TIMEOUT_MS) })
+      // Behind its own write: the choice still reads as unsaved.
+      const save = rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' })
+      expect(save).toHaveAttribute('aria-disabled', 'false')
+      api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-G' }, sam])
+      fireEvent.click(save)
+      await act(async () => {})
+      await act(async () => {})
+      expect(rowOf('Kid').getByText('The limit for Kid was already saved from this device. It is now: up to G and TV-G. Choose again if that is not what you want.')).toHaveAttribute('role', 'status')
+      expect(rowOf('Kid').queryByText(/another device/)).toBeNull()
+      expect(api.updateProfile).toHaveBeenCalledTimes(1)
+      expect(limitOf('Kid')).toHaveValue('TV-G')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // What this row wrote explains a different limit on the server only until
+  // the row shows it. After that, the same limit coming back is someone
+  // else's doing.
+  it('blames another device when the limit comes back to one this row wrote and has since shown', async () => {
+    await open()
+    pick('Kid', 'TV-G')
+    api.listProfiles.mockResolvedValueOnce([parent, kid, sam])
+    api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-G' }, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
+    await waitFor(() => expect(rowOf('Kid').queryByRole('button', { name: 'Save limit for Kid' })).toBeNull())
+    // Another device sets a looser limit; this row learns of it at its next Save.
+    pick('Kid', 'TV-Y7')
+    api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-14' }, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    await rowOf('Kid').findByText(/changed on another device a moment ago/)
+    await waitFor(() => expect(limitOf('Kid')).toHaveValue('TV-14'))
+    // And then back to the limit this row wrote earlier.
+    pick('Kid', 'TV-Y7')
+    api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-G' }, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    expect(await rowOf('Kid').findByText('The limit for Kid was changed on another device a moment ago, so nothing was saved. It is now: up to G and TV-G. Choose again if that is not what you want.')).toBeInTheDocument()
+    expect(rowOf('Kid').queryByText(/already saved from this device/)).toBeNull()
+    expect(api.updateProfile).toHaveBeenCalledTimes(1)
+  })
+
   // The question's words are about one stored limit. When a reload brings
   // another while it is up, it is withdrawn, not left asking "Loosen …: up
   // to G and TV-G. The limit now is: up to G and TV-G".
