@@ -255,6 +255,41 @@ describe('what leads Tonight', () => {
     expect(await stripLabels()).toEqual(['Pick Alpha, showing now', 'Pick Beta', 'Pick Gamma'])
   })
 
+  // That the wait ran out is one visit's fact. It used to be kept for the
+  // user and profile for as long as the tab lived: signing in again as the
+  // same person found the wait already over, so the hero put up a pick with
+  // Continue Watching still out, and the title to resume then took the hero
+  // over, also from under a viewer already in it.
+  it('waits for the title to resume again after signing out and in, though that wait once ran out', async () => {
+    const page = renderTonight()
+    const release = page.hold('/api/progress/continue')
+    // Not vacuous: the wait runs out, and a pick goes up.
+    await screen.findByRole('button', { name: 'Details of Pick Alpha' }, { timeout: 8000 })
+    release()
+    await screen.findByRole('button', { name: 'Details of Left Unfinished' }, find)
+
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
+    const username = await screen.findByPlaceholderText('Enter username', {}, find)
+    const releaseAgain = page.hold('/api/progress/continue')
+    const since = page.commits.length
+    const picks = page.answered.filter(p => p === '/api/me/hero').length
+    fireEvent.change(username, { target: { value: 'ronnie' } })
+    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    // The picks and the rails have landed again; only Continue Watching is out.
+    await waitFor(() => expect(page.answered.filter(p => p === '/api/me/hero').length).toBeGreaterThan(picks), find)
+    await screen.findAllByText('Only In The Catalog', undefined, find)
+    await new Promise(done => setTimeout(done, 300))
+    expect(hero()).toBeNull()
+    expect(page.commits.slice(since).filter(c => c.heroTitle !== null)).toEqual([])
+
+    releaseAgain()
+    await screen.findByRole('button', { name: 'Details of Left Unfinished' }, find)
+    // The hero opened on the title to resume: no commit showed a pick first.
+    expect(page.commits.slice(since).map(c => c.heroTitle).filter(Boolean).every(t => t === 'Left Unfinished')).toBe(true)
+  })
+
   it('is the first pick when nothing is unfinished, and stops waiting when that request fails', async () => {
     renderTonight({ unfinished: [] })
     await screen.findByRole('button', { name: 'Details of Pick Alpha' }, find)
@@ -297,6 +332,34 @@ describe("the hero's filmstrip", () => {
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.dataset.media).toBe(String(PICK_B.id))
     expect(player()!.dataset.resume).toBe('0')
+  })
+
+  // The strip hands App a place in the slate, and App reads the slate through
+  // a ref. Mirrored in a passive effect, that ref still held the slate of the
+  // commit before when a press landed in the frame the strip was drawn in:
+  // the press put up another pick, or nothing. The observer presses in that
+  // frame every time (its callback runs after the commit's DOM changes and
+  // before the commit's passive effects), where a test that waits for the
+  // strip first only lands there on a slow machine.
+  it('puts up the pick that was pressed, also in the frame the strip is drawn in', async () => {
+    let pressed = false
+    const seen = new MutationObserver(() => {
+      if (pressed) return
+      const beta = document.querySelector<HTMLElement>('[data-hero-picks] button[aria-label="Pick Beta"]')
+      if (!beta) return
+      pressed = true
+      fireEvent.click(beta)
+    })
+    seen.observe(document.body, { childList: true, subtree: true })
+    try {
+      renderTonight()
+      await waitFor(() => expect(pressed).toBe(true), find)
+      await screen.findByRole('button', { name: 'Details of Pick Beta' }, find)
+      expect(heroTitle()).toBe('Pick Beta')
+      expect(await stripLabels()).toEqual(['Pick Alpha', 'Pick Beta, showing now', 'Pick Gamma'])
+    } finally {
+      seen.disconnect()
+    }
   })
 
   // Off the lead, on a pick: the title to resume is one row down, where it

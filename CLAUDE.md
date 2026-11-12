@@ -417,13 +417,26 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   Continue Watching has answered or failed for the user and profile, or four
   seconds have passed (`heroLeadSettled`, `HERO_LEAD_WAIT_MS`; when there is
   no profile to ask for, once the startup load settles): shown earlier it
-  put up a pick and then swapped it for that title. An answer that arrives
-  after the four seconds still takes the hero over, unless the viewer has
-  done something in the hero meanwhile (pointer or focus in it, a pick
-  chosen, the rotation paused); the title is then the first card of
-  Continue Watching. A switch puts the hero back on the lead (`heroOnLead`),
-  so the new profile's Tonight opens on its own title, not on the place in
-  the slate the previous profile had moved to. Only a pick is reported to
+  put up a pick and then swapped it for that title. That the wait ran out
+  is one visit's fact: a sign-out and a profile switch forget it, with the
+  mark that the viewer is in the hero (`forgetHeroLeadWait`, called
+  wherever Continue Watching's own answer is forgotten), so a return to the
+  same user and profile waits again. An answer that arrives after the four
+  seconds takes the hero over only while the hero is still on the entry it
+  opened on and the viewer has done nothing in it (pointer or focus in it,
+  a pick chosen, the rotation paused). Once the rotation has moved on (its
+  first tick is nine seconds after it starts) the title comes up when the
+  rotation wraps round to it, and for a viewer in the hero not at all;
+  either way it is the first card of Continue Watching. A touch or
+  screen-reader viewer is not in the hero until they press something in
+  it, so for them a late answer can change the title between aiming and
+  pressing. The filmstrip hands back a place in the slate, which a press
+  reads through a ref mirrored in a layout effect (`heroSlateRef`): in a
+  passive one, a press in the frame the strip was drawn in read the slate
+  of the commit before and put up another pick, or none. A switch puts the
+  hero back on the lead (`heroOnLead`), so the new profile's Tonight opens
+  on its own title, not on the place in the slate the previous profile had
+  moved to. Only a pick is reported to
   the recommender as seen, at the place the server sent it at: never the
   title to resume, also when it is one of the picks (the server credits
   what is watched afterwards to the exposure), and never the catalog's
@@ -438,7 +451,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   browser's snapshot again, which is every change of user or profile, and
   on sign-out), and holds the titles the server listed; a listed title's
   card can still be drawn from this browser's copy of it. Pinned by
-  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`.
+  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`; of the two calls
+  that forget the wait, only the switch's is pinned alone (after a sign-out
+  the switch's reset runs too, so the test there fails only with both gone).
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The

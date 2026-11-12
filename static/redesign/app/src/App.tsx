@@ -2248,6 +2248,17 @@ export default function App() {
   const heroTouchedForRef = useRef<string | null>(null)
   // Whose hero it is now (the user and profile), for handlers.
   const heroOwnerRef = useRef<string | null>(null)
+  // Both facts are one visit's, forgotten wherever Continue Watching's own
+  // answer is (a sign-out, a profile switch). Kept, a return to the same
+  // user and profile found the wait already over: the hero put up a pick
+  // with Continue Watching still out, and the title to resume then took the
+  // hero over, also from under a viewer already in it. And a mark left from
+  // the earlier visit kept that title out of an untouched hero.
+  const forgetHeroLeadWait = useCallback(() => {
+    leadWaitOverForRef.current = null
+    heroTouchedForRef.current = null
+    setLeadWaitOverFor(null)
+  }, [])
   // Ref mirror for effects that need the CURRENT list without re-running
   // when the CW poll refreshes it (e.g. the detail fetch's season seed).
   //
@@ -3582,6 +3593,7 @@ export default function App() {
     showsRefreshAcRef.current = null
     setContinueItems([])
     setContinueFor(null)
+    forgetHeroLeadWait()
     // The ref too, now: it is what a card's Play reads at click time, and it
     // would otherwise hold the previous profile's records until the next
     // commit's effects.
@@ -3627,7 +3639,7 @@ export default function App() {
     // were admin) before our auth checks fired. Server-side guards
     // prevent data leakage, but the UX reads as a permissions bug.
     navigate('/')
-  }, [navigate, closePlayer])
+  }, [navigate, closePlayer, forgetHeroLeadWait])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party
@@ -5727,12 +5739,13 @@ export default function App() {
     setShowsLoadingMore(false)
     setContinueItems([])
     setContinueFor(null)
+    forgetHeroLeadWait()
     // The ref too, now: it is what a card's Play reads at click time, and it
     // would otherwise hold the previous profile's records until the next
     // commit's effects.
     continueItemsRef.current = []
     if (viewRef.current === 'detail') setSelectedMedia(null)
-  }, [])
+  }, [forgetHeroLeadWait])
   useOnProfileChange(activeProfileId, resetForProfileChange)
   // Whether the startup load had settled before this render; written after
   // the effect above has read it, so on the render that settles it and sets
@@ -5803,7 +5816,11 @@ export default function App() {
   const tonightHero = heroEntry ? heroEntry.media : homeHero
   const heroSlateRef = useRef(heroSlate)
   const heroSlateIndexRef = useRef(heroSlateIndex)
-  useEffect(() => { heroSlateRef.current = heroSlate; heroSlateIndexRef.current = heroSlateIndex }, [heroSlate, heroSlateIndex])
+  // useLayoutEffect, not useEffect: the filmstrip hands back a place in the
+  // slate it was drawn from, and a press reads the slate here. Mirrored in a
+  // passive effect, a press in the frame the strip was drawn in read the
+  // slate of the commit before: another pick went up, or none.
+  useLayoutEffect(() => { heroSlateRef.current = heroSlate; heroSlateIndexRef.current = heroSlateIndex }, [heroSlate, heroSlateIndex])
   // Put one of the slate's entries up. The lead is a flag; a pick is its
   // place in the recommender's pool, which is also what its exposure is
   // reported under.

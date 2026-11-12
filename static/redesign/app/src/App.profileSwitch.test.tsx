@@ -95,7 +95,8 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  `hold(key)` keeps one answer back until the returned release is called;
  *  a browse page's key is `<type>-p<page>-<bound profile>`, a search's
  *  `search-<bound profile>`, Home's own library count's
- *  `count-<bound profile>`, the signed-in user's (`/api/auth/me`) `me`. An
+ *  `count-<bound profile>`, Continue Watching's `continue-<bound profile>`,
+ *  the signed-in user's (`/api/auth/me`) `me`. An
  *  aborted request rejects as fetch's does, once its answer would have
  *  arrived.
  *
@@ -137,8 +138,9 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     if (p === '/api/profiles') profileLists++
     const held = holds.get(p === '/api/auth/me' ? 'me'
       : p === '/api/media/search' ? `search-${asked}`
-        : p !== '/api/media' ? ''
-          : isCount ? `count-${asked}` : `${url.searchParams.get('type')}-p${page}-${asked}`)
+        : p === '/api/progress/continue' ? `continue-${asked}`
+          : p !== '/api/media' ? ''
+            : isCount ? `count-${asked}` : `${url.searchParams.get('type')}-p${page}-${asked}`)
     // The Kid's answers take a moment, as a server's do. Answered at once, they
     // land in the same render as the switch's resets and would hide a reset
     // that cleared nothing: the previous profile's titles would never be
@@ -382,6 +384,44 @@ describe('a profile switch never commits the new name over the previous profileâ
     expect(kid(commits).filter(c => c.heroTitle !== null && c.heroTitle !== 'Kidonly Resume')).toEqual([])
     expect(kidOverParent(commits)).toBe(0)
   })
+
+  // The hero waits for Continue Watching for four seconds at most, and that
+  // the wait ran out is one visit's fact. It used to be kept for the user
+  // and profile for as long as the tab lived: after a switch away and back
+  // the wait was already over, so the hero put up a pick with Continue
+  // Watching still out, and the title to resume then took the hero over,
+  // also from under a viewer already in it.
+  it('on Home: the hero waits for the title to resume again after a switch away and back, though that wait once ran out', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const release = server.hold('continue-1')
+    const commits = renderApp('/')
+    // Not vacuous: the Parent's wait runs out, and a pick goes up.
+    await screen.findByRole('button', { name: 'Details of Parentonly Hero' }, { timeout: 8000 })
+    release()
+    await parentHeroUp()
+
+    switchToKid()
+    await kidHeroUp()
+    // Back to the Parent, whose Continue Watching is out again.
+    const again = server.hold('continue-1')
+    const since = commits.length
+    const pools = server.heroPools.filter(asked => asked === 1).length
+    pickInTopBar(/Parent/)
+    // The Parent's picks and rails have landed; only Continue Watching is out.
+    await waitFor(() => expect(server.heroPools.filter(asked => asked === 1).length).toBeGreaterThan(pools), { timeout: 5000 })
+    await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    const back = () => commits.slice(since).filter(c => c.label === 'Parent')
+    expect(back().length).toBeGreaterThan(0)
+    expect(back().filter(c => c.heroTitle !== null)).toEqual([])
+
+    again()
+    await parentHeroUp()
+    // The hero opened on the title to resume: no commit showed a pick first.
+    expect(back().filter(c => c.heroTitle !== null && c.heroTitle !== 'Parentonly Resume')).toEqual([])
+    // Longer than the default: the first wait alone is four seconds.
+  }, 20_000)
 
   // A profile with a limit has its own list as a rail on Tonight. This
   // browser keeps a snapshot of each profile's list, and the Kid's can hold
