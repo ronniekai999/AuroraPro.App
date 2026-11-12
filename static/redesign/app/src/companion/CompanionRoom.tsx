@@ -2,7 +2,8 @@
 // voice, beside a film that plays on another screen.
 //
 //   - The party's name, its code, how many are here, and Leave.
-//   - What is playing, and where it was when the phone last heard.
+//   - What is playing, and where it was when the phone last heard; its
+//     poster's colour is washed down the top of the screen.
 //   - Who is here; the ring round a person means they are speaking.
 //   - The chat, a line a message.
 //   - The nine reactions, voice, and the message field.
@@ -10,12 +11,13 @@
 // It only shows what the companion's connection holds and calls its actions:
 // it owns no socket.
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ChatMessageEvent, PartyParticipant } from '@/lib/party'
 import type { VoiceState } from '@/lib/voice'
 import { Icon } from '@/components/Icon'
 import { PersonDisc } from '@/components/PersonDisc'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
+import { ambientFor } from '@/lib/ambient'
 import { personColor } from '@/lib/personColor'
 import type { CompanionState } from '@/hooks/useCompanion'
 import { CompanionPoster } from './JoinScreen'
@@ -48,6 +50,19 @@ export function CompanionRoom({
   const [micError, setMicError] = useState<string | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // The colour the poster of what is playing casts on the screen behind it
+  // (lib/ambient: sampled from the picture already drawn, and clamped dark),
+  // kept with the poster it came from: it is shown only while that is still
+  // the poster on screen.
+  const poster = state.mediaPoster
+  const [wash, setWash] = useState<{ poster: string | undefined; color: string | null } | null>(null)
+  const onArt = useCallback((img: HTMLImageElement) => {
+    void ambientFor(img).then(color => {
+      setWash(was => (was && was.poster === poster && was.color === color ? was : { poster, color }))
+    })
+  }, [poster])
+  const ambient = wash && wash.poster === poster ? wash.color : null
 
   // Follow the newest message, but only for someone already near the end:
   // a person reading back is not pulled down. A chat that has just filled
@@ -117,8 +132,14 @@ export function CompanionRoom({
   const refused = state.connected && state.error ? state.error : null
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-none items-center gap-2 pl-4 pr-2 pt-3">
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      style={{ '--ambient': ambient ?? 'transparent' } as CSSProperties}
+    >
+      {/* Behind everything else on the screen: the header and the page
+          below are positioned, and come after it. */}
+      <div className="companion-wash" aria-hidden="true" />
+      <header className="relative flex flex-none items-center gap-2 pl-4 pr-2 pt-3">
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-display text-[26px] font-bold leading-[1.15] tracking-[-0.015em] text-ink">
             {state.partyName || state.mediaTitle || 'Watch party'}
@@ -138,10 +159,10 @@ export function CompanionRoom({
         </button>
       </header>
 
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main className="relative flex min-h-0 flex-1 flex-col">
         {(state.mediaTitle || state.mediaPoster) && (
           <section aria-label="Now playing" className="companion-tall-only mx-4 mt-3 flex-none items-center gap-3 rounded-control bg-surface-raised p-3">
-            <CompanionPoster poster={state.mediaPoster} className="h-[60px] w-10 rounded-chip" />
+            <CompanionPoster poster={state.mediaPoster} className="h-[60px] w-10 rounded-chip" onArt={onArt} />
             <div className="min-w-0 flex-1">
               <p className="truncate text-[15px] font-semibold text-ink">{state.mediaTitle || 'Now playing'}</p>
               {/* The room's connection is told the position when the phone

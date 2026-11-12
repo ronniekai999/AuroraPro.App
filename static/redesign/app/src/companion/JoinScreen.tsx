@@ -188,13 +188,29 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
 }
 
 // The title's poster, small, on the join and room screens. Where there is
-// none, a plain tile with a film mark.
-export function CompanionPoster({ poster, className = '' }: { poster?: string; className?: string }) {
+// none, a plain tile with a film mark. `onArt` is told the picture once it
+// has loaded, for a caller that takes its colour from it.
+export function CompanionPoster({ poster, className = '', onArt }: {
+  poster?: string
+  className?: string
+  onArt?: (img: HTMLImageElement) => void
+}) {
   const src = poster ? posterURL(poster, 'w185') : ''
   return (
     <div className={`relative grid flex-none place-items-center overflow-hidden bg-surface-raised-2 ${className}`} aria-hidden="true">
       {src
-        ? <img src={src} alt="" className="h-full w-full object-cover" loading="lazy" />
+        ? (
+          <img
+            src={src}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+            // Both: a picture from the cache is complete before a load
+            // handler can be attached.
+            ref={el => { if (el?.complete) onArt?.(el) }}
+            onLoad={e => onArt?.(e.currentTarget)}
+          />
+        )
         : <Icon name="film" size={16} className="text-ink-3" />}
     </div>
   )

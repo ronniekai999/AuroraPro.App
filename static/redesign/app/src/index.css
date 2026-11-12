@@ -3587,6 +3587,17 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   width: 48px;
   padding: 0;
 }
+/* The companion's room: the colour of what is playing, washed down from the
+   top of the screen. `--ambient` is set on the room once the poster has
+   been sampled (lib/ambient clamps it dark and low in saturation), and is
+   transparent until then, so this paints nothing rather than a guess. */
+.companion-wash {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 320px;
+  pointer-events: none;
+  background: radial-gradient(420px 320px at 50% 0px, var(--ambient), transparent 100%);
+}
 /* What the companion's room shows only when the window is tall enough for
    it: what is playing and who is here. On a phone held on its side they
    would leave the chat no room, and the message field would fall off the

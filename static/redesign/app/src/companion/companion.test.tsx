@@ -22,6 +22,9 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('@/lib/api', async orig => ({ ...(await orig<typeof import('@/lib/api')>()), ...api }))
 
+const ambient = vi.hoisted(() => ({ ambientFor: vi.fn() }))
+vi.mock('@/lib/ambient', () => ambient)
+
 const companion = vi.hoisted(() => ({ current: null as unknown }))
 vi.mock('@/hooks/useCompanion', () => ({ useCompanion: () => companion.current }))
 
@@ -87,6 +90,7 @@ beforeEach(() => {
   api.getSetupStatus.mockReset().mockResolvedValue({ setup_complete: true, has_users: true, oauth_google_enabled: true })
   api.getStoredUser.mockReset().mockReturnValue(null)
   api.login.mockReset()
+  ambient.ambientFor.mockReset().mockResolvedValue(null)
 })
 afterEach(() => { vi.useRealTimers() })
 
@@ -216,6 +220,39 @@ describe('the companion’s room', () => {
     expect(within(playing).getByText('41:07 · playing at the last update')).toBeInTheDocument()
     rerender(<CompanionRoom {...props} state={{ ...ROOM, isPlaying: false, currentTimeMs: 8_460_000 }} />)
     expect(within(screen.getByRole('region', { name: 'Now playing' })).getByText('2:21:00 · paused at the last update')).toBeInTheDocument()
+  })
+
+  // The colour comes from the poster drawn in the now-playing card, and is
+  // that poster's only: the sample answers later, and by then the party may
+  // be on another title.
+  it('washes the screen with the colour of the poster on screen, and with no other poster\'s', async () => {
+    const answers: ((color: string | null) => void)[] = []
+    ambient.ambientFor.mockImplementation(() => new Promise(resolve => { answers.push(resolve) }))
+    const { rerender, props, container } = room()
+    const screenRoot = container.firstElementChild as HTMLElement
+    const art = () => screenRoot.querySelector('section[aria-label="Now playing"] img') as HTMLImageElement
+    expect(screenRoot.querySelector('.companion-wash')).not.toBeNull()
+    expect(screenRoot.style.getPropertyValue('--ambient')).toBe('transparent')
+    fireEvent.load(art())
+    expect(ambient.ambientFor).toHaveBeenCalledWith(art())
+    await act(async () => { answers.forEach(a => a('rgba(29, 65, 72, 0.6)')) })
+    expect(screenRoot.style.getPropertyValue('--ambient')).toBe('rgba(29, 65, 72, 0.6)')
+
+    // The party moves to another title. Its poster has not answered yet,
+    // and the first title's colour is not kept for it.
+    const before = answers.length
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, mediaPoster: '/p9.jpg' }} />)
+    expect(screenRoot.style.getPropertyValue('--ambient')).toBe('transparent')
+    fireEvent.load(art())
+    await act(async () => { answers.slice(before).forEach(a => a('rgba(72, 40, 29, 0.6)')) })
+    expect(screenRoot.style.getPropertyValue('--ambient')).toBe('rgba(72, 40, 29, 0.6)')
+
+    // A poster with no colour worth showing leaves the screen plain.
+    const again = answers.length
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, mediaPoster: '/grey.jpg' }} />)
+    fireEvent.load(art())
+    await act(async () => { answers.slice(again).forEach(a => a(null)) })
+    expect(screenRoot.style.getPropertyValue('--ambient')).toBe('transparent')
   })
 
   it('lists who is here, the viewer as "You", with what is known of how each is here', () => {
