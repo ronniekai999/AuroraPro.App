@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { APIError, apiFetch, type Profile } from '@/lib/api'
+import { APIError, apiFetch } from '@/lib/api'
 import { refusalMessage, refusalReason, waitPhrase } from '@/lib/profileRefusal'
-import { PageHeader } from '@/components/PageHeader'
+import { Icon } from '@/components/Icon'
 
 interface Props {
   username: string
   initialCode: string
-  /** The profile this session acts as, as the server has bound it; null
-   *  when that is not known (never a remembered choice). */
-  actingProfile?: Profile | null
-  /** The account's profiles, for whether any is without a PIN. */
-  profiles?: readonly Profile[]
+  /** Whether the account has a profile without a PIN: true or false once
+   *  its profiles are known, null until then. */
+  someProfileUnlocked?: boolean | null
 }
 
 type Phase = 'lookup' | 'approve'
@@ -60,20 +58,26 @@ function pairingRefusal(e: unknown, phase: Phase): string {
   }
 }
 
-/** Which profile the TV starts on, where this page can be sure of it. The
- *  server gives the TV the approver's own profile when that has no PIN. When
- *  it has one, the TV gets a profile without a PIN, if the account has any
- *  (which one is the server's choice). When every profile has a PIN the
- *  server either refuses or, on an account with no password, picks one past
- *  its PIN, and the page cannot tell which: it says nothing. */
-function startsOn(acting: Profile | null | undefined, profiles: readonly Profile[] | undefined): string | null {
-  if (!acting) return null
-  if (!acting.has_pin) return `The TV will start on ${acting.name}, the profile you are using here.`
-  if (profiles?.some(p => p.id !== acting.id && !p.has_pin)) return `The TV will start on a profile without a PIN, not on ${acting.name}.`
-  return null
+/** What happens on the TV after an approval. The TV does not start on a
+ *  profile: it opens its own "who is watching" list, whichever profile the
+ *  server bound it to. That binding only decides which profile it may enter
+ *  without a PIN, and when the account has a profile without one, that is
+ *  the kind it binds: every profile with a PIN still asks for it. When
+ *  every profile has a PIN the server either refuses, or on an account with
+ *  no password lets the TV into one of them past its PIN, and this page
+ *  cannot tell which, so it says nothing of PINs; nor while the profiles
+ *  are not known. */
+const afterApproval = (someProfileUnlocked: boolean | null | undefined) =>
+  `After you approve, go back to the TV and choose who is watching.${someProfileUnlocked ? ' Profiles with a PIN still ask for it there.' : ''}`
+
+/** A code as the TV shows it, four and four, whatever dashes it was typed
+ *  with. */
+function asShown(code: string): string {
+  const bare = code.replaceAll('-', '')
+  return bare.length === 8 ? `${bare.slice(0, 4)}-${bare.slice(4)}` : code
 }
 
-export default function DeviceApprovalView({ username, initialCode, actingProfile, profiles }: Props) {
+export default function DeviceApprovalView({ username, initialCode, someProfileUnlocked }: Props) {
   const [code, setCode] = useState(initialCode)
   const [device, setDevice] = useState<{ device_name: string; user_id: number; username: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -87,6 +91,9 @@ export default function DeviceApprovalView({ username, initialCode, actingProfil
   // removed in another tab), so it is forgotten at the next TV found; at
   // worst that costs one more refusal.
   const [locked, setLocked] = useState<string | null>(null)
+  // "Not my TV" was pressed: said in the page's status line, in sight, since
+  // the TV's card has just gone and nothing else shows that it was heard.
+  const [putAside, setPutAside] = useState(false)
   const request = useRef<AbortController | null>(null)
   useEffect(() => () => request.current?.abort(), [])
   // As the server reads a code: dashes dropped.
@@ -117,6 +124,7 @@ export default function DeviceApprovalView({ username, initialCode, actingProfil
     setBusy(true)
     setError(null)
     setDevice(null)
+    setPutAside(false)
     try {
       const result = await apiFetch<{ device_name: string; user_id: number; username: string }>(`/api/auth/device/preview?code=${encodeURIComponent(code.trim())}`, {
         signal: controller.signal,
@@ -163,12 +171,32 @@ export default function DeviceApprovalView({ username, initialCode, actingProfil
     }
   }
 
-  const profileLine = startsOn(actingProfile, profiles)
+  // "Not my TV": the found TV is put aside. Nothing is sent, since nothing
+  // was approved and the server has no route to refuse a TV with; its code
+  // runs out by itself.
+  function notMine() {
+    if (busy) return
+    setDevice(null)
+    setLocked(null)
+    setError(null)
+    setPutAside(true)
+    focusNext.current = 'field'
+  }
+
   const invalid = error?.aboutCode === true
+  const offered = device !== null && !locked
 
   return (
-    <section className="max-w-xl">
-      <PageHeader eyebrow="AuroraPro on TV" title="Connect your TV" sub={`Signing in as ${device?.username ?? username}`} />
+    // One column in the middle of the page's free width and height: what
+    // the window has left under the top bar, above the phone's tab bar and
+    // inside the page's own padding (a little more is left on a phone, where
+    // the page keeps room for the bug report button too).
+    <section className="mx-auto flex min-h-[calc(100dvh-var(--chrome-h,var(--topnav-h))-var(--tabbar-space)-9.5rem)] w-full max-w-[520px] flex-col justify-center gap-7 md:min-h-[calc(100dvh-var(--chrome-h,var(--topnav-h))-var(--tabbar-space)-6.125rem)]">
+      <div>
+        <h1 className="font-display text-[clamp(2.25rem,11vw,3.5rem)] font-extrabold leading-none tracking-[-0.02em] text-ink">Connect your TV</h1>
+        <p className="mt-2 text-[17px] leading-snug text-ink-2">Enter the code shown on the TV. It signs the TV in to this account without typing a password on a remote.</p>
+        <p className="mt-1.5 text-[14px] leading-snug text-ink-2">Signing in as {device?.username ?? username}</p>
+      </div>
       {approved ? (
         // Takes the focus the Approve button had: the button goes with the
         // form it was in.
@@ -177,45 +205,72 @@ export default function DeviceApprovalView({ username, initialCode, actingProfil
         </p>
       ) : (
         <>
-          <form onSubmit={lookup}>
-            <label htmlFor="device-code" className="block text-[15px] font-semibold text-ink">Enter the code shown on your TV</label>
+          <form onSubmit={lookup} className="flex flex-col">
+            <label htmlFor="device-code" className="text-[13px] font-semibold text-ink-2">Code from the TV</label>
             {/* Read-only, not disabled, while a request is out: a disabled
                 field or button drops the focus it holds. Spaces go as they
                 are typed or pasted: the server takes a code with its ends
                 trimmed, and a space inside one is never part of it. */}
             <input ref={fieldRef} id="device-code" name="device-code" value={code} readOnly={busy}
-              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null) }}
+              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null); setPutAside(false) }}
               autoComplete="off" autoCapitalize="characters" spellCheck={false} placeholder="ABCD-1234"
               aria-invalid={invalid}
               aria-describedby={invalid ? 'device-code-hint device-error' : 'device-code-hint'}
-              className="mt-2 w-full font-mono tracking-[0.2em]" />
+              className="device-code-field mt-1.5 w-full" />
             <p id="device-code-hint" className="mt-2 text-[13px] leading-snug text-ink-2">8 letters and numbers, as on the TV. The dash is optional.</p>
+            {/* The page's one main action until a TV is found; a small
+                second one after that, when approving is the main action. It
+                stays, and keeps the focus it had: Enter looks up again and
+                never approves. */}
             <button ref={findRef} type="submit" disabled={!codeComplete} aria-disabled={busy}
-              className={`stage-btn mt-4 ${device ? 'stage-btn-ghost' : 'stage-btn-primary'}`}>{busy && !device ? 'Checking…' : 'Find TV'}</button>
+              className={device ? 'stage-btn stage-btn-ghost mt-4 self-start' : 'stage-btn stage-btn-primary stage-btn-tall mt-5 w-full'}>{busy && !device ? 'Checking…' : 'Find TV'}</button>
           </form>
-          <p role="status" className="sr-only">{device && !locked ? `Found ${device.device_name}. Check its code, then approve it below.` : ''}</p>
+          <p role="status" className={putAside ? 'text-[14px] leading-snug text-ink-2' : 'sr-only'}>
+            {putAside ? 'Nothing was approved. That TV has not been signed in.'
+              : offered ? `Found ${device.device_name}. Check its code, then approve it below.` : ''}
+          </p>
           {device && (
-            <div className="mt-6 rounded-control bg-surface-raised p-5">
-              {/* The name is whatever the device called itself: it can be
-                  one long unbroken word. */}
-              <p className="text-[17px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">{device.device_name} wants to sign in to your AuroraPro account.</p>
+            <div className="rounded-control bg-surface-raised p-4">
+              <div className="flex items-start gap-3">
+                <Icon name="tv" size={22} className="mt-0.5 flex-none text-ink-2" />
+                {/* The name is whatever the device called itself: it can be
+                    one long unbroken word. */}
+                <p className="min-w-0 [overflow-wrap:anywhere]">
+                  <span className="block text-[15px] font-semibold leading-snug text-ink">{device.device_name}</span>{' '}
+                  <span className="block text-[13px] leading-snug text-ink-2">wants to sign in to your AuroraPro account.</span>
+                </p>
+              </div>
               {locked ? (
                 // In Approve's place, for as long as this TV is shown: the
                 // card must not sit there with no button and no reason. It
                 // takes the focus Approve had; it is not a live region, so
                 // it is read once, by that.
-                <p ref={lockedRef} tabIndex={-1} className="mt-3 rounded-control text-[14px] leading-snug text-danger-ink">{locked}</p>
+                <p ref={lockedRef} tabIndex={-1} className="mt-3 rounded-chip border-t border-line pt-3 text-[14px] leading-snug text-danger-ink">{locked}</p>
               ) : (
-                <>
-                  <p className="mt-2 text-[14px] leading-snug text-ink-2">Approve only if you started sign-in on this TV and its code matches <strong className="whitespace-nowrap font-mono font-semibold tracking-[0.1em] text-ink">{code}</strong>.</p>
-                  {profileLine && <p className="mt-2 text-[14px] leading-snug text-ink">{profileLine}</p>}
-                  <button type="button" onClick={() => void approve()} aria-disabled={busy}
-                    className="stage-btn stage-btn-primary stage-btn-wrap mt-4">{busy ? 'Approving…' : `Approve TV for ${device.username}`}</button>
-                </>
+                <p className="mt-3 border-t border-line pt-3 text-[13px] leading-snug text-ink-2">{afterApproval(someProfileUnlocked)}</p>
               )}
             </div>
           )}
-          <p id="device-error" role="alert" className={error ? 'mt-4 text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error?.text ?? ''}</p>
+          {offered && (
+            <>
+              <p className="flex gap-2.5 text-[14px] leading-snug text-ink">
+                <Icon name="alertTriangle" size={18} className="mt-0.5 flex-none text-warn" />
+                {/* The code as the TV shows it, on one line: typed with more
+                    dashes it is the same code, and would not fit. */}
+                <span>Approve only if you started sign-in on this TV and its code matches <strong className="whitespace-nowrap font-mono font-semibold tracking-[0.1em] text-ink">{asShown(code)}</strong>.</span>
+              </p>
+              {/* Side by side, one part to two; one over the other on the
+                  narrowest phones, where side by side each label broke in
+                  two. In the order they are read either way. */}
+              <div className="flex flex-col gap-3 min-[360px]:flex-row">
+                <button type="button" onClick={notMine} aria-disabled={busy}
+                  className="stage-btn stage-btn-ghost stage-btn-tall stage-btn-wrap flex-1">Not my TV</button>
+                <button type="button" onClick={() => void approve()} aria-disabled={busy}
+                  className="stage-btn stage-btn-primary stage-btn-tall stage-btn-wrap flex-[2]">{busy ? 'Approving…' : `Approve TV for ${device.username}`}</button>
+              </div>
+            </>
+          )}
+          <p id="device-error" role="alert" className={error ? 'text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error?.text ?? ''}</p>
         </>
       )}
     </section>

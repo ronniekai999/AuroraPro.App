@@ -6846,11 +6846,9 @@ export default function App() {
               key={location.key}
               username={user.username}
               initialCode={new URLSearchParams(location.search).get('code') ?? ''}
-              // The profile the server has bound this session to, for the
-              // line that says which profile the TV will start on; none
-              // while a switch is under way.
-              actingProfile={profileSwitchPending ? null : profiles.find(p => p.id === activeProfileId) ?? null}
-              profiles={profiles}
+              // For the sentence that says locked profiles still ask for
+              // their PIN on the TV: unknown until the profiles are loaded.
+              someProfileUnlocked={profilesLoaded ? profiles.some(p => !p.has_pin) : null}
             />
           )}
           {view === 'search' && (

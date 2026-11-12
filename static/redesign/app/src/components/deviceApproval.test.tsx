@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import DeviceApprovalView from './DeviceApprovalView'
-import { APIError, apiFetch, type Profile } from '@/lib/api'
+import { APIError, apiFetch } from '@/lib/api'
 
 // The real module but for the request itself: the page tells a refusal by
 // the error type the real one throws.
@@ -16,8 +16,10 @@ const refused = (status: number, message: string, reason?: string, retryAfterSec
 const tv = { device_name: 'Living room TV', user_id: 7, username: 'alice' }
 const LOCKED = 'Every profile on this account has a PIN, so a TV cannot be approved from here. Sign in on the TV with the account password instead.'
 const lockedRefusal = () => refused(409, 'every profile on this account has a PIN; sign in on the device with the account password instead', 'profile_locked')
-const profile = (id: number, name: string, extra: Partial<Profile> = {}): Profile => ({ id, user_id: 7, name, is_default: id === 1, created_at: '', updated_at: '', ...extra })
-const field = () => screen.getByLabelText('Enter the code shown on your TV')
+// The found TV's card: its name as the title, and what it is asking for.
+const card = () => screen.getByText('wants to sign in to your AuroraPro account.').closest('div')!.parentElement as HTMLElement
+const AFTER = 'After you approve, go back to the TV and choose who is watching.'
+const field = () => screen.getByLabelText('Code from the TV')
 const alertText = () => screen.getByRole('alert').textContent
 
 describe('TV device approval', () => {
@@ -29,7 +31,8 @@ describe('TV device approval', () => {
     expect(screen.getByText('Signing in as alice')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve TV for alice' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    expect(await screen.findByText('Living room TV wants to sign in to your AuroraPro account.')).toBeInTheDocument()
+    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    expect(card()).toHaveTextContent('Living room TV wants to sign in to your AuroraPro account.')
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0][0]).toBe('/api/auth/device/preview?code=ABCD-1234')
     await user.click(screen.getByRole('button', { name: 'Approve TV for alice' }))
@@ -44,7 +47,7 @@ describe('TV device approval', () => {
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
     await screen.findByRole('button', { name: 'Approve TV for alice' })
-    await user.clear(screen.getByLabelText('Enter the code shown on your TV'))
+    await user.clear(screen.getByLabelText('Code from the TV'))
     expect(screen.queryByRole('button', { name: 'Approve TV for alice' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Find TV' })).toBeDisabled()
   })
@@ -172,7 +175,10 @@ describe('TV device approval', () => {
     expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
     // In the card, with the TV it is about; read once, by taking the focus,
     // and not a second time by a live region.
-    expect(reason.parentElement).toHaveTextContent('Living room TV wants to sign in to your AuroraPro account.')
+    expect(reason.parentElement).toBe(card())
+    expect(card()).toHaveTextContent('Living room TV wants to sign in to your AuroraPro account.')
+    expect(card()).not.toHaveTextContent(AFTER)
+    expect(screen.queryByRole('button', { name: 'Not my TV' })).toBeNull()
     await waitFor(() => expect(reason).toHaveFocus())
     expect(reason).not.toHaveAttribute('role')
     expect(alertText()).toBe('')
@@ -240,45 +246,81 @@ describe('TV device approval', () => {
     expect(field()).not.toHaveAttribute('aria-invalid', 'true')
   })
 
-  // The server gives the TV the approver's own profile when that has no
-  // PIN. A parent approving from their own profile hands a child's TV the
-  // profile without a limit, so the page says which it will be, where it
-  // can be sure.
-  it('says which profile the TV will start on when the profile in use here has no PIN', async () => {
-    const user = userEvent.setup()
-    fetch.mockResolvedValue(tv)
-    const parent = profile(1, 'Parent')
-    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" actingProfile={parent} profiles={[parent, profile(2, 'Kid', { has_pin: true })]} />)
-    expect(screen.queryByText(/The TV will start on/)).toBeNull()
-    await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
-    expect(screen.getByText('The TV will start on Parent, the profile you are using here.')).toBeInTheDocument()
-  })
-
-  it('says the TV will not start on the profile in use here when that has a PIN and another has none', async () => {
-    const user = userEvent.setup()
-    fetch.mockResolvedValue(tv)
-    const parent = profile(1, 'Parent', { has_pin: true })
-    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" actingProfile={parent} profiles={[parent, profile(2, 'Kid'), profile(3, 'Sam', { has_pin: true })]} />)
-    await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
-    expect(screen.getByText('The TV will start on a profile without a PIN, not on Parent.')).toBeInTheDocument()
-  })
-
-  // Every profile locked: the server refuses, or on an account with no
-  // password picks a profile past its PIN, and the page cannot tell which.
-  // Nor can it say anything of a profile it does not know.
+  // The TV does not start on a profile: it opens its own "who is watching"
+  // list. The page says that, and says locked profiles still ask for their
+  // PIN there only when it knows the account has a profile without one
+  // (then that is the kind the server lets the TV into unasked).
   it.each([
-    ['every profile has a PIN', profile(1, 'Parent', { has_pin: true }), [profile(1, 'Parent', { has_pin: true }), profile(2, 'Kid', { has_pin: true })]],
-    ['the profile in use here is not known', null, [profile(1, 'Parent'), profile(2, 'Kid')]],
-    ['nothing was passed', undefined, undefined],
-  ] as const)('says nothing about the TV\'s profile when %s', async (_, acting, all) => {
+    ['the account has a profile without a PIN', true, `${AFTER} Profiles with a PIN still ask for it there.`],
+    ['every profile has a PIN', false, AFTER],
+    ['the profiles are not known yet', null, AFTER],
+    ['nothing is said of the profiles', undefined, AFTER],
+  ] as const)('says what happens on the TV after an approval when %s', async (_, someProfileUnlocked, words) => {
     const user = userEvent.setup()
     fetch.mockResolvedValue(tv)
-    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" actingProfile={acting} profiles={all} />)
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" someProfileUnlocked={someProfileUnlocked} />)
+    expect(screen.queryByText(/After you approve/)).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
     await screen.findByRole('button', { name: 'Approve TV for alice' })
-    expect(screen.queryByText(/The TV will start on/)).toBeNull()
+    expect(screen.getByText(/After you approve/).textContent).toBe(words)
+    expect(screen.getByText(/After you approve/).closest('div')).toBe(card())
+    // No profile is named anywhere on the page.
+    expect(document.body.textContent).not.toMatch(/will start on/)
+  })
+
+  // There is no route that refuses a TV: "Not my TV" sends nothing. It puts
+  // the found TV aside, says nothing was approved, and gives the focus to
+  // the code field.
+  it('puts a TV aside with "Not my TV": no request, the words said, the focus on the code', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValue(tv)
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const notMine = screen.getByRole('button', { name: 'Not my TV' })
+    notMine.focus()
+    await user.keyboard('{Enter}')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
+    expect(screen.queryByText('wants to sign in to your AuroraPro account.')).toBeNull()
+    const said = screen.getByText('Nothing was approved. That TV has not been signed in.')
+    expect(said).toHaveAttribute('role', 'status')
+    expect(said.className).not.toMatch(/sr-only/)
+    await waitFor(() => expect(field()).toHaveFocus())
+    expect(field()).toHaveValue('ABCD-1234')
+    expect(alertText()).toBe('')
+    // It is one status line: looking the code up again replaces the words.
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    expect(screen.queryByText(/Nothing was approved/)).toBeNull()
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not put a TV aside while its approval is being sent', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockImplementationOnce(() => new Promise(() => {}))
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve TV for alice' }))
+    const notMine = screen.getByRole('button', { name: 'Not my TV' })
+    expect(notMine).toHaveAttribute('aria-disabled', 'true')
+    await user.click(notMine)
+    expect(screen.getByRole('button', { name: 'Approving…' })).toBeInTheDocument()
+    expect(screen.queryByText(/Nothing was approved/)).toBeNull()
+  })
+
+  // Typed with more dashes it is the same code, as the server reads it. The
+  // page shows it the way the TV does, which also fits a narrow phone.
+  it('shows the code to check as the TV shows it, whatever dashes it was typed with', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValue(tv)
+    render(<DeviceApprovalView username="alice" initialCode="" />)
+    await user.type(field(), 'ab-cd--12-34----')
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    expect(screen.getByText(/Approve only if you started sign-in on this TV/)).toHaveTextContent('its code matches ABCD-1234.')
   })
 
   it('handles expiry and cancels lookup when leaving the page', async () => {
