@@ -53,13 +53,7 @@ const CSS = 'src/index.css'
 const REAL_INDICATOR = /focus(-visible)?:(ring(-|\b)|shadow-|outline-(?!none))/
 const INPUT_FAMILY = new Set(['input', 'textarea', 'select'])
 
-const ALLOWED = new Map([
-  ['src/companion/JoinScreen.tsx:176',
-    'Invisible (opacity-0) overlay input for OTP-style entry. NOTE: the box ' +
-    'treatment it delegates to is gated on `isCursor && !filled`, so once all ' +
-    'six characters are entered NOTHING indicates focus — tracked as a real ' +
-    'defect, fixed separately; this entry documents the delegation, not that it works.'],
-])
+const ALLOWED = new Map([])
 
 let problems = 0
 

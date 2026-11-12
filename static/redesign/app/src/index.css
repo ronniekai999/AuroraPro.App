@@ -2348,13 +2348,35 @@ input.device-code-field:not([type="range"]) {
   font-weight: 700;
   letter-spacing: 0.14em;
 }
-/* No TV is waiting with the code as typed: the field says so itself, as
-   the PIN field above does and by the same two rules (the border, then the
-   focus ring moved outside it so that both show). */
-input.device-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]) {
+/* The phone companion's party code: six characters, the page's main
+   object, centred. And the companion's other fields at 16px, so a phone does
+   not zoom the page when one takes the focus (the global size is 15px). */
+input.party-code-field:not([type="range"]) {
+  height: 76px;
+  padding: 0 16px;
+  border-width: 2px;
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 10vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  /* The tracking adds a gap after the last character too; the indent puts
+     the six back in the middle. */
+  text-indent: 0.2em;
+  text-align: center;
+}
+input.companion-field:not([type="range"]) {
+  font-size: 16px;
+}
+/* No TV is waiting with the code as typed, or the party's code was refused:
+   the field says so itself, as the PIN field above does and by the same two
+   rules (the border, then the focus ring moved outside it so that both
+   show). */
+input.device-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]),
+input.party-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]) {
   border-color: var(--danger-ink);
 }
-input.device-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]):focus {
+input.device-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]):focus,
+input.party-code-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]):focus {
   box-shadow: 0 0 0 2px var(--surface-page), 0 0 0 4px #ffffff;
 }
 /* The refused state owns the border while the field has focus too: a
@@ -3548,6 +3570,30 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   padding-block: 10px;
   justify-content: center;
   text-align: center;
+}
+/* The phone companion's sizes: the one action of its join screen (56px), and
+   the controls that share a row in its room, a thumb's 48px, of which
+   `-square` is the icon button. */
+.stage-btn-join {
+  height: 56px;
+  font-size: 17px;
+}
+.stage-btn-thumb {
+  height: 48px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+.stage-btn-thumb.stage-btn-square {
+  width: 48px;
+  padding: 0;
+}
+/* What the companion's room shows only when the window is tall enough for
+   it: what is playing and who is here. On a phone held on its side they
+   would leave the chat no room, and the message field would fall off the
+   end of a screen that does not scroll. */
+.companion-tall-only { display: none; }
+@media (min-height: 560px) {
+  .companion-tall-only { display: flex; }
 }
 .stage-btn:disabled,
 .stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }

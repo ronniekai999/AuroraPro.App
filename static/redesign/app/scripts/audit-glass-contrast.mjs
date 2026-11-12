@@ -728,9 +728,7 @@ const EXEMPT = [
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
   { file: 'src/App.tsx', anchor: 'text-white/35 text-xs">ⓘ</span>', kind: 'non-text',
     why: 'the glyph that marks a stat tile as having a hover hint' },
-  // ── companion, browse ──
-  { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
-    why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
+  // ── onboarding ──
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
     why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
   // ── search ──
