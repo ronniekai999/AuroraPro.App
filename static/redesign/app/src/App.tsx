@@ -2792,8 +2792,17 @@ export default function App() {
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
   // Ref mirror for effects that need the CURRENT list without re-running
   // when the CW poll refreshes it (e.g. the detail fetch's season seed).
+  //
+  // Mirrored in a LAYOUT effect, in the same commit that draws from the list.
+  // A card's Play reads the record through this ref at click time
+  // (playOrResume) while its label ("Resume …") is drawn from the state. In
+  // a passive effect the ref lagged the commit, so a press that landed in
+  // between found a button saying Resume and no record: the title played
+  // from the start, and playing from the start overwrites the saved
+  // position. Too short a gap for a hand, but a test pressing the button
+  // the moment it appeared hit it under load.
   const continueItemsRef = useRef(continueItems)
-  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
+  useLayoutEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
   // 2026-05-27 — Bug-report config. Holds the full server response so
   // the BugReportButton + modal can both gate on `enabled` AND surface
   // admin-only token-health diagnostics (added 2026-05-27 PAT health
