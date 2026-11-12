@@ -55,16 +55,18 @@ interface Props {
 
 export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, tokenHealthReason, onRefreshConfig }: Props) {
   const [modalOpen, setModalOpen] = useState(false)
-  // While the button is on the page, the page says so on its root: on a
-  // phone the button floats over the end of the page, and the page leaves
-  // room there so its last row can be scrolled clear of it (index.css,
-  // `html[data-bug-launcher]`).
+  // While the button is mounted, the page says so on its root: the button
+  // floats over the end of the page, and the page leaves room there so its
+  // last row can be scrolled clear of it (index.css,
+  // `html[data-bug-launcher]`). For as long as it is mounted, also while it
+  // is hidden under the player or a panel: taking the room away then
+  // shortened the page under whoever was at its end, and closing the panel
+  // left them higher up than they had been.
   useEffect(() => {
-    if (hidden) return
     const root = document.documentElement
     root.setAttribute('data-bug-launcher', '')
     return () => root.removeAttribute('data-bug-launcher')
-  }, [hidden])
+  }, [])
 
   const handleSubmitted = (result: BugReportSubmitResult) => {
     // 2026-05-27 — Dropped the window.open(issue_url) — Aurora's

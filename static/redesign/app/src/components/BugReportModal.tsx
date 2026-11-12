@@ -21,7 +21,7 @@
 //   - role/aria already set; aria-live error region announces
 //     validation failures
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { submitBugReport, type BugReportSubmitResult } from '@/lib/api'
 import { Icon } from '@/components/Icon'
@@ -182,13 +182,20 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   // holds only while those are the words on screen, so a later refusal
   // about something else (a capture that failed) is not pinned on a field.
   const [fieldRefusal, setFieldRefusal] = useState<{ field: 'title' | 'description'; text: string } | null>(null)
-  const errorField = fieldRefusal && error?.replace(/\u00a0$/, '') === fieldRefusal.text ? fieldRefusal.field : null
-  // A refusal with the words of the one already on screen differs from it
-  // by a trailing space: a live region whose text does not change is not
-  // read out again, and the same press deserves the same answer aloud.
+  const errorField = fieldRefusal && error === fieldRefusal.text ? fieldRefusal.field : null
+  // Every refusal goes through here. One with the words already on screen
+  // is taken down and put up again on the next frame: a live region whose
+  // text does not change is not read out again, and the same press (or the
+  // same oversize file picked twice) deserves the same answer aloud. It
+  // uses nothing of the render it was made in, since a recording's handlers
+  // keep it for as long as the recording runs.
+  const errorShown = useRef<string | null>(null)
+  useLayoutEffect(() => { errorShown.current = error }, [error])
   const refuse = (text: string, field: 'title' | 'description' | null = null) => {
     setFieldRefusal(field ? { field, text } : null)
-    setError(prev => (prev === text ? `${text}\u00a0` : text))
+    if (errorShown.current !== text) { setError(text); return }
+    setError(null)
+    requestAnimationFrame(() => { if (mountedRef.current) setError(text) })
   }
   const actionsRef = useRef<HTMLDivElement | null>(null)
   const attachTriggerRef = useRef<HTMLButtonElement | null>(null)
@@ -392,7 +399,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   const handleAttachmentChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.files?.[0] ?? null
     if (raw && raw.size > MAX_ATTACHMENT_BYTES) {
-      setError(`Attachment exceeds 25 MB (got ${(raw.size / 1024 / 1024).toFixed(1)} MB).`)
+      refuse(`Attachment exceeds 25 MB (got ${(raw.size / 1024 / 1024).toFixed(1)} MB).`)
       // Clear the picker so the user has to pick again — without this,
       // the file name keeps showing even though we're refusing it.
       e.target.value = ''
@@ -470,7 +477,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     } catch (err) {
       if (!mountedRef.current) return
       setCaptureAnnounce('')
-      setError('Couldn\'t load the screenshot library. Try uploading a screenshot from disk instead.')
+      refuse('Couldn\'t load the screenshot library. Try uploading a screenshot from disk instead.')
       console.warn('[Aurora] html-to-image chunk load failed', err)
       return
     }
@@ -579,12 +586,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       }
       if (!mountedRef.current) return
       if (!blob) {
-        setError('Capture failed: the browser could not encode the screenshot.')
+        refuse('Capture failed: the browser could not encode the screenshot.')
         setCaptureAnnounce('Capture failed.')
         return
       }
       if (blob.size > MAX_ATTACHMENT_BYTES) {
-        setError(
+        refuse(
           `Capture too large (${(blob.size / 1024 / 1024).toFixed(1)} MB > 25 MB cap). ` +
           'Try uploading a screenshot from disk instead.',
         )
@@ -617,7 +624,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       }
     } catch (err) {
       if (!mountedRef.current) return
-      setError(err instanceof Error
+      refuse(err instanceof Error
         ? `Capture failed: ${err.message}`
         : 'Capture failed — try again or upload a screenshot from disk instead.')
       setCaptureAnnounce('Capture failed.')
@@ -726,7 +733,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       || !navigator.mediaDevices?.getDisplayMedia
       || typeof MediaRecorder === 'undefined'
     ) {
-      setError('Screen recording isn\'t supported in this browser. Try Chrome, Edge, Firefox, or Safari 16.4+.')
+      refuse('Screen recording isn\'t supported in this browser. Try Chrome, Edge, Firefox, or Safari 16.4+.')
       return
     }
     setCaptureAnnounce('Requesting screen-share permission…')
@@ -765,7 +772,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       if (name === 'NotAllowedError' || name === 'AbortError') {
         return
       }
-      setError(err instanceof Error
+      refuse(err instanceof Error
         ? `Screen recording failed to start: ${err.message}`
         : 'Screen recording failed to start.')
       return
@@ -810,7 +817,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       })
     } catch (err) {
       releaseMediaStream()
-      setError(err instanceof Error
+      refuse(err instanceof Error
         ? `Recorder init failed: ${err.message}`
         : 'Recorder init failed.')
       return
@@ -827,12 +834,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       setRecordingRemainingMs(MAX_RECORDING_MS)
       const blob = new Blob(chunks, { type: mimeType.startsWith('video/webm') ? 'video/webm' : mimeType })
       if (blob.size === 0) {
-        setError('Recording produced no data — try again.')
+        refuse('Recording produced no data — try again.')
         setCaptureAnnounce('Recording failed: no data captured.')
         return
       }
       if (blob.size > MAX_ATTACHMENT_BYTES) {
-        setError(`Recording too large (${(blob.size / 1024 / 1024).toFixed(1)} MB > 25 MB cap). Try a shorter recording.`)
+        refuse(`Recording too large (${(blob.size / 1024 / 1024).toFixed(1)} MB > 25 MB cap). Try a shorter recording.`)
         setCaptureAnnounce('Recording too large.')
         return
       }
@@ -880,7 +887,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     } catch (err) {
       releaseMediaStream()
       mediaRecorderRef.current = null
-      setError(err instanceof Error
+      refuse(err instanceof Error
         ? `Recorder failed to start: ${err.message}`
         : 'Recorder failed to start.')
       setCaptureAnnounce('Recording failed to start.')
@@ -1275,7 +1282,6 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   (the native input carries that semantic implicitly;
                   the custom button has to declare it). */}
               <button
-                id="bug-attachment-trigger"
                 ref={attachTriggerRef}
                 type="button"
                 onClick={() => fileInputRef.current?.click()}

@@ -1436,8 +1436,15 @@ function AdminFlaggedTab() {
       if (mine < readLanded.current) return
       readLanded.current = mine
       setItems(list)
+      setErr(null)
     }
-    catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+    catch (e) {
+      // A failure lands by the same rule as an answer: not over a newer
+      // read's list, and a newer read that succeeds takes it down.
+      if (mine < readLanded.current) return
+      readLanded.current = mine
+      setErr(e instanceof Error ? e.message : 'failed')
+    }
   }, [])
   useEffect(() => { void reload() }, [reload])
 

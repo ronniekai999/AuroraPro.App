@@ -12,7 +12,7 @@ import type { ActiveStreamRow, MatchSearchResult, ServerMediaItem, SessionDiagno
 const api = vi.hoisted(() => ({
   getAdminDashboard: vi.fn(), getEmbeddingStatus: vi.fn(), getSkipMarkerStatus: vi.fn(),
   listFlaggedItems: vi.fn(), getAIRematchStatus: vi.fn(), searchForMatch: vi.fn(), manualMatch: vi.fn(),
-  listAdminSessions: vi.fn(), diagnoseSession: vi.fn(),
+  listAdminSessions: vi.fn(), diagnoseSession: vi.fn(), startAIRematch: vi.fn(),
 }))
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
@@ -177,6 +177,50 @@ describe('Flagged items and the match dialog', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // A failure lands by the rule an answer does: the older of two reads
+  // failing last must not put an error over the newer one's list, and a
+  // read that lands takes an earlier failure's words down.
+  it('does not put an older read\'s failure over a newer list, and clears a failure when a read lands', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.listFlaggedItems.mockResolvedValueOnce([flagged(1, 'Kestrel')])
+      api.manualMatch.mockReturnValue(new Promise(() => {}))
+      await openSection(user, 'Flagged items')
+      await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
+      await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+      // The read at the close is slow and will fail; the one four seconds
+      // on answers first.
+      let failFirst: (e: Error) => void = () => {}
+      api.listFlaggedItems.mockImplementationOnce(() => new Promise<ServerMediaItem[]>((_, reject) => { failFirst = reject }))
+      api.listFlaggedItems.mockResolvedValueOnce([flagged(2, 'Wren')])
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(api.listFlaggedItems).toHaveBeenCalledTimes(2))
+      await act(async () => { vi.advanceTimersByTime(4000) })
+      await within(list()).findByRole('button', { name: 'Match Wren' })
+      await act(async () => { failFirst(new Error('the older read failed')) })
+      expect(screen.queryByText('the older read failed')).toBeNull()
+      expect(within(list()).getByRole('button', { name: 'Match Wren' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes a failed read\'s words down when a later read lands', async () => {
+    const user = userEvent.setup()
+    api.listFlaggedItems.mockRejectedValueOnce(new Error('the list could not be read'))
+    api.getAIRematchStatus.mockResolvedValue({ enabled: true })
+    await openSection(user, 'Flagged items')
+    expect(await screen.findByText('the list could not be read')).toBeInTheDocument()
+    // A second read (the sweep is started, which reads the list again).
+    api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel')])
+    api.getAIRematchStatus.mockResolvedValue({ enabled: true, job: { started_at: '2026-01-01T00:00:00Z', total: 1, processed: 0, matched: 0, suggested: 0, failed: 0 } })
+    api.startAIRematch.mockResolvedValue(undefined)
+    await user.click(screen.getByRole('button', { name: 'Re-match with AI' }))
+    await within(list()).findByRole('button', { name: 'Match Kestrel' })
+    expect(screen.queryByText('the list could not be read')).toBeNull()
   })
 
   it('says a saved match in the colour of success', async () => {

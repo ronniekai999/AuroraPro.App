@@ -4,7 +4,7 @@
 // to whom, and where the focus is while a report is sent.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BugReportSubmitResult } from '@/lib/api'
 
@@ -63,13 +63,16 @@ describe('the bug report button', () => {
     expect(screen.getByRole('dialog', { name: 'Report a bug' })).toBeInTheDocument()
   })
 
-  // On a phone the button floats over the end of the page, and the page
-  // leaves room for it there while it shows (index.css reads this).
-  it('tells the page while it is on it, and not while it is hidden or gone', () => {
+  // The button floats over the end of the page, and the page leaves room
+  // for it there (index.css reads this). For as long as the button is
+  // mounted, hidden or not: App hides it under the player and every panel,
+  // and taking the room away then shortened the page under whoever was at
+  // its end.
+  it('tells the page for as long as it is mounted, also while it is hidden, and not once it is gone', () => {
     const { view, onToast } = setup()
     expect(document.documentElement).toHaveAttribute('data-bug-launcher')
     view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} hidden />)
-    expect(document.documentElement).not.toHaveAttribute('data-bug-launcher')
+    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
     view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} />)
     expect(document.documentElement).toHaveAttribute('data-bug-launcher')
     view.unmount()
@@ -182,12 +185,12 @@ describe('sending a report', () => {
     expect(title).toHaveAccessibleDescription('Title is required.')
     expect(description).not.toHaveAttribute('aria-invalid', 'true')
     expect(submitBugReport).not.toHaveBeenCalled()
-    // The same press gets the same answer, in words that are not the same
-    // string: a live region whose text has not changed is not read again.
-    const first = alert.textContent
-    await user.click(send)
-    expect(alert.textContent).not.toBe(first)
-    expect(alert.textContent?.trim()).toBe('Title is required.')
+    // The same press gets the same answer aloud. A live region whose text
+    // has not changed is not read again, so the words are taken down and
+    // put up on the next frame: the very same words, with nothing added.
+    act(() => { send.click() })
+    expect(alert.textContent).toBe('')
+    await waitFor(() => expect(alert.textContent).toBe('Title is required.'))
     expect(title).toHaveAttribute('aria-invalid', 'true')
     await user.type(title, 'Now it has one')
     expect(title).not.toHaveAttribute('aria-invalid', 'true')
@@ -228,6 +231,26 @@ describe('sending a report', () => {
     await user.keyboard('{Enter}')
     expect(within(dialog).queryByRole('button', { name: 'Remove attachment' })).toBeNull()
     expect(within(dialog).getByRole('button', { name: 'Choose file' })).toHaveFocus()
+  })
+
+  // Every refusal goes the same way, not only the form's own checks: the
+  // same oversize file picked twice is refused aloud twice.
+  it('says the same refusal of a file again when the file is picked again', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    const alert = dialog.querySelector('#bug-error') as HTMLElement
+    const input = dialog.querySelector('input[type="file"]') as HTMLInputElement
+    const big = new File(['x'], 'long.webm', { type: 'video/webm' })
+    Object.defineProperty(big, 'size', { value: 30 * 1024 * 1024 })
+    await user.upload(input, big)
+    expect(alert.textContent).toBe('Attachment exceeds 25 MB (got 30.0 MB).')
+    // Picked again: the words go and come back, so they are read again.
+    act(() => { fireEvent.change(input, { target: { files: [big] } }) })
+    expect(alert.textContent).toBe('')
+    await waitFor(() => expect(alert.textContent).toBe('Attachment exceeds 25 MB (got 30.0 MB).'))
+    expect(within(dialog).queryByRole('button', { name: 'Remove attachment' })).toBeNull()
   })
 
   // The three ways to attach are a group with a heading, each named by its

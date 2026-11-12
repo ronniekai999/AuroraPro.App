@@ -972,16 +972,14 @@ html[data-effects="reduced"] .stage-tabbar {
 }
 /* The page leaves room for the bar on phones. */
 .stage-shell { padding-bottom: var(--tabbar-space); }
-/* And for the bug report button while it is on the page (the button sets
-   the attribute): it floats 1.25rem above the bar, 44px high, over the end
-   of the page, where a row's own action sits. Its height and its gap, and
-   12px to clear it, are added so the last row scrolls out from under it.
-   On phones only: from md up the button is in the corner beside the page's
-   column. --tabbar-space itself is not changed: other things read it. */
+/* And for the bug report button while it is mounted (the button sets the
+   attribute): it floats 1.25rem above the bar, or above the window's foot
+   where there is no bar, 44px high, over the end of the page, on a row's
+   own action or a card's caption. Its height and its gap, and 12px to
+   clear it, are added so the last row scrolls out from under it. At every
+   width: the button is over the page's column on a wide window too.
+   --tabbar-space itself is not changed: other things read it. */
 html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) + 1.25rem + 44px + 12px); }
-@media (min-width: 768px) {
-  html[data-bug-launcher] .stage-shell { padding-bottom: var(--tabbar-space); }
-}
 
 /* ── The nav search field ─────────────────────────────────────────────
    The field resets the global input treatment (the input inside is bare)
