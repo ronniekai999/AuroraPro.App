@@ -81,12 +81,18 @@ describe('the requests page', () => {
     expect(within(filters).getAllByRole('button').map(b => [b.textContent, b.getAttribute('aria-pressed')])).toEqual([
       ['All · 5', 'true'], ['Pending · 1', 'false'], ['Waiting for approval · 1', 'false'], ['Processing · 1', 'false'], ['Available · 2', 'false'], ['Failed · 0', 'false'],
     ])
+    const said = () => document.querySelector('[data-requests-filtered]')!
+    expect(said()).toHaveAttribute('role', 'status')
+    expect(said().textContent).toBe('Filter requests by status: All, 5 shown')
     fireEvent.click(within(filters).getByRole('button', { name: 'Available · 2' }))
     expect(names()).toEqual(['Copper Sky', 'Little Atlas'])
+    // What the press did is said: nothing else tells a screen reader.
+    expect(said().textContent).toBe('Filter requests by status: Available, 2 shown')
     expect(within(filters).getByRole('button', { name: 'Available · 2' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(within(filters).getByRole('button', { name: 'Failed · 0' }))
     expect(names()).toEqual([])
     expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('No requests are failed right now')
+    expect(said().textContent).toBe('Filter requests by status: Failed, 0 shown')
     fireEvent.click(within(filters).getByRole('button', { name: 'All · 5' }))
     expect(names()).toHaveLength(5)
   })

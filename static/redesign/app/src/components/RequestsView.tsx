@@ -217,13 +217,21 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       {askRow}
 
       {requests.length > 0 && (
-        <div role="group" aria-label="Filter requests by status" className="req-filters">
-          {filters.map(f => (
-            <button key={f.id} type="button" className="genre-chip" aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
-              {f.label} · {f.count.toLocaleString()}
-            </button>
-          ))}
-        </div>
+        <>
+          <div role="group" aria-label="Filter requests by status" className="req-filters">
+            {filters.map(f => (
+              <button key={f.id} type="button" className="genre-chip" aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
+                {f.label} · {f.count.toLocaleString()}
+              </button>
+            ))}
+          </div>
+          {/* Pressing a filter silently rewrites the list under it: nothing
+              moves the focus, and the button's own pressed state is heard
+              only by someone still on it. This says what the press did. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-requests-filtered="">
+            {`Filter requests by status: ${filters.find(f => f.id === filter)?.label ?? ''}, ${filtered.length.toLocaleString()} shown`}
+          </span>
+        </>
       )}
 
       {filtered.length === 0 ? (
