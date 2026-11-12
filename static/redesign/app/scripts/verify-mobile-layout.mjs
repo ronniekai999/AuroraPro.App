@@ -162,8 +162,8 @@ mustHave(CARD, "'has-reason '")
 
 // Small buttons outside a card: drawn at 36px, with a 44px target on a touch
 // screen (.stage-hit44). Tonight's live strip (Join; I'm in, Maybe, Open
-// lobby, side by side) and the search page's "Search by description" and
-// "Try again". Built from the components' own class lists, in the rows they
+// lobby, side by side) and the search page's "Search by description",
+// "Try again" and "Request it". Built from the components' own class lists, in the rows they
 // sit in.
 const LIVE = 'src/components/TonightLive.tsx'
 const SEARCH = 'src/components/SearchView.tsx'
@@ -178,6 +178,8 @@ const DESCRIBE_LINE = classesOf(SEARCH, 'search-describe-line')
 const FAILED_LINE = classesOf(SEARCH, 'search-failed-line')
 const DESCRIBE_BTN = classesOf(SEARCH, 'search-describe-btn')
 const RETRY_BTN = classesOf(SEARCH, 'search-retry-btn')
+const REQUEST_LINE = classesOf(SEARCH, 'search-request-line')
+const REQUEST_BTN = classesOf(SEARCH, 'search-request-btn')
 // The Library header: on a phone its scope names are a strip that runs edge
 // to edge and scrolls sideways, with the scope's count and controls on a row
 // under it. It is on this page so that the "no wider than the device" check
@@ -259,7 +261,9 @@ const smallHtml = `
   <p class="${DESCRIBE_LINE}" data-small="describe">These match the title.
     <button type="button" class="${DESCRIBE_BTN}" data-small-btn="Search by description">Search by description</button></p>
   <p class="${FAILED_LINE}" data-small="failed">Nothing is wrong with what you typed. The server could not run it.
-    <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>`
+    <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>
+  <p class="${REQUEST_LINE}" data-small="request">Not in the library?
+    <button type="button" class="${REQUEST_BTN}" data-small-btn="Request it">Request it</button></p>`
 
 // The top bar, from TopNav's own class lists, once per case. The mark and the
 // icons are empty boxes of the size the components draw; the wordmark takes
@@ -690,7 +694,7 @@ for (const touch of [true, false]) {
     // 4. Small buttons outside a card. On a touch screen each is a 44px
     // target by hit-testing, whatever it is drawn at; a neighbour's area
     // laid over it shortens what is measured, so an overlap fails here too.
-    if (r.small.length !== 6) fail(`the small-button probe found ${r.small.length} buttons, expected 6 — this check is out of date`)
+    if (r.small.length !== 7) fail(`the small-button probe found ${r.small.length} buttons, expected 7 — this check is out of date`)
     for (const b of r.small) {
       if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)

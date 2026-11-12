@@ -263,3 +263,73 @@ describe("the page's own field (a phone has none in the top bar)", () => {
     expect(base.onQueryChange).toHaveBeenLastCalledWith('')
   })
 })
+
+describe('words with a space at either end', () => {
+  // A space typed before the next word. The answer used to be compared with
+  // the field's text, untrimmed, and dropped as stale: a skeleton for good.
+  it('still shows what was found for them', async () => {
+    render(<SearchView {...base} query="harbor " />)
+    await settle(300)
+    expect(asks.map(a => a.query)).toEqual(['harbor'])
+    asks[0].answer([media(1, 'Harbor Lights')])
+    await settle()
+    expect(screen.getByText('Harbor Lights')).toBeInTheDocument()
+    expect(status()).toBe('1 result for "harbor "')
+  })
+})
+
+// Requesting has no tab of its own: it is where a search that found nothing
+// ends.
+describe('a search that finds nothing', () => {
+  const offer = () => document.querySelector('[data-search-request]')
+  async function searchFor(words: string, props: Record<string, unknown> = {}) {
+    const view = render(<SearchView {...base} query={words} {...props} />)
+    await settle(300)
+    return view
+  }
+
+  it('offers to request it, with the words that were searched for', async () => {
+    const onRequest = vi.fn()
+    await searchFor('  the lost reel ', { onRequest, onDescribe: vi.fn() })
+    asks[0].answer([])
+    await settle()
+    expect(offer()!.textContent).toContain('Not in the library?')
+    fireEvent.click(screen.getByRole('button', { name: 'Request it' }))
+    expect(onRequest).toHaveBeenCalledWith('the lost reel')
+  })
+
+  it('still offers it after a search by description has found nothing either', async () => {
+    const onRequest = vi.fn()
+    await searchFor('cozy mystery', { onRequest, describe: { query: 'cozy mystery', n: 1 }, onDescribe: vi.fn() })
+    asks[0].answer([], 'semantic')
+    await settle()
+    expect(screen.getByRole('heading', { name: 'Nothing found' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Request it' }))
+    expect(onRequest).toHaveBeenCalledWith('cozy mystery')
+  })
+
+  // A profile that is not offered requests is given no handler.
+  it('does not offer it to a session that has no requests', async () => {
+    await searchFor('the lost reel', { onDescribe: vi.fn() })
+    asks[0].answer([])
+    await settle()
+    expect(document.querySelector('[data-search-empty]')).not.toBeNull()
+    expect(offer()).toBeNull()
+  })
+
+  it('does not offer it while there are results, while it is still looking, or when the search failed', async () => {
+    const onRequest = vi.fn()
+    await searchFor('harbor', { onRequest })
+    // Still looking.
+    expect(offer()).toBeNull()
+    asks[0].answer([media(1, 'Harbor Lights')])
+    await settle()
+    expect(offer()).toBeNull()
+    cleanup()
+    asks.length = 0
+    await searchFor('harbor', { onRequest })
+    asks[0].fail(new Error('HTTP 500'))
+    await settle()
+    expect(offer()).toBeNull()
+  })
+})

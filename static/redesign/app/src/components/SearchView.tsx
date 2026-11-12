@@ -22,7 +22,7 @@ import { describedAnswerFor, keepDescribedAnswer } from '@/lib/describedSearch'
 import { type Media } from '@/lib/types'
 
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
-export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, libraryIds, onToggleLib }: {
+export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, libraryIds, onToggleLib, onRequest }: {
   query: string
   // Below md the top bar has no search field, so the page carries its own.
   // It is the only way to type a query on a phone.
@@ -51,6 +51,9 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // My Library + button — same contract as MediaRail / BrowseView.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
+  // Where a search that found nothing ends: asking for the title to be
+  // added. Not given to a session that is not offered requests.
+  onRequest?: (query: string) => void
 }) {
   const [results, setResults] = useState<Media[]>([])
   // Driven by the server's X-Search-Mode response — only show the
@@ -80,9 +83,13 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   }, [focusNonce, takeFocus])
 
   useEffect(() => {
-    lastQueryRef.current = query
-    setFailed(null)
     const q = query.trim()
+    // The words as they are asked for: an answer is compared with these. It
+    // used to hold the field's text untrimmed, so the answer for "harbor "
+    // (a space typed before the next word) never matched, was dropped as
+    // stale, and the page sat on its skeleton.
+    lastQueryRef.current = q
+    setFailed(null)
     if (!q) {
       setResults([])
       setAnswered(null)
@@ -266,6 +273,16 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               <h2 className="text-lg text-ink">Nothing found</h2>
               <p className="mt-1 text-sm text-ink-2">Try other words, or a title.</p>
             </>
+          )}
+          {/* Requesting has no page of its own to go looking for: it is
+              offered here, where a search has just come up empty. */}
+          {onRequest && (
+            <p className="search-request-line mt-8 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-request>
+              Not in the library?
+              <button type="button" onClick={() => onRequest(q)} className="stage-btn stage-btn-sm stage-btn-ghost search-request-btn stage-hit44">
+                Request it
+              </button>
+            </p>
           )}
         </div>
       ) : (

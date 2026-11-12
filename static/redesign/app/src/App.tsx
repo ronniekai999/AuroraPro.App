@@ -2890,6 +2890,19 @@ export default function App() {
     rememberScroll(location.key)
     navigate(`/${v}`)
   }, [view, navigate, closePlayer, location.key, navScope])
+  // Where a search that found nothing in the library ends: the requests
+  // page, with its composer open and the words already searched for. The
+  // ask is stamped with whose it is and handed over only to them, and is
+  // forgotten once the page has taken it.
+  const [requestAsk, setRequestAsk] = useState<{ query: string; n: number; owner: string } | null>(null)
+  const requestAsksRef = useRef(0)
+  const requestFromSearch = useCallback((q: string) => {
+    const query = q.trim()
+    if (!query) return
+    setRequestAsk({ query, n: ++requestAsksRef.current, owner: searchOwner })
+    handleNavigate('requests')
+  }, [searchOwner, handleNavigate])
+  const forgetRequestAsk = useCallback(() => setRequestAsk(null), [])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -6864,6 +6877,10 @@ export default function App() {
                 // button; handed over only while it is still this session's.
                 describe={searchDescribe && searchDescribe.owner === searchOwner ? searchDescribe : null}
                 onDescribe={describeSearch}
+                // A search that finds nothing ends in "Request it". Not for
+                // a profile with a content limit, which is offered no
+                // requests anywhere.
+                onRequest={navScope === 'restricted' ? undefined : requestFromSearch}
                 focusNonce={searchFocusNonce}
                 takeFocus={takeSearchFieldFocus}
                 onSelect={handleSelect}
@@ -7071,6 +7088,9 @@ export default function App() {
               <RequestsView
                 everyone={adminUI}
                 requests={requestsList}
+                // Handed over only while it is still this session's.
+                ask={requestAsk && requestAsk.owner === searchOwner ? requestAsk : null}
+                onAskTaken={forgetRequestAsk}
                 onRequestSubmitted={(r) => {
                   // Not loaded yet (or dropped on a switch): leave it to the
                   // fetch, which will include this one, rather than show it

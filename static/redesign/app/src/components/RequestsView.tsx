@@ -128,7 +128,19 @@ const STATUS_LABELS: Record<string, string> = {
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
 // RequestsView — submitted requests with status. Includes an inline
 // TMDB search + create dialog.
-export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false }: { everyone?: boolean; requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
+export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false, ask, onAskTaken }: {
+  everyone?: boolean
+  requests: MediaRequest[] | null
+  onRequestSubmitted: (r: MediaRequest) => void
+  onRequestDeleted: (id: number) => void
+  /** Words a search that found nothing in the library was asked to request:
+   *  the page opens with its composer up and those words already searched
+   *  for. `n` tells one ask from the next. */
+  ask?: { query: string; n: number } | null
+  /** Called once the ask has been taken, so that coming back to the page
+   *  later does not open the composer again. */
+  onAskTaken?: () => void
+}) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'>('all')
   // The server lists every member's requests to a session with the admin
   // powers and only the caller's own to anyone else; the page says which.
@@ -141,6 +153,15 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   const [searchResults, setSearchResults] = useState<TmdbSearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [submitting, setSubmitting] = useState<number | null>(null) // tmdb_id currently submitting
+  // An ask arriving from search: taken once, by its number.
+  const [askTaken, setAskTaken] = useState(0)
+  if (ask && ask.n !== askTaken) {
+    setAskTaken(ask.n)
+    setSearchQ(ask.query)
+    setCreateOpen(true)
+  }
+  const askN = ask?.n
+  useEffect(() => { if (askN !== undefined) onAskTaken?.() }, [askN, onAskTaken])
   // 4K toggle — default false. We can't easily probe whether a 4K
   // ARR service is configured here, so we always offer it.
   const [requestQuality4K, setRequestQuality4K] = useState(false)
