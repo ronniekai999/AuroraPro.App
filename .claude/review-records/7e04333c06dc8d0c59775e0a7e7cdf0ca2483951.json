@@ -1,0 +1,10 @@
+{
+  "sha": "7e04333c06dc8d0c59775e0a7e7cdf0ca2483951",
+  "verdict": "lows-only",
+  "summary": "Profile follow-ups (one commit over f12d142), third pass by the profiles reviewer at da73a9e: the earlier lows are resolved (a whole-value selection in the PIN field is replaced, not appended to; the colour stability claim is corrected and the displaced case pinned; the invalid border shows while focused; modified arrow keys pass). Lows-only: the invalid border now hides the password field's focus indicator, the new picker-closed avatar test can pass without its behaviour because the colour store is not reset between tests, and a touch caret drag on the invisible PIN field may leave the caret mid-value (needs a device). The colour store's behaviour is unchanged. Applied by cherry-pick; profile-owned files byte-identical to the reviewed commit.",
+  "reviewer": "fresh-context-agent-aa6f9651",
+  "findings": "3",
+  "diff_digest": "94beb779492c8833214fc355856b1f9ddfb78b436aa5bf8ab1019e0343426a76",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T02:17:13Z"
+}
