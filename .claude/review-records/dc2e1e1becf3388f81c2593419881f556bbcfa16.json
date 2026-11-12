@@ -1,0 +1,10 @@
+{
+  "sha": "dc2e1e1becf3388f81c2593419881f556bbcfa16",
+  "verdict": "lows-only",
+  "summary": "Profile picker and PIN prompt (B3), two rounds. Round 1 fix-first at 1badb5f: two profiles on one account could share a colour (colour taken from a server-wide id modulo nine); lows: an invisible caret could file PIN digits out of order and spend an attempt, a 20px recovery link, dead style claims on the unlock fields, near-invisible empty PIN boxes. Round 2 lows-only at 8bff3b2: a deletion can recolour a displaced profile (the stability claim is false), select-all then type appends and can spend a PIN attempt, the password field's error border shows only when unfocused, no test that avatars outside the picker follow its colours; all sent to the builder. No change found in when or how a profile switch activates. Applied by cherry-pick without the unreviewed title page: package.json and index.css conflicts resolved to the profile changes only; profile-owned files byte-identical to the reviewed head.",
+  "reviewer": "fresh-context-agent-aa6f9651",
+  "findings": "7",
+  "diff_digest": "b6b3150d184ade60d10f6546f86276e7d778a97d332307590478be5eb5914f79",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T01:46:34Z"
+}
