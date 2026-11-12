@@ -13,6 +13,9 @@ import type { BugReportSubmitResult } from '@/lib/api'
 
 interface Props {
   open: boolean
+  /** The session changed profile under the open dialog: it closes as soon
+   *  as nothing of its own is in flight, and the person is told why. */
+  dismissed?: boolean
   onClose: () => void
   /** Fills in "Your name", so a report says who sent it. */
   prefillName?: string
@@ -26,12 +29,17 @@ interface Props {
   focusFallback?: () => void
 }
 
-export function BugReportHost({ open, onClose, prefillName, onToast, tokenHealthy, tokenHealthReason, focusFallback }: Props) {
+export function BugReportHost({ open, dismissed = false, onClose, prefillName, onToast, tokenHealthy, tokenHealthReason, focusFallback }: Props) {
   if (!open) return null
   return (
     <BugReportModal
       prefillName={prefillName}
-      onClose={onClose}
+      dismissed={dismissed}
+      onClose={() => {
+        // A dialog that closed itself says why: nothing was pressed.
+        if (dismissed) onToast('The bug report was closed because this tab is now on another profile.', 'info')
+        onClose()
+      }}
       // The dialog itself shows the issue's number; the toast is the
       // confirmation that stays when the dialog is closed. No link: the
       // repository is private, and its address is a login wall for most.

@@ -6,7 +6,7 @@ menu (and on the Me page on a phone), opens a dialog with name / title /
 description fields plus an optional screenshot or short recording
 attachment. On submit, the
 Aurora server creates a labeled issue in your configured GitHub repo
-and links the user to it.
+and tells the user its number (not a link: the repo is usually private).
 
 The feature is **off by default**. Enabling it requires four env vars.
 

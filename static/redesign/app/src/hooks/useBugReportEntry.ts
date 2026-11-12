@@ -23,12 +23,15 @@ export const RETURN_GIVE_UP_MS = 1500
 export const SKELETON_WAIT_MS = 4000
 
 export interface BugReportEntryInput {
+  /** The server takes reports. When it stops, an open dialog closes: it
+   *  could send nothing, and "open" must not wait for reports to come back. */
+  enabled: boolean
   /** The signed-in user, or null when nobody is. */
   userId: number | null
   /** The profile the session acts as, or null when that is not known. */
   profileId: number | null
   /** The address on screen and its history entry (react-router's location). */
-  location: { pathname: string; search: string; key: string }
+  location: { pathname: string; search: string; hash?: string; key: string }
   /** How the app arrived at this entry: react-router's navigation type,
    *  "PUSH" for a step forward. */
   arrivedBy: string
@@ -49,6 +52,11 @@ export interface BugReportEntryInput {
 export interface BugReportEntry {
   /** The dialog is open. */
   open: boolean
+  /** The session changed profile while the dialog was open. The dialog is
+   *  to close as soon as nothing of its own is in flight (a send finishes
+   *  first; a recording is stopped), and calls `close` when it has. What it
+   *  holds (a capture of a page, a description) was the other profile's. */
+  dismissed: boolean
   /** Open the dialog over the page on screen. */
   openHere: () => void
   /** From the Me page: go back to the page the person came from and open
@@ -57,7 +65,7 @@ export interface BugReportEntry {
   close: () => void
 }
 
-interface Remembered { owner: string; pathname: string; search: string; key: string }
+interface Remembered { owner: string; pathname: string; search: string; hash: string; key: string }
 
 /** True while the page still shows the app's loading shapes. */
 function stillLoading(): boolean {
@@ -65,24 +73,38 @@ function stillLoading(): boolean {
 }
 
 export function useBugReportEntry(input: BugReportEntryInput): BugReportEntry {
-  const { userId, profileId, location, arrivedBy, viewOf, shownView, mayShow, goTo, goBack, onAsk } = input
+  const { enabled, userId, profileId, location, arrivedBy, viewOf, shownView, mayShow, goTo, goBack, onAsk } = input
   const owner = `${userId}:${profileId}`
   const [open, setOpen] = useState(false)
   // The address the app is on its way back to, before the dialog opens.
   const [returning, setReturning] = useState<string | null>(null)
 
-  // Nothing of one person's visit outlives it: a sign-out closes the dialog
+  const [dismissed, setDismissed] = useState(false)
+
+  // Nothing of one person's visit outlives it. A sign-out closes the dialog
   // (the app stays mounted through it, so this state would otherwise greet
-  // the next person to sign in), and a change of profile drops a return
-  // that has not arrived. Reset in the render that sees the change.
+  // the next person to sign in). A change of profile drops a return that
+  // has not arrived, and dismisses an open dialog: a parent's capture of a
+  // page, left open, could otherwise be sent from a child's session after a
+  // switch made in another tab. And the dialog is closed while the server
+  // takes no reports, so it cannot come back unasked when it does again.
+  // Reset in the render that sees the change.
   const [forUser, setForUser] = useState(userId)
   const [forOwner, setForOwner] = useState(owner)
   if (forUser !== userId) {
     setForUser(userId)
-    setOpen(false)
-  }
-  if (forOwner !== owner) {
     setForOwner(owner)
+    setOpen(false)
+    setDismissed(false)
+    setReturning(null)
+  } else if (forOwner !== owner) {
+    setForOwner(owner)
+    setReturning(null)
+    if (open) setDismissed(true)
+  }
+  if (!enabled && (open || dismissed || returning !== null)) {
+    setOpen(false)
+    setDismissed(false)
     setReturning(null)
   }
 
@@ -113,10 +135,10 @@ export function useBugReportEntry(input: BugReportEntryInput): BugReportEntry {
       // a replacement leaves whatever was before the page it replaced.
       if (moved && arrivedBy === 'PUSH' && prev) meEntry.current = { key: location.key, back: prev.key }
     } else if (!fromMe) {
-      last.current = { owner, pathname: location.pathname, search: location.search, key: location.key }
+      last.current = { owner, pathname: location.pathname, search: location.search, hash: location.hash ?? '', key: location.key }
     }
     before.current = { key: location.key, view, fromMe }
-  }, [owner, userId, location.pathname, location.search, location.key, arrivedBy, viewOf])
+  }, [owner, userId, location.pathname, location.search, location.hash, location.key, arrivedBy, viewOf])
 
   // What the openers read, as of the last render: they are handed to
   // memoised children and must not change with every address.
@@ -144,13 +166,18 @@ export function useBugReportEntry(input: BugReportEntryInput): BugReportEntry {
       return
     }
     going.current = true
-    setReturning(to.pathname + to.search)
+    // The whole address, a fragment included.
+    const address = to.pathname + to.search + to.hash
+    setReturning(address)
     const me = meEntry.current
     if (me && me.key === at.key && me.back === to.key) at.goBack()
-    else at.goTo(to.pathname + to.search)
+    else at.goTo(address)
   }, [])
 
-  // The dialog opens once the page gone back to is the one drawn.
+  // The dialog opens once the page gone back to is the one drawn. That page
+  // can itself send the session on (a title now above the profile's limit
+  // leaves for Tonight): the dialog then opens over wherever the tab ended
+  // up, and the report carries that address, which is the true one.
   const onMe = viewOf(location.pathname) === 'me'
   const arrived = returning !== null && !onMe && shownView === viewOf(location.pathname)
   useEffect(() => {
@@ -178,6 +205,6 @@ export function useBugReportEntry(input: BugReportEntryInput): BugReportEntry {
     return () => cancelAnimationFrame(frame)
   }, [returning, arrived])
 
-  const close = useCallback(() => setOpen(false), [])
-  return { open, openHere, openFromMe, close }
+  const close = useCallback(() => { setOpen(false); setDismissed(false) }, [])
+  return { open, dismissed, openHere, openFromMe, close }
 }

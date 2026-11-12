@@ -26,7 +26,8 @@ const USER = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' 
  *  server says the session acts as; an activation rebinds it. `limit(id)`
  *  gives a profile a content limit from then on, as an edit made on another
  *  device does. */
-function stubServer({ reports = true, bound = 10 } = {}) {
+function stubServer({ reports = true, bound = 10, role = 'user' } = {}) {
+  const me = { ...USER, role }
   const limits = new Map<number, string>([[20, 'PG']])
   const profile = (p: typeof PARENT) => ({ ...p, max_age_rating: limits.get(p.id) })
   const sent: FormData[] = []
@@ -36,10 +37,10 @@ function stubServer({ reports = true, bound = 10 } = {}) {
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const p = new URL(input, 'http://localhost').pathname
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
-    if (p === '/api/auth/login' && init?.method === 'POST') { signedIn = true; return json({ expires_in: 900, user: USER }) }
+    if (p === '/api/auth/login' && init?.method === 'POST') { signedIn = true; return json({ expires_in: 900, user: me }) }
     if (!signedIn) return json({ error: { code: 401, message: 'signed out' } }, 401)
-    if (p === '/api/auth/me') return json(USER)
-    if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
+    if (p === '/api/auth/me') return json(me)
+    if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
     if (p === '/api/profiles') return json([profile(PARENT), profile(KID)])
     if (p === '/api/profiles/active') return json(profile(bound === 10 ? PARENT : KID))
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
@@ -64,6 +65,10 @@ function stubServer({ reports = true, bound = 10 } = {}) {
     sent,
     limit(id: number, rating: string) { limits.set(id, rating) },
     signOut() { signedIn = false },
+    /** The session is bound to another profile, as a switch in another tab does. */
+    bind(id: number) { bound = id },
+    /** Whether the server takes reports, from the next time it is asked. */
+    takeReports(on: boolean) { reports = on },
   }
 }
 
@@ -79,9 +84,9 @@ const dialog = () => screen.queryByRole('dialog')
 const tab = (id: string) => document.querySelector<HTMLButtonElement>(`.stage-tabbar-item[data-nav="${id}"]`)!
 const meRows = () => within(screen.getByRole('navigation', { name: 'Account' }))
 
-async function open(at: string, as = 'Parent') {
+async function open(at: string, as = 'Parent', role = 'user') {
   localStorage.clear()
-  localStorage.setItem('aurora_user', JSON.stringify(USER))
+  localStorage.setItem('aurora_user', JSON.stringify({ ...USER, role }))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
   window.history.replaceState(null, '', at)
   render(<BrowserRouter><App /></BrowserRouter>)
@@ -105,7 +110,6 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
-  document.documentElement.removeAttribute('data-bug-launcher')
 })
 
 describe('where "Report a bug" is', () => {
@@ -296,5 +300,52 @@ describe('an open dialog and the session', () => {
     await waitFor(() => expect(shownAs()).toBe('Parent'), find)
     await new Promise(done => setTimeout(done, 150))
     expect(dialog()).toBeNull()
+  })
+
+  // A parent opens the dialog over a page; another tab switches the session
+  // to the child; this tab follows at its next look. What the dialog holds
+  // was the parent's, and Send would file it from the child's session.
+  it('closes when the session changes profile, and says why', async () => {
+    const server = stubServer()
+    await open('/movies')
+    fireEvent.click(identity())
+    fireEvent.click(await within(screen.getByRole('group', { name: 'Account and profiles' })).findByRole('button', { name: 'Report a bug' }, find))
+    expect(dialog()).toBeInTheDocument()
+    server.bind(20)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(shownAs()).toBe('Kid'), find)
+    await waitFor(() => expect(dialog()).toBeNull(), find)
+    expect(await screen.findByText('The bug report was closed because this tab is now on another profile.', {}, find)).toBeInTheDocument()
+    // And it is closed, not waiting: the entry opens an ordinary one.
+    fireEvent.click(identity())
+    fireEvent.click(await within(screen.getByRole('group', { name: 'Account and profiles' })).findByRole('button', { name: 'Report a bug' }, find))
+    expect(dialog()).toBeInTheDocument()
+    await new Promise(done => setTimeout(done, 150))
+    expect(dialog()).toBeInTheDocument()
+  })
+
+  // The config is asked for again as the dialog opens, and again whenever
+  // the session's admin powers change. "Open" must not outlive a "no".
+  it('closes when the server stops taking reports, and does not come back by itself when it takes them again', async () => {
+    const server = stubServer({ role: 'admin' })
+    await open('/movies', 'Parent', 'admin')
+    fireEvent.click(identity())
+    const entry = await within(screen.getByRole('group', { name: 'Account and profiles' })).findByRole('button', { name: 'Report a bug' }, find)
+    // The server has stopped by the time the dialog asks again.
+    server.takeReports(false)
+    fireEvent.click(entry)
+    await waitFor(() => expect(dialog()).toBeNull(), find)
+    // Reports are taken again, and the config is asked for anew (the
+    // session's admin powers change with the profile).
+    server.takeReports(true)
+    server.bind(20)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(shownAs()).toBe('Kid'), find)
+    fireEvent.click(identity())
+    await within(screen.getByRole('group', { name: 'Account and profiles' })).findByRole('button', { name: 'Report a bug' }, find)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(dialog()).toBeNull()
+    // It was closed long before the switch, so nothing says it was closed by it.
+    expect(screen.queryByText(/bug report was closed/)).toBeNull()
   })
 })

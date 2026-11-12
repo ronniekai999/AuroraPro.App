@@ -57,6 +57,11 @@ interface Props {
   // the app has gone back to the page the report is about), or nothing had
   // the focus when the dialog opened.
   focusFallback?: () => void
+  // The session the dialog was opened in is no longer the one on screen (a
+  // switch of profile made in another tab). The dialog calls onClose as
+  // soon as nothing of its own is in flight: a send under way finishes
+  // first, and a recording is stopped.
+  dismissed?: boolean
 }
 
 // Match server-side limits (internal/api/feedback_handlers.go) so the
@@ -175,7 +180,7 @@ async function compressImageIfLarge(file: File): Promise<File> {
 // expiry; user can also stop early via the in-recording UI.
 const MAX_RECORDING_MS = 30_000
 
-export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason, focusFallback }: Props) {
+export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason, focusFallback, dismissed = false }: Props) {
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -196,11 +201,34 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   // keep it for as long as the recording runs.
   const errorShown = useRef<string | null>(null)
   useLayoutEffect(() => { errorShown.current = error }, [error])
+  // The frame a taken-down refusal is waiting on, to come back. Anything
+  // that says something else first, or clears the line, cancels it: left
+  // alone it put the older words back over a newer refusal, and back on a
+  // field the person had since typed in.
+  const refill = useRef(0)
+  // While it waits, the line keeps its height: the row of actions under it
+  // would otherwise jump up a line and back.
+  const [refilling, setRefilling] = useState(false)
+  const cancelRefill = () => {
+    if (!refill.current) return
+    cancelAnimationFrame(refill.current)
+    refill.current = 0
+    setRefilling(false)
+  }
+  useEffect(() => () => cancelAnimationFrame(refill.current), [])
+  const clearError = () => { cancelRefill(); setError(null) }
   const refuse = (text: string, field: 'title' | 'description' | null = null) => {
+    cancelRefill()
     setFieldRefusal(field ? { field, text } : null)
     if (errorShown.current !== text) { setError(text); return }
     setError(null)
-    requestAnimationFrame(() => { if (mountedRef.current) setError(text) })
+    setRefilling(true)
+    refill.current = requestAnimationFrame(() => {
+      refill.current = 0
+      if (!mountedRef.current) return
+      setRefilling(false)
+      setError(text)
+    })
   }
   const actionsRef = useRef<HTMLDivElement | null>(null)
   const attachTriggerRef = useRef<HTMLButtonElement | null>(null)
@@ -413,7 +441,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       setAttachmentWithPreview(null)
       return
     }
-    setError(null)
+    clearError()
     if (!raw) {
       setAttachmentWithPreview(null)
       return
@@ -471,7 +499,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   // `toBlob(node, options)` returns a Blob directly instead of
   // html2canvas's two-step canvas → toBlob pattern.
   const handleCapture = async () => {
-    setError(null)
+    clearError()
     // Deep-debug Phase 2 #7 — load the library BEFORE the modal
     // hide. If the chunk fetch fails we want the modal to stay
     // visible so the user sees the error without a confusing
@@ -726,7 +754,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   }
 
   const handleStartRecording = async () => {
-    setError(null)
+    clearError()
     // Phase 3 (deep-debug M6) — re-entrancy guard. The browser's
     // OS picker is modal to the tab, so a normal double-click can't
     // get here twice, but a programmatic re-invocation (test runner,
@@ -930,6 +958,19 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     }
   }
 
+  // Dismissed by the app (see the prop): close once nothing is in flight. A
+  // recording is stopped, which ends it as Stop does and brings this back
+  // round; a send or a capture under way is waited for.
+  useEffect(() => {
+    if (!dismissed) return
+    if (recording) { handleStopRecording(); return }
+    if (submitting || capturing) return
+    onClose()
+    // onClose is the caller's; it is called once, when the state above
+    // first allows it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dismissed, recording, submitting, capturing])
+
   // Cleanup recording state on unmount (defensive — onstop is the
   // normal-flow finalization, but a forced unmount via the parent
   // should also stop the recorder, kill the timers, and release the
@@ -978,7 +1019,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       refuse(`Description exceeds ${MAX_DESC_LEN} characters.`, 'description')
       return
     }
-    setError(null)
+    clearError()
     setFieldRefusal(null)
     submittingRef.current = true
     setSubmitting(true)
@@ -1206,7 +1247,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               ref={titleInputRef}
               type="text"
               value={title}
-              onChange={e => { setTitle(e.target.value); if (errorField === 'title') setError(null) }}
+              onChange={e => { setTitle(e.target.value); if (errorField === 'title' || (refilling && fieldRefusal?.field === 'title')) clearError() }}
               maxLength={MAX_TITLE_LEN}
               required
               aria-invalid={errorField === 'title'}
@@ -1231,7 +1272,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             <textarea
               id="bug-desc"
               value={description}
-              onChange={e => { setDescription(e.target.value); if (errorField === 'description') setError(null) }}
+              onChange={e => { setDescription(e.target.value); if (errorField === 'description' || (refilling && fieldRefusal?.field === 'description')) clearError() }}
               maxLength={MAX_DESC_LEN}
               required
               aria-invalid={errorField === 'description'}
@@ -1462,7 +1503,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           {/* A refusal: the form's own checks, a capture that failed, the
               server's answer. An alert, always in the page so that its
               words arriving are what is announced. */}
-          <p id="bug-error" role="alert" className={error ? 'text-danger-ink text-sm leading-snug' : 'sr-only'}>
+          <p id="bug-error" role="alert" className={error ? 'text-danger-ink text-sm leading-snug' : refilling ? 'min-h-[1.375em] text-sm leading-snug' : 'sr-only'}>
             {error ?? ''}
           </p>
 

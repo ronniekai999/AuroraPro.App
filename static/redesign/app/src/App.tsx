@@ -6372,10 +6372,15 @@ export default function App() {
   const mayReturnTo = (pathname: string) => {
     const v = pathToView(pathname)
     if (hiddenFromRestricted(v) && !hiddenOk) return false
-    if (v === 'admin' && (!user || user.role !== 'admin' || (actingRestricted && !adminUI))) return false
+    // The admin page only for a session shown the admin UI: an admin whose
+    // profile is not yet confirmed would be sent back to a page that shows
+    // its "checking" notice and nothing else.
+    if (v === 'admin' && !adminUI) return false
     return true
   }
+  const reportsOn = !!bugReportConfig?.enabled
   const bugReport = useBugReportEntry({
+    enabled: reportsOn,
     userId: userIdForBugReport ?? null,
     profileId: activeProfileId,
     location,
@@ -6387,7 +6392,6 @@ export default function App() {
     goBack: () => { navigate(-1) },
     onAsk: refreshBugReportConfig,
   })
-  const reportsOn = !!bugReportConfig?.enabled
 
   // An admin's list holds every member's requests (with their usernames) and
   // a restricted session's only the account's own, so it is dropped when the
@@ -7653,6 +7657,7 @@ export default function App() {
       {reportsOn && (
         <BugReportHost
           open={bugReport.open}
+          dismissed={bugReport.dismissed}
           onClose={bugReport.close}
           prefillName={user.username}
           onToast={addToast}

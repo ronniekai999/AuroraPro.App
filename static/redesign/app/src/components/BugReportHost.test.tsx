@@ -288,3 +288,124 @@ describe('sending a report', () => {
     expect(within(group).getByRole('button', { name: 'Choose file' })).toBeInTheDocument()
   })
 })
+
+// The session changed profile under the open dialog (a switch made in
+// another tab). What it holds was the other profile's: a capture of a page,
+// a description. It closes, and says why, once nothing is in flight.
+describe('a dialog the app dismisses', () => {
+  function Held(props: { dismissed: boolean; onClose: () => void; onToast: HostProps['onToast'] }) {
+    return <main><BugReportHost open {...props} /></main>
+  }
+
+  it('closes at once when it is idle, and says why', () => {
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+    expect(onClose).not.toHaveBeenCalled()
+    view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith('The bug report was closed because this tab is now on another profile.', 'info')
+  })
+
+  it('says nothing of the kind when the person closes it', async () => {
+    const user = userEvent.setup()
+    const { onToast } = setup()
+    await user.click(launcher())
+    await user.keyboard('{Escape}')
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('lets a send that is under way finish, then closes', async () => {
+    const user = userEvent.setup()
+    let land: (r: BugReportSubmitResult) => void = () => {}
+    submitBugReport.mockImplementationOnce(() => new Promise<BugReportSubmitResult>(resolve => { land = resolve }))
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    expect(within(dialog).getByRole('button', { name: 'Sending…' })).toBeInTheDocument()
+    view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+    // Still there, and the request has not been abandoned.
+    expect(onClose).not.toHaveBeenCalled()
+    expect(submitBugReport).toHaveBeenCalledTimes(1)
+    expect((submitBugReport.mock.calls[0][1] as AbortSignal).aborted).toBe(false)
+    await act(async () => { land(SENT) })
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    // The report was filed, and that is said too.
+    expect(onToast).toHaveBeenCalledWith('Bug reported as issue #512. Thank you.', 'success')
+  })
+
+  it('stops a recording that is running, then closes', async () => {
+    const user = userEvent.setup()
+    const stopped = vi.fn()
+    // A recorder as the browser's behaves: stop() ends it and reports so.
+    class Recorder {
+      static isTypeSupported() { return true }
+      state = 'inactive'
+      ondataavailable: ((e: { data: Blob }) => void) | null = null
+      onstop: (() => void) | null = null
+      start() { this.state = 'recording' }
+      stop() { stopped(); this.state = 'inactive'; this.ondataavailable?.({ data: new Blob(['x'], { type: 'video/webm' }) }); this.onstop?.() }
+    }
+    vi.stubGlobal('MediaRecorder', Recorder)
+    const track = { stop: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), kind: 'video' }
+    const stream = { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [] }
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getDisplayMedia: vi.fn(async () => stream) } })
+    try {
+      const onClose = vi.fn()
+      const onToast = vi.fn()
+      const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+      await user.click(within(screen.getByRole('dialog', { hidden: true })).getByRole('button', { name: /Record screen/ }))
+      await screen.findByRole('button', { name: 'Stop screen recording' })
+      view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+      expect(stopped).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined })
+    }
+  })
+})
+
+// A repeated refusal is taken down and put back a frame later, so that it
+// is read out again. In that frame nothing else may be undone by it.
+describe('a refusal that is waiting to be said again', () => {
+  it('does not come back over a newer refusal, nor on a field that has since been typed in', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    const title = within(dialog).getByLabelText(/^Title/)
+    const description = within(dialog).getByLabelText(/^Description/)
+    const alert = dialog.querySelector('#bug-error') as HTMLElement
+    const send = within(dialog).getByRole('button', { name: 'Send report' })
+    await user.type(title, '   ')
+    await user.type(description, 'Something')
+    await user.click(send)
+    expect(alert.textContent).toBe('Title is required.')
+    // Pressed again, and the field typed in before the frame comes round.
+    act(() => { send.click() })
+    expect(alert.textContent).toBe('')
+    // The line keeps its height while it waits: the actions do not jump.
+    expect(alert.className).not.toMatch(/sr-only/)
+    fireEvent.change(title, { target: { value: 'Now it has one' } })
+    await new Promise(done => setTimeout(done, 60))
+    expect(alert.textContent).toBe('')
+    expect(title).not.toHaveAttribute('aria-invalid', 'true')
+    expect(alert.className).toMatch(/sr-only/)
+
+    // And a different refusal in that frame is the one that stays.
+    fireEvent.change(title, { target: { value: '   ' } })
+    await user.click(send)
+    expect(alert.textContent).toBe('Title is required.')
+    const input = dialog.querySelector('input[type="file"]') as HTMLInputElement
+    const big = new File(['x'], 'long.webm', { type: 'video/webm' })
+    Object.defineProperty(big, 'size', { value: 30 * 1024 * 1024 })
+    act(() => { send.click(); fireEvent.change(input, { target: { files: [big] } }) })
+    await new Promise(done => setTimeout(done, 60))
+    expect(alert.textContent).toBe('Attachment exceeds 25 MB (got 30.0 MB).')
+  })
+})
+

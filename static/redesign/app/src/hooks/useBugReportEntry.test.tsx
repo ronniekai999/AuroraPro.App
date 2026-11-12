@@ -21,7 +21,7 @@ function mount(start: string, over: Partial<BugReportEntryInput> = {}) {
   const goBack = vi.fn<() => void>()
   const onAsk = vi.fn()
   let props: BugReportEntryInput = {
-    userId: 1, profileId: 10, location: at(start), arrivedBy: 'POP', viewOf, shownView: viewOf(start),
+    enabled: true, userId: 1, profileId: 10, location: at(start), arrivedBy: 'POP', viewOf, shownView: viewOf(start),
     mayShow: () => true, goTo, goBack, onAsk, ...over,
   }
   const hook = renderHook((p: BugReportEntryInput) => useBugReportEntry(p), { initialProps: props })
@@ -108,6 +108,16 @@ describe('"Report a bug" from the Me page', () => {
     expect(app.goTo).toHaveBeenCalledWith('/movies?sort=title')
     app.go('/movies', '?sort=title')
     await waitFor(() => expect(app.open()).toBe(true))
+  })
+
+  it('goes back to the whole address, a fragment included', () => {
+    const app = mount('/movies')
+    app.set({ location: { pathname: '/title/107', search: '?from=search', hash: '#episodes', key: 'title' }, arrivedBy: 'PUSH', shownView: 'title' })
+    app.go('/me')
+    app.go('/settings/account')
+    app.go('/me')
+    act(() => app.hook.result.current.openFromMe())
+    expect(app.goTo).toHaveBeenCalledWith('/title/107?from=search#episodes')
   })
 
   it('counts Settings as a page of its own when it was not opened from Me', () => {
@@ -267,13 +277,54 @@ describe('the page a report goes back to is one session\'s', () => {
     expect(app.open()).toBe(true)
   })
 
-  // What happened with the corner button: a switch made from another tab
-  // left an open dialog open (only what it says about the token changed).
-  it('leaves an open dialog open across a change of profile', () => {
+  // A parent's capture of a page, left open, could be sent from a child's
+  // session after a switch made in another tab. The dialog is told to
+  // close; it does so itself once nothing of its own is in flight (the
+  // dialog's own tests), and until it has it is still mounted.
+  it('dismisses an open dialog when the session changes profile, and is closed once the dialog says so', () => {
+    const app = mount('/movies')
+    expect(app.hook.result.current.dismissed).toBe(false)
+    act(() => app.hook.result.current.openHere())
+    expect(app.hook.result.current.dismissed).toBe(false)
+    app.set({ profileId: 20 })
+    expect(app.hook.result.current.dismissed).toBe(true)
+    expect(app.open()).toBe(true)
+    act(() => app.hook.result.current.close())
+    expect(app.open()).toBe(false)
+    expect(app.hook.result.current.dismissed).toBe(false)
+    // The next one opened is an ordinary one.
+    act(() => app.hook.result.current.openHere())
+    expect(app.hook.result.current.dismissed).toBe(false)
+  })
+
+  it('dismisses nothing when no dialog was open at the switch', () => {
+    const app = mount('/movies')
+    app.set({ profileId: 20 })
+    expect(app.hook.result.current.dismissed).toBe(false)
+    expect(app.open()).toBe(false)
+  })
+
+  // The config is asked for again at every change of the session's admin
+  // powers; an "open" left standing would bring the dialog back unasked.
+  it('closes when the server stops taking reports, and stays closed when it takes them again', () => {
     const app = mount('/movies')
     act(() => app.hook.result.current.openHere())
-    app.set({ profileId: 20 })
-    expect(app.open()).toBe(true)
+    app.set({ enabled: false })
+    expect(app.open()).toBe(false)
+    app.set({ enabled: true })
+    expect(app.open()).toBe(false)
+  })
+
+  it('drops a return that is on its way when the server stops taking reports', () => {
+    vi.useFakeTimers()
+    const app = mount('/movies')
+    app.go('/me')
+    act(() => app.hook.result.current.openFromMe())
+    app.set({ enabled: false })
+    app.set({ enabled: true })
+    app.go('/movies', '', 'POP')
+    act(() => { vi.advanceTimersByTime(RETURN_GIVE_UP_MS + SKELETON_WAIT_MS) })
+    expect(app.open()).toBe(false)
   })
 })
 
