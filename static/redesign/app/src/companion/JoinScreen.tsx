@@ -10,7 +10,7 @@
 // It holds no session and joins nothing itself: it hands a complete code to
 // the companion's root, which owns the sign-in and the connection.
 
-import { useCallback, useEffect, useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import {
   getCompanionPartyPreview,
   posterURL,
@@ -19,7 +19,7 @@ import {
 } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 import { PersonDisc } from '@/components/PersonDisc'
-import { formatPartyTime } from '@/lib/partyInvites'
+import { localDateKey } from '@/lib/partyInvites'
 import { CompanionHeader } from './companionUi'
 
 const CODE_LEN = 6
@@ -88,6 +88,21 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
     return () => { ac.abort(); clearTimeout(t) }
   }, [code])
 
+  // A complete code takes no more typing: a character typed into the middle
+  // of one would push its last character out and send the caret to the end.
+  // Refused before it happens, as the field's length limit used to; a paste
+  // is not typing, and is cut after it has been cleaned (above).
+  const fieldRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    const el = fieldRef.current
+    if (!el) return
+    const refuseOverfill = (e: InputEvent) => {
+      if (e.inputType === 'insertText' && el.value.length >= CODE_LEN && el.selectionStart === el.selectionEnd) e.preventDefault()
+    }
+    el.addEventListener('beforeinput', refuseOverfill)
+    return () => el.removeEventListener('beforeinput', refuseOverfill)
+  }, [])
+
   const attempt = useCallback(() => {
     if (!CODE_RE.test(code)) {
       setError({ text: 'Enter the full 6-character code.', aboutCode: true })
@@ -125,6 +140,7 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
         <form className="flex flex-col" onSubmit={e => { e.preventDefault(); attempt() }} noValidate>
           <label htmlFor={`${ids}-code`} className="text-[13px] font-semibold text-ink-2">Party code</label>
           <input
+            ref={fieldRef}
             id={`${ids}-code`}
             value={code}
             onChange={e => { setError(null); setCode(normalize(e.target.value)) }}
@@ -183,7 +199,7 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
                 {/* Everyone in the room, phones included: "here", not "watching". */}
                 {started
                   ? (here !== null ? ` · ${here} here` : '')
-                  : preview.scheduledStartAt ? `, starts ${startsWhen(preview.scheduledStartAt)}` : ''}
+                  : preview.scheduledStartAt ? `, ${plannedStartPhrase(preview.scheduledStartAt, new Date())}` : ''}
               </span>
             </p>
           </div>
@@ -207,10 +223,23 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
   )
 }
 
-/** When a planned party starts, for the middle of a sentence: "tonight ·
- *  8:00 PM", "Fri, Aug 7 · 8:00 PM". */
-function startsWhen(iso: string): string {
-  return formatPartyTime(iso, new Date()).replace(/^(Tonight|Tomorrow)/, day => day.toLowerCase())
+/** When a party that has not started is planned for, for the middle of a
+ *  sentence: "starts tonight at 8:00 PM", "starts tomorrow at 9:30 AM",
+ *  "starts Fri, Aug 7 at 8:00 PM". Once the time has passed with the party
+ *  still not started (its start failed, or nobody came) it does not go on
+ *  saying "starts": "was planned for today at 6:00 PM". A time today is
+ *  "tonight" only from five in the afternoon. */
+export function plannedStartPhrase(iso: string, now: Date): string {
+  const at = new Date(iso)
+  const clock = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  const day = localDateKey(iso)
+  const dayOf = (offsetDays: number) => localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays, 12).toISOString())
+  const past = at.getTime() <= now.getTime()
+  const when = day === dayOf(0) ? (!past && at.getHours() >= 17 ? 'tonight' : 'today')
+    : day === dayOf(1) ? 'tomorrow'
+    : day === dayOf(-1) ? 'yesterday'
+    : at.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  return `${past ? 'was planned for' : 'starts'} ${when} at ${clock}`
 }
 
 // The title's poster, small, on the join and room screens. Where there is

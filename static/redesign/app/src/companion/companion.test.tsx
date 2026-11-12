@@ -29,7 +29,7 @@ vi.mock('@/lib/ambient', () => ambient)
 const companion = vi.hoisted(() => ({ current: null as unknown }))
 vi.mock('@/hooks/useCompanion', () => ({ useCompanion: () => companion.current }))
 
-import { JoinScreen } from './JoinScreen'
+import { JoinScreen, plannedStartPhrase } from './JoinScreen'
 import { CompanionRoom, type CompanionRoomProps } from './CompanionRoom'
 import { CompanionApp } from './CompanionApp'
 
@@ -59,6 +59,7 @@ const ROOM: CompanionState = {
   connected: true,
   reconnecting: false,
   status: 'connected',
+  synced: true,
   error: null,
 } as CompanionState
 
@@ -216,7 +217,47 @@ describe('the companion’s join screen', () => {
     expect(await screen.findByText('Sunday film has not started')).toBeInTheDocument()
     expect(screen.queryByText(/is live/)).toBeNull()
     expect(screen.queryByText(/0 (here|watching)/)).toBeNull()
-    expect(screen.getByText(/^The Orchard, starts (tomorrow|[A-Z][a-z]{2}, )/)).toBeInTheDocument()
+    expect(screen.getByText(/^The Orchard, starts (tomorrow|[A-Z][a-z]{2}, [A-Z][a-z]{2} \d+) at \d/)).toBeInTheDocument()
+  })
+
+  // A planned party whose start failed stays unstarted on the server.
+  it('does not go on saying "starts" once the planned time has passed', async () => {
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', partyName: 'Sunday film', mediaTitle: 'The Orchard', participantCount: 0, startedAt: null, scheduledStartAt: new Date(Date.now() - 3 * 24 * 3600e3).toISOString() })
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
+    expect(await screen.findByText('Sunday film has not started')).toBeInTheDocument()
+    expect(screen.getByText(/^The Orchard, was planned for /)).toBeInTheDocument()
+    expect(screen.queryByText(/starts/)).toBeNull()
+  })
+
+  it('words a planned time by the day it falls on, and "tonight" only from the late afternoon', () => {
+    const now = new Date(2026, 9, 1, 15, 0)
+    const at = (d: number, h: number, m = 0) => new Date(2026, 9, d, h, m).toISOString()
+    expect(plannedStartPhrase(at(1, 20), now)).toBe('starts tonight at 8:00 PM')
+    expect(plannedStartPhrase(at(1, 16, 30), now)).toBe('starts today at 4:30 PM')
+    expect(plannedStartPhrase(at(2, 8), now)).toBe('starts tomorrow at 8:00 AM')
+    expect(plannedStartPhrase(at(9, 20), now)).toMatch(/^starts Fri, Oct 9 at 8:00 PM$/)
+    // Passed, the party still not started.
+    expect(plannedStartPhrase(at(1, 8), now)).toBe('was planned for today at 8:00 AM')
+    expect(plannedStartPhrase(new Date(2026, 8, 30, 20).toISOString(), now)).toBe('was planned for yesterday at 8:00 PM')
+    // A planned time of this evening that has passed is not "tonight" to come.
+    expect(plannedStartPhrase(at(1, 18), new Date(2026, 9, 1, 21, 0))).toBe('was planned for today at 6:00 PM')
+  })
+
+  // A character typed into the middle of a complete code would push its
+  // last one out and send the caret to the end.
+  it('takes no more typing into a complete code, and leaves the caret where it was', async () => {
+    const user = userEvent.setup()
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="FRD4YC" />)
+    const code = screen.getByLabelText('Party code') as HTMLInputElement
+    await user.click(code)
+    code.setSelectionRange(3, 3)
+    await user.keyboard('X')
+    expect(code).toHaveValue('FRD4YC')
+    expect(code.selectionStart).toBe(3)
+    // Typing over a selection replaces it, as anywhere.
+    code.setSelectionRange(0, 3)
+    await user.keyboard('M')
+    expect(code).toHaveValue('M4YC')
   })
 
   it('says only that a party has not started when it has no planned time', async () => {
@@ -501,17 +542,72 @@ describe('the companion’s room', () => {
 
   // The history that arrives with the connection is not news, and a live
   // region would read all of it out.
+  //
+  // The states are the ones the connection really goes through, in its
+  // order (useCompanion.test.tsx pins that order): joining; connected as
+  // the socket opens, with nothing arrived; then the room's state, history
+  // and all, in one message.
   it('does not announce the chat it arrives to, only what is said after', async () => {
-    const { rerender, props } = room({ state: { ...ROOM, connected: false, status: 'joining', chat: [] } })
+    const frames = () => new Promise(done => setTimeout(done, 80))
+    const empty = { ...ROOM, chat: [], participants: [], partyName: undefined, mediaTitle: undefined, mediaPoster: undefined, synced: false }
+    const { rerender, props } = room({ state: { ...empty, connected: false, status: 'joining' } })
     const log = screen.getByRole('log', { name: 'Chat' })
     expect(log).toHaveAttribute('aria-live', 'off')
+    // The socket is open. Nothing has been sent to it yet, and it stays off
+    // however long that takes.
+    rerender(<CompanionRoom {...props} state={{ ...empty, connected: true, status: 'connected' }} />)
+    await frames()
+    expect(log).toHaveAttribute('aria-live', 'off')
+    // The state arrives, with the history: still off in the commit that
+    // draws it, and on a frame later.
     rerender(<CompanionRoom {...props} state={ROOM} />)
-    // Still off in the commit that draws the history.
     expect(log).toHaveAttribute('aria-live', 'off')
     await waitFor(() => expect(log).toHaveAttribute('aria-live', 'polite'))
-    // Reconnecting brings the history again.
-    rerender(<CompanionRoom {...props} state={{ ...ROOM, reconnecting: true, status: 'reconnecting' }} />)
+    // A drop: off, and off still when the socket has reopened and the
+    // history has yet to come again.
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, connected: false, reconnecting: true, status: 'reconnecting', synced: false }} />)
     expect(log).toHaveAttribute('aria-live', 'off')
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, synced: false }} />)
+    await frames()
+    expect(log).toHaveAttribute('aria-live', 'off')
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    await waitFor(() => expect(log).toHaveAttribute('aria-live', 'polite'))
+  })
+
+  // A history that comes back shorter than the chat's box fires no scroll
+  // event: a reader who had scrolled back in a longer one must not be left
+  // unfollowed for good.
+  it('counts a reader as at the end again when everything left is within reach', () => {
+    const msg = (id: string) => ({ id, user_id: 2, username: 'priya', message: 'more', timestamp: '' })
+    const { rerender, props } = room()
+    const log = screen.getByRole('log', { name: 'Chat' })
+    let height = 2000
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => height })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, get: () => 300 })
+    log.scrollTop = 0
+    fireEvent.scroll(log)
+    // The history is replaced by a short one; no scroll event comes.
+    height = 320
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [msg('n1')] }} />)
+    height = 420
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [msg('n1'), msg('n2')] }} />)
+    expect(log.scrollTop).toBe(420)
+  })
+
+  it('says when the connection is back, and that the message is still there', async () => {
+    const user = userEvent.setup()
+    const down = { ...ROOM, connected: false, reconnecting: true, status: 'reconnecting' as const, synced: false }
+    const { rerender, props } = room()
+    // The first connection is not a return.
+    expect(said('status')).toEqual([])
+    rerender(<CompanionRoom {...props} state={down} />)
+    await user.type(screen.getByLabelText('Message the party'), 'still here')
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    expect(said('status')).toEqual(['Connected again. Your message is still in the field.'])
+    rerender(<CompanionRoom {...props} state={down} />)
+    await user.clear(screen.getByLabelText('Message the party'))
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    expect(said('status')).toEqual(['Connected again.'])
   })
 
   it('follows a new message when the reader was at the end, and not when they had scrolled back', () => {
@@ -720,6 +816,47 @@ describe('the companion’s sign-in', () => {
     expect((companion.current as UseCompanion).join).toHaveBeenCalledTimes(1)
     expect(await screen.findByText('Joining as morgan')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Sign in to join' })).toBeNull()
+  })
+
+  // After the last reconnect attempt fails, the room is replaced by the
+  // join screen. "What you type is kept" has to hold through that.
+  it('keeps what was typed in a party through a connection that was given up on, and drops it when the person leaves', async () => {
+    const user = userEvent.setup()
+    api.fetchMe.mockResolvedValue(MORGAN)
+    api.getStoredUser.mockReturnValue(MORGAN)
+    const inRoom = (): UseCompanion => ({ ...idle(), state: ROOM })
+    // A new element each time, or React has nothing to re-render for.
+    const tree = () => (
+      <MemoryRouter initialEntries={['/join/FRD4YC']}>
+        <Routes>
+          <Route path="join" element={<CompanionApp />} />
+          <Route path="join/:code" element={<CompanionApp />} />
+        </Routes>
+      </MemoryRouter>
+    )
+    companion.current = inRoom()
+    const view = render(tree())
+    await user.type(await screen.findByLabelText('Message the party'), 'are you still there?')
+    // The connection is given up on: the join screen, with why.
+    companion.current = { ...idle(), state: { ...ROOM, code: 'FRD4YC', connected: false, synced: false, status: 'error', error: 'Lost connection to the party. Refresh to retry.' } }
+    view.rerender(tree())
+    expect(await screen.findByLabelText('Party code')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Message the party')).toBeNull()
+    // Back in the same party: the words are there.
+    companion.current = inRoom()
+    view.rerender(tree())
+    expect(await screen.findByLabelText('Message the party')).toHaveValue('are you still there?')
+    // Another party's field is its own.
+    companion.current = { ...idle(), state: { ...ROOM, code: 'MOON42' } }
+    view.rerender(tree())
+    expect(screen.getByLabelText('Message the party')).toHaveValue('')
+    // Leaving a party is the end of what was being said in it.
+    companion.current = inRoom()
+    view.rerender(tree())
+    expect(screen.getByLabelText('Message the party')).toHaveValue('are you still there?')
+    await user.click(screen.getByRole('button', { name: 'Leave the party' }))
+    view.rerender(tree())
+    expect(screen.getByLabelText('Message the party')).toHaveValue('')
   })
 
   it('says it is loading while the session is checked, with nothing to press', () => {

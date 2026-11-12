@@ -87,6 +87,12 @@ export interface CompanionState {
   connected: boolean
   reconnecting: boolean
   status: CompanionConnStatus
+  /** The room's state has been applied on this connection. `connected`
+   *  and status 'connected' are set as the socket opens, before the server
+   *  has sent anything: the people, the chat's history and what is playing
+   *  arrive after, in one message. False again from a join and from a drop,
+   *  until the next one arrives. */
+  synced: boolean
   error: string | null
 }
 
@@ -101,6 +107,7 @@ const INITIAL_STATE: CompanionState = {
   connected: false,
   reconnecting: false,
   status: 'idle',
+  synced: false,
   error: null,
 }
 
@@ -247,6 +254,7 @@ export function useCompanion(): UseCompanion {
             prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
               ? []
               : prev.recentReactions,
+          synced: true,
           error: null,
         }))
         break
@@ -384,7 +392,7 @@ export function useCompanion(): UseCompanion {
       voiceRef.current?.onRoomSocketDown()
 
       if (userInitiatedLeaveRef.current) {
-        setStatePatch({ connected: false, reconnecting: false, status: 'idle' })
+        setStatePatch({ connected: false, reconnecting: false, status: 'idle', synced: false })
         return
       }
 
@@ -394,6 +402,7 @@ export function useCompanion(): UseCompanion {
           connected: false,
           reconnecting: false,
           status: 'error',
+          synced: false,
           error: 'Lost connection to the party. Refresh to retry.',
         })
         return
@@ -401,7 +410,7 @@ export function useCompanion(): UseCompanion {
 
       const delay = RECONNECT_BACKOFF_MS[attempt]
       reconnectAttemptRef.current = attempt + 1
-      setStatePatch({ connected: false, reconnecting: true, status: 'reconnecting' })
+      setStatePatch({ connected: false, reconnecting: true, status: 'reconnecting', synced: false })
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null
         // Refresh before reconnect — the WS upgrade authenticates via the

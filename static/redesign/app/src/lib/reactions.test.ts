@@ -11,16 +11,24 @@ import { describe, expect, it } from 'vitest'
 import managerGo from '../../../../../internal/watchparty/manager.go?raw'
 import { QUICK_REACTIONS, drawnReaction } from './reactions'
 
-/** The keys of `allowedReactions`, decoded from Go's \UXXXXXXXX escapes. */
-function serverReactions(): string[] {
-  const block = /var allowedReactions = map\[string\]bool\{([\s\S]*?)\n\}/.exec(managerGo)
+/** The keys of `allowedReactions`, decoded from Go's \UXXXXXXXX escapes.
+ *  An entry on a comment line is not an entry: a reaction commented out of
+ *  the map is one the server refuses. */
+function serverReactions(source: string): string[] {
+  const block = /var allowedReactions = map\[string\]bool\{([\s\S]*?)\n\}/.exec(source)
   if (!block) throw new Error('allowedReactions not found in internal/watchparty/manager.go: this test is out of date, not passing')
-  return [...block[1].matchAll(/"((?:\\U[0-9A-Fa-f]{8})+)":\s*true/g)].map(m =>
+  const live = block[1].split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+  return [...live.matchAll(/"((?:\\U[0-9A-Fa-f]{8})+)":\s*true/g)].map(m =>
     [...m[1].matchAll(/\\U([0-9A-Fa-f]{8})/g)].map(c => String.fromCodePoint(parseInt(c[1], 16))).join(''))
 }
 
 describe('the reactions a party offers', () => {
-  const accepted = serverReactions()
+  const accepted = serverReactions(managerGo)
+
+  it('does not count an entry the server has commented out', () => {
+    const source = 'var allowedReactions = map[string]bool{\n\t"\\U0001F525": true, // fire\n\t// "\\U0001F480": true, // skull\n}\n'
+    expect(serverReactions(source)).toEqual(['🔥'])
+  })
 
   it('reads a real list from the server', () => {
     // Not vacuous: fifteen today, and a list that parsed to nothing would

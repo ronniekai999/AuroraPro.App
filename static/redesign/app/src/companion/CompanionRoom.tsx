@@ -29,6 +29,11 @@ export interface CompanionRoomProps {
   currentUserId: number
   /** False when the message was not sent: the draft is then kept. */
   sendChat: (message: string) => boolean | void
+  /** What is typed and not yet sent, when the caller holds it: the room can
+   *  be taken down under it (the connection given up on), and the words
+   *  must be there when the person comes back to the party. */
+  draft?: string
+  onDraftChange?: (text: string) => void
   sendReaction: (emoji: string) => void
   joinVoice: () => Promise<void>
   toggleMute: () => void
@@ -39,9 +44,12 @@ export interface CompanionRoomProps {
 export function CompanionRoom({
   state, voice, currentUserId,
   sendChat, sendReaction, joinVoice, toggleMute, leaveVoice, onLeave,
+  draft: heldDraft, onDraftChange,
 }: CompanionRoomProps) {
   const ids = useId()
-  const [draft, setDraft] = useState('')
+  const [ownDraft, setOwnDraft] = useState('')
+  const draft = heldDraft ?? ownDraft
+  const setDraft = onDraftChange ?? setOwnDraft
   const [micBusy, setMicBusy] = useState(false)
   // Set as voice is asked for, not at the next render: two presses in one
   // moment must not both ask.
@@ -85,6 +93,15 @@ export function CompanionRoom({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastKey])
 
+  // When everything left is within reach of the end, the reader is at the
+  // end, whatever the last scroll event said: a history that comes back
+  // shorter than the box (after a reconnect) fires no scroll event, and a
+  // reader left "scrolled back" would never be followed again.
+  useEffect(() => {
+    const el = chatScrollRef.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 120) nearEnd.current = true
+  }, [state.chat])
+
   // The chat's own box changes height too (a note appears above the message
   // field, the voice row opens): someone at the end stays at the end.
   useEffect(() => {
@@ -97,14 +114,16 @@ export function CompanionRoom({
 
   // The chat is a live region, and the history that arrives with the
   // connection is not news: up to a hundred lines would be read out at once.
-  // It is switched on a frame after the first state has been drawn, and off
-  // again while the phone reconnects (the history arrives again).
+  // It is switched on a frame after the room's state has been drawn, and
+  // off again from a drop until the state has arrived anew. `synced`, not
+  // the connection's status: the socket is "connected" as it opens, before
+  // the server has sent the history.
   const [chatLive, setChatLive] = useState(false)
   useEffect(() => {
-    if (state.status !== 'connected') { setChatLive(false); return }
+    if (!state.synced) { setChatLive(false); return }
     const frame = requestAnimationFrame(() => setChatLive(true))
     return () => cancelAnimationFrame(frame)
-  }, [state.status])
+  }, [state.synced])
 
   // Entering the room, the focus goes to its heading: the screen before it
   // (the code field, the sign-in) is gone, and the focus with it.
@@ -175,6 +194,20 @@ export function CompanionRoom({
   const leave = () => { leftVoice.current = true; leaveVoice() }
 
   const live = state.connected && !state.reconnecting
+  // The connection has come back: said for a few seconds, since the note
+  // about being disconnected otherwise just goes.
+  const [backAgain, setBackAgain] = useState(false)
+  const wasLive = useRef<boolean | null>(null)
+  useEffect(() => {
+    const before = wasLive.current
+    wasLive.current = live
+    if (!live) { setBackAgain(false); return }
+    // Only a return: the first connection is not one.
+    if (before !== false) return
+    setBackAgain(true)
+    const t = window.setTimeout(() => setBackAgain(false), 6000)
+    return () => window.clearTimeout(t)
+  }, [live])
   // The first connection still on its way counts as connecting, so the
   // header never says "offline" while the phone is in fact getting there.
   const pending = state.reconnecting || (state.status === 'joining' && !state.connected)
@@ -204,8 +237,10 @@ export function CompanionRoom({
             {here > 0 && `${here} here`}
           </p>
           {/* The connection, in words, whenever it is not simply up. */}
-          <p role="status" className={live ? 'sr-only' : `text-[13px] leading-snug ${pending ? 'text-warn' : 'text-danger-ink'}`}>
-            {live ? '' : pending ? (state.status === 'joining' ? 'Connecting…' : 'Reconnecting…') : 'Offline'}
+          <p role="status" className={live ? (backAgain ? 'text-[13px] leading-snug text-ink-2' : 'sr-only') : `text-[13px] leading-snug ${pending ? 'text-warn' : 'text-danger-ink'}`}>
+            {live
+              ? (backAgain ? (draft.trim() ? 'Connected again. Your message is still in the field.' : 'Connected again.') : '')
+              : pending ? (state.status === 'joining' ? 'Connecting…' : 'Reconnecting…') : 'Offline'}
           </p>
         </div>
         <button type="button" onClick={onLeave} className="stage-btn stage-btn-danger flex-none" aria-label="Leave the party">

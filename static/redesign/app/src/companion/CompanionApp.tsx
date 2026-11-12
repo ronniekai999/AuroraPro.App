@@ -69,6 +69,23 @@ export function CompanionApp() {
   const companion = useCompanion()
   const { join } = companion
 
+  // What is typed in a party's message field and not yet sent, by the
+  // party's code. Held here, above the room: when the connection is given
+  // up on, the room is replaced by the join screen, and the words must be
+  // there when the person rejoins. One person's: gone with a sign-out, and
+  // with a party the person chose to leave.
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const signedInAs = user?.id ?? null
+  const [draftsFor, setDraftsFor] = useState(signedInAs)
+  if (draftsFor !== signedInAs) {
+    setDraftsFor(signedInAs)
+    setDrafts({})
+  }
+  const roomCode = companion.state.code ?? ''
+  const setRoomDraft = useCallback((text: string) => {
+    setDrafts(d => (d[roomCode] === text ? d : { ...d, [roomCode]: text }))
+  }, [roomCode])
+
   // Auto-join once we have BOTH a route code AND an authenticated user
   // and we're idle. This covers the QR / deep-link path: scan → land on
   // /join/CODE → (sign in if needed) → connect automatically. We guard
@@ -95,8 +112,10 @@ export function CompanionApp() {
   }, [join, navigate, routeCode])
 
   const handleLeave = useCallback(() => {
+    const left = companion.state.code
     companion.leave()
     autoJoinedRef.current = null
+    if (left) setDrafts(d => { const { [left]: _gone, ...rest } = d; return rest })
     navigate('/join', { replace: true })
   }, [companion, navigate])
 
@@ -131,6 +150,8 @@ export function CompanionApp() {
           toggleMute={companion.toggleMute}
           leaveVoice={companion.leaveVoice}
           onLeave={handleLeave}
+          draft={drafts[roomCode] ?? ''}
+          onDraftChange={setRoomDraft}
         />
       ) : (
         <JoinScreen
