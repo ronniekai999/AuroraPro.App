@@ -421,13 +421,17 @@ function JoinWithCode({ fieldId, joining, refused, onJoin }: { fieldId: string; 
   const id = fieldId
   const [code, setCode] = useState('')
   const fieldRef = useRef<HTMLInputElement | null>(null)
+  const submitRef = useRef<HTMLButtonElement | null>(null)
   const submit = (e: FormEvent) => {
     e.preventDefault()
     if (code.length !== 6 || joining !== null) return
     void onJoin(code, `the party with code ${code}`, 'code').then(r => {
-      if (r.ok) setCode('')
-      // The code stays to be corrected, with the caret in it.
-      else fieldRef.current?.focus()
+      if (r.ok) { setCode(''); return }
+      // The code stays to be corrected, with the caret in it. But a join
+      // can take seconds to be refused: someone who has moved on to another
+      // control keeps their place.
+      const at = document.activeElement
+      if (!at || at === document.body || at === submitRef.current || at === fieldRef.current) fieldRef.current?.focus()
     })
   }
   return (
@@ -453,7 +457,7 @@ function JoinWithCode({ fieldId, joining, refused, onJoin }: { fieldId: string; 
         {/* Named apart from the Join of a party in the list. Off through
             aria-disabled, never `disabled`: the press that joins also empties
             the field, and a disabled button would drop the focus. */}
-        <button type="submit" aria-label="Join with this code" aria-disabled={code.length !== 6 || joining !== null} className="stage-btn stage-btn-ghost">
+        <button type="submit" ref={submitRef} aria-label="Join with this code" aria-disabled={code.length !== 6 || joining !== null} className="stage-btn stage-btn-ghost">
           {joining === code && code ? 'Joining…' : 'Join'}
         </button>
       </form>
@@ -547,6 +551,10 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   const [error, setError] = useState<string | null>(null)
   // The room just made, whose row takes the focus the form had.
   const [made, setMade] = useState<number | null>(null)
+  // The room whose row last had the focus. Its Join button goes when a
+  // reload finds its party has ended; the row takes the focus then.
+  const focusedRoom = useRef<number | null>(null)
+  const loadedOnce = useRef(false)
 
   // Read when the page opens, and again when the parties running change: a
   // room says whether a party is on in it ("live now" / "nothing on"), and
@@ -555,13 +563,19 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   useEffect(() => {
     const ac = new AbortController()
     listRooms(ac.signal)
-      .then(list => { setRooms(list); setFailed(false) })
+      .then(list => { loadedOnce.current = true; setRooms(list); setFailed(false) })
       .catch((err: unknown) => {
         if (ac.signal.aborted || (err instanceof Error && err.name === 'AbortError')) return
-        setRooms(prev => { if (prev === null) setFailed(true); return prev ?? [] })
+        // Only the first read failing leaves nothing to show.
+        if (!loadedOnce.current) { setFailed(true); setRooms([]) }
       })
     return () => ac.abort()
   }, [partyKey])
+
+  useEffect(() => {
+    if (focusedRoom.current === null) return
+    focusIfLost(listRef.current?.querySelector<HTMLElement>(`[data-room="${focusedRoom.current}"]`))
+  }, [rooms])
 
   useEffect(() => {
     if (made === null) return
@@ -636,7 +650,7 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
             return (
               // Focusable from code only: a room just made takes the focus
               // its form had, and a room with nothing on has no button.
-              <li key={r.id} data-room={r.id} tabIndex={-1} className="rounded-control bg-surface-raised px-4 py-2.5">
+              <li key={r.id} data-room={r.id} tabIndex={-1} onFocus={() => { focusedRoom.current = r.id }} className="rounded-control bg-surface-raised px-4 py-2.5">
                 <div className="flex min-h-[40px] items-center gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[15px] font-semibold text-ink">{r.name}</div>

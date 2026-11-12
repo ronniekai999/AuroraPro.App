@@ -1692,7 +1692,12 @@ export default function App() {
   // user is tri-valued (null | false | ApiUser); narrow to id only
   // when actually logged in so the hook's cache key isn't keyed on
   // undefined-but-truthy values.
-  const party = useParty(user && typeof user === 'object' ? user.id : undefined)
+  // The hook also files that record under the profile the session acts as
+  // (two profiles of one account are two people), so that state is declared
+  // here, ahead of it. What it means and when it changes is said below,
+  // where the rest of the profile state is.
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  const party = useParty(user && typeof user === 'object' ? user.id : undefined, activeProfileId)
   // Freshest party state for callbacks that close over an early render (e.g.
   // handlePlayContinue is a stable useCallback). Reading party.state directly
   // inside such a callback would capture a stale snapshot.
@@ -1797,8 +1802,8 @@ export default function App() {
   // so a new login (which binds the account default) can re-select it; it
   // used to seed activeProfileId, which fetched for the remembered profile
   // before the binding was read, and kept it for the tab's life when the
-  // profile list failed to load.
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  // profile list failed to load. (`activeProfileId` itself is declared
+  // above, beside the party hook that takes it.)
   // Personalized content (the hero, the personalized Home rails, Continue
   // Watching, taste onboarding) loads only once the session's profile is
   // known, or the account has no profile to know. A request sent before then

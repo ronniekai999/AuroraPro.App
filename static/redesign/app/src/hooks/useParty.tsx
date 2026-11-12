@@ -246,13 +246,19 @@ export interface UseParty {
 // signed-in user. Optional — when undefined, caching is skipped and the
 // modal's "Recently in" pill simply won't render. Callers that already
 // have user.id should pass it (App.tsx does).
-export function useParty(currentUserId?: number): UseParty {
+export function useParty(currentUserId?: number, actingProfileId: number | null = null): UseParty {
   const [state, setState] = useState<PartyState>(INITIAL_STATE)
   // Track the latest userId in a ref so the leave callback's stable
   // identity doesn't capture a stale id when the user logs in/out
   // mid-session. Also avoids re-creating callbacks every render.
   const currentUserIdRef = useRef<number | undefined>(currentUserId)
   currentUserIdRef.current = currentUserId
+  // The profile the session acts as, the same way: "you were just in" is
+  // filed under it, and read back under it by the page that shows it. Null
+  // is an account with no profile, or a session whose profile is not known
+  // yet; the reader uses null for those too.
+  const actingProfileIdRef = useRef<number | null>(actingProfileId)
+  actingProfileIdRef.current = actingProfileId
   const roomWsRef = useRef<WebSocket | null>(null)
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
@@ -459,7 +465,7 @@ export function useParty(currentUserId?: number): UseParty {
         partyName: state.partyName,
         mediaTitle: state.mediaTitle,
         wasHost: state.hostUserId === userId,
-      })
+      }, actingProfileIdRef.current)
     }
     // Mark this as user-initiated FIRST so any pending close handlers
     // know not to attempt reconnect. Without this flag, calling leave()
@@ -583,7 +589,7 @@ export function useParty(currentUserId?: number): UseParty {
               partyName: inner.party_name,
               mediaTitle: inner.media_title,
               wasHost: inner.host_user_id === userId,
-            })
+            }, actingProfileIdRef.current)
           }
         }
         // First party-state arrival is the cue to open the sync

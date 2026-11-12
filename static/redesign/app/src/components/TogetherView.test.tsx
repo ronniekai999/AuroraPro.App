@@ -8,7 +8,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import TogetherView, { watchedAgo, type TogetherViewProps } from './TogetherView'
 import type { ActiveParty, MyPartyInvite } from '@/lib/api'
 import { cacheLastParty, readLastParty } from '@/lib/lastParty'
-import { rememberProfileId } from '@/lib/profileSession'
 
 // The page's own requests: the viewer's rooms and what the people they
 // follow finished.
@@ -181,6 +180,21 @@ describe('the ways into a party', () => {
     expect(submit).toHaveFocus()
   })
 
+  // A join can take seconds to be refused.
+  it('does not pull the caret back to the code field from someone who has moved on', async () => {
+    let answer!: (r: { ok: boolean; error?: string }) => void
+    const onJoinParty = vi.fn(() => new Promise<{ ok: boolean; error?: string }>(resolve => { answer = resolve }))
+    render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
+    const field = screen.getByLabelText('Party code, six letters or digits')
+    fireEvent.change(field, { target: { value: 'ABC123' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Join with this code' }))
+    const elsewhere = screen.getByRole('button', { name: 'New room' })
+    elsewhere.focus()
+    await act(async () => { answer({ ok: false, error: 'Invalid party code.' }) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid party code.')
+    expect(elsewhere).toHaveFocus()
+  })
+
   it('offers the party this browser was just in, for the person who was in it', async () => {
     cacheLastParty({ code: 'LAST01', partyName: 'Friday crew', userId: 1, wasHost: true })
     const onJoinParty = vi.fn(async () => ({ ok: true }))
@@ -245,8 +259,7 @@ describe('the ways into a party', () => {
   // Two profiles of one account are two people: one must not be offered
   // the party the other was in.
   it('remembers the last party per profile, and reads nothing kept under the old single key', () => {
-    rememberProfileId(7)
-    cacheLastParty({ code: 'KIDS01', partyName: 'Cartoons', userId: 1, wasHost: false })
+    cacheLastParty({ code: 'KIDS01', partyName: 'Cartoons', userId: 1, wasHost: false }, 7)
     const view = render(<TogetherView {...props({ profileId: 7 })} />)
     expect(screen.getByRole('region', { name: 'You were just in' })).toHaveTextContent('Cartoons')
     view.unmount()
@@ -321,6 +334,21 @@ describe('the ways into a party', () => {
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(document.querySelector('[data-join-error]')).toBeNull()
     expect(join).toHaveFocus()
+  })
+
+  it('keeps focus on a room\'s row when its party ends and its Join button goes', async () => {
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '', active_party_code: 'FRD4YC' }])
+    const live = party({ code: 'FRD4YC', party_name: 'In the room' })
+    const view = render(<TogetherView {...props({ activeParties: [live] })} />)
+    const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
+    const join = await rooms.findByRole('button', { name: 'Join Friday crew' })
+    join.focus()
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '' }])
+    view.rerender(<TogetherView {...props({ activeParties: [] })} />)
+    await waitFor(() => expect(rooms.queryByRole('button', { name: 'Join Friday crew' })).toBeNull())
+    const row = rooms.getByText('Friday crew', { selector: 'div' }).closest('li')!
+    expect(row).toHaveTextContent('nothing on')
+    await waitFor(() => expect(row).toHaveFocus())
   })
 
   // "live now" was only as true as the moment the page opened.
@@ -593,7 +621,7 @@ describe('the parties the viewer is part of', () => {
       expect(said()).toBe(' You said maybe for Kestrel.')
     })
 
-    it('moves focus to the top heading when a declined invitation was the last thing there', async () => {
+    it('moves focus to the party\'s row when a declined invitation leaves it listed under Coming up', async () => {
       answering([booked('KSTRL1', 'Kestrel night')], [invite(7, 'KSTRL1', 'Kestrel')])
       press(7, 'Can’t')
       expect(screen.queryByRole('region', { name: 'Invitations' })).toBeNull()
