@@ -539,6 +539,9 @@
    under it at every width, phones and past the ultra-wide cap included
    (scripts/verify-page-alignment.mjs asserts it). */
 @media (min-width: 768px) {
+  .stage-topnav { gap: 16px; }
+}
+@media (min-width: 1024px) {
   .stage-topnav { gap: 28px; }
 }
 html[data-effects="reduced"] .stage-topnav {
@@ -988,7 +991,17 @@ html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) 
    (audit-focus-indicators.mjs, Checks 3 and 4). */
 .stage-navsearch {
   flex: 0 1 320px;
+  /* The field takes what the bar has left, down to nothing, so the BAR must
+     leave it room to type in: between md and lg it gives up its wordmark
+     and the identity's name, below xl the title in the presence pill, and
+     the keyboard hint whenever the field itself is short of room (TopNav).
+     At 834px, and from 1024px to about 1100px, it used to be an icon, a
+     zero-width input and a hint lying on the presence pill.
+     scripts/verify-mobile-layout.mjs lays the bar out from 768px up with
+     the longest things it can hold and fails under 120px of field. */
   min-width: 0;
+  /* The hint below asks how wide the field is, not the window. */
+  container: navsearch / inline-size;
   align-items: center;
   gap: 10px;
   height: 40px;
@@ -1031,6 +1044,13 @@ html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) 
   font-family: inherit;
   font-size: 12px;
   color: var(--ink-2);
+}
+/* Drawn only where the field can hold it beside about twelve characters
+   of what is typed. The number is the field's CONTENT width (its box less
+   24px of padding and 2px of border). */
+.stage-navsearch-hint { display: none; }
+@container navsearch (min-width: 190px) {
+  .stage-navsearch-hint { display: block; }
 }
 .stage-navsearch-clear {
   flex: none;

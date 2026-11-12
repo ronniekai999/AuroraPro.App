@@ -185,7 +185,10 @@ function IdentityMenu({
             </span>
           )}
         </span>
-        <span data-identity-name="" className="max-w-[120px] truncate text-sm font-semibold">{shownName}</span>
+        {/* The name is drawn from lg up; between md and lg the avatar's
+            initial stands for it (the room goes to the search field), and
+            the control's accessible name still says it (below). */}
+        <span data-identity-name="" className="max-w-[120px] truncate text-sm font-semibold max-lg:sr-only">{shownName}</span>
         {limitShown && (
           <span className="rounded-chip bg-ink px-1.5 py-0.5 text-xs font-bold text-action-on">{limitShown}</span>
         )}
@@ -446,7 +449,10 @@ export function TopNav({
         {/* Drawn wordmark in plain ink: at this size the gradient has nowhere
             to travel, and the mark beside it carries the brand colour.
             Decorative: the button's aria-label names it. */}
-        <AuroraWordmark decorative ink="#F4F4F5" className="hidden h-[15px] w-auto md:block" />
+        {/* From lg up. Between md and lg (a tablet in portrait, a narrow
+            window) the bar has no room for it AND a search field anyone
+            can type in: the mark alone carries the brand there. */}
+        <AuroraWordmark decorative ink="#F4F4F5" className="hidden h-[15px] w-auto lg:block" />
       </button>
 
       {/* Phones: the bar names the page; the destinations are the tab bar. */}
@@ -483,7 +489,12 @@ export function TopNav({
             <Icon name="x" size={14} />
           </button>
         ) : (
-          <kbd aria-hidden="true">⌘K</kbd>
+          // A hint for a keyboard, drawn only while the FIELD is wide enough
+          // to hold it beside what is typed (a container query on the field,
+          // index.css): the field's width follows the names and the pill
+          // beside it, not the window's alone. Squeezed, the hint used to
+          // spill out of the field onto the presence pill.
+          <kbd aria-hidden="true" className="stage-navsearch-hint">⌘K</kbd>
         )}
       </div>
 
@@ -498,8 +509,10 @@ export function TopNav({
             className="flex h-11 max-w-[280px] items-center gap-2 rounded-full bg-white/[0.08] px-3.5 text-[13px] font-medium text-ink transition-colors hover:bg-white/[0.14] md:h-10"
           >
             <AuroraDot />
-            <span className="truncate lg:hidden">{presence.short}</span>
-            <span className="hidden truncate lg:inline">{presence.label}</span>
+            {/* What is on is named from xl up. Below that the bar cannot
+                hold the title AND a search field wide enough to type in. */}
+            <span className="truncate xl:hidden">{presence.short}</span>
+            <span className="hidden truncate xl:inline">{presence.label}</span>
           </button>
         )}
 

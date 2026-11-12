@@ -46,6 +46,22 @@
 //      And at rest nothing but the art (and a progress bar) may be painted
 //      on the poster.
 //
+//   5. THE TOP BAR FROM md UP. From 768px the bar holds the mark, the
+//      destinations, the search field, the presence pill and the identity
+//      control in one row, and the field takes what is left. Nothing checked
+//      that anything WAS left: at 834px (a tablet in portrait), and from
+//      1024px to about 1100px, the field was squeezed to an icon and a
+//      zero-width input, and its "⌘K" hint lay on the presence pill beside
+//      it. The bar is laid out here at 768, 834, 900, 1024, 1100, 1279, 1280
+//      and 1440px with the usual contents, with the longest it can hold (a
+//      long profile name, a two-digit audience, a long title), for a limited
+//      profile (wider destinations, a rating beside the name) and with a
+//      search typed in. At every one: the page is no wider than the window,
+//      the bar's parts follow each other without overlapping and end at the
+//      page's own margin, the field is at least 120px wide and holds
+//      everything drawn inside it, and the hint is drawn only where it
+//      leaves 100px of input (and IS drawn in a wide window).
+//
 // Class lists are READ FROM THE SOURCE (see classesOf / mustHave), so a call
 // site drifting away from the fix fails here rather than passing against a
 // stale copy. The page is served over HTTP, not setContent: the built CSS
@@ -66,6 +82,11 @@
 // break a word; the AI dot allowed to shrink; the buttons sitting on the
 // progress bar; the reason line changing the caption's height or not
 // replacing the facts.
+// For the top bar (5), each of these alone, in TopNav.tsx or index.css: the
+// wordmark, or the identity's name, drawn from md again; the pill naming the
+// title from lg again; the hint drawn whatever the field's width, or never
+// (its container query gone, or the field no longer a container); the bar's
+// gap at md back to 28px.
 //
 // What this cannot see is the card markup itself — the probe rebuilds it from
 // class names — so the token / separator STRUCTURE and the action buttons'
@@ -232,6 +253,62 @@ const smallHtml = `
     <button type="button" class="${DESCRIBE_BTN}" data-small-btn="Search by description">Search by description</button></p>
   <p class="${FAILED_LINE}" data-small="failed">Nothing is wrong with what you typed. The server could not run it.
     <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>`
+
+// The top bar, from TopNav's own class lists, once per case. The mark and the
+// icons are empty boxes of the size the components draw; the wordmark takes
+// its width from the drawn word's own viewBox.
+const TOPNAV = 'src/components/TopNav.tsx'
+const NAV_BRAND = classesOf(TOPNAV, '-mx-1 flex flex-none items-center')
+const NAV_WORDMARK = classesOf(TOPNAV, 'h-[15px] w-auto')
+const NAV_PAGE = classesOf(TOPNAV, 'min-w-0 flex-1 truncate font-display')
+const NAV_TABS = classesOf(TOPNAV, 'hidden flex-none items-center gap-1 md:flex')
+const NAV_FIELD = classesOf(TOPNAV, 'stage-navsearch hidden md:flex')
+const NAV_RIGHT = classesOf(TOPNAV, 'ml-auto flex flex-none items-center')
+const NAV_PILL = classesOf(TOPNAV, 'max-w-[280px]')
+const NAV_PILL_SHORT = classesOf(TOPNAV, 'truncate xl:hidden')
+const NAV_PILL_LONG = classesOf(TOPNAV, 'hidden truncate xl:inline')
+const NAV_IDENTITY = classesOf(TOPNAV, 'flex h-10 items-center gap-2.5 rounded-full')
+const NAV_NAME = classesOf(TOPNAV, 'max-lg:sr-only')
+const NAV_LIMIT = classesOf(TOPNAV, 'rounded-chip bg-ink px-1.5')
+mustHave(TOPNAV, 'className="stage-topnav"')
+mustHave(TOPNAV, 'className="stage-tab"')
+mustHave(TOPNAV, 'className="stage-navsearch-hint"')
+mustHave(TOPNAV, 'className="stage-navsearch-clear"')
+mustHave(TOPNAV, '<div className="hidden md:block">')
+mustHave(TOPNAV, '<span className="relative flex-none">')
+mustHave(TOPNAV, '<AuroraMark />')
+mustHave(TOPNAV, 'export function AuroraMark({ size = 28 }')
+mustHave(TOPNAV, 'inline-block h-2 w-2 flex-none rounded-full')
+mustHave(TOPNAV, '<Icon name="search" size={16} className="flex-none text-ink-2" />')
+mustHave(TOPNAV, '<Icon name="chevronDown" size={14} className="flex-none text-ink-2" />')
+mustHave(TOPNAV, 'size={28} />')
+const WORDMARK_BOX = /BOREALIS_VIEWBOX = '([^']+)'/.exec(fs.readFileSync(path.join(APP, 'src/components/AuroraWordmark.tsx'), 'utf8'))?.[1]
+if (!WORDMARK_BOX) throw new Error('verify-mobile: AuroraWordmark.tsx no longer names BOREALIS_VIEWBOX — this check is out of date, not passing')
+const FULL_TABS = ['Tonight', 'Library', 'Together']
+const NAV_CASES = [
+  { id: 'usual', scope: 'full', tabs: FULL_TABS, name: 'Morgan', short: '3 watching', label: '3 watching Night Train to Meridian' },
+  { id: 'longest', scope: 'full', tabs: FULL_TABS, name: LONG_NAME, short: '24 watching',
+    label: '24 watching The Assassination of Jesse James by the Coward Robert Ford' },
+  { id: 'limited', scope: 'restricted', tabs: ['Tonight', 'Movies', 'Shows'], name: LONG_NAME, limit: 'TV-14' },
+  { id: 'typed', scope: 'full', tabs: FULL_TABS, name: 'Morgan', short: '3 watching', label: '3 watching Night Train to Meridian',
+    typed: 'something funny for the kids' },
+]
+const NAV_WIDTHS = [768, 834, 900, 1024, 1100, 1279, 1280, 1440]
+const navHtml = NAV_CASES.map(c => `
+<header class="stage-topnav" data-nav-scope="${c.scope}" data-navcase="${c.id}">
+  <button type="button" class="${NAV_BRAND}" data-nav-part="brand"><svg width="28" height="28" viewBox="0 0 36 36"></svg><svg viewBox="${WORDMARK_BOX}" class="${NAV_WORDMARK}" data-nav-wordmark></svg></button>
+  <span class="${NAV_PAGE}" data-nav-part="page">Library</span>
+  <nav class="${NAV_TABS}" data-nav-part="destinations">${c.tabs.map((t, i) => `<button type="button" class="stage-tab"${i === 1 ? ' aria-current="page"' : ''}>${t}</button>`).join('')}</nav>
+  <div class="${NAV_FIELD}" data-nav-part="field"><svg width="16" height="16" class="flex-none text-ink-2"></svg>
+    <input type="text" placeholder="Search, or describe a mood" aria-label="Search titles" value="${c.typed ?? ''}">
+    ${c.typed
+      ? '<button type="button" class="stage-navsearch-clear" aria-label="Clear search"><svg width="14" height="14"></svg></button>'
+      : '<kbd aria-hidden="true" class="stage-navsearch-hint">⌘K</kbd>'}</div>
+  <div class="${NAV_RIGHT}" data-nav-part="presence and identity">
+    ${c.short ? `<button type="button" data-presence="" class="${NAV_PILL}"><span aria-hidden="true" class="inline-block h-2 w-2 flex-none rounded-full"></span><span class="${NAV_PILL_SHORT}" data-pill="short">${c.short}</span><span class="${NAV_PILL_LONG}" data-pill="long">${c.label}</span></button>` : ''}
+    <div class="hidden md:block"><div class="relative"><button type="button" data-identity-trigger="" class="${NAV_IDENTITY}"><span class="relative flex-none"><span style="display:block;width:28px;height:28px"></span></span><span data-identity-name="" class="${NAV_NAME}">${c.name}</span>${c.limit ? `<span class="${NAV_LIMIT}">${c.limit}</span>` : ''}<svg width="14" height="14" class="flex-none text-ink-2"></svg></button></div></div>
+  </div>
+</header>`).join('')
 
 const SUBTITLE = 'Hand-picked by Aurora for your taste'
 // [title, AI attribution, subtitle, See All]
@@ -616,6 +693,99 @@ for (const touch of [true, false]) {
     console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} / ${r.titleFamily} · page ${r.sw}px · ${r.rails.length} rail headers · facts shown ${shownStr} · actions ${actsStr}`)
     await ctx.close()
   }
+}
+// 5. The top bar from md up: a page of its own (it is the first thing on
+// every page, and nothing else here belongs under four of it), a pointer's
+// layout (the same on a touch screen: nothing in the bar asks which).
+const NAV_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/v2/assets/${cssFile}">
+<style>body{margin:0}*,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
+${navHtml}
+</body></html>`
+console.log('\n══ the top bar from md up')
+for (const width of NAV_WIDTHS) {
+  const before = problems
+  const ctx = await browser.newContext({ viewport: { width, height: 400 } })
+  await ctx.route(`${ORIGIN}/**`, route => {
+    const p = new URL(route.request().url()).pathname
+    if (p === '/') return route.fulfill({ body: NAV_PAGE_HTML, contentType: 'text/html' })
+    const f = path.join(ASSETS, path.basename(p))
+    if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
+      const type = f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream'
+      return route.fulfill({ body: fs.readFileSync(f), contentType: type })
+    }
+    return route.fulfill({ status: 404, body: '' })
+  })
+  const page = await ctx.newPage()
+  await page.goto(`${ORIGIN}/`)
+  const r = await page.evaluate(async () => {
+    await document.fonts.ready
+    const faces = [...document.fonts].filter(f => f.status !== 'unloaded')
+    const box = el => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right, w: b.width } }
+    // Drawn: it has a box wider than the 1px a screen-reader-only span keeps.
+    const drawn = el => !!el && getComputedStyle(el).visibility !== 'hidden' && el.getBoundingClientRect().width > 1.5
+    const bars = [...document.querySelectorAll('[data-navcase]')].map(bar => {
+      const cs = getComputedStyle(bar)
+      const b = bar.getBoundingClientRect()
+      const field = bar.querySelector('[data-nav-part="field"]')
+      const hint = field.querySelector('.stage-navsearch-hint')
+      const short = bar.querySelector('[data-pill="short"]'), long = bar.querySelector('[data-pill="long"]')
+      return {
+        id: bar.dataset.navcase,
+        contentLeft: b.left + parseFloat(cs.paddingLeft), contentRight: b.right - parseFloat(cs.paddingRight),
+        spill: bar.scrollWidth - bar.clientWidth,
+        parts: [...bar.children].filter(drawn).map(el => ({ part: el.dataset.navPart, ...box(el) })),
+        field: box(field),
+        inside: [...field.children].filter(drawn).map(el => ({ what: el.tagName.toLowerCase(), ...box(el) })),
+        input: box(field.querySelector('input')),
+        hint: hint ? drawn(hint) : null,
+        pill: short ? { short: drawn(short), long: drawn(long), shortCut: short.scrollWidth - short.clientWidth } : null,
+        name: drawn(bar.querySelector('[data-identity-name]')),
+        wordmark: drawn(bar.querySelector('[data-nav-wordmark]')),
+      }
+    })
+    return { bars, sw: document.documentElement.scrollWidth, vw: window.innerWidth,
+      fontErrors: faces.filter(f => f.status === 'error').map(f => f.family),
+      fontsLoaded: faces.filter(f => f.status === 'loaded').map(f => f.family),
+      bodyFamily: getComputedStyle(document.body).fontFamily.split(',')[0].trim().replace(/['"]/g, '') }
+  })
+  if (r.fontErrors.length) fail(`web font(s) failed to load: ${r.fontErrors.join(', ')}`)
+  if (!r.fontsLoaded.includes(r.bodyFamily)) fail(`the bar was measured in a fallback face (${r.bodyFamily} did not load)`)
+  if (r.sw > r.vw + 0.5) fail(`the page is ${r.sw}px wide in a ${r.vw}px window`)
+  if (r.bars.length !== NAV_CASES.length) fail(`the top-bar probe found ${r.bars.length} bars, expected ${NAV_CASES.length} — this check is out of date`)
+  const widths = []
+  for (const bar of r.bars) {
+    const at = `${width}px, ${bar.id}`
+    if (bar.spill > 0.5) fail(`${at}: the bar's contents run ${bar.spill}px past it`)
+    const want = ['brand', 'destinations', 'field', 'presence and identity']
+    if (bar.parts.map(p => p.part).join(' | ') !== want.join(' | ')) {
+      fail(`${at}: the bar draws [${bar.parts.map(p => p.part).join(' | ')}], expected [${want.join(' | ')}]`)
+      continue
+    }
+    bar.parts.forEach((p, i) => {
+      const prev = bar.parts[i - 1]
+      if (prev && p.l < prev.r - 0.5) fail(`${at}: the ${p.part} starts ${(prev.r - p.l).toFixed(1)}px inside the ${prev.part}`)
+    })
+    const last = bar.parts[bar.parts.length - 1]
+    if (last.r > bar.contentRight + 0.5) fail(`${at}: the ${last.part} ends ${(last.r - bar.contentRight).toFixed(1)}px past the page's right margin`)
+    if (bar.field.w < 120) fail(`${at}: the search field is ${bar.field.w.toFixed(0)}px wide, under the 120px it takes to type in`)
+    for (const el of bar.inside) {
+      if (el.l < bar.field.l - 0.5 || el.r > bar.field.r + 0.5) fail(`${at}: the field's ${el.what} is drawn outside the field (${el.l.toFixed(0)}..${el.r.toFixed(0)} against ${bar.field.l.toFixed(0)}..${bar.field.r.toFixed(0)})`)
+    }
+    if (bar.hint && bar.input.w < 100) fail(`${at}: the "⌘K" hint is drawn beside an input ${bar.input.w.toFixed(0)}px wide, under the 100px it must leave`)
+    if (bar.hint === false && bar.id === 'usual' && width >= 1440) fail(`${at}: the "⌘K" hint is not drawn in a wide window`)
+    if (bar.pill) {
+      const named = width >= 1280
+      if (bar.pill.long !== named || bar.pill.short === named) fail(`${at}: the presence pill ${bar.pill.long ? 'names' : 'does not name'} what is on (it does from 1280px)`)
+      if (bar.pill.short && bar.pill.shortCut > 0.5) fail(`${at}: the presence pill's short text is cut off`)
+    }
+    if (bar.name !== (width >= 1024)) fail(`${at}: the identity's name is ${bar.name ? '' : 'not '}drawn (it is from 1024px)`)
+    if (bar.wordmark !== (width >= 1024)) fail(`${at}: the wordmark is ${bar.wordmark ? '' : 'not '}drawn (it is from 1024px)`)
+    widths.push(`${bar.id} ${bar.field.w.toFixed(0)}${bar.hint ? '+hint' : ''}`)
+  }
+  console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} · page ${r.sw}px · field: ${widths.join(' · ')}`)
+  await ctx.close()
 }
 await browser.close()
 console.log(`\n${problems} mobile layout problem(s).`)
