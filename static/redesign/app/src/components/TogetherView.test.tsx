@@ -21,31 +21,45 @@ const props = (over: Partial<TogetherViewProps> = {}): TogetherViewProps => ({
 afterEach(cleanup)
 
 describe('joining a party from the list', () => {
-  it('says why when the server refuses, under the party it was for', async () => {
-    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'This party is full.' }))
+  it('says why when the join is refused, above the list, naming the party', async () => {
+    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'This party has ended.' }))
     render(<TogetherView {...props({ activeParties: [party(), party({ code: 'OTHER1', party_name: 'Other' })], onJoinParty })} />)
     const row = screen.getByText('Friday crew').closest('li')!
     fireEvent.click(within(row).getByRole('button', { name: 'Join' }))
     const alert = await screen.findByRole('alert')
-    expect(alert.textContent).toBe('This party is full.')
-    expect(row.contains(alert)).toBe(true)
+    expect(alert.textContent).toBe('Couldn’t join Friday crew: This party has ended.')
+    expect(alert.getAttribute('data-join-error')).toBe('MOON42')
     expect(onJoinParty).toHaveBeenCalledWith('MOON42')
+    // Not in the party's row: the next poll takes an ended party's row away.
+    expect(row.contains(alert)).toBe(false)
+    expect(alert.closest('ul')).toBeNull()
     // The button is usable again.
     expect(within(row).getByRole('button', { name: 'Join' })).not.toBeDisabled()
+  })
+
+  it('keeps the message when the party leaves the list', async () => {
+    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'This party has ended.' }))
+    const { rerender } = render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Join' }))
+    await screen.findByRole('alert')
+    // The poll that follows no longer lists it.
+    rerender(<TogetherView {...props({ activeParties: [], onJoinParty })} />)
+    expect(screen.getByRole('alert').textContent).toBe('Couldn’t join Friday crew: This party has ended.')
+    expect(document.querySelector('[data-party-status]')!.textContent).toBe('Nobody is watching together right now.')
   })
 
   it('says something even when the refusal carries no reason, or the join throws', async () => {
     const onJoinParty = vi.fn<TogetherViewProps['onJoinParty']>().mockResolvedValueOnce({ ok: false }).mockRejectedValueOnce(new Error('offline'))
     render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
     fireEvent.click(screen.getByRole('button', { name: 'Join' }))
-    expect((await screen.findByRole('alert')).textContent).toBe('Could not join the party. Try again.')
+    expect((await screen.findByRole('alert')).textContent).toBe('Couldn’t join Friday crew: Could not join the party. Try again.')
     fireEvent.click(screen.getByRole('button', { name: 'Join' }))
     await waitFor(() => expect(onJoinParty).toHaveBeenCalledTimes(2))
-    expect((await screen.findByRole('alert')).textContent).toBe('Could not join the party. Try again.')
+    expect((await screen.findByRole('alert')).textContent).toBe('Couldn’t join Friday crew: Could not join the party. Try again.')
   })
 
   it('says nothing when the join works, and clears an earlier refusal when another is tried', async () => {
-    const onJoinParty = vi.fn<TogetherViewProps['onJoinParty']>().mockResolvedValueOnce({ ok: false, error: 'Full.' }).mockResolvedValueOnce({ ok: true })
+    const onJoinParty = vi.fn<TogetherViewProps['onJoinParty']>().mockResolvedValueOnce({ ok: false, error: 'Ended.' }).mockResolvedValueOnce({ ok: true })
     render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
     fireEvent.click(screen.getByRole('button', { name: 'Join' }))
     await screen.findByRole('alert')

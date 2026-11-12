@@ -5,8 +5,9 @@
 // person's invitations until their own request landed, and a late answer to
 // the previous person's request replaced theirs.
 
+import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { usePartyInvites } from './usePartyInvites'
 
 const invite = (id: number, title: string) => ({
@@ -78,6 +79,30 @@ describe('usePartyInvites', () => {
     expect(server.asked).toBe(2)
     await server.answer(1, ['Under profile 2'])
     expect(titles(result.current.invites)).toEqual(['Under profile 2'])
+  })
+
+  // The Together page is keyed by the session, so it mounts on the commit
+  // that changes owner and asks from its own effect, which runs before the
+  // hook's. That request is for the new owner, and it is the only one.
+  it('asks once, for the new owner, when a page that reads the list mounts on the commit that changes owner', async () => {
+    const server = stub()
+    function Page({ refresh }: { refresh: () => void }) {
+      useEffect(() => { refresh() }, [refresh])
+      return null
+    }
+    function App({ owner }: { owner: string }) {
+      const s = usePartyInvites(owner)
+      return <><output>{JSON.stringify(titles(s.invites))}</output><Page key={owner} refresh={s.refresh} /></>
+    }
+    const shown = () => JSON.parse(document.querySelector('output')!.textContent!) as string[] | null
+    const { rerender } = render(<App owner="1:1" />)
+    expect(server.asked).toBe(1)
+    await server.answer(0, ['Under profile 1'])
+    rerender(<App owner="1:2" />)
+    expect(shown()).toBeNull()
+    expect(server.asked).toBe(2)
+    await server.answer(1, ['Under profile 2'])
+    expect(shown()).toEqual(['Under profile 2'])
   })
 
   it('does not ask for a new owner when nothing has asked yet', () => {

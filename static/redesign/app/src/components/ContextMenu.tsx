@@ -230,8 +230,11 @@ export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Pro
     // in any case once the cap has passed, so a release that is never seen
     // cannot leave the menu deaf to them.
     let listenFrom = held.size > 0 ? performance.now() + PRESS_HOLD_CAP_MS : 0
+    // A release that IS seen always gets its grace, a late one included: a
+    // touch held past the cap and then lifted still sends its click, and
+    // that click must not close the menu either.
     const onRelease = (e: PointerEvent) => {
-      if (held.delete(e.pointerId) && held.size === 0) listenFrom = Math.min(listenFrom, performance.now() + PRESS_RELEASE_GRACE_MS)
+      if (held.delete(e.pointerId) && held.size === 0) listenFrom = performance.now() + PRESS_RELEASE_GRACE_MS
     }
     const onClick = (e: MouseEvent) => {
       if (performance.now() < listenFrom) return

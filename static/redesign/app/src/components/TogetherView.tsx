@@ -51,17 +51,23 @@ export default function TogetherView({
   useEffect(() => { onRefreshInvites() }, [onRefreshInvites])
   const others = activeParties.filter(p => p.host_user_id !== currentUserId)
   const pending = (invites ?? []).filter(i => i.rsvp === 'pending')
-  // A join that the server refuses (full, ended, a title over this profile's
-  // limit) used to say nothing: the button was pressed and nothing happened.
-  // The reason is shown under the party it was for, until another is tried.
+  // A join that fails before the room is entered (a code that is no longer
+  // good, a party that has ended, the room offline, a session that has ended)
+  // used to say nothing: the button was pressed and nothing happened. Those
+  // are the failures this result carries; a room that is full, or a title
+  // over this profile's limit, is refused later, over the room's own
+  // connection, and the party panel reports it. The reason is shown above
+  // the list, not in the party's row: the next poll takes an ended party's
+  // row away, and the message must outlive it. It names the party by what
+  // the row said, and goes when another join is tried.
   const [joining, setJoining] = useState<string | null>(null)
-  const [joinError, setJoinError] = useState<{ code: string; message: string } | null>(null)
-  const join = async (code: string) => {
+  const [joinError, setJoinError] = useState<{ code: string; name: string; message: string } | null>(null)
+  const join = async (code: string, name: string) => {
     setJoinError(null)
     setJoining(code)
     const r = await onJoinParty(code).catch((): { ok: boolean; error?: string } => ({ ok: false }))
     setJoining(null)
-    if (!r.ok) setJoinError({ code, message: r.error || 'Could not join the party. Try again.' })
+    if (!r.ok) setJoinError({ code, name, message: r.error || 'Could not join the party. Try again.' })
   }
   // One line says what the list is doing, in one polite status region that
   // stays mounted: loading, could not load, nobody is watching, or how many
@@ -86,6 +92,11 @@ export default function TogetherView({
       <p className={partyStatus ? 'mt-3 text-sm text-ink-2' : 'sr-only'} role="status" data-party-status>
         {partyStatus ?? `${others.length} watch ${others.length === 1 ? 'party' : 'parties'} listed.`}
       </p>
+      {joinError && (
+        <p className="mt-3 text-[13px] text-danger-ink" role="alert" data-join-error={joinError.code}>
+          Couldn&rsquo;t join {joinError.name}: {joinError.message}
+        </p>
+      )}
       {!partyStatus && (
         <ul className="mt-3 grid gap-3">
           {others.map(p => (
@@ -98,12 +109,14 @@ export default function TogetherView({
                     : `Live now · ${p.participant_count} watching${p.media_title ? ` ${p.media_title}` : ''}`}
                 </div>
               </div>
-              <button type="button" className="stage-btn stage-btn-sm stage-btn-primary" disabled={joining !== null} onClick={() => { void join(p.code) }}>
+              <button
+                type="button"
+                className="stage-btn stage-btn-sm stage-btn-primary"
+                disabled={joining !== null}
+                onClick={() => { void join(p.code, p.party_name?.trim() || p.media_title || 'the party') }}
+              >
                 {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
               </button>
-              {joinError?.code === p.code && (
-                <p className="basis-full text-[13px] text-danger-ink" role="alert">{joinError.message}</p>
-              )}
             </li>
           ))}
         </ul>

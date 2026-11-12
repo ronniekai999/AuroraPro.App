@@ -14,7 +14,7 @@
 // profile's limit), given out only while that owner is the current one, and
 // an answer for an owner that is no longer current is dropped. A change of
 // owner drops the stored list and, if the list was wanted before, asks again.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { listMyPartyInvites, type MyPartyInvite } from '@/lib/api'
 
 export interface PartyInvitesState {
@@ -36,8 +36,12 @@ export function usePartyInvites(ownerKey: string | null): PartyInvitesState {
   // Whether anything has asked yet: a new owner is asked for only then.
   const wanted = useRef(false)
 
+  // Whose list the latest request is for.
+  const askedFor = useRef<string | null>(null)
+
   const ask = useCallback((owner: string) => {
     const mine = ++seq.current
+    askedFor.current = owner
     listMyPartyInvites()
       .then(list => {
         // An answer for someone who is no longer the session, or an older
@@ -48,12 +52,20 @@ export function usePartyInvites(ownerKey: string | null): PartyInvitesState {
       .catch(() => { /* non-fatal: rows that read the list degrade to plain lines */ })
   }, [])
 
+  // The owner is known to refresh() before any passive effect runs: a page
+  // that mounts on the commit that changes owner asks from its own effect,
+  // which runs before this hook's, and would otherwise ask for the owner
+  // who has just left.
+  useLayoutEffect(() => { ownerRef.current = ownerKey }, [ownerKey])
   useEffect(() => {
-    ownerRef.current = ownerKey
-    // The previous owner's list is dropped, not merely hidden, and any answer
-    // still out for them is orphaned by the new request number.
-    seq.current++
+    // The previous owner's list is dropped, not merely hidden.
     setStored(prev => (prev && prev.owner === ownerKey ? prev : null))
+    // A request already out for the new owner (that page's) is the one; any
+    // other answer still out is orphaned by a new number, and the new owner
+    // is asked for if the list was wanted before.
+    if (askedFor.current === ownerKey) return
+    seq.current++
+    askedFor.current = null
     if (ownerKey !== null && wanted.current) ask(ownerKey)
   }, [ownerKey, ask])
 

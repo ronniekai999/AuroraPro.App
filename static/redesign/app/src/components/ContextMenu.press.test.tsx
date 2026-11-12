@@ -92,6 +92,20 @@ describe('a menu opened by a press that is still held', () => {
     fireEvent.pointerUp(document.body, touch(17))
   })
 
+  // The cap ends the wait, but a release that then IS seen still sends its
+  // click, and that click lands on the scrim like any other.
+  it('gives a touch lifted after the cap its grace too', () => {
+    const onClose = openMidPress(19)
+    act(() => { vi.advanceTimersByTime(PRESS_HOLD_CAP_MS + 2000) })
+    fireEvent.pointerUp(scrim(), touch(19))
+    fireEvent.mouseDown(scrim())
+    fireEvent.click(scrim())
+    expect(onClose).not.toHaveBeenCalled()
+    act(() => { vi.advanceTimersByTime(PRESS_RELEASE_GRACE_MS) })
+    fireEvent.mouseDown(scrim())
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('forgets a touch whose release it never saw once the page is hidden, so the next menu is not held by it', () => {
     fireEvent.pointerDown(document.body, touch(18))
     const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')

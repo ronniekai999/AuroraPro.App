@@ -202,11 +202,6 @@ export default function BrowseView({
       })
       .map(c => mapContinueToMedia(c) as Media)
   }, [continueItems, mediaType])
-  // Deep-debug H3 (mirrored from HomeView) — the resume click must
-  // resolve the match against the FRESHEST continueItems at click time,
-  // not the render-time closure. Otherwise a mid-hover refresh (another
-  // device advanced position_ms) could dispatch a stale record. Keep a
-  // ref in sync and read it inside the click handler.
   // Phase 5.3 final QA — pill identifier above the page headline.
   // "TV Shows" and "Movies" pages both use the same pattern. Built
   // from the page title for now; could be derived from view if we
