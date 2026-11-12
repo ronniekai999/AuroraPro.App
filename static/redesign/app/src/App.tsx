@@ -6842,7 +6842,16 @@ export default function App() {
             </ViewSuspense>
           )}
           {view === 'device' && (
-            <DeviceApprovalView key={location.key} username={user.username} initialCode={new URLSearchParams(location.search).get('code') ?? ''} />
+            <DeviceApprovalView
+              key={location.key}
+              username={user.username}
+              initialCode={new URLSearchParams(location.search).get('code') ?? ''}
+              // The profile the server has bound this session to, for the
+              // line that says which profile the TV will start on; none
+              // while a switch is under way.
+              actingProfile={profileSwitchPending ? null : profiles.find(p => p.id === activeProfileId) ?? null}
+              profiles={profiles}
+            />
           )}
           {view === 'search' && (
             <ViewSuspense fallback={<ViewFallback />}>
