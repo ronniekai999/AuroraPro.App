@@ -1,0 +1,10 @@
+{
+  "sha": "39ba7977fa63648cb59f77b19da62a96b7b5f8cb",
+  "verdict": "clean",
+  "summary": "Audit scripts: verify-hero-phone.mjs and verify-title-contrast.mjs ask up to three times when Chromium refuses a screenshot (the CI failure on 4fec1a2). Reviewer: the failure was a refused capture, not a script or page defect; the retry cannot turn a failed check into a pass; no check or threshold changed; no other script in the audit chain takes a screenshot.",
+  "reviewer": "fresh-context-agent-acb8c453",
+  "findings": "0",
+  "diff_digest": "fe5383c973d5d15d624cf1117e62f441e575bac914d9dfe286ab57634a9805b4",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T16:41:17Z"
+}
