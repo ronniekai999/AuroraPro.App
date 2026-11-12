@@ -1360,9 +1360,12 @@ html:has(.stage-toolbar) {
      full strength over the whole block, then gone within a fixed 200px.
      Nothing about it is straight, and beyond that distance the picture is
      untouched, so it reads as the picture getting darker round the text and
-     not as a panel laid on a photo. The block is as wide as its content, up
-     to a cap that narrows with the window, so a short title darkens less
-     and the right-hand side of the art is always left.
+     not as a panel laid on a photo. The block is the poster and a text
+     column capped at a width that narrows with the window, which is what
+     leaves the right-hand side of the art. (It is sized to its content, but
+     the action row on one line is always wider than the cap, so in practice
+     every title's block is the same width: a short title does not darken
+     less.)
      Below lg the text is as wide as the window; the backing is a band, and
      what keeps the picture is height: the art is 360px, the title starts
      low on it, and the band does not begin until the art's lower half.
@@ -1494,9 +1497,13 @@ html:has(.stage-toolbar) {
    Upwards, the radius is 0.7286 H + `--fv` (140px), and the same share of
    it is at full strength. With F / W = Fv / H the corners would be exactly
    as far inside as they are across; Fv is a fixed 140px, which is at least
-   that whenever the block is no taller than 0.7 of its width. The tallest
-   block the page makes is about 0.6 of it (the script measures it at every
-   width), and the corners stay inside the full-strength zone until 0.87.
+   that whenever the block is no taller than 0.7 of its width. This is a
+   BOUND, not a fact about every block: the corners stay inside the
+   full-strength zone only while the block's height is under 0.87 of its
+   width. The tallest block the page makes today is about 0.6 to 0.7 of it;
+   scripts/verify-title-contrast.mjs measures that at every width and fails
+   at 0.8, so something added to the hero cannot quietly push the title's
+   first line into the fade.
 
    The falloff is a DISTANCE, not a share of the block: a share of a column
    several hundred px wide ran off the window's edge at every size and

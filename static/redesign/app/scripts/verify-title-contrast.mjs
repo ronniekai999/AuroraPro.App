@@ -38,7 +38,13 @@
 //    running right from the text has left the backing before the window
 //    ends (from 1200).
 //
-// Neither is arithmetic on gradients. The hero is laid out in a real engine
+// 4. The ellipse still covers the block. Its full-strength zone holds the
+//    block's corners only while the block is no taller than about 0.87 of
+//    its width; (1) proves that for the content this model lays out, and
+//    this keeps a margin for content it does not: from lg the block's
+//    height may be at most MAX_BLOCK_RATIO of its width.
+//
+// None of this is arithmetic on gradients. The hero is laid out in a real engine
 // with the real built stylesheet, at the widths that matter, with the
 // tallest content the page can produce; for (1) the text is hidden and the
 // pixels behind each piece of it are read, and the LIGHTEST is compared with
@@ -56,7 +62,9 @@
 // raised to the whole fade, (2) fails at 390; with the mask cut off at half
 // strength, (3) fails on the step; with the falloff tripled to 600px (it
 // runs off the window, as the ellipse before this one did), (2) fails at
-// every desktop width and (3) fails on its last 24px.
+// every desktop width and (3) fails on its last 24px; with the text column
+// capped at 300px (a block taller than it is wide), (4) fails at every
+// desktop width.
 
 import { chromium } from 'playwright'
 import fs from 'node:fs'
@@ -251,6 +259,11 @@ const MAX_STEP = 0.012
 // grey level. More means the backing is still easing away at the window's
 // edge, that is, it runs off the window.
 const MAX_TAIL = 0.004
+// (4): the corners of the block leave the ellipse's full-strength zone when
+// the block's height passes about 0.87 of its width (the stylesheet's
+// comment has the geometry). 0.8 leaves room for what this model does not
+// lay out.
+const MAX_BLOCK_RATIO = 0.8
 const VIEWPORTS = [[390, 844], [1024, 768], [1200, 800], [1280, 720], [1440, 900]]
 const browser = await chromium.launch({ executablePath: EXE })
 let problems = 0
@@ -348,6 +361,12 @@ for (const [width, height] of VIEWPORTS) {
       ['upwards above the title', box.text.left + 12, box.text.top - 4, 0, -1, box.text.top - box.backBottom - 12, false],
       ['up and right from the corner', box.text.right + 4, box.text.top - 4, 1, -1, Math.min(width - box.text.right - 6, box.text.top - box.hero.top - 6), false],
     ]
+    // ── (4) the block's proportions ──────────────────────────────────────
+    const blockW = box.block.right - box.block.left, blockH = box.block.bottom - box.block.top
+    const tall = blockH / blockW
+    const fits = tall <= MAX_BLOCK_RATIO
+    if (!fits) problems++
+    console.log(`   ${'block the ellipse must cover'.padEnd(38)} ${Math.round(blockW)}x${Math.round(blockH)}px, height ${tall.toFixed(2)} of width  (at most ${MAX_BLOCK_RATIO})  ${fits ? 'PASS' : '*** FAIL'}`)
     for (const [name, x0, y0, dx, dy, len, mustLeave] of lines) {
       let step = 0
       for (let k = 1; k < len; k++) step = Math.max(step, Math.abs(at(x0 + dx * k, y0 + dy * k) - at(x0 + dx * (k - 1), y0 + dy * (k - 1))))
