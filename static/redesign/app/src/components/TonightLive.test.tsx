@@ -96,6 +96,21 @@ describe('the strip', () => {
     expect(onJoin).toHaveBeenCalledWith('KEST88')
   })
 
+  // A party's poster is stored as a bare image path ("abc.jpg"), not an
+  // address: used as the picture's source it asked the app's own origin for
+  // a page that is no picture, and the box stayed empty.
+  it("asks the image proxy for an invitation's poster, whether or not the stored path has a leading slash", () => {
+    render(<TonightLive {...props} parties={[]} invites={[
+      invite({ invite_id: 1, media_poster: 'abc.jpg' }),
+      invite({ invite_id: 2, party_code: 'OTHR22', media_poster: '/def.jpg' }),
+      invite({ invite_id: 3, party_code: 'NONE33', media_poster: '' }),
+    ]} />)
+    const strip = screen.getByRole('region', { name: 'Happening now' })
+    expect([...strip.querySelectorAll('img')].map(img => img.getAttribute('src'))).toEqual([
+      '/api/images/w154/abc.jpg', '/api/images/w154/def.jpg',
+    ])
+  })
+
   it('says an invitation whose party has started is live, and offers to join it', () => {
     render(<TonightLive {...props} parties={[]} invites={[invite({ started_at: '2026-11-11T17:00:00Z' })]} />)
     const strip = screen.getByRole('region', { name: 'Happening now' })

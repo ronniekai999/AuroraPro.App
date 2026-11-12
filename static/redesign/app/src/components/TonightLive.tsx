@@ -6,7 +6,7 @@
 // It draws nothing when there is nothing to show, and it is given nothing
 // (parties undefined) for a session that is not offered Together, so a
 // restricted profile never sees a party or an invitation here.
-import { type ActiveParty, type MyPartyInvite } from '@/lib/api'
+import { posterURL, type ActiveParty, type MyPartyInvite } from '@/lib/api'
 import { formatPartyTime } from '@/lib/partyInvites'
 import { partyPresence } from '@/hooks/useActiveParties'
 
@@ -73,8 +73,13 @@ export function TonightLive({ parties, invites, currentUserId, inPartyCode, onJo
           : i.scheduled_start_at ? formatPartyTime(i.scheduled_start_at, at) : 'In the lobby'
         return (
           <div key={`invite-${i.invite_id}`} className="tonight-live-row" data-live-invite={i.invite_id}>
+            {/* A party's poster is stored as the bare image path (App strips
+                the proxy's prefix when it creates the party, and the server
+                shares it that way), so it goes back through the image proxy
+                here. Used as it is, it was a request for a page that is not a
+                picture, and the box stayed empty. */}
             {i.media_poster
-              ? <img src={i.media_poster} alt="" className="tonight-live-poster" loading="lazy" decoding="async" />
+              ? <img src={posterURL(i.media_poster, 'w154')} alt="" className="tonight-live-poster" loading="lazy" decoding="async" />
               : <span className="tonight-live-poster" aria-hidden="true" />}
             <div className="tonight-live-text">
               <span className="tonight-live-title">{i.host_username} invited you to watch {i.media_title}</span>
