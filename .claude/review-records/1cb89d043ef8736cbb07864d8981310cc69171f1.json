@@ -1,0 +1,10 @@
+{
+  "sha": "1cb89d043ef8736cbb07864d8981310cc69171f1",
+  "verdict": "lows-only",
+  "summary": "Tonight (acb8c453, four passes: fix-first, then lows-only three times, the last two on fix commits 8d826b2 and 1cb89d0) and the Settings follow-up 660c078 (a8ce3c17, lows-only). Open lows: touch and screen-reader viewers are not counted as in the hero until they press; a session of unknown scope asks for the recommender's rails; the phone-hero audit hand-copies the hero's nesting; heroOwnerRef is mirrored passively; Tonight's closing line can fall back to the previous account's grid totals after an expiry on an account with no profile; Settings: a hung list read freezes the limit control, a superseded re-read is worded as a failure, one N4 test is weak, the re-read/write race needs the server.",
+  "reviewer": "fresh-context-agents-acb8c453-a8ce3c17",
+  "findings": "10",
+  "diff_digest": "20e50e4052dfd5a0204cbdaac12afdf8138d1dc9aa2480fbcae7c3549629ae21",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T15:48:17Z"
+}
