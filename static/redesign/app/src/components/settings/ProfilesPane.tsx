@@ -61,19 +61,26 @@ export function ProfilesPane({ actingProfile, profileKnown, profileSettled = tru
   // Each load supersedes the ones before it, so an older answer cannot land
   // last and put back a list a newer one replaced.
   const loadGenRef = useRef(0)
-  const reload = useCallback(async (): Promise<Profile[] | null> => {
+  // The newest load, for an older one to hand its caller: a load that a
+  // newer one has overtaken did not fail, and its caller wants the list.
+  const latestLoadRef = useRef<Promise<Profile[] | null> | null>(null)
+  const reload = useCallback((): Promise<Profile[] | null> => {
     const gen = ++loadGenRef.current
-    try {
-      const list = await listProfiles()
-      if (gen !== loadGenRef.current) return null
-      setAll(list)
-      setErr(null)
-      return list
-    } catch (e) {
-      if (gen !== loadGenRef.current) return null
-      setErr(e instanceof Error && e.message ? e.message : 'The profiles could not be loaded.')
-      return null
-    }
+    const load = (async (): Promise<Profile[] | null> => {
+      try {
+        const list = await listProfiles()
+        if (gen !== loadGenRef.current) return latestLoadRef.current
+        setAll(list)
+        setErr(null)
+        return list
+      } catch (e) {
+        if (gen !== loadGenRef.current) return latestLoadRef.current
+        setErr(e instanceof Error && e.message ? e.message : 'The profiles could not be loaded.')
+        return null
+      }
+    })()
+    latestLoadRef.current = load
+    return load
     // The acting profile is a dependency so the list is read again when the
     // session moves to another profile: what it may see has changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps

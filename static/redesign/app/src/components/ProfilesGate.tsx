@@ -48,8 +48,8 @@ interface ProfilesGateProps {
   /**
    * Reports whether the gate is currently up. The gate self-gates, so the host
    * cannot otherwise know — and it needs to: App's Cmd+K handler guards on
-   * every other blocking surface (`playerTarget`, `partyJoinPrompt`,
-   * `contextMenu`, `addToListMedia`) and the gate was missing from the list,
+   * every other blocking surface (`playerTarget`, `contextMenu`,
+   * `addToListMedia`) and the gate was missing from the list,
    * while SearchPalette renders at z-200 over it. So Cmd+K opened the palette
    * on top of the gate and selecting a result navigated the app behind a gate
    * that stayed up — the same family as the Escape-bubbling bug above.

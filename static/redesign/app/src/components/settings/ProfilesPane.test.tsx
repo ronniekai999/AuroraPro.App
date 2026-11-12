@@ -14,6 +14,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { APIError, type Profile } from '@/lib/api'
 import { ProfilesPane, addProfileRefusal } from './ProfilesPane'
+import { LIMIT_CHECK_TIMEOUT_MS, ProfileRow } from './ProfileRow'
 
 const api = vi.hoisted(() => ({
   listProfiles: vi.fn(), listWatchlists: vi.fn(), createWatchlist: vi.fn(), deleteWatchlist: vi.fn(),
@@ -325,6 +326,54 @@ describe('managing profiles, from a profile without a limit', () => {
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
   })
 
+  // A read that never answers must not freeze the control.
+  it('gives up on a check that does not answer, says nothing was saved, and can be tried again', async () => {
+    await open()
+    pick('Kid', 'TV-G')
+    vi.useFakeTimers()
+    try {
+      api.listProfiles.mockReturnValue(new Promise(() => {}))
+      fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+      // While it waits the buttons are off, and a second press sends nothing.
+      expect(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' })).toHaveAttribute('aria-disabled', 'true')
+      await act(async () => { vi.advanceTimersByTime(LIMIT_CHECK_TIMEOUT_MS - 1) })
+      expect(rowOf('Kid').queryByText(/took too long/)).toBeNull()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(rowOf('Kid').getByText('The server took too long to say what the limit for Kid is now, so nothing was saved. Try again.')).toHaveAttribute('role', 'status')
+      expect(api.updateProfile).not.toHaveBeenCalled()
+      // The control is usable again, with the choice kept.
+      expect(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' })).toHaveAttribute('aria-disabled', 'false')
+      expect(limitOf('Kid')).toHaveValue('TV-G')
+    } finally {
+      vi.useRealTimers()
+    }
+    api.listProfiles.mockResolvedValue([parent, kid, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
+  })
+
+  // Another row's write reloads the list while Save's own read is out. The
+  // older read was overtaken, not refused: Save goes by the newer answer.
+  it('goes by the newer list when its own read is overtaken by another reload', async () => {
+    await open()
+    pick('Kid', 'TV-G')
+    let first!: (list: Profile[]) => void
+    api.listProfiles.mockReturnValueOnce(new Promise<Profile[]>(resolve => { first = resolve }))
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    // A second reload starts (Sam is renamed) and answers first.
+    api.listProfiles.mockResolvedValue([parent, kid, { ...sam, name: 'Sammy' }])
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Edit Sam' }))
+    fireEvent.change(rowOf('Sam').getByRole('textbox', { name: 'Name' }), { target: { value: 'Sammy' } })
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Save name' }))
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(3, { name: 'Sammy' }))
+    // That reload has landed: the row carries the new name.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close Sammy' })).toBeInTheDocument())
+    first([parent, kid, sam])
+    // Not "could not be checked": nothing failed, and the limit is saved.
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
+    expect(screen.queryByText(/could not be checked/)).toBeNull()
+  })
+
   // The question's words are about one stored limit. When a reload brings
   // another while it is up, it is withdrawn, not left asking "Loosen …: up
   // to G and TV-G. The limit now is: up to G and TV-G".
@@ -590,6 +639,34 @@ describe('managing profiles, from a profile without a limit', () => {
     expect(confirm()).toBeInTheDocument()
     view.rerender(<ProfilesPane actingProfile={{ ...parent, max_age_rating: 'TV-PG' }} profileKnown onToast={vi.fn()} />)
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(api.deleteProfile).not.toHaveBeenCalled()
+  })
+
+  // The same when the session stops being allowed to manage profiles while
+  // this row stays on the page. (In the pane a session that gets a limit
+  // loses the other rows, so this is pinned on the row itself.)
+  it('withdraws a delete question when the row can no longer be managed, though the row stays', async () => {
+    const row = (manages: boolean) => (
+      <ul>
+        <ProfileRow
+          profile={sam}
+          profiles={[parent, kid, sam]}
+          acting={false}
+          manages={manages}
+          openDoor={false}
+          onChanged={async () => {}}
+          onRefresh={async () => [parent, kid, sam]}
+        />
+      </ul>
+    )
+    const view = render(row(true))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Sam' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Sam' }))
+    expect(within(confirm()).getByRole('heading', { name: 'Delete Sam?' })).toBeInTheDocument()
+    view.rerender(row(false))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    // The row is still there, without the controls.
+    expect(screen.getByText('Sam')).toBeInTheDocument()
     expect(api.deleteProfile).not.toHaveBeenCalled()
   })
 

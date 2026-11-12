@@ -10,7 +10,7 @@
 //      room, not posting about it.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 // vi.mock is hoisted above the imports, so the doubles have to be too.
@@ -159,8 +159,8 @@ describe('PartyShareCardModal', () => {
 
   it('uses the caller’s heading when one is supplied', async () => {
     getPartyCardLinks.mockResolvedValueOnce(LINKS)
-    render(<PartyShareCardModal code="7K2QD9" title="Party booked 🎉" onClose={() => {}} />)
-    expect(await screen.findByRole('heading', { name: 'Party booked 🎉' })).toBeInTheDocument()
+    render(<PartyShareCardModal code="7K2QD9" title="Party booked" onClose={() => {}} />)
+    expect(await screen.findByRole('heading', { name: 'Party booked' })).toBeInTheDocument()
   })
 })
 
@@ -178,6 +178,22 @@ describe('PartyLobbyCard share button', () => {
   it('hides it from a guest', () => {
     render(<PartyLobbyCard code="7K2QD9" scheduledStartAt={soon()} isHost={false} />)
     expect(screen.queryByRole('button', { name: 'Share card' })).not.toBeInTheDocument()
+  })
+
+  // A new time that has passed is refused in words under the field, and
+  // the field says so to someone who cannot see them.
+  it('ties "pick a time that is still ahead" to the time field', async () => {
+    const onReschedule = vi.fn()
+    render(<PartyLobbyCard code="7K2QD9" scheduledStartAt={soon()} isHost onStartNow={() => {}} onReschedule={onReschedule} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Change time' }))
+    const field = screen.getByLabelText('New party time')
+    expect(field).toHaveAttribute('aria-invalid', 'false')
+    expect(field).not.toHaveAttribute('aria-describedby')
+    fireEvent.change(field, { target: { value: '2001-01-01T10:00' } })
+    expect(field).toHaveAttribute('aria-invalid', 'true')
+    expect(field).toHaveAccessibleDescription('Pick a time that is still ahead.')
+    expect(screen.getByRole('button', { name: 'Update time' })).toBeDisabled()
+    expect(onReschedule).not.toHaveBeenCalled()
   })
 })
 
@@ -200,7 +216,7 @@ describe('PartyComposerModal scheduled-success state', () => {
     await userEvent.click(chip!)
     await userEvent.click(screen.getByRole('button', { name: /Schedule party/ }))
 
-    expect(await screen.findByRole('heading', { name: 'Party booked 🎉' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Party booked' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Download PNG' })).toBeInTheDocument()
   })
 
@@ -212,6 +228,6 @@ describe('PartyComposerModal scheduled-success state', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: 'Start party' }))
     await waitFor(() => expect(onClose).toHaveBeenCalled())
-    expect(screen.queryByRole('heading', { name: 'Party booked 🎉' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Party booked' })).not.toBeInTheDocument()
   })
 })

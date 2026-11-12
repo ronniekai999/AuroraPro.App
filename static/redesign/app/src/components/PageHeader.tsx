@@ -57,7 +57,10 @@ export function PageHeader({ eyebrow, title, sub, action, className }: PageHeade
         </h1>
         {sub && <div className="text-white/60 text-sm mt-1.5">{sub}</div>}
       </div>
-      {action && <div className="shrink-0">{action}</div>}
+      {/* max-w-full: never squeezed by the title, but never wider than the
+          page either, so an action of several buttons can wrap on a phone
+          instead of pushing the page sideways. */}
+      {action && <div className="shrink-0 max-w-full">{action}</div>}
     </div>
   )
 }

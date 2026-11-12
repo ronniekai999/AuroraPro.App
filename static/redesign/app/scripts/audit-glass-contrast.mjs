@@ -737,15 +737,8 @@ const EXEMPT = [
     why: 'the bullet between the page subtitle and its count' },
   { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
     why: 'the attachment\'s icon-only "×" remove button' },
-  { file: 'src/components/MembersView.tsx', anchor: '<Icon name="users" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
-    why: 'the illustration above the members list\'s error message' },
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
     why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
-  // ── party ──
-  { file: 'src/components/PartyInvite.tsx', anchor: 'rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white"', kind: 'non-text',
-    why: 'the invite\'s icon-only close button' },
-  { file: 'src/components/PartyShareCardModal.tsx', anchor: 'className="text-white/40 hover:text-white/80 text-sm transition-colors"', kind: 'non-text',
-    why: 'the share card\'s icon-only "✕" close button' },
   // ── requests, search, top bar ──
   { file: 'src/components/RequestsView.tsx', anchor: "r.media_type === 'tv' ? 'tv' : 'film'} size={20} className=\"text-white/25\" />", kind: 'decorative',
     why: 'the glyph a search result shows where its poster is missing; the title and "TV"/"Movie" are beside it' },
@@ -760,14 +753,6 @@ const EXEMPT = [
   { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
     why: 'the dots between the key legend\'s entries' },
   // ── member pages, voice, the match tool ──
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="user" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
-    why: 'the illustration above a member page\'s error message' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<span className="text-white/20">&middot;</span>', kind: 'decorative',
-    why: 'the dot between the follower and following counts' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="globe" size={12} className="text-white/40" />', kind: 'decorative',
-    why: 'the globe on a social link chip, which names the network in text' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="eye" size={14} className="text-white/25" />', kind: 'decorative',
-    why: 'the eye before the hidden-history message, which says it in words' },
   { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
     why: 'the glyph a match candidate shows where its poster is missing' },
   // ── admin ──

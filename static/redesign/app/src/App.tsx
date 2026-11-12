@@ -77,7 +77,6 @@ import {
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
-import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
 import { firstEpisodeToPlay, regularSeasonsFirst, resolvePartyEpisodeId, startsLaterNotice } from '@/lib/partyEpisode'
@@ -1777,7 +1776,6 @@ export default function App() {
       setPartyInviteOpen(false)
     }
   }, [party.state.code])
-  const [partyJoinPrompt, setPartyJoinPrompt] = useState(false)
   // Phase 5 — add-to-watchlist dialog. Opened from DetailView. The
   // dialog fetches the active profile's watchlists on open + lets
   // the user pick one or create a new list inline.
@@ -3161,7 +3159,7 @@ export default function App() {
         // Allow Cmd+K from inside our own top-bar search input
         // (acts as "upgrade to palette" affordance).
         if (inEditable && target !== searchInputRef.current) return
-        if (playerTarget || partyJoinPrompt || contextMenu || addToListMedia) return
+        if (playerTarget || contextMenu || addToListMedia) return
         // The profile gate belongs in this list too. SearchPalette is z-200 and
         // the gate is z-85, so Cmd+K opened the palette over it, and picking a
         // result navigated the app behind a gate that stayed up.
@@ -3175,7 +3173,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, pinTarget, closePlayer, closeSearch])
+  }, [playerTarget, playerLoading, searchOpen, view, handleBack, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, pinTarget, closePlayer, closeSearch])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -6785,6 +6783,7 @@ export default function App() {
                 // otherwise share it across a sign-out and sign-in.
                 key={`together:${user.id}:${activeProfileId}`}
                 currentUserId={user.id}
+                profileId={activeProfileId}
                 activeParties={activeParties.parties}
                 partiesLoaded={activeParties.loaded}
                 partiesFailed={activeParties.failed}
@@ -6796,7 +6795,7 @@ export default function App() {
                   if (r.ok) { setPartyPanelOpen(true); activeParties.reload() }
                   return r
                 }}
-                onJoinByCode={() => setPartyJoinPrompt(true)}
+                onOpenTitle={(id) => navigate(`/title/${id}`)}
                 onRsvp={handleInviteRsvp}
                 onRefreshInvites={refreshMyPartyInvites}
                 onOpenMembers={() => handleNavigate('members')}
@@ -7310,25 +7309,6 @@ export default function App() {
             </button>
           </div>
         </div>
-      )}
-
-      {/* Watch Party hub — replaces the old "type a 6-character code"
-          modal. Three sections: Recently in (localStorage cache), My
-          Rooms (persistent rooms via /api/rooms), Enter a code. See
-          PartyHubModal.tsx for the rationale. */}
-      {partyJoinPrompt && user && typeof user === 'object' && (
-        <PartyHubModal
-          currentUserId={user.id}
-          onClose={() => setPartyJoinPrompt(false)}
-          onJoin={async (joinCode) => {
-            const r = await party.join(joinCode)
-            if (r.ok) {
-              setPartyJoinPrompt(false)
-              setPartyPanelOpen(true)
-            }
-            return r
-          }}
-        />
       )}
 
       {/* Watch-party invite composer — "Plan a Watch Party" (now or

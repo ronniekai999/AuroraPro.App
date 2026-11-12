@@ -37,6 +37,9 @@ import { AvatarPicker, LeanPicker } from './ProfilePickers'
 type OnToast = (message: string, type?: Toast['type']) => void
 type Run = (write: () => Promise<unknown>, fallback: string, done?: string, onRefusal?: (e: unknown) => string | null) => Promise<boolean>
 
+/** How long Save waits for the list it reads before a limit is written. */
+export const LIMIT_CHECK_TIMEOUT_MS = 10_000
+
 /** The server counts a name's bytes (100 at most), not its characters. */
 const NAME_MAX_BYTES = 100
 const byteLength = (text: string) => new TextEncoder().encode(text).length
@@ -338,7 +341,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
                   aria-disabled={busy || profile.is_default}
                   aria-describedby={`${ids}-default`}
                   onClick={makeDefault}
-                  className="stage-btn stage-btn-ghost h-auto min-h-11 whitespace-normal py-2 text-left"
+                  className="stage-btn stage-btn-ghost stage-btn-wrap"
                 >
                   Make {name} the default
                 </button>
@@ -359,7 +362,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
                     e.currentTarget.focus()
                     setConfirmDelete(true)
                   }}
-                  className="stage-btn stage-btn-danger h-auto min-h-11 whitespace-normal py-2 text-left"
+                  className="stage-btn stage-btn-danger stage-btn-wrap"
                 >
                   Delete {name}
                 </button>
@@ -472,8 +475,19 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
     // has moved stops the save and is shown.
     setChecking(true)
     setStopped(null)
-    const fresh = await onRefresh().catch(() => null)
+    // With a deadline: a read that never answers must not leave the control
+    // waiting, with Save, Undo and the dropdown all inert.
+    let timer = 0
+    const fresh = await Promise.race([
+      onRefresh().catch(() => null),
+      new Promise<'slow'>(resolve => { timer = window.setTimeout(() => resolve('slow'), LIMIT_CHECK_TIMEOUT_MS) }),
+    ])
+    window.clearTimeout(timer)
     setChecking(false)
+    if (fresh === 'slow') {
+      setStopped(`The server took too long to say what the limit for ${name} is now, so nothing was saved. Try again.`)
+      return
+    }
     if (!fresh) {
       setStopped(`The limit for ${name} could not be checked just now, so nothing was saved. Try again.`)
       return

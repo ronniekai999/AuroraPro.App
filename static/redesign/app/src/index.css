@@ -2844,6 +2844,20 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   font-weight: 700;
   gap: 12px;
 }
+/* A label that may take two lines (a profile's name inside it, a sentence on
+   the narrowest phones): the button grows and may shrink to its line,
+   instead of running off the page. A class, for the reason the sizes above
+   are: `whitespace-normal` and `h-auto` at the call site lose to .stage-btn. */
+.stage-btn-wrap {
+  flex-shrink: 1;
+  min-width: 0;
+  height: auto;
+  min-height: 44px;
+  padding-block: 8px;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: normal;
+}
 .stage-btn:disabled,
 .stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 /* Press feedback: a 3% settle over 90ms is the smallest tactile cue that
