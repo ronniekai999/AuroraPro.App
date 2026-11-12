@@ -49,24 +49,30 @@ export function ProfilesPane({ actingProfile, profileKnown, profileSettled = tru
   const actingId = actingProfile?.id ?? null
   const [all, setAll] = useState<Profile[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // The acting profile as this page last read it, which can be newer than
-  // the app's copy: another device may have given it a limit since.
-  const acting = all?.find(p => p.id === actingId) ?? actingProfile
-  const restricted = !profileKnown || isRestrictedProfile(acting)
+  // Two copies of the acting profile: the app's, and the one in the list
+  // this page last read. Either can be the newer one (another device gave
+  // the profile a limit, and only one of the two has been read since), so
+  // the session is treated as limited when EITHER says so. The server
+  // refuses a limited session's management writes whatever is shown.
+  const listed = all?.find(p => p.id === actingId)
+  const acting = listed ?? actingProfile
+  const restricted = !profileKnown || isRestrictedProfile(actingProfile) || isRestrictedProfile(listed)
 
   // Each load supersedes the ones before it, so an older answer cannot land
   // last and put back a list a newer one replaced.
   const loadGenRef = useRef(0)
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<Profile[] | null> => {
     const gen = ++loadGenRef.current
     try {
       const list = await listProfiles()
-      if (gen !== loadGenRef.current) return
+      if (gen !== loadGenRef.current) return null
       setAll(list)
       setErr(null)
+      return list
     } catch (e) {
-      if (gen !== loadGenRef.current) return
+      if (gen !== loadGenRef.current) return null
       setErr(e instanceof Error && e.message ? e.message : 'The profiles could not be loaded.')
+      return null
     }
     // The acting profile is a dependency so the list is read again when the
     // session moves to another profile: what it may see has changed.
@@ -132,6 +138,7 @@ export function ProfilesPane({ actingProfile, profileKnown, profileSettled = tru
                 manages={!restricted}
                 openDoor={openDoors.some(o => o.id === p.id)}
                 onChanged={changed}
+                onRefresh={reload}
                 // The deleted profile's row took the focus with it.
                 onDeleted={() => headingRef.current?.focus()}
                 onSignInAgain={onSignInAgain}
@@ -212,7 +219,9 @@ function AddProfile({ first, onAdded, onToast }: {
             id={`${ids}-name`}
             value={name}
             maxLength={NAME_MAX_BYTES}
-            disabled={busy}
+            // Read-only, not disabled, while the profile is added: a
+            // disabled field drops the focus.
+            readOnly={busy}
             aria-invalid={tooLong}
             onChange={e => setName(e.target.value)}
             className="mt-1.5 block h-11 w-56 max-w-full py-0"
@@ -221,10 +230,13 @@ function AddProfile({ first, onAdded, onToast }: {
         {!first && (
           <div>
             <label htmlFor={`${ids}-limit`} className="mb-1.5 block text-[13px] font-semibold text-ink">Limit</label>
-            <SettingSelect id={`${ids}-limit`} wide value={limit} options={LIMIT_OPTIONS} disabled={busy} onChange={setLimit} />
+            <SettingSelect id={`${ids}-limit`} wide value={limit} options={LIMIT_OPTIONS} onChange={v => { if (!busy) setLimit(v) }} />
           </div>
         )}
-        <button type="submit" disabled={!next || tooLong || busy} className="stage-btn stage-btn-primary">{busy ? 'Adding…' : 'Add profile'}</button>
+        {/* Off through aria-disabled, never `disabled`: the button is off
+            again the moment the profile is added (the name is empty), and a
+            disabled button would drop the focus it was pressed with. */}
+        <button type="submit" aria-disabled={!next || tooLong || busy} className="stage-btn stage-btn-primary">{busy ? 'Adding…' : 'Add profile'}</button>
       </div>
       {tooLong && <p className="mt-2 text-[13px] text-danger-ink">That name is too long. Shorten it a little.</p>}
       <p role="alert" className={error ? 'mt-3 max-w-[62ch] text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error ?? ''}</p>

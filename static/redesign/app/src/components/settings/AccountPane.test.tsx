@@ -127,6 +127,8 @@ describe('AccountPane', () => {
     // going straight to the sign-in page read as the change having failed.
     const done = await screen.findByRole('status')
     expect(done).toHaveTextContent('The password is changed.')
+    // The form that had the focus is gone; what replaced it has it.
+    expect(done).toHaveFocus()
     expect(done).toHaveTextContent('Every device on this account has been signed out, this one included. Sign in again with the new password.')
     await act(async () => {})
     expect(onLogout).not.toHaveBeenCalled()
@@ -165,6 +167,12 @@ describe('AccountPane', () => {
     expect(await within(form).findByText('That is not the current password.')).toHaveAttribute('role', 'alert')
     expect(onLogout).not.toHaveBeenCalled()
     expect(within(form).getByRole('button', { name: 'Change password' })).toBeEnabled()
+    // Focus is on the field to correct.
+    await waitFor(() => expect(within(form).getByLabelText('Current password')).toHaveFocus())
+    // Cancel closes the form and hands focus back to the button that opened it.
+    fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('form', { name: 'Change the password' })).toBeNull())
+    expect(screen.getByRole('button', { name: 'Change password' })).toHaveFocus()
   })
 
   it('words the other refusals of a password change', () => {
@@ -188,8 +196,17 @@ describe('AccountPane', () => {
 
   // The password is the key to every profile, so its form goes with the
   // sign-in methods: not offered to a session with a content limit.
-  it('offers a restricted session no password form', () => {
-    render(<AccountPane user={USER} activeProfile={profile({ max_age_rating: 'PG' })} profileKnown onLogout={vi.fn()} />)
+  it('offers a restricted session no password form, and does not tell it what the password unlocks', async () => {
+    const view = render(<AccountPane user={USER} activeProfile={profile({ max_age_rating: 'PG' })} profileKnown onLogout={vi.fn()} />)
+    expect(screen.queryByText(/account password also unlocks every profile/)).toBeNull()
+    view.rerender(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={vi.fn()} />)
+    expect(screen.getByText(/account password also unlocks every profile/)).toBeInTheDocument()
+    await screen.findByRole('button', { name: 'Change password' })
+    // Nor a session whose profile is not known.
+    view.rerender(<AccountPane user={USER} activeProfile={null} profileKnown={false} onLogout={vi.fn()} />)
+    expect(screen.queryByText(/account password also unlocks every profile/)).toBeNull()
+    view.rerender(<AccountPane user={USER} activeProfile={profile({ max_age_rating: 'PG' })} profileKnown onLogout={vi.fn()} />)
+    api.listOAuthLinks.mockClear()
     expect(screen.queryByRole('button', { name: 'Change password' })).toBeNull()
     expect(screen.getByText(/can only be managed from a profile without a content limit/)).toBeInTheDocument()
     expect(api.listOAuthLinks).not.toHaveBeenCalled()

@@ -41,7 +41,7 @@ type Run = (write: () => Promise<unknown>, fallback: string, done?: string, onRe
 const NAME_MAX_BYTES = 100
 const byteLength = (text: string) => new TextEncoder().encode(text).length
 
-export function ProfileRow({ profile, profiles, acting, manages, openDoor, onChanged, onDeleted, onSignInAgain, onToast }: {
+export function ProfileRow({ profile, profiles, acting, manages, openDoor, onChanged, onRefresh, onDeleted, onSignInAgain, onToast }: {
   profile: Profile
   /** Every profile on the account (for the rules that count them). */
   profiles: Profile[]
@@ -53,6 +53,9 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   openDoor: boolean
   /** Reload the list (and tell the app its copy is stale). */
   onChanged: () => Promise<void>
+  /** Read the list again and hand it back, or null when it could not be
+   *  read. For a check against what the server has now, before a write. */
+  onRefresh: () => Promise<Profile[] | null>
   /** This profile was deleted here and the list reloaded: this row is gone,
    *  and focus with it unless the list takes it. */
   onDeleted?: () => void
@@ -74,6 +77,16 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   // A write that needs the profile's current PIN or the account password.
   const [unlockFor, setUnlockFor] = useState<null | { kind: 'change-pin'; pin: string } | { kind: 'remove-pin' } | { kind: 'default' }>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // A question asked of one session must not be answered by another: if
+  // this device starts watching as this profile while "Delete Sam?" is up
+  // (a switch made in another tab), or stops being allowed to manage
+  // profiles, the question is withdrawn. Confirming it would delete the
+  // profile this device now acts as, which the server does not refuse.
+  useEffect(() => { setConfirmDelete(false) }, [acting, manages])
+  // Where focus goes when the control that had it is gone or cannot hold it.
+  const pinToggleRef = useRef<HTMLButtonElement | null>(null)
+  const editToggleRef = useRef<HTMLButtonElement | null>(null)
+  const defaultRef = useRef<HTMLButtonElement | null>(null)
 
   const name = profile.name
   const soleUnrestricted = isSoleUnrestrictedProfile(profiles, profile.id)
@@ -123,9 +136,16 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
       e2 => (refusalReason(e2) === 'profile_pin_required'
         ? `Another device set a PIN on ${name} a moment ago, so this one was not set. The row has been reloaded: change the PIN with that one, or with the account password.`
         : null),
-    ).then(ok => { if (ok) { setNewPin(''); setPinFormOpen(false) } })
+    ).then(ok => {
+      if (!ok) return
+      setNewPin('')
+      setPinFormOpen(false)
+      // The form, and the field that had focus, are gone.
+      pinToggleRef.current?.focus()
+    })
   }
   const makeDefault = () => {
+    if (busy || profile.is_default) return
     // A locked profile becomes the default only with its PIN or the account
     // password, unless this session is already acting as it.
     if (profile.has_pin && !acting) { setUnlockFor({ kind: 'default' }); return }
@@ -183,7 +203,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
 
         {manages && (
           <>
-            <LimitControl profile={profile} acting={acting} soleUnrestricted={soleUnrestricted} busy={busy} run={run} />
+            <LimitControl profile={profile} acting={acting} soleUnrestricted={soleUnrestricted} busy={busy} run={run} onRefresh={onRefresh} />
             <div>
               <p className="mb-1 text-xs font-medium text-ink-2" aria-hidden="true">PIN</p>
               <p className={`flex h-11 items-center gap-1.5 whitespace-nowrap text-[14px] ${profile.has_pin ? 'text-ink' : openDoor ? 'text-warn' : 'text-ink-2'}`}>
@@ -193,17 +213,21 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
             </div>
             <button
               type="button"
+              ref={pinToggleRef}
               aria-expanded={pinFormOpen}
               // Only while there is a form to point at.
               aria-controls={pinFormOpen ? `${ids}-pin` : undefined}
-              disabled={busy}
-              onClick={() => { setPinFormOpen(o => !o); setNewPin(''); setError(null) }}
+              // Not `disabled` for the length of a write: this button takes
+              // the focus when the PIN form closes.
+              aria-disabled={busy}
+              onClick={() => { if (busy) return; setPinFormOpen(o => !o); setNewPin(''); setError(null) }}
               className="stage-btn stage-btn-ghost px-4 lg:mt-5 lg:w-full"
             >
               {profile.has_pin ? 'Change PIN' : 'Set a PIN'}{' '}<span className="sr-only">for {name}</span>
             </button>
             <button
               type="button"
+              ref={editToggleRef}
               aria-expanded={open}
               aria-controls={open ? `${ids}-panel` : undefined}
               onClick={() => setEditing(o => !o)}
@@ -236,16 +260,18 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
               data-form-type="other"
               maxLength={4}
               value={newPin}
-              disabled={busy}
+              // Read-only, not disabled, while the PIN is sent: a disabled
+              // field drops the focus.
+              readOnly={busy}
               aria-describedby={`${ids}-pinnote`}
               onChange={e => setNewPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
               className="h-11 w-28 py-0 text-[17px] tracking-[0.3em]"
             />
-            <button type="submit" disabled={!pinOk || busy} className="stage-btn stage-btn-primary">
+            <button type="submit" disabled={!pinOk} aria-disabled={busy} className="stage-btn stage-btn-primary">
               {profile.has_pin ? 'Change PIN' : 'Set PIN'}
             </button>
             {profile.has_pin && (
-              <button type="button" disabled={busy} onClick={() => setUnlockFor({ kind: 'remove-pin' })} className="stage-btn stage-btn-danger">
+              <button type="button" aria-disabled={busy} onClick={() => { if (!busy) setUnlockFor({ kind: 'remove-pin' }) }} className="stage-btn stage-btn-danger">
                 Remove PIN
               </button>
             )}
@@ -303,10 +329,20 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
               <div className="min-w-0 flex-1 basis-[14rem]">
                 {/* The name can be long: the label wraps instead of running
                     off a phone. */}
-                <button type="button" disabled={busy || profile.is_default} onClick={makeDefault} className="stage-btn stage-btn-ghost h-auto min-h-11 whitespace-normal py-2 text-left">
+                <button
+                  type="button"
+                  ref={defaultRef}
+                  // Never `disabled`: once this profile IS the default the
+                  // button that was pressed would drop the focus. It stays,
+                  // says why it does nothing, and does nothing.
+                  aria-disabled={busy || profile.is_default}
+                  aria-describedby={`${ids}-default`}
+                  onClick={makeDefault}
+                  className="stage-btn stage-btn-ghost h-auto min-h-11 whitespace-normal py-2 text-left"
+                >
                   Make {name} the default
                 </button>
-                <p className="mt-2 max-w-[44ch] text-[13px] leading-snug text-ink-2">{defaultNote}</p>
+                <p id={`${ids}-default`} className="mt-2 max-w-[44ch] text-[13px] leading-snug text-ink-2">{defaultNote}</p>
               </div>
               <div className="min-w-0 flex-1 basis-[14rem]">
                 <button
@@ -316,7 +352,13 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
                   // hands focus back to this button, and a disabled one
                   // cannot hold it.
                   aria-disabled={busy}
-                  onClick={() => { if (!busy) setConfirmDelete(true) }}
+                  onClick={e => {
+                    if (busy) return
+                    // Not every browser focuses a button on a click, and the
+                    // dialog gives focus back to what had it.
+                    e.currentTarget.focus()
+                    setConfirmDelete(true)
+                  }}
                   className="stage-btn stage-btn-danger h-auto min-h-11 whitespace-normal py-2 text-left"
                 >
                   Delete {name}
@@ -345,8 +387,10 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {
           setConfirmDelete(false)
+          if (acting || !manages) return
           void run(() => deleteProfile(profile.id), `${name} could not be deleted.`, `${name} is deleted`).then(ok => { if (ok) onDeleted?.() })
         }}
+        fallbackFocus={() => editToggleRef.current}
       >
         The watch history, lists, ratings and picks of {name} are deleted with it, and the devices using it are signed out. This cannot be undone.
       </ConfirmDialog>
@@ -359,6 +403,8 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
           submitLabel={unlockFor.kind === 'change-pin' ? 'Change PIN' : unlockFor.kind === 'remove-pin' ? 'Remove PIN' : 'Make default'}
           onSubmit={submitUnlock}
           onCancel={() => setUnlockFor(null)}
+          // A PIN change closes the form that asked for it.
+          fallbackFocus={unlockFor.kind === 'default' ? () => defaultRef.current : () => pinToggleRef.current}
         />
       )}
     </li>
@@ -371,27 +417,38 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
 // choice is held here until Save is pressed, and a choice that lets MORE
 // through, or that limits the profile this device is watching as, is asked
 // about first.
-function LimitControl({ profile, acting, soleUnrestricted, busy, run }: {
+function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh }: {
   profile: Profile
   acting: boolean
   soleUnrestricted: boolean
   busy: boolean
   run: Run
+  onRefresh: () => Promise<Profile[] | null>
 }) {
   const ids = useId()
   const name = profile.name
   const stored = limitOptionValue(profile.max_age_rating)
   const [draft, setDraft] = useState(stored)
-  // The stored limit changed under the control (saved here, or on another
-  // device and reloaded): the control shows it.
-  useEffect(() => { setDraft(stored) }, [stored, profile.id])
   const [asking, setAsking] = useState(false)
+  // The stored limit changed under the control (saved here, or on another
+  // device and reloaded): the control shows it, and a question asked about
+  // the old one is withdrawn, since its words no longer hold.
+  useEffect(() => { setDraft(stored); setAsking(false) }, [stored, profile.id])
+  // So is one asked before this device started, or stopped, watching as
+  // this profile: "limit yourself" is a different question.
+  useEffect(() => { setAsking(false) }, [acting])
+  // Save reads the list again first; this is what it found, when that
+  // stopped the save.
+  const [checking, setChecking] = useState(false)
+  const [stopped, setStopped] = useState<string | null>(null)
   const selectRef = useRef<HTMLSpanElement | null>(null)
+  const focusSelect = () => selectRef.current?.querySelector('select')?.focus()
   const dirty = draft !== stored
   const loosens = loosensLimit(stored, draft)
   // Limiting the profile this session acts as takes these controls away
   // from it.
   const limitsSelf = acting && stored === NO_LIMIT && draft !== NO_LIMIT
+  const waiting = busy || checking
 
   const save = async () => {
     setAsking(false)
@@ -404,10 +461,32 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run }: {
     if (!ok) setDraft(stored)
     // The Save button is gone either way; focus goes to the control it
     // belonged to instead of nowhere.
-    selectRef.current?.querySelector('select')?.focus()
+    focusSelect()
   }
-  const pressSave = () => {
-    if (!dirty || busy) return
+  const pressSave = async () => {
+    if (!dirty || waiting) return
+    // Whether this choice loosens the limit is a question about what the
+    // server has NOW. Another device may have tightened it since this row
+    // was drawn, and judged against the old value a looser limit would go
+    // through unasked. So the list is read again first, and a limit that
+    // has moved stops the save and is shown.
+    setChecking(true)
+    setStopped(null)
+    const fresh = await onRefresh().catch(() => null)
+    setChecking(false)
+    if (!fresh) {
+      setStopped(`The limit for ${name} could not be checked just now, so nothing was saved. Try again.`)
+      return
+    }
+    const now = fresh.find(p => p.id === profile.id)
+    // Deleted on another device: the row goes with the reload.
+    if (!now) return
+    const nowStored = limitOptionValue(now.max_age_rating)
+    if (nowStored !== stored) {
+      setStopped(`The limit for ${name} was changed on another device a moment ago, so nothing was saved. It is now: ${limitPhrase(nowStored)}. Choose again if that is not what you want.`)
+      focusSelect()
+      return
+    }
     if (loosens || limitsSelf) setAsking(true)
     else void save()
   }
@@ -424,7 +503,7 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run }: {
           options={limitOptionsFor(profile.max_age_rating)}
           // Not disabled while a write is out: that would drop the focus.
           disabled={soleUnrestricted}
-          onChange={v => { if (!busy) setDraft(v) }}
+          onChange={v => { if (!waiting) { setDraft(v); setStopped(null) } }}
         />
       </span>
       {soleUnrestricted && (
@@ -432,16 +511,22 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run }: {
           {name} is the only profile without a limit. One has to stay that way, so that someone can manage the others.
         </p>
       )}
+      <p role="status" className={stopped ? 'mt-2 max-w-[16rem] text-[13px] leading-snug text-ink' : 'sr-only'}>{stopped ?? ''}</p>
       {dirty && (
         <div className="mt-2 max-w-[16rem]">
           <p id={`${ids}-unsaved`} className="text-[13px] leading-snug text-ink-2">
             Not saved. The limit for {name} is still: {limitPhrase(stored)}.
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <button type="button" aria-disabled={busy} onClick={pressSave} className="stage-btn stage-btn-primary px-4">
+            <button
+              type="button"
+              aria-disabled={waiting}
+              onClick={e => { e.currentTarget.focus(); void pressSave() }}
+              className="stage-btn stage-btn-primary px-4"
+            >
               Save limit{' '}<span className="sr-only">for {name}</span>
             </button>
-            <button type="button" aria-disabled={busy} onClick={() => { if (!busy) setDraft(stored) }} className="stage-btn stage-btn-quiet px-3">
+            <button type="button" aria-disabled={waiting} onClick={() => { if (!waiting) { setDraft(stored); focusSelect() } }} className="stage-btn stage-btn-quiet px-3">
               Undo
             </button>
           </div>
@@ -491,13 +576,16 @@ function RenameForm({ profile, busy, run }: { profile: Profile; busy: boolean; r
           id={id}
           value={name}
           maxLength={NAME_MAX_BYTES}
-          disabled={busy}
+          readOnly={busy}
           aria-invalid={tooLong}
           aria-describedby={tooLong ? `${id}-long` : undefined}
           onChange={e => setName(e.target.value)}
           className="h-11 w-64 max-w-full py-0"
         />
-        <button type="submit" disabled={!changed || busy} className="stage-btn stage-btn-ghost">Save name</button>
+        {/* Off through aria-disabled, never `disabled`: Save is off again
+            once the name is the stored one, and a disabled button would
+            drop the focus it was pressed with. */}
+        <button type="submit" aria-disabled={!changed || busy} className="stage-btn stage-btn-ghost">Save name</button>
       </div>
       {tooLong && <p id={`${id}-long`} className="mt-1.5 text-[13px] text-danger-ink">That name is too long. Shorten it a little.</p>}
     </form>
@@ -564,7 +652,7 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
           {lists.map(l => (
             <li key={l.id} className="flex min-h-11 items-center justify-between gap-2 border-t border-line py-1 first:border-t-0">
               <span className="min-w-0 break-words text-[15px] text-ink">{l.name}</span>
-              <button type="button" aria-disabled={busy} onClick={() => { if (!busy) setConfirming(l) }} className="stage-btn stage-btn-quiet flex-none px-3">
+              <button type="button" aria-disabled={busy} onClick={e => { if (busy) return; e.currentTarget.focus(); setConfirming(l) }} className="stage-btn stage-btn-quiet flex-none px-3">
                 Delete{' '}<span className="sr-only">the list {l.name}</span>
               </button>
             </li>
@@ -581,8 +669,8 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
         }}
       >
         <label htmlFor={id} className="sr-only">New list for {profileName}</label>
-        <input id={id} value={name} maxLength={100} placeholder="New list" disabled={busy} onChange={e => setName(e.target.value)} className="h-11 w-64 max-w-full py-0" />
-        <button type="submit" disabled={!name.trim() || busy} className="stage-btn stage-btn-ghost">Add list</button>
+        <input id={id} value={name} maxLength={100} placeholder="New list" readOnly={busy} onChange={e => setName(e.target.value)} className="h-11 w-64 max-w-full py-0" />
+        <button type="submit" aria-disabled={!name.trim() || busy} className="stage-btn stage-btn-ghost">Add list</button>
       </form>
       <p role="alert" className={error ? 'mt-2 text-[14px] text-danger-ink' : 'sr-only'}>{error ?? ''}</p>
 

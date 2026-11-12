@@ -34,6 +34,10 @@ export function AccountPane({ user, activeProfile, profileKnown, profileSettled 
   onToast?: OnToast
 }) {
   const [confirmSignOut, setConfirmSignOut] = useState(false)
+  const signOutRef = useRef<HTMLButtonElement | null>(null)
+  // The password is the key to every profile: said to the people who manage
+  // them, not to a session with a limit (or one that might have one).
+  const managesSignIn = profileKnown && !isRestrictedProfile(activeProfile)
   return (
     <>
       {user && (
@@ -44,7 +48,9 @@ export function AccountPane({ user, activeProfile, profileKnown, profileSettled 
 
       <PaneSection
         title="Sign-in methods"
-        note="The account password also unlocks every profile, whatever its PIN. A linked account signs in without the password."
+        note={managesSignIn
+          ? 'The account password also unlocks every profile, whatever its PIN. A linked account signs in without the password.'
+          : undefined}
       >
         {profileSettled
           ? <SignInMethodsCard username={user?.username} activeProfile={activeProfile} profileKnown={profileKnown} onLogout={onLogout} onToast={onToast} />
@@ -61,7 +67,16 @@ export function AccountPane({ user, activeProfile, profileKnown, profileSettled 
               Signs out every device on this account, this one included. One device cannot be signed out by itself.
             </p>
           </div>
-          <button type="button" onClick={() => setConfirmSignOut(true)} className="stage-btn stage-btn-danger flex-none">Sign out</button>
+          <button
+            type="button"
+            ref={signOutRef}
+            // Not every browser focuses a button on a click, and the dialog
+            // gives focus back to what had it.
+            onClick={e => { e.currentTarget.focus(); setConfirmSignOut(true) }}
+            className="stage-btn stage-btn-danger flex-none"
+          >
+            Sign out
+          </button>
           <ConfirmDialog
             open={confirmSignOut}
             title="Sign out of every device?"
@@ -70,6 +85,7 @@ export function AccountPane({ user, activeProfile, profileKnown, profileSettled 
             destructive
             onCancel={() => setConfirmSignOut(false)}
             onConfirm={() => { setConfirmSignOut(false); onLogout() }}
+            fallbackFocus={() => signOutRef.current}
           >
             This signs out every device on this account: this one, and every other browser, phone and TV that is signed in. Each signs in again.
           </ConfirmDialog>
@@ -108,6 +124,8 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
   // A provider just disconnected: its row now offers Connect, and that
   // button takes the focus the Disconnect button had.
   const [disconnected, setDisconnected] = useState<string | null>(null)
+  // The provider the last question was about, kept after the dialog closes.
+  const [asked, setAsked] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!disconnected) return
@@ -182,7 +200,8 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
             // Not `disabled` for the length of the request: the dialog
             // hands focus back to this button.
             aria-disabled={busy === l.provider}
-            onClick={() => { if (busy !== l.provider) setConfirming(l.provider) }}
+            data-disconnect={l.provider}
+            onClick={e => { if (busy === l.provider) return; e.currentTarget.focus(); setAsked(l.provider); setConfirming(l.provider) }}
             className="stage-btn stage-btn-outline"
           >
             {busy === l.provider ? 'Disconnecting…' : 'Disconnect'}{' '}<span className="sr-only">{oauthProviderLabel(l.provider)}</span>
@@ -197,6 +216,7 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
         destructive
         onCancel={() => setConfirming(null)}
         onConfirm={() => { const p = confirming; if (p) void disconnect(p) }}
+        fallbackFocus={() => (asked ? rootRef.current?.querySelector<HTMLElement>(`[data-disconnect="${asked}"]`) : null)}
       >
         You will no longer be able to sign in to Aurora with your {confirming ? oauthProviderLabel(confirming) : ''} account. You can connect it again later.
       </ConfirmDialog>
@@ -226,14 +246,25 @@ function PasswordForm({ username, onSignIn }: { username?: string; onSignIn?: ()
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const currentRef = useRef<HTMLInputElement | null>(null)
-  useEffect(() => { if (open) currentRef.current?.focus() }, [open])
+  const openerRef = useRef<HTMLButtonElement | null>(null)
+  const doneRef = useRef<HTMLDivElement | null>(null)
+  // Opening the form swaps the button that opened it for the form, and
+  // closing it swaps back: focus follows, or it is left on nothing.
+  const wasOpen = useRef(false)
+  useEffect(() => {
+    if (open) currentRef.current?.focus()
+    else if (wasOpen.current) openerRef.current?.focus()
+    wasOpen.current = open
+  }, [open])
+  useEffect(() => { if (done) doneRef.current?.focus() }, [done])
 
   // The server counts bytes, 8 to 128: a password of accented or non-Latin
   // characters reaches both ends sooner than its length in characters says.
   const bytes = passwordBytes(next)
   const tooShort = next.length > 0 && bytes < 8
   const tooLong = bytes > 128
-  const ready = current.length > 0 && bytes >= 8 && !tooLong && !busy
+  const filled = current.length > 0 && bytes >= 8 && !tooLong
+  const ready = filled && !busy
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -246,12 +277,14 @@ function PasswordForm({ username, onSignIn }: { username?: string; onSignIn?: ()
     } catch (err) {
       setError(passwordErrorMessage(err))
       setBusy(false)
+      // The field to correct.
+      if (err instanceof APIError && err.status === 401 && err.message === WRONG_CURRENT_PASSWORD) currentRef.current?.focus()
     }
   }
 
   if (done) {
     return (
-      <div className="border-t border-line py-4" role="status">
+      <div ref={doneRef} tabIndex={-1} className="border-t border-line py-4" role="status">
         <p className="text-[15px] font-semibold text-ink">The password is changed.</p>
         <p className="mt-0.5 max-w-[56ch] text-[13px] leading-snug text-ink-2">
           Every device on this account has been signed out, this one included. Sign in again with the new password.
@@ -266,7 +299,7 @@ function PasswordForm({ username, onSignIn }: { username?: string; onSignIn?: ()
         label="Change the password"
         desc="Signs out every device on this account, this one included. You sign in again with the new password."
       >
-        <button type="button" onClick={() => setOpen(true)} className="stage-btn stage-btn-ghost">Change password</button>
+        <button type="button" ref={openerRef} onClick={() => setOpen(true)} className="stage-btn stage-btn-ghost">Change password</button>
       </SettingRow>
     )
   }
@@ -289,7 +322,9 @@ function PasswordForm({ username, onSignIn }: { username?: string; onSignIn?: ()
             type="password"
             autoComplete="current-password"
             value={current}
-            disabled={busy}
+            // Read-only, not disabled, while the change is sent: a disabled
+            // field drops the focus.
+            readOnly={busy}
             onChange={e => setCurrent(e.target.value)}
             className="mt-1.5 block h-11 w-56 max-w-full py-0"
           />
@@ -301,15 +336,15 @@ function PasswordForm({ username, onSignIn }: { username?: string; onSignIn?: ()
             type="password"
             autoComplete="new-password"
             value={next}
-            disabled={busy}
+            readOnly={busy}
             aria-invalid={tooShort || tooLong}
             aria-describedby={`${ids}-hint`}
             onChange={e => setNext(e.target.value)}
             className="mt-1.5 block h-11 w-56 max-w-full py-0"
           />
         </label>
-        <button type="submit" disabled={!ready} className="stage-btn stage-btn-primary">{busy ? 'Changing…' : 'Change password'}</button>
-        <button type="button" disabled={busy} onClick={() => { setOpen(false); setCurrent(''); setNext(''); setError(null) }} className="stage-btn stage-btn-quiet">Cancel</button>
+        <button type="submit" disabled={!filled} aria-disabled={busy} className="stage-btn stage-btn-primary">{busy ? 'Changing…' : 'Change password'}</button>
+        <button type="button" aria-disabled={busy} onClick={() => { if (busy) return; setOpen(false); setCurrent(''); setNext(''); setError(null) }} className="stage-btn stage-btn-quiet">Cancel</button>
       </div>
       <p id={`${ids}-hint`} className={`mt-2 text-[13px] ${tooShort || tooLong ? 'text-danger-ink' : 'text-ink-3'}`}>
         {tooLong ? 'That is too long for a password here. Shorten it.' : 'At least 8 characters.'}

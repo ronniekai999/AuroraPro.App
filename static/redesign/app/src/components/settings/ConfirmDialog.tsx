@@ -3,10 +3,9 @@
 // disconnecting a way to sign in, loosening a limit, signing out everywhere.
 //
 // The app's alert dialog: focus goes into it (onto the answer that changes
-// nothing), stays in it, and Escape and the cancel button close it. Where
-// focus goes afterwards is this file's job: the dialog is opened by state,
-// not by a trigger of its own, and without one it would hand focus to
-// nothing when it closes.
+// nothing), stays in it, and Escape and the cancel button close it. It is
+// opened by state, not by a trigger of its own, so where focus goes when it
+// closes is said here (lib/returnFocus).
 
 import { memo, useEffect, useRef, type ReactNode } from 'react'
 import {
@@ -14,6 +13,7 @@ import {
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { buttonVariants } from '@/components/ui/button'
+import { useReturnFocus } from '@/lib/returnFocus'
 
 interface WordsProps {
   open: boolean
@@ -60,9 +60,9 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
   onConfirm: () => void
   /** Closed any other way: the cancel button, Escape. */
   onCancel: () => void
-  /** Where focus goes when the dialog closes and what opened it is no
-   *  longer there to take it back (a Save button that goes with the choice
-   *  it saved). */
+  /** Where focus goes when the dialog closes and what opened it cannot take
+   *  it back: it is gone (a Save button that goes with the choice it saved),
+   *  or the browser never focused it. */
   fallbackFocus?: () => HTMLElement | null | undefined
 }) {
   // The dialog also "closes" when its confirm button is pressed; that is not
@@ -70,26 +70,10 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
   // dialog fades out, is not a second confirmation.
   const confirmed = useRef(false)
   useEffect(() => { if (open) confirmed.current = false }, [open])
-  const opener = useRef<HTMLElement | null>(null)
+  const returnFocus = useReturnFocus(fallbackFocus)
   return (
     <AlertDialog open={open} onOpenChange={next => { if (!next && !confirmed.current) onCancel() }}>
-      <AlertDialogContent
-        // Runs before focus moves into the dialog: what has it now is what
-        // opened the dialog.
-        onOpenAutoFocus={() => {
-          const el = document.activeElement
-          opener.current = el instanceof HTMLElement && el !== document.body ? el : null
-        }}
-        onCloseAutoFocus={e => {
-          e.preventDefault()
-          const from = opener.current
-          opener.current = null
-          // The caller has already put focus somewhere on purpose.
-          if (document.activeElement && document.activeElement !== document.body) return
-          const back = from && from.isConnected && !from.matches(':disabled') ? from : fallbackFocus?.()
-          back?.focus()
-        }}
-      >
+      <AlertDialogContent {...returnFocus}>
         <Words
           open={open}
           title={title}

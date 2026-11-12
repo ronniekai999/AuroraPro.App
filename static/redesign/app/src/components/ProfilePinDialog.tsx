@@ -16,6 +16,7 @@ import { Lock } from 'lucide-react'
 import { ProfileAvatar } from './ProfileAvatar'
 import { type Profile, type ProfileUnlock } from '@/lib/api'
 import { refusalMessage, refusalReason } from '@/lib/profileRefusal'
+import { useReturnFocus } from '@/lib/returnFocus'
 
 interface ProfilePinDialogProps {
   // `id` picks the avatar's colour, so the disc here is the one in the picker.
@@ -28,6 +29,9 @@ interface ProfilePinDialogProps {
   submitLabel?: string
   /** Sends the PIN or password. Resolve on success; reject with the APIError. */
   onSubmit: (unlock: ProfileUnlock) => Promise<void>
+  /** Where focus goes when the prompt closes and what opened it cannot take
+   *  it back. */
+  fallbackFocus?: () => HTMLElement | null | undefined
   onCancel: () => void
 }
 
@@ -47,8 +51,9 @@ export function unlockErrorMessage(e: unknown, mode: 'pin' | 'password'): string
 }
 
 export function ProfilePinDialog({
-  profile, title, description, submitLabel = 'Unlock', onSubmit, onCancel,
+  profile, title, description, submitLabel = 'Unlock', onSubmit, onCancel, fallbackFocus,
 }: ProfilePinDialogProps) {
+  const returnFocus = useReturnFocus(fallbackFocus)
   const [mode, setMode] = useState<'pin' | 'password'>('pin')
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
@@ -104,6 +109,7 @@ export function ProfilePinDialog({
     <Dialog open onOpenChange={open => { if (!open && !busy) onCancel() }}>
       <DialogContent
         showCloseButton={false}
+        {...returnFocus}
         // Above ProfilesGate (z-85): picking a locked profile there opens this
         // over the gate, and the gate stays up until the unlock succeeds.
         overlayClassName="z-[90] bg-[rgba(6,7,8,0.72)]"

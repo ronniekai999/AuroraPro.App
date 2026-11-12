@@ -116,6 +116,22 @@ describe('what a session with a content limit is shown', () => {
     expect(screen.getByText(/Parent has a content limit/)).toBeInTheDocument()
   })
 
+  // And the other way round: the app has re-read the session's profile and
+  // knows it is limited now, while this page's list is from before. Either
+  // copy saying "limited" is enough; the page must not wait for its own.
+  it('treats the session as limited when the app\'s copy says so and the page\'s older list does not', async () => {
+    const view = render(<ProfilesPane actingProfile={parent} profileKnown />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    // The next reads never answer: the page is left with its old list.
+    api.listProfiles.mockReturnValue(new Promise(() => {}))
+    view.rerender(<ProfilesPane actingProfile={{ ...parent, max_age_rating: 'TV-PG' }} profileKnown />)
+    expect(rows()).toHaveLength(1)
+    expect(screen.queryByRole('combobox', { name: /Limit for/ })).toBeNull()
+    expect(screen.queryByRole('form', { name: 'Add a profile' })).toBeNull()
+    expect(screen.queryByText(/no PIN\./)).toBeNull()
+    expect(screen.getByText(/Parent has a content limit/)).toBeInTheDocument()
+  })
+
   // The password is the key to every profile: not said to a limited session.
   it('tells only a session that manages profiles that the password unlocks them all', async () => {
     const view = render(<ProfilesPane actingProfile={kid} profileKnown />)
@@ -153,6 +169,8 @@ describe('managing profiles, from a profile without a limit', () => {
   const limitOf = (name: string) => rowOf(name).getByRole('combobox', { name: `Limit for ${name}` }) as HTMLSelectElement
   const pick = (name: string, value: string) => fireEvent.change(limitOf(name), { target: { value } })
   const confirm = () => screen.getByRole('alertdialog')
+  // Save reads the list again before it asks or sends.
+  const asked = () => screen.findByRole('alertdialog')
 
   it('shows every profile with its limit and whether it has a PIN', async () => {
     api.listProfiles.mockResolvedValue([parent, kid, { ...sam, has_pin: true }])
@@ -202,10 +220,12 @@ describe('managing profiles, from a profile without a limit', () => {
     pick('Kid', 'TV-G')
     expect(api.updateProfile).not.toHaveBeenCalled()
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
-    expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() => expect(changed).toHaveBeenCalledTimes(1))
-    expect(api.listProfiles).toHaveBeenCalledTimes(1)
+    // Read once before the write (is the row's limit still the server's?)
+    // and once after it.
+    expect(api.listProfiles).toHaveBeenCalledTimes(2)
     // Focus is on the control, not lost with the Save button.
     await waitFor(() => expect(limitOf('Kid')).toHaveFocus())
   })
@@ -216,8 +236,8 @@ describe('managing profiles, from a profile without a limit', () => {
     await open()
     pick('Kid', 'TV-14')
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    expect(within(await asked()).getByRole('heading', { name: 'Loosen the limit for Kid?' })).toBeInTheDocument()
     expect(api.updateProfile).not.toHaveBeenCalled()
-    expect(within(confirm()).getByRole('heading', { name: 'Loosen the limit for Kid?' })).toBeInTheDocument()
     expect(confirm()).toHaveTextContent('Kid will be able to see and play more: up to PG-13 and TV-14. The limit now is: up to PG and TV-Y7.')
     // Focus goes into the dialog, on the answer that changes nothing.
     expect(within(confirm()).getByRole('button', { name: 'Keep it as it is' })).toHaveFocus()
@@ -230,7 +250,7 @@ describe('managing profiles, from a profile without a limit', () => {
 
     pick('Kid', 'TV-14')
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
-    fireEvent.click(within(confirm()).getByRole('button', { name: 'Loosen the limit' }))
+    fireEvent.click(within(await asked()).getByRole('button', { name: 'Loosen the limit' }))
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-14' }))
     expect(api.updateProfile).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(limitOf('Kid')).toHaveFocus())
@@ -241,7 +261,7 @@ describe('managing profiles, from a profile without a limit', () => {
     await open()
     pick('Kid', '')
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
-    expect(within(confirm()).getByRole('heading', { name: 'Take the limit off Kid?' })).toBeInTheDocument()
+    expect(within(await asked()).getByRole('heading', { name: 'Take the limit off Kid?' })).toBeInTheDocument()
     expect(confirm()).toHaveTextContent('Kid will be able to see and play everything on this server.')
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
@@ -250,7 +270,7 @@ describe('managing profiles, from a profile without a limit', () => {
 
     pick('Kid', '')
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
-    fireEvent.click(within(confirm()).getByRole('button', { name: 'Remove the limit' }))
+    fireEvent.click(within(await asked()).getByRole('button', { name: 'Remove the limit' }))
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: '' }))
   })
 
@@ -260,11 +280,71 @@ describe('managing profiles, from a profile without a limit', () => {
     await open()
     pick('Parent', 'TV-PG')
     fireEvent.click(rowOf('Parent').getByRole('button', { name: 'Save limit for Parent' }))
-    expect(within(confirm()).getByRole('heading', { name: 'Limit Parent?' })).toBeInTheDocument()
+    expect(within(await asked()).getByRole('heading', { name: 'Limit Parent?' })).toBeInTheDocument()
     expect(confirm()).toHaveTextContent('You are watching as Parent. With a limit (up to PG and TV-PG), this device can no longer manage profiles until it switches to one without a limit.')
     expect(api.updateProfile).not.toHaveBeenCalled()
     fireEvent.click(within(confirm()).getByRole('button', { name: 'Limit Parent' }))
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(1, { max_age_rating: 'TV-PG' }))
+  })
+
+  // Whether a choice loosens a limit is a question about what the server
+  // has now. Another device tightened Kid's limit since this row was drawn:
+  // against the row's copy (PG) "TV-Y7" is stricter and would go unasked;
+  // against the server's (TV-G) it is looser.
+  it('reads the limit again on Save, and stops when another device has changed it', async () => {
+    await open()
+    pick('Kid', 'TV-Y7')
+    api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-G' }, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    const said = await rowOf('Kid').findByText('The limit for Kid was changed on another device a moment ago, so nothing was saved. It is now: up to G and TV-G. Choose again if that is not what you want.')
+    expect(said).toHaveAttribute('role', 'status')
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    // The row shows what the server has, and focus is on the control.
+    await waitFor(() => expect(limitOf('Kid')).toHaveValue('TV-G'))
+    expect(limitOf('Kid')).toHaveFocus()
+    // Choosing again, against the limit as it is now, is asked about.
+    pick('Kid', 'TV-Y7')
+    expect(rowOf('Kid').queryByText(/changed on another device/)).toBeNull()
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    expect(within(await asked()).getByRole('heading', { name: 'Loosen the limit for Kid?' })).toBeInTheDocument()
+    expect(api.updateProfile).not.toHaveBeenCalled()
+  })
+
+  it('saves nothing when the limit cannot be checked first', async () => {
+    await open()
+    pick('Kid', 'TV-G')
+    api.listProfiles.mockRejectedValue(new TypeError('offline'))
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    expect(await rowOf('Kid').findByText('The limit for Kid could not be checked just now, so nothing was saved. Try again.')).toHaveAttribute('role', 'status')
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    // The choice is kept for the next try.
+    expect(limitOf('Kid')).toHaveValue('TV-G')
+    api.listProfiles.mockResolvedValue([parent, kid, sam])
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { max_age_rating: 'TV-G' }))
+  })
+
+  // The question's words are about one stored limit. When a reload brings
+  // another while it is up, it is withdrawn, not left asking "Loosen …: up
+  // to G and TV-G. The limit now is: up to G and TV-G".
+  it('withdraws the question when the stored limit changes under it', async () => {
+    await open()
+    pick('Kid', 'TV-14')
+    fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
+    await asked()
+    // A reload from elsewhere on the page (another row's write) brings a
+    // limit another device set meanwhile.
+    api.listProfiles.mockResolvedValue([parent, { ...kid, max_age_rating: 'TV-14' }, sam])
+    // (The page behind the dialog is hidden from the accessibility tree.)
+    const samRow = within(document.querySelector('[data-profile-row="3"]') as HTMLElement)
+    fireEvent.click(samRow.getByRole('button', { name: 'Edit Sam', hidden: true }))
+    fireEvent.change(samRow.getByRole('textbox', { name: 'Name', hidden: true }), { target: { value: 'Sammy' } })
+    fireEvent.click(samRow.getByRole('button', { name: 'Save name', hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(limitOf('Kid')).toHaveValue('TV-14')
+    expect(api.updateProfile).toHaveBeenCalledTimes(1)
+    expect(api.updateProfile).toHaveBeenCalledWith(3, { name: 'Sammy' })
   })
 
   // The server refuses to limit or delete the account's last profile without
@@ -294,9 +374,10 @@ describe('managing profiles, from a profile without a limit', () => {
     expect(screen.queryByText('server words')).toBeNull()
     // The row shows what the server still has.
     await waitFor(() => expect(limitOf('Kid')).toHaveValue('PG'))
-    // A refusal that means this list is out of date reads it again, and
-    // tells the app, whose copy says what this session may do.
-    await waitFor(() => expect(api.listProfiles).toHaveBeenCalledTimes(reloads ? 1 : 0))
+    // A refusal that means this list is out of date reads it again (after
+    // the one read every Save starts with), and tells the app, whose copy
+    // says what this session may do.
+    await waitFor(() => expect(api.listProfiles).toHaveBeenCalledTimes(reloads ? 2 : 1))
     expect(changed).toHaveBeenCalledTimes(reloads ? 1 : 0)
   })
 
@@ -307,7 +388,7 @@ describe('managing profiles, from a profile without a limit', () => {
     pick('Kid', 'TV-G')
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Save limit for Kid' }))
     await waitFor(() => expect(rowOf('Kid').getByRole('alert')).toHaveTextContent('Kid was deleted on another device. The list has been reloaded.'))
-    await waitFor(() => expect(api.listProfiles).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(api.listProfiles).toHaveBeenCalledTimes(2))
   })
 
   it('offers the way to sign in again when the server says this device was signed out', async () => {
@@ -332,8 +413,13 @@ describe('managing profiles, from a profile without a limit', () => {
     expect(field).toHaveValue('123')
     expect(rowOf('Sam').getByRole('button', { name: 'Set PIN' })).toBeDisabled()
     fireEvent.change(field, { target: { value: '1234' } })
+    api.listProfiles.mockResolvedValue([parent, kid, { ...sam, has_pin: true }])
     fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Set PIN' }))
     await waitFor(() => expect(api.setProfilePin).toHaveBeenCalledWith(3, '1234'))
+    // The form closes; the button that opened it has the focus, under the
+    // name it has now.
+    await waitFor(() => expect(rowOf('Sam').getByRole('button', { name: 'Change PIN for Sam' })).toHaveFocus())
+    expect(rowOf('Sam').queryByLabelText(/PIN for Sam, four digits/)).toBeNull()
   })
 
   // Another device set a PIN first: the row said "no PIN", so it has no
@@ -364,6 +450,9 @@ describe('managing profiles, from a profile without a limit', () => {
     fireEvent.change(within(prompt).getByLabelText('Profile PIN'), { target: { value: '1111' } })
     await waitFor(() => expect(api.setProfilePin).toHaveBeenCalledWith(3, '4321', { pin: '1111' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change the PIN for Sam' })).toBeNull())
+    // The prompt and the form behind it are both gone: the row's PIN button
+    // takes the focus.
+    await waitFor(() => expect(rowOf('Sam').getByRole('button', { name: 'Change PIN for Sam' })).toHaveFocus())
 
     api.setProfilePin.mockClear()
     fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Change PIN for Sam' }))
@@ -404,8 +493,14 @@ describe('managing profiles, from a profile without a limit', () => {
     render(<ProfilesPane actingProfile={parent} profileKnown />)
     await waitFor(() => expect(rows()).toHaveLength(4))
     fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Edit Sam' }))
-    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Make Sam the default' }))
+    const makeSam = rowOf('Sam').getByRole('button', { name: 'Make Sam the default' })
+    makeSam.focus()
+    fireEvent.click(makeSam)
     await waitFor(() => expect(api.setDefaultProfile).toHaveBeenCalledWith(3))
+    // The pressed button is still there to hold the focus.
+    await act(async () => {})
+    expect(makeSam).toHaveFocus()
+    expect(makeSam).not.toBeDisabled()
 
     api.setDefaultProfile.mockClear()
     fireEvent.click(rowOf('Lee').getByRole('button', { name: 'Edit Lee' }))
@@ -416,9 +511,15 @@ describe('managing profiles, from a profile without a limit', () => {
     fireEvent.change(within(prompt).getByLabelText('Account password'), { target: { value: 'hunter22' } })
     fireEvent.click(within(prompt).getByRole('button', { name: 'Make default' }))
     await waitFor(() => expect(api.setDefaultProfile).toHaveBeenCalledWith(4, { password: 'hunter22' }))
-    // The default itself has nothing to make.
+    // The default itself has nothing to make: its button is off (and says
+    // why), and a press sends nothing.
+    api.setDefaultProfile.mockClear()
     fireEvent.click(rowOf('Parent').getByRole('button', { name: 'Edit Parent' }))
-    expect(rowOf('Parent').getByRole('button', { name: 'Make Parent the default' })).toBeDisabled()
+    const isDefault = rowOf('Parent').getByRole('button', { name: 'Make Parent the default' })
+    expect(isDefault).toHaveAttribute('aria-disabled', 'true')
+    expect(isDefault).toHaveAccessibleDescription('Parent is the default: the profile a new sign-in with the password starts on.')
+    fireEvent.click(isDefault)
+    expect(api.setDefaultProfile).not.toHaveBeenCalled()
   })
 
   // What a new default does beyond the obvious is said before the press.
@@ -466,6 +567,32 @@ describe('managing profiles, from a profile without a limit', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Profiles and parental controls' })).toHaveFocus())
   })
 
+  // "Delete Sam?" is up when another tab switches this session to Sam.
+  // Confirming would now delete the profile this device acts as, and the
+  // server does not refuse that. The question is withdrawn.
+  it('withdraws a delete question when the session starts watching as that profile', async () => {
+    const view = render(<ProfilesPane actingProfile={parent} profileKnown onToast={vi.fn()} />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Edit Sam' }))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Delete Sam' }))
+    expect(within(confirm()).getByRole('heading', { name: 'Delete Sam?' })).toBeInTheDocument()
+    view.rerender(<ProfilesPane actingProfile={sam} profileKnown onToast={vi.fn()} />)
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(api.deleteProfile).not.toHaveBeenCalled()
+    // And its row no longer offers the delete.
+    await waitFor(() => expect(rowOf('Sam').getByRole('button', { name: 'Delete Sam' })).toBeDisabled())
+  })
+  it('withdraws a delete question when the session gets a limit', async () => {
+    const view = render(<ProfilesPane actingProfile={parent} profileKnown onToast={vi.fn()} />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Edit Sam' }))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Delete Sam' }))
+    expect(confirm()).toBeInTheDocument()
+    view.rerender(<ProfilesPane actingProfile={{ ...parent, max_age_rating: 'TV-PG' }} profileKnown onToast={vi.fn()} />)
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(api.deleteProfile).not.toHaveBeenCalled()
+  })
+
   // Deleting the default is refused by the server; deleting the profile the
   // session acts as would end this session with it.
   it('does not offer to delete the default profile or the one being watched as', async () => {
@@ -498,11 +625,17 @@ describe('managing profiles, from a profile without a limit', () => {
     await open()
     fireEvent.click(rowOf('Kid').getByRole('button', { name: 'Edit Kid' }))
     const field = rowOf('Kid').getByRole('textbox', { name: 'Name' })
+    const save = rowOf('Kid').getByRole('button', { name: 'Save name' })
     fireEvent.change(field, { target: { value: 'é'.repeat(51) } })
-    expect(rowOf('Kid').getByRole('button', { name: 'Save name' })).toBeDisabled()
+    expect(save).toHaveAttribute('aria-disabled', 'true')
     expect(rowOf('Kid').getByText('That name is too long. Shorten it a little.')).toBeInTheDocument()
+    fireEvent.click(save)
+    fireEvent.submit(field.closest('form')!)
+    expect(api.updateProfile).not.toHaveBeenCalled()
     fireEvent.change(field, { target: { value: 'é'.repeat(50) } })
-    expect(rowOf('Kid').getByRole('button', { name: 'Save name' })).toBeEnabled()
+    expect(save).toHaveAttribute('aria-disabled', 'false')
+    fireEvent.click(save)
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledWith(2, { name: 'é'.repeat(50) }))
   })
 
   it('loads a profile\'s lists when its panel opens, makes one, and deletes one only through a dialog', async () => {
@@ -539,7 +672,11 @@ describe('managing profiles, from a profile without a limit', () => {
   it('adds a profile with its limit in the same request', async () => {
     const changed = await open()
     const form = screen.getByRole('form', { name: 'Add a profile' })
-    expect(within(form).getByRole('button', { name: 'Add profile' })).toBeDisabled()
+    // Off with no name: a press sends nothing.
+    const add = within(form).getByRole('button', { name: 'Add profile' })
+    expect(add).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(add)
+    expect(api.createProfile).not.toHaveBeenCalled()
     fireEvent.change(within(form).getByLabelText('Name'), { target: { value: ' Robin ' } })
     fireEvent.change(within(form).getByLabelText('Limit'), { target: { value: 'TV-Y7' } })
     fireEvent.click(within(form).getByRole('button', { name: 'Add profile' }))

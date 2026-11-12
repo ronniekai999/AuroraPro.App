@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -161,5 +162,57 @@ describe('ProfilePinDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalled()
     expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  // The prompt is opened by state, with no trigger of its own to give focus
+  // back to: without help, closing it left focus on nothing.
+  describe('where focus goes when it closes', () => {
+    function Opener({ removeOpener = false }: { removeOpener?: boolean }) {
+      const [open, setOpen] = useState(false)
+      const [closed, setClosed] = useState(false)
+      return (
+        <div>
+          {!(removeOpener && closed) && <button type="button" onClick={() => setOpen(true)}>Switch to Kid</button>}
+          <button type="button" id="elsewhere">Elsewhere</button>
+          {open && (
+            <ProfilePinDialog
+              profile={kid}
+              onSubmit={async () => { setOpen(false); setClosed(true) }}
+              onCancel={() => { setOpen(false); setClosed(true) }}
+              fallbackFocus={() => document.getElementById('elsewhere')}
+            />
+          )}
+        </div>
+      )
+    }
+
+    it('goes back to what opened the prompt when it is cancelled', async () => {
+      const user = userEvent.setup()
+      render(<Opener />)
+      await user.click(screen.getByRole('button', { name: 'Switch to Kid' }))
+      await waitFor(() => expect(screen.getByLabelText('Profile PIN')).toHaveFocus())
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Switch to Kid' })).toHaveFocus())
+    })
+
+    it('goes back there after the PIN is accepted too', async () => {
+      const user = userEvent.setup()
+      render(<Opener />)
+      await user.click(screen.getByRole('button', { name: 'Switch to Kid' }))
+      await waitFor(() => expect(screen.getByLabelText('Profile PIN')).toHaveFocus())
+      await user.keyboard('1234')
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Switch to Kid' })).toHaveFocus())
+    })
+
+    it('goes to the caller\'s fallback when what opened it is gone', async () => {
+      const user = userEvent.setup()
+      render(<Opener removeOpener />)
+      await user.click(screen.getByRole('button', { name: 'Switch to Kid' }))
+      await waitFor(() => expect(screen.getByLabelText('Profile PIN')).toHaveFocus())
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Elsewhere' })).toHaveFocus())
+    })
   })
 })
