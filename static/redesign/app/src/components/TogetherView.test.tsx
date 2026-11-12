@@ -383,6 +383,44 @@ describe('the ways into a party', () => {
     expect(document.body).toHaveFocus()
   })
 
+  // Another app or tab took the window's focus: the button gets a blur, but
+  // it is still the page's focused element, and the person comes back to it.
+  it('hands the focus to the row when the Join button goes while the window is not focused', async () => {
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '', active_party_code: 'FRD4YC' }])
+    const view = render(<TogetherView {...props({ activeParties: [party({ code: 'FRD4YC', party_name: 'In the room' })] })} />)
+    const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
+    const join = await rooms.findByRole('button', { name: 'Join Friday crew' })
+    join.focus()
+    // The blur a window switch sends: the event, with the focus left where
+    // it is.
+    fireEvent.blur(join)
+    expect(join).toHaveFocus()
+    await act(async () => {})
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '' }])
+    view.rerender(<TogetherView {...props({ activeParties: [] })} />)
+    await waitFor(() => expect(rooms.queryByRole('button', { name: 'Join Friday crew' })).toBeNull())
+    const row = rooms.getByText('Friday crew', { selector: 'div' }).closest('li')!
+    await waitFor(() => expect(row).toHaveFocus())
+  })
+
+  // A room made at once, before the first read of the rooms has answered,
+  // is not the person's rooms: when that read fails, it is said.
+  it('says the rooms could not be loaded when a room was made before the first read failed', async () => {
+    let failRead: (err: Error) => void = () => {}
+    api.listRooms.mockImplementationOnce(() => new Promise((_, reject) => { failRead = reject }))
+    api.createRoom.mockResolvedValue({ id: 3, code: 'SC7T3N', name: 'Slow cinema', owner_user_id: 1, created_at: '' })
+    render(<TogetherView {...props({ activeParties: [] })} />)
+    const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
+    fireEvent.click(rooms.getByRole('button', { name: 'New room' }))
+    fireEvent.change(rooms.getByLabelText('Room name'), { target: { value: 'Slow cinema' } })
+    fireEvent.click(rooms.getByRole('button', { name: 'Make room' }))
+    await rooms.findByText('Slow cinema')
+    expect(rooms.queryByText('Your rooms could not be loaded.')).toBeNull()
+    await act(async () => { failRead(new Error('boom')) })
+    expect(rooms.getByText('Your rooms could not be loaded.')).toBeInTheDocument()
+    expect(rooms.getByText('Slow cinema')).toBeInTheDocument()
+  })
+
   // "Only the first read failing leaves nothing to show" forgot a room made
   // after that first read failed: the next failed read emptied the list.
   it('keeps a room just made when the rooms could not be read before it and cannot be read after', async () => {

@@ -259,6 +259,13 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
   // yet; the reader uses null for those too.
   const actingProfileIdRef = useRef<number | null>(actingProfileId)
   actingProfileIdRef.current = actingProfileId
+  // The profile a party was joined as, kept with the party. The session can
+  // move to another profile while the room socket stays open; the record of
+  // that party still belongs to the profile that was in it, or the other
+  // profile would be offered a party it never joined.
+  const joinedAsRef = useRef<{ code: string; profileId: number | null } | null>(null)
+  const profileOfParty = (code: string) =>
+    joinedAsRef.current?.code === code ? joinedAsRef.current.profileId : actingProfileIdRef.current
   const roomWsRef = useRef<WebSocket | null>(null)
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
@@ -465,7 +472,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
         partyName: state.partyName,
         mediaTitle: state.mediaTitle,
         wasHost: state.hostUserId === userId,
-      }, actingProfileIdRef.current)
+      }, profileOfParty(state.code))
     }
     // Mark this as user-initiated FIRST so any pending close handlers
     // know not to attempt reconnect. Without this flag, calling leave()
@@ -589,7 +596,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
               partyName: inner.party_name,
               mediaTitle: inner.media_title,
               wasHost: inner.host_user_id === userId,
-            }, actingProfileIdRef.current)
+            }, profileOfParty(inner.code))
           }
         }
         // First party-state arrival is the cue to open the sync
@@ -1195,6 +1202,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
     activeCodeRef.current = null
     closeSockets()
     setState({ ...INITIAL_STATE, joining: true })
+    joinedAsRef.current = { code, profileId: actingProfileIdRef.current }
     tickRef.current = null
     seekRef.current = null
     latestAcceptedRevRef.current = 0

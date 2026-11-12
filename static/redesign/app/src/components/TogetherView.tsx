@@ -560,8 +560,10 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   // page with it, at every later change of the party list, from anyone
   // whose focus was on nothing.
   const heldInRoom = useRef<{ room: number; el: HTMLElement } | null>(null)
-  // There is a list to keep: a read has answered, or a room was made here.
-  const loadedOnce = useRef(false)
+  // A read of the rooms has answered. Until one has, a read that fails is
+  // said, also beside a room made here meanwhile: that room alone is not the
+  // person's rooms.
+  const answered = useRef(false)
 
   // Read when the page opens, and again when the parties running change: a
   // room says whether a party is on in it ("live now" / "nothing on"), and
@@ -570,11 +572,13 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   useEffect(() => {
     const ac = new AbortController()
     listRooms(ac.signal)
-      .then(list => { loadedOnce.current = true; setRooms(list); setFailed(false) })
+      .then(list => { answered.current = true; setRooms(list); setFailed(false) })
       .catch((err: unknown) => {
         if (ac.signal.aborted || (err instanceof Error && err.name === 'AbortError')) return
-        // Only the first read failing leaves nothing to show.
-        if (!loadedOnce.current) { setFailed(true); setRooms([]) }
+        // A reload that fails keeps the rooms a read brought. With none
+        // read yet there are none to keep but the ones made here, and those
+        // stay.
+        if (!answered.current) { setFailed(true); setRooms(prev => prev ?? []) }
       })
     return () => ac.abort()
   }, [partyKey])
@@ -603,8 +607,6 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
     try {
       const room = await createRoom({ name: next })
       setRooms(prev => (prev ? [room, ...prev.filter(r => r.id !== room.id)] : [room]))
-      // A later read that fails keeps this room, also when none has answered.
-      loadedOnce.current = true
       setName('')
       setCreating(false)
       setMade(room.id)
@@ -674,10 +676,15 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
                 // handler today (measured in Chromium), but nothing here
                 // leans on that: the two are told apart a moment later, when
                 // a control that was removed is no longer connected and its
-                // record stays for the effect above.
+                // record stays for the effect above. Nor does a window that
+                // lost the focus count: the control gets a blur then too,
+                // and is still the page's focused element when the person
+                // comes back.
                 onBlur={e => {
                   const el = e.target as HTMLElement
-                  queueMicrotask(() => { if (heldInRoom.current?.el === el && el.isConnected) heldInRoom.current = null })
+                  queueMicrotask(() => {
+                    if (heldInRoom.current?.el === el && el.isConnected && document.activeElement !== el) heldInRoom.current = null
+                  })
                 }}
                 className="rounded-control bg-surface-raised px-4 py-2.5"
               >
