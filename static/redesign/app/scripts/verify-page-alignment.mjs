@@ -66,7 +66,11 @@ function classesOf(file, marker) {
 }
 const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
 const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar')
-const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0 left-0 right-0 z-20')
+// Tonight's hero: its root and, inside it, the row that holds the title block
+// and the picks. The row is in the flow now (the root is a flex column that
+// sets it at the bottom), so the probe is built from both, as the page is.
+const HERO_SECTION = classesOf('src/components/HeroSection.tsx', 'flex-col justify-end overflow-hidden')
+const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'stage-gutter relative z-20')
 // The title page is one column: a gutter element that takes the page padding
 // and, inside it, an element that caps the measure. The hero's content row is
 // built the same way, and the two must agree.
@@ -91,7 +95,7 @@ const html = `<!doctype html><html><head><style>${css}</style>
   <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_COL}"><div>synopsis</div><div>episodes</div></div></div>
   <section style="position:relative;display:flex;flex-direction:column;min-height:200px"><div class="${HERO_GUTTER}"><div id="herotext" class="${HERO_ROW}"><div>poster</div><div style="flex:1">hero text</div></div></div></section>
   <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
-  <section style="position:relative;height:200px;overflow:hidden">
+  <section class="${HERO_SECTION}">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
   </section>
 </div></body></html>`

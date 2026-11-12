@@ -142,3 +142,129 @@ describe('usePartyInvites', () => {
     expect(result.current.invites).toBeNull()
   })
 })
+
+// A profile switch binds the new profile on the server before the app shows
+// it. For that moment the owner is still the old profile and the server
+// answers for the new one, so an answer stored then would be the new
+// profile's list under the old profile's name.
+describe('usePartyInvites across a profile switch', () => {
+  /** A switch as the app sees it: out or not, how many have started, how
+   *  many have ended. */
+  function switches() {
+    const state = { out: false, started: 0, ended: 0 }
+    return {
+      state,
+      start() { state.out = true; state.started++ },
+      end() { state.out = false; state.ended++ },
+    }
+  }
+  const stable = { isSwitching: vi.fn<() => boolean>(), generation: vi.fn<() => number>() }
+  function mount(sw: ReturnType<typeof switches>, owner = '1:2') {
+    stable.isSwitching.mockImplementation(() => sw.state.out)
+    stable.generation.mockImplementation(() => sw.state.started)
+    return renderHook(({ owner, ended }: { owner: string; ended: number }) =>
+      usePartyInvites(owner, { isSwitching: stable.isSwitching, generation: stable.generation, ended }),
+    { initialProps: { owner, ended: sw.state.ended } })
+  }
+
+  it('starts no request while a switch is out, and makes it when the switch ends on the same profile', async () => {
+    const server = stub(), sw = switches()
+    const { result, rerender } = mount(sw)
+    sw.start()
+    act(() => result.current.refresh())
+    act(() => result.current.refresh())
+    expect(server.asked).toBe(0)
+    // Refused, or its PIN prompt cancelled: the owner does not change.
+    sw.end()
+    rerender({ owner: '1:2', ended: sw.state.ended })
+    expect(server.asked).toBe(1)
+    await server.answer(0, ['For the Kid'])
+    expect(titles(result.current.invites)).toEqual(['For the Kid'])
+    // Asked once: a later render with nothing owed asks nothing.
+    rerender({ owner: '1:2', ended: sw.state.ended })
+    expect(server.asked).toBe(1)
+  })
+
+  it('makes the request for the new profile when the switch ends on it, once', async () => {
+    const server = stub(), sw = switches()
+    const { result, rerender } = mount(sw)
+    sw.start()
+    act(() => result.current.refresh())
+    expect(server.asked).toBe(0)
+    sw.end()
+    rerender({ owner: '1:1', ended: sw.state.ended })
+    expect(server.asked).toBe(1)
+    await server.answer(0, ['For the Parent'])
+    expect(titles(result.current.invites)).toEqual(['For the Parent'])
+  })
+
+  it('drops an answer that lands while a switch is out, and asks again when it ends', async () => {
+    const server = stub(), sw = switches()
+    const seen: (string[] | null)[] = []
+    const { result, rerender } = renderHook(({ owner, ended }: { owner: string; ended: number }) => {
+      const s = usePartyInvites(owner, { isSwitching: stable.isSwitching, generation: stable.generation, ended })
+      if (owner === '1:2') seen.push(titles(s.invites))
+      return s
+    }, { initialProps: { owner: '1:2', ended: 0 } })
+    stable.isSwitching.mockImplementation(() => sw.state.out)
+    stable.generation.mockImplementation(() => sw.state.started)
+    // Asked as the Kid, before any switch.
+    act(() => result.current.refresh())
+    expect(server.asked).toBe(1)
+    // The switch binds the Parent on the server; the app still shows the Kid.
+    sw.start()
+    // The server answers the Kid's request for the Parent.
+    await server.answer(0, ["The Parent's, over the Kid's limit"])
+    expect(result.current.invites).toBeNull()
+    expect(server.asked).toBe(1)
+    // The switch is refused: still the Kid. The list is asked for again.
+    sw.end()
+    rerender({ owner: '1:2', ended: sw.state.ended })
+    expect(server.asked).toBe(2)
+    await server.answer(1, ['For the Kid'])
+    expect(titles(result.current.invites)).toEqual(['For the Kid'])
+    // No render under the Kid ever held the Parent's.
+    expect(seen.filter(s => s?.some(t => t.startsWith("The Parent's")))).toEqual([])
+  })
+
+  it('drops an answer asked before a switch that has since ended on the same profile, and asks again at once', async () => {
+    const server = stub(), sw = switches()
+    const { result, rerender } = mount(sw)
+    act(() => result.current.refresh())
+    // A switch starts and ends (the binding was read back as this profile)
+    // while the request is out: the server may have answered in between
+    // for the profile it was bound to for that moment.
+    sw.start()
+    sw.end()
+    rerender({ owner: '1:2', ended: sw.state.ended })
+    // Nothing was owed yet (the request was simply out), so nothing more was asked.
+    expect(server.asked).toBe(1)
+    await server.answer(0, ['Answered in between'])
+    expect(result.current.invites).toBeNull()
+    // Asked again, without waiting for anything else to happen.
+    expect(server.asked).toBe(2)
+    await server.answer(1, ['For the Kid'])
+    expect(titles(result.current.invites)).toEqual(['For the Kid'])
+    expect(server.asked).toBe(2)
+  })
+
+  it('asks nothing again that nobody wanted', async () => {
+    const server = stub(), sw = switches()
+    const { rerender } = mount(sw)
+    sw.start()
+    sw.end()
+    rerender({ owner: '1:2', ended: sw.state.ended })
+    rerender({ owner: '1:1', ended: sw.state.ended })
+    expect(server.asked).toBe(0)
+  })
+
+  it('keeps what it had on screen while a switch is out', async () => {
+    const server = stub(), sw = switches()
+    const { result } = mount(sw)
+    act(() => result.current.refresh())
+    await server.answer(0, ['For the Kid'])
+    sw.start()
+    act(() => result.current.refresh())
+    expect(titles(result.current.invites)).toEqual(['For the Kid'])
+  })
+})

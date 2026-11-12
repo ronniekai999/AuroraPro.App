@@ -211,9 +211,14 @@ describe('the identity control', () => {
     openMenu()
     const rows = profileRows()
     expect(rows.map(r => r.getAttribute('aria-current'))).toEqual(['true', null])
-    expect(rows[0].textContent).toContain('Default · locked with a PIN')
+    // The whole line of each, so a doubled or missing fact is seen, and
+    // the limit first: it is what a narrow row must not cut.
+    const summary = (row: HTMLElement) => row.querySelector('[data-profile-summary]')?.textContent
+    expect(rows.map(summary)).toEqual(['No limit · default · locked with a PIN', 'Up to PG'])
     expect(rows[0].textContent).toContain('watching now')
-    expect(rows[1].textContent).toContain('Up to PG')
+    // The line is not cut off: it wraps, in a row that grows with it.
+    expect(rows[0].querySelector('[data-profile-summary]')).not.toHaveClass('truncate')
+    expect(rows[0].className).not.toMatch(/(^|\s)h-\[/)
     fireEvent.click(profileRow(/Kid/))
     expect(onSelectProfile).toHaveBeenCalledWith(2)
     // Choosing closes the menu.
@@ -287,6 +292,41 @@ describe('the identity control', () => {
     render(<TopNav {...props({ adminUI: false, navScope: 'restricted', activeProfileId: 2 })} />)
     expect(trigger().textContent).toContain('Kid')
     expect(trigger().textContent).toContain('PG')
+  })
+})
+
+describe('the search field', () => {
+  const field = () => screen.getByRole('textbox', { name: 'Search titles' })
+
+  it('reports typing as it happens, and Enter as a separate ask', () => {
+    const onChange = vi.fn(), onSubmit = vi.fn()
+    render(<TopNav {...props({ searchQuery: 'cozy mystery', onSearchQueryChange: onChange, onSearchSubmit: onSubmit })} />)
+    fireEvent.change(field(), { target: { value: 'cozy mysteries' } })
+    expect(onChange).toHaveBeenCalledWith('cozy mysteries')
+    expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    // No other key asks.
+    fireEvent.keyDown(field(), { key: 'a' })
+    fireEvent.keyDown(field(), { key: 'Tab' })
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not ask for nothing, or while an input method is still composing', () => {
+    const onSubmit = vi.fn()
+    const { rerender } = render(<TopNav {...props({ searchQuery: '   ', onSearchSubmit: onSubmit })} />)
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    rerender(<TopNav {...props({ searchQuery: 'こ', onSearchSubmit: onSubmit })} />)
+    fireEvent.keyDown(field(), { key: 'Enter', isComposing: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a description is welcome, and tells the phone keyboard its key searches', () => {
+    render(<TopNav {...props()} />)
+    expect(field()).toHaveAttribute('placeholder', 'Search, or describe a mood')
+    expect(field()).toHaveAttribute('enterkeyhint', 'search')
   })
 })
 

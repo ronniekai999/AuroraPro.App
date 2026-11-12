@@ -5,9 +5,8 @@
 // view in <ViewSuspense fallback={<BrowseLoadingState/>}> so the chunk-load
 // fallback is visually identical to the data-load fallback — no two-phase
 // flash. BrowseSort is module-private.
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useMemo, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
-import { HeroSection } from '@/components/HeroSection'
 import { MediaRail } from '@/components/MediaRail'
 import { Spinner } from '@/components/ui/spinner'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
@@ -21,9 +20,9 @@ export default function BrowseView({
   items, title, subtitle, total, sortBy, onSortChange,
   genreFilter, onGenreChange, availableGenres,
   onLoadMore, isLoadingMore,
-  onSelect, onPlay, onCardContext, onCardPlay, resumableIds,
+  onSelect, onCardContext, onCardPlay, resumableIds,
   libraryIds, onToggleLib,
-  mediaType, continueItems, onPlayContinue,
+  mediaType, continueItems,
 }: {
   items: Media[]
   title: string
@@ -55,12 +54,6 @@ export default function BrowseView({
   onLoadMore: () => void
   isLoadingMore: boolean
   onSelect: (m: Media) => void
-  // 2026-05-31 (library hybrid redesign) — onPlay is back, but ONLY for
-  // the hero's primary CTA (Play / Resume). The grid/list cards still
-  // open detail on click (the established "click → detail → act"
-  // language); they do NOT call onPlay. So unlike the pre-2028 prop this
-  // one has a real, single consumer.
-  onPlay: (m: Media) => void
   // The card menu. Required: see MediaCardCinema.
   onCardContext: (e: MouseEvent, m: Media) => void
   // A card's on-poster Play: resumes when the viewer has a position in the
@@ -70,7 +63,7 @@ export default function BrowseView({
   // My Library + button on cards. Same contract as MediaRail.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
-  // 2026-05-31 — 'movie' | 'show' so the hero eyebrow + Continue
+  // 2026-05-31 — 'movie' | 'show' so the header's eyebrow + Continue
   // Watching filter know which catalog this is. (title is display-only;
   // don't branch behavior on it.)
   mediaType: 'movie' | 'show'
@@ -78,7 +71,6 @@ export default function BrowseView({
   // in grid view, filtered to this view's media type. Empty/absent just
   // hides the rail.
   continueItems?: ContinueWatchingItem[]
-  onPlayContinue?: (c: ContinueWatchingItem) => void
 }) {
   // Genre is now server-side (Batch A 2026-05-25). The server filters
   // + paginates against the FULL catalog, so `items.length` is already
@@ -119,73 +111,6 @@ export default function BrowseView({
     try { localStorage.setItem(DENSITY_KEY, d) } catch { /* ignore quota/denied */ }
   }
 
-  // ── Hero (featured) ───────────────────────────────────────────────
-  // Feature top-rated titles that have a backdrop (same rule Home uses:
-  // a missing backdrop makes a flat hero). Cap the pool so rotation
-  // doesn't crawl the whole catalog. Only meaningful when sorted by
-  // rating; under A-Z / Newest the "featured" pool is just the visible
-  // order's backdrop-having items, which is still a reasonable showcase.
-  const heroPool = useMemo(
-    () => items.filter(m => m.backdrop && m.backdrop.length > 0).slice(0, 5),
-    [items],
-  )
-  // The featured title is held by id, not position: a live catalog refresh
-  // (a scan adding titles) can insert titles ahead of it, and a position
-  // swapped the hero mid-read, past the hover pause and reduced motion. It
-  // stays while it is anywhere in the list with a backdrop, not only in the
-  // pool: under the Recently Added sort an import pushes it out of the first
-  // five within a refresh or two. One that leaves the list falls back to the
-  // pool's first.
-  const [heroId, setHeroId] = useState<number | null>(null)
-  const [heroPaused, setHeroPaused] = useState(false)
-  const heroAt = heroPool.findIndex(m => m.id === heroId)
-  const heldOutsidePool = heroAt < 0 && heroId !== null
-    ? items.find(m => m.id === heroId && !!m.backdrop)
-    : undefined
-  const heroMedia = heroAt >= 0 ? heroPool[heroAt] : heldOutsidePool ?? heroPool[0]
-  // Hold whatever is showing from the start, not from the first rotation:
-  // a reduced-motion reader never rotates, and anyone reads for 9 s before
-  // it, so an insertion in that time swapped the hero too.
-  useEffect(() => {
-    if (heroAt < 0 && !heldOutsidePool && heroPool.length > 0) setHeroId(heroPool[0].id)
-  }, [heroAt, heldOutsidePool, heroPool])
-  // Read by the rotation's interval, which is not re-created when the pool's
-  // contents change at the same length.
-  const heroPoolRef = useRef(heroPool)
-  useEffect(() => { heroPoolRef.current = heroPool }, [heroPool])
-  // Auto-advance every 9s (matches Home), paused on hover. Only when
-  // there's more than one to rotate through.
-  useEffect(() => {
-    if (heroPool.length < 2 || heroPaused) return
-    // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion: a
-    // 9s crossfade that swaps the hero background + text mid-read is
-    // problematic for low-vision users. Skip auto-rotation; the manual
-    // hover-pause / "Not tonight" affordances still work.
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
-    const id = window.setInterval(() => {
-      setHeroId(cur => {
-        const pool = heroPoolRef.current
-        if (pool.length === 0) return cur
-        const at = pool.findIndex(m => m.id === cur)
-        // From a title held outside the pool, rotation resumes at its start.
-        return pool[at < 0 ? 0 : (at + 1) % pool.length].id
-      })
-    }, 9000)
-    return () => window.clearInterval(id)
-  }, [heroPool.length, heroPaused])
-  // Resume bundle for the hero's CTA — if the featured title has a
-  // resumable CW record, the hero shows "Resume …" instead of "Play".
-  const heroResume = heroMedia && continueItems
-    ? (() => {
-        const match = continueItems.find(
-          c => c.media_item_id === heroMedia.id && isResumable(c),
-        )
-        return match && onPlayContinue
-          ? { item: match, onPlay: onPlayContinue }
-          : undefined
-      })()
-    : undefined
-
   // ── Continue Watching rail (grid view only) ───────────────────────
   // Filter App-level CW records to THIS view's media type, dedupe by
   // media_item_id (a show with progress on several episodes surfaces
@@ -223,65 +148,9 @@ export default function BrowseView({
 
   return (
     <div className="animate-fade-in relative">
-      {/* ── Hero (featured) ──────────────────────────────────────────
-          Reuses the same HeroSection component the Home view uses, so
-          the look + parallax + rotation behave identically. We only
-          mount it once there's at least one backdrop-bearing title;
-          otherwise the page goes straight to the toolbar (no empty
-          hero). The hero's primary CTA plays (or resumes) via the
-          threaded handlers; "More Info" opens detail. */}
-      {heroMedia && (
-        <HeroSection
-          hero={heroMedia}
-          onPlay={onPlay}
-          onInfo={onSelect}
-          onPauseChange={setHeroPaused}
-          resume={heroResume}
-          // 2026-07-25 (Aurora Stage Phase 4) — the browse pages get the
-          // mockup's 250px title band instead of Home's full stage, and it
-          // carries the page's own eyebrow / title / count. The separate
-          // header block below therefore only renders when there is NO
-          // hero (empty library, or no title with a backdrop yet).
-          compact
-          eyebrow={pillLabel}
-          pageTitle={title}
-          // h1: with a hero present BrowseView's own <h1> is gated off, so
-          // without this the browse pages had NO h1 at all and an
-          // h2-without-h1 outline. The app never sets document.title
-          // either, so this heading is the page's only identity signal.
-          titleAs="h1"
-          // A FRAGMENT, not a template literal. `countLabel` above is JSX
-          // (it bolds the number), so `${...}`-ing it rendered the literal
-          // text "[object Object]" under the title on both browse pages.
-          // TypeScript accepted it because template literals stringify any
-          // non-symbol, and nothing in the suite renders this component.
-          countLabel={<>{subtitle} · {countLabel}</>}
-        />
-      )}
-
-      {/* Edgeless header glow — only when there's no hero (the hero
-          already paints its own gradient floor; doubling them muddies
-          the top of the page). */}
-      {!heroMedia && (
-        <div
-          aria-hidden="true"
-          // No negative insets. They existed to cancel a parent gutter —
-          // first the global p-8, then --page-gutter — but BrowseView is
-          // full-bleed as of Phase 4, so the cancellation target is now 0
-          // and the offsets overshot 48px past each edge and 48px up behind
-          // the sticky nav. Third time this box has been re-tuned; anchoring
-          // it to the edges directly ends that.
-          className="absolute inset-x-0 top-0 h-[360px] pointer-events-none overflow-hidden"
-        >
-          <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-white/5 blur-3xl" />
-          <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-white/5 blur-3xl" />
-        </div>
-      )}
-
-      {/* Page title + count — FALLBACK ONLY. With a hero the compact
-          variant above renders these over the backdrop; this is the
-          no-backdrop path (fresh library, or a filter with no art yet). */}
-      {!heroMedia && (
+      {/* The page's header: what this is and how many there are. A browse
+          page has no featured band: the hero is Tonight's alone, and a grid's
+          first screen is its grid. */}
       <div className="stage-gutter relative pt-8 mb-5">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-line mb-3">
           <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-ink" />
@@ -296,7 +165,6 @@ export default function BrowseView({
           {countLabel}
         </p>
       </div>
-      )}
 
       {/* ── Toolbar: genre chips · density toggle · sort ─────────────
           STICKY as of Aurora Stage Phase 4. This was deliberately left

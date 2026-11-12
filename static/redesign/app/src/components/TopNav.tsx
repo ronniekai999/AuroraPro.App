@@ -223,12 +223,15 @@ function IdentityMenu({
                         close(true)
                         if (!sel) onSelectProfile(p.id)
                       }}
-                      className={`flex h-[52px] w-full items-center gap-3 rounded-art px-3 text-left transition-colors hover:bg-white/[0.08] ${sel ? 'bg-white/[0.08]' : ''}`}
+                      // As tall as its lines: the summary wraps rather than
+                      // being cut (its longest form does not fit one line of
+                      // this panel), so the row grows a line for it.
+                      className={`flex min-h-[52px] w-full items-center gap-3 rounded-art px-3 py-2 text-left transition-colors hover:bg-white/[0.08] ${sel ? 'bg-white/[0.08]' : ''}`}
                     >
                       <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} colorKey={p.id} size={32} />
                       <span className="min-w-0 flex-1 leading-tight">
                         <span className="block truncate text-[15px] font-semibold text-ink">{p.name}</span>
-                        <span className="block truncate text-xs text-ink-2">{profileSummary(p)}</span>
+                        <span className="block text-xs text-ink-2" data-profile-summary="">{profileSummary(p)}</span>
                       </span>
                       {sel && <Icon name="check" size={16} className="flex-none text-ink" />}
                       {sel && <span className="sr-only">, watching now</span>}
@@ -331,6 +334,8 @@ export interface TopNavProps {
   searchQuery: string
   onSearchQueryChange: (v: string) => void
   onSearchFocus: () => void
+  /** Enter in the field: search by what the words describe. */
+  onSearchSubmit?: () => void
   /** Clear the query and leave search. */
   onSearchClose: () => void
   searchInputRef: React.RefObject<HTMLInputElement | null>
@@ -356,7 +361,7 @@ export interface TopNavProps {
 
 export function TopNav({
   user, currentView, navScope, adminUI, onNavigate, onPrefetch, pageTitle,
-  searchQuery, onSearchQueryChange, onSearchFocus, onSearchClose, searchInputRef,
+  searchQuery, onSearchQueryChange, onSearchFocus, onSearchSubmit, onSearchClose, searchInputRef,
   presence, onPresenceClick, notifCount, onOpenNotificationsPanel, onOpenServerPanel,
   profiles, activeProfileId, onSelectProfile, onOpenProfilesGate, onManageProfiles,
   onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onSignOut,
@@ -463,6 +468,15 @@ export function TopNav({
           value={searchQuery}
           onChange={(e) => onSearchQueryChange(e.target.value)}
           onFocus={onSearchFocus}
+          // Typing matches titles as you go. Enter asks for more: a search
+          // by what the words describe, which takes the server a model call,
+          // so it is run only when asked for.
+          enterKeyHint="search"
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || e.nativeEvent.isComposing || !searchQuery.trim()) return
+            e.preventDefault()
+            onSearchSubmit?.()
+          }}
         />
         {searchQuery ? (
           <button type="button" className="stage-navsearch-clear" onClick={onSearchClose} aria-label="Clear search">

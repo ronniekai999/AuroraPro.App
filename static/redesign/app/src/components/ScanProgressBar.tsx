@@ -131,7 +131,8 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
                 measured height as --chrome-h. The counts here update every
                 4s, so if the text can wrap as digits grow the stack height
                 changes and every consumer of --chrome-h (the sticky browse
-                toolbar, both drawers, DetailRail) steps with it. */}
+                and admin toolbars, both drawers, the identity menu's height,
+                the page's scroll padding) steps with it. */}
             <div className="flex items-center justify-between gap-3 mb-1 h-4">
               <span className="text-white/80 text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">
                 Scanning <strong className="text-ink">{lib.name}</strong>

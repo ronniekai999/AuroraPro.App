@@ -264,9 +264,10 @@ if (!negZ.length) console.log('  no negative z-index rules.')
 for (const sel of negZ) {
   // The owner must be annotated with where its stacking context comes from. This
   // is a documentation-forcing check on purpose: whether a given ancestor is a
-  // stacking context is not decidable from the stylesheet alone (the vibe bar's
-  // comes from a `z-20` utility in App.tsx), so the check requires the author to
-  // have said, and fails when nobody has.
+  // stacking context is not decidable from the stylesheet alone (the halo of
+  // the vibe bar that used to sit on Home got its from a `z-20` utility in
+  // App.tsx), so the check requires the author to have said, and fails when
+  // nobody has.
   // The comment block IMMEDIATELY above the rule, not "somewhere in the previous
   // 1400 characters". The wide window auto-approved any negative-z rule authored
   // near an existing annotation — a review inserted `.brand-new-halo { z-index: -3 }`

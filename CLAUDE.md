@@ -213,7 +213,8 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - The SPA's My Library snapshot is the profile's own (per account and
     profile), but can hold titles saved before its ceiling was set or
     lowered; they show until the server's filtered list arrives, or while
-    offline.
+    offline. (Tonight's "Your list" rail for a restricted profile waits for
+    the server's list and shows only the titles on it.)
   - The calendar, live-party, invite and collection listings fail open on
     a resolve error, like browse; a collection's name, description and AI
     prompt are shown as written; and a party's title still reaches a
@@ -409,6 +410,35 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   default on the discovery routes, so a kid's Home showed the parent's hero
   pick on every load; those routes now answer for the acting profile, and the
   wait keeps the app from showing content for a profile it has not confirmed.
+  Tonight's hero leads with the title the profile left unfinished, from
+  Continue Watching, with the recommender's picks in a filmstrip beside it
+  (`lib/tonightSlate.ts`, derived each render, never stored; the strip
+  lists the picks only, never the title to resume). It shows nothing until
+  Continue Watching has answered or failed for the user and profile, or four
+  seconds have passed (`heroLeadSettled`, `HERO_LEAD_WAIT_MS`; when there is
+  no profile to ask for, once the startup load settles): shown earlier it
+  put up a pick and then swapped it for that title. An answer that arrives
+  after the four seconds still takes the hero over, unless the viewer has
+  done something in the hero meanwhile (pointer or focus in it, a pick
+  chosen, the rotation paused); the title is then the first card of
+  Continue Watching. A switch puts the hero back on the lead (`heroOnLead`),
+  so the new profile's Tonight opens on its own title, not on the place in
+  the slate the previous profile had moved to. Only a pick is reported to
+  the recommender as seen, at the place the server sent it at: never the
+  title to resume, also when it is one of the picks (the server credits
+  what is watched afterwards to the exposure), and never the catalog's
+  stand-in. A session acting as a restricted profile gets the calmer
+  Tonight: one title, two actions, no filmstrip, no rotation, and a last
+  line that states the limit. Its rails are what it has started (when that
+  is more than the hero's title), its own list and the two catalog shelves
+  ("Movies", "Shows"), on larger cards; the recommender's rails are not
+  shown to it and not asked for. "Your list" appears only once the server
+  has answered for that profile's list in this session
+  (`libraryServerFor`, cleared whenever the list is loaded from this
+  browser's snapshot again, which is every change of user or profile, and
+  on sign-out), and holds the titles the server listed; a listed title's
+  card can still be drawn from this browser's copy of it. Pinned by
+  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`.
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
@@ -419,21 +449,36 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   clears the previous profile's hero. A switch also loads Home cold (its rails
   come down at once, so a slow or failed load shows the skeleton or the error,
   not the old rails), drops the Movies and Shows grids (aborting a Load More
-  or a first page in flight), Continue Watching and the conversational rail,
+  or a first page in flight) and Continue Watching,
   swaps My Library to the new profile's snapshot, sends an open title back
   through its `/title/:id` hydration, which leaves for Home if the new profile
   may not see it, and remounts search, collections, the calendar and member
   pages (`useOnProfileChange`). Each of these used to keep the previous
-  profile's titles: the grids for the session, the conversational rail until
-  the next search, Home's rails and Continue Watching until a refetch
-  succeeded. Those resets run in passive effects, after the commit that
+  profile's titles: the grids for the session, Home's rails and Continue
+  Watching until a refetch succeeded. A search by description (Enter in a
+  search field, or the search page's button; it was a "describe a vibe" bar
+  on Home with a rail of its own) is the search page's: typing asks the
+  server for a title search only (`mode=literal`), and the model-backed
+  search (`mode=semantic`) runs once per ask. The ask carries the user and
+  profile that made it and is handed to the page only while the app still
+  acts as them, so after a switch the remounted page searches the same words
+  by title and no model call is made on the new profile's behalf. The answer
+  to the last ask is kept (`lib/describedSearch.ts`, one entry, under the
+  ask's own key) so that Back from a result shows it again without another
+  model call; it is forgotten on sign-out and on a profile switch. The
+  server answers a description search with title matches both when it has
+  no model and when its description search finds nothing, and says
+  "literal" either way, so the page says exactly that and does not call
+  them results by description. Those resets run in passive effects, after the commit that
   already names the new profile, and React could paint that commit: the
   previous profile's hero showed under the new name for a frame. Until they
   run (`profileSwitchPending`), Home, the grids, My Library and an open title
   render their cold state instead. A pick from the picker an unreadable
   binding opens is a switch for all of this, the hero included: the catalog
   behind the picker was fetched under the binding the server does have.
-  Home's own library count (its greeting's "titles in your library") waits
+  Home's own library count (the "titles in your library" in the line under
+  Tonight's rails; it opened the page, in a greeting, until the greeting was
+  removed) waits
   for the startup binding too (`catalogProfileSettled`) and is asked again
   for each profile the session acts as: one request once the startup load
   settles and one per switch (Home's live catalog refresh also asks for it
@@ -452,7 +497,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   before the binding was read, so a fresh sign-in that bound the default and then
   re-selected the profile this browser last showed counted the default's
   catalog, and a switch kept the previous profile's count. While it is in
-  flight, and when it fails, the greeting falls back to the grid totals,
+  flight, and when it fails, that line falls back to the grid totals,
   which a switch resets (so a switch can briefly show the new profile's
   grid total first). A failed activation (a switch, a PIN unlock, the startup
   re-selection) re-reads the binding, because a lost answer can follow a bind
@@ -789,10 +834,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and through the picker an unreadable binding opens, and fails if any
     commit puts the new name beside the previous profile's titles on Home,
     the grids, My Library or an open title, or the Parent's grid total in
-    Home's greeting. That pins `profileSwitchPending` and the resets whose
+    the line under Tonight's rails. That pins `profileSwitchPending` and the resets whose
     loss would show something: the hero, Home's rails, Continue Watching,
-    the conversational rail (its results, and its run counter, through a
-    search answering after the switch), the grids, the Movies and Shows
+    a search by description (its results, a request answering after the
+    switch, and that the new profile's page asks by title only), the grids, the Movies and Shows
     totals, their Load More aborts and loading flags, their effects'
     profile dependency, an open title and the My Library swap. It also
     fails if Home's own library count shows another profile's catalog on
@@ -903,6 +948,40 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   self-validate the current schedule and deduplicate reminders.
 - Party calendar chips group by viewer-local date; episode air dates remain
   UTC-keyed.
+- In the web app the caller's invitation list (`hooks/usePartyInvites.ts`:
+  the bell's rows, Tonight's live strip, the Together page) is stored with
+  the user and acting profile it was asked for and given out to no other,
+  and an answer for an owner that is no longer current is dropped. A profile
+  switch is bound on the server before the app shows it, and for that moment
+  the server answers for the new profile under the old one's name, so the
+  list is also held to the live catalog refresh's rule (see Live catalog
+  updates): no request starts while a switch or its PIN prompt is out, an
+  answer is dropped when one is out or has started since it was asked for,
+  and what was held back or dropped is asked for again when a switch ends,
+  the one that ends on the profile already shown included (App counts the
+  end of every switch made through its UI, `switchProfileWatched`). The
+  "is out" half of the drop is covered by the "started since" half and by
+  the start guard, as in the catalog refresh, so deleting it fails no test;
+  it is kept in case the flag is ever set without a generation bump. Pinned
+  by `usePartyInvites.test.tsx` and `App.invites.test.tsx` (a delayed
+  activation from a restricted profile into an unrestricted one, every
+  commit sampled). Not covered: a switch made only in another tab, which
+  this tab's flag and counter do not see, until its `storage` or visibility
+  re-read moves this tab; and a session moved by the startup re-selection,
+  which is not a switch.
+- A show's party needs an episode (`lib/partyEpisode.ts`): one created with
+  none cannot be joined once it is playing. "Where a show starts" has one
+  definition for a card's Play and "Watch together", the title page and the
+  prewarm: the resume episode, else the earliest episode with a file, the
+  regular seasons in order and the Specials (season 0) last. The title page
+  opens on the season that walk ends in when nothing is in progress, so what
+  it lists, what its Play starts and what its party opens on agree, also
+  when the first regular season's files are gone; and when the viewer has
+  moved the page to a season with nothing to play, its party is sent
+  through the card's lookup rather than created with no episode. Play says
+  so when it starts later than the first episode (`startsLaterNotice`).
+  Known gap: a show with nothing to play anywhere reads every season before
+  Play fails, and its party is still created with no episode.
 
 ### Direct-play casting
 
@@ -1577,8 +1656,10 @@ New titles reach open web apps without a reload. Code:
   and catches up when next shown:
   - Home refetches only its three catalog rails and its library count,
     recomposed under the personalized rails; never Continue Watching or the
-    personalized rails, and the hero only when none is showing (a first
-    import into an empty library). Running the full Home load per update
+    personalized rails, and the catalog's stand-in hero only when none is
+    recorded (a first import into an empty library; the stand-in is what the
+    hero shows when there is neither a title to resume nor a pick, and is
+    never one of the picks). Running the full Home load per update
     reset the hero carousel every ten seconds. Every catalog-rails fetch (the
     full load's and the live refresh's) takes a number when it starts
     (`homeRailsSeqRef`), and its rails land only if no later-started fetch's
@@ -1644,10 +1725,10 @@ New titles reach open web apps without a reload. Code:
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
     grid deeper than 5 pages is left stale rather than refetched or dropped.
-    Its featured hero is held by id from its first render while it is
-    anywhere in the list with a backdrop, not only in the rotation pool (the
-    first five), so an insertion ahead of it does not swap it, under the
-    Recently Added sort included (`BrowseView.hero.test.tsx`).
+    A grid has no featured band (the hero is Tonight's alone), so a refresh
+    has no title at the top of the page to swap: the page's heading and
+    count are its own, and nothing on it rotates
+    (`BrowseView.header.test.tsx`).
   - The admin dashboard refetches its counts while its tab shows.
   - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
     and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or

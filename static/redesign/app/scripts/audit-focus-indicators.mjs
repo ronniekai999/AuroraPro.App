@@ -220,8 +220,9 @@ if (!problems) console.log('  no unguarded suppressions.')
  *  From then on Check 3 printed "no containers reset the global treatment —
  *  nothing to check" while Check 4, three lines further down the same output,
  *  listed two of them: the check existed, ran, and verified nothing. Deleting
- *  `.convo-search:focus-within` — the vibe bar's only focus indicator — left
- *  the gate green. Same family as Check 4's own selector scan below, so the two
+ *  `.convo-search:focus-within` — the only focus indicator of the vibe bar
+ *  that sat on Home at the time (since folded into search) — left the gate
+ *  green. Same family as Check 4's own selector scan below, so the two
  *  checks can no longer disagree about which containers exist. */
 function resettersIn(text) {
   return [...new Set(
@@ -301,8 +302,9 @@ if (!m) {
 // global treatment, stated in so many words that they "must supply their own
 // :focus-within indicator", and then never looked. The block only console.log'd —
 // it never touched `problems`. So deleting `.convo-search:focus-within` outright,
-// which is the vibe search bar's ONLY focus indicator once the global rule is
-// nulled at (0,3,1), left the gate at exit 0 with the words "must supply their own
+// which was the vibe search bar's ONLY focus indicator once the global rule was
+// nulled at (0,3,1) (that bar has since been folded into search; the top bar's
+// field and the palette's are the containers today), left the gate at exit 0 with the words "must supply their own
 // :focus-within indicator" still printed in its own passing output.
 //
 // That is precisely the defect class this file's header says it exists to catch,

@@ -6,7 +6,7 @@
 // (deep-debug H3). Shares isResumable (format), MediaCardCinema, Icon, and
 // the app-side Media type with the other views — no reach-back into App.
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
@@ -71,8 +71,11 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
   // click handler resolves the freshest record at click-time, not
   // render-time. Without this, a mid-hover refetch (e.g. cross-tab
   // playback updated position_ms) would dispatch a stale record.
+  // A LAYOUT effect: a press can land between the commit that draws a
+  // card's "Resume" and a passive effect, and found no record there (the
+  // press did nothing).
   const continueItemsRef = useRef(continueItems)
-  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
+  useLayoutEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
 
   return (
     <div className="animate-fade-in">

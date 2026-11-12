@@ -4,7 +4,7 @@
 // a card's "Watch together" both go through here.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { firstEpisodeToPlay, partyEpisodeId, regularSeasonsFirst, resolvePartyEpisodeId } from './partyEpisode'
+import { firstEpisodeToPlay, partyEpisodeId, regularSeasonsFirst, resolvePartyEpisodeId, startsLaterNotice } from './partyEpisode'
 
 const show = { id: 5, type: 'show' }
 const movie = { id: 6, type: 'movie' }
@@ -105,6 +105,17 @@ describe('resolvePartyEpisodeId', () => {
     expect(await resolvePartyEpisodeId(show, undefined)).toBe(first?.episode.id)
   })
 
+  // What was passed over on the way, in the order it was met: season 1's
+  // only episode, then season 2's first, neither with a file.
+  it('says which earlier episodes it passed over, and none when the show starts at its beginning', async () => {
+    stub()
+    expect((await firstEpisodeToPlay(5))?.skipped).toEqual([
+      { seasonNumber: 1, episodeNumber: 1 }, { seasonNumber: 2, episodeNumber: 1 },
+    ])
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify([{ id: 301, episode_number: 1, files: file }, { id: 302, episode_number: 2, files: file }]), { status: 200, headers: { 'content-type': 'application/json' } }))
+    expect((await firstEpisodeToPlay(5, undefined, [{ season_number: 1 }]))?.skipped).toEqual([])
+  })
+
   it('takes the season list it is given instead of asking for it, and is null when nothing can be played', async () => {
     const asked = stub()
     expect((await firstEpisodeToPlay(5, undefined, [{ season_number: 2 }]))?.episode.id).toBe(202)
@@ -123,5 +134,28 @@ describe('resolvePartyEpisodeId', () => {
   it('rejects when the episodes cannot be read, so the caller does not start a party nobody can join', async () => {
     stub({ fail: true })
     await expect(resolvePartyEpisodeId(show, undefined)).rejects.toBeTruthy()
+  })
+})
+
+describe('startsLaterNotice', () => {
+  const start = (seasonNumber: number, episode_number: number, skipped: { seasonNumber: number; episodeNumber: number }[]) =>
+    ({ seasonNumber, episode: { episode_number }, skipped })
+
+  it('says nothing when the show starts at its first episode', () => {
+    expect(startsLaterNotice('Harbor Lights', start(1, 1, []))).toBe('')
+  })
+  it('names the one episode that is missing, and where it starts instead', () => {
+    expect(startsLaterNotice('Harbor Lights', start(1, 2, [{ seasonNumber: 1, episodeNumber: 1 }])))
+      .toBe('Episode 1 of "Harbor Lights" is not available. Starting at episode 2.')
+  })
+  it('says where it starts when more than one is missing, or the start is in another season', () => {
+    expect(startsLaterNotice('Harbor Lights', start(1, 3, [{ seasonNumber: 1, episodeNumber: 1 }, { seasonNumber: 1, episodeNumber: 2 }])))
+      .toBe('Earlier episodes of "Harbor Lights" are not available. Starting at season 1, episode 3.')
+    expect(startsLaterNotice('Harbor Lights', start(2, 1, [{ seasonNumber: 1, episodeNumber: 1 }])))
+      .toBe('Earlier episodes of "Harbor Lights" are not available. Starting at season 2, episode 1.')
+  })
+  it('calls season 0 the Specials', () => {
+    expect(startsLaterNotice('Pruned First', start(0, 1, [{ seasonNumber: 1, episodeNumber: 1 }])))
+      .toBe('Earlier episodes of "Pruned First" are not available. Starting at the Specials, episode 1.')
   })
 })

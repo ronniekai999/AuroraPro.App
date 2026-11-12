@@ -66,9 +66,10 @@ describe('ProfilesGate', () => {
 
   it('labels a locked profile', () => {
     renderGate(() => true)
-    expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent('Locked')
+    // In words, wherever the fact falls in the line (the limit leads it).
+    expect(screen.getByRole('radio', { name: /Profile 2/ })).toHaveTextContent(/locked with a PIN/i)
     expect(screen.getByRole('radio', { name: /Profile 2/ }).querySelector('[data-profile-lock]')).not.toBeNull()
-    expect(screen.getByRole('radio', { name: /Profile 3/ })).not.toHaveTextContent('Locked')
+    expect(screen.getByRole('radio', { name: /Profile 3/ })).not.toHaveTextContent(/locked/i)
     expect(screen.getByRole('radio', { name: /Profile 3/ }).querySelector('[data-profile-lock]')).toBeNull()
   })
 
@@ -118,12 +119,13 @@ describe('ProfilesGate', () => {
   it('says "no limit" for every profile that has none, a default or locked one included', () => {
     const kid: Profile = { ...profile(3), name: 'Kid', max_age_rating: 'PG', has_pin: true }
     render(<ProfilesGate profiles={[profiles[0], profiles[1], kid]} activeProfileId={1} onSelect={() => true} ready forced />)
-    // The whole line, so a fact stated twice fails too.
+    // The whole line, so a fact stated twice fails too. The limit leads it
+    // (lib/navScope.profileSummary).
     const line = (name: RegExp) => screen.getByRole('radio', { name }).querySelector('[data-profile-summary]')?.textContent
-    expect(line(/Profile 1/)).toBe('Default · no limit')
-    expect(line(/Profile 2/)).toBe('Locked with a PIN · no limit')
-    expect(line(/Kid/)).toBe('Locked with a PIN · up to PG')
-    expect(screen.getByRole('radio', { name: /Kid/ })).toHaveTextContent('Locked with a PIN · up to PG')
+    expect(line(/Profile 1/)).toBe('No limit · default')
+    expect(line(/Profile 2/)).toBe('No limit · locked with a PIN')
+    expect(line(/Kid/)).toBe('Up to PG · locked with a PIN')
+    expect(screen.getByRole('radio', { name: /Kid/ })).toHaveTextContent('Up to PG · locked with a PIN')
     expect(screen.getByRole('radio', { name: /Kid/ })).not.toHaveTextContent(/no limit/i)
   })
 

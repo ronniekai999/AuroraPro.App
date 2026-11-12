@@ -139,6 +139,40 @@ mustHave(CARD, 'className="card-open"')
 mustHave(CARD, 'className="co-reason"')
 mustHave(CARD, "'has-reason '")
 
+// Small buttons outside a card: drawn at 36px, with a 44px target on a touch
+// screen (.stage-hit44). Tonight's live strip (Join; I'm in, Maybe, Open
+// lobby, side by side) and the search page's "Search by description" and
+// "Try again". Built from the components' own class lists, in the rows they
+// sit in.
+const LIVE = 'src/components/TonightLive.tsx'
+const SEARCH = 'src/components/SearchView.tsx'
+const LIVE_JOIN = classesOf(LIVE, 'tonight-live-act stage-hit44')
+const LIVE_RSVP = classesOf(LIVE, 'tonight-live-rsvp')
+const LIVE_OPEN = classesOf(LIVE, 'tonight-live-open')
+mustHave(LIVE, 'className="tonight-live"')
+mustHave(LIVE, 'className="tonight-live-row"')
+mustHave(LIVE, 'className="tonight-live-acts"')
+mustHave(LIVE, 'className="tonight-live-text"')
+const DESCRIBE_LINE = classesOf(SEARCH, 'search-describe-line')
+const FAILED_LINE = classesOf(SEARCH, 'search-failed-line')
+const DESCRIBE_BTN = classesOf(SEARCH, 'search-describe-btn')
+const RETRY_BTN = classesOf(SEARCH, 'search-retry-btn')
+const smallHtml = `
+  <section class="tonight-live" data-small="live">
+    <div class="tonight-live-row"><div class="tonight-live-text"><span class="tonight-live-title">3 watching Night Train to Meridian</span></div>
+      <button type="button" class="${LIVE_JOIN}" data-small-btn="Join">Join</button></div>
+    <div class="tonight-live-row"><div class="tonight-live-text"><span class="tonight-live-title">Jonah invited you to watch Kestrel</span></div>
+      <div class="tonight-live-acts">
+        <button type="button" class="${LIVE_RSVP}" data-small-btn="I'm in">I'm in</button>
+        <button type="button" class="${LIVE_RSVP}" data-small-btn="Maybe">Maybe</button>
+        <button type="button" class="${LIVE_OPEN}" data-small-btn="Open lobby">Open lobby</button>
+      </div></div>
+  </section>
+  <p class="${DESCRIBE_LINE}" data-small="describe">These match the title.
+    <button type="button" class="${DESCRIBE_BTN}" data-small-btn="Search by description">Search by description</button></p>
+  <p class="${FAILED_LINE}" data-small="failed">Nothing is wrong with what you typed. The server could not run it.
+    <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>`
+
 const SUBTITLE = 'Hand-picked by Aurora for your taste'
 // [title, AI attribution, subtitle, See All]
 const RAILS = [
@@ -221,6 +255,7 @@ const PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 *,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
 <div class="stage-gutter" id="rails">${railHtml}</div>
 <div class="stage-gutter" id="cards" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start">${cardHtml}</div>
+<div class="stage-gutter" id="small" style="padding-top:40px;padding-bottom:40px">${smallHtml}</div>
 </body></html>`
 
 const browser = await chromium.launch({ executablePath: EXE })
@@ -376,7 +411,12 @@ for (const touch of [true, false]) {
         }
         cards.push(out)
       }
-      return { rails, cards, fontErrors, fontsLoaded, bodyFamily, titleFamily, hover, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
+      // The small buttons: each one's drawn box and its target.
+      const small = [...document.querySelectorAll('[data-small-btn]')].map(b => {
+        b.scrollIntoView({ block: 'center' })
+        return { name: b.dataset.smallBtn, ...boxOf(b), hit: hitArea(b) }
+      })
+      return { rails, cards, small, fontErrors, fontsLoaded, bodyFamily, titleFamily, hover, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
     })
 
     const before = problems
@@ -473,6 +513,14 @@ for (const touch of [true, false]) {
       if (c.hidden && !c.rowClips) fail(`${at}: ${c.hidden} wrapped token(s) are PAINTED below the row — it does not clip`)
       if (c.truncated && c.shown > 1) fail(`${at}: TOKENS SHRUNK INSTEAD OF DROPPED — ${c.truncated} of ${c.shown} truncated`)
       if (c.savedInRow === false) fail(`${at}: the saved mark is squeezed or pushed out of the facts row`)
+    }
+    // 4. Small buttons outside a card. On a touch screen each is a 44px
+    // target by hit-testing, whatever it is drawn at; a neighbour's area
+    // laid over it shortens what is measured, so an overlap fails here too.
+    if (r.small.length !== 6) fail(`the small-button probe found ${r.small.length} buttons, expected 6 — this check is out of date`)
+    for (const b of r.small) {
+      if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
+      if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)
     }
     const shownStr = r.cards.filter(c => c.w.endsWith('full')).map(c => `${parseInt(c.w)}:${c.shown}/${c.of}`).join(' ')
     const actsStr = r.cards.filter(c => c.w.endsWith('full')).map(c => `${parseInt(c.w)}:${c.acts.length}`).join(' ')

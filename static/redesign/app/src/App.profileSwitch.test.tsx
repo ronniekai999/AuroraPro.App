@@ -27,23 +27,34 @@
 //
 // The same requirement holds for every commit after it, so a reset that
 // cleared nothing fails here too: the switch through the picker an unreadable
-// binding opens, a conversational search on screen, the grids' totals in
-// Home's greeting, and requests the previous profile started that answer
-// after the switch (a Load More, a first grid page, a vibe search). What no
-// commit shows is not pinned: the grids' next-page resets are replaced by the
-// next first page before a Load More can run.
+// binding opens, a search by description on screen, the grids' totals in
+// Tonight's closing line, and requests the previous profile started that
+// answer after the switch (a Load More, a first grid page, a search by
+// description).
+// What no commit shows is not pinned: the grids' next-page resets are
+// replaced by the next first page before a Load More can run.
 //
-// Home's own library count, in its greeting, is held to the profile the app
-// acts as on every commit, from the start: after the startup load re-selects
-// the profile this browser last showed (not a switch), after a switch, and
-// when the previous profile's answer arrives after one. It is asked for once
-// per profile, not again when the user object is replaced.
+// Home's own library count, in the closing line under its rails ("N titles
+// worth your time out of the T titles in your library"; it used to open the
+// page, in a greeting), is held to the profile the app acts as on every
+// commit, from the start: after the startup load re-selects the profile this
+// browser last showed (not a switch), after a switch, and when the previous
+// profile's answer arrives after one. It is asked for once per profile, not
+// again when the user object is replaced.
+//
+// Tonight's hero leads with the title the profile left unfinished
+// ("…Resume"), with Aurora's picks ("…Hero", "…Second") in the filmstrip
+// beside it. The Kid has a content limit, so its Tonight is the calmer one:
+// that title, two actions, no filmstrip, and a closing line that states the
+// limit instead of counting picks. `kidUnrestricted` gives the Kid the same
+// page as the Parent, so a pick or a count kept from the Parent would show.
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App'
+import { pageText } from '@/test/pageText'
 
 const NOW = '2026-10-01T00:00:00Z'
 const item = (id: number, title: string) => ({
@@ -77,12 +88,12 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  when the session's row is briefly unreachable. The server still has a
  *  binding (the Parent) and answers for it.
  *
- *  `homeCountFails`: Home's own library count fails, so its greeting falls
+ *  `homeCountFails`: Home's own library count fails, so its closing line falls
  *  back to the browse grids' totals. The Parent's catalog totals 37 titles
  *  and the Kid's 2, so a total tells them apart.
  *
  *  `hold(key)` keeps one answer back until the returned release is called;
- *  a browse page's key is `<type>-p<page>-<bound profile>`, a vibe search's
+ *  a browse page's key is `<type>-p<page>-<bound profile>`, a search's
  *  `search-<bound profile>`, Home's own library count's
  *  `count-<bound profile>`, the signed-in user's (`/api/auth/me`) `me`. An
  *  aborted request rejects as fetch's does, once its answer would have
@@ -90,7 +101,11 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *
  *  `counts` lists the profile the session was bound to when each request for
  *  Home's own library count was sent; `activations`, each profile bound;
- *  `profileLists`, how many times the profile list was asked for. */
+ *  `profileLists`, how many times the profile list was asked for;
+ *  `heroPools`, the profile each answered request for Aurora's picks was
+ *  answered for; `searches`, the profile each search was asked under and
+ *  how it was asked for (`literal`: by title; `semantic`: by description,
+ *  which costs the server a model call). */
 function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false } = {}) {
   // `kidUnrestricted`: the Kid profile has no content limit. A restricted
   // profile is not shown My Library at all, so a switch on that page is held
@@ -100,6 +115,10 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   const holds = new Map<string, Promise<void>>()
   const counts: number[] = []
   const activations: number[] = []
+  const heroPools: number[] = []
+  // Profiles whose own list ("My Library") the server fails to answer for.
+  const listFails = new Set<number>()
+  const searches: { asked: number; mode: string | null }[] = []
   let profileLists = 0
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -114,6 +133,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     // Home's own count is the one catalog list asked for with no type.
     const isCount = p === '/api/media' && !url.searchParams.has('type')
     if (isCount) counts.push(asked)
+    if (p === '/api/media/search') searches.push({ asked, mode: url.searchParams.get('mode') })
     if (p === '/api/profiles') profileLists++
     const held = holds.get(p === '/api/auth/me' ? 'me'
       : p === '/api/media/search' ? `search-${asked}`
@@ -140,9 +160,13 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
       return new Response(null, { status: 204 })
     }
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
+      if (listFails.has(asked)) return json({ error: 'unavailable' }, 503)
       return json([{ media_item_id: sees.saved.id, title: sees.saved.title, type: 'movie', year: 2020 }])
     }
-    if (p === '/api/me/hero') return json({ picks: sees.hero.map(it => ({ item: it, reason: 'Picked for you' })), slate_token: `slate-${bound}` })
+    if (p === '/api/me/hero') {
+      heroPools.push(asked)
+      return json({ picks: sees.hero.map(it => ({ item: it, reason: 'Picked for you' })), slate_token: `slate-${asked}` })
+    }
     if (p === '/api/media/recent') return json({ data: [sees.catalog] })
     if (isCount && homeCountFails) return json({ error: 'unavailable' }, 503)
     if (p === '/api/media') {
@@ -167,6 +191,17 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
         participant_count: 3, max_participants: 0, is_playing: true, started_at: NOW,
       }] : [] })
     }
+    // One invitation nobody has answered. Invitations are the ACCOUNT's, so
+    // the server lists it whichever profile is bound: what keeps it off the
+    // Kid's Tonight is that a profile with a limit is shown no live strip.
+    // (Not with kidUnrestricted, where it would be shown, rightly, under
+    // either name, and the Parent-only probe would count it.)
+    if (p === '/api/me/party-invites') {
+      return json({ invites: kidUnrestricted ? [] : [{
+        invite_id: 7, party_code: 'INVITE1', media_title: 'Parentonly Invite', host_username: 'jonah', rsvp: 'pending',
+        scheduled_start_at: '2099-01-01T20:00:00Z', started_at: null, created_at: NOW,
+      }] })
+    }
     return json([])
   })
   // The event socket, and two browser APIs App's layout uses that jsdom lacks.
@@ -176,6 +211,10 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   return {
     counts,
     activations,
+    heroPools,
+    searches,
+    /** From now on the server fails to answer for this profile's own list. */
+    failListFor(profile: number) { listFails.add(profile) },
     get profileLists() { return profileLists },
     hold(key: string) {
       let release!: () => void
@@ -191,7 +230,7 @@ interface Commit {
   label: string | null
   /** Any Parent-only title, in the page's text or in a label that names one. */
   parentTitles: boolean
-  /** The Parent's pick count in Home's greeting. */
+  /** The Parent's pick count in Tonight's closing line. */
   parentCount: boolean
   /** The hero's no-pick card (an empty library), not its loading skeleton. */
   noPickCard: boolean
@@ -199,8 +238,10 @@ interface Commit {
   railsOrSkeleton: boolean
   /** My Library's empty-state message. */
   libraryEmpty: boolean
-  /** The Parent's catalog total in Home's greeting. */
+  /** The Parent's catalog total in Tonight's closing line. */
   parentTotal: boolean
+  /** The title Tonight's hero names, when it is up. */
+  heroTitle: string | null
 }
 
 /** The name on the top bar's identity control: the profile the app says it
@@ -217,18 +258,19 @@ function pickInTopBar(name: RegExp) {
 function renderApp(path: string) {
   const commits: Commit[] = []
   const onRender = () => {
-    const text = document.body.textContent ?? ''
+    const text = pageText()
     const named = [...document.querySelectorAll('[aria-label], img[alt], [title]')]
       .map(el => `${el.getAttribute('aria-label') ?? ''} ${el.getAttribute('alt') ?? ''} ${el.getAttribute('title') ?? ''}`)
     commits.push({
       label: identityName(),
       parentTitles: `${text} ${named.join(' ')}`.includes('Parentonly'),
-      parentCount: text.includes('2 titles worth your time'),
+      parentCount: /\b2 titles worth your time/.test(text),
       // The skeleton keeps this heading too, but only for assistive tech.
       noPickCard: [...document.querySelectorAll('h2')].some(h => h.textContent === 'Welcome to Aurora' && !h.classList.contains('sr-only')),
       railsOrSkeleton: !!document.querySelector('.rail-title') || text.includes('Loading your library…'),
       libraryEmpty: text.includes('No saved titles yet'),
       parentTotal: /\b37 titles in your library/.test(text),
+      heroTitle: document.querySelector('section[data-hero-kind] h2')?.textContent ?? null,
     })
   }
   render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
@@ -237,6 +279,38 @@ function renderApp(path: string) {
 
 function switchToKid() {
   pickInTopBar(/Kid/)
+}
+
+/** Types a description into the top bar's search field and asks for the
+ *  search by description (Enter). */
+function describeInTopBar(words: string) {
+  const field = screen.getByRole('textbox', { name: 'Search titles' })
+  fireEvent.change(field, { target: { value: words } })
+  fireEvent.keyDown(field, { key: 'Enter' })
+}
+
+/** Tonight's hero is up for the Parent, all of it: the title they left
+ *  unfinished leads, and Aurora's two picks are in the filmstrip beside it. */
+async function parentHeroUp() {
+  await screen.findByRole('button', { name: 'Details of Parentonly Resume' }, { timeout: 5000 })
+  const strip = await screen.findByRole('list', { name: /picks from Aurora/ }, { timeout: 5000 })
+  expect(within(strip).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Parentonly Hero', 'Parentonly Second'])
+}
+
+/** Tonight's hero is up for the Kid, and everything it is made from has
+ *  been answered: the title the Kid left unfinished, and Aurora's picks for
+ *  the Kid. A profile with a limit is shown no filmstrip, so for it the
+ *  picks' arrival is read from the server; with no limit the one pick is in
+ *  the strip. A moment more then lets whatever that answer changed commit. */
+async function kidHeroUp() {
+  const hero = await screen.findByRole('button', { name: /^(More about|Details of) Kidonly Resume$/ }, { timeout: 5000 })
+  await waitFor(() => expect(server.heroPools).toContain(2), { timeout: 5000 })
+  if (hero.getAttribute('aria-label')!.startsWith('Details of')) {
+    await screen.findByRole('button', { name: 'Kidonly Hero' }, { timeout: 5000 })
+  } else {
+    await new Promise(done => setTimeout(done, 50))
+    expect(screen.queryByRole('list', { name: /picks from Aurora/ })).toBeNull()
+  }
 }
 
 /** The commits that showed the Kid profile's name over a Parent-only title. */
@@ -255,21 +329,112 @@ describe('a profile switch never commits the new name over the previous profile�
   beforeEach(signedIn)
   afterEach(() => { vi.unstubAllGlobals() })
 
-  it('on Home: the hero, the rails and Continue Watching', async () => {
+  // Into a profile with a limit (the calmer Tonight: no filmstrip, no pick
+  // count) and into one without (the Parent's own page, where a kept pick or
+  // count would have somewhere to show).
+  it.each([
+    ['into a profile with a limit', false],
+    ['into a profile with none', true],
+  ])('on Home: the hero, its picks, the rails and Continue Watching, %s', async (_how, kidUnrestricted) => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted })
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Parentonly Resume', undefined, { timeout: 5000 })
+    await parentHeroUp()
+    await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
     // Not vacuous: the Parent's name stood over the Parent's titles and count.
     expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
-    expect(commits.some(c => c.label === 'Parent' && c.parentCount)).toBe(true)
+    await waitFor(() => expect(commits.some(c => c.label === 'Parent' && c.parentCount)).toBe(true), { timeout: 5000 })
 
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
+    await kidHeroUp()
+    await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+    // The Kid's own closing line is up: its own count, and for a profile
+    // with no limit its own number of picks.
+    await waitFor(() => expect(document.querySelector('[data-tonight-foot]')?.textContent).toMatch(
+      kidUnrestricted ? /^1 titles worth your time out of the 2 titles in your library\./ : /^Showing the 2 titles in your library rated PG and under\./,
+    ), { timeout: 5000 })
     expect(kidOverParent(commits)).toBe(0)
     expect(kid(commits).filter(c => c.parentCount)).toEqual([])
     expect(kid(commits).filter(c => c.noPickCard)).toEqual([])
     expect(kid(commits).filter(c => !c.railsOrSkeleton)).toEqual([])
+  })
+
+  // The hero remembers that the viewer moved off the title to resume, onto
+  // a pick, and which pick. That is the previous profile's glance at the
+  // previous profile's slate: the new profile's Tonight opens on its own
+  // unfinished title, as a first visit does.
+  it('on Home: the new profile\'s hero opens on its own unfinished title, not where the last one had moved to', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/')
+    await parentHeroUp()
+    fireEvent.click(screen.getByRole('button', { name: 'Parentonly Second' }))
+    // Not vacuous: the Parent's hero moved to the second pick.
+    await screen.findByRole('button', { name: 'Details of Parentonly Second' }, { timeout: 5000 })
+
+    switchToKid()
+    await kidHeroUp()
+    const strip = screen.getByRole('list', { name: /picks from Aurora/ })
+    // On its own title to resume, with its one pick beside it, not showing.
+    expect(document.querySelector('section[data-hero-kind] h2')?.textContent).toBe('Kidonly Resume')
+    expect(within(strip).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Kidonly Hero'])
+    // And no commit under the Kid's name had the pick up instead.
+    expect(kid(commits).filter(c => c.heroTitle !== null && c.heroTitle !== 'Kidonly Resume')).toEqual([])
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  // A profile with a limit has its own list as a rail on Tonight. This
+  // browser keeps a snapshot of each profile's list, and the Kid's can hold
+  // a title saved before the limit was set, which the server no longer
+  // lists. The rail is the server's answer for the Kid, on every commit:
+  // not the snapshot, and not on the strength of the Parent's answer.
+  it('on Home, into a profile with a limit: its list is the server\'s, never this browser\'s snapshot', async () => {
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: 108, title: 'Parentonly Saved Before The Limit', year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const commits = renderApp('/')
+    await parentHeroUp()
+    switchToKid()
+    await kidHeroUp()
+    const list = (await screen.findByRole('heading', { name: 'Your list' }, { timeout: 5000 })).closest('section')!
+    expect(within(list).getAllByText('Kidonly Saved').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Parentonly Saved Before The Limit')).toBeNull()
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  // The rail is the server's answer for the Kid "this time": an answer the
+  // Kid's list had on an earlier visit does not vouch for what this browser
+  // holds now. Kid, then Parent, then Kid again, with the Kid's list
+  // unanswered the second time and the snapshot changed meanwhile (another
+  // tab wrote it, or the limit was lowered from another device since).
+  it('on Home, back into a profile with a limit: an earlier answer for its list does not vouch for the snapshot', async () => {
+    const commits = renderApp('/')
+    await parentHeroUp()
+    switchToKid()
+    await kidHeroUp()
+    // Not vacuous: the Kid's list was answered once, and shown.
+    const first = (await screen.findByRole('heading', { name: 'Your list' }, { timeout: 5000 })).closest('section')!
+    expect(within(first).getAllByText('Kidonly Saved').length).toBeGreaterThan(0)
+
+    server.failListFor(1)
+    server.failListFor(2)
+    pickInTopBar(/Parent/)
+    await parentHeroUp()
+    // What this browser holds for the Kid now.
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: 108, title: 'Parentonly Saved Before The Limit', year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const since = commits.length
+    switchToKid()
+    await kidHeroUp()
+    await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    // No answer for the list this time: no rail, on any commit.
+    expect(screen.queryByRole('heading', { name: 'Your list' })).toBeNull()
+    expect(screen.queryByText('Parentonly Saved Before The Limit')).toBeNull()
+    expect(commits.slice(since).filter(c => c.label === 'Kid').length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
   })
 
   it('in the top bar: the live-presence pill', async () => {
@@ -280,10 +445,28 @@ describe('a profile switch never commits the new name over the previous profile�
     expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
 
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    await kidHeroUp()
     expect(kidOverParent(commits)).toBe(0)
     // A restricted session is not shown other people's parties at all.
     expect(pill()).toBeNull()
+  })
+
+  // Tonight's live strip: the Parent's running party and the account's open
+  // invitation. A profile with a limit is offered no way to watch together,
+  // so the strip is not drawn for the Kid at all, on any commit.
+  it('on Home: the live strip', async () => {
+    const commits = renderApp('/')
+    const strip = () => document.querySelector('[data-tonight-live]')?.textContent ?? null
+    // Not vacuous: both rows are up for the Parent.
+    await waitFor(() => {
+      expect(strip()).toContain('3 watching Parentonly Party')
+      expect(strip()).toContain('jonah invited you to watch Parentonly Invite')
+    }, { timeout: 5000 })
+    switchToKid()
+    await kidHeroUp()
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+    expect(strip()).toBeNull()
   })
 
   it.each([['Movies', '/movies'], ['TV Shows', '/shows']])('on the %s grid', async (_name, path) => {
@@ -334,62 +517,70 @@ describe('a profile switch never commits the new name over the previous profile�
   // the same probe as any other Parent-only title.
   it('closes an open card menu', async () => {
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    await parentHeroUp()
     fireEvent.click((await screen.findAllByRole('button', { name: /^More actions for Parentonly/ }, { timeout: 5000 }))[0])
     // Not vacuous: the menu is up, and named for a Parent-only title.
     expect(screen.getByRole('menu').getAttribute('aria-label')).toMatch(/^Actions for Parentonly/)
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    await kidHeroUp()
     expect(screen.queryByRole('menu')).toBeNull()
     expect(kid(commits).length).toBeGreaterThan(0)
     expect(kidOverParent(commits)).toBe(0)
   })
 
-  it('drops a vibe search that was in flight', async () => {
+  // A search by description is the search page's now (it was a bar on Home
+  // with a rail of its own). The words stay in the field across a switch,
+  // and the page searches them again for the new profile, by title: nobody
+  // asked the model anything on the new profile's behalf.
+  it('drops a search by description that was in flight', async () => {
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    await parentHeroUp()
     const release = server.hold('search-1')
-    fireEvent.change(screen.getByLabelText('Describe a vibe to search by'), { target: { value: 'cozy' } })
-    fireEvent.click(document.querySelector('.convo-search button[aria-label="Search"]')!)
-    await screen.findByText('Sensing the vibe...', undefined, { timeout: 5000 })
+    describeInTopBar('cozy')
+    await screen.findByText('Looking for titles like "cozy"…', undefined, { timeout: 5000 })
+    // Not vacuous: the search that is out is the Parent's, by description.
+    await waitFor(() => expect(server.searches).toContainEqual({ asked: 1, mode: 'semantic' }), { timeout: 5000 })
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
+    await screen.findAllByText('Kidonly Vibe', undefined, { timeout: 5000 })
     release()
     await new Promise(done => setTimeout(done, 100))
     expect(screen.queryAllByText('Parentonly Vibe')).toEqual([])
-    // Nor is the Kid's Home left showing the search as still running.
-    expect(screen.queryByText('Sensing the vibe...')).toBeNull()
+    // Nor is the Kid's page left saying the Parent's search is still running.
+    expect(screen.queryByText(/Looking for titles like/)).toBeNull()
+    expect(server.searches.filter(x => x.asked === 2).map(x => x.mode)).toEqual(['literal'])
+    expect(kid(commits).length).toBeGreaterThan(0)
     expect(kidOverParent(commits)).toBe(0)
   })
 
-  // Home's greeting counts the library from its own fetch, or, when that
-  // failed, from the browse grids' totals, which are the Parent's until the
-  // switch clears them. One grid each, so the greeting's total is that grid's.
+  // Tonight's closing line counts the library from its own fetch, or, when
+  // that failed, from the browse grids' totals, which are the Parent's until
+  // the switch clears them. One grid each, so the line's total is that grid's.
   it.each([['Movies', '/movies'], ['Shows', '/shows']])(
-    "does not count the Parent's library in Home's greeting from the %s total", async (_grid, path) => {
+    "does not count the Parent's library in Tonight's closing line from the %s total", async (_grid, path) => {
       vi.unstubAllGlobals()
       server = stubServer({ homeCountFails: true })
       const commits = renderApp(path)
       await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
       fireEvent.click(document.querySelector('header .stage-tab[data-nav="home"]')!)
-      // Not vacuous: the fallback did put the Parent's total in the greeting.
-      await waitFor(() => expect(document.body.textContent).toMatch(/\b37 titles in your library/), { timeout: 5000 })
+      // Not vacuous: the fallback did put the Parent's total in the line.
+      await waitFor(() => expect(pageText()).toMatch(/\b37 titles in your library/), { timeout: 5000 })
       switchToKid()
-      await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+      await kidHeroUp()
       expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
       expect(kidOverParent(commits)).toBe(0)
     })
 
-  it('clears a conversational search', async () => {
+  it('clears the results of a search by description', async () => {
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
-    fireEvent.change(screen.getByLabelText('Describe a vibe to search by'), { target: { value: 'cozy' } })
-    fireEvent.click(document.querySelector('.convo-search button[aria-label="Search"]')!)
+    await parentHeroUp()
+    describeInTopBar('cozy')
+    // Not vacuous: the Parent's results are up, and marked as the model's.
     await screen.findAllByText('Parentonly Vibe', undefined, { timeout: 5000 })
+    expect(server.searches).toContainEqual({ asked: 1, mode: 'semantic' })
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
+    await screen.findAllByText('Kidonly Vibe', undefined, { timeout: 5000 })
+    expect(server.searches.filter(x => x.asked === 2).map(x => x.mode)).toEqual(['literal'])
+    expect(kid(commits).length).toBeGreaterThan(0)
     expect(kidOverParent(commits)).toBe(0)
   })
 
@@ -411,7 +602,7 @@ describe('a profile switch never commits the new name over the previous profile�
     await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
     switchToKid()
     // A restricted profile sees Tonight, Movies and Shows: it lands on Tonight.
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    await kidHeroUp()
     expect(kidOverParent(commits)).toBe(0)
     expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
     expect(kid(commits).length).toBeGreaterThan(0)
@@ -422,7 +613,7 @@ describe('a profile switch never commits the new name over the previous profile�
     await screen.findAllByText('Parentonly Hero', undefined, { timeout: 5000 })
     switchToKid()
     // The hydration asks again, is refused, and goes Home.
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    await kidHeroUp()
     expect(kidOverParent(commits)).toBe(0)
   })
 
@@ -444,8 +635,8 @@ describe('a profile switch never commits the new name over the previous profile�
     })
 })
 
-// Home's greeting counts the library from its own fetch ("N titles in your
-// library"), and the server counts what the session's profile may see: the
+// Tonight's closing line counts the library from its own fetch ("N titles in
+// your library"), and the server counts what the session's profile may see: the
 // Parent's catalog totals 37 titles and the Kid's 2. No commit may show one
 // profile's count while the app acts as another.
 describe('Home’s library count is the acting profile’s', () => {
@@ -453,8 +644,8 @@ describe('Home’s library count is the acting profile’s', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
   const total = (n: number) => new RegExp(`\\b${n} titles in your library`)
-  const greetingCounts = (n: number) =>
-    waitFor(() => expect(document.body.textContent).toMatch(total(n)), { timeout: 5000 })
+  const lineCounts = (n: number) =>
+    waitFor(() => expect(pageText()).toMatch(total(n)), { timeout: 5000 })
 
   // A fresh sign-in on a browser the Kid last used: the server binds the
   // default (the Parent), then the startup load re-selects the Kid. That is
@@ -466,7 +657,7 @@ describe('Home’s library count is the acting profile’s', () => {
     // server's answer for /me, held here until the startup load has settled.
     const releaseUser = server.hold('me')
     const commits = renderApp('/')
-    await greetingCounts(2)
+    await lineCounts(2)
     // Not vacuous: the session was the Parent's until the re-selection.
     expect(server.activations).toEqual([2])
     expect(commits.filter(c => c.parentTotal)).toEqual([])
@@ -481,7 +672,7 @@ describe('Home’s library count is the acting profile’s', () => {
     releaseUser()
     await waitFor(() => expect(server.profileLists).toBe(lists + 1), { timeout: 5000 })
     expect(server.counts).toEqual([2])
-    expect(document.body.textContent).toMatch(total(2))
+    expect(pageText()).toMatch(total(2))
   })
 
   it.each([
@@ -491,17 +682,17 @@ describe('Home’s library count is the acting profile’s', () => {
     vi.unstubAllGlobals()
     server = stubServer({ bindingUnreadable })
     const commits = renderApp('/')
-    // Not vacuous: the greeting counted the Parent's library first (with the
+    // Not vacuous: the line counted the Parent's library first (with the
     // binding unreadable, behind the picker, under the binding the server
     // does have).
-    await greetingCounts(37)
+    await lineCounts(37)
     if (bindingUnreadable) {
       const picker = await screen.findByRole('dialog', { name: "Who's watching?" }, { timeout: 5000 })
       fireEvent.click(within(picker).getByRole('radio', { name: /Kid/ }))
     } else {
       switchToKid()
     }
-    await greetingCounts(2)
+    await lineCounts(2)
     expect(kid(commits).length).toBeGreaterThan(0)
     expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
     // Once for each profile.
@@ -511,23 +702,23 @@ describe('Home’s library count is the acting profile’s', () => {
   it('drops an answer for the previous profile that arrives after a switch', async () => {
     const release = server.hold('count-1')
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    await parentHeroUp()
     await waitFor(() => expect(server.counts).toEqual([1]), { timeout: 5000 })
     switchToKid()
-    await greetingCounts(2)
+    await lineCounts(2)
     release()
     await new Promise(done => setTimeout(done, 100))
-    expect(document.body.textContent).toMatch(total(2))
+    expect(pageText()).toMatch(total(2))
     expect(commits.filter(c => c.parentTotal)).toEqual([])
   })
 
-  // Back on the Parent before the Kid's count landed, the greeting waits for
+  // Back on the Parent before the Kid's count landed, the line waits for
   // the Parent's new answer rather than showing the one from before the
   // switch: kept, the same user and profile coming back (a sign-out and
   // sign-in in this tab, say) would show an answer from another session.
   it('asks again after a switch away and back, showing no earlier answer', async () => {
     const commits = renderApp('/')
-    await greetingCounts(37)
+    await lineCounts(37)
     const releaseKid = server.hold('count-2')
     switchToKid()
     await waitFor(() => expect(server.counts).toEqual([1, 2]), { timeout: 5000 })
@@ -540,7 +731,7 @@ describe('Home’s library count is the acting profile’s', () => {
     await new Promise(done => setTimeout(done, 100))
     expect(commits.slice(since).filter(c => c.parentTotal)).toEqual([])
     release()
-    await greetingCounts(37)
+    await lineCounts(37)
     releaseKid()
   })
 })

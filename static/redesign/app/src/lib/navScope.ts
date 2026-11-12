@@ -129,14 +129,18 @@ export function mayRenderHidden(scope: NavScope, startup: { settled: boolean; as
   return startup.settled && !startup.askingForProfile
 }
 
-/** One line of facts about a profile, for a switcher row: "Default · locked
- *  with a PIN", "Up to PG", "No limit". Only what the profile record holds. */
+/** One line of facts about a profile, for a switcher row: "Up to PG",
+ *  "No limit · default · locked with a PIN". Only what the profile record
+ *  holds. */
 export function profileSummary(p: Pick<Profile, 'is_default' | 'has_pin' | 'max_age_rating'>): string {
   const limit = p.max_age_rating?.trim()
   // The limit is always stated, "no limit" included: it is the fact a
   // person choosing a profile most needs, and a line that left it out for a
-  // default or locked profile read as if nothing were known about it.
-  const facts = [p.is_default ? 'default' : null, p.has_pin ? 'locked with a PIN' : null, limit ? `up to ${limit}` : 'no limit']
+  // default or locked profile read as if nothing were known about it. It
+  // comes FIRST: where a row has no room for the whole line, what is cut
+  // must not be the fact the line is there to state (it was last, and a
+  // default, PIN-locked profile lost it in the identity menu).
+  const facts = [limit ? `up to ${limit}` : 'no limit', p.is_default ? 'default' : null, p.has_pin ? 'locked with a PIN' : null]
     .filter((f): f is string => f !== null)
   const line = facts.join(' · ')
   return line[0].toUpperCase() + line.slice(1)

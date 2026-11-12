@@ -106,7 +106,8 @@
     --page-gutter: 48px;
     /* Ultra-wide cap (Phase 12). Above this the gutter alone stops being a layout:
        at 2560 the content box was 2464px, so a rail ran nine posters wide and the
-       vibe bar's placeholder floated in the middle of two metres of glass. */
+       search bar on Home (since folded into search) floated its placeholder in
+       the middle of two metres of glass. */
     --page-max: 1920px;
     /* The horizontal page padding, and the ONLY thing any page-level rule should
        read. `max()` with a percentage, NOT a max-width plus auto margins.
@@ -364,104 +365,6 @@
      predates the neutral system; it is a soft dark shadow, not a glow. */
   .glow-purple {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  }
-
-  /* Phase D — conversational "mood box": a focal, on-brand search pill that
-     invites natural-language discovery. A violet→cyan gradient ring + soft halo
-     (the same palette as the rest of the UI) that intensifies on hover/focus
-     and breathes gently to draw the eye. Honors prefers-reduced-motion and
-     calms down under Reduce effects. */
-  .convo-search {
-    position: relative;
-    /* Rounded-rect, not a full pill: a full pill's semicircular end caps swept
-       empty space above/below the trailing "↵ to search" hint, so it read as
-       floating mid-bar even when flush. A defined vertical right edge lets the
-       hint actually hug it. */
-    border-radius: var(--r-xl);
-    background:
-      linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
-      linear-gradient(100deg, rgba(255, 255, 255, 0.385), rgba(255, 255, 255, 0.22) 48%, rgba(34, 211, 238, 0.6)) border-box;
-    border: 1.5px solid transparent;
-    box-shadow:
-      0 8px 28px -10px rgba(0, 0, 0, 0.4),
-      0 0 20px -6px rgba(34, 211, 238, 0.25);
-    transition: box-shadow var(--dur-slow) var(--ease-standard);
-  }
-  /* The breathing halo. `z-index: -1` means this paints BEHIND its own parent's
-     background, which only works while something contains it.
-     STACKING CONTEXT: the wrapper in App.tsx, via `relative z-20`. NOT
-     `.convo-search` — that is `position: relative; z-index: auto` with no
-     transform/filter/opacity/isolation, so it is not a stacking context and
-     cannot contain a negative-z child.
-     This matters under prefers-reduced-motion specifically. If the containing
-     context were the HomeView root, that element is a stacking context only
-     because `.animate-fade-in` is animating, and `@media (prefers-reduced-motion:
-     reduce)` nulls that animation with `!important` — at which point this halo
-     escapes to the document root and paints behind `.aurora-bg`, invisible, for
-     exactly the users least likely to report a missing animation. The `z-20` on
-     the wrapper is what makes it motion-independent, and it must stay for that
-     reason rather than the scrim reason this file used to give.
-     audit-reduced-motion.mjs Check 2 requires this note to exist. */
-  .convo-search::before {
-    content: '';
-    position: absolute;
-    inset: -3px;
-    border-radius: calc(var(--r-xl) + 3px); /* tracks the bar radius + the 3px inset */
-    background: linear-gradient(100deg, rgba(255, 255, 255, 0.248), rgba(34, 211, 238, 0.4));
-    filter: blur(16px);
-    opacity: 0.28;
-    z-index: -1;
-    animation: convo-breathe 5s ease-in-out infinite;
-  }
-  .convo-search:hover {
-    box-shadow:
-      0 10px 32px -10px rgba(0, 0, 0, 0.5),
-      0 0 26px -4px rgba(34, 211, 238, 0.4);
-  }
-  /* TWO-TONE focus ring, and the second tone is the load-bearing half.
-     This rule is now the ONLY focus indicator for the conversational search
-     bar — the inner <input> is reset (see the unlayered rule further down),
-     because the global input treatment would otherwise draw a second indicator
-     inside the wrapper's own gradient border.
-     It shipped as a 1px `rgba(168,85,247,.3)` ring, which measures 1.12–1.45:1
-     against the bar: a glow, not an indicator. A single light ring was not enough
-     either, BECAUSE AT THE TIME the bar sat on hero artwork, so the surface
-     outside the ring was arbitrary and a lavender ring over a bright frame is
-     only 1.97:1 against what's beyond it. The dark outer ring is what made the
-     indicator frame-independent:
-       inner vs the bar inside     9.99:1 (dark) · 3.39:1 (bright)
-       inner vs the outer ring    10.42:1 (dark) · 8.94:1 (bright)
-
-     Phase 10b moved the bar off the artwork (`-mt-5` -> `mt-2` in App.tsx), so
-     the premise of that paragraph no longer holds: the surface outside the ring
-     is now `.aurora-bg`, not arbitrary, and the "(bright)" column above does not
-     describe any reachable state — the real figures are the "(dark)" ones, 9.99:1
-     and 10.42:1. The two-tone ring is therefore over-engineered for its current
-     situation and is KEPT anyway: it costs nothing, it is measured, and the
-     element has moved four times in four phases. Do not "simplify" it back to a
-     single ring on the strength of the dark column alone.
-
-     The glow layers are kept too — they are decoration and are not relied on.
-     NOTE this rule is what audit-focus-indicators.mjs Check 3 verifies: the
-     wrapper nulls the global input treatment at (0,3,1), so deleting this rule
-     leaves the field with no focus indicator at all. */
-  .convo-search:focus-within {
-    box-shadow: 0 0 0 2px #ffffff, 0 0 0 5px rgba(14, 15, 17, 0.9);
-  }
-  .convo-search:focus-within::before {
-    opacity: 0.55;
-    animation-play-state: paused;
-  }
-  @keyframes convo-breathe {
-    0%, 100% { opacity: 0.2; }
-    50% { opacity: 0.42; }
-  }
-  html[data-effects="reduced"] .convo-search::before {
-    opacity: 0.14;
-    animation: none;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .convo-search::before { animation: none; opacity: 0.3; }
   }
 
   .scrollbar-hide {
@@ -1023,18 +926,124 @@ html[data-effects="reduced"] .stage-tabbar {
   padding-inline: calc(50vw - 50%);
 }
 
-/* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────
-   The mockup's defining move: edge to edge, no radius, no border, and an
-   oversized display title. The scrim is two layers — a left-to-right sweep
-   for the text column and a bottom fade that lands on EXACTLY #0e0f11 so
-   there is no seam where the hero ends and the rails begin. */
+/* ── Tonight's hero ─────────────────────────────────────────────────
+   The artwork fills the right 72% of a 440px frame and fades into the page
+   to its left and at its foot; the title block sits bottom left on what is
+   then page ink, and the picks bottom right, over the art.
+
+   Two scrims, one per layout, each a plain rule that
+   scripts/audit-onart-contrast.mjs reads and pins (its stops, its
+   directions, and that nothing else styles it):
+
+   Wide (.stage-hero-scrim). Its first layer runs left to right: ink until
+   the art begins at 28%, then down to nothing at 78%. Its second runs
+   bottom to top and is deliberately heavy low down: the picks' label and
+   controls sit about 40% up the frame over whatever the art is, and need
+   0.6 of ink behind them to hold 4.5:1 against white artwork. It is gone
+   by 74%, so the upper half of the picture is untouched.
+
+   Phone (.stage-hero-scrim-phone). The art is a 260px band across the top
+   and the title block starts 84px above its foot, so this fades the band's
+   lower third to ink: 0.9 at 32% (those 84px) and gone by 85%.
+
+   Each is display:none on the other's range, and the audit checks that at
+   the width it models the phone scrim is not painted. */
 .stage-hero-scrim {
   position: absolute;
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(14, 15, 17, 0.95) 0%, rgba(14, 15, 17, 0.72) 40%, rgba(14, 15, 17, 0.15) 72%, rgba(14, 15, 17, 0.35) 100%),
-    linear-gradient(0deg, #0e0f11 2%, rgba(14, 15, 17, 0.25) 30%, transparent 55%);
+    linear-gradient(90deg, rgba(14, 15, 17, 1) 0%, rgba(14, 15, 17, 1) 28%, rgba(14, 15, 17, 0.78) 46%, rgba(14, 15, 17, 0) 78%),
+    linear-gradient(0deg, rgba(14, 15, 17, 1) 0%, rgba(14, 15, 17, 0.9) 30%, rgba(14, 15, 17, 0.66) 44%, rgba(14, 15, 17, 0) 74%);
+}
+.stage-hero-scrim-phone {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 260px;
+  pointer-events: none;
+  background: linear-gradient(0deg, rgba(14, 15, 17, 1) 0%, rgba(14, 15, 17, 0.9) 32%, rgba(14, 15, 17, 0.5) 58%, rgba(14, 15, 17, 0) 85%);
+}
+@media (min-width: 1024px) {
+  .stage-hero-scrim-phone { display: none; }
+}
+@media not all and (min-width: 1024px) {
+  .stage-hero-scrim { display: none; }
+}
+/* A long title is set narrower before it is cut: the display face has a
+   width axis, and 85% takes about a seventh off a line's length. */
+.stage-hero-title-long {
+  font-stretch: 85%;
+}
+/* The aurora dot: the one sign for "Aurora is involved". 8px, never
+   squeezed by the flex row it sits in. */
+.aurora-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--aurora);
+}
+/* The picks: a label with the rotation's controls, over a strip of
+   thumbnails. The strip is as wide as four 148px thumbnails; more than four
+   share that width equally, so every pick is on screen and none needs a
+   scroll. On a phone the strip scrolls sideways instead, at 96px a
+   thumbnail, with the titles read out and not drawn. */
+.stage-hero-picks {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  flex: none;
+  width: min(628px, 44vw);
+}
+.stage-hero-strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 148px);
+  justify-content: end;
+  gap: 12px;
+}
+.stage-hero-strip-item {
+  min-width: 0;
+}
+.stage-hero-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.stage-hero-thumb-art {
+  display: block;
+  width: 100%;
+  aspect-ratio: 148 / 84;
+  object-fit: cover;
+  border-radius: var(--radius-art);
+  background: var(--surface-raised);
+}
+@media not all and (min-width: 1024px) {
+  .stage-hero-picks {
+    width: auto;
+    flex: 0 1 auto;
+  }
+  .stage-hero-strip {
+    display: flex;
+    /* From the start: aligned to the end, as the wide strip is, the first
+       thumbnails would overflow to the left, where a scroll cannot reach. */
+    justify-content: flex-start;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* To the screen's edge on the right, so a cut-off thumbnail says there
+       are more. */
+    margin-right: calc(-1 * var(--page-pad-x));
+    padding-right: var(--page-pad-x);
+    gap: 8px;
+  }
+  .stage-hero-strip-item {
+    flex: 0 0 96px;
+  }
 }
 /* The words change with the art (Stage refresh, H2). HeroSection keys the
    reason, genre line, title, description and the compact "Featured" line on
@@ -1053,10 +1062,6 @@ html[data-effects="reduced"] .stage-tabbar {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
 }
-/* The match ring eases to the next pick's score. */
-.stage-hero-ring-arc {
-  transition: stroke-dasharray 700ms var(--ease-emphasized);
-}
 @media (prefers-reduced-motion: reduce) {
   .stage-hero-swap,
   .stage-hero-swap-d1,
@@ -1065,25 +1070,6 @@ html[data-effects="reduced"] .stage-tabbar {
     opacity: 1;
     transform: none;
   }
-  .stage-hero-ring-arc {
-    transition: none;
-  }
-}
-
-/* Top feather (Stage refresh, H1). The backdrop used to start on a hard line
-   right under the greeting; this lets the art rise out of the page instead,
-   the same #0e0f11 the bottom fade lands on. A fixed 72px, not a percentage,
-   so the full hero (480-680px) and the 250px browse band lose the same strip
-   of artwork. It is a child of the scrim, so it paints over both layers above
-   and under the corner vignette. It only darkens, so it can only raise the
-   white text's contrast — audit-onart-contrast models it anyway, because that
-   audit's claim is that it composites EVERY layer. */
-.stage-hero-scrim::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto;
-  height: 72px;
-  background: linear-gradient(180deg, #0e0f11 0%, rgba(14, 15, 17, 0.55) 45%, transparent 100%);
 }
 
 /* Transient-overlay menu items get a ring on plain :focus, not only on
@@ -1104,118 +1090,8 @@ html[data-effects="reduced"] .stage-tabbar {
   outline-offset: -2px;
 }
 
-/* Local backing for the match/score ring (Phase 8 contrast audit).
-   .stage-hero-scrim ramps its horizontal layer DOWN to 0.15 at 72% and 0.35 at
-   the right edge, on purpose: that is where the artwork is meant to be visible.
-   The consequence, which nobody had measured until Phase 8, is that the one
-   widget living out there had no scrim to speak of — 0.314 effective alpha. Over
-   a bright frame (a daylight exterior, a snow scene, a title card) the "MATCH"
-   eyebrow measured 1.22:1 and the percentage numeral 2.16:1. The eyebrow is the
-   only thing that says what the number MEANS, and it was invisible.
-   Fixing the scrim was the wrong lever — darkening the right side would spend
-   exactly the artwork the ramp exists to preserve. So the widget carries its own
-   backing, sized to itself.
-   Plateau out to 72% of each radius, then ramp: the eyebrow sits at the bottom
-   of the cluster, so a plain centre-weighted radial would have left the very
-   text this exists to rescue in the falloff. inset:-28px puts all content inside
-   the plateau (content half-extents land at 60% and 65% of the two radii).
-
-   `closest-side`, and NO border-radius. The first version had
-   `ellipse at center` (which defaults to `farthest-corner`) plus
-   `border-radius: 50%`, and those two never agree: a farthest-corner ellipse in
-   a w×h box has semi-axes (w/2)·√2 × (h/2)·√2, while border-radius:50% clips at
-   (w/2)×(h/2) — so the clip lands at gradient position 1/√2 = 70.71%, INSIDE the
-   72% plateau, for any box size. The ramp from 72% to 100% was clipped away
-   entirely and the veil rendered as a hard-edged flat ellipse: exactly the
-   "floating fragment" artefact the ring-track note thirty lines down complains
-   about. `closest-side` makes the gradient's own extent equal the box's
-   half-extents, so the ramp is inside the box and renders, and the clip is
-   redundant. */
-/* The conversational search bar's inner <input> must not paint its own focus
-   treatment. Same problem .stage-navsearch solved with a reset, and the same
-   solution — it just never got one, which stopped mattering only because the
-   global halo used to be invisible at alpha .1. Now that the global treatment is
-   a 0.9-alpha lavender border plus a .28 halo (it had to become visible to meet
-   1.4.11 at all), a chromeless input inside a wrapper that draws its OWN
-   gradient border renders two nested indicators. The wrapper is the control here,
-   so the wrapper keeps the indicator: `.convo-search:focus-within` below.
-   A bare `.convo-search:focus-within` cannot do it: at (0,2,0) it loses to the
-   global input rule's (0,2,1). The DESCENDANT form below reaches (0,3,1) — one
-   class more than the global rule — which is what lets it null the treatment.
-   (This is the selector whose (0,3,1) is genuinely correct, and is probably why
-   the wrong (0,3,1) for the global rule went unquestioned for a while.) */
-/* BASE state. This rule did not exist until Phase 10b, and its absence meant the
-   call site's own `bg-transparent border-0 py-3 pl-1 pr-2 text-sm` — all (0,1,0)
-   utilities — lost every one of its declarations to the unlayered global
-   `input:not([type="range"])` at (0,1,1), which also sits later in the emitted
-   sheet. Six declarations won that nobody intended:
-
-     background     transparent  ->  rgba(255,255,255,0.05)
-     border         0            ->  1px solid rgba(255,255,255,0.1)
-     border-radius  —            ->  10px
-     padding        12/4/12/8    ->  12px 16px
-     font-size      0.875rem     ->  0.9rem
-
-   So the bar has been drawing a second rounded box INSIDE its own gradient
-   border this whole time, with its text starting 13px right of where the call
-   site put it and a 24px icon-to-text gap against the designed 12px.
-
-   `.stage-navsearch` above solved this on day one with `all: unset`; this bar
-   never got the same treatment, and four phases of polish on this element missed
-   it because the vertical padding coincides at 12px — which is why the height
-   came out at the expected ~49px and nothing looked obviously wrong.
-
-   (0,2,1) beats the global's (0,1,1). The call site's utilities are removed
-   rather than left as decoration: two sources of truth for the same box is how
-   this went unnoticed. */
-.convo-search input:not([type="range"]) {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  padding: 0.75rem 0.5rem 0.75rem 0.25rem;
-  /* 16px below lg so iOS/iPadOS Safari doesn't zoom the viewport on focus — it
-     zooms any focused input under 16px, and the designed size here is 14px. Same
-     guard `.stage-navsearch` has carried since it was written; this bar never got
-     it, so tapping the one field the home page is built around punched the layout
-     to ~1.14x on every iPhone. The designed 0.875rem applies from lg, where a
-     touch keyboard is not the primary input.
-     rem at lg, px below it, deliberately: the guard is about a fixed CSS-pixel
-     threshold in Safari, so it must not scale with the root font-size, while the
-     design size should. */
-  font-size: 16px;
-  line-height: 1.25rem;
-}
-@media (min-width: 1024px) {
-  .convo-search input:not([type="range"]) { font-size: 0.875rem; }
-}
-/* FOCUS state, and the three `:not()`s are load-bearing arithmetic, not noise.
-   The global focus rule is
-     input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus
-   which is (0,4,1). This rule was `.convo-search input:not([type="range"]):focus`
-   at (0,3,1) and therefore LOST — so the global treatment (lavender border,
-   rgba(255,255,255,0.08) fill, and a 3px purple box-shadow) has been painting a
-   nested ring inside the wrapper's gradient border on every focus, which is the
-   exact thing the comment on `.convo-search:focus-within` claims this rule
-   prevents.
-
-   It did once win: the global rule was (0,2,1) when both container resets were
-   written, and the comments here and on `.stage-navsearch` still quote that
-   figure. Adding the checkbox/radio exclusions to the global rule raised it two
-   class units and silently overtook both, and nothing re-derived the comparison
-   — audit-focus-indicators.mjs even printed these two containers as the ones
-   that "reset this treatment", while they had stopped doing so. Check 4 there
-   now compares the two specificities and fails if the container does not win.
-
-   Matching the global's shape takes this to (0,5,1). */
-.convo-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
-.convo-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
-  outline: none;
-  background: transparent;
-  border-color: transparent;
-  box-shadow: none;
-}
 /* ── Search palette input (Stage refresh, D2) ──────────────────────────
-   The third container reset, after .stage-navsearch and .convo-search, and for
+   A container reset, like .stage-navsearch's, and for
    the same reason: the palette's query field is chromeless by design, but the
    unlayered global `input:not([type="range"])` (0,1,1) beat every utility on it,
    so the palette rendered the app-wide input box inside its own panel — a fill,
@@ -1249,51 +1125,6 @@ html[data-effects="reduced"] .stage-tabbar {
 .stage-palette:focus-within {
   border-color: rgba(255, 255, 255, 0.7);
   box-shadow: 0 20px 80px -10px rgba(0, 0, 0, 0.6);
-}
-
-/* See the note at its call site in HeroSection. Starts at the hero's own opaque
-   ink so there is no step at the boundary, and fades out over its own height so
-   `.aurora-bg`'s radials arrive gradually.
-   The top stop is #0e0f11 because that is what BOTH the hero section's own
-   background and the vertical scrim's final stop resolve to — if either of those
-   changes, this has to change with them, which is why all three say #0e0f11
-   literally rather than one of them reading a token the others do not. */
-.stage-hero-seam {
-  pointer-events: none;
-  background: linear-gradient(180deg, #0e0f11 0%, rgba(14, 15, 17, 0) 100%);
-}
-.stage-hero-match-veil {
-  position: absolute;
-  inset: -28px;
-  pointer-events: none;
-  background: radial-gradient(
-    closest-side,
-    rgba(14, 15, 17, 0.72) 0%,
-    rgba(14, 15, 17, 0.72) 72%,
-    rgba(14, 15, 17, 0) 100%
-  );
-}
-
-/* "Aurora picked this for you" — the AI provenance pill above the title. */
-.stage-pick-pill {
-  align-self: flex-start;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 14px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.275);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.35);
-}
-html[data-effects="reduced"] .stage-pick-pill {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: var(--surface-raised-2);
-    box-shadow: none;
 }
 
 /* Eyebrow above a page/browse title ("MOVIES"). */
@@ -2997,6 +2828,22 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 .stage-btn-pill {
   border-radius: var(--r-pill);
 }
+/* The hero's primary action: 48px, and 64px for the children's
+   presentation. Sizes are set here, not with height utilities at the call
+   site: these rules are unlayered and would beat them. */
+.stage-btn-lg {
+  height: 48px;
+  padding: 0 26px 0 22px;
+  font-size: 16px;
+  gap: 10px;
+}
+.stage-btn-xl {
+  height: 64px;
+  padding: 0 36px 0 28px;
+  font-size: 22px;
+  font-weight: 700;
+  gap: 12px;
+}
 .stage-btn:disabled,
 .stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 /* Press feedback: a 3% settle over 90ms is the smallest tactile cue that
@@ -3103,19 +2950,13 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 /* 6px, not 10px (Stage refresh, T1): on the emphasized curve the shorter rise
    reads as arrival rather than travel. The END state is deliberately unchanged —
    `translateY(0)` held by `forwards` is what keeps every .animate-fade-in root a
-   stacking context, and several notes in this file and in App.tsx reason from
-   that (see .convo-search::before). Do not "tidy" it to `transform: none`. */
+   stacking context, which rules have been written against before (the halo
+   of the search bar that used to sit on Home painted at z-index -1 inside
+   one). Do not "tidy" it to `transform: none`. */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
-
-@keyframes aurora-drift {
-  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.6; }
-  33% { transform: translate(30px, -20px) scale(1.1); opacity: 0.8; }
-  66% { transform: translate(-20px, 20px) scale(0.9); opacity: 0.6; }
-}
-
 
 /* Removed with the dead CSS (UI polish pass): .animate-chromatic,
    .animate-float, .animate-pulse-glow, .animate-shimmer, .animate-slide-in
@@ -3135,9 +2976,9 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
    manually forcing opacity:1 via DevTools. "forwards" holds the "to" state
    (opacity:1) after the animation completes.
 
-   The cost of that fix is documented at .stage-hero-img below: the held
-   `transform: translateY(0)` also outranked the hero's inline parallax
-   transform, which is why the hero no longer uses this class. */
+   The held `transform: translateY(0)` outranks any inline transform on the
+   same element, which is why the hero's artwork fades on its own
+   opacity-only keyframe (.stage-hero-img) and does not use this class. */
 .animate-fade-in {
   animation: fadeIn var(--dur-enter) var(--ease-emphasized) forwards;
 }
@@ -3244,25 +3085,28 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   pointer-events: none;
 }
 
-/* Hero backdrop layers (HeroSection). The transform reads the parallax
-   custom properties the section writes from a rAF (--hero-px/--hero-py,
-   each in [-1, 1] → ±1% drift inside the 5% overscan), and the fade is
-   OPACITY-ONLY on its own keyframe. That separation is the point: the
-   <img> used to carry .animate-fade-in, whose `forwards` fill ends in
-   `transform: translateY(0)`, and an animation declaration outranks the
-   inline style the parallax was written to — so scale and drift were dead
-   from the day `forwards` was added (see the note above .animate-slide-in).
-   `.is-incoming` starts invisible and `.is-loaded` starts the fade; they are
-   two rules on purpose, so no single rule pairs `opacity: 0` with an
-   animation (audit-reduced-motion Check 1b). */
+/* The hero's artwork (HeroSection): two layers, so a change of title is a
+   dissolve. Across the top on a phone; the right 72% of the frame, full
+   height, on a wide screen, where the scrim fades its left edge into the
+   page. The fade is OPACITY-ONLY on its own keyframe. `.is-incoming` starts
+   invisible and `.is-loaded` starts the fade; they are two rules on
+   purpose, so no single rule pairs `opacity: 0` with an animation
+   (audit-reduced-motion Check 1b). Nothing here follows the pointer. */
 .stage-hero-img {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
   width: 100%;
-  height: 100%;
+  height: 260px;
   object-fit: cover;
-  transform: scale(1.05) translate(calc(var(--hero-px, 0) * 1%), calc(var(--hero-py, 0) * 1%));
-  transition: transform 0.7s ease-out;
+}
+@media (min-width: 1024px) {
+  .stage-hero-img {
+    left: auto;
+    right: 0;
+    width: 72%;
+    height: 100%;
+  }
 }
 .stage-hero-img.is-incoming { opacity: 0; }
 .stage-hero-img.is-incoming.is-loaded { animation: heroFadeIn 0.5s ease-out forwards; }
@@ -3270,15 +3114,6 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
-.aurora-pulse-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(40px);
-  mix-blend-mode: screen;
-  animation: aurora-drift 8s ease-in-out infinite;
-}
-
 
 /* Custom scrollbar: a neutral thumb on a transparent track that lets the
    page show through, a little brighter under the pointer. Firefox uses
@@ -3410,6 +3245,124 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
     -webkit-mask-image: none;
     mask-image: none;
   }
+}
+
+/* ── Tonight: the wash and the closing line ─────────────────────────────────
+   The wash is the one decorative gradient on the page: the hero artwork's
+   ambient colour (--ambient, set by HomeView from lib/ambient, which clamps
+   it dark and low in saturation), falling from where the art sits. The hero
+   itself is opaque, so what shows is the fall beneath it, behind the first
+   rails. Transparent until a picture has been sampled, and for one with no
+   colour worth showing. */
+.tonight-wash {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 820px;
+  pointer-events: none;
+  background: radial-gradient(1100px 820px at 74% 0px, var(--ambient), transparent 100%);
+}
+/* The page's last line, and the way on. */
+.tonight-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  margin-top: 20px;
+  font-size: 15px;
+  color: var(--ink-2);
+}
+.tonight-foot p {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.tonight-foot b {
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Tonight: "Happening now" ───────────────────────────────────────────────
+   A running party and an unanswered invitation, above the first rail. Rows on
+   the raised surface, two up where there is room for 560px each. The count
+   sits in a 2px aurora ring: live presence is one of the three places the
+   brand gradient is allowed. */
+.tonight-live {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+.tonight-live-row {
+  min-height: 76px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  min-width: 0;
+}
+.tonight-live-count {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 2px;
+  border-radius: 50%;
+  background: var(--aurora);
+}
+.tonight-live-count > span {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.tonight-live-poster {
+  flex: none;
+  width: 32px;
+  height: 48px;
+  border-radius: var(--radius-chip);
+  object-fit: cover;
+  background: var(--surface-raised-2);
+}
+.tonight-live-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tonight-live-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.tonight-live-sub {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.tonight-live-acts {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.tonight-live-act { flex: none; }
+/* A phone has no room for three buttons beside the text: they drop under
+   it. (The negated form, so no fractional width falls between this and the
+   640px rules.) */
+@media not all and (min-width: 640px) {
+  .tonight-live-row { flex-wrap: wrap; }
+  .tonight-live-text { flex-basis: calc(100% - 50px); }
+  .tonight-live-row[data-live-party] .tonight-live-text { flex-basis: 0; }
+  .tonight-live-acts { flex-basis: 100%; justify-content: flex-start; }
 }
 
 .rail-container {
@@ -4386,16 +4339,14 @@ textarea:focus-visible {
 }
 
 /* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
-   blocks above already guard most decorative motion (convo-search,
-   media-card, onboarding, recap), but these infinite animations had no
-   guard: .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
-   (skeletons + spinners become static — still visible, just not
-   animating). The list used to also name .animate-pulse-glow,
+   blocks above already guard most decorative motion (media-card,
+   onboarding, recap), but these infinite animations had no guard:
+   Tailwind's animate-pulse / animate-spin (skeletons + spinners become
+   static — still visible, just not animating). The list used to also name .animate-pulse-glow,
    .status-dot.processing, .animate-chromatic, .holo-text::before,
    .animate-float and .animate-shimmer; those rules were dead and were
    removed with the rest of the unused CSS. */
 @media (prefers-reduced-motion: reduce) {
-  .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin,
   .stage-skel::before,
@@ -4448,11 +4399,10 @@ textarea:focus-visible {
   .stage-sheet-in {
     animation: none !important;
   }
-  /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than
-     stilled — `.is-incoming` starts at opacity 0 and relies on heroFadeIn to
-     appear, so nulling the animation alone would leave the new art invisible
-     until the promotion timer swapped it in. */
-  .stage-hero-img { transition: none; }
+  /* Hero artwork: the incoming layer is REVEALED rather than stilled.
+     `.is-incoming` starts at opacity 0 and relies on heroFadeIn to appear,
+     so nulling the animation alone would leave the new art invisible until
+     the promotion timer swapped it in. */
   .stage-hero-img.is-incoming.is-loaded {
     animation: none !important;
     opacity: 1;

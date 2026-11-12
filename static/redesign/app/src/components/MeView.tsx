@@ -60,7 +60,8 @@ export default function MeView({
         <ProfileAvatar avatarUrl={active?.avatar_url} name={active?.name ?? user.username} colorKey={active?.id} size={64} />
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-display text-[28px] font-bold leading-tight tracking-[-0.015em] text-ink">{active?.name ?? user.username}</h1>
-          <p className="truncate text-[13px] text-ink-2">{active ? profileSummary(active) : `Signed in as ${user.username}`}</p>
+          {/* Wraps: the limit leads the line, and none of it is cut. */}
+          <p className="text-[13px] text-ink-2" data-profile-summary="">{active ? profileSummary(active) : `Signed in as ${user.username}`}</p>
         </div>
       </header>
 

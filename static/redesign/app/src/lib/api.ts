@@ -747,6 +747,10 @@ export interface HeroPick {
   // future confidence-aware copy without changing the current ring.
   matchConfidence?: number
   matchModelVersion?: string
+  // The pick's place in the slate as the server sent it. An exposure is
+  // reported under this, not under the pick's place in the pool as it is
+  // now, which shifts when a title is taken out of it (a low rating).
+  position?: number
 }
 export interface HeroPersonalization {
   coldStart: boolean
@@ -782,9 +786,10 @@ export async function getHeroPool(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
   return {
-    picks: (resp.picks || []).map(p => ({
+    picks: (resp.picks || []).map((p, position) => ({
       media: mapMedia(p.item), reason: p.reason, score: p.score, match: p.match,
       matchConfidence: p.match_confidence, matchModelVersion: p.match_model_version,
+      position,
     })),
     // Defaults preserve the pre-personalization-field behavior for any
     // server older than this change (cold_start=false hides the hint).

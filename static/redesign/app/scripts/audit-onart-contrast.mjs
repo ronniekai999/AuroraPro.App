@@ -1,9 +1,9 @@
-// Phase 8 — contrast audit of every on-artwork text surface introduced in
-// Phases 3–5.
+// Contrast audit of every piece of text Tonight's hero draws over artwork.
 //
-// IMPLEMENTATION_PLAN names this as a risk in its own words: "Text-on-art
-// contrast replaces a purpose-built AA text shelf — scrim must guarantee ≥4.5:1
-// for meta; audited again in Phase 8." This is that audit.
+// The hero (src/components/HeroSection.tsx) sets a title block and a strip of
+// picks on a picture nobody has seen in advance, with a scrim between them.
+// "The scrim guarantees 4.5:1" is a claim about arithmetic, and this is the
+// arithmetic.
 //
 // Method. The scrims are MULTI-LAYER gradients (a horizontal ramp painted over a
 // vertical one, over the artwork), so a single "the scrim is 0.72" figure is
@@ -32,22 +32,24 @@ import { createRequire } from 'node:module'
 // mutation-tested. It was: its own literals were mutated, which proves nothing
 // about the code.
 // The rewrite derived the scrims, but ten of its eleven text surfaces still
-// carried a typed-in alpha, so reverting the "Not tonight" contrast fix
-// (`text-white/75` back to `/60`) again left the output byte-identical and exit 0.
+// carried a typed-in alpha, so reverting a contrast fix on one of that hero's
+// labels (`text-white/75` back to `/60`) again left the output byte-identical
+// and exit 0.
 // Now each surface's colour, alpha, size, weight and fill are read from the
 // classes of its element, or of the element it inherits them from (`text()`
-// below); whether it sits over the match veil is read from the tree; every
-// element enclosing it up to the hero's root is checked for opacity, fills,
-// z-index and anything else this audit does not model; the root's own layers,
-// the scrim, glow and vignette composited beneath the text, are pinned in their
-// paint order and their strength, with the index.css rules their values come
-// from, their gradients' directions and the veil's shape (LAYERS,
-// PINNED_RULES); every other element in the text's two layers must have
+// below); every element enclosing it up to the hero's root is checked for
+// opacity, fills, z-index and anything else this audit does not model; the
+// root's own layers, the scrim composited beneath the text, are pinned in
+// their paint order and their strength, with the index.css rules their
+// values come from and their gradients' directions (LAYERS, PINNED_RULES),
+// and the phone's scrim is pinned as not painted at the width this models;
+// every other element in the text's layer must have
 // classes this audit can read, dies if it leaves the flow unless listed
 // (OVERLAP_OK), and has its box-shadow glow measured into every surface it can
 // reach (GLOWS). The run fails if a value it depends on has moved or cannot be
-// read. NOT derived: each surface's sample point (x, y), measured by hand at
-// the 1440x900 frame its classes are resolved at, and the list of surfaces
+// read. NOT derived: each surface's sample point (x, y), measured in a browser
+// at the 1440x900 frame its classes are resolved at and then moved to the
+// worst place that surface can reach (see SURFACES), and the list of surfaces
 // itself, so text HeroSection gains is measured only once it is listed. Not
 // read at all: anything above the hero's root, rules in index.css that select
 // by element rather than class, what a component renders, an element built
@@ -162,9 +164,10 @@ const INTERACTION = new Set(['hover', 'focus', 'focus-visible', 'focus-within', 
 // paint behind it: layout, spacing, borders, transitions, transforms, the
 // `group`/`peer` markers, and text and drop shadows, which this audit never
 // credits. A transform does change the paint order (it paints the element as
-// a positioned one would), which `veilUnder` counts on, and that matters only
-// against the veil. Not `z-*` (classified below), `order-*` (a flex item's
-// order is its paint order; `order-first` put the eyebrow under the veil in
+// a positioned one would), which matters only against an overlay, and an
+// overlay dies unless it is listed (OVERLAP_OK). Not `z-*` (classified
+// below), `order-*` (a flex item's order is its paint order: `order-first`
+// once put a line of text under an absolutely positioned backing in
 // Chromium) or `ring-*` (an inset ring is a box-shadow painted behind the
 // text). A class neither classified nor matched here dies unless index.css
 // defines it, and then its rules are checked (`checkCssRules`). Skipped
@@ -176,6 +179,8 @@ const INERT = new RegExp('^(?:' + [
   'flex-.+|grow(?:-.+)?|shrink(?:-.+)?|items-.+|justify-.+|content-.+|self-.+|place-.+',
   'overflow-.+|whitespace-.+|break-.+|truncate|line-clamp-.+|sr-only|not-sr-only',
   'italic|not-italic|uppercase|lowercase|capitalize|normal-case|tracking-.+|leading-.+|underline|no-underline',
+  // Numeral forms (font-variant-numeric): which glyphs, not what colour or size.
+  'tabular-nums|proportional-nums|lining-nums|oldstyle-nums|normal-nums',
   'rounded(?:-.+)?|border(?:-.+)?|outline(?:-.+)?',
   'transition(?:-.+)?|duration-.+|ease-.+|delay-.+|cursor-.+|pointer-events-.+|select-.+|align-.+|aspect-.+|object-.+',
   String.raw`drop-shadow(?:-(?:sm|md|lg|xl|2xl|none))?|font-(?:sans|serif|mono)`,
@@ -203,6 +208,8 @@ const SAFE = new RegExp('^(?:' + [
   'display|overflow(?:-[xy])?|-webkit-line-clamp|-webkit-box-orient|cursor|pointer-events|user-select',
   '(?:padding|margin)(?:-(?:top|right|bottom|left|inline|block)(?:-(?:start|end))?)?|(?:min-|max-)?(?:width|height)',
   'gap|row-gap|column-gap|flex(?:-(?:grow|shrink|basis|direction|wrap))?|align-(?:items|self|content)|justify-(?:content|items|self)',
+  // Grid placement, and whether a scroller draws its scrollbar: layout and chrome.
+  'grid-auto-flow|grid-auto-columns|scrollbar-width',
   'border(?:-.+)?|outline(?:-.+)?|transition(?:-.+)?|animation-(?:delay|duration|timing-function|name)',
 ].join('|') + ')$')
 // What each classified property already accounts for.
@@ -690,8 +697,7 @@ function resting(classes) {
  *  rather than being given a default. An unset weight is read as normal, the
  *  stricter threshold. Opacity composes down the tree, so both elements'
  *  multiply; under a fill it would dim the fill too, which is not modelled.
- *  Every other enclosing element is checked by `checkAncestors`, and the match
- *  veil is found by `veilUnder`. */
+ *  Every other enclosing element is checked by `checkAncestors`. */
 function text(anchor, parent) {
   const at = elementAt(anchor)
   const own = classesOf(at)
@@ -711,22 +717,7 @@ function text(anchor, parent) {
   if (stacks(r.z) || stacks(p.z)) throw new Error(`audit: the element anchored by "${anchor}"${stacks(r.z) ? '' : "'s named parent"} sets a z-index; this audit does not model where that paints it`)
   checkAncestors(chain, par?.el)
   return { file: `HeroSection.tsx:${own.line}`, color: color.rgb, alpha: color.a * (r.opacity ?? 1) * (p.opacity ?? 1), px,
-    bold: (r.weight ?? p.weight ?? 400) >= 700, fills, veil: veilUnder(at.el, chain), nodes: [at.el, ...chain] }
-}
-
-/** A non-text stroke, from an SVG element's own `stroke="…"`. */
-function stroke(anchor) {
-  const { el } = elementAt(anchor)
-  const attrs = attrsOf(el)
-  for (const a of ['opacity', 'strokeOpacity', 'className', 'style'])
-    if (attrs.has(a)) throw new Error(`audit: ${where(el)} now carries ${a}; model it`)
-  const s = attrs.get('stroke')
-  if (!s || !ts.isStringLiteral(s)) throw new Error(`audit: ${where(el)} has no literal stroke`)
-  const c = parseColor(s.text, where(el))
-  const chain = ancestorsOf(el)
-  checkAncestors(chain)
-  return { file: `HeroSection.tsx:${lineOf(openingOf(el).getStart(HERO_SF))}`, color: c.rgb, alpha: c.a, px: 0, nonText: true,
-    veil: veilUnder(el, chain), nodes: [el, ...chain] }
+    bold: (r.weight ?? p.weight ?? 400) >= 700, fills, nodes: [at.el, ...chain] }
 }
 
 /** What the elements enclosing a surface may do to it without colouring it:
@@ -752,47 +743,6 @@ function checkAncestors(chain, skip) {
       if (stacks(r.z) && a !== layer && a !== HERO_ROOT) throw new Error(`audit: ${where(a)} sets a z-index; this audit does not model where that paints the surfaces inside it`)
     }
   }
-}
-
-/** Whether `c` is the match veil. Read loosely: a sibling's className need not
- *  be one this audit can resolve. */
-function isVeil(c) {
-  return (ts.isJsxElement(c) || ts.isJsxSelfClosingElement(c)) && openingOf(c).attributes.properties.some(p =>
-    ts.isJsxAttribute(p) && p.name.getText(HERO_SF) === 'className' && p.initializer
-    && p.initializer.getText(HERO_SF).split(/[^\w-]+/).includes('stage-hero-match-veil'))
-}
-
-/** The match veil's alpha when a surface sits over it, else 0. It does when an
- *  enclosing element holds the veil as an earlier child than the branch leading
- *  to the surface, and something on that branch is positioned or transformed at
- *  rest. The veil is `position: absolute`, so it paints over a static sibling
- *  (CSS 2.1 App. E, step 6 over step 5): that is the eyebrow's 1.35:1 in the
- *  note at `backdropFor`. A surface the veil would paint over dies, rather than
- *  being measured with the veil on the wrong side. The veil element itself is
- *  pinned: its own class and aria-hidden, nothing else (its rule is pinned at
- *  VEIL), since a `hidden`, an `opacity-20` or a `z-30` on it changed what the
- *  surfaces sit on while the audit still credited it. A veil inside a {…}
- *  expression is not seen, and the surface is measured without it, the
- *  stricter answer. */
-function veilUnder(el, chain) {
-  const lifted = x => {
-    const bs = classBranches(x)
-    return bs.length > 0 && bs.every(b => /^(relative|absolute|fixed|sticky)$/.test(resting(b.text).position ?? 'static')
-      || b.text.split(/\s+/).some(t => /^-?(translate-[xy]|rotate|scale(-[xy])?)-/.test(t)))
-  }
-  for (const [k, a] of chain.entries()) {
-    const veil = a.children.find(isVeil)
-    if (!veil) continue
-    const attrs = attrsOf(veil)
-    const own = classBranches(veil)
-    if ([...attrs.keys()].some(n => n !== 'className' && n !== 'aria-hidden') || own.length !== 1 || own[0].text.trim() !== 'stage-hero-match-veil' || ts.isJsxElement(veil))
-      throw new Error(`audit: the match veil ${where(veil)} carries more than its class (or children); model it — the audit is out of date, not passing`)
-    const branch = [el, ...chain.slice(0, k)]
-    if (branch[branch.length - 1].getStart(HERO_SF) < veil.getStart(HERO_SF) || !branch.some(lifted))
-      throw new Error(`audit: .stage-hero-match-veil paints over ${where(el)}; give the surface position, or model the veil above it`)
-    return VEIL
-  }
-  return 0
 }
 
 const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
@@ -833,11 +783,11 @@ const rampA = (stops, t) => {
   return stops[stops.length - 1][1]
 }
 
-// ── the hero's THREE scrim layers, transcribed from source ────────────────
-// The first version of this file modelled only two and therefore reported a
-// failure that did not exist (the match numeral at "2.16:1" — really 6.01:1).
-// A partial layer model is worse than none: it produces confident wrong numbers.
-// .stage-hero-scrim, in index.css — first layer listed paints ON TOP.
+// ── the hero's scrim, read from source ───────────────────────────────────
+// .stage-hero-scrim, in index.css: two layers, the first listed painted ON
+// TOP. A partial layer model is worse than none: it produces confident wrong
+// numbers, so every layer the hero paints is either composited here or pinned
+// as not painted at this width.
 const scrim = cssValue('.stage-hero-scrim', 'background')
 /** A background's layers, split on its top-level commas. */
 function bgLayers(value) {
@@ -865,44 +815,31 @@ const HERO = {
   vert: parseLinearStops(scrim, 1),
 }
 // ── the hero's layers, pinned ─────────────────────────────────────────────
-// The text sits above the scrim, the glow and the corner vignette because its
-// two layers carry z-20 and those carry none, and those three composite in
-// tree order. All of that is the hero root's children, so it is read from them
-// and pinned: a layer added, removed or reordered, or a z-index on any of them
-// (a class, an inline style, or its index.css rules), dies rather than being
-// painted in an order this model does not know. A review showed each passing
-// unseen before: `z-30` on the scrim, a new `bg-white/40` overlay, `-z-10` on
-// the content row. Each entry names its layer by text its opening tag carries.
+// The text sits above the scrim because its layer carries z-20 and the scrim
+// carries none, and the layers under it composite in tree order. All of that
+// is the hero root's children, so it is read from them and pinned: a layer
+// added, removed or reordered, or a z-index on any of them (a class, an
+// inline style, or its index.css rules), dies rather than being painted in an
+// order this model does not know. A review showed each passing unseen before:
+// `z-30` on the scrim, a new `bg-white/40` overlay, `-z-10` on the content row.
+// Each entry names its layer by text its opening tag carries.
 //
-// The three layers the model composites are pinned for strength as well as
-// order: exactly the attributes and classes listed (`attrs`, `classes`), and an
-// inline style, where there is one, that sets `background` and nothing else.
-// The next review showed why order was not enough: `opacity-40` or `lg:hidden`
-// on the scrim left every figure as it was while 11 of 13 surfaces really
-// failed. The artwork layers and the base under them are left free: the black
-// and white frames stand in for whatever they paint. The two surface layers are
-// read as ancestors (`checkAncestors`) and for overlap (`checkLayerContents`).
-const LAYOUT = ['absolute', 'inset-0', 'pointer-events-none']
+// The two scrims are pinned for strength as well as order: exactly the
+// attributes and classes listed (`attrs`, `classes`). Order was not enough:
+// `opacity-40` or `lg:hidden` on the scrim left every figure as it was while
+// most surfaces really failed. The artwork layers and the base under them are
+// left free: the black and white frames stand in for whatever they paint,
+// and where the artwork does not reach (the left of a wide hero) the base is
+// the page ink, darker than either frame's verdict needs. The surface layer
+// is read as an ancestor (`checkAncestors`) and for overlap (NEIGHBOURS).
 const LAYERS = [
-  { what: 'brand-gradient base (under the artwork; the frames stand in for it)', tag: 'div', has: 'bg-gradient-to-br', free: true },
-  { what: 'settled backdrop (the artwork)', tag: 'img', has: 'className="stage-hero-img', free: true },
-  { what: 'incoming backdrop (the artwork)', tag: 'img', has: 'stage-hero-img is-incoming', free: true },
-  { what: 'scrim and its ::before feather', tag: 'div', has: 'stage-hero-scrim', attrs: ['className'], classes: ['stage-hero-scrim'] },
-  { what: 'purple glow', tag: 'div', has: 'mix-blend-screen', attrs: ['className', 'style'], classes: [...LAYOUT, 'mix-blend-screen', /^opacity-/] },
-  { what: 'top-right corner vignette', tag: 'div', has: 'radial-gradient(ellipse 42%', attrs: ['className', 'style'], classes: LAYOUT },
-  { what: 'match cluster', tag: 'div', has: 'flex flex-col items-center', z: '20', surfaces: true },
+  { what: 'page-ink base (under the artwork; the frames stand in for it)', tag: 'div', has: 'absolute inset-0 bg-surface-page', free: true },
+  { what: 'settled artwork', tag: 'img', has: 'className="stage-hero-img"', free: true },
+  { what: 'incoming artwork', tag: 'img', has: 'stage-hero-img is-incoming', free: true },
+  { what: 'scrim', tag: 'div', has: 'className="stage-hero-scrim"', attrs: ['className'], classes: ['stage-hero-scrim'] },
+  { what: "the phone's scrim (not painted at this width)", tag: 'div', has: 'className="stage-hero-scrim-phone"', attrs: ['className'], classes: ['stage-hero-scrim-phone'] },
   { what: 'content row', tag: 'div', has: 'stage-gutter', z: '20', surfaces: true },
 ]
-/** A pinned layer's inline background: the style must be `{{ background: '…' }}`
- *  and nothing else. */
-function layerBackground(el) {
-  const init = attrsOf(el).get('style')
-  const obj = init && ts.isJsxExpression(init) && init.expression && ts.isObjectLiteralExpression(init.expression) ? init.expression : null
-  const p = obj?.properties
-  if (!p || p.length !== 1 || !ts.isPropertyAssignment(p[0]) || p[0].name.getText(HERO_SF) !== 'background' || !ts.isStringLiteral(p[0].initializer))
-    throw new Error(`audit: ${where(el)}'s inline style is no longer exactly { background: '…' }; model it — the audit is out of date, not passing`)
-  return p[0].initializer.text
-}
 const LAYER_ELS = (() => {
   const els = []
   const collect = n => { if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) els.push(n); else ts.forEachChild(n, collect) }
@@ -931,7 +868,6 @@ const LAYER_ELS = (() => {
       const stray = own?.filter(t => !L.classes.some(c => (c instanceof RegExp ? c.test(t) : c === t)))
       if (!own || stray.length || L.classes.some(c => !(c instanceof RegExp) && !own.includes(c)))
         throw new Error(`audit: ${where(el)} (${L.what}) is no longer exactly ${L.classes.map(String).join(' ')}${stray?.length ? ` (it carries ${stray.join(' ')})` : ''}; model it — the audit is out of date, not passing`)
-      if (L.attrs.includes('style')) layerBackground(el)
     }
   })
   return els
@@ -939,135 +875,59 @@ const LAYER_ELS = (() => {
 const SURFACE_LAYERS = new Set(LAYER_ELS.filter((_, i) => LAYERS[i].surfaces))
 
 // The index.css rules the model reads its values from, pinned the same way:
-// exactly these rules, each with exactly its own selector at the top level (a
-// copy inside a media query would override it at some width unseen, and
-// `cssValue` reads only the first), and only these properties, those with a
-// pattern held to it. A review dimmed the scrim with `opacity: 0.4` in its own
-// rule, and overrode the veil's alpha to 0.15 in a media query, both unseen.
+// exactly these rules, and only these properties, those with a pattern held
+// to it. A review dimmed the scrim with `opacity: 0.4` in its own rule, and
+// overrode another's alpha in a media query, both unseen.
+//
+// Each scrim has ONE rule at the top level, which is what `cssValue` reads,
+// and ONE more inside a media query that may only hide it (`display: none`),
+// because the hero has two layouts and each scrim belongs to one. Which is
+// painted at the width this audit models is then a fact it checks, not
+// assumes: the wide scrim's hiding rule must NOT apply at VIEWPORT_W, and
+// the phone scrim's MUST, so the phone scrim is not composited here because
+// it is not there. (The phone layout is not modelled by this audit at all:
+// see what cannot be verified in the hero's own notes.)
 const PINNED_RULES = [
-  { selector: '.stage-hero-scrim', props: { position: /^absolute$/, inset: /^0$/, 'pointer-events': null, background: null } },
-  { selector: '.stage-hero-scrim::before', props: { content: null, position: /^absolute$/, inset: /^0 0 auto$/, height: null, background: null } },
-  { selector: '.stage-hero-match-veil', props: { position: /^absolute$/, inset: /^-28px$/, 'pointer-events': null, background: null } },
+  { selector: '.stage-hero-scrim', hiddenAtModelWidth: false,
+    props: { position: /^absolute$/, inset: /^0$/, 'pointer-events': null, background: null } },
+  { selector: '.stage-hero-scrim-phone', hiddenAtModelWidth: true,
+    props: { position: /^absolute$/, inset: /^0 0 auto 0$/, height: /^\d+px$/, 'pointer-events': null, background: null } },
 ]
-for (const cls of ['stage-hero-scrim', 'stage-hero-match-veil']) {
+/** Whether a media query this audit can read applies at VIEWPORT_W: the two
+ *  forms the stylesheet uses for a breakpoint, `(min-width: Npx)` and its
+ *  negation. Anything else dies. */
+function mediaAppliesAtModelWidth(params) {
+  const p = params.trim().replace(/\s+/g, ' ')
+  let m
+  if ((m = p.match(/^\(min-width: (\d+)px\)$/))) return VIEWPORT_W >= Number(m[1])
+  if ((m = p.match(/^not all and \(min-width: (\d+)px\)$/))) return VIEWPORT_W < Number(m[1])
+  throw new Error(`audit: a hero scrim is styled inside @media ${params}, a condition this audit cannot place at ${VIEWPORT_W}px — model it, do not pass`)
+}
+for (const pinned of PINNED_RULES) {
+  const cls = pinned.selector.slice(1)
   const got = CSS_RULES.get(cls) ?? []
-  const want = PINNED_RULES.filter(p => p.selector.startsWith(`.${cls}`))
-  const selectors = got.map(g => g.rule.selector)
-  if (got.length !== want.length || want.some(w => selectors.filter(s => s === w.selector).length !== 1))
-    throw new Error(`audit: index.css styles .${cls} with ${selectors.join(' | ') || 'nothing'}; this audit reads exactly ${want.map(w => w.selector).join(' | ')} — model the rest, do not pass`)
-  for (const { rule } of got) {
-    const w = want.find(x => x.selector === rule.selector)
-    if (rule.parent.type !== 'root') throw new Error(`audit: index.css's ${rule.selector} is inside @${rule.parent.name ?? rule.parent.type}; this audit reads it at the top level only`)
-    for (const d of declsOf(rule)) {
-      if (!(d.prop in w.props) || (w.props[d.prop] && !w.props[d.prop].test(d.value.trim())))
-        throw new Error(`audit: index.css's ${rule.selector} sets ${d.prop}: ${d.value}, which this audit does not model — the audit is out of date, not passing`)
-    }
+  const top = got.filter(g => g.rule.parent.type === 'root')
+  const inMedia = got.filter(g => g.rule.parent.type === 'atrule' && g.rule.parent.name === 'media' && g.rule.parent.parent.type === 'root')
+  if (top.length !== 1 || inMedia.length !== 1 || got.length !== 2 || got.some(g => g.pseudo || g.rule.selector !== pinned.selector))
+    throw new Error(`audit: index.css styles .${cls} with ${got.map(g => `${g.rule.parent.type === 'root' ? '' : `@${g.rule.parent.name} ${g.rule.parent.params} `}${g.rule.selector}`).join(' | ') || 'nothing'}; this audit reads exactly one top-level ${pinned.selector} and one copy inside a media query that hides it — model the rest, do not pass`)
+  for (const d of declsOf(top[0].rule)) {
+    if (!(d.prop in pinned.props) || (pinned.props[d.prop] && !pinned.props[d.prop].test(d.value.trim())))
+      throw new Error(`audit: index.css's ${pinned.selector} sets ${d.prop}: ${d.value}, which this audit does not model — the audit is out of date, not passing`)
   }
-}
-
-// The corner vignette is an INLINE style on its own div — which is why a grep of
-// index.css never found it:
-//   radial-gradient(ellipse 42% 48% at 100% 0%, rgba(<page ink>,0.72), transparent 70%)
-// It predates Phase 8 and exists for exactly this widget; its own comment says
-// so ("on a backdrop that's bright in this corner … the white score number +
-// ring vanished"). Radii are 42% of width and 48% of height, centred on the
-// TOP-RIGHT corner, ramping to transparent at 70% along the ray.
-const cornerDecl = layerBackground(LAYER_ELS[5]).match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at 100% 0%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
-if (!cornerDecl) throw new Error(`audit: the top-right corner vignette is no longer in ${SRC_HERO} in the expected form`)
-// Composited as page ink below (cornerAlpha feeds over(INK, ...)), so the
-// vignette's colour has to be the page ink, not merely have an alpha.
-if (!isPageInk(`rgba(${cornerDecl[3]})`)) throw new Error(`audit: the top-right corner vignette is rgba(${cornerDecl[3]}), not the page ink ${PAGE_INK_HEX} this audit composites — model the new colour, do not pass`)
-const CORNER = {
-  rx: Number(cornerDecl[1]) / 100,
-  ry: Number(cornerDecl[2]) / 100,
-  a0: Number(cornerDecl[3].split(',')[3]),
-  end: Number(cornerDecl[4]) / 100,
-}
-// The purple glow between the scrim and the vignette: a radial purple at
-// `opacity-30` under `mix-blend-screen`, which lightens whatever is beneath
-// it. The model left it out until a review composited it and measured the
-// left column's figures up to about 6% high. Read from its own element, which
-// LAYERS pins to its layout classes, `mix-blend-screen` and one `opacity-*`:
-// the gradient from its inline style, the opacity from its class.
-const GLOW = (() => {
-  const el = LAYER_ELS[4]
-  const m = layerBackground(el).match(/^radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at ([\d.]+)% ([\d.]+)%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)$/)
-  if (!m) throw new Error(`audit: the hero glow ${where(el)} is no longer a radial-gradient in the expected form`)
-  const ops = classBranches(el)[0].text.split(/\s+/).filter(t => /^opacity-/.test(t))
-  if (ops.length !== 1) throw new Error(`audit: the hero glow ${where(el)} needs exactly one opacity-* class, not ${ops.length}`)
-  const opacity = twOpacity(ops[0].slice(8), ops[0])
-  const c = parseColor(`rgba(${m[5]})`, where(el))
-  return { rx: Number(m[1]) / 100, ry: Number(m[2]) / 100, cx: Number(m[3]) / 100, cy: Number(m[4]) / 100,
-    rgb: c.rgb, a0: c.a * opacity, end: Number(m[6]) / 100 }
-})()
-// The fourth layer: .stage-hero-scrim::before, the top feather (Stage refresh
-// H1). A fixed-px band, so its alpha at a fractional y depends on the hero's
-// real height — read from the hero's own height utilities at the 1440x900 frame
-// the coordinates below were taken at (VIEWPORT_H), not assumed.
-const FEATHER = (() => {
-  const bg = cssValue('.stage-hero-scrim::before', 'background')
-  if (bgLayers(bg).length !== 1 || !/^linear-gradient\(\s*(?:180deg|to bottom)\s*,/.test(bg)) throw new Error('audit: the hero top feather is no longer one top-down (180deg) linear-gradient')
-  const h = cssValue('.stage-hero-scrim::before', 'height').match(/^([\d.]+)px$/)
-  if (!h) throw new Error('audit: the hero top feather height is no longer a px length')
-  const sizes = hero.match(/'relative w-full h-\[(\d+)vh\] min-h-\[(\d+)px\] max-h-\[(\d+)px\]/)
-  if (!sizes) throw new Error(`audit: the full hero's h-[Nvh] min-h-[px] max-h-[px] sizing is no longer in ${SRC_HERO}`)
-  const heroPx = Math.min(Number(sizes[3]), Math.max(Number(sizes[2]), (Number(sizes[1]) / 100) * VIEWPORT_H))
-  // `transparent 100%` has no rgba, so the last stop is parsed as alpha 0.
-  return { stops: parseLinearStops(bg, 0), px: Number(h[1]), heroPx }
-})()
-function featherAlpha(yFromBottom) {
-  const fromTop = (1 - yFromBottom) * FEATHER.heroPx
-  return fromTop >= FEATHER.px ? 0 : rampA(FEATHER.stops, fromTop / FEATHER.px)
-}
-
-function cornerAlpha(x, yFromBottom) {
-  const dx = (1 - x) / CORNER.rx
-  const dy = (1 - yFromBottom) / CORNER.ry
-  const d = Math.hypot(dx, dy)
-  if (d >= CORNER.end) return 0
-  return CORNER.a0 * (1 - d / CORNER.end)
-}
-
-/** The glow screened over `bg` at (x from left, y from bottom): screen is
- *  1 - (1 - glow)(1 - backdrop) per channel, then laid over the backdrop at the
- *  glow's alpha there (its gradient times the element's opacity). */
-function glowOver(x, yFromBottom, bg) {
-  const d = Math.hypot((x - GLOW.cx) / GLOW.rx, ((1 - yFromBottom) - GLOW.cy) / GLOW.ry)
-  if (d >= GLOW.end) return bg
-  const a = GLOW.a0 * (1 - d / GLOW.end)
-  return bg.map((b, i) => a * (1 - (1 - GLOW.rgb[i]) * (1 - b)) + (1 - a) * b)
+  const hide = declsOf(inMedia[0].rule)
+  if (hide.length !== 1 || hide[0].prop !== 'display' || hide[0].value.trim() !== 'none')
+    throw new Error(`audit: index.css's ${pinned.selector} inside @media ${inMedia[0].rule.parent.params} does more than hide it; model it — the audit is out of date, not passing`)
+  const hidden = mediaAppliesAtModelWidth(inMedia[0].rule.parent.params)
+  if (hidden !== pinned.hiddenAtModelWidth)
+    throw new Error(`audit: at ${VIEWPORT_W}px ${pinned.selector} is ${hidden ? 'hidden' : 'painted'}, and this audit models it as ${pinned.hiddenAtModelWidth ? 'hidden' : 'painted'} — re-model the hero's layers, do not pass`)
 }
 
 /** Composite the hero's layers at (x from left, y from bottom) over `frame`,
- *  in paint order: artwork, vertical ramp, horizontal ramp, top feather (the
- *  scrim's own ::before, so above both of its layers), glow, corner vignette. */
+ *  in paint order: artwork, then the scrim's vertical ramp, then its
+ *  horizontal one (the first listed layer of a background is the top one). */
 function heroBackdrop(x, yFromBottom, frame) {
-  let bg = over(INK, rampA(HERO.vert, yFromBottom), frame)
-  bg = over(INK, rampA(HERO.horiz, x), bg)
-  bg = over(INK, featherAlpha(yFromBottom), bg)
-  bg = glowOver(x, yFromBottom, bg)
-  return over(INK, cornerAlpha(x, yFromBottom), bg)
-}
-
-// The veil's rule is pinned with the scrim's (PINNED_RULES): it may only place
-// it and paint its background. The surfaces are credited the veil's plateau,
-// so the background's shape is pinned too: closest-side, flat to 72%, clear at
-// 100%, with only the plateau's alpha read. A review deleted the 72% stop, so
-// the veil faded from its centre and the eyebrow sat on about 0.32 of it,
-// while the audit still credited 0.72.
-const VEIL = (() => {
-  const v = cssValue('.stage-hero-match-veil', 'background')
-  // The veil is composited as page ink, so its three stops must BE page ink.
-  const ink = PAGE_INK_RGB.map(c => String.raw`\s*${c}`).join(',')
-  const m = v.match(new RegExp(String.raw`^radial-gradient\(\s*closest-side,\s*rgba\(${ink},\s*([\d.]+)\)\s+0%,\s*rgba\(${ink},\s*([\d.]+)\)\s+72%,\s*rgba\(${ink},\s*0\)\s+100%\s*\)$`))
-  if (!m || m[1] !== m[2]) throw new Error('audit: .stage-hero-match-veil is no longer a closest-side radial plateau, flat to 72% — model its shape, do not pass')
-  return Number(m[1])
-})()
-{
-  const veils = []
-  const find = n => { if (isVeil(n)) veils.push(n); ts.forEachChild(n, find) }
-  find(HERO_ROOT)
-  if (veils.length !== 1) throw new Error(`audit: the hero has ${veils.length} .stage-hero-match-veil elements; this audit models exactly one — a second paints over whatever follows it`)
+  const bg = over(INK, rampA(HERO.vert, yFromBottom), frame)
+  return over(INK, rampA(HERO.horiz, x), bg)
 }
 
 // Known answers for the class reader, run every time: a reader that quietly
@@ -1116,80 +976,73 @@ const VEIL = (() => {
 // Each surface's colour, alpha, size, weight and fill come from its element
 // (`text()`), found by an anchor that must occur exactly once in the hero's code;
 // the line reported is that element's, or for a title its className branch's.
-// x/y are fractions (x from the left edge, y from the BOTTOM edge), read off the
-// hero's own layout: the text column starts at --page-gutter (~3% at 1440px)
-// and the stack runs title → meta → description → buttons up from the lower
-// third. They are typed in, and moving an element does not move them.
+// x/y are fractions (x from the left edge, y from the BOTTOM edge) of the
+// hero at 1440x900, where it is 1440x440. They are typed in, and moving an
+// element does not move them.
+//
+// Each is the surface's WORST point, not its usual one. The scrim is weakest
+// to the right and to the top, so the point is the box's top right corner in
+// the tallest stack the markup allows: the text column is at most 620px wide
+// (680px for a child) from the 48px gutter, so it ends at x 0.464 (0.506),
+// and it is anchored to the bottom (36px), so a two-line title over a
+// two-line reason pushes everything above them up. Measured in a build
+// (render-A/measure-hero.js) for the usual stack and then raised by the
+// extra lines; a point that is wrong for a reason nobody checked is a coin
+// flip, not a measurement.
 const SURFACES = [
-  // lg:type-hero extrabold → large text, 3:1
-  { what: 'hero title', ...text('lg:type-hero'), x: 0.03, y: 0.40 },
-  // the browse variant, md:type-browse extrabold → large text
-  { what: 'browse hero title', ...text('md:type-browse'), x: 0.03, y: 0.40 },
-  // description, 16px at md+ → normal text, 4.5:1
-  { what: 'hero description', ...text('desc-${hero.id}'), x: 0.03, y: 0.27 },
-  // The compact band's "Featured: X — N titles" line. Every glyph on it is in a
-  // child span with its own colour; the line's own colour paints only the
-  // ellipsis line-clamp-1 adds when the line is cut short (Chromium draws that
-  // in the block's colour, not the last span's), so it is measured for that.
-  { what: 'meta line (its clamp ellipsis)', ...text('featured-${hero.id}'), x: 0.03, y: 0.33 },
-  // the spans INSIDE that line, which take its size
-  { what: 'meta label span ("Featured: ")', ...text('>Featured: <', 'featured-${hero.id}'), x: 0.03, y: 0.33 },
-  { what: 'meta title span', ...text('>{hero.title}</span>', 'featured-${hero.id}'), x: 0.03, y: 0.33 },
-  { what: 'meta count span (" — N titles")', ...text('{countLabel}</span>', 'featured-${hero.id}'), x: 0.03, y: 0.33 },
-  // the AI reason, 14px italic
-  { what: 'AI reason', ...text('reason-${hero.id}'), x: 0.03, y: 0.47 },
-  // the cold-start hint, in the same slot when there is no reason, 12px italic
-  { what: 'cold-start hint', ...text('to unlock personalized picks'), x: 0.03, y: 0.47 },
-  // genre/year line, 14px
-  { what: 'genre / year line', ...text('genre-${hero.id}'), x: 0.03, y: 0.52 },
-  // The "MATCH" / "SCORE" eyebrow and the percentage numeral. RIGHT
-  // side of the hero, near the top, where the horizontal ramp is at its WEAKEST
-  // (0.15 at 72%, 0.35 at 100%). Both sit over .stage-hero-match-veil, the local
-  // backing Phase 8 added precisely because this corner has no scrim worth the
-  // name — without it the eyebrow measured 1.22:1 and the numeral 2.16:1.
-  // `veilUnder` finds the veil from the tree; it is not listed here.
-  // Geometry derived from the cluster's `md:top-11` and its 52px right inset at
-  // this width + an 84px ring + a gap-1.5 + a 10px caption at 1440x900, not
-  // estimated: the earlier x:0.95,
-  // y:0.72 was off by 0.12-0.18 on y. It happened not to change any verdict
-  // (the vertical ramp is already 0 above y=0.55) but a sample point that is
-  // wrong for a reason you have not checked is a coin flip, not a measurement.
-  { what: 'MATCH/SCORE eyebrow', ...text("{showingPersonal ? 'Match' : 'Score'}"), x: 0.935, y: 0.844 },
-  { what: 'match numeral "NN%"', ...text('{matchScore}%'), x: 0.935, y: 0.904 },
-  { what: 'ring track vs backdrop', ...stroke('stroke="rgba('), x: 0.935, y: 0.904,
-    // Redundant encoding — see the note at the call site. The arc's purple end
-    // cannot clear 3:1 against any track that itself clears 3:1 above the
-    // backdrop; the value is carried by the numeral above and by the wrapper's
-    // aria-label. Tracked here so it stays visible, not asserted.
-    advisory: true },
-  // "Not tonight" control, bottom-right. The label is a span that takes its
-  // colour, size and fill from the button. Its 0.06 border is deliberately
-  // NOT audited as a 1.4.11 surface: the control is identified by a permanent
-  // visible text label, so the border is decoration. See the call site.
-  // y from the pb-9 bottom bar's real centre (~57px up), not the 0.15 first
-  // guessed — at which this measured 4.42:1 and looked like a failure. It was
-  // not one: at its actual position `text-white/60` was already 6.56:1. The
-  // /60 -> /75 change is harmless and mildly beneficial, but it was made on a
-  // bad number and this comment says so rather than keeping the credit.
-  { what: '"Not tonight" label', ...text('>Not tonight<', 'onClick={onNextPick}'), x: 0.93, y: 0.063 },
+  // 12px semibold uppercase, in the secondary ink → normal text, 4.5:1
+  { what: 'eyebrow', ...text('eyebrow-${hero.id}'), x: 0.178, y: 0.831 },
+  // lg:text-[72px] extrabold → large text, 3:1. Two lines of it reach the
+  // column's right edge and y 0.758.
+  { what: 'hero title', ...text('lg:text-[72px]'), x: 0.464, y: 0.758 },
+  // a long title, condensed and smaller, on the same two lines
+  { what: 'hero title (long)', ...text('stage-hero-title-long'), x: 0.464, y: 0.758 },
+  // The one line under the title: where the viewer is in it, why Aurora picked
+  // it, the cold-start hint, or the description. 17px, up to two lines.
+  { what: 'where the viewer is', ...text('where-${hero.id}'), x: 0.464, y: 0.415 },
+  { what: 'AI reason', ...text('reason-${hero.id}'), x: 0.464, y: 0.415 },
+  { what: 'cold-start hint', ...text('hint-${hero.id}'), x: 0.464, y: 0.415 },
+  { what: 'hero description', ...text('desc-${hero.id}'), x: 0.464, y: 0.415 },
+  // "29 min left", beside the progress bar, and the facts line in its place
+  { what: 'time left', ...text('left-${hero.id}'), x: 0.325, y: 0.267 },
+  { what: 'facts line', ...text('facts-${hero.id}'), x: 0.464, y: 0.267 },
+  // The quiet actions' labels: a span that takes its colour and size from its
+  // button, over the button's own translucent fill. The primary action is an
+  // opaque white pill (.stage-btn-primary): its label is not on the artwork.
+  { what: '"Episodes" / "Details" label', ...text('data-hero-secondary', "'Details of'"), x: 0.33, y: 0.191 },
+  { what: '"Watch together" label', ...text('data-hero-together', 'Watch ${hero.title} together'), x: 0.37, y: 0.191 },
+  // A child's hero: a bigger title, one line under it, bigger actions.
+  { what: "child's hero title", ...text('kids-title-${hero.id}'), x: 0.506, y: 0.709 },
+  { what: "child's hero line", ...text('kids-line-${hero.id}'), x: 0.506, y: 0.327 },
+  { what: "child's second action label", ...text('data-hero-kids-secondary', "'All episodes of'"), x: 0.40, y: 0.227 },
+  // The picks, on the RIGHT of the hero, where the horizontal ramp has run
+  // out (0 from 78%) and only the vertical one is left. The label's top is
+  // highest with four picks or fewer (one row of thumbs, each wider).
+  { what: "picks' label", ...text('id="tonight-picks-label"'), x: 0.664, y: 0.424 },
+  // over its own bg-black/60, which is what makes it readable on white art
+  { what: '"Surprise me" label', ...text('data-hero-surprise', 'Play one of tonight'), x: 0.957, y: 0.424 },
+  // A pick's title under its thumbnail: the one showing, and the others.
+  { what: "pick's title (showing)", ...text('truncate text-xs font-semibold text-white max-lg:sr-only'), x: 0.967, y: 0.118 },
+  { what: "pick's title", ...text('truncate text-xs font-medium text-ink max-lg:sr-only'), x: 0.967, y: 0.118 },
 ]
 
-// ── what else the two text layers hold ────────────────────────────────────
-// Every other element in the text's two layers (the buttons, badges, pill,
-// icons, the ring's arc) is read too, because it can reach measured text
-// without enclosing it, in two ways.
+// ── what else the text layer holds ────────────────────────────────────────
+// Every other element in the text's layer (the buttons, the progress bar,
+// the picks' controls and thumbnails, the icons) is read too, because it can
+// reach measured text without enclosing it, in two ways.
 //
 // Out of the flow: positioned absolute, fixed or sticky, offset (an inset,
 // physical or logical), transformed (a transform, or its own translate, scale
 // or rotate), moved along an offset path, pulled by a negative margin, or
 // drawing a ::before or ::after box, through a class, an inline style or its
 // index.css rules. Such an element can sit over
-// or under any text, so it dies unless it is the veil (modelled) or listed in
+// or under any text, so it dies unless it is listed in
 // OVERLAP_OK, matched by its tag and exact classes, with the reason it covers
 // no measured text; an entry that no longer matches dies as unneeded. A review
-// added a purple halo behind the match ring (`absolute inset-0
-// bg-purple-400/40`): the eyebrow measured 4.22:1 with it while the audit
-// passed unchanged.
+// added a purple halo behind a figure on the old hero (`absolute inset-0
+// bg-purple-400/40`): the text beside it measured 4.22:1 with it while the
+// audit passed unchanged. Nothing in this hero's text layer is out of the
+// flow, so the list is empty and stays so until something earns a place.
 //
 // Past its own box, in the flow: a box-shadow glow, from index.css's
 // box-shadow or its -webkit- alias. Those are measured (GLOWS below), a dark
@@ -1202,11 +1055,8 @@ const SURFACES = [
 // and every class in it is classified, INERT, or an index.css class whose
 // rules this audit reads. Its inline style may size it or dash an SVG stroke,
 // nothing else. What a component renders is not read, and neither is SVG
-// geometry: a shape drawn over the ring's track is not seen.
-const OVERLAP_OK = [
-  { tag: 'span', classes: 'absolute left-0 right-0 bottom-0 h-[3px] bg-white/25',
-    why: "the Resume button's 3px progress bar, along that button's own bottom edge, and its fill's 8px glow below it, where nothing is measured; the button holds no measured text" },
-]
+// geometry.
+const OVERLAP_OK = []
 
 /** Every class string an element's className can produce: a literal, either
  *  branch of a condition, and each combination of a template's slots, so a
@@ -1358,13 +1208,13 @@ function neighbourOf(el) {
   return res
 }
 
-/** The elements in the text layers that enclose no surface, each with what
+/** The elements in the text layer that enclose no surface, each with what
  *  `neighbourOf` found, allowed overlays' contents skipped. */
 const NEIGHBOURS = (() => {
   const ENCLOSING = new Set(SURFACES.flatMap(s => s.nodes))
   const out = [], used = new Set()
   const visit = n => {
-    if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && !ENCLOSING.has(n) && !isVeil(n)) {
+    if ((ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) && !ENCLOSING.has(n)) {
       const nb = neighbourOf(n)
       if (nb.out) {
         const strs = classStrings(n)
@@ -1401,8 +1251,9 @@ const NEIGHBOURS = (() => {
 // it is positioned or makes a stacking context (opacity below 1, isolation, a
 // filter or backdrop-filter, a transform, will-change, a blend mode,
 // containment), and lifted elements paint after the rest, in tree order among
-// themselves: the pill's backdrop-filter lifts it, and Chromium paints its
-// glow over the genre line beside it. Between two elements that are not
+// themselves: on the hero before this one a pill's backdrop-filter lifted it,
+// and Chromium painted its glow over the line of text beside it. Between two
+// elements that are not
 // lifted, G paints after S's text when G comes later in the tree and sits in
 // something painted all at once (a flex or grid item, or an inline-block, as
 // every glow here does); otherwise a later G may paint in the background phase,
@@ -1957,16 +1808,10 @@ for (const s of SURFACES) {
 
 const need = s => (s.nonText ? 3.0 : (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5)
 
-/** The backdrop a surface actually sits on: scrim, then any local veil, then any
- *  translucent fills of its own element and its named parent. */
+/** The backdrop a surface actually sits on: the scrim, then the translucent
+ *  fills of its named parent and its own element, in that order. */
 function backdropFor(s, frame) {
   let bg = heroBackdrop(s.x, s.y, frame)
-  // The veil sits UNDER these surfaces — which is only true since the eyebrow
-  // was given `relative`. Before that the veil painted over it (CSS 2.1 App. E
-  // step 6 vs step 5) and the honest figure for the eyebrow was 1.35:1, not the
-  // 6.94:1 this function reported. Modelling a layer on the wrong side of the
-  // text is the same class of error as omitting one.
-  if (s.veil) bg = over(INK, s.veil, bg)
   for (const f of s.fills ?? []) bg = over(f.rgb, f.a, bg)
   return bg
 }

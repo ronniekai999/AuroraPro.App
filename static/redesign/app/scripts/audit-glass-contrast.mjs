@@ -7,11 +7,14 @@
 // the hero and meaningless anywhere else, so extending it would have meant bolting
 // a second, unrelated model into it.
 //
-// WHAT IT EXISTS FOR. The vibe search bar's placeholder sat at 3.18-3.53:1 — under
-// the 4.5 floor — for THREE PHASES, and the on-art audit was structurally
-// incapable of seeing it: the bar is not in HeroSection. A human reviewer found it
-// by hand in Phase 10. Every other panel-and-glass surface in the app is still in
-// that position, and this closes the class rather than the instance.
+// WHAT IT EXISTS FOR. The "describe a vibe" search bar that used to sit on Home
+// had a placeholder at 3.18-3.53:1 — under the 4.5 floor — for THREE PHASES, and
+// the on-art audit was structurally incapable of seeing it: the bar was not in
+// HeroSection. A human reviewer found it by hand in Phase 10. Every other
+// panel-and-glass surface in the app was in that position, and this closes the
+// class rather than the instance. That bar has since been folded into search;
+// the fields a description is typed into now (the top bar's, and the search
+// page's own on a phone) are measured below in its place.
 //
 // THE MODEL. Text on glass has a knowable backdrop, unlike text on artwork: an
 // opaque page ink, then one or more translucent panel fills, then the text's own
@@ -516,16 +519,25 @@ function rootToken(name) {
   return parseColor(resolveVars(m[1].trim()))
 }
 
-/** The text colour an element's OWN tag sets: `text-white/NN`, or a token via
- *  `text-[color:var(--x)]`. Returns { rgb, a }. Dies when the tag sets neither,
- *  rather than guessing an inherited colour. */
+/** The text colour an element's OWN tag sets: `text-white/NN`, a token via
+ *  `text-[color:var(--x)]`, or a neutral-system utility (`text-ink-2`),
+ *  followed through tailwind.config.js to its token as `twFill` follows a
+ *  fill. Returns { rgb, a }. Dies when the tag sets none, or more than one of
+ *  the last kind, rather than guessing an inherited colour. */
 function twText(file, anchor) {
   const tag = tagOf(file, anchor)
   const tok = tag.match(/(?:^|[\s"'`{])text-\[color:var\((--[\w-]+)\)\]/)
   if (tok) return rootToken(tok[1])
   const w = tag.match(/(?:^|[\s"'`{])text-white\/(\d+)/)
   if (w) return { rgb: W, a: Number(w[1]) / 100 }
-  throw new Error(`audit: no text-white/N or text-[color:var(--…)] on the element anchored by "${anchor}" in ${file}`)
+  const ink = [...tag.matchAll(/(?:^|[\s"'`{])text-ink(?:-([23]))?(?=[\s"'`}])/g)]
+  if (ink.length === 1) {
+    const mapped = twConfig.theme?.extend?.colors?.ink?.[ink[0][1] ?? 'DEFAULT']
+    const v = typeof mapped === 'string' && mapped.match(/^var\((--[\w-]+)\)$/)
+    if (!v) throw new Error(`audit: tailwind maps text-ink${ink[0][1] ? `-${ink[0][1]}` : ''} to ${mapped}, not a var(--token) — the audit is out of date, not passing`)
+    return rootToken(v[1])
+  }
+  throw new Error(`audit: no text-white/N, text-[color:var(--…)] or single text-ink utility on the element anchored by "${anchor}" in ${file}`)
 }
 
 /** The fill on an element's own tag, in one of the three forms the app writes
@@ -567,7 +579,6 @@ const INK = (() => {
 })()
 
 // Panel fills, each named by the rule that owns it.
-const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
 // What the top bar's text can sit on. Unscrolled, the bar is over the page
 // itself. Scrolled, content passes under it and the [data-scrolled] fill is
@@ -635,6 +646,7 @@ const ONB_INK = (() => {
 // sound only while the panel's fill is opaque, which is asserted below: a
 // translucent panel would let the view beneath reach the text.
 const PAL = 'src/components/SearchPalette.tsx'
+const SEARCH = 'src/components/SearchView.tsx'
 const PAL_SCRIM = [[twFill(PAL, 'data-palette-scrim')]]
 const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
 if (PAL_PANEL[0][0].a !== 1) throw new Error(`audit: the palette panel's fill is no longer opaque (alpha ${PAL_PANEL[0][0].a}); the view beneath the scrim would show through the text's backdrop — model it, do not pass`)
@@ -747,8 +759,6 @@ const EXEMPT = [
     why: 'a request\'s icon-only delete button' },
   { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
     why: 'the dots between the key legend\'s entries' },
-  { file: 'src/components/SearchView.tsx', anchor: '<Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
-    why: 'the illustration above "No results found"' },
   // ── member pages, voice, the match tool ──
   { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="user" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
     why: 'the illustration above a member page\'s error message' },
@@ -966,16 +976,29 @@ const SURFACES = [
     px: 14,
     on: () => [over(W, twAlpha(ONB, 'A podcast, a forum', 'bg-white'), ONB_INK)],
   },
-  // ── The vibe search bar. THE case this script exists for. ──
+  // ── The search page's own field, where a phone types a title or a
+  //    description (the top bar has no field there). The text this script
+  //    was first written for was a search placeholder, so both of today's
+  //    are measured: this one on the field's own fill, read from its tag. ──
   {
-    what: 'vibe bar placeholder', where: `${APP} (.convo-search input)`,
-    color: W, alpha: () => twAlpha(APP, 'placeholder:text-white', 'placeholder:text-white'),
-    px: 14, on: () => stack(CONVO),
+    what: 'search page field placeholder', where: `${SEARCH} (page field)`,
+    color: () => cssColor('input::placeholder, textarea::placeholder', 'color').rgb,
+    alpha: () => cssColor('input::placeholder, textarea::placeholder', 'color').a,
+    px: 16,
+    on: () => { const f = twFill(SEARCH, 'role="search"'); return [over(f.rgb, f.a, INK)] },
   },
   {
-    what: 'vibe bar "Clear"', where: `${APP} (.convo-search)`,
-    color: W, alpha: () => twAlpha(APP, 'aria-label="Clear search"', 'text-white'),
-    px: 12, on: () => stack(CONVO),
+    // The line that offers the search by description, beside its button.
+    what: 'search page "These match the title."', where: `${SEARCH} (describe offer)`,
+    color: () => twText(SEARCH, 'data-search-describe').rgb,
+    alpha: () => twText(SEARCH, 'data-search-describe').a,
+    px: 14, on: () => [INK],
+  },
+  {
+    what: 'search page empty-state hint', where: `${SEARCH} (no title matches)`,
+    color: () => twText(SEARCH, 'If that describes what you want to watch').rgb,
+    alpha: () => twText(SEARCH, 'If that describes what you want to watch').a,
+    px: 14, on: () => [INK],
   },
   // ── The top bar. Its search field is where "describe a mood" lives, so
   //    its placeholder is the text this script was first written for. The
@@ -1018,15 +1041,6 @@ const SURFACES = [
     px: 12,
     // The tab bar's own fill over a white frame: content scrolls under it too.
     on: () => { const bar = parseColor(cssValue('.stage-tabbar', 'background')); return [over(bar.rgb, bar.a, W)] },
-  },
-  // ── The bar's submit chip: text on a tint on the bar on the ink. Three
-  //    composites deep, which is exactly the case eyeballing gets wrong. ──
-  {
-    what: 'vibe bar "↵ Search" chip', where: `${APP} (.convo-search)`,
-    color: W,
-    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-white'),
-    px: 12,
-    on: () => stack(CONVO).map(bg => over(W, twAlpha(APP, 'aria-label="Search"', 'bg-white'), bg)),
   },
   // ── The search palette. ──
   {

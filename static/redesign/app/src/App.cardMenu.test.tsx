@@ -49,6 +49,8 @@ const TWO = item(304, 'Two Episodes', 'show')
 const SPECIALS = item(305, 'Has Specials', 'show')
 // Its first season's files are gone; only a Special can be played.
 const PRUNED = item(306, 'Pruned First', 'show')
+// Part-way through an episode of season 2; season 1's files are gone.
+const AHEAD = item(307, 'Second Season In', 'show')
 const FOUND = item(401, 'Found By Search')
 const SAVED = item(501, 'Saved Title')
 const COLLECTED = item(601, 'In A Collection')
@@ -57,12 +59,17 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role }
   const asks: string[] = []
   const parties: unknown[] = []
+  const holds = new Map<string, Promise<void>>()
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
     asks.push(p)
+    // A held answer waits to be let go; a request abandoned meanwhile
+    // rejects when its answer would have arrived, as fetch's does.
+    const held = holds.get(p)
+    if (held) await held
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
@@ -82,18 +89,25 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
         { media_item_id: HALF.id, title: HALF.title, type: 'movie', year: 2020, position_ms: 600_000, duration_ms: 6_000_000, percent_complete: 10 },
         { media_item_id: TWO.id, episode_id: 3041, season_number: 1, episode_number: 1, title: TWO.title, type: 'show', year: 2020, position_ms: 300_000, duration_ms: 3_000_000, percent_complete: 10 },
         { media_item_id: TWO.id, episode_id: 3042, season_number: 1, episode_number: 2, title: TWO.title, type: 'show', year: 2020, position_ms: 900_000, duration_ms: 3_000_000, percent_complete: 30 },
+        { media_item_id: AHEAD.id, episode_id: 3072, season_number: 2, episode_number: 5, title: AHEAD.title, type: 'show', year: 2020, position_ms: 900_000, duration_ms: 3_000_000, percent_complete: 30 },
       ])
     }
     if (p === `/api/media/${TWO.id}/seasons/1/episodes`) {
       return json([3041, 3042].map((id, i) => ({ id, season_id: 1, media_item_id: TWO.id, episode_number: i + 1, files: [{ id: id + 5000, resolution: '1080p' }] })))
     }
+    // Where the show starts (season 1), where this viewer is (season 2), and
+    // a season with nothing to play (season 3): three different answers.
+    if (p === `/api/media/${AHEAD.id}/seasons`) return json([{ id: 71, media_item_id: AHEAD.id, season_number: 1 }, { id: 72, media_item_id: AHEAD.id, season_number: 2 }, { id: 73, media_item_id: AHEAD.id, season_number: 3 }])
+    if (p === `/api/media/${AHEAD.id}/seasons/1/episodes`) return json([{ id: 3071, season_id: 71, media_item_id: AHEAD.id, episode_number: 1, files: [{ id: 8071, resolution: '1080p' }] }])
+    if (p === `/api/media/${AHEAD.id}/seasons/2/episodes`) return json([{ id: 3072, season_id: 72, media_item_id: AHEAD.id, episode_number: 5, files: [{ id: 8072, resolution: '1080p' }] }])
+    if (p === `/api/media/${AHEAD.id}/seasons/3/episodes`) return json([{ id: 3073, season_id: 73, media_item_id: AHEAD.id, episode_number: 1, files: [] }])
     if (p === `/api/media/${PRUNED.id}/seasons`) return json([{ id: 60, media_item_id: PRUNED.id, season_number: 0 }, { id: 61, media_item_id: PRUNED.id, season_number: 1 }])
     if (p === `/api/media/${PRUNED.id}/seasons/1/episodes`) return json([{ id: 3061, season_id: 61, media_item_id: PRUNED.id, episode_number: 1, files: [] }])
     if (p === `/api/media/${PRUNED.id}/seasons/0/episodes`) return json([{ id: 3060, season_id: 60, media_item_id: PRUNED.id, episode_number: 1, files: [{ id: 8060, resolution: '1080p' }] }])
     // The title page's own record of a title.
     const byId = p.match(/^\/api\/media\/(\d+)$/)
     if (byId) {
-      const it = [HALF, FRESH, SHOW, TWO, SPECIALS, PRUNED].find(x => x.id === Number(byId[1]))
+      const it = [HALF, FRESH, SHOW, TWO, SPECIALS, PRUNED, AHEAD].find(x => x.id === Number(byId[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     // Season 0 is listed first, as the lowest number.
@@ -124,7 +138,14 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   vi.stubGlobal('WebSocket', class { readyState = 3; close() {} send() {} addEventListener() {} removeEventListener() {} })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
-  return { asks, parties }
+  return {
+    asks, parties,
+    hold(path: string) {
+      let release!: () => void
+      holds.set(path, new Promise<void>(done => { release = done }))
+      return () => { holds.delete(path); release() }
+    },
+  }
 }
 
 function renderAt(path: string, opts: { bound?: number; role?: string } = {}) {
@@ -225,9 +246,11 @@ describe('every page that draws a card gives it the menu', () => {
 })
 
 describe('what the menu offers follows the session', () => {
+  // A profile with a content limit has the calmer Tonight: two shelves,
+  // "Movies" and "Shows", and no "Recently Added".
   const offered = async (opts: { bound?: number; role?: string }) => {
     renderAt('/', opts)
-    return (await openMenu('Never Started', await rail('Recently Added'))).rows
+    return (await openMenu('Never Started', await rail(opts.bound === 2 ? 'Movies' : 'Recently Added'))).rows
   }
 
   it('an unrestricted profile, not an admin: Watch together, no Refresh metadata', async () => {
@@ -309,6 +332,64 @@ describe('Watch together, from a card', () => {
     expect(server.parties[0]).toMatchObject({ media_item_id: SPECIALS.id, episode_id: 3051 })
   })
 
+  // A show whose first season's files are gone but whose Specials can be
+  // played. The page used to open on that first season: every row listed
+  // had nothing to play, its Play started a Special it was not showing, and
+  // its party was created with no episode, which nobody can join.
+  it('the title page of a show whose first season has nothing to play opens on the season that does, and its party gets that episode', async () => {
+    const server = renderAt(`/title/${PRUNED.id}`)
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    // Season 0 is listed first and is the one showing.
+    await waitFor(() => expect(within(seasons).getAllByRole('button').map(b => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']), find)
+    expect(server.asks).toContain(`/api/media/${PRUNED.id}/seasons/1/episodes`)
+    expect(server.asks).toContain(`/api/media/${PRUNED.id}/seasons/0/episodes`)
+    fireEvent.click(await screen.findByRole('button', { name: 'Watch together' }, find))
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const actions = within(composer).getAllByRole('button')
+    fireEvent.click(actions[actions.length - 1])
+    await waitFor(() => expect(server.parties).toHaveLength(1), find)
+    // 3060: what the card's Play starts for this show, below.
+    expect(server.parties[0]).toMatchObject({ media_item_id: PRUNED.id, episode_id: 3060 })
+  })
+
+  it('and when the viewer has moved the page to a season with nothing to play, the party still gets the show\'s episode', async () => {
+    const server = renderAt(`/title/${PRUNED.id}`)
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    await waitFor(() => expect(within(seasons).getAllByRole('button').map(b => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']), find)
+    const before = server.asks.filter(a => a === `/api/media/${PRUNED.id}/seasons/1/episodes`).length
+    fireEvent.click(within(seasons).getAllByRole('button')[1])
+    await waitFor(() => expect(within(seasons).getAllByRole('button').map(b => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']), find)
+    // The page now lists season 1, whose one episode has no file.
+    await waitFor(() => expect(server.asks.filter(a => a === `/api/media/${PRUNED.id}/seasons/1/episodes`).length).toBeGreaterThan(before), find)
+    await new Promise(done => setTimeout(done, 50))
+    fireEvent.click(await screen.findByRole('button', { name: 'Watch together' }, find))
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const actions = within(composer).getAllByRole('button')
+    fireEvent.click(actions[actions.length - 1])
+    await waitFor(() => expect(server.parties).toHaveLength(1), find)
+    expect(server.parties[0]).toMatchObject({ media_item_id: PRUNED.id, episode_id: 3060 })
+  })
+
+  // The viewer's own place in the show, wherever the page has been moved to.
+  it('and the party of a show the viewer is part-way through opens on their episode, from any season of the page', async () => {
+    const server = renderAt(`/title/${AHEAD.id}`)
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    // The page opens on the season they are in.
+    await waitFor(() => expect(within(seasons).getByRole('button', { name: 'Season 2' }).getAttribute('aria-pressed')).toBe('true'), find)
+    // They look at season 3, where nothing can be played.
+    fireEvent.click(within(seasons).getByRole('button', { name: 'Season 3' }))
+    await waitFor(() => expect(within(seasons).getByRole('button', { name: 'Season 3' }).getAttribute('aria-pressed')).toBe('true'), find)
+    await waitFor(() => expect(server.asks).toContain(`/api/media/${AHEAD.id}/seasons/3/episodes`), find)
+    await new Promise(done => setTimeout(done, 50))
+    fireEvent.click(await screen.findByRole('button', { name: 'Watch together' }, find))
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const actions = within(composer).getAllByRole('button')
+    fireEvent.click(actions[actions.length - 1])
+    await waitFor(() => expect(server.parties).toHaveLength(1), find)
+    // Their episode: not the show's first (3071), and not no episode.
+    expect(server.parties[0]).toMatchObject({ media_item_id: AHEAD.id, episode_id: 3072 })
+  })
+
   it('starts a movie\'s party with no episode, and reads none', async () => {
     const server = renderAt('/')
     const { menu } = await openMenu('Never Started', await rail('Recently Added'))
@@ -368,14 +449,65 @@ describe('Play on the poster and the menu agree', () => {
   })
 
   // A season whose files are gone is passed over rather than failing the
-  // play: the show still has something to start on.
-  it('starts a show whose first season has no files on what it does have', async () => {
+  // play: the show still has something to start on. The viewer is told, or
+  // they are dropped into a Special with no word of why.
+  it('starts a show whose first season has no files on what it does have, and says so', async () => {
     renderAt('/')
     const recent = await rail('Recently Added')
     fireEvent.click(await within(recent).findByRole('button', { name: 'Play Pruned First' }, find))
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.getAttribute('data-season')).toBe('0')
     expect(player()!.getAttribute('data-episode')).toBe('3060')
+    expect(screen.getByText('Earlier episodes of "Pruned First" are not available. Starting at the Specials, episode 1.')).toBeInTheDocument()
+  })
+
+  it('starts a show whose first episode has no file on the next, and says which', async () => {
+    renderAt('/')
+    const recent = await rail('Recently Added')
+    fireEvent.click(await within(recent).findByRole('button', { name: 'Play Harbor Lights' }, find))
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    expect(player()!.getAttribute('data-episode')).toBe('3022')
+    expect(screen.getByText('Episode 1 of "Harbor Lights" is not available. Starting at episode 2.')).toBeInTheDocument()
+  })
+
+  // The title page's own Play is the same handler: the same word of why.
+  it('says so from the title page\'s Play as well', async () => {
+    const server = renderAt(`/title/${SHOW.id}`)
+    // The page has its episodes (one season: no season chips to wait for).
+    await waitFor(() => expect(server.asks).toContain(`/api/media/${SHOW.id}/seasons/1/episodes`), find)
+    fireEvent.click(await screen.findByRole('button', { name: 'Play' }, find))
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    expect(player()!.getAttribute('data-episode')).toBe('3022')
+    expect(screen.getByText('Episode 1 of "Harbor Lights" is not available. Starting at episode 2.')).toBeInTheDocument()
+  })
+
+  it('says nothing of the kind when a show starts at its first episode', async () => {
+    renderAt('/')
+    const recent = await rail('Recently Added')
+    fireEvent.click(await within(recent).findByRole('button', { name: 'Play Has Specials' }, find))
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    expect(screen.queryByText(/not available/)).toBeNull()
+  })
+
+  // Hovering Play warms the stream it would start, which for a show means
+  // reading its seasons until one has something to play. Those reads are
+  // the hover's: they stop when the viewer leaves the page.
+  it('stops looking for the episode to warm once the viewer has left the title page', async () => {
+    const server = renderAt(`/title/${PRUNED.id}`)
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    await waitFor(() => expect(within(seasons).getAllByRole('button').map(b => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']), find)
+    await new Promise(done => setTimeout(done, 50))
+    server.asks.length = 0
+    const release = server.hold(`/api/media/${PRUNED.id}/seasons/1/episodes`)
+    fireEvent.mouseEnter(await screen.findByRole('button', { name: 'Play' }, find))
+    // Not vacuous: the warm's lookup is out, at the first season.
+    await waitFor(() => expect(server.asks).toContain(`/api/media/${PRUNED.id}/seasons/1/episodes`), find)
+    fireEvent.click(document.querySelector('header .stage-tab[data-nav="home"]')!)
+    await rail('Recently Added')
+    release()
+    await new Promise(done => setTimeout(done, 150))
+    // The next season was never read for it.
+    expect(server.asks).not.toContain(`/api/media/${PRUNED.id}/seasons/0/episodes`)
   })
 
   it('plays a title with no position from the start', async () => {

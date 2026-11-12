@@ -195,19 +195,21 @@ describe('profileSummary', () => {
   it('states only what the profile record holds', () => {
     expect(profileSummary({ is_default: false })).toBe('No limit')
     expect(profileSummary({ is_default: false, max_age_rating: ' PG ' })).toBe('Up to PG')
-    expect(profileSummary({ is_default: false, has_pin: true, max_age_rating: 'PG-13' })).toBe('Locked with a PIN · up to PG-13')
+    expect(profileSummary({ is_default: false, has_pin: true, max_age_rating: 'PG-13' })).toBe('Up to PG-13 · locked with a PIN')
   })
 
   // The limit is the fact a person choosing a profile most needs. It used to
   // be left out whenever there was anything else to say, so the same profile
   // read "Default" in the identity menu and "Default · no limit" in the
-  // picker, which had to write its own line.
-  it('always states the limit, "no limit" included', () => {
-    expect(profileSummary({ is_default: true })).toBe('Default · no limit')
-    expect(profileSummary({ is_default: true, has_pin: true })).toBe('Default · locked with a PIN · no limit')
-    expect(profileSummary({ is_default: false, has_pin: true })).toBe('Locked with a PIN · no limit')
-    expect(profileSummary({ is_default: true, max_age_rating: 'PG' })).toBe('Default · up to PG')
+  // picker, which had to write its own line. And it leads the line: at the
+  // end, it was the part a narrow row cut off.
+  it('always states the limit, "no limit" included, and states it first', () => {
+    expect(profileSummary({ is_default: true })).toBe('No limit · default')
+    expect(profileSummary({ is_default: true, has_pin: true })).toBe('No limit · default · locked with a PIN')
+    expect(profileSummary({ is_default: false, has_pin: true })).toBe('No limit · locked with a PIN')
+    expect(profileSummary({ is_default: true, max_age_rating: 'PG' })).toBe('Up to PG · default')
+    expect(profileSummary({ is_default: true, has_pin: true, max_age_rating: 'PG' })).toBe('Up to PG · default · locked with a PIN')
     // Whitespace is no limit, as the app reads a ceiling elsewhere.
-    expect(profileSummary({ is_default: true, max_age_rating: '  ' })).toBe('Default · no limit')
+    expect(profileSummary({ is_default: true, max_age_rating: '  ' })).toBe('No limit · default')
   })
 })
