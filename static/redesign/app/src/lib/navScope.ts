@@ -133,9 +133,11 @@ export function mayRenderHidden(scope: NavScope, startup: { settled: boolean; as
  *  with a PIN", "Up to PG", "No limit". Only what the profile record holds. */
 export function profileSummary(p: Pick<Profile, 'is_default' | 'has_pin' | 'max_age_rating'>): string {
   const limit = p.max_age_rating?.trim()
-  const facts = [p.is_default ? 'default' : null, p.has_pin ? 'locked with a PIN' : null, limit ? `up to ${limit}` : null]
+  // The limit is always stated, "no limit" included: it is the fact a
+  // person choosing a profile most needs, and a line that left it out for a
+  // default or locked profile read as if nothing were known about it.
+  const facts = [p.is_default ? 'default' : null, p.has_pin ? 'locked with a PIN' : null, limit ? `up to ${limit}` : 'no limit']
     .filter((f): f is string => f !== null)
-  if (facts.length === 0) return 'No limit'
   const line = facts.join(' · ')
   return line[0].toUpperCase() + line.slice(1)
 }
