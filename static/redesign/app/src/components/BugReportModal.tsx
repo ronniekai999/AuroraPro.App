@@ -177,6 +177,27 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   const [attachment, setAttachment] = useState<File | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The field a refusal is about, when it is about one (the form's own
+  // checks of the title and the description), with the refusal's words: it
+  // holds only while those are the words on screen, so a later refusal
+  // about something else (a capture that failed) is not pinned on a field.
+  const [fieldRefusal, setFieldRefusal] = useState<{ field: 'title' | 'description'; text: string } | null>(null)
+  const errorField = fieldRefusal && error?.replace(/\u00a0$/, '') === fieldRefusal.text ? fieldRefusal.field : null
+  // A refusal with the words of the one already on screen differs from it
+  // by a trailing space: a live region whose text does not change is not
+  // read out again, and the same press deserves the same answer aloud.
+  const refuse = (text: string, field: 'title' | 'description' | null = null) => {
+    setFieldRefusal(field ? { field, text } : null)
+    setError(prev => (prev === text ? `${text}\u00a0` : text))
+  }
+  const actionsRef = useRef<HTMLDivElement | null>(null)
+  const attachTriggerRef = useRef<HTMLButtonElement | null>(null)
+  // A refusal adds a line above Cancel and Send. The panel scrolls, and its
+  // offset stays where it was: the new line pushed Send half out of view
+  // with the focus still on it. The row is brought back into view.
+  useEffect(() => {
+    if (error) actionsRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [error])
   // 2026-05-27 — Post-submit success state. When non-null, the modal
   // body is replaced with a thank-you panel showing the issue number
   // (NOT a link — the GitHub repo is private and the URL would be a
@@ -620,6 +641,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
+    // The remove button goes with the attachment it removed; the focus goes
+    // to the control that attaches one.
+    attachTriggerRef.current?.focus()
   }
 
   // Deep-debug #27 — Cancel during submit aborts the request via
@@ -922,25 +946,26 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     // Send stays focusable while a report is out (a disabled button drops
     // the focus it holds), so a second press is refused here.
     if (submittingRef.current) return
-    setError(null)
     const trimmedTitle = title.trim()
     const trimmedDesc = description.trim()
     if (!trimmedTitle) {
-      setError('Title is required.')
+      refuse('Title is required.', 'title')
       return
     }
     if (!trimmedDesc) {
-      setError('Description is required.')
+      refuse('Description is required.', 'description')
       return
     }
     if (trimmedTitle.length > MAX_TITLE_LEN) {
-      setError(`Title exceeds ${MAX_TITLE_LEN} characters.`)
+      refuse(`Title exceeds ${MAX_TITLE_LEN} characters.`, 'title')
       return
     }
     if (trimmedDesc.length > MAX_DESC_LEN) {
-      setError(`Description exceeds ${MAX_DESC_LEN} characters.`)
+      refuse(`Description exceeds ${MAX_DESC_LEN} characters.`, 'description')
       return
     }
+    setError(null)
+    setFieldRefusal(null)
     submittingRef.current = true
     setSubmitting(true)
     const ac = new AbortController()
@@ -973,7 +998,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       // Aborts are user-initiated (Cancel); don't surface them as
       // errors. AbortError comes from fetch when signal.aborted.
       if (err && (err as Error).name === 'AbortError') return
-      setError(err instanceof Error ? err.message : 'Submit failed')
+      refuse(err instanceof Error && err.message ? err.message : 'The report could not be sent.')
     } finally {
       submittingRef.current = false
       setSubmitting(false)
@@ -1098,7 +1123,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 </svg>
               </div>
               <div className="text-ink text-sm">
-                <p>Submitted. Aurora's team will triage from here.</p>
+                <p>Sent. Aurora's team will take it from here.</p>
                 <p className="text-ink-2 text-xs mt-1">
                   Reference: <span className="font-mono text-ink">issue #{submittedResult.issue_number}</span>
                 </p>
@@ -1130,7 +1155,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           >
             <strong>Admin notice — GitHub token issue:</strong>{' '}
             {tokenHealthReason || 'The configured PAT failed its most recent health check.'}{' '}
-            Users won't be able to submit bug reports until this is resolved. See{' '}
+            Nobody can send a bug report until this is resolved. See{' '}
             <code className="font-mono">docs/bug-report-setup.md</code>.
           </div>
         )}
@@ -1153,7 +1178,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               readOnly={submitting}
               disabled={capturing || recording}
               placeholder="So we can credit you in the issue thread"
-              className="w-full disabled:opacity-50"
+              className="w-full disabled:opacity-50 read-only:opacity-60"
             />
           </div>
 
@@ -1167,15 +1192,17 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               ref={titleInputRef}
               type="text"
               value={title}
-              onChange={e => setTitle(e.target.value)}
+              onChange={e => { setTitle(e.target.value); if (errorField === 'title') setError(null) }}
               maxLength={MAX_TITLE_LEN}
               required
+              aria-invalid={errorField === 'title'}
+              aria-describedby={errorField === 'title' ? 'bug-error' : undefined}
               // Read-only, not disabled, while the report is sent: a disabled
               // field drops the focus it holds.
               readOnly={submitting}
               disabled={capturing || recording}
               placeholder="e.g. Continue Watching card jumps to wrong episode"
-              className="w-full disabled:opacity-50"
+              className="w-full disabled:opacity-50 read-only:opacity-60"
             />
             <p className="text-ink-2 text-xs mt-1 tabular-nums">
               {title.length} / {MAX_TITLE_LEN}
@@ -1190,16 +1217,18 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             <textarea
               id="bug-desc"
               value={description}
-              onChange={e => setDescription(e.target.value)}
+              onChange={e => { setDescription(e.target.value); if (errorField === 'description') setError(null) }}
               maxLength={MAX_DESC_LEN}
               required
+              aria-invalid={errorField === 'description'}
+              aria-describedby={errorField === 'description' ? 'bug-error' : undefined}
               // Read-only, not disabled, while the report is sent: a disabled
               // field drops the focus it holds.
               readOnly={submitting}
               disabled={capturing || recording}
               rows={6}
               placeholder="What did you expect to happen? What actually happened? Steps to reproduce?"
-              className="w-full disabled:opacity-50 resize-y min-h-[120px]"
+              className="w-full disabled:opacity-50 read-only:opacity-60 resize-y min-h-[120px]"
             />
             <p className="text-ink-2 text-xs mt-1 tabular-nums">
               {description.length} / {MAX_DESC_LEN}
@@ -1208,13 +1237,13 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
 
           {/* Attachment */}
           <div>
-            {/* Deep-debug L5 — label htmlFor points at the visible
-                trigger button (not the sr-only file input), so
-                clicking the label focuses the actual visible control
-                instead of an invisible element. */}
-            <label htmlFor="bug-attachment-trigger" className="block text-ink text-sm font-semibold mb-1">
+            {/* The heading of a group of three buttons, not the label of
+                one of them: as a <label> for the first it became that
+                button's name, so "Choose file" was announced as
+                "Screenshot or recording (optional, max 25 MB)". */}
+            <p id="bug-attachment-label" className="block text-ink text-sm font-semibold mb-1">
               Screenshot or recording <span className="font-normal text-ink-2">(optional, max 25 MB)</span>
-            </label>
+            </p>
             {/* 2026-05-27 polish — three matching outlined buttons in a
                 consistent row. Native file <input> is hidden behind a
                 custom-styled "Choose file" button so all three options
@@ -1237,7 +1266,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               aria-hidden="true"
               className="sr-only"
             />
-            <div className="flex items-center gap-2 flex-wrap">
+            <div role="group" aria-labelledby="bug-attachment-label" className="flex items-center gap-2.5 flex-wrap">
               {/* Custom-styled file-picker trigger. Matches Capture /
                   Record visually. Forwards click to the hidden native
                   <input> so the browser's picker still opens.
@@ -1247,6 +1276,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   the custom button has to declare it). */}
               <button
                 id="bug-attachment-trigger"
+                ref={attachTriggerRef}
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={submitting || capturing || recording}
@@ -1341,7 +1371,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             <p className="text-warn text-xs mt-1 leading-snug">
               Captures show whatever is on screen now — library, currently playing media, profile info.
               If you Record screen and choose to share tab or system audio in the browser's share
-              dialog, that audio is recorded into the clip too. Review the thumbnail below before submitting.
+              dialog, that audio is recorded into the clip too. Review the thumbnail below before sending.
             </p>
             {attachment && (
               <div className="mt-2 flex items-center gap-3 p-2 rounded-control bg-surface-raised">
@@ -1404,7 +1434,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               <>
                 {' '}Screenshots and recordings may also show personal data
                 (your library, currently playing media, profile info) —
-                review what you're attaching before submitting.
+                review what you're attaching before sending.
                 {attachment.type.startsWith('video/') && (
                   <>
                     {' '}If you shared tab or system audio in the screen-share
@@ -1416,17 +1446,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             )}
           </div>
 
-          {/* Error — aria-live so screen readers announce validation
-              failures + server errors. */}
-          {error && (
-            <div
-              className="text-danger-ink text-sm leading-snug"
-              role="alert"
-              aria-live="polite"
-            >
-              {error}
-            </div>
-          )}
+          {/* A refusal: the form's own checks, a capture that failed, the
+              server's answer. An alert, always in the page so that its
+              words arriving are what is announced. */}
+          <p id="bug-error" role="alert" className={error ? 'text-danger-ink text-sm leading-snug' : 'sr-only'}>
+            {error ?? ''}
+          </p>
 
           {/* Phase 2 (deep-debug #10) — sr-only aria-live region so
               screen readers hear capture progress. Visible text stays
@@ -1436,7 +1461,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           </p>
 
           {/* Actions */}
-          <div className="flex items-center justify-end gap-2 pt-2">
+          <div ref={actionsRef} className="flex flex-wrap items-center justify-end gap-2 pt-2">
             {/* Deep-debug #27 — Cancel stays enabled during submit
                 so a slow GitHub can be aborted (the AbortController
                 cancels the in-flight fetch via handleCancel).
@@ -1514,8 +1539,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             ping animation. The static dot + countdown text still
             carry the recording-state meaning. */}
         <span aria-hidden="true" className="relative inline-flex items-center justify-center w-3 h-3">
-          <span className="absolute inset-0 rounded-full bg-[var(--danger-ink)] motion-safe:animate-ping opacity-75" />
-          <span className="relative inline-block w-3 h-3 rounded-full bg-[var(--danger-ink)]" />
+          <span className="absolute inset-0 rounded-full bg-danger-ink motion-safe:animate-ping opacity-75" />
+          <span className="relative inline-block w-3 h-3 rounded-full bg-danger-ink" />
         </span>
         <span className="text-ink text-sm font-medium tabular-nums">
           {/* Deep-debug M3 — clamp at 1 so the countdown never

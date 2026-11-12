@@ -4,7 +4,7 @@
 // to whom, and where the focus is while a report is sent.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BugReportSubmitResult } from '@/lib/api'
 
@@ -23,11 +23,9 @@ function setup(props: Partial<Parameters<typeof BugReportButton>[0]> = {}) {
   const view = render(<BugReportButton prefillName="morgan" onToast={onToast} onRefreshConfig={onRefreshConfig} {...props} />)
   return { onToast, onRefreshConfig, view }
 }
-const launcher = () => screen.getByRole('button', { name: 'Report bug', hidden: true })
-// The button's inline `bottom` is a calc() over a custom property, which
-// jsdom's computed style cannot resolve; the pointer-events check that reads
-// it is skipped (nothing here is about pointer-events).
-const POINTER = { pointerEventsCheck: 0 } as const
+// As a person finds it: by role and name, in the accessibility tree. A
+// button that is `display: none` or hidden from it is not found.
+const launcher = () => screen.getByRole('button', { name: 'Report bug' })
 
 async function fill(user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) {
   await user.type(within(dialog).getByLabelText(/^Title/), 'Wrong episode opens')
@@ -36,7 +34,7 @@ async function fill(user: ReturnType<typeof userEvent.setup>, dialog: HTMLElemen
 
 describe('the bug report button', () => {
   it('opens the dialog with the focus on the title, asks for the config again, and gives the focus back when it closes', async () => {
-    const user = userEvent.setup(POINTER)
+    const user = userEvent.setup()
     const { onRefreshConfig } = setup()
     expect(screen.queryByRole('dialog')).toBeNull()
     await user.click(launcher())
@@ -52,33 +50,49 @@ describe('the bug report button', () => {
   // Hidden, not unmounted: a recording in flight must outlive a player
   // opening over the page.
   it('stays mounted, with its dialog, while it is hidden', async () => {
-    const user = userEvent.setup(POINTER)
+    const user = userEvent.setup()
     const { view, onToast } = setup()
     await user.click(launcher())
+    expect(launcher().style.display).toBe('')
     view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} hidden />)
-    // By title and by selector: jsdom cannot compute the hidden button's
-    // style, which a query by role and name needs.
+    // Out of the accessibility tree, and still in the page. By its title:
+    // an element that is not displayed has no accessible name to be found
+    // by.
+    expect(screen.queryByRole('button', { name: 'Report bug' })).toBeNull()
     expect(screen.getByTitle('Report a bug or share feedback').style.display).toBe('none')
-    expect(document.querySelector('[role="dialog"]')).toHaveTextContent('Report a bug')
+    expect(screen.getByRole('dialog', { name: 'Report a bug' })).toBeInTheDocument()
+  })
+
+  // On a phone the button floats over the end of the page, and the page
+  // leaves room for it there while it shows (index.css reads this).
+  it('tells the page while it is on it, and not while it is hidden or gone', () => {
+    const { view, onToast } = setup()
+    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
+    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} hidden />)
+    expect(document.documentElement).not.toHaveAttribute('data-bug-launcher')
+    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} />)
+    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
+    view.unmount()
+    expect(document.documentElement).not.toHaveAttribute('data-bug-launcher')
   })
 
   // The server sends the token's health only to a session with admin
   // powers, and App passes it on only to one: with none, nothing is said.
   it('shows the token warning only when the token is known to be failing', async () => {
-    const user = userEvent.setup(POINTER)
+    const user = userEvent.setup()
     const { view, onToast } = setup()
     await user.click(launcher())
     expect(screen.queryByText(/GitHub token issue/)).toBeNull()
     view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} tokenHealthy />)
     expect(screen.queryByText(/GitHub token issue/)).toBeNull()
     view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} tokenHealthy={false} tokenHealthReason="GitHub answered 401." />)
-    expect(screen.getByRole('alert')).toHaveTextContent('Admin notice — GitHub token issue: GitHub answered 401.')
+    expect(screen.getByText(/GitHub token issue/).closest('[role="alert"]')).toHaveTextContent('Admin notice — GitHub token issue: GitHub answered 401. Nobody can send a bug report until this is resolved.')
   })
 })
 
 describe('sending a report', () => {
   it('keeps the focus on Send while the report is out, sends it once, and ends on Done', async () => {
-    const user = userEvent.setup(POINTER)
+    const user = userEvent.setup()
     let land: (r: BugReportSubmitResult) => void = () => {}
     submitBugReport.mockImplementationOnce(() => new Promise<BugReportSubmitResult>(resolve => { land = resolve }))
     const { onToast } = setup()
@@ -108,7 +122,7 @@ describe('sending a report', () => {
   })
 
   it('says a report that was refused, keeps what was written, and can be sent again', async () => {
-    const user = userEvent.setup(POINTER)
+    const user = userEvent.setup()
     submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
     const { onToast } = setup()
     await user.click(launcher())
@@ -117,8 +131,13 @@ describe('sending a report', () => {
     const send = within(dialog).getByRole('button', { name: 'Send report' })
     send.focus()
     await user.keyboard('{Enter}')
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('GitHub did not accept the report')
-    expect(within(dialog).getByRole('button', { name: 'Send report' })).toHaveFocus()
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    // By attribute as well as by where the focus is: jsdom leaves the focus
+    // on a button that becomes disabled, where a browser drops it.
+    const again = within(dialog).getByRole('button', { name: 'Send report' })
+    expect(again).toHaveFocus()
+    expect(again).not.toBeDisabled()
+    expect(again).toHaveAttribute('aria-disabled', 'false')
     expect(within(dialog).getByLabelText(/^Title/)).toHaveValue('Wrong episode opens')
     expect(within(dialog).getByLabelText(/^Title/)).not.toHaveAttribute('readonly')
     expect(onToast).not.toHaveBeenCalled()
@@ -127,15 +146,98 @@ describe('sending a report', () => {
     expect(submitBugReport).toHaveBeenCalledTimes(2)
   })
 
-  it('sends nothing without a title and a description', async () => {
-    const user = userEvent.setup(POINTER)
+  // Two presses before the page has drawn the first one's "Sending…".
+  it('sends one report for two presses in the same tick', async () => {
+    const user = userEvent.setup()
+    submitBugReport.mockReturnValue(new Promise(() => {}))
     setup()
     await user.click(launcher())
     const dialog = screen.getByRole('dialog')
-    await user.type(within(dialog).getByLabelText(/^Title/), '   ')
-    await user.type(within(dialog).getByLabelText(/^Description/), 'Something')
-    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Title is required.')
+    await fill(user, dialog)
+    const send = within(dialog).getByRole('button', { name: 'Send report' })
+    // Both inside one act(): nothing is drawn, and no effect runs, between
+    // the two presses.
+    act(() => { send.click(); send.click() })
+    expect(submitBugReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('ties a missing title or description to its field, says it again for a second press, and lets go when the field is typed in', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    const title = within(dialog).getByLabelText(/^Title/)
+    const description = within(dialog).getByLabelText(/^Description/)
+    const alert = dialog.querySelector('#bug-error') as HTMLElement
+    expect(alert).toHaveAttribute('role', 'alert')
+    const send = within(dialog).getByRole('button', { name: 'Send report' })
+    // Spaces only: a field left empty is stopped by the browser's own
+    // "fill this in" before the form's check is reached.
+    await user.type(title, '   ')
+    await user.type(description, 'Something')
+    await user.click(send)
+    expect(alert).toHaveTextContent('Title is required.')
+    expect(alert).not.toHaveAttribute('aria-live')
+    expect(title).toHaveAttribute('aria-invalid', 'true')
+    expect(title).toHaveAccessibleDescription('Title is required.')
+    expect(description).not.toHaveAttribute('aria-invalid', 'true')
     expect(submitBugReport).not.toHaveBeenCalled()
+    // The same press gets the same answer, in words that are not the same
+    // string: a live region whose text has not changed is not read again.
+    const first = alert.textContent
+    await user.click(send)
+    expect(alert.textContent).not.toBe(first)
+    expect(alert.textContent?.trim()).toBe('Title is required.')
+    expect(title).toHaveAttribute('aria-invalid', 'true')
+    await user.type(title, 'Now it has one')
+    expect(title).not.toHaveAttribute('aria-invalid', 'true')
+    expect(alert).toHaveTextContent('')
+    await user.clear(description)
+    await user.type(description, '  ')
+    await user.click(send)
+    expect(alert).toHaveTextContent('Description is required.')
+    expect(description).toHaveAttribute('aria-invalid', 'true')
+    expect(title).not.toHaveAttribute('aria-invalid', 'true')
+    expect(submitBugReport).not.toHaveBeenCalled()
+  })
+
+  // A server's refusal is about no one field.
+  it('marks no field for a report the server refused', async () => {
+    const user = userEvent.setup()
+    submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    expect(within(dialog).getByLabelText(/^Title/)).not.toHaveAttribute('aria-invalid', 'true')
+    expect(within(dialog).getByLabelText(/^Description/)).not.toHaveAttribute('aria-invalid', 'true')
+  })
+
+  // The remove button goes with the attachment it removed.
+  it('hands the focus to the attach control when an attachment is removed', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    const input = dialog.querySelector('input[type="file"]') as HTMLInputElement
+    await user.upload(input, new File(['%PDF-1.4 not really'], 'trace.webm', { type: 'video/webm' }))
+    const remove = await within(dialog).findByRole('button', { name: 'Remove attachment' })
+    remove.focus()
+    await user.keyboard('{Enter}')
+    expect(within(dialog).queryByRole('button', { name: 'Remove attachment' })).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Choose file' })).toHaveFocus()
+  })
+
+  // The three ways to attach are a group with a heading, each named by its
+  // own words.
+  it('names each attach control by what it says', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(launcher())
+    const group = within(screen.getByRole('dialog')).getByRole('group', { name: /^Screenshot or recording/ })
+    expect(within(group).getAllByRole('button').map(b => b.textContent?.trim())).toEqual(['Choose file', 'Capture this page· PNG', 'Record screen· WebM 30s'])
+    expect(within(group).getByRole('button', { name: 'Choose file' })).toBeInTheDocument()
   })
 })

@@ -129,15 +129,16 @@ Restart Aurora to pick up the env changes.
 ## Step 3 — Verify
 
 Sign in to Aurora as any authenticated user. You should see a small
-"Report bug" pill in the bottom-right corner of any view. Clicking it
-opens the modal.
+"Report bug" button in the bottom-right corner of any view. Clicking it
+opens the dialog.
 
 To smoke-test the full flow:
 1. Fill in title + description
 2. Optionally attach a small PNG screenshot
-3. Submit
-4. Toast should show `Bug reported — issue #N created. <URL>`
-5. Click the URL to confirm the issue exists in your repo with labels
+3. Press "Send report"
+4. The dialog should say "Thanks, got it" with the issue's number, and a
+   toast should show `Bug reported as issue #N. Thank you.`
+5. Open that issue in your repo to confirm it exists with labels
    `bug` and `user-report`
 
 ## What gets stored where

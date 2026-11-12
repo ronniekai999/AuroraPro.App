@@ -19,7 +19,7 @@
 // server/notif panels (z-[45]), and the toast column (z-[200]). It sits
 // 1.25rem above the corner, plus the phone's tab bar where there is one.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { BugReportModal } from './BugReportModal'
 import type { BugReportSubmitResult } from '@/lib/api'
 
@@ -55,6 +55,16 @@ interface Props {
 
 export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, tokenHealthReason, onRefreshConfig }: Props) {
   const [modalOpen, setModalOpen] = useState(false)
+  // While the button is on the page, the page says so on its root: on a
+  // phone the button floats over the end of the page, and the page leaves
+  // room there so its last row can be scrolled clear of it (index.css,
+  // `html[data-bug-launcher]`).
+  useEffect(() => {
+    if (hidden) return
+    const root = document.documentElement
+    root.setAttribute('data-bug-launcher', '')
+    return () => root.removeAttribute('data-bug-launcher')
+  }, [hidden])
 
   const handleSubmitted = (result: BugReportSubmitResult) => {
     // 2026-05-27 — Dropped the window.open(issue_url) — Aurora's
@@ -91,11 +101,10 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
         // (App's ToastContainer). `display: none`, not an unmount, while
         // `hidden`: the dialog's state must outlive a player opening over
         // it (see the note at the top of this file).
-        style={{
-          bottom: 'calc(1.25rem + var(--tabbar-space, 0px))',
-          ...(hidden ? { display: 'none' } : {}),
-        }}
-        className="fixed right-4 z-[40] inline-flex h-11 items-center gap-2 rounded-control bg-surface-raised-2 px-3.5 text-[13px] font-medium text-ink-2 shadow-[shadow:var(--shadow-modal)] transition-colors hover:text-ink sm:right-6"
+        // `bottom` is a class, not an inline style: its height and its gap
+        // are the figures index.css reserves at the end of the page.
+        style={hidden ? { display: 'none' } : undefined}
+        className="fixed bottom-[calc(1.25rem+var(--tabbar-space,0px))] right-6 z-[40] inline-flex h-11 items-center gap-2 rounded-control bg-surface-raised-2 px-3.5 text-[13px] font-medium text-ink-2 shadow-[shadow:var(--shadow-modal)] transition-colors hover:text-ink"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
             Bug icon = stylized beetle with antennae and legs (Feather's
