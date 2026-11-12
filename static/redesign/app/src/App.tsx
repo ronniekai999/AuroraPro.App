@@ -5706,6 +5706,31 @@ export default function App() {
     setHeroOnLead(true)
     setHomeHero(null)
   }, [activeProfileId])
+  // Nobody is signed in: the hero, Continue Watching and the hero's wait for
+  // it are nobody's. Sign out clears them in resetUserState, and on an
+  // account with profiles the profile going to null does (the effect above
+  // and the switch's reset). A session that EXPIRES while the app knows no
+  // profile for the account comes through neither: expiry is a bare
+  // setUser(false), and the profile is null before and after. Whoever
+  // signed in next on the tab was then handed all of it: the hero led at
+  // once with the title the last Continue Watching answer named (or, for
+  // another account, once its own slow answer outran the wait), over picks
+  // the rotation had kept turning while nobody was signed in.
+  useEffect(() => {
+    if (user !== false) return
+    heroLoadRef.current++
+    heroPoolRef.current = []
+    setHeroPool(pool => (pool.length ? [] : pool))
+    setHeroPersonalization(null)
+    setHeroSlateToken(undefined)
+    setHeroIndex(0)
+    setHeroOnLead(true)
+    setHomeHero(null)
+    setContinueItems(items => (items.length ? [] : items))
+    setContinueFor(null)
+    continueItemsRef.current = []
+    forgetHeroLeadWait()
+  }, [user, forgetHeroLeadWait])
   // A switch also drops everything else App keeps that the server filtered
   // by the previous profile: the browse grids, Continue Watching and the
   // conversational rail (each refetches for the new profile; a failed fetch

@@ -421,12 +421,20 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   is one visit's fact: a sign-out and a profile switch forget it, with the
   mark that the viewer is in the hero (`forgetHeroLeadWait`, called
   wherever Continue Watching's own answer is forgotten), so a return to the
-  same user and profile waits again. An answer that arrives after the four
-  seconds takes the hero over only while the hero is still on the entry it
-  opened on and the viewer has done nothing in it (pointer or focus in it,
-  a pick chosen, the rotation paused). Once the rotation has moved on (its
-  first tick is nine seconds after it starts) the title comes up when the
-  rotation wraps round to it, and for a viewer in the hero not at all;
+  same user and profile waits again. A session that expires is a bare
+  `setUser(false)`, not `resetUserState`, and while the app knows no
+  profile for the account no profile changes either, so one effect clears
+  the hero (its picks, its place in the slate, the catalog's stand-in),
+  Continue Watching and the wait whenever nobody is signed in: the next
+  sign-in on the tab used to be handed the last answer's title as the
+  hero's lead. That effect covers Tonight's hero only; what else that path
+  leaves in the tab is a gap older than this (see Known gaps). An answer
+  that arrives after the four seconds takes the hero over only while the
+  hero is still on the entry it opened on and the viewer has done nothing
+  in it (pointer or focus in it, a pick chosen, the rotation paused).
+  Otherwise the title comes up when the rotation next wraps round to it
+  (its first tick is nine seconds after it starts; it does not run while
+  the pointer or focus is in the hero, or once the viewer has paused it);
   either way it is the first card of Continue Watching. A touch or
   screen-reader viewer is not in the hero until they press something in
   it, so for them a late answer can change the title between aiming and
@@ -451,9 +459,11 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   browser's snapshot again, which is every change of user or profile, and
   on sign-out), and holds the titles the server listed; a listed title's
   card can still be drawn from this browser's copy of it. Pinned by
-  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`; of the two calls
-  that forget the wait, only the switch's is pinned alone (after a sign-out
-  the switch's reset runs too, so the test there fails only with both gone).
+  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`. Of what forgets
+  the wait, the switch's call and the signed-out effect are each pinned
+  alone (a switch away and back; an expiry on an account with no profile);
+  the call in `resetUserState` is not, since after a sign-out the other two
+  run as well.
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
@@ -934,6 +944,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     keeps writing progress for the outgoing profile and is refused.
   - The SPA does not re-read the session's profile after a 403
     `profile_restricted` on a data route.
+  - A session that expires (`SESSION_EXPIRED_EVENT`) signs the tab out with
+    a bare `setUser(false)`; `resetUserState` does not run. On an account
+    with profiles the profile going to null runs the switch's resets. While
+    the app knows no profile for the account (a new account before its
+    first progress write, or a tab that has not listed the profiles since)
+    nothing does, beyond Home's rails (`railsUserRef`), the notification
+    count, and Tonight's hero, Continue Watching and wait (the signed-out
+    effect). What else App keeps for the previous user on that path (the
+    browse grids, an open title) has not been audited: the next sign-in on
+    the tab may be shown it until its own answers land.
 
 ### Member profiles and follows
 

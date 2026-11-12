@@ -47,8 +47,10 @@ interface Options {
   saved?: ReturnType<typeof item>[]
   /** The request for that list fails. */
   savedFails?: boolean
+  /** An account with no profile: the session acts as the server's stand-in. */
+  noProfiles?: boolean
 }
-function stubServer({ bound = 1, unfinished = [LEFT_RECORD], picks = [PICK_A, PICK_B, PICK_C], refreshed, saved = [], savedFails = false }: Options = {}) {
+function stubServer({ bound = 1, unfinished = [LEFT_RECORD], picks = [PICK_A, PICK_B, PICK_C], refreshed, saved = [], savedFails = false, noProfiles = false }: Options = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   const exposures: { query: string; body: unknown }[] = []
   const parties: unknown[] = []
@@ -72,8 +74,10 @@ function stubServer({ bound = 1, unfinished = [LEFT_RECORD], picks = [PICK_A, PI
     if (!signedIn) return json({ error: { code: 401, message: 'signed out' } }, 401)
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
-    if (p === '/api/profiles') return json([PARENT, KID])
-    if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
+    if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, KID])
+    if (p === '/api/profiles/active') {
+      return noProfiles ? json({ error: { code: 404, message: 'no profile' } }, 404) : json(bound === 1 ? PARENT : KID)
+    }
     if (p === '/api/me/hero') {
       const rebuilt = url.searchParams.get('refresh') === '1' ? refreshed : undefined
       if (rebuilt === 'fails') return json({ error: 'unavailable' }, 503)
@@ -134,6 +138,13 @@ function stubServer({ bound = 1, unfinished = [LEFT_RECORD], picks = [PICK_A, PI
     exposures, parties, answered, searches,
     /** From now on the profile's own list cannot be read. */
     failSaved() { listFails = true },
+    /** The server ends the session: every request is refused until the next
+     *  sign-in, and the app is told its session expired, as api.ts tells it
+     *  when a refresh is rejected. */
+    expire() {
+      signedIn = false
+      act(() => { window.dispatchEvent(new Event('aurora:session-expired')) })
+    },
     hold(path: string) {
       let release!: () => void
       holds.set(path, new Promise<void>(done => { release = done }))
@@ -289,6 +300,43 @@ describe('what leads Tonight', () => {
     // The hero opened on the title to resume: no commit showed a pick first.
     expect(page.commits.slice(since).map(c => c.heroTitle).filter(Boolean).every(t => t === 'Left Unfinished')).toBe(true)
   })
+
+  // A session that expires leaves by another door than Sign out (the app
+  // just stops having a user), and on an account with no profile nothing
+  // about the profile changes for a switch's reset to see. Whoever signs in
+  // next on the tab must not be handed what Continue Watching last answered,
+  // nor the fact that the wait for it once ran out: the hero waits for this
+  // sign-in's own answer, and if that never comes it leads with a pick, not
+  // with the title the answer before the expiry named.
+  it('forgets Continue Watching and the wait when the session expires on an account with no profile', async () => {
+    const page = renderTonight({ noProfiles: true })
+    const release = page.hold('/api/progress/continue')
+    // Not vacuous: the wait runs out, and a pick goes up.
+    await screen.findByRole('button', { name: 'Details of Pick Alpha' }, { timeout: 8000 })
+    release()
+    await screen.findByRole('button', { name: 'Details of Left Unfinished' }, find)
+
+    page.expire()
+    const username = await screen.findByPlaceholderText('Enter username', {}, find)
+    // This sign-in's Continue Watching never answers.
+    page.hold('/api/progress/continue')
+    const since = page.commits.length
+    const picks = page.answered.filter(p => p === '/api/me/hero').length
+    fireEvent.change(username, { target: { value: 'ronnie' } })
+    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    // The picks and the rails have landed again; only Continue Watching is out.
+    await waitFor(() => expect(page.answered.filter(p => p === '/api/me/hero').length).toBeGreaterThan(picks), find)
+    await screen.findAllByText('Only In The Catalog', undefined, find)
+    await new Promise(done => setTimeout(done, 300))
+    // Waiting again, not showing what it had before the session expired.
+    expect(hero()).toBeNull()
+    // The wait runs out again: a pick leads, and the title from before the
+    // expiry is nowhere on the page.
+    await screen.findByRole('button', { name: 'Details of Pick Alpha' }, { timeout: 8000 })
+    expect(page.commits.slice(since).map(c => c.heroTitle).filter(Boolean).every(t => t === 'Pick Alpha')).toBe(true)
+    expect(page.commits.slice(since).filter(c => c.text.includes('Left Unfinished'))).toEqual([])
+  }, 30_000)
 
   it('is the first pick when nothing is unfinished, and stops waiting when that request fails', async () => {
     renderTonight({ unfinished: [] })
