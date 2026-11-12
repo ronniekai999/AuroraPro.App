@@ -832,6 +832,262 @@ html[data-effects="reduced"] .stage-topnav {
 }
 .search-recent-row:hover { background: var(--surface-raised); }
 
+/* ── The search page ────────────────────────────────────────────────
+   Results on the left; beside them, from the width two columns fit at, what
+   can be done with the search and what was searched for lately. Below that
+   width the second column wraps under the first (a phone, a narrow window).
+   SearchView sets no display on these through utilities, so each class
+   that lays out children declares its own. */
+.search-cols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 40px 48px;
+}
+.search-main {
+  flex: 999 1 640px;
+  min-width: 0;
+}
+.search-aside {
+  flex: 1 1 280px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+@media not all and (min-width: 768px) {
+  .search-aside { max-width: none; }
+}
+/* The one line that says what was found, and how. */
+.search-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.search-section { margin-top: 40px; }
+.search-filters + .search-section,
+.search-status + .search-section { margin-top: 32px; }
+.search-h2 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+/* A phone's sections are headed as its lists are: a small label. */
+@media not all and (min-width: 768px) {
+  .search-h2 {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .search-section { margin-top: 24px; }
+}
+/* A phone's titles are rows (MediaListRow), a little larger here than in
+   the Library's list: the poster is what a search is recognised by. The
+   weight is the row's own rules' plus one, so these win wherever they sit. */
+.media-list[data-search-rows] .media-list-row { height: 88px; }
+.media-list[data-search-rows] .media-list-row .mlr-thumb { width: 48px; height: 72px; }
+.media-list[data-search-rows] .media-list-row .mlr-title { font-size: 16px; }
+.search-h2-note {
+  margin-left: 10px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--ink-2);
+}
+/* The best match: a row of its own. The title's button holds the art and
+   the words; Play and More sit beside it. */
+.search-best {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+.search-best-open {
+  flex: 1 1 420px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  border-radius: var(--radius-art);
+  text-align: left;
+  cursor: pointer;
+}
+.search-best-art {
+  position: relative;
+  flex: none;
+  width: 256px;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-art);
+  background: var(--surface-raised-2);
+}
+.search-best-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.search-best-text {
+  flex: 1;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.search-best-title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.search-best:hover .search-best-title { text-decoration: underline; }
+.search-best-facts {
+  font-size: 14px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+/* What it is about: two lines at most. */
+.search-best-line {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  color: var(--ink);
+}
+.search-best-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.search-best-more {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.search-best-more:hover { background: var(--surface-raised-2); color: var(--ink); }
+/* Collections that hold the words: a row each, as wide as fits. */
+.search-colgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.search-colrow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 88px;
+  padding: 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.search-colrow:hover { background: var(--surface-raised-2); }
+.search-colrow:hover .search-colrow-name { text-decoration: underline; }
+.search-colrow-art {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  overflow: hidden;
+  border-radius: var(--radius-chip);
+}
+.search-colrow-art img {
+  display: block;
+  width: 43px;
+  height: 64px;
+  object-fit: cover;
+  background: var(--surface-raised-2);
+}
+.search-colrow-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.search-colrow-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.search-colrow-facts {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+/* The second column: small headings, rows to press, a closing hint. */
+.search-aside-h {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.search-action-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  width: calc(100% + 24px);
+  margin-inline: -12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-art);
+  font-size: 14px;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.search-action-row:hover { background: var(--surface-raised); }
+.search-hint {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+/* Alone in its column (nothing to do, nothing searched for lately), it
+   closes nothing: no rule above it. */
+.search-hint:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
 /* The genres, under the row: as many lines as they need. */
 .stage-genres {
   gap: 8px;

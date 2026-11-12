@@ -25,6 +25,9 @@ function renderApp(bound = 1, keep = false) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   /** What the requests page looked up on TMDB. */
   const lookups: string[] = []
+  /** How many times the list of collections was asked for. */
+  const collectionLists = { n: 0 }
+  const TOWNS = { id: 5, owner_user_id: 1, name: 'Harbor towns', kind: 'manual', is_public: false, item_count: 1, created_at: NOW, updated_at: NOW }
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string) => {
@@ -45,6 +48,8 @@ function renderApp(bound = 1, keep = false) {
     if (p === `/api/media/${HARBOR.id}`) return json(HARBOR)
     if (p === '/api/requests/search') { lookups.push(url.searchParams.get('q') ?? ''); return json({ results: [] }) }
     if (p === '/api/requests') return json([])
+    if (p === '/api/collections') { collectionLists.n++; return json([TOWNS]) }
+    if (p === '/api/collections/5') return json({ collection: TOWNS, items: [HARBOR] })
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
     if (p === '/api/parties/active') return json({ parties: [] })
     return json([])
@@ -58,7 +63,7 @@ function renderApp(bound = 1, keep = false) {
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
   render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
-  return { lookups }
+  return { lookups, collectionLists }
 }
 
 const find = { timeout: 8000 }
@@ -154,5 +159,58 @@ describe('recent searches', () => {
     await waitFor(() => expect(document.querySelector('[data-search-recent]')).toBeNull())
     expect(localStorage.getItem('aurora_recent_searches:1:1')).toBeNull()
     expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:2')!)).toEqual(['dinosaurs'])
+  })
+})
+
+// What a search finds besides titles, against the whole App: the collections
+// that hold the words, and a watch party with the best match. Both belong to
+// a session offered the Library's Collections and Together, which a profile
+// with a content limit is not.
+describe('what a search offers besides titles', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+  async function typeInBar(words: string) {
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: words } })
+  }
+
+  it('lists a collection that holds the words, and opens Collections on it', async () => {
+    renderApp()
+    await screen.findByText('Parent', undefined, find)
+    await typeInBar('harbor')
+    const row = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-collections] .search-colrow')
+      if (!el) throw new Error('no collection listed yet')
+      return el
+    }, find)
+    expect(row.querySelector('.search-colrow-name')!.textContent).toBe('Harbor towns')
+    expect(screen.getByRole('button', { name: 'Start a watch party with Harbor Lights' })).toBeInTheDocument()
+    fireEvent.click(row)
+    // The collection's own page, under the Library's Collections.
+    expect(await screen.findByRole('heading', { level: 1, name: 'Harbor towns' }, find)).toBeInTheDocument()
+    expect(document.querySelector('[data-library-header] [aria-current="page"]')!.textContent).toBe('Collections')
+    // Something was done with the search: it is remembered.
+    expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:1') ?? '[]')).toEqual(['harbor'])
+    fireEvent.click(screen.getByRole('button', { name: 'Back to collections' }))
+    await waitFor(() => expect(document.querySelector('.stage-colcard-open')).not.toBeNull(), find)
+    // Coming back to Collections later shows the index, not that collection
+    // again: the ask was taken once, and forgotten.
+    const scope = (name: string) => [...document.querySelectorAll<HTMLElement>('[data-library-header] .stage-scope')].find(b => b.textContent === name)!
+    fireEvent.click(scope('My Library'))
+    await waitFor(() => expect(document.querySelector('[data-library-header] [aria-current="page"]')!.textContent).toBe('My Library'), find)
+    fireEvent.click(scope('Collections'))
+    await waitFor(() => expect(document.querySelector('.stage-colcard-open')).not.toBeNull(), find)
+    expect(screen.queryByRole('heading', { level: 1, name: 'Harbor towns' })).toBeNull()
+  })
+
+  it('lists no collection and offers no party to a profile with a content limit, and asks for no collections', async () => {
+    const server = renderApp(2)
+    await screen.findByText('Kid', undefined, find)
+    await typeInBar('harbor')
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    await new Promise(done => setTimeout(done, 200))
+    expect(document.querySelector('[data-search-collections]')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Start a watch party/ })).toBeNull()
+    expect(document.querySelector('[data-search-actions]')).toBeNull()
+    expect(server.collectionLists.n).toBe(0)
   })
 })

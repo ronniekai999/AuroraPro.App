@@ -163,9 +163,10 @@ mustHave(CARD, "'has-reason '")
 // Small buttons outside a card: drawn at 36px, with a 44px target on a touch
 // screen (.stage-hit44). Tonight's live strip (Join; I'm in, Maybe, Open
 // lobby, side by side) and the search page's "Search by description",
-// "Try again" and "Request it", and its recent searches (each row, and
-// "Clear"). Built from the components' own class lists, in the rows they
-// sit in.
+// "Try again" and "Request it", its recent searches (each row, and
+// "Clear"), its best match's Play and More, and the rows of what can be
+// done with a search. Built from the components' own class lists, in the
+// rows they sit in.
 const LIVE = 'src/components/TonightLive.tsx'
 const SEARCH = 'src/components/SearchView.tsx'
 const LIVE_JOIN = classesOf(LIVE, 'tonight-live-act stage-hit44')
@@ -183,6 +184,13 @@ const REQUEST_LINE = classesOf(SEARCH, 'search-request-line')
 const REQUEST_BTN = classesOf(SEARCH, 'search-request-btn')
 const RECENT_CLEAR = classesOf(SEARCH, 'search-recent-clear')
 const RECENT_ROW = classesOf(SEARCH, 'search-recent-row')
+// The search page's best match (Play and More beside its title) and the
+// rows of what can be done with a search.
+const BEST_MORE = classesOf(SEARCH, 'search-best-more')
+mustHave(SEARCH, 'className="search-best"')
+mustHave(SEARCH, 'className="search-best-acts"')
+mustHave(SEARCH, 'className="stage-btn stage-btn-primary"')
+mustHave(SEARCH, 'className="search-action-row"')
 // The Library header: on a phone its scope names are a strip that runs edge
 // to edge and scrolls sideways, with the scope's count and controls on a row
 // under it. It is on this page so that the "no wider than the device" check
@@ -270,7 +278,13 @@ const smallHtml = `
   <section style="max-width:36rem;margin-top:24px"><div class="mb-1 flex items-center"><h2 class="flex-1 text-xs">Recent searches</h2>
     <button type="button" class="${RECENT_CLEAR}" data-small-btn="Clear">Clear</button></div>
     <ul class="m-0 list-none p-0"><li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 1"><span class="min-w-0 flex-1 truncate">night train</span></button></li>
-      <li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 2"><span class="min-w-0 flex-1 truncate">something funny for the kids, not too long, that the grandparents will sit through as well</span></button></li></ul></section>`
+      <li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 2"><span class="min-w-0 flex-1 truncate">something funny for the kids, not too long, that the grandparents will sit through as well</span></button></li></ul></section>
+  <div class="search-best" style="margin-top:24px"><div class="search-best-acts">
+    <button type="button" class="stage-btn stage-btn-primary" data-small-btn="best match Play">Play</button>
+    <button type="button" class="${BEST_MORE}" data-small-btn="best match More">More</button></div></div>
+  <section style="max-width:22rem;margin-top:24px;padding:0 12px">
+    <button type="button" class="search-action-row" data-small-btn="Start a watch party"><span class="min-w-0 flex-1">Start a watch party with The Assassination of Jesse James by the Coward Robert Ford</span></button>
+    <button type="button" class="search-action-row" data-small-btn="Request a title"><span class="min-w-0 flex-1">Not here? Request a title</span></button></section>`
 
 // The top bar, from TopNav's own class lists, once per case. The mark and the
 // icons are empty boxes of the size the components draw; the wordmark takes
@@ -701,7 +715,7 @@ for (const touch of [true, false]) {
     // 4. Small buttons outside a card. On a touch screen each is a 44px
     // target by hit-testing, whatever it is drawn at; a neighbour's area
     // laid over it shortens what is measured, so an overlap fails here too.
-    if (r.small.length !== 10) fail(`the small-button probe found ${r.small.length} buttons, expected 10 — this check is out of date`)
+    if (r.small.length !== 14) fail(`the small-button probe found ${r.small.length} buttons, expected 14 — this check is out of date`)
     for (const b of r.small) {
       if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)

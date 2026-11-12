@@ -76,11 +76,26 @@ interface Props {
   // don't wire it just keep the old behavior (drill-down state
   // sticky until the user clicks the in-page Back affordance).
   rewindNonce?: number
+  /** A collection to open the page on (picked from a search's results);
+   *  `n` tells one ask from the next. */
+  open?: { id: number; n: number } | null
+  /** Called once the ask has been taken, so that coming back to the page
+   *  later shows the index. */
+  onOpenTaken?: () => void
 }
 
-export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, onCardContext, rewindNonce }: Props) {
+export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, onCardContext, rewindNonce, open, onOpenTaken }: Props) {
   const [collections, setCollections] = useState<Collection[] | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
+  // A collection picked somewhere else (the search page): the page opens
+  // on it, once per ask.
+  const [openTaken, setOpenTaken] = useState(0)
+  if (open && open.n !== openTaken) {
+    setOpenTaken(open.n)
+    setSelected(open.id)
+  }
+  const openN = open?.n
+  useEffect(() => { if (openN !== undefined) onOpenTaken?.() }, [openN, onOpenTaken])
   const [items, setItems] = useState<ServerMediaItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadingItems, setLoadingItems] = useState(false)

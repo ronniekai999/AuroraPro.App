@@ -9,8 +9,8 @@
 // onCardContext / libraryIds / onToggleLib contract, so BrowseView wires
 // both the same way.
 
-import { useEffect, useRef, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
-import { LONG_PRESS_MS } from '@/components/MediaCardCinema'
+import { type MouseEvent as ReactMouseEvent } from 'react'
+import { useLongPress } from '@/hooks/useLongPress'
 
 // Structural subset this row reads. Any UI `Media` satisfies it.
 export interface RowMedia {
@@ -55,9 +55,6 @@ export interface MediaListRowProps {
   resumable?: boolean
 }
 
-// How far a finger may drift during a long press before it is a scroll.
-const LONG_PRESS_SLOP_PX = 10
-
 function PlusSvg() {
   return (
     <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -94,46 +91,11 @@ export function MediaListRow({
   const rated = contentRatingOf(item.tags)
   const sub = [item.year && item.year > 0 ? String(item.year) : '', rated, progress?.label ?? ''].filter(Boolean).join(' · ')
 
-  // Long press, as on a card (MediaCardCinema): touch only. A mouse has its
-  // own contextmenu event and Android fires one for a long press, but iOS
-  // Safari does not, so a timer does it there, and without it the menu
-  // could not be reached from a row on an iPhone at all. When the timer
-  // opens the menu, the click that follows the finger lifting must not also
-  // open the title.
-  const press = useRef<{ timer: number; x: number; y: number } | null>(null)
-  const suppressClick = useRef(false)
-  const cancelPress = () => {
-    if (press.current) { window.clearTimeout(press.current.timer); press.current = null }
-  }
-  // A row replaced mid-press must not open a menu for the title it held.
-  useEffect(() => () => {
-    if (press.current) { window.clearTimeout(press.current.timer); press.current = null }
-  }, [item.id])
-  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    suppressClick.current = false
-    if (e.pointerType !== 'touch' || !onCardContext) return
-    // A press that starts on one of the row's actions is that button's.
-    // (The title is a button too, and most of what a finger lands on: a
-    // press there is the row's.)
-    if ((e.target as Element).closest?.('.mlr-acts')) return
-    cancelPress()
-    const el = e.currentTarget
-    const { clientX, clientY } = e
-    press.current = {
-      x: clientX,
-      y: clientY,
-      timer: window.setTimeout(() => {
-        press.current = null
-        suppressClick.current = true
-        // The menu takes a mouse event for its position; a press has one.
-        onCardContext({ preventDefault() {}, clientX, clientY, detail: 1, currentTarget: el } as unknown as ReactMouseEvent)
-      }, LONG_PRESS_MS),
-    }
-  }
-  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const p = press.current
-    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress()
-  }
+  // Long press, as on a card: touch only (hooks/useLongPress). A press that
+  // starts on one of the row's actions is that button's. (The title is a
+  // button too, and most of what a finger lands on: a press there is the
+  // row's.)
+  const longPress = useLongPress(onCardContext, item.id, '.mlr-acts')
 
   return (
     // The row is a plain container: the title is the button (what a
@@ -147,16 +109,9 @@ export function MediaListRow({
     <div
       className="media-list-row group"
       data-media-id={item.id}
-      onClick={() => {
-        if (suppressClick.current) { suppressClick.current = false; return }
-        onSelect()
-      }}
-      onContextMenu={(e) => { cancelPress(); onCardContext?.(e) }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={cancelPress}
-      onPointerCancel={cancelPress}
-      onPointerLeave={cancelPress}
+      onClick={() => { if (!longPress.swallowClick()) onSelect() }}
+      onContextMenu={(e) => { longPress.cancel(); onCardContext?.(e) }}
+      {...longPress.handlers}
       title={item.title}
     >
       {/* The title cell: a small poster and the title, and the row's one

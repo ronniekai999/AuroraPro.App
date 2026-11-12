@@ -2918,6 +2918,16 @@ export default function App() {
     handleNavigate('requests')
   }, [searchOwner, handleNavigate])
   const forgetRequestAsk = useCallback(() => setRequestAsk(null), [])
+  // A collection picked from the search page's results: the Collections
+  // scope is opened on it. Owner-stamped, like the ask above, so it is not
+  // carried to another profile's Collections.
+  const [collectionAsk, setCollectionAsk] = useState<{ id: number; n: number; owner: string } | null>(null)
+  const collectionAsksRef = useRef(0)
+  const openCollectionFromSearch = useCallback((id: number) => {
+    setCollectionAsk({ id, n: ++collectionAsksRef.current, owner: searchOwner })
+    handleNavigate('collections')
+  }, [handleNavigate, searchOwner])
+  const forgetCollectionAsk = useCallback(() => setCollectionAsk(null), [])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -6909,6 +6919,16 @@ export default function App() {
                 onCardContext={openCardContextMenu}
                 onCardPlay={(m) => { noteSearch(searchQuery); playOrResume(m) }}
                 resumableIds={profileSwitchPending ? undefined : resumableIds}
+                progressById={profileSwitchPending ? undefined : listProgressById}
+                // A party with the best match, and the collections that hold
+                // the words: for a session offered Together and the
+                // Library's Collections, which a profile with a content
+                // limit is not.
+                onWatchTogether={navScope === 'full' ? (m) => {
+                  noteSearch(searchQuery)
+                  void startPartyFromCard(m, continueItems.find(c => c.media_item_id === m.id && isResumable(c)))
+                } : undefined}
+                onOpenCollection={navScope === 'full' ? (id) => { noteSearch(searchQuery); openCollectionFromSearch(id) } : undefined}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}
               />
@@ -7053,6 +7073,8 @@ export default function App() {
                 key={`profile-${activeProfileId}-${adminUI}`}
                 isAdmin={adminUI}
                 rewindNonce={navRewindNonce}
+                open={collectionAsk && collectionAsk.owner === searchOwner ? collectionAsk : null}
+                onOpenTaken={forgetCollectionAsk}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
                 onOpenMedia={(id) => {
                   // Synthesize a minimal Media shape for handleSelect;

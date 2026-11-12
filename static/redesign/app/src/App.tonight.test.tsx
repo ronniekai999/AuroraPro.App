@@ -608,7 +608,9 @@ describe('the page around the hero', () => {
     // Enter asks for the search by description, once.
     fireEvent.keyDown(field, { key: 'Enter' })
     await screen.findAllByText('Found By Description', undefined, find)
-    expect(screen.getByText('Smart search')).toBeInTheDocument()
+    // The page says the description search is what ran (its mark and line).
+    expect(document.querySelector('[data-search-read-as-mood]')).not.toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('Aurora read this as a mood, not a title. Showing the closest matches in your library.')
     expect(page.searches).toEqual([{ q: 'a slow mystery', mode: 'literal' }, { q: 'a slow mystery', mode: 'semantic' }])
 
     // Editing the words is a new query: by title again, until asked.

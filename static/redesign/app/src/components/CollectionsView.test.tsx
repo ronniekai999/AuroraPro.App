@@ -29,13 +29,16 @@ const col = (id: number, name: string, over: Partial<Collection> = {}): Collecti
 const item = (id: number, title: string) => ({ id, library_id: 1, type: 'movie', title, year: 2020, added_at: NOW, updated_at: NOW }) as unknown as ServerMediaItem
 const noop = () => {}
 
-function Page({ isAdmin = false, onOpenCreate = noop }: { isAdmin?: boolean; onOpenCreate?: () => void }) {
+function Page({ isAdmin = false, onOpenCreate = noop, open, onOpenTaken, rewindNonce }: {
+  isAdmin?: boolean; onOpenCreate?: () => void
+  open?: { id: number; n: number } | null; onOpenTaken?: () => void; rewindNonce?: number
+}) {
   const [slot, setSlot] = useState<HTMLElement | null>(null)
   return (
     <>
       <LibraryHeader current="collections" navScope="full" onNavigate={noop} toolsRef={setSlot} />
       <LibraryToolsProvider value={slot}>
-        <main><CollectionsView isAdmin={isAdmin} onOpenCreate={onOpenCreate} onOpenMedia={noop} onCardContext={noop} /></main>
+        <main><CollectionsView isAdmin={isAdmin} onOpenCreate={onOpenCreate} onOpenMedia={noop} onCardContext={noop} open={open} onOpenTaken={onOpenTaken} rewindNonce={rewindNonce} /></main>
       </LibraryToolsProvider>
     </>
   )
@@ -169,5 +172,32 @@ describe('a collection\'s own page', () => {
     await open('Empty One')
     expect(await screen.findByText('This collection is empty.')).toBeInTheDocument()
     expect(facts()).toBe('0 titles · private')
+  })
+})
+
+// A collection picked on the search page: Collections opens on it.
+describe('opened on a collection picked elsewhere', () => {
+  it('shows that collection\'s own page, once per ask, and says the ask was taken', async () => {
+    const onOpenTaken = vi.fn()
+    const view = render(<Page open={{ id: 2, n: 1 }} onOpenTaken={onOpenTaken} />)
+    expect(await screen.findByRole('heading', { level: 1, name: 'Best of 2026' })).toBeInTheDocument()
+    expect(api.getCollection).toHaveBeenCalledTimes(1)
+    expect(api.getCollection.mock.calls[0][0]).toBe(2)
+    expect(onOpenTaken).toHaveBeenCalledTimes(1)
+    // Back to the index; the same ask does not open it again.
+    fireEvent.click(screen.getByRole('button', { name: 'Back to collections' }))
+    view.rerender(<Page open={{ id: 2, n: 1 }} onOpenTaken={onOpenTaken} />)
+    expect(screen.queryByRole('heading', { level: 1, name: 'Best of 2026' })).toBeNull()
+    expect(await screen.findByText('Empty One')).toBeInTheDocument()
+    // A new ask does.
+    view.rerender(<Page open={{ id: 1, n: 2 }} onOpenTaken={onOpenTaken} />)
+    expect(await screen.findByRole('heading', { level: 1, name: 'Space, but make it sad' })).toBeInTheDocument()
+    expect(api.getCollection.mock.calls[1][0]).toBe(1)
+  })
+
+  it('opens on the index when there is no ask', async () => {
+    render(<Page open={null} />)
+    expect(await screen.findByText('Best of 2026')).toBeInTheDocument()
+    expect(api.getCollection).not.toHaveBeenCalled()
   })
 })
