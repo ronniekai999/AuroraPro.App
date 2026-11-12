@@ -4,7 +4,7 @@
 // a card's "Watch together" both go through here.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { partyEpisodeId, regularSeasonsFirst, resolvePartyEpisodeId } from './partyEpisode'
+import { firstEpisodeToPlay, partyEpisodeId, regularSeasonsFirst, resolvePartyEpisodeId } from './partyEpisode'
 
 const show = { id: 5, type: 'show' }
 const movie = { id: 6, type: 'movie' }
@@ -93,6 +93,24 @@ describe('resolvePartyEpisodeId', () => {
     expect(asked).toEqual(['/api/media/5/seasons', '/api/media/5/seasons/1/episodes'])
     regularHasFile = false
     expect(await resolvePartyEpisodeId(show, undefined)).toBe(900)
+  })
+
+  // Play, its prewarm and the party all start a show on this episode.
+  it('shares where a show starts: the earliest episode with a file, with its season, passing over what has none', async () => {
+    stub()
+    const first = await firstEpisodeToPlay(5)
+    expect(first?.seasonNumber).toBe(2)
+    expect(first?.episode.id).toBe(202)
+    // The same answer the party gets.
+    expect(await resolvePartyEpisodeId(show, undefined)).toBe(first?.episode.id)
+  })
+
+  it('takes the season list it is given instead of asking for it, and is null when nothing can be played', async () => {
+    const asked = stub()
+    expect((await firstEpisodeToPlay(5, undefined, [{ season_number: 2 }]))?.episode.id).toBe(202)
+    expect(asked).toEqual(['/api/media/5/seasons/2/episodes'])
+    expect(await firstEpisodeToPlay(5, undefined, [{ season_number: 1 }])).toBeNull()
+    expect(await firstEpisodeToPlay(5, undefined, [])).toBeNull()
   })
 
   it('stops when it is told the viewer has moved on', async () => {

@@ -84,6 +84,7 @@ import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
+import { firstEpisodeToPlay } from '@/lib/partyEpisode'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
 import { regularSeasonsFirst, resolvePartyEpisodeId } from '@/lib/partyEpisode'
 import {
@@ -3412,20 +3413,17 @@ export default function App() {
         const seasonsRaw = await getSeasons(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         if (seasonsRaw.length === 0) throw new Error('No seasons available')
-        // Season 1 before season 0: Specials have the lowest number and are
-        // not where a show starts. (They are still played when the show has
-        // nothing else.)
-        const seasons = regularSeasonsFirst(seasonsRaw)
-        const firstSeason = seasons[0]
-        const episodesRaw = await getEpisodes(m.id, firstSeason.season_number, ac.signal)
+        // Where the show starts (lib/partyEpisode): the earliest episode
+        // with a file, the regular seasons in order and Specials last.
+        // Season 0 has the lowest number and is not where a show starts; it
+        // is still played when the show has nothing else. A season or an
+        // episode with no file is passed over rather than failing the play:
+        // a show whose first season's files were pruned still has something
+        // to start on.
+        const first = await firstEpisodeToPlay(m.id, ac.signal, seasonsRaw)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
-        if (episodesRaw.length === 0) throw new Error('No episodes available')
-        const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
-        const ep = episodes[0]
-        // ep.files is already typed `EpisodeFile[] | undefined` in
-        // api.ts — the previous redundant `as` cast suggested a type
-        // mismatch that doesn't exist. Same cleanup applied to all
-        // four remaining sites in this file.
+        if (!first) throw new Error('Episode has no files')
+        const ep = first.episode
         const file = pickFile(ep.files, preferQuality)
         if (!file) throw new Error('Episode has no files')
         setPlayerTarget({
@@ -3433,10 +3431,10 @@ export default function App() {
           fileId: file.id,
           fileType: 'episode',
           episodeId: ep.id,
-          seasonNumber: firstSeason.season_number,
+          seasonNumber: first.seasonNumber,
           episodeNumber: ep.episode_number,
           title: m.title,
-          subtitle: `S${firstSeason.season_number}E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
+          subtitle: `S${first.seasonNumber}E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
         })
       } else {
         // Movie → quality-preferred file.
@@ -3506,15 +3504,10 @@ export default function App() {
           const file = pickFile(ep?.files, preferQuality)
           if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec })
         } else {
-          // Fresh → first episode of the first season (mirrors handlePlay's
-          // explicit season/episode sort).
-          const seasonsRaw = await getSeasons(m.id)
-          if (seasonsRaw.length === 0) return
-          const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
-          const episodesRaw = await getEpisodes(m.id, seasons[0].season_number)
-          if (episodesRaw.length === 0) return
-          const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
-          const file = pickFile(episodes[0].files, preferQuality)
+          // Fresh → the episode handlePlay will start (the same lookup, so
+          // the stream that is warmed is the one that is played).
+          const first = await firstEpisodeToPlay(m.id)
+          const file = pickFile(first?.episode.files, preferQuality)
           if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec: 0 })
         }
       } else {
@@ -5132,10 +5125,15 @@ export default function App() {
             const cw = continueItemsRef.current.find(
               c => c.media_item_id === selectedMedia.id && c.season_number != null,
             )
+            // With nothing in progress: the first REGULAR season, not the
+            // lowest number, which is Specials when a show has them. The
+            // page then lists the season its Play starts and its party opens
+            // on (lib/partyEpisode), as a card's do. The picker still lists
+            // the seasons in number order.
             const initialSeason =
               cw?.season_number != null && seasons.some(s => s.season_number === cw.season_number)
                 ? cw.season_number
-                : seasons[0].season_number
+                : regularSeasonsFirst(seasons)[0].season_number
             setDetailSelectedSeason(initialSeason)
             const epsRaw = await getEpisodes(selectedMedia.id, initialSeason, ac.signal)
             if (cancelled) return
@@ -7076,9 +7074,12 @@ export default function App() {
           {view === 'together' && hiddenOk && (
             <HiddenPage name="together"><ViewSuspense fallback={<ViewFallback />}>
               <TogetherView
-                // Remount per profile: the view may hold its own state, and
-                // nothing of one profile's may show under another's name.
-                key={`together:${activeProfileId}`}
+                // Remount per account and profile: the view holds its own
+                // state (a join in flight, a refusal), and nothing of one
+                // session's may show under another's name. The account is
+                // part of the key because two accounts with no profiles would
+                // otherwise share it across a sign-out and sign-in.
+                key={`together:${user.id}:${activeProfileId}`}
                 currentUserId={user.id}
                 activeParties={activeParties.parties}
                 partiesLoaded={activeParties.loaded}
