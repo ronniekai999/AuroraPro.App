@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 // Exercise the real player/controls; mock only delivery, telemetry and CAF.
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive, createCastToken, deleteSession } from '@/lib/streaming'
 import { markWatched, reportProgress } from '@/lib/api'
 import { CastMediaLoadError, type CastLoadArgs } from '@/lib/cast'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
@@ -115,6 +116,21 @@ function rejectReplacement(reason: string | null, identity: 'failed' | 'committe
 }
 async function advanceLoadWindow() { await act(async () => { vi.advanceTimersByTime(3100) }); await settle() }
 
+// The cast widget is a dialog, and one of the player's own surfaces. With
+// something of the player's or the party's left open (a reaction picker in
+// the rail) and the last press in the widget, Escape still closes that thing.
+// Read as some other dialog's key, it went past it to the app, which on a
+// title page goes back.
+function expectEscapeFromTheWidgetToCloseALayer() {
+  const layer = vi.fn(), app = vi.fn()
+  const drop = pushEscapeLayer(layer)
+  window.addEventListener('keydown', app)
+  fireEvent.keyDown(within(screen.getByRole('dialog', { name: 'Cast controls' })).getAllByRole('button')[0], { key: 'Escape' })
+  window.removeEventListener('keydown', app)
+  drop()
+  expect([layer.mock.calls.length, app.mock.calls.length]).toEqual([1, 0])
+}
+
 describe('Cast first-release regressions through VideoPlayer', () => {
   // A double tap is a user seek like any other: while casting it has to reach
   // the receiver through the path the skip button takes, not the frozen local
@@ -152,6 +168,7 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     const view = render(<VideoPlayer target={null} onClose={close} onRemoteActiveChange={remote} />)
     await settle()
     expect(screen.getByRole('dialog', { name: 'Cast controls' })).toBeInTheDocument()
+    expectEscapeFromTheWidgetToCloseALayer()
     expect(screen.getByText('Receiver title')).toBeInTheDocument()
     expect(remote).toHaveBeenLastCalledWith(true)
     expect(screen.queryByRole('button', { name: 'Expand player' })).toBeNull()
@@ -166,6 +183,7 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     const view = render(element()); await bootHls()
     fake.cast.status.connected = true; view.rerender(element()); await settle()
     expect(minimized).toHaveBeenLastCalledWith(true)
+    expectEscapeFromTheWidgetToCloseALayer()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     expect(minimized).toHaveBeenLastCalledWith(false); expect(remote).toHaveBeenLastCalledWith(true)
     fireEvent.keyDown(window, { key: 'Escape' }); await settle(); expect(close).not.toHaveBeenCalled()

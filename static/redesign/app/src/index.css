@@ -2250,7 +2250,8 @@ html[data-effects="reduced"] .stage-toolbar {
 @media (min-width: 640px) {
   :root { --player-timeline-top: 160px; }
 }
-/* One transport row from md, plus the row of range names. */
+/* One transport row from md, plus the row of range names (which the party's
+   minimal face does without in a short window; the measured figure says). */
 @media (min-width: 768px) {
   :root { --player-timeline-top: 128px; }
 }
@@ -2427,6 +2428,11 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
      - a window under 360px wide (the two need about 320 plus a gap);
      - the party rail open over the picture from 640 to 767px wide, which
        leaves 284 to 411px and they need about 390. From 768 they fit. */
+/* Its edge, as the Skip button's: a white fill has no boundary on a white
+   frame, and the shadow separates it downward only. */
+.stage-tap-sound {
+  border: 1px solid rgba(0, 0, 0, 0.42);
+}
 @media not all and (min-width: 360px) {
   .stage-tap-sound[data-beside-skip] { width: 48px; padding: 0; }
   .stage-tap-sound[data-beside-skip] .stage-tap-sound-label { display: none; }
@@ -2459,20 +2465,28 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   .player-lane-upper {
     bottom: calc(var(--player-timeline-top) + 64px + var(--player-dock-lift));
   }
-  /* Two things keep the lane out of the row the party's chip and voice pill
-     share, where a press meant for "Tap for sound" or Skip would land on
-     them (they are fixed above the player):
-     - No row of range names under the timeline. Its 20px are what pushed
-       the lane into that row when the transport wraps to two rows, as it
-       does for a party's host from 768 to about 830px wide. The ranges
-       themselves stay on the bar. (`html` in the selector: the row's own
-       `md:block` is emitted later and would win at equal specificity.)
-     - The chip's row sits 12px nearer the title bar, which leaves a window
-       360px high clear of a voice pill with people in it (48px tall). */
-  html [data-range-labels] {
+}
+/* A short window with the party's minimal face on screen (`data-party-dock`:
+   only that face has the chip and the voice pill, fixed above the player in
+   a row under the title bar). Two things keep the lane out of that row,
+   where a press meant for "Tap for sound" or Skip would land on them:
+   - No row of range names under the timeline. Its 20px are what pushed the
+     lane into that row when the transport wraps to two rows, as it does for
+     a party's host from 768 to about 830px wide. The ranges themselves stay
+     on the bar. Only here: anyone else in a short window keeps the names,
+     which are the only thing that tells an intro from a recap.
+   - The chip's row sits 12px nearer the title bar.
+   With a two-row transport that leaves the lane's buttons 4px clear of a
+   voice pill with people in it (48px tall) in a window 360px high, and the
+   Up next card (52px) touching it. BELOW ABOUT 356px HIGH THEY OVERLAP (a
+   small Android phone held sideways with the browser's toolbar showing):
+   the two rows and the control band do not fit in that height, and nothing
+   here makes them. scripts/verify-player-lane.mjs measures the 360px case. */
+@media (max-height: 480px) {
+  html[data-player-surface="theater"][data-party-dock] [data-range-labels] {
     display: none;
   }
-  :root {
+  html[data-player-surface="theater"][data-party-dock] {
     --theater-chip-top: 92px;
   }
 }
@@ -2820,7 +2834,9 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
     gap: 12px;
     width: auto;
     max-width: calc(100% - 24px);
-    padding: 6px 6px 6px 16px;
+    /* 52px tall with its 44px button: 4px more and its top went under the
+       voice pill in the party's minimal face at 360px high. */
+    padding: 4px 4px 4px 16px;
   }
   .stage-upnext .stage-upnext-eyebrow,
   .stage-upnext .stage-upnext-note { display: none; }

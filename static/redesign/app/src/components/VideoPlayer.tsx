@@ -7012,6 +7012,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         className="player-cast-widget"
         role="dialog"
         aria-label="Cast controls"
+        // One of the player's own surfaces: an Escape pressed in it still
+        // belongs to whatever of the player's is open (lib/escapeLayers).
+        data-escape-layers=""
       >
         <div className="flex items-center gap-2">
           <Cast size={18} className="text-ink-2 shrink-0" />
@@ -7575,6 +7578,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 <button
                   type="button"
                   aria-label="Playback started muted — tap for sound"
+                  // For a pointer, where the button has given up its words.
+                  title="Tap for sound"
                   onClick={() => {
                     const vid = videoRef.current
                     if (vid) {
@@ -7880,6 +7885,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         className="player-cast-widget"
         role="dialog"
         aria-label="Cast controls"
+        // One of the player's own surfaces: an Escape pressed in it still
+        // belongs to whatever of the player's is open (lib/escapeLayers).
+        data-escape-layers=""
       >
         <div className="flex items-center gap-2">
           {cast.status.connected ? (

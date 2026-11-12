@@ -142,7 +142,8 @@ export function PartyPanel({
     // elsewhere (the profile picker, a PIN prompt) keeps its own keys.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') return
-      const fullscreen = document.fullscreenElement
+      // Both names, as the player reads it (older Safari has only one).
+      const fullscreen = document.fullscreenElement ?? document.webkitFullscreenElement
       if (fullscreen && !(dialog && fullscreen.contains(dialog))) return
       if (inForeignDialog(e.target)) return
       e.stopPropagation()

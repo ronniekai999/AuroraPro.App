@@ -239,17 +239,23 @@ describe('keys while the host\u2019s leave confirmation is open', () => {
     await user.click(screen.getByRole('button', { name: 'Leave Party' }))
     const elsewhere = document.createElement('div')
     document.body.append(elsewhere)
-    // jsdom has no Fullscreen API; this is what a browser reports.
-    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => elsewhere })
-    shortcuts.mockClear()
-    for (const key of ['ArrowLeft', 'k', 'f']) fireEvent.keyDown(document.body, { key })
-    expect(shortcuts).toHaveBeenCalledTimes(3)
-    // Tab is not pulled into a confirm nobody can see.
-    const outside = screen.getByPlaceholderText(/Message the party/)
-    outside.focus()
-    expect(fireEvent.keyDown(outside, { key: 'Tab' })).toBe(true)
-    expect(outside).toHaveFocus()
-    delete (document as unknown as { fullscreenElement?: Element }).fullscreenElement
+    // jsdom has no Fullscreen API; this is what a browser reports, under
+    // the standard name and under the one older Safari has.
+    for (const name of ['fullscreenElement', 'webkitFullscreenElement']) {
+      Object.defineProperty(document, name, { configurable: true, get: () => elsewhere })
+      try {
+        shortcuts.mockClear()
+        for (const key of ['ArrowLeft', 'k', 'f']) fireEvent.keyDown(document.body, { key })
+        expect(shortcuts, name).toHaveBeenCalledTimes(3)
+        // Tab is not pulled into a confirm nobody can see.
+        const outside = screen.getByPlaceholderText(/Message the party/)
+        outside.focus()
+        expect(fireEvent.keyDown(outside, { key: 'Tab' }), name).toBe(true)
+        expect(outside).toHaveFocus()
+      } finally {
+        delete (document as unknown as Record<string, unknown>)[name]
+      }
+    }
     elsewhere.remove()
     window.removeEventListener('keydown', shortcuts)
   })

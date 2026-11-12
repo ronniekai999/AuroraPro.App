@@ -19,6 +19,15 @@
 //     form is not used more widely than it has to be), and always when no
 //     Skip button is showing.
 //
+// And one more thing the same lane has to stay clear of. In a short window
+// (a phone held sideways) the party's minimal face keeps its chip and its
+// voice pill in a row under the title bar, fixed above the player, and the
+// lane is the next row down. With a two-row transport (a timeline 160px up,
+// which is what the player measures there) the lane's buttons must start
+// below a voice pill with people in it at 360px high and up; the row of
+// range names is not drawn there, and IS drawn for everyone else in a short
+// window, who has no such row to clear.
+//
 // The class lists are READ FROM THE SOURCE, each required to be found exactly
 // once, so a call site that drifts from this model fails as out of date. The
 // longest Skip label is used. Fonts are the engine's fallback (the built
@@ -32,7 +41,9 @@
 // overlap at 640, 667 and 700; without the restore at 768 the words are
 // missing at 768 and up beside the rail; with the button moved to the upper
 // row while a Skip button shows, it is not in Skip's row at any width and
-// moves 60px when one appears.
+// moves 60px when one appears; with the chip's row left at 104px the buttons
+// start under the voice pill at 360px high; with the range names hidden for
+// everyone in a short window, the solo case fails.
 
 import { chromium } from 'playwright'
 import fs from 'node:fs'
@@ -59,6 +70,15 @@ const C = {
   skip: classesOf(PLAYER, 'stage-skip-pill'),
   tap: classesOf(PLAYER, 'stage-tap-sound player-lane'),
   label: classesOf(PLAYER, 'stage-tap-sound-label'),
+  // The voice pill with people in it (the taller of its two forms).
+  voice: classesOf('src/components/VoicePill.tsx', 'stage-voice-pill fixed top-4 right-4 z-[67] inline-flex'),
+  rangeNames: classesOf('src/components/PlayerControls.tsx', 'hidden md:block'),
+}
+if (!fs.readFileSync('src/components/PlayerControls.tsx', 'utf8').includes('data-range-labels=""')) {
+  throw new Error('verify: PlayerControls.tsx no longer marks the row of range names with data-range-labels — this check is out of date, not passing')
+}
+if (!fs.readFileSync('src/components/PartyPanel.tsx', 'utf8').includes("el.dataset.partyDock = 'open'")) {
+  throw new Error('verify: PartyPanel.tsx no longer stamps data-party-dock for its minimal face — this check is out of date, not passing')
 }
 // The marks the stylesheet keys on must still be what the player writes.
 const src = fs.readFileSync(PLAYER, 'utf8')
@@ -112,6 +132,40 @@ for (const [width, height, rail, words] of CASES) {
   if (rail !== (m.cover > 0)) fail(`the rail's cover is ${m.cover}px, expected ${rail ? 'some' : 'none'}: this model is out of date`)
   if (m.words !== words) fail(words ? 'has lost its words where the two fit with them' : 'kept its words where the two do not fit')
   if (!alone.words) fail('has no words with no Skip button showing')
+}
+// ── A short window: the lane against the party's chip row ────────────────
+// TIMELINE_TOP is what the player publishes there for a two-row transport
+// with no row of range names (measured in the app at 667x375 and 812x375).
+const TIMELINE_TOP = 160
+const short = ({ dock }) => `<!doctype html>
+<html data-player-surface="theater"${dock ? ' data-party-dock="open"' : ''} style="--player-timeline-top:${TIMELINE_TOP}px"><head><meta charset="utf-8"><style>${css}</style></head>
+<body style="margin:0;background:#000">
+<div id="voice" class="${C.voice}"><span style="display:block;width:180px;height:36px"></span></div>
+<div style="position:fixed;inset:0">
+  <button type="button" id="skip" class="${C.skip}">Skip intro</button>
+  <button type="button" id="tap" data-tap-for-sound="" data-beside-skip="" class="${C.tap}"><svg width="18" height="18" class="flex-none"></svg><span class="${C.label}">Tap for sound</span></button>
+  <div id="names" class="${C.rangeNames}" data-range-labels=""></div>
+</div></body></html>`
+console.log('\n## A short window: the lane under the party\'s chip row')
+for (const [width, height] of [[640, 360], [800, 360], [667, 375], [812, 375], [844, 390]]) {
+  const tab = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 })
+  const read = async (dock) => {
+    await tab.setContent(short({ dock }))
+    return tab.evaluate(() => {
+      const r = id => { const b = document.getElementById(id).getBoundingClientRect(); return { top: b.top, bottom: b.bottom } }
+      return { voice: r('voice'), tap: r('tap'), skip: r('skip'), names: getComputedStyle(document.getElementById('names')).display }
+    })
+  }
+  const party = await read(true)
+  const solo = await read(false)
+  await tab.close()
+  const clear = party.tap.top - party.voice.bottom
+  console.log(`── ${`${width}x${height}`.padEnd(10)} voice pill ${Math.round(party.voice.top)}-${Math.round(party.voice.bottom)}  lane ${Math.round(party.tap.top)}-${Math.round(party.tap.bottom)}  clear by ${Math.round(clear)}px  range names: ${party.names === 'none' ? 'not drawn' : 'drawn'} (alone: ${solo.names === 'none' ? 'not drawn' : 'drawn'})`)
+  if (clear < 0) fail(`"Tap for sound" starts ${Math.round(-clear)}px inside the voice pill's row`)
+  if (party.skip.top < party.voice.bottom) fail(`Skip starts ${Math.round(party.voice.bottom - party.skip.top)}px inside the chip's row`)
+  if (party.names !== 'none') fail('the row of range names is drawn in the minimal face, whose 20px the lane needs')
+  // From md, where the row exists at all, a viewer with no chip row keeps it.
+  if (width >= 768 && solo.names === 'none') fail('the range names are hidden for a viewer with no chip row to clear')
 }
 await browser.close()
 console.log(`\n${problems} player-lane problem(s).`)
