@@ -37,10 +37,19 @@ vi.mock('@/lib/api', async (original) => ({
 const MADE = { id: 900, title: 'The Lost Reel' }
 /** How many times the list was drawn, in any commit: a list that comes up
  *  for one frame has already asked the server its questions. */
-const requestList = { drawn: 0 }
+const requestList = { drawn: 0, toldToTakeFocus: 0, enabledFor: [] as boolean[] }
+/** What the page's knowledge of the server's requests is, for a test to set:
+ *  whether they may be offered (the config says so, or could not be read). */
+const requestsAre = { offered: true }
 vi.mock('@/components/SearchRequest', () => ({
-  SearchRequest: (p: { query: string; userId: number; onRequested: (r: unknown) => void; onOpenRequests: () => void }) => (requestList.drawn++,
-    <div data-search-request="" data-query={p.query} data-user={p.userId}>
+  // The page holds this for the list (the real one asks the server once).
+  useRequesting: (enabled: boolean) => {
+    requestList.enabledFor.push(enabled)
+    return { config: null, configAsked: true, offered: enabled && requestsAre.offered, mine: [], wantMine() {}, noteMade() {} }
+  },
+  SearchRequest: (p: { query: string; userId: number; state: { offered: boolean }; takeFocus?: boolean; onRequested: (r: unknown) => void; onOpenRequests: () => void }) => (
+    requestList.drawn++, p.takeFocus && requestList.toldToTakeFocus++,
+    <div data-search-request="" data-query={p.query} data-user={p.userId} data-state-offered={String(p.state.offered)}>
       <button type="button" onClick={() => p.onRequested(MADE)}>request the first</button>
       <button type="button" onClick={p.onOpenRequests}>see requests</button>
     </div>
@@ -68,6 +77,7 @@ const settle = (ms = 0) => act(async () => { await vi.advanceTimersByTimeAsync(m
 beforeEach(() => {
   asks.length = 0; forgetDescribedAnswer(); vi.useFakeTimers(); base.onQueryChange.mockReset()
   base.onSelect.mockReset(); base.onCardContext.mockReset()
+  requestsAre.offered = true; requestList.toldToTakeFocus = 0; requestList.enabledFor = []
   collectionList.items = []; collectionList.asks = 0; collectionList.fails = false
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
@@ -375,6 +385,30 @@ describe('a search that finds nothing', () => {
     asks[0].answer([])
     await settle()
     expect(requestList.drawn).toBeGreaterThan(0)
+  })
+
+  // L2: until the server is known to take requests the page promises
+  // nothing. The list is still mounted: it says it is looking, or that
+  // requests are not set up, whichever turns out.
+  it('does not promise a request before the server is known to take them', async () => {
+    requestsAre.offered = false
+    await searchFor('the lost reel', { requesting: requesting(), onDescribe: vi.fn() })
+    asks[0].answer([])
+    await settle()
+    expect(document.querySelector('.search-none-lead')!.textContent).toBe('Nothing here matches “the lost reel”.')
+    expect(list()).not.toBeNull()
+    expect(list()!.getAttribute('data-state-offered')).toBe('false')
+  })
+
+  // The page asks the server about requests only for a session that may make them.
+  it('holds the server\'s answer about requests for a session offered them, and asks nothing for one that is not', async () => {
+    await searchFor('harbor', { requesting: requesting() })
+    expect(requestList.enabledFor.every(e => e === true)).toBe(true)
+    cleanup()
+    requestList.enabledFor = []
+    await searchFor('harbor')
+    expect(requestList.enabledFor.length).toBeGreaterThan(0)
+    expect(requestList.enabledFor.every(e => e === false)).toBe(true)
   })
 
   // A profile that is not offered requests is given nothing to request with.
@@ -756,6 +790,9 @@ describe('the results', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Not here? Request a title' }))
       const asking = document.querySelector<HTMLElement>('[data-search-asking]')!
       expect(within(asking).getByRole('heading', { name: 'Request a title' })).toBeInTheDocument()
+      // The pressed button has gone with its section: the list is told to
+      // take the focus, once.
+      expect(requestList.toldToTakeFocus).toBe(1)
       expect(asking.querySelector<HTMLElement>('[data-search-request]')!.dataset.query).toBe('harbor')
       // The results, their filter, the other way to search and the actions step aside.
       expect(section('best')).toBeNull()
@@ -768,6 +805,8 @@ describe('the results', () => {
       fireEvent.click(within(asking).getByRole('button', { name: 'Back to the results' }))
       expect(document.querySelector('[data-search-asking]')).toBeNull()
       expect(section('best')).not.toBeNull()
+      // "Back" went with the list: the focus is back on the button that opened it.
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Not here? Request a title' }))
       // Asked again, then the words change: the new words' results, not a
       // request list nobody asked for.
       fireEvent.click(screen.getByRole('button', { name: 'Not here? Request a title' }))
@@ -777,6 +816,24 @@ describe('the results', () => {
       await settle()
       expect(document.querySelector('[data-search-asking]')).toBeNull()
       expect(section('best')).not.toBeNull()
+      // And typing the first words again does not bring back a list that
+      // was asked for the last time they were on screen.
+      view.rerender(<SearchView {...base} query="harbor" requesting={r} />)
+      await settle(300)
+      asks[asks.length - 1].answer(found)
+      await settle()
+      expect(document.querySelector('[data-search-asking]')).toBeNull()
+    })
+
+    // L2: the aside's offer waits for the server's answer too.
+    it('does not offer to request beside results before the server is known to take requests', async () => {
+      requestsAre.offered = false
+      await answered({ requesting: requesting(), onWatchTogether: vi.fn() })
+      expect(screen.queryByRole('button', { name: 'Not here? Request a title' })).toBeNull()
+      expect(screen.getByRole('button', { name: /^Start a watch party/ })).toBeInTheDocument()
+      cleanup()
+      await answered({ requesting: requesting() })
+      expect(section('actions')).toBeNull()
     })
 
     it('offers nothing to do while nothing is found or typed', async () => {

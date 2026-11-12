@@ -18,13 +18,13 @@
 // the query string, the ask (`describe`) and the library set, and passes
 // them as props.
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { GridSkeleton } from '@/components/Skeletons'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { MediaListRow, contentRatingOf, type RowProgress } from '@/components/MediaListRow'
 import { useLongPress } from '@/hooks/useLongPress'
-import { SearchRequest } from '@/components/SearchRequest'
+import { SearchRequest, useRequesting } from '@/components/SearchRequest'
 import { listCollections, posterURL, searchMedia, type Collection, type MediaRequest } from '@/lib/api'
 import { describedAnswerFor, keepDescribedAnswer } from '@/lib/describedSearch'
 import { type Media } from '@/lib/types'
@@ -236,6 +236,23 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // words it was pressed for. The titles that can be requested take the
   // results' place until the words change or the viewer goes back.
   const [asking, setAsking] = useState<string | null>(null)
+  // It is for the words it was pressed for, and goes when they change: kept,
+  // retyping the same words later reopened a list nobody had asked for.
+  if (asking !== null && asking !== query.trim()) setAsking(null)
+  // Whether this server takes requests, and what has been asked for already:
+  // read once for the page (SearchRequest is unmounted at every keystroke),
+  // and what the page's own offers of a request are worded by.
+  const requestState = useRequesting(!!requesting)
+  // Where the focus goes when the control that had it is about to leave the
+  // page: into the request list when "Not here? Request a title" is pressed
+  // (its section steps aside), and back to that button from "Back to the
+  // results" (which goes with the list).
+  const [focusAsk, setFocusAsk] = useState<'list' | 'action' | null>(null)
+  const askActionRef = useRef<HTMLButtonElement | null>(null)
+  useLayoutEffect(() => {
+    if (focusAsk === 'action') askActionRef.current?.focus()
+    if (focusAsk !== null) setFocusAsk(null)
+  }, [focusAsk])
   // The collections this session may open, read once: a search matches
   // their names and descriptions here, as the server's search is of titles.
   // A failed read lists none, which is what the page shows without them.
@@ -346,7 +363,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // an empty search, and the page (and the lookup of what can be requested)
   // came up for one frame on the first key of every search.
   const empty = !loading && !!q && found === 0 && !failed && answered?.query === q
-  const askingNow = !!requesting && !!q && asking === q
+  // Requests are offered once the server is known to take them (L2: the
+  // page used to promise one and then say they are not set up).
+  const mayRequest = !!requesting && requestState.offered
+  const askingNow = mayRequest && !!q && asking === q
   const kinds = KINDS.filter(k => k.id !== 'collection' || mayOpenCollections)
 
   // The other way to search these words, said where the results are (or
@@ -462,14 +482,14 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             // Asked for while the search has results: the titles that can be
             // requested for these words, in the results' place.
             <div className="search-none" data-search-asking="">
-              <button type="button" onClick={() => setAsking(null)} className="stage-btn stage-btn-sm stage-btn-quiet search-none-back stage-hit44">
+              <button type="button" onClick={() => { setAsking(null); setFocusAsk('action') }} className="stage-btn stage-btn-sm stage-btn-quiet search-none-back stage-hit44">
                 <Icon name="arrowLeft" size={14} /> Back to the results
               </button>
               <h2 className="search-none-title">Request a title</h2>
               <p className="search-none-lead">
                 If what you want is not among the results for &ldquo;{q}&rdquo;, it may be one of these. Request it and you will get a notification when it is ready to watch.
               </p>
-              <SearchRequest query={q} userId={requesting.userId} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
+              <SearchRequest query={q} userId={requesting.userId} state={requestState} takeFocus={focusAsk === 'list'} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
             </div>
           ) : loading && found === 0 ? (
             // First search (or a new query after an empty result): hold the
@@ -484,11 +504,13 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               <h2 className="search-none-title">Not in your library yet</h2>
               <p className="search-none-lead">
                 {described ? <>Nothing here matches &ldquo;{q}&rdquo;, by title or by description.</> : <>Nothing here matches &ldquo;{q}&rdquo;.</>}
-                {requesting && ' If it is one of these, request it and you will get a notification when it is ready to watch.'}
+                {mayRequest && ' If it is one of these, request it and you will get a notification when it is ready to watch.'}
               </p>
               {describeLine}
+              {/* Also while the server's answer about requests is still
+                  out, and where it says they are off: the list says which. */}
               {requesting && (
-                <SearchRequest query={q} userId={requesting.userId} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
+                <SearchRequest query={q} userId={requesting.userId} state={requestState} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
               )}
             </div>
           ) : (
@@ -583,7 +605,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             below it: what can be done with this search, and what was
             searched for lately. */}
         <aside className="search-aside" aria-label="Search actions and recent searches">
-          {q && !loading && found > 0 && !askingNow && ((onWatchTogether && titles.length > 0) || requesting) && (
+          {q && !loading && found > 0 && !askingNow && ((onWatchTogether && titles.length > 0) || mayRequest) && (
             <section aria-labelledby="search-actions-heading" data-search-actions="">
               {/* Under the results on a phone, where it is what else there is. */}
               <h2 id="search-actions-heading" className="search-aside-h">{wide ? 'Actions' : 'More'}</h2>
@@ -593,8 +615,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                   <span className="min-w-0 flex-1">Start a watch party with {titles[0].title}</span>
                 </button>
               )}
-              {requesting && (
-                <button type="button" className="search-action-row" onClick={() => setAsking(q)}>
+              {mayRequest && (
+                <button ref={askActionRef} type="button" className="search-action-row" onClick={() => { setAsking(q); setFocusAsk('list') }}>
                   <Icon name="download" size={18} className="flex-none text-ink-2" />
                   <span className="min-w-0 flex-1">Not here? Request a title</span>
                 </button>

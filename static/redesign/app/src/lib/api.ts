@@ -3247,9 +3247,11 @@ export async function denyRequest(id: number): Promise<void> {
 // directly from TMDB CDN (the items aren't in the library yet, so
 // the image proxy doesn't have them). This is the same pattern V1
 // uses (aurora_pro.html does `https://image.tmdb.org/t/p/w500${path}`).
-export function tmdbPosterURL(path?: string): string {
+/** A TMDB poster at one of TMDB's own widths: w500 for a card, w154 for a
+ *  thumb a few dozen pixels wide. */
+export function tmdbPosterURL(path?: string, size: 'w154' | 'w500' = 'w500'): string {
   if (!path) return ''
-  return `https://image.tmdb.org/t/p/w500${path.startsWith('/') ? path : '/' + path}`
+  return `https://image.tmdb.org/t/p/${size}${path.startsWith('/') ? path : '/' + path}`
 }
 
 // ──────────────────────────────────────────────────────────────────

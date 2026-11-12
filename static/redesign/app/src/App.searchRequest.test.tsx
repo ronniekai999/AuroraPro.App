@@ -7,7 +7,7 @@
 // here included.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App'
 
@@ -23,7 +23,7 @@ const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', y
 
 /** `bindingUnreadable`: the server cannot say which profile the session acts
  *  as, so the app knows none (it opens the profile picker over the page). */
-function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false } = {}) {
+function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false, kidFree = false } = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   /** What was looked up outside the library (the server asks TMDB). */
   const lookups: string[] = []
@@ -33,6 +33,10 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   /** How many times the list of collections was asked for. */
   const collectionLists = { n: 0 }
   const heroAsks = { n: 0 }
+  /** The profile the session acts as (a switch moves it). */
+  const acting = { id: bound }
+  /** Holds the answer to the next request made until let go. */
+  const held: { answer: Promise<void> | null } = { answer: null }
   const TOWNS = { id: 5, owner_user_id: 1, name: 'Harbor towns', kind: 'manual', is_public: false, item_count: 1, created_at: NOW, updated_at: NOW }
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -42,9 +46,13 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
     // `noProfiles`: an account that has made none (the server acts as a stand-in).
-    if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, KID])
+    // `kidFree`: the second profile has no content limit, so both may request.
+    const kid = kidFree ? { ...KID, max_age_rating: undefined } : KID
+    if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, kid])
+    const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
+    if (activate && init?.method === 'POST') { acting.id = Number(activate[1]); return new Response(null, { status: 204 }) }
     if (p === '/api/profiles/active' && noProfiles) return json({ error: 'no profile' }, 404)
-    if (p === '/api/profiles/active') return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(bound === 1 ? PARENT : KID)
+    if (p === '/api/profiles/active') return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(acting.id === 1 ? PARENT : kid)
     // Asked for only once the app knows who it is showing Tonight to.
     if (p === '/api/me/hero') { heroAsks.n++; return json({ picks: [], slate_token: 's' }) }
     if (p === '/api/media/recent') return json({ data: [] })
@@ -63,6 +71,7 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
     if (p === '/api/requests' && init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>
       posted.push(body)
+      if (held.answer) await held.answer
       const made = { id: 31, user_id: 1, ...body, status: 'pending', requested_at: NOW, updated_at: NOW }
       listed.unshift(made)
       return json(made, 201)
@@ -83,7 +92,14 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
   render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
-  return { lookups, collectionLists, heroAsks, posted }
+  return {
+    lookups, collectionLists, heroAsks, posted,
+    holdRequest() {
+      let release!: () => void
+      held.answer = new Promise<void>(done => { release = done })
+      return () => { held.answer = null; release() }
+    },
+  }
 }
 
 const find = { timeout: 8000 }
@@ -119,6 +135,38 @@ describe('a search that finds nothing in the library', () => {
     fireEvent.click(screen.getByRole('button', { name: 'See my requests' }))
     expect(await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)).toBeInTheDocument()
     expect(await screen.findByText('The Lost Reel', undefined, find)).toBeInTheDocument()
+  })
+
+  // L6 of review 21. A request's answer can come back after the tab has
+  // moved on to someone else. It was told to the app whoever that was: a
+  // toast, and a row in whatever requests list the tab then held.
+  it('tells the app nothing about a request answered after the session moved to another profile', async () => {
+    const server = renderApp(1, false, { kidFree: true })
+    await screen.findByText('Parent', undefined, find)
+    await searchFor('the lost reel')
+    const release = server.holdRequest()
+    fireEvent.click(await screen.findByRole('button', { name: 'Request The Lost Reel (2025)' }, find))
+    await waitFor(() => expect(server.posted).toHaveLength(1), find)
+    // Another profile, while the answer is still out.
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name: /Kid/ }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Kid'), find)
+    release()
+    await new Promise(done => setTimeout(done, 400))
+    expect(screen.queryByText('Requested "The Lost Reel"')).toBeNull()
+  })
+
+  // The same answer, with nothing moved: it is told.
+  it('tells the app about a request answered late while the session is still the one that made it', async () => {
+    const server = renderApp(1, false, { kidFree: true })
+    await screen.findByText('Parent', undefined, find)
+    await searchFor('the lost reel')
+    const release = server.holdRequest()
+    fireEvent.click(await screen.findByRole('button', { name: 'Request The Lost Reel (2025)' }, find))
+    await waitFor(() => expect(server.posted).toHaveLength(1), find)
+    await new Promise(done => setTimeout(done, 300))
+    release()
+    expect(await screen.findByText('Requested "The Lost Reel"', undefined, find)).toBeInTheDocument()
   })
 
   it('offers no request to a profile with a content limit', async () => {

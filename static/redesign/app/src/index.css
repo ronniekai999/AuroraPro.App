@@ -1123,7 +1123,6 @@ html[data-effects="reduced"] .stage-topnav {
   font-size: 14px;
   color: var(--ink-2);
 }
-.search-req-note:empty { display: none; }
 .search-req-4k {
   display: flex;
   align-items: center;

@@ -2926,13 +2926,19 @@ export default function App() {
     const id = nextToastId()
     setToasts(prev => [...prev, { id, message: `Requested "${r.title}"`, type: 'success' }])
   }, [nextToastId])
-  // What the search page needs to take requests where a search ends.
+  // What the search page needs to take requests where a search ends. A
+  // request's answer can arrive after the tab has moved on (a sign-out and
+  // another sign-in, a profile switch): it is stamped with whose press it
+  // was, and told to the app only while the tab still acts as them. It used
+  // to be added to whatever requests list the tab then held, and announced.
   const searchUserId = user ? user.id : 0
+  const searchOwnerRef = useRef(searchOwner)
+  useLayoutEffect(() => { searchOwnerRef.current = searchOwner }, [searchOwner])
   const searchRequesting = useMemo(() => ({
     userId: searchUserId,
-    onRequested: handleRequestSubmitted,
+    onRequested: (r: MediaRequest) => { if (searchOwnerRef.current === searchOwner) handleRequestSubmitted(r) },
     onOpenRequests: () => handleNavigate('requests'),
-  }), [searchUserId, handleRequestSubmitted, handleNavigate])
+  }), [searchUserId, searchOwner, handleRequestSubmitted, handleNavigate])
   // A collection picked from the search page's results: the Collections
   // scope is opened on it. Owner-stamped, like the ask above, so it is not
   // carried to another profile's Collections.

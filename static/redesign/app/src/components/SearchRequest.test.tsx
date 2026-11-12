@@ -20,7 +20,7 @@ vi.mock('@/lib/api', async (original) => ({
   ...api,
 }))
 
-import { SearchRequest } from './SearchRequest'
+import { SearchRequest, useRequesting } from './SearchRequest'
 
 const NOW = '2026-10-01T00:00:00Z'
 const match = (tmdb_id: number, title: string, over: Partial<TmdbSearchResult> = {}): TmdbSearchResult =>
@@ -37,8 +37,12 @@ const ORCHARD = [
 ]
 
 const calls = { requested: vi.fn(), open: vi.fn() }
-const view = (query = 'the glass orchard') =>
-  <SearchRequest query={query} userId={1} onRequested={calls.requested} onOpenRequests={calls.open} />
+/** The list with the state the search page holds for it (useRequesting). */
+function Held({ query, takeFocus }: { query: string; takeFocus?: boolean }) {
+  const state = useRequesting(true)
+  return <SearchRequest query={query} userId={1} state={state} takeFocus={takeFocus} onRequested={calls.requested} onOpenRequests={calls.open} />
+}
+const view = (query = 'the glass orchard', takeFocus = false) => <Held query={query} takeFocus={takeFocus} />
 const settle = (ms = 0) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 const status = () => document.querySelector('[data-search-request-status]')!.textContent
 const rows = () => [...document.querySelectorAll<HTMLElement>('.search-req-row')]
@@ -66,7 +70,10 @@ describe('the titles that can be requested', () => {
     expect(api.searchTmdb).toHaveBeenCalledTimes(1)
     expect(api.searchTmdb.mock.calls[0][0]).toBe('the glass orchard')
     await settle()
-    expect(status()).toBe('')
+    // The matches arriving are said, in the region that said it was looking
+    // (which never leaves the tree: an emptied one announced nothing).
+    expect(status()).toBe('3 titles can be requested.')
+    expect(document.querySelector('[data-search-request-status]')).toHaveAttribute('role', 'status')
     expect(screen.getByRole('list', { name: 'Matches you can request' })).toBeInTheDocument()
     expect(rows().map(r => [
       r.querySelector('.search-req-title')!.textContent,
@@ -103,7 +110,7 @@ describe('the titles that can be requested', () => {
     // And the list that was up stays up: the late answer is not taken for
     // "still looking".
     expect(rows()).toHaveLength(3)
-    expect(status()).toBe('')
+    expect(status()).toBe('3 titles can be requested.')
   })
 
   it('requests the one pressed, in 1080p, says what became of it, and tells the app', async () => {
@@ -127,6 +134,65 @@ describe('the titles that can be requested', () => {
     expect(calls.open).toHaveBeenCalledTimes(1)
     // The others still can be, and the primary button is now the first of them.
     expect(screen.getAllByRole('button', { name: /^Request / }).map(b => b.className.includes('stage-btn-primary'))).toEqual([true, false])
+  })
+
+  // While a request is out the buttons stay in the tab order and keep the
+  // focus they hold (a disabled control can drop it); a second press does
+  // nothing. When it goes through, the button's place is taken by "See my
+  // requests", which takes its focus.
+  it('takes one request at a time without disabling its buttons, and keeps the focus on the row', async () => {
+    let answer!: (r: MediaRequest) => void
+    api.createRequest.mockImplementationOnce(() => new Promise(done => { answer = done as (r: MediaRequest) => void }))
+    render(view())
+    await settle()
+    await settle(500)
+    await settle()
+    const first = screen.getByRole('button', { name: 'Request The Glass Orchard (2025)' })
+    first.focus()
+    fireEvent.click(first)
+    expect(first).not.toBeDisabled()
+    expect(first).toHaveAttribute('aria-disabled', 'true')
+    expect(first.textContent).toBe('Requesting…')
+    expect(document.activeElement).toBe(first)
+    // Pressed again, and another row's pressed: nothing more is sent.
+    fireEvent.click(first)
+    fireEvent.click(screen.getByRole('button', { name: 'Request Orchard of Glass' }))
+    expect(api.createRequest).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Request Orchard of Glass' })).toHaveAttribute('aria-disabled', 'true')
+    answer(asked(900, 10))
+    await settle()
+    expect(document.activeElement).toBe(within(row('movie:10')).getByRole('button', { name: /^See my requests/ }))
+    expect(screen.getByRole('button', { name: 'Request Orchard of Glass' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('takes the focus on its status line when it was opened by a press', async () => {
+    render(view('the glass orchard', true))
+    expect(document.activeElement).toBe(document.querySelector('[data-search-request-status]'))
+    cleanup()
+    render(view())
+    expect(document.activeElement).not.toBe(document.querySelector('[data-search-request-status]'))
+  })
+
+  // L7: switched off after the page read that requests were on.
+  it('says requests are not set up when the server refuses for that, not to try again', async () => {
+    api.createRequest.mockRejectedValueOnce(new Error('requests feature is not enabled'))
+    render(view())
+    await settle()
+    await settle(500)
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Request The Glass Orchard (2025)' }))
+    await settle()
+    expect(within(row('movie:10')).getByRole('alert').textContent).toBe('Requests are not set up on this server.')
+  })
+
+  it('draws a poster at the size of its tile', async () => {
+    api.searchTmdb.mockResolvedValueOnce([match(10, 'The Glass Orchard', { poster_path: '/orchard.jpg' })])
+    render(view())
+    await settle()
+    await settle(500)
+    await settle()
+    expect(row('movie:10').querySelector('img')).toHaveAttribute('src', 'https://image.tmdb.org/t/p/w154/orchard.jpg')
+    expect(status()).toBe('1 title can be requested.')
   })
 
   it('says so when the server holds the request for an admin', async () => {
@@ -173,7 +239,11 @@ describe('the titles that can be requested', () => {
     await settle(500)
     await settle()
     expect(row('movie:12').querySelector('.search-req-state')).toBeNull()
-    expect(screen.getAllByRole('button', { name: /^Request / }).map(b => b.getAttribute('aria-label'))).toEqual(['Request Orchard of Glass'])
+    // Another member's request does not take the caller's own away: the
+    // server's one-request-per-title rule is per account. Their own does.
+    expect(screen.getAllByRole('button', { name: /^Request / }).map(b => b.getAttribute('aria-label'))).toEqual(['Request The Glass Orchard (2019)', 'Request Orchard of Glass'])
+    expect(within(row('tv:11')).queryByRole('button', { name: /^See my requests/ })).toBeNull()
+    expect(within(row('movie:10')).getByRole('button', { name: /^See my requests/ })).toBeInTheDocument()
     // The amber of "under way", and green for one that has arrived.
     expect(row('movie:10').querySelector('.search-req-state')).toHaveAttribute('data-status', 'processing')
   })
@@ -291,6 +361,7 @@ describe('the titles that can be requested', () => {
     expect(status()).toBe('Nothing to request was found for these words. Check the spelling, or try the original title.')
     expect(screen.queryByRole('list')).toBeNull()
     cleanup()
+    const before = api.searchTmdb.mock.calls.length
     api.searchTmdb.mockRejectedValueOnce(new Error('HTTP 503'))
     render(view())
     await settle()
@@ -298,10 +369,24 @@ describe('the titles that can be requested', () => {
     await settle()
     expect(status()).toContain('The titles that can be requested could not be loaded.')
     expect(document.body.textContent).not.toMatch(/HTTP|503/)
+    // A press is answered at once: looking again, the button gone, and the
+    // focus on the line that says so (not fallen to the page).
+    api.searchTmdb.mockRejectedValueOnce(new Error('HTTP 503'))
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(status()).toBe('Looking for “the glass orchard” outside your library…')
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    expect(document.activeElement).toBe(document.querySelector('[data-search-request-status]'))
+    // It fails again: said again (the line changed in between), and can be tried again.
+    await settle(500)
+    await settle()
+    expect(status()).toContain('The titles that can be requested could not be loaded.')
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     await settle(500)
     await settle()
     expect(rows()).toHaveLength(3)
+    expect(status()).toBe('3 titles can be requested.')
+    // One lookup per try: the first, and the two presses.
+    expect(api.searchTmdb.mock.calls.length - before).toBe(3)
   })
 
   it('always has the way to the requests page under the list, and says what the limit does without a number', async () => {
@@ -314,5 +399,81 @@ describe('the titles that can be requested', () => {
     expect(foot.textContent).not.toMatch(/\d/)
     fireEvent.click(within(foot).getByRole('button', { name: 'See my requests' }))
     expect(calls.open).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The page holds what does not change with the words (useRequesting), so a
+// list that is unmounted and mounted again at every search does not ask the
+// server the same two questions each time.
+describe('what the search page holds for the list', () => {
+  function Page({ show, enabled = true }: { show: boolean; enabled?: boolean }) {
+    const state = useRequesting(enabled)
+    return (
+      <>
+        <output data-offered={String(state.offered)} />
+        {show && <SearchRequest query="the glass orchard" userId={1} state={state} onRequested={calls.requested} onOpenRequests={calls.open} />}
+      </>
+    )
+  }
+  const offered = () => document.querySelector('output')!.getAttribute('data-offered')
+
+  it('asks whether the server takes requests once, at once, and for the list of requests once, when a list is first shown', async () => {
+    const v = render(<Page show={false} />)
+    await settle()
+    expect(api.getRequestsConfig).toHaveBeenCalledTimes(1)
+    expect(api.listRequests).not.toHaveBeenCalled()
+    for (let i = 0; i < 3; i++) {
+      v.rerender(<Page show />)
+      await settle()
+      v.rerender(<Page show={false} />)
+      await settle()
+    }
+    expect(api.getRequestsConfig).toHaveBeenCalledTimes(1)
+    expect(api.listRequests).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers requests only once the server is known to take them, or could not say', async () => {
+    let answer!: (c: RequestsConfig) => void
+    api.getRequestsConfig.mockImplementationOnce(() => new Promise(done => { answer = done }))
+    render(<Page show={false} />)
+    await settle()
+    expect(offered()).toBe('false')
+    answer(ON)
+    await settle()
+    expect(offered()).toBe('true')
+    cleanup()
+    api.getRequestsConfig.mockResolvedValueOnce({ enabled: false, has_radarr: false, has_sonarr: false })
+    render(<Page show={false} />)
+    await settle()
+    expect(offered()).toBe('false')
+    cleanup()
+    api.getRequestsConfig.mockRejectedValueOnce(new Error('HTTP 503'))
+    render(<Page show={false} />)
+    await settle()
+    expect(offered()).toBe('true')
+  })
+
+  it('asks nothing for a session that is not offered requests', async () => {
+    render(<Page show={false} enabled={false} />)
+    await settle()
+    expect(api.getRequestsConfig).not.toHaveBeenCalled()
+    expect(api.listRequests).not.toHaveBeenCalled()
+    expect(offered()).toBe('false')
+  })
+
+  it('keeps a request made in one list for the next list shown', async () => {
+    const v = render(<Page show />)
+    await settle()
+    await settle(500)
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Request The Glass Orchard (2025)' }))
+    await settle()
+    v.rerender(<Page show={false} />)
+    await settle()
+    v.rerender(<Page show />)
+    await settle()
+    await settle(500)
+    await settle()
+    expect(row('movie:10').querySelector('.search-req-state')!.textContent).toBe('Requested · sent, nothing found yet')
   })
 })
