@@ -356,6 +356,8 @@ describe('the presence pill', () => {
     expect([rest.textContent, rest.className]).toEqual([' Night Train', 'sr-only xl:hidden'])
     expect([whole.textContent, whole.className]).toEqual(['3 watching Night Train', 'hidden truncate xl:inline'])
     expect(pill).not.toHaveAttribute('aria-label')
+    // No tooltip either: it would repeat the name, word for word.
+    expect(pill).not.toHaveAttribute('title')
   })
 
   it('adds nothing where the short text is not the start of the label, or is all of it', () => {

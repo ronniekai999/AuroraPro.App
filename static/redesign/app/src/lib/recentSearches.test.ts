@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { forgetRecentSearches, readRecentSearches, rememberSearch } from './recentSearches'
+import { forgetAccountRecentSearches, forgetRecentSearches, readRecentSearches, rememberSearch } from './recentSearches'
 
 beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
 
@@ -62,5 +62,28 @@ describe('the searches a profile is offered again', () => {
   it('still answer when the list cannot be stored', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('full') })
     expect(rememberSearch('1:1', 'harbor')).toEqual(['harbor'])
+  })
+
+  // Signing out forgets what every profile of that account searched for in
+  // this browser, and nothing else that is stored.
+  it('are forgotten for a whole account, and only that account', () => {
+    rememberSearch('1:1', 'harbor')
+    rememberSearch('1:2', 'dinosaurs')
+    rememberSearch('1:none', 'no profile yet')
+    rememberSearch('12:1', 'another account, whose id starts the same')
+    rememberSearch('2:1', 'another account')
+    localStorage.setItem('aurora_prefs', '{"kept":true}')
+    forgetAccountRecentSearches(1)
+    expect(readRecentSearches('1:1')).toEqual([])
+    expect(readRecentSearches('1:2')).toEqual([])
+    expect(readRecentSearches('1:none')).toEqual([])
+    expect(readRecentSearches('12:1')).toEqual(['another account, whose id starts the same'])
+    expect(readRecentSearches('2:1')).toEqual(['another account'])
+    expect(localStorage.getItem('aurora_prefs')).toBe('{"kept":true}')
+  })
+
+  it('does not throw where storage cannot be read', () => {
+    vi.spyOn(Storage.prototype, 'key').mockImplementation(() => { throw new Error('blocked') })
+    expect(() => forgetAccountRecentSearches(1)).not.toThrow()
   })
 })

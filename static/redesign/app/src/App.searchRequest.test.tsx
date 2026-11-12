@@ -21,12 +21,15 @@ const PARENT = { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at
 const KID = { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' }
 const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', year: 2022, rating: 8, overview: 'A harbor.', added_at: NOW, updated_at: NOW }
 
-function renderApp(bound = 1, keep = false) {
+/** `bindingUnreadable`: the server cannot say which profile the session acts
+ *  as, so the app knows none (it opens the profile picker over the page). */
+function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false } = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   /** What the requests page looked up on TMDB. */
   const lookups: string[] = []
   /** How many times the list of collections was asked for. */
   const collectionLists = { n: 0 }
+  const heroAsks = { n: 0 }
   const TOWNS = { id: 5, owner_user_id: 1, name: 'Harbor towns', kind: 'manual', is_public: false, item_count: 1, created_at: NOW, updated_at: NOW }
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -35,9 +38,12 @@ function renderApp(bound = 1, keep = false) {
     const p = url.pathname
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
-    if (p === '/api/profiles') return json([PARENT, KID])
-    if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
-    if (p === '/api/me/hero') return json({ picks: [], slate_token: 's' })
+    // `noProfiles`: an account that has made none (the server acts as a stand-in).
+    if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, KID])
+    if (p === '/api/profiles/active' && noProfiles) return json({ error: 'no profile' }, 404)
+    if (p === '/api/profiles/active') return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(bound === 1 ? PARENT : KID)
+    // Asked for only once the app knows who it is showing Tonight to.
+    if (p === '/api/me/hero') { heroAsks.n++; return json({ picks: [], slate_token: 's' }) }
     if (p === '/api/media/recent') return json({ data: [] })
     if (p === '/api/media') return json({ data: [], page: 1, per_page: 30, total_items: 0, total_pages: 1 })
     // Nothing in the library matches anything, but "harbor".
@@ -63,7 +69,7 @@ function renderApp(bound = 1, keep = false) {
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
   render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
-  return { lookups, collectionLists }
+  return { lookups, collectionLists, heroAsks }
 }
 
 const find = { timeout: 8000 }
@@ -98,6 +104,26 @@ describe('a search that finds nothing in the library', () => {
     await searchFor('the lost reel')
     expect(screen.queryByRole('button', { name: 'Request it' })).toBeNull()
     expect(document.querySelector('[data-search-request]')).toBeNull()
+  })
+})
+
+// While the app does not know which profile the session acts as, it is
+// offered nothing a profile with a content limit lacks: the session may be a
+// child's. Requests are one of those things.
+describe('a search that finds nothing, while the session\'s profile is not known', () => {
+  it('offers no request', async () => {
+    renderApp(1, false, { bindingUnreadable: true })
+    // The picker is up (the binding could not be read); the page is behind it.
+    await screen.findByRole('heading', { name: /Who.s watching/ }, find)
+    const field = await waitFor(() => {
+      const el = document.querySelector<HTMLInputElement>('.stage-navsearch input')
+      if (!el) throw new Error('no search field yet')
+      return el
+    }, find)
+    fireEvent.change(field, { target: { value: 'the lost reel' } })
+    await waitFor(() => expect(document.querySelector('[data-search-empty]')).not.toBeNull(), find)
+    expect(document.querySelector('[data-search-request]')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Request it' })).toBeNull()
   })
 })
 
@@ -162,6 +188,56 @@ describe('recent searches', () => {
   })
 })
 
+// How long they are kept: until that profile clears them, or the account
+// signs out of this browser. And never in the one bucket every profile of an
+// account would share while the app does not know which of them it is.
+describe('recent searches, signing out, and a session whose profile is not known', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+
+  it('forgets every profile\'s searches for the account on an explicit sign-out, and no other account\'s', async () => {
+    localStorage.clear()
+    localStorage.setItem('aurora_recent_searches:1:1', JSON.stringify(['harbor']))
+    localStorage.setItem('aurora_recent_searches:1:2', JSON.stringify(['dinosaurs']))
+    localStorage.setItem('aurora_recent_searches:2:1', JSON.stringify(['someone else']))
+    renderApp(1, true)
+    await screen.findByText('Parent', undefined, find)
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /Sign out/ }, find))
+    await waitFor(() => expect(localStorage.getItem('aurora_recent_searches:1:1')).toBeNull(), find)
+    expect(localStorage.getItem('aurora_recent_searches:1:2')).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_recent_searches:2:1')!)).toEqual(['someone else'])
+  })
+
+  // An account with no profile at all has no one to keep them apart from:
+  // its searches are its own.
+  it('remembers for an account that has no profile', async () => {
+    localStorage.clear()
+    const server = renderApp(1, true, { noProfiles: true })
+    // Until the list of profiles is in, the app does not know the account has none.
+    await waitFor(() => expect(server.heroAsks.n).toBeGreaterThan(0), find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:none') ?? '[]')).toEqual(['harbor']), find)
+  })
+
+  it('neither shows nor adds to the account\'s no-profile bucket while a profile exists and is not known', async () => {
+    localStorage.clear()
+    localStorage.setItem('aurora_recent_searches:1:none', JSON.stringify(['left by whoever was here']))
+    renderApp(1, true, { bindingUnreadable: true })
+    await screen.findByRole('heading', { name: /Who.s watching/ }, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    const card = await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    expect(document.querySelector('[data-search-recent]')).toBeNull()
+    expect(document.body.textContent).not.toContain('left by whoever was here')
+    fireEvent.click(card)
+    await screen.findByRole('heading', { level: 1, name: 'Harbor Lights' }, find)
+    expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:none')!)).toEqual(['left by whoever was here'])
+    expect(Object.keys(localStorage).filter(k => k.startsWith('aurora_recent_searches:'))).toEqual(['aurora_recent_searches:1:none'])
+  })
+})
+
 // What a search finds besides titles, against the whole App: the collections
 // that hold the words, and a watch party with the best match. Both belong to
 // a session offered the Library's Collections and Together, which a profile
@@ -200,6 +276,31 @@ describe('what a search offers besides titles', () => {
     fireEvent.click(scope('Collections'))
     await waitFor(() => expect(document.querySelector('.stage-colcard-open')).not.toBeNull(), find)
     expect(screen.queryByRole('heading', { level: 1, name: 'Harbor towns' })).toBeNull()
+  })
+
+  // The nav's rewind counter is one for the whole app. Pressing a nav item
+  // again anywhere used to leave every later visit to Collections on its
+  // index, a picked collection included.
+  it('opens Collections on the collection though a nav item was pressed again earlier', async () => {
+    renderApp()
+    await screen.findByText('Parent', undefined, find)
+    const tonight = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('header .stage-tab[data-nav="home"]')
+      if (!el) throw new Error('no nav yet')
+      return el
+    }, find)
+    fireEvent.click(tonight)
+    fireEvent.click(tonight)
+    await typeInBar('harbor')
+    const row = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-collections] .search-colrow')
+      if (!el) throw new Error('no collection listed yet')
+      return el
+    }, find)
+    fireEvent.click(row)
+    expect(await screen.findByRole('heading', { level: 1, name: 'Harbor towns' }, find)).toBeInTheDocument()
+    await new Promise(done => setTimeout(done, 200))
+    expect(screen.getByRole('heading', { level: 1, name: 'Harbor towns' })).toBeInTheDocument()
   })
 
   it('lists no collection and offers no party to a profile with a content limit, and asks for no collections', async () => {

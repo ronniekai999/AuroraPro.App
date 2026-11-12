@@ -3,7 +3,7 @@
 // Two states: list (all visible collections) and detail (one
 // collection's items). Click a collection card → detail.
 
-import { useEffect, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import {
   listCollections,
   getCollection,
@@ -112,11 +112,16 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
   >(null)
   const [dialogError, setDialogError] = useState<string | null>(null)
 
-  // Re-click on the Collections nav resets to the index. Skip the
-  // initial render (nonce === 0 OR undefined) so first-paint doesn't
-  // wipe a selection set via deep-link.
+  // Pressing the Collections nav item again goes back to the index. Only a
+  // press made while this page is up: the counter is the app's, one for
+  // every destination, so a page mounted later starts from whatever it has
+  // reached. It used to skip only a count of zero, and with any nav item
+  // re-pressed earlier in the session it ran on mount and undid a selection
+  // the page was opened on (a collection picked on the search page).
+  const rewindSeen = useRef(rewindNonce)
   useEffect(() => {
-    if (rewindNonce === undefined || rewindNonce === 0) return
+    if (rewindNonce === rewindSeen.current) return
+    rewindSeen.current = rewindNonce
     setSelected(null)
   }, [rewindNonce])
 

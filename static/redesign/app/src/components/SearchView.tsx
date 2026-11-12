@@ -39,6 +39,8 @@ const KINDS: readonly { id: Kind; label: string; none: string }[] = [
   { id: 'collection', label: 'Collections', none: 'No collections match' },
 ]
 const isShow = (m: Media) => m.type === 'show' || m.type === 'anime'
+/** "Show · 2024": what a result is, then when. */
+const kindAndYear = (m: Media) => [isShow(m) ? 'Show' : 'Movie', m.year > 0 ? String(m.year) : ''].filter(Boolean).join(' · ')
 
 /** From md up (the widths the top bar has its own search field at). A phone
  *  lists titles as rows; a wider screen has room for the best match's row
@@ -57,14 +59,17 @@ function useWide(): boolean {
 }
 
 /** The words of a search a collection is matched on: every one of them must
- *  be in its name, its note or the description it was built from. */
+ *  be in its name, its note or (for one Aurora built) the description it
+ *  was built from. */
 function wordsOf(query: string): string[] {
   return query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length >= 2)
 }
 export function collectionMatches(c: Collection, query: string): boolean {
   const words = wordsOf(query)
   if (words.length === 0) return false
-  const hay = `${c.name} ${c.description ?? ''} ${c.prompt ?? ''}`.toLowerCase()
+  // The description a collection was built from is shown (on its own page)
+  // only for one Aurora built: it is matched only for those.
+  const hay = `${c.name} ${c.description ?? ''} ${c.kind === 'ai' ? c.prompt ?? '' : ''}`.toLowerCase()
   return words.every(w => hay.includes(w))
 }
 function collectionFacts(c: Collection): string {
@@ -184,8 +189,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // Library's Collections; without it no collection is listed or asked for.
   onOpenCollection?: (id: number) => void
   // What this profile searched for lately in this browser (newest first),
-  // offered again while nothing is typed. Picking one searches for it;
-  // "Clear" forgets them.
+  // offered again beside whatever the page shows. Picking one searches for
+  // it; "Clear" forgets them.
   recent?: string[]
   onPickRecent?: (words: string) => void
   onClearRecent?: () => void
@@ -324,7 +329,9 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   const best = wide && titles.length > 0 ? titles[0] : null
   const rest = best ? titles.slice(1) : titles
   // By description, and the server says that is what it ran.
-  const readAsMood = !loading && !failed && found > 0 && searchMode === 'semantic'
+  // (Titles, not collections: those are matched here on plain words, and
+  // the model had nothing to do with them.)
+  const readAsMood = !loading && !failed && results.length > 0 && searchMode === 'semantic'
   const empty = !loading && !!q && found === 0 && !failed
   const kinds = KINDS.filter(k => k.id !== 'collection' || mayOpenCollections)
 
@@ -406,12 +413,14 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               {results.length > 0 ? 'These match the title. ' : ''}A search by description found nothing for these words, or is not set up on this server.
             </p>
           )}
-          {canDescribe && results.length > 0 && (
+          {canDescribe && found > 0 && (
             // The other way to search these words, said where the results are:
             // nothing on the page otherwise tells a pointer or touch user that
-            // Enter does something typing did not.
+            // Enter does something typing did not. Also when only a
+            // collection matched: the empty page, which makes the same offer,
+            // is not shown then, and this line was the only cue left.
             <p className="search-describe-line mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-describe>
-              These match the title.
+              {results.length > 0 ? 'These match the title.' : 'No title matches these words.'}
               {/* Drawn at 36px; a touch screen gets the 44px target. */}
               <button type="button" onClick={() => onDescribe?.(query)} className="stage-btn stage-btn-sm stage-btn-ghost search-describe-btn stage-hit44">
                 <Icon name="sparkle" size={14} /> Search by description
@@ -439,7 +448,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               <Icon name="search" size={48} className="mx-auto mb-4 text-ink-3" />
               {canDescribe ? (
                 <>
-                  <h2 className="text-lg text-ink">No title matches &ldquo;{query}&rdquo;</h2>
+                  <h2 className="break-words text-lg text-ink">No title matches &ldquo;{query}&rdquo;</h2>
                   <p className="mt-1 text-sm text-ink-2">If that describes what you want to watch, search by description.</p>
                   <button type="button" onClick={() => onDescribe?.(query)} className="stage-btn stage-btn-primary mt-5">
                     <Icon name="sparkle" size={16} /> Search by description
@@ -484,8 +493,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                     {best && <span className="search-h2-note">{rest.length.toLocaleString()} more</span>}
                   </h2>
                   {wide ? (
-                    // The app's own cards, in the Library's compact grid: a
-                    // screen of results is a screen of results.
+                    // The app's own cards, set as closely as the Library's
+                    // compact grid: a screen of results is a screen of results.
                     <div className="poster-grid is-compact mt-4">
                       {rest.map(item => (
                         <MediaCardCinema
@@ -497,7 +506,9 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                           onToggleLib={onToggleLib}
                           onPlay={onCardPlay}
                           resumable={resumableIds?.has(item.id)}
-                          compact
+                          // A search mixes movies and shows: the kind leads
+                          // the card's one line of facts, then the year.
+                          subtitle={kindAndYear(item)}
                         />
                       ))}
                     </div>
@@ -516,6 +527,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                           onPlay={onCardPlay ? () => onCardPlay(item) : undefined}
                           resumable={resumableIds?.has(item.id)}
                           progress={progressById?.get(item.id)}
+                          kind={isShow(item) ? 'Show' : 'Movie'}
                         />
                       ))}
                     </div>
@@ -594,7 +606,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
           )}
           {onDescribe && (
             <p className="search-hint">
-              Titles appear as you type. Press Enter to search by mood or description, which takes a few seconds longer.
+              Titles appear as you type. {wide ? 'Press Enter' : 'Use the Search key on your keyboard'} to search by mood or description, which takes a few seconds longer.
             </p>
           )}
         </aside>

@@ -333,6 +333,11 @@ describe('a list row\'s actions', () => {
     const sub = document.querySelector('.media-list-row .mlr-sub')!
     expect(sub.textContent).toBe('2021 · PG-13 · 41 min left')
     expect(sub).toHaveAttribute('aria-hidden', 'true')
+    // So are the cells: the button has said them, and read as well they
+    // would be said twice.
+    const cells = [...document.querySelectorAll('.media-list-row .mlr-cell')]
+    expect(cells).toHaveLength(12)
+    expect(cells.every(c => c.getAttribute('aria-hidden') === 'true')).toBe(true)
   })
 
   // Children of a button are presentational to assistive tech: a More

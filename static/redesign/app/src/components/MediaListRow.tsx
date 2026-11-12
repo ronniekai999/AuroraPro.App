@@ -53,6 +53,10 @@ export interface MediaListRowProps {
    *  caller decides); `resumable` says which the button is. */
   onPlay?: () => void
   resumable?: boolean
+  /** What the title is ("Movie", "Show"), said first where the list mixes
+   *  kinds (a search's results). A Library grid is of one kind and says
+   *  nothing. */
+  kind?: string
 }
 
 function PlusSvg() {
@@ -85,12 +89,13 @@ function CheckSvg() {
   )
 }
 export function MediaListRow({
-  item, onSelect, onCardContext, libraryIds, onToggleLib, progress, onPlay, resumable,
+  item, onSelect, onCardContext, libraryIds, onToggleLib, progress, onPlay, resumable, kind,
 }: MediaListRowProps) {
   const isInLib = !!libraryIds?.has(item.id)
   const rated = contentRatingOf(item.tags)
-  const sub = [item.year && item.year > 0 ? String(item.year) : '', rated, progress?.label ?? ''].filter(Boolean).join(' · ')
+  const sub = [kind ?? '', item.year && item.year > 0 ? String(item.year) : '', rated, progress?.label ?? ''].filter(Boolean).join(' · ')
   const said = [
+    kind ?? '',
     item.year && item.year > 0 ? String(item.year) : '',
     rated,
     item.genre ?? '',
@@ -160,15 +165,17 @@ export function MediaListRow({
         </span>
       </button>
 
-      <div className="mlr-cell mlr-genre">{item.genre || '—'}</div>
-      <div className="mlr-cell mlr-length">{item.duration || '—'}</div>
-      <div className="mlr-cell mlr-year">{item.year && item.year > 0 ? item.year : '—'}</div>
-      <div className="mlr-cell mlr-rated">{rated || '—'}</div>
-      <div className="mlr-cell mlr-score">{item.rating !== undefined && item.rating > 0 ? item.rating.toFixed(1) : '—'}</div>
+      {/* The cells are for the eye: the title's button says them (above),
+          and read as well they would be said twice. */}
+      <div className="mlr-cell mlr-genre" aria-hidden="true">{item.genre || '—'}</div>
+      <div className="mlr-cell mlr-length" aria-hidden="true">{item.duration || '—'}</div>
+      <div className="mlr-cell mlr-year" aria-hidden="true">{item.year && item.year > 0 ? item.year : '—'}</div>
+      <div className="mlr-cell mlr-rated" aria-hidden="true">{rated || '—'}</div>
+      <div className="mlr-cell mlr-score" aria-hidden="true">{item.rating !== undefined && item.rating > 0 ? item.rating.toFixed(1) : '—'}</div>
       {/* Where the viewer is, for a title they have started. Empty for the
           rest: the catalog does not say which titles are finished, so the
           list does not guess "not started". */}
-      <div className="mlr-cell mlr-where">
+      <div className="mlr-cell mlr-where" aria-hidden="true">
         {progress && (
           <>
             <span className="mlr-where-label">{progress.label}</span>

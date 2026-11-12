@@ -505,7 +505,6 @@ export function TopNav({
             data-presence=""
             onClick={onPresenceClick}
             aria-expanded={presence.expanded}
-            title={presence.label}
             className="flex h-11 max-w-[280px] items-center gap-2 rounded-full bg-white/[0.08] px-3.5 text-[13px] font-medium text-ink transition-colors hover:bg-white/[0.14] md:h-10"
           >
             <AuroraDot />

@@ -195,6 +195,28 @@ describe('opened on a collection picked elsewhere', () => {
     expect(api.getCollection.mock.calls[1][0]).toBe(1)
   })
 
+  // The rewind counter is the app's, one for every destination: by the time
+  // this page mounts it may be well above zero (a nav item was pressed
+  // again somewhere earlier). That is not a press made here, and must not
+  // send the page back to the index it was just opened past.
+  it('opens on the collection though a nav item was re-pressed earlier in the session', async () => {
+    const view = render(<Page open={{ id: 2, n: 1 }} rewindNonce={3} />)
+    expect(await screen.findByRole('heading', { level: 1, name: 'Best of 2026' })).toBeInTheDocument()
+    // A press made now does go back to the index.
+    view.rerender(<Page open={{ id: 2, n: 1 }} rewindNonce={4} />)
+    expect(await screen.findByText('Empty One')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 1, name: 'Best of 2026' })).toBeNull()
+  })
+
+  it('goes back to the index when the Collections nav item is pressed again, from a collection opened by hand', async () => {
+    const view = render(<Page rewindNonce={0} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Best of 2026/ }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'Best of 2026' })).toBeInTheDocument()
+    view.rerender(<Page rewindNonce={1} />)
+    expect(await screen.findByText('Empty One')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 1, name: 'Best of 2026' })).toBeNull()
+  })
+
   it('opens on the index when there is no ask', async () => {
     render(<Page open={null} />)
     expect(await screen.findByText('Best of 2026')).toBeInTheDocument()

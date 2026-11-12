@@ -37,3 +37,19 @@ export function rememberSearch(owner: string, words: string): string[] {
 export function forgetRecentSearches(owner: string): void {
   try { localStorage.removeItem(key(owner)) } catch { /* nothing to forget */ }
 }
+
+/** Forgets what every profile of an account searched for in this browser:
+ *  what signing out does. (A session that merely expires leaves them, as it
+ *  leaves the My Library snapshot: the same person signs in again.) Owners
+ *  are `<user id>:<profile id or "none">`. */
+export function forgetAccountRecentSearches(userId: number): void {
+  try {
+    const prefix = key(`${userId}:`)
+    const mine: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(prefix)) mine.push(k)
+    }
+    for (const k of mine) localStorage.removeItem(k)
+  } catch { /* nothing to forget */ }
+}

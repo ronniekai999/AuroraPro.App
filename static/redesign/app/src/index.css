@@ -866,6 +866,12 @@ html[data-effects="reduced"] .stage-topnav {
   font-size: 14px;
   color: var(--ink-2);
 }
+/* The line quotes what was typed, and a long word with no space in it must
+   break rather than widen a phone's page. */
+.search-status > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .search-filters {
   display: flex;
   flex-wrap: wrap;
@@ -898,7 +904,7 @@ html[data-effects="reduced"] .stage-topnav {
 /* A phone's titles are rows (MediaListRow), a little larger here than in
    the Library's list: the poster is what a search is recognised by. The
    weight is the row's own rules' plus one, so these win wherever they sit. */
-.media-list[data-search-rows] .media-list-row { height: 88px; }
+.media-list[data-search-rows] .media-list-row { height: 88px; padding-inline: 0; }
 .media-list[data-search-rows] .media-list-row .mlr-thumb { width: 48px; height: 72px; }
 .media-list[data-search-rows] .media-list-row .mlr-title { font-size: 16px; }
 .search-h2-note {

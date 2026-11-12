@@ -107,7 +107,7 @@ import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
-import { forgetRecentSearches, readRecentSearches, rememberSearch } from '@/lib/recentSearches'
+import { forgetAccountRecentSearches, forgetRecentSearches, readRecentSearches, rememberSearch } from '@/lib/recentSearches'
 import { LibraryHeader, LibraryToolsProvider } from '@/components/LibraryHeader'
 import { BrowseTools, GenreChips, LetterStrip } from '@/components/BrowseControls'
 import { DEFAULT_BROWSE_SORT, fallbackGenres, readBrowseLayout, useGridLayout, writeBrowseLayout, type BrowseLayout } from '@/lib/browseLayout'
@@ -1892,15 +1892,25 @@ export default function App() {
   // The profile's recent searches (lib/recentSearches), read for whoever
   // the page is for now and held with that owner's stamp, so one profile's
   // list is never drawn for another on the commit a switch lands in.
-  const [recentSearches, setRecentSearches] = useState<{ owner: string; list: string[] }>(() => ({ owner: searchOwner, list: readRecentSearches(searchOwner) }))
-  if (recentSearches.owner !== searchOwner) setRecentSearches({ owner: searchOwner, list: readRecentSearches(searchOwner) })
+  // Kept only for a known owner: a profile, or an account known to have
+  // none. While the app knows no profile on an account that has profiles
+  // (startup, an unreadable binding), the owner would be `<user>:none`, one
+  // bucket every profile of the account would read and write in that state:
+  // nothing is read from it or remembered then.
+  const recentKnown = !!user && (activeProfileId != null || (profilesLoaded && profiles.length === 0))
+  const recentOwner = recentKnown ? searchOwner : null
+  const readRecent = (owner: string | null) => ({ owner: searchOwner, list: owner ? readRecentSearches(owner) : NO_RECENT, known: owner !== null })
+  const [recentSearches, setRecentSearches] = useState<{ owner: string; list: string[]; known: boolean }>(() => readRecent(recentOwner))
+  if (recentSearches.owner !== searchOwner || recentSearches.known !== recentKnown) setRecentSearches(readRecent(recentOwner))
   const noteSearch = useCallback((words: string) => {
-    setRecentSearches({ owner: searchOwner, list: rememberSearch(searchOwner, words) })
-  }, [searchOwner])
+    if (!recentOwner) return
+    setRecentSearches({ owner: recentOwner, list: rememberSearch(recentOwner, words), known: true })
+  }, [recentOwner])
   const clearRecentSearches = useCallback(() => {
-    forgetRecentSearches(searchOwner)
-    setRecentSearches({ owner: searchOwner, list: [] })
-  }, [searchOwner])
+    if (!recentOwner) return
+    forgetRecentSearches(recentOwner)
+    setRecentSearches({ owner: recentOwner, list: [], known: true })
+  }, [recentOwner])
   const describeSearch = useCallback((q: string) => {
     const query = q.trim()
     if (!query) return
@@ -5502,6 +5512,20 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // What the search page does with a result. Each remembers the search (a
+  // search is remembered when something is done with it) and is the same
+  // function from one render to the next, so the page's cards are not
+  // drawn again each time App renders: the words are read when it is called.
+  const searchQueryRef = useRef(searchQuery)
+  useLayoutEffect(() => { searchQueryRef.current = searchQuery }, [searchQuery])
+  const selectFromSearch = useCallback((m: Media) => { noteSearch(searchQueryRef.current); handleSelect(m) }, [noteSearch, handleSelect])
+  const playFromSearch = useCallback((m: Media) => { noteSearch(searchQueryRef.current); playOrResume(m) }, [noteSearch, playOrResume])
+  const partyFromSearch = useCallback((m: Media) => {
+    noteSearch(searchQueryRef.current)
+    void startPartyFromCard(m, continueItemsRef.current.find(c => c.media_item_id === m.id && isResumable(c)))
+  }, [noteSearch, startPartyFromCard])
+  const collectionFromSearch = useCallback((id: number) => { noteSearch(searchQueryRef.current); openCollectionFromSearch(id) }, [noteSearch, openCollectionFromSearch])
+
   // The card menu: what a right click, a card's More button, the context-menu
   // key and a long press all open (ContextMenu). Everything a card can do is
   // here, so nothing is reachable only by one of those gestures.
@@ -6350,9 +6374,14 @@ export default function App() {
       ready: () => navigator.serviceWorker.ready,
     })
     await apiLogout()
+    // Signing out forgets what this account's profiles searched for in this
+    // browser (description text included). A session that expires does not
+    // come through here and leaves them, as it leaves the My Library
+    // snapshot: the same person signs in again.
+    if (user) forgetAccountRecentSearches(user.id)
     setUser(false)
     resetUserState()
-  }, [party, resetUserState])
+  }, [party, resetUserState, user])
 
   if (user === null) {
     // Auth check in flight on a fresh tab with a stored token. Render
@@ -6902,10 +6931,11 @@ export default function App() {
                 // button; handed over only while it is still this session's.
                 describe={searchDescribe && searchDescribe.owner === searchOwner ? searchDescribe : null}
                 onDescribe={describeSearch}
-                // A search that finds nothing ends in "Request it". Not for
-                // a profile with a content limit, which is offered no
-                // requests anywhere.
-                onRequest={navScope === 'restricted' ? undefined : requestFromSearch}
+                // A search that finds nothing ends in "Request it". For a
+                // session known to be offered requests: not a profile with
+                // a content limit, and not one whose profile is not known
+                // yet (the identity menu offers Requests to the same).
+                onRequest={navScope === 'full' ? requestFromSearch : undefined}
                 // What this profile searched for lately in this browser. A
                 // search is remembered when something is done with it: a
                 // result opened or played, or a search by description asked
@@ -6915,20 +6945,17 @@ export default function App() {
                 onClearRecent={clearRecentSearches}
                 focusNonce={searchFocusNonce}
                 takeFocus={takeSearchFieldFocus}
-                onSelect={(m) => { noteSearch(searchQuery); handleSelect(m) }}
+                onSelect={selectFromSearch}
                 onCardContext={openCardContextMenu}
-                onCardPlay={(m) => { noteSearch(searchQuery); playOrResume(m) }}
+                onCardPlay={playFromSearch}
                 resumableIds={profileSwitchPending ? undefined : resumableIds}
                 progressById={profileSwitchPending ? undefined : listProgressById}
                 // A party with the best match, and the collections that hold
                 // the words: for a session offered Together and the
                 // Library's Collections, which a profile with a content
                 // limit is not.
-                onWatchTogether={navScope === 'full' ? (m) => {
-                  noteSearch(searchQuery)
-                  void startPartyFromCard(m, continueItems.find(c => c.media_item_id === m.id && isResumable(c)))
-                } : undefined}
-                onOpenCollection={navScope === 'full' ? (id) => { noteSearch(searchQuery); openCollectionFromSearch(id) } : undefined}
+                onWatchTogether={navScope === 'full' ? partyFromSearch : undefined}
+                onOpenCollection={navScope === 'full' ? collectionFromSearch : undefined}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}
               />

@@ -494,6 +494,10 @@ describe('the results', () => {
     const titles = section('titles')!
     expect(within(titles).getByRole('heading', { name: /^Titles/ }).textContent).toBe('Titles3 more')
     expect([...titles.querySelectorAll('.cc-title')].map(t => t.textContent)).toEqual(['Harbor Nights', 'Harbor Days', 'Harbor Dawn'])
+    // A search mixes kinds: each card's one line of facts is its kind, then
+    // its year, and no quality or rating chips.
+    expect([...titles.querySelectorAll('.co-meta')].map(m => m.textContent)).toEqual(['Show · 2024', 'Show · 2024', 'Movie · 2024'])
+    expect(titles.querySelector('.co-chip')).toBeNull()
     // The best match is not also one of the cards.
     expect(titles.textContent).not.toContain('Harbor Lights')
     view.unmount()
@@ -555,7 +559,10 @@ describe('the results', () => {
       collectionList.items = [
         col(1, 'Harbor towns', { item_count: 9, kind: 'ai', is_public: true, poster_paths: ['/a.jpg', '/b.jpg', '/c.jpg', '/d.jpg'] }),
         col(2, 'Rainy Sunday', { description: 'Slow films for a harbor morning', item_count: 1 }),
-        col(3, 'Best of 2025', { prompt: 'award winners' }),
+        col(3, 'Best of 2025', { kind: 'ai', prompt: 'award winners' }),
+        // A prompt is shown only for a collection Aurora built: one left on a
+        // hand-made collection is not what it is found by.
+        col(4, 'Hand made', { prompt: 'winners and a harbor' }),
       ]
     })
 
@@ -589,6 +596,33 @@ describe('the results', () => {
       cleanup()
       await answered({ onOpenCollection }, found, 'harbor winners')
       expect(section('collections')).toBeNull()
+    })
+
+    // Only a collection matched: the empty page, with its offer of the other
+    // way to search, is not shown, so the line under the count makes it, and
+    // must not say the titles matched.
+    it('still offer the search by description when a collection is all that matched', async () => {
+      const onDescribe = vi.fn()
+      await answered({ onOpenCollection: vi.fn(), onDescribe }, [], 'rainy')
+      expect(document.querySelector('[data-search-empty]')).toBeNull()
+      const line = document.querySelector<HTMLElement>('[data-search-describe]')!
+      expect(line.textContent).toContain('No title matches these words.')
+      expect(line.textContent).not.toContain('These match the title')
+      fireEvent.click(within(line).getByRole('button', { name: 'Search by description' }))
+      expect(onDescribe).toHaveBeenCalledWith('rainy')
+    })
+
+    // The model ranks titles. A collection found here by its words, beside
+    // a description search that found no title, is not the model's doing.
+    it('are not passed off as the description search\'s matches', async () => {
+      const view = render(<SearchView {...base} query="rainy" describe={{ query: 'rainy', n: 1 }} onDescribe={vi.fn()} onOpenCollection={vi.fn()} />)
+      await settle(0)
+      asks[asks.length - 1].answer([], 'semantic')
+      await settle()
+      expect(readAsMood()).toBe(false)
+      expect(status()).toBe('1 result for "rainy"')
+      expect([...section('collections')!.querySelectorAll('.search-colrow-name')].map(n => n.textContent)).toEqual(['Rainy Sunday'])
+      view.unmount()
     })
 
     it('are a result by themselves: a search that matches no title but a collection is not an empty one', async () => {
@@ -665,9 +699,14 @@ describe('the results', () => {
       expect(document.querySelector('[data-search-request]')).not.toBeNull()
     })
 
-    it('says how the two ways of searching differ, only where there are two', () => {
+    it('says how the two ways of searching differ, only where there are two, and names the key the screen has', () => {
       render(<SearchView {...base} query="" onDescribe={vi.fn()} />)
       expect(document.querySelector('.search-hint')!.textContent).toMatch(/^Titles appear as you type\. Press Enter to search by mood or description/)
+      cleanup()
+      screenIs(false)
+      render(<SearchView {...base} query="" onDescribe={vi.fn()} />)
+      expect(document.querySelector('.search-hint')!.textContent).toMatch(/^Titles appear as you type\. Use the Search key on your keyboard to search by mood or description/)
+      screenIs(true)
       cleanup()
       render(<SearchView {...base} query="" />)
       expect(document.querySelector('.search-hint')).toBeNull()
@@ -685,7 +724,10 @@ describe('the results', () => {
       expect(screen.queryByRole('group', { name: 'Filter results' })).toBeNull()
       const rows = [...document.querySelectorAll<HTMLElement>('[data-search-rows] .media-list-row')]
       expect(rows.map(r => r.querySelector('.mlr-title')!.textContent)).toEqual(['Harbor Lights', 'Harbor Nights', 'Harbor Days', 'Harbor Dawn'])
-      expect(rows[1].querySelector('.mlr-sub')!.textContent).toBe('2024 · S1 E2 · 12 min left')
+      // The kind first, as on a card.
+      expect(rows.map(r => r.querySelector('.mlr-sub')!.textContent)).toEqual(['Movie · 2021 · PG-13', 'Show · 2024 · S1 E2 · 12 min left', 'Show · 2024', 'Movie · 2024'])
+      // And said, in the title button's name.
+      expect(within(rows[1]).getByRole('button', { name: 'Harbor Nights, Show, 2024, Drama, 2h, score 8.0, S1 E2 · 12 min left' })).toBeInTheDocument()
       expect(within(section('titles')!).getByRole('heading').textContent).toBe('Titles')
       fireEvent.click(within(rows[2]).getByRole('button', { name: /^Harbor Days/ }))
       expect(base.onSelect).toHaveBeenLastCalledWith(found[2])
