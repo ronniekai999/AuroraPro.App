@@ -5317,12 +5317,19 @@ export default function App() {
     // it or not, and may still be at it. Nothing is claimed either way.
     // The title is read now, and again after a wait, since a read that
     // comes before the server has finished shows the old details.
-    const read = () => void getMedia(id)
-      // Only onto the title it was read for: the person may have moved on.
-      .then(detail => setDetailItem(shown => (shown && shown.id === id ? detail : shown)))
+    // The two reads are numbered: the first can take longer than the wait
+    // before the second, and must not land over it with the older details.
+    let landed = 0
+    const read = (n: number) => void getMedia(id)
+      .then(detail => {
+        if (n < landed) return
+        landed = n
+        // Only onto the title it was read for: the person may have moved on.
+        setDetailItem(shown => (shown && shown.id === id ? detail : shown))
+      })
       .catch(() => { /* the page keeps what it has */ })
-    read()
-    window.setTimeout(read, 4000)
+    read(1)
+    window.setTimeout(() => read(2), 4000)
     const tid = nextToastId()
     setToasts(prev => [...prev, {
       id: tid,

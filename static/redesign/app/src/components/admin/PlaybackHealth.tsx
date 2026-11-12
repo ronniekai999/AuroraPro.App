@@ -54,9 +54,12 @@ const REASON: Record<string, string> = {
  *  the slowest of a handful is one playback, not a pattern. */
 const ENOUGH_FOR_ONE_IN_TWENTY = 20
 
-/** What the slow-start figure of one delivery is: of that delivery's own
- *  playbacks, however many there were in all. */
-const slowOf = (n: number) => (n < ENOUGH_FOR_ONE_IN_TWENTY ? `the slowest of ${n.toLocaleString()}` : 'one in twenty')
+/** What the slow-start figure of one delivery is, by that delivery's own
+ *  count of playbacks, however many there were in all. With few it is about
+ *  the slowest one: "about", since the figure is taken over the playbacks
+ *  whose wait was measured, which can be fewer than the count, and sits a
+ *  little under the slowest. */
+const slowOf = (n: number) => (n < ENOUGH_FOR_ONE_IN_TWENTY ? 'about the slowest' : 'one in twenty')
 
 /** A delivery's slow-start figure with what it is, or that there is none. */
 function SlowStart({ ms, of }: { ms: number | null | undefined; of: number }) {

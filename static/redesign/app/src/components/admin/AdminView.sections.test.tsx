@@ -123,6 +123,62 @@ describe('Flagged items and the match dialog', () => {
     }
   })
 
+  // Four seconds is long enough to have clicked into the page to read. The
+  // second read must not take the focus from there, or scroll the page to
+  // the list.
+  it('does not take the focus at the second read from someone who has moved it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.listFlaggedItems.mockResolvedValue([flagged(1, 'Kestrel')])
+      api.manualMatch.mockReturnValue(new Promise(() => {}))
+      await openSection(user, 'Flagged items')
+      await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
+      await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await waitFor(() => expect(within(list()).getByRole('button', { name: 'Match Kestrel' })).toHaveFocus())
+      await waitFor(() => expect(api.listFlaggedItems).toHaveBeenCalledTimes(2))
+      ;(document.activeElement as HTMLElement).blur()
+      api.listFlaggedItems.mockResolvedValue([])
+      await act(async () => { vi.advanceTimersByTime(4000) })
+      await waitFor(() => expect(within(list()).queryByRole('button', { name: 'Match Kestrel' })).toBeNull())
+      await act(async () => {})
+      expect(document.body).toHaveFocus()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Two reads can be out at once, and the first can be the slower: its
+  // older answer must not go up over the newer one.
+  it('drops a read that lands after a later one has', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.listFlaggedItems.mockResolvedValueOnce([flagged(1, 'Kestrel')])
+      api.manualMatch.mockReturnValue(new Promise(() => {}))
+      await openSection(user, 'Flagged items')
+      await user.click(await within(list()).findByRole('button', { name: 'Match Kestrel' }))
+      await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: /^Match Kestrel \(2019\)/ }))
+      // The read at the close is slow; the one four seconds on is not.
+      let landFirst: (items: ServerMediaItem[]) => void = () => {}
+      api.listFlaggedItems.mockImplementationOnce(() => new Promise<ServerMediaItem[]>(resolve => { landFirst = resolve }))
+      api.listFlaggedItems.mockResolvedValue([])
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(api.listFlaggedItems).toHaveBeenCalledTimes(2))
+      await act(async () => { vi.advanceTimersByTime(4000) })
+      await waitFor(() => expect(within(list()).getByText(/Nothing flagged/)).toBeInTheDocument())
+      // The first read answers now, with the item still flagged as it was
+      // when that read was made.
+      await act(async () => { landFirst([flagged(1, 'Kestrel')]) })
+      expect(within(list()).queryByRole('button', { name: 'Match Kestrel' })).toBeNull()
+      expect(within(list()).getByText(/Nothing flagged/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('says a saved match in the colour of success', async () => {
     const user = userEvent.setup()
     api.listFlaggedItems.mockResolvedValueOnce([flagged(1, 'Kestrel')]).mockResolvedValue([])

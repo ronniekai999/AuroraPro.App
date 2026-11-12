@@ -55,10 +55,10 @@ describe('Playback health', () => {
     const table = await screen.findByRole('table', { name: 'How each was delivered' })
     const rows = within(table).getAllByRole('row').slice(1).map(r => r.textContent)
     // Each row's slow-start figure says what it is by that row's own
-    // count: one in twenty of 85, the slowest of 7.
+    // count: one in twenty of 85, about the slowest of 7.
     expect(rows[0]).toMatch(/^Played as it is.*850\.9 s2\.1 sone in twenty$/)
     expect(rows[1]).toMatch(/^Repackaged.*42\.5 sNot measured$/)
-    expect(rows[2]).toMatch(/^Converted.*74\.8 s12 sthe slowest of 7$/)
+    expect(rows[2]).toMatch(/^Converted.*74\.8 s12 sabout the slowest$/)
     expect(within(table).getByRole('columnheader', { name: 'Slowest starts' })).toBeInTheDocument()
     expect(within(table).queryByText(/direct_play|direct_stream|transcode/)).toBeNull()
   })
@@ -182,8 +182,8 @@ describe('Playback health', () => {
     expect(screen.queryByText(/One start in twenty/)).toBeNull()
     const table = screen.getByRole('table', { name: 'How each was delivered' })
     expect(within(table).getAllByRole('row').slice(1).map(r => r.textContent)).toEqual([
-      expect.stringMatching(/2\.1 sthe slowest of 3$/),
-      expect.stringMatching(/6\.2 sthe slowest of 2$/),
+      expect.stringMatching(/2\.1 sabout the slowest$/),
+      expect.stringMatching(/6\.2 sabout the slowest$/),
     ])
     expect(within(table).queryByText('one in twenty')).toBeNull()
   })

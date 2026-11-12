@@ -1379,8 +1379,11 @@ function AdminFlaggedTab() {
   // dialog gives the focus back to that item's Match button; the read then
   // takes the row away, and the list takes the focus when the row has gone
   // and the focus with it. It is asked once per such read, when the read
-  // has landed, so nothing is left set to move the focus at some later
-  // reload.
+  // has landed and only if the focus was in that row at that moment, so
+  // nothing is left set to move the focus at some later reload, and the
+  // focus is not taken from someone who has put it elsewhere meanwhile (a
+  // click into the page to read, four seconds on). The page is not
+  // scrolled for it.
   const [handBack, setHandBack] = useState<{ id: number } | null>(null)
   const itemsRef = useRef(items)
   useLayoutEffect(() => { itemsRef.current = items }, [items])
@@ -1388,8 +1391,14 @@ function AdminFlaggedTab() {
     if (!handBack) return
     const now = itemsRef.current
     if (!now || now.some(it => it.id === handBack.id)) return
-    if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus()
+    if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus({ preventScroll: true })
   }, [handBack])
+  // Called when a read has landed and before it is drawn: the row is still
+  // in the page if it was.
+  const handBackIfInRow = (id: number) => {
+    const row = listRef.current?.querySelector(`[data-flagged="${id}"]`)
+    if (row?.contains(document.activeElement)) setHandBack({ id })
+  }
   // The second read after the dialog was closed on a match in flight.
   const rereadTimer = useRef<number | null>(null)
   useEffect(() => () => { if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current) }, [])
@@ -1414,8 +1423,20 @@ function AdminFlaggedTab() {
   const pollTimerRef = useRef<number | null>(null)
   const pollCancelledRef = useRef(false)
 
+  // Reads are numbered as they start, and one that lands after a
+  // later-started read has landed is dropped: two can be out at once (the
+  // read after a dialog closed mid-match and the one four seconds on; the
+  // sweep's poll), and the older answer must not go up over the newer.
+  const readStarted = useRef(0)
+  const readLanded = useRef(0)
   const reload = useCallback(async () => {
-    try { setItems(await listFlaggedItems()) }
+    const mine = ++readStarted.current
+    try {
+      const list = await listFlaggedItems()
+      if (mine < readLanded.current) return
+      readLanded.current = mine
+      setItems(list)
+    }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload() }, [reload])
@@ -1570,7 +1591,7 @@ function AdminFlaggedTab() {
         const confidence = it.ai_match_confidence ?? 0
         const evaluated = !!it.ai_match_ran_at
         return (
-          <div key={it.id} className="py-3 border-b border-line last:border-0">
+          <div key={it.id} data-flagged={it.id} className="py-3 border-b border-line last:border-0">
             <div className="flex items-start gap-3">
               <span className="text-warn text-xs uppercase font-semibold flex-shrink-0">{(it.match_status || 'flagged').replace(/_/g, ' ')}</span>
               <div className="min-w-0 flex-1">
@@ -1642,7 +1663,7 @@ function AdminFlaggedTab() {
             // a read that comes before the server has finished shows the
             // item still flagged.
             say(`The dialog was closed while the match for ${title} was still being sent, so it may or may not have been saved. This list is read again now and once more in a few seconds: a match that was saved can take a moment to show.`, false)
-            const read = () => void reload().then(() => setHandBack({ id }))
+            const read = () => void reload().then(() => handBackIfInRow(id))
             read()
             if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current)
             rereadTimer.current = window.setTimeout(read, REREAD_AFTER_MS)
@@ -1651,7 +1672,7 @@ function AdminFlaggedTab() {
             const { id, title } = matchTarget
             setMatchTarget(null)
             say(`Matched ${title}.`, true)
-            void reload().then(() => setHandBack({ id }))
+            void reload().then(() => handBackIfInRow(id))
           }}
         />
       )}
