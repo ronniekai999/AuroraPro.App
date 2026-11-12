@@ -5,6 +5,15 @@
 //
 // It reads the server's summary and shows it. The summary is counts and
 // timings of playback sessions: it holds no title and no name.
+//
+// What the summary cannot say, the page does not make up:
+// - A session is recorded when its first picture appears. A playback that
+//   never showed one is not in any number here.
+// - How a playback went after that (whether it failed, how long it
+//   buffered) arrives with the player's last report. The summary gives those
+//   two shares as 0 when no report has arrived, with nothing to tell that 0
+//   from a measured one. The page can tell in one case, and says "Not
+//   measured yet" in every other: see `ended`.
 
 import { useEffect, useId, useState } from 'react'
 import { getPlaybackHealth, type PlaybackHealthSummary } from '@/lib/api'
@@ -30,9 +39,15 @@ const REASON: Record<string, string> = {
   bit_depth: 'The video is 10-bit or deeper, which the device does not take',
   audio_track: 'The sound the device can play is not the file’s first audio track',
   bitrate: 'The file’s bitrate is above the viewer’s limit',
-  compatible: 'No reason recorded',
+  // The player found nothing the device could not take, and the title was
+  // repackaged or converted all the same (a picked quality does that).
+  compatible: 'The device could have played the file as it is',
   unspecified: 'No reason recorded',
 }
+
+/** Fewer starts than this, and "one in twenty" describes no start at all:
+ *  the slowest of a handful is one playback, not a pattern. */
+const ENOUGH_FOR_ONE_IN_TWENTY = 20
 
 /** A wait in seconds: one decimal under ten, whole above. */
 export function seconds(ms: number | null | undefined): string | null {
@@ -93,23 +108,36 @@ export function PlaybackHealth() {
   const slowest = seconds(s?.p95_first_frame_ms)
   const converted = s ? s.by_decision.filter(d => d.decision !== 'direct_play').reduce((n, d) => n + d.count, 0) : 0
   const mostReasons = s ? Math.max(1, ...s.top_reasons.map(r => r.count)) : 1
+  // Whether any playback is known to have reported how it ended. The failed
+  // and buffering shares are measured over those reports alone, and the
+  // summary does not say how many there were. It does say how many sessions
+  // are old enough to have ended and what share of THOSE never reported:
+  // when some are, and not all of them stayed silent, a report exists. A
+  // share above zero is also proof of one.
+  const ended = !!s && s.settled_sessions > 0 && s.abandoned_ratio < 1
+  const failedMeasured = !!s && (ended || s.error_rate > 0)
+  const bufferingMeasured = !!s && (ended || s.rebuffer_ratio > 0)
+  const fewStarts = !!s && s.sessions < ENOUGH_FOR_ONE_IN_TWENTY
+  const slowestLabel = fewStarts ? 'Slowest waited about' : 'One in twenty waited'
 
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
         <p className="text-[15px] text-ink" role="status">
           {error ? '' : loading ? 'Loading…' : s && s.sessions > 0
-            ? `${count(s.sessions, 'playback session', 'playback sessions')} in ${period.phrase}.`
-            : `No playback was recorded in ${period.phrase}.`}
+            ? `${count(s.sessions, 'playback', 'playbacks')} reached a picture in ${period.phrase}.`
+            : `No playback reached a picture in ${period.phrase}.`}
         </p>
-        <div role="group" aria-label="Period" className="flex gap-1 rounded-control bg-surface-raised p-1">
+        {/* The three share the row's width when it is too narrow for their
+            words on one line each, and their labels wrap inside them. */}
+        <div role="group" aria-label="Period" className="flex max-w-full gap-1 rounded-control bg-surface-raised p-1">
           {PERIODS.map(p => (
             <button
               key={p.hours}
               type="button"
               aria-pressed={hours === p.hours}
               onClick={() => setHours(p.hours)}
-              className={`h-11 rounded-art px-3.5 text-[13px] font-semibold transition-colors ${
+              className={`min-h-[44px] min-w-0 flex-1 rounded-art px-3 py-1 text-[13px] font-semibold leading-tight transition-colors sm:flex-none sm:px-3.5 ${
                 hours === p.hours ? 'bg-action text-action-on' : 'text-ink-2 hover:text-ink'
               }`}
             >
@@ -134,53 +162,87 @@ export function PlaybackHealth() {
               label="Played as they are"
               value={percent(s.direct_play_ratio)}
               note={converted > 0
-                ? `${count(converted, 'session was', 'sessions were')} repackaged or converted, which is work for the server.`
-                : 'Nothing had to be repackaged or converted.'}
+                ? `Of the playbacks that reached a picture. ${count(converted, 'was', 'were')} repackaged or converted, which is work for the server.`
+                : 'Of the playbacks that reached a picture. Nothing had to be repackaged or converted.'}
             />
             <Tile
               label="Wait for the first picture"
               value={typical ?? 'Not measured'}
               note={typical === null
-                ? 'No session in this period reported it.'
-                : slowest ? `The usual wait after pressing play. One start in twenty took ${slowest} or longer.` : 'The usual wait after pressing play.'}
+                ? 'No playback in this period reported it.'
+                : !slowest ? 'The usual wait after pressing play.'
+                : fewStarts ? `The usual wait after pressing play. The slowest start took about ${slowest}; with ${count(s.sessions, 'playback', 'playbacks')} that is one start, not a pattern.`
+                : `The usual wait after pressing play. One start in twenty took ${slowest} or longer.`}
             />
             <Tile
               label="Time spent buffering"
-              value={percent(s.rebuffer_ratio)}
-              note="Of the time spent watching, the share that was spent waiting for the picture to come back."
+              value={bufferingMeasured ? percent(s.rebuffer_ratio) : 'Not measured yet'}
+              note={bufferingMeasured
+                ? 'Of the time watched, the share spent waiting for the picture to come back, in the playbacks that reported how they ended.'
+                : 'This comes with a playback’s last report, and none has arrived for this period as far as these numbers show.'}
             />
             <Tile
               label="Playback that failed"
-              value={percent(s.error_rate)}
-              note="Of the sessions that reported how they ended."
+              value={failedMeasured ? percent(s.error_rate) : 'Not measured yet'}
+              note={failedMeasured
+                ? 'Of the playbacks that reached a picture and reported how they ended.'
+                : 'This comes with a playback’s last report, and none has arrived for this period as far as these numbers show.'}
             />
             <Tile
               label="Never reported an ending"
               value={s.settled_sessions > 0 ? percent(s.abandoned_ratio) : 'Too soon to say'}
               note={s.settled_sessions > 0
-                ? `Of the ${count(s.settled_sessions, 'session', 'sessions')} old enough to have ended. When this is high the player’s last report is not arriving, and the two numbers before it are less sure.`
-                : 'No session in this period is old enough to have ended yet.'}
+                ? `Of the ${count(s.settled_sessions, 'playback', 'playbacks')} old enough to have ended. When this is high the player’s last report is not arriving, and the two numbers before it are less sure.`
+                : 'No playback in this period is old enough to have ended yet.'}
             />
           </dl>
 
           <h3 id={`${ids}-delivery`} className="mb-3 mt-8 font-display text-[17px] font-semibold text-ink">How each was delivered</h3>
-          {/* Four columns that fit a phone: the numbers are short, and the
-              first column's words wrap. A table that scrolled sideways hid
-              the waits, which are the point of it. */}
-          <div className="rounded-control bg-surface-raised">
+          {/* A table needs its four columns side by side, and a phone has room
+              for the words or for the numbers, not both: at 320 wide the
+              first column was one word to a line. Below the table's width
+              each delivery is a block instead: its name and what it means,
+              then its three figures, each under its label. One of the two
+              is displayed at a time. */}
+          <ul aria-labelledby={`${ids}-delivery`} className="rounded-control bg-surface-raised px-4 sm:hidden">
+            {s.by_decision.map(d => {
+              const words = DELIVERY[d.decision] ?? { name: d.decision, note: '' }
+              return (
+                <li key={d.decision} className="border-t border-line py-3.5 first:border-t-0">
+                  <p className="text-[15px] font-semibold text-ink">{words.name}</p>
+                  {words.note && <p className="mt-0.5 text-[13px] leading-snug text-ink-2">{words.note}</p>}
+                  <dl className="mt-2.5 grid grid-cols-3 gap-x-3 text-[13px] leading-snug">
+                    <div>
+                      <dt className="text-ink-2">Playbacks</dt>
+                      <dd className="mt-0.5 text-[15px] tabular-nums text-ink">{d.count.toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-2">Usual wait</dt>
+                      <dd className="mt-0.5 text-[15px] tabular-nums text-ink">{seconds(d.p50_first_frame_ms) ?? 'Not measured'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-2">{slowestLabel}</dt>
+                      <dd className="mt-0.5 text-[15px] tabular-nums text-ink">{seconds(d.p95_first_frame_ms) ?? 'Not measured'}</dd>
+                    </div>
+                  </dl>
+                </li>
+              )
+            })}
+          </ul>
+          <div className="hidden rounded-control bg-surface-raised sm:block">
             <table aria-labelledby={`${ids}-delivery`} className="w-full table-fixed text-left text-[14px]">
               <colgroup>
                 <col />
-                <col className="w-[4.75rem] sm:w-28" />
-                <col className="w-[4.25rem] sm:w-28" />
-                <col className="w-[5.25rem] sm:w-44" />
+                <col className="w-28" />
+                <col className="w-28" />
+                <col className="w-44" />
               </colgroup>
               <thead>
                 <tr className="align-bottom text-[13px] text-ink-2">
-                  <th scope="col" className="py-3 pl-4 pr-2 font-semibold sm:pl-5">Delivery</th>
-                  <th scope="col" className="px-2 py-3 text-right font-semibold">Sessions</th>
+                  <th scope="col" className="py-3 pl-5 pr-2 font-semibold">Delivery</th>
+                  <th scope="col" className="px-2 py-3 text-right font-semibold">Playbacks</th>
                   <th scope="col" className="px-2 py-3 text-right font-semibold">Usual wait</th>
-                  <th scope="col" className="py-3 pl-2 pr-4 text-right font-semibold sm:pr-5">One in twenty waited</th>
+                  <th scope="col" className="py-3 pl-2 pr-5 text-right font-semibold">{slowestLabel}</th>
                 </tr>
               </thead>
               <tbody>
@@ -188,13 +250,13 @@ export function PlaybackHealth() {
                   const words = DELIVERY[d.decision] ?? { name: d.decision, note: '' }
                   return (
                     <tr key={d.decision} className="border-t border-line align-top">
-                      <th scope="row" className="py-3 pl-4 pr-2 font-normal sm:pl-5">
+                      <th scope="row" className="py-3 pl-5 pr-2 font-normal">
                         <span className="block font-semibold text-ink">{words.name}</span>
                         {words.note && <span className="mt-0.5 block text-[13px] leading-snug text-ink-2">{words.note}</span>}
                       </th>
                       <td className="px-2 py-3 text-right tabular-nums text-ink">{d.count.toLocaleString()}</td>
                       <td className="px-2 py-3 text-right tabular-nums text-ink">{seconds(d.p50_first_frame_ms) ?? 'Not measured'}</td>
-                      <td className="py-3 pl-2 pr-4 text-right tabular-nums text-ink sm:pr-5">{seconds(d.p95_first_frame_ms) ?? 'Not measured'}</td>
+                      <td className="py-3 pl-2 pr-5 text-right tabular-nums text-ink">{seconds(d.p95_first_frame_ms) ?? 'Not measured'}</td>
                     </tr>
                   )
                 })}
@@ -205,7 +267,7 @@ export function PlaybackHealth() {
           {s.top_reasons.length > 0 && (
             <>
               <h3 id={`${ids}-why`} className="mb-3 mt-8 font-display text-[17px] font-semibold text-ink">
-                Why {count(converted, 'session was', 'sessions were')} not played as {converted === 1 ? 'it is' : 'they are'}
+                Why {count(converted, 'playback was', 'playbacks were')} not played as {converted === 1 ? 'it is' : 'they are'}
               </h3>
               <ul aria-labelledby={`${ids}-why`} className="rounded-control bg-surface-raised px-5 py-2">
                 {s.top_reasons.map(r => (
@@ -226,7 +288,7 @@ export function PlaybackHealth() {
 
           {s.burn_in_sessions > 0 && (
             <p className="mt-5 max-w-[68ch] text-[14px] leading-snug text-ink-2">
-              {count(s.burn_in_sessions, 'session', 'sessions')} had subtitles drawn into the picture. That keeps the converter off its
+              {count(s.burn_in_sessions, 'playback', 'playbacks')} had subtitles drawn into the picture. That keeps the converter off its
               fastest path, so it is the first thing to look at when converted titles start slowly.
             </p>
           )}
@@ -234,7 +296,11 @@ export function PlaybackHealth() {
       )}
 
       <p className="mt-8 max-w-[68ch] text-[13px] leading-snug text-ink-2">
-        These are counts and timings of playback sessions, kept for 30 days. They hold no title and no name: nothing here says
+        A playback is counted from its first picture. One that never showed a picture, because it failed or was given up on
+        before that, is not in any number on this page.
+      </p>
+      <p className="mt-3 max-w-[68ch] text-[13px] leading-snug text-ink-2">
+        These are counts and timings of playbacks, kept for 30 days. They hold no title and no name: nothing here says
         who watched what.
       </p>
     </div>

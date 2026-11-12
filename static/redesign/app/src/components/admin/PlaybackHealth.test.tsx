@@ -26,11 +26,11 @@ beforeEach(() => { api.getPlaybackHealth.mockReset().mockResolvedValue(summary()
 const tile = (label: string) => screen.getByText(label).closest('div') as HTMLElement
 
 describe('Playback health', () => {
-  it('asks for the last 7 days first, and says how many sessions that was', async () => {
+  it('asks for the last 7 days first, and says how many playbacks that was', async () => {
     render(<PlaybackHealth />)
     expect(api.getPlaybackHealth).toHaveBeenCalledWith(168, expect.anything())
     expect(screen.getByRole('status')).toHaveTextContent('Loading…')
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('96 playback sessions in the last 7 days.'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('96 playbacks reached a picture in the last 7 days.'))
     expect(screen.getByRole('button', { name: 'Last 7 days' })).toHaveAttribute('aria-pressed', 'true')
   })
 
@@ -38,14 +38,16 @@ describe('Playback health', () => {
     render(<PlaybackHealth />)
     await screen.findByText('How things played')
     expect(tile('Played as they are')).toHaveTextContent('89%')
-    expect(tile('Played as they are')).toHaveTextContent('11 sessions were repackaged or converted')
+    expect(tile('Played as they are')).toHaveTextContent('Of the playbacks that reached a picture. 11 were repackaged or converted')
     expect(tile('Wait for the first picture')).toHaveTextContent('1.8 s')
     expect(tile('Wait for the first picture')).toHaveTextContent('One start in twenty took 6.2 s or longer.')
     // A share that is not zero never reads "0%".
     expect(tile('Time spent buffering')).toHaveTextContent('under 1%')
+    expect(tile('Time spent buffering')).toHaveTextContent('in the playbacks that reported how they ended')
     expect(tile('Playback that failed')).toHaveTextContent('2%')
+    expect(tile('Playback that failed')).toHaveTextContent('Of the playbacks that reached a picture and reported how they ended.')
     expect(tile('Never reported an ending')).toHaveTextContent('10%')
-    expect(tile('Never reported an ending')).toHaveTextContent('Of the 90 sessions old enough to have ended.')
+    expect(tile('Never reported an ending')).toHaveTextContent('Of the 90 playbacks old enough to have ended.')
   })
 
   it('lists each way of delivering a title by what it means, with its waits', async () => {
@@ -58,15 +60,32 @@ describe('Playback health', () => {
     expect(within(table).queryByText(/direct_play|direct_stream|transcode/)).toBeNull()
   })
 
-  it('says why sessions were not played as they are, in words, most common first', async () => {
+  // Below the table's width the same rows are blocks. They are a second
+  // drawing of one list, so they must say what the table says.
+  it('gives the narrow layout the same deliveries and figures as the table', async () => {
     render(<PlaybackHealth />)
-    const list = await screen.findByRole('list', { name: 'Why 11 sessions were not played as they are' })
+    const table = await screen.findByRole('table', { name: 'How each was delivered' })
+    const blocks = within(screen.getByRole('list', { name: 'How each was delivered' })).getAllByRole('listitem')
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(blocks).toHaveLength(rows.length)
+    rows.forEach((row, i) => {
+      const name = within(row).getByRole('rowheader').textContent ?? ''
+      const figures = within(row).getAllByRole('cell').map(c => c.textContent)
+      expect(blocks[i].textContent?.startsWith(name)).toBe(true)
+      expect(within(blocks[i]).getAllByRole('definition').map(d => d.textContent)).toEqual(figures)
+      expect(within(blocks[i]).getAllByRole('term').map(d => d.textContent)).toEqual(['Playbacks', 'Usual wait', 'One in twenty waited'])
+    })
+  })
+
+  it('says why playbacks were not played as they are, in words, most common first', async () => {
+    render(<PlaybackHealth />)
+    const list = await screen.findByRole('list', { name: 'Why 11 playbacks were not played as they are' })
     expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual([
       'The device cannot play the audio format6',
       'The video is 10-bit or deeper, which the device does not take3',
       'No reason recorded2',
     ])
-    expect(screen.getByText(/2 sessions had subtitles drawn into the picture/)).toBeInTheDocument()
+    expect(screen.getByText(/2 playbacks had subtitles drawn into the picture/)).toBeInTheDocument()
   })
 
   it('asks again for another period, keeps one request per choice, and says the new count', async () => {
@@ -79,7 +98,7 @@ describe('Playback health', () => {
     // The other period's numbers are not shown as this period's.
     expect(screen.getByRole('status')).toHaveTextContent('Loading…')
     expect(screen.queryByText('How things played')).toBeNull()
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('1 playback session in the last 30 days.'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('1 playback reached a picture in the last 30 days.'))
     fireEvent.click(screen.getByRole('button', { name: 'Last 24 hours' }))
     expect(api.getPlaybackHealth).toHaveBeenLastCalledWith(24, expect.anything())
   })
@@ -87,7 +106,7 @@ describe('Playback health', () => {
   it('says so when nothing was played, and shows no empty tables', async () => {
     api.getPlaybackHealth.mockResolvedValue(summary({ sessions: 0, by_decision: [], top_reasons: [], burn_in_sessions: 0, p50_first_frame_ms: null, p95_first_frame_ms: null, settled_sessions: 0 }))
     render(<PlaybackHealth />)
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('No playback was recorded in the last 7 days.'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('No playback reached a picture in the last 7 days.'))
     expect(screen.queryByText('How things played')).toBeNull()
     expect(screen.queryByRole('table')).toBeNull()
   })
@@ -99,10 +118,75 @@ describe('Playback health', () => {
     render(<PlaybackHealth />)
     await screen.findByText('How things played')
     expect(tile('Never reported an ending')).toHaveTextContent('Too soon to say')
-    expect(tile('Never reported an ending')).toHaveTextContent('No session in this period is old enough to have ended yet.')
+    expect(tile('Never reported an ending')).toHaveTextContent('No playback in this period is old enough to have ended yet.')
     expect(tile('Wait for the first picture')).toHaveTextContent('Not measured')
     expect(screen.queryByText(/not played as/)).toBeNull()
     expect(screen.queryByText(/subtitles drawn into the picture/)).toBeNull()
+  })
+
+  // The failed and buffering shares arrive with a playback's last report.
+  // The summary sends 0 for both when none has arrived, and nothing that
+  // tells that 0 from a measured one: on a quiet day "0% failed" would be a
+  // clean bill of health nobody measured.
+  it.each([
+    ['nothing is old enough to have ended', { settled_sessions: 0, abandoned_ratio: 0 }],
+    ['every playback old enough to have ended stayed silent', { settled_sessions: 12, abandoned_ratio: 1 }],
+  ])('says "Not measured yet" for failures and buffering when %s', async (_, over) => {
+    api.getPlaybackHealth.mockResolvedValue(summary({ ...over, error_rate: 0, rebuffer_ratio: 0 }))
+    render(<PlaybackHealth />)
+    await screen.findByText('How things played')
+    for (const label of ['Playback that failed', 'Time spent buffering']) {
+      expect(tile(label)).toHaveTextContent('Not measured yet')
+      expect(tile(label)).toHaveTextContent('This comes with a playback’s last report, and none has arrived for this period as far as these numbers show.')
+      expect(tile(label)).not.toHaveTextContent('0%')
+    }
+  })
+
+  it('says 0% when playbacks did report how they ended and none failed or buffered', async () => {
+    api.getPlaybackHealth.mockResolvedValue(summary({ settled_sessions: 12, abandoned_ratio: 0.25, error_rate: 0, rebuffer_ratio: 0 }))
+    render(<PlaybackHealth />)
+    await screen.findByText('How things played')
+    expect(tile('Playback that failed')).toHaveTextContent('0%')
+    expect(tile('Playback that failed')).toHaveTextContent('reported how they ended')
+    expect(tile('Time spent buffering')).toHaveTextContent('0%')
+    expect(screen.queryByText('Not measured yet')).toBeNull()
+  })
+
+  // A share above zero can only come from a report: it is shown, whatever
+  // else the summary says.
+  it('shows a share that is above zero even when nothing is old enough to have ended', async () => {
+    api.getPlaybackHealth.mockResolvedValue(summary({ settled_sessions: 0, abandoned_ratio: 0, error_rate: 0.5, rebuffer_ratio: 0 }))
+    render(<PlaybackHealth />)
+    await screen.findByText('How things played')
+    expect(tile('Playback that failed')).toHaveTextContent('50%')
+    expect(tile('Time spent buffering')).toHaveTextContent('Not measured yet')
+  })
+
+  it('says that a playback which never showed a picture is in none of the numbers', async () => {
+    render(<PlaybackHealth />)
+    expect(screen.getByText(/A playback is counted from its first picture\. One that never showed a picture, because it failed or was given up on before that, is not in any number on this page\./)).toBeInTheDocument()
+  })
+
+  // "One start in twenty" of five starts is no start at all.
+  it('does not speak of one start in twenty when there were only a few', async () => {
+    api.getPlaybackHealth.mockResolvedValue(summary({ sessions: 5 }))
+    render(<PlaybackHealth />)
+    await screen.findByText('How things played')
+    expect(tile('Wait for the first picture')).toHaveTextContent('The slowest start took about 6.2 s; with 5 playbacks that is one start, not a pattern.')
+    expect(screen.queryByText(/One start in twenty/)).toBeNull()
+    const table = screen.getByRole('table', { name: 'How each was delivered' })
+    expect(within(table).getByRole('columnheader', { name: 'Slowest waited about' })).toBeInTheDocument()
+    expect(within(table).queryByRole('columnheader', { name: 'One in twenty waited' })).toBeNull()
+  })
+
+  it('tells a title the device could have played from one with no reason recorded', async () => {
+    api.getPlaybackHealth.mockResolvedValue(summary({ top_reasons: [{ reason: 'compatible', count: 3 }, { reason: 'unspecified', count: 2 }] }))
+    render(<PlaybackHealth />)
+    const list = await screen.findByRole('list', { name: /^Why 11 playbacks/ })
+    expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual([
+      'The device could have played the file as it is3',
+      'No reason recorded2',
+    ])
   })
 
   it('says when the numbers cannot be loaded, and tries again when asked', async () => {
