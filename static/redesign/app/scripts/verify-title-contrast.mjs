@@ -265,6 +265,23 @@ const MAX_TAIL = 0.004
 // lay out.
 const MAX_BLOCK_RATIO = 0.8
 const VIEWPORTS = [[390, 844], [1024, 768], [1200, 800], [1280, 720], [1440, 900]]
+// A capture the browser refuses is not a finding. Chromium on a small CI
+// runner now and then answers a screenshot of a page that is laid out and
+// idle with "Unable to capture screenshot"; that failed this script once with
+// every measurement before it passing. Ask again, twice, before giving up.
+// Any other error, and a third refusal, still fail the run: nothing is
+// measured from a picture that was not taken.
+async function capture(pg) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await pg.screenshot({ fullPage: true })
+    } catch (err) {
+      if (attempt >= 3 || !/Unable to capture screenshot/.test(String(err && err.message))) throw err
+      console.log(`   (the browser refused a capture, attempt ${attempt} of 3; asking again)`)
+      await new Promise(done => setTimeout(done, 300 * attempt))
+    }
+  }
+}
 const browser = await chromium.launch({ executablePath: EXE })
 let problems = 0
 for (const [width, height] of VIEWPORTS) {
@@ -283,7 +300,7 @@ for (const [width, height] of VIEWPORTS) {
   })
   // What is BEHIND the text: the same page with the text made invisible.
   await tab.addStyleTag({ content: '[data-probe], [data-probe] * { color: transparent !important; }' })
-  const shot = decodePng(await tab.screenshot({ fullPage: true }))
+  const shot = decodePng(await capture(tab))
   console.log(`\n── ${width}x${height}  (hero ${Math.round(box.hero.height)}px tall)`)
   for (const pr of probes) {
     if (pr.w < 1 || pr.h < 1) { console.log(`   ${pr.name.padEnd(34)} not shown at this width`); continue }
@@ -310,7 +327,7 @@ for (const [width, height] of VIEWPORTS) {
   // ── (2) the picture over mid-grey ──────────────────────────────────────
   const grey = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 })
   await grey.setContent(page(GREY))
-  const g = decodePng(await grey.screenshot({ fullPage: true }))
+  const g = decodePng(await capture(grey))
   await grey.close()
   // Where the picture is supposed to be left alone.
   //   Below lg: the upper half of the art band, under Back.

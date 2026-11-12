@@ -215,6 +215,23 @@ const KEEP = 0.9
 // drawn, from the narrowest phone the app supports to the last pixel before
 // the wide layout.
 const VIEWPORTS = [[320, 568], [360, 740], [390, 844], [430, 932], [767, 1024], [1023, 768]]
+// A capture the browser refuses is not a finding. Chromium on a small CI
+// runner now and then answers a screenshot of a page that is laid out and
+// idle with "Unable to capture screenshot"; that failed this script once with
+// every measurement before it passing. Ask again, twice, before giving up.
+// Any other error, and a third refusal, still fail the run: nothing is
+// measured from a picture that was not taken.
+async function capture(pg) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await pg.screenshot({ fullPage: true })
+    } catch (err) {
+      if (attempt >= 3 || !/Unable to capture screenshot/.test(String(err && err.message))) throw err
+      console.log(`   (the browser refused a capture, attempt ${attempt} of 3; asking again)`)
+      await new Promise(done => setTimeout(done, 300 * attempt))
+    }
+  }
+}
 const browser = await chromium.launch({ executablePath: EXE })
 let problems = 0
 for (const [width, height] of VIEWPORTS) {
@@ -229,7 +246,7 @@ for (const [width, height] of VIEWPORTS) {
   }))
   // What is BEHIND the text: the same page with the text made invisible.
   await tab.addStyleTag({ content: '[data-probe], [data-probe] * { color: transparent !important; } .aurora-dot { visibility: hidden !important; }' })
-  const shot = decodePng(await tab.screenshot({ fullPage: true }))
+  const shot = decodePng(await capture(tab))
   console.log(`\n── ${width}x${height}`)
   for (const pr of probes) {
     if (pr.w < 1 || pr.h < 1) { console.log(`   ${pr.name.padEnd(28)} *** not drawn`); problems++; continue }
@@ -258,7 +275,7 @@ for (const [width, height] of VIEWPORTS) {
     const r = a.getBoundingClientRect()
     return { x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height }
   }))
-  const g = decodePng(await grey.screenshot({ fullPage: true }))
+  const g = decodePng(await capture(grey))
   const bare = lum(0x80, 0x80, 0x80)
   for (const [n, b] of bands.entries()) {
     let sum = 0, count = 0
