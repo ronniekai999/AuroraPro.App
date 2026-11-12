@@ -297,6 +297,20 @@ describe('the page a report goes back to is one session\'s', () => {
     expect(app.hook.result.current.dismissed).toBe(false)
   })
 
+  // At startup the profile is not known for a moment, then is the one the
+  // server has bound. That is the same session becoming known, not a
+  // switch: a dialog opened in that moment is this profile's.
+  it('does not take the startup step from no profile to a profile for a switch', () => {
+    const app = mount('/movies', { profileId: null })
+    act(() => app.hook.result.current.openHere())
+    app.set({ profileId: 10 })
+    expect(app.hook.result.current.dismissed).toBe(false)
+    expect(app.open()).toBe(true)
+    // From there on, a change of profile is one.
+    app.set({ profileId: 20 })
+    expect(app.hook.result.current.dismissed).toBe(true)
+  })
+
   it('dismisses nothing when no dialog was open at the switch', () => {
     const app = mount('/movies')
     app.set({ profileId: 20 })

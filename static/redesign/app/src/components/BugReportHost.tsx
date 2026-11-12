@@ -35,9 +35,16 @@ export function BugReportHost({ open, dismissed = false, onClose, prefillName, o
     <BugReportModal
       prefillName={prefillName}
       dismissed={dismissed}
-      onClose={() => {
-        // A dialog that closed itself says why: nothing was pressed.
-        if (dismissed) onToast('The bug report was closed because this tab is now on another profile.', 'info')
+      // The person closed it (Cancel, Done, Escape): nothing to explain,
+      // also while a dismissal was waiting for a send to finish.
+      onClose={onClose}
+      // The dialog closed itself: it says why, since nothing was pressed,
+      // and that a report it was sending did not go, since the refusal it
+      // would have shown goes with it.
+      onDismissed={(unsent) => {
+        const why = 'The bug report was closed because this tab is now on another profile'
+        if (unsent) onToast(`${why}, and the report was not sent: ${unsent}`, 'error')
+        else onToast(`${why}.`, 'info')
         onClose()
       }}
       // The dialog itself shows the issue's number; the toast is the

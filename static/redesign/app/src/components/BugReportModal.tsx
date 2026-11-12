@@ -62,6 +62,11 @@ interface Props {
   // soon as nothing of its own is in flight: a send under way finishes
   // first, and a recording is stopped.
   dismissed?: boolean
+  // Called in place of onClose when it is the dismissal that closes the
+  // dialog, and not the person. `unsent` is why the last send failed, when
+  // one did and nothing has been sent since: the dialog is going, and its
+  // refusal with it, so the caller has to say that the report was not sent.
+  onDismissed?: (unsent: string | null) => void
 }
 
 // Match server-side limits (internal/api/feedback_handlers.go) so the
@@ -180,7 +185,7 @@ async function compressImageIfLarge(file: File): Promise<File> {
 // expiry; user can also stop early via the in-recording UI.
 const MAX_RECORDING_MS = 30_000
 
-export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason, focusFallback, dismissed = false }: Props) {
+export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason, focusFallback, dismissed = false, onDismissed }: Props) {
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -952,6 +957,11 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     }, 1000)
   }
 
+  // Why the last send failed, while nothing has been sent since. Read by
+  // the dismissal (below), which closes the dialog in the same pass that
+  // would have shown the refusal.
+  const unsentRef = useRef<string | null>(null)
+
   const handleStopRecording = () => {
     if (mediaRecorderRef.current?.state === 'recording') {
       try { mediaRecorderRef.current.stop() } catch { /* defensive */ }
@@ -965,9 +975,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     if (!dismissed) return
     if (recording) { handleStopRecording(); return }
     if (submitting || capturing) return
-    onClose()
-    // onClose is the caller's; it is called once, when the state above
-    // first allows it.
+    if (onDismissed) onDismissed(unsentRef.current)
+    else onClose()
+    // The callbacks are the caller's; one is called, once, when the state
+    // above first allows it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dismissed, recording, submitting, capturing])
 
@@ -1021,6 +1032,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     }
     clearError()
     setFieldRefusal(null)
+    unsentRef.current = null
     submittingRef.current = true
     setSubmitting(true)
     const ac = new AbortController()
@@ -1053,7 +1065,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       // Aborts are user-initiated (Cancel); don't surface them as
       // errors. AbortError comes from fetch when signal.aborted.
       if (err && (err as Error).name === 'AbortError') return
-      refuse(err instanceof Error && err.message ? err.message : 'The report could not be sent.')
+      const why = err instanceof Error && err.message ? err.message : 'The report could not be sent.'
+      unsentRef.current = why
+      refuse(why)
     } finally {
       submittingRef.current = false
       setSubmitting(false)

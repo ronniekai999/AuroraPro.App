@@ -337,6 +337,64 @@ describe('a dialog the app dismisses', () => {
     expect(onToast).toHaveBeenCalledWith('Bug reported as issue #512. Thank you.', 'success')
   })
 
+  // The refusal would have been shown in the dialog, and the dialog is
+  // going in the same pass: without this the person is told only that it
+  // closed, and may take the report for filed.
+  it('says that the report was not sent when the send it waited for is refused', async () => {
+    const user = userEvent.setup()
+    let fail: (e: Error) => void = () => {}
+    submitBugReport.mockImplementationOnce(() => new Promise<BugReportSubmitResult>((_, reject) => { fail = reject }))
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+    expect(onClose).not.toHaveBeenCalled()
+    await act(async () => { fail(new Error('GitHub did not accept the report')) })
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith('The bug report was closed because this tab is now on another profile, and the report was not sent: GitHub did not accept the report', 'error')
+  })
+
+  // A refusal from before the switch counts too, for as long as nothing has
+  // been sent since; one that was followed by a report that went does not.
+  it('says it of a send that had already been refused, and not once a later one has gone', async () => {
+    const user = userEvent.setup()
+    submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await within(dialog).findByRole('button', { name: 'Done' })
+    onToast.mockClear()
+    view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith('The bug report was closed because this tab is now on another profile.', 'info')
+  })
+
+  // The person closed it; the dialog did not close itself.
+  it('says nothing of a dismissal when the person closes the dialog while it waits for a send', async () => {
+    const user = userEvent.setup()
+    submitBugReport.mockImplementationOnce(() => new Promise<BugReportSubmitResult>(() => {}))
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
+    expect(onClose).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
   it('stops a recording that is running, then closes', async () => {
     const user = userEvent.setup()
     const stopped = vi.fn()

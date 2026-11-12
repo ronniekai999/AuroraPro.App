@@ -90,17 +90,20 @@ export function useBugReportEntry(input: BugReportEntryInput): BugReportEntry {
   // takes no reports, so it cannot come back unasked when it does again.
   // Reset in the render that sees the change.
   const [forUser, setForUser] = useState(userId)
-  const [forOwner, setForOwner] = useState(owner)
+  const [forProfile, setForProfile] = useState(profileId)
   if (forUser !== userId) {
     setForUser(userId)
-    setForOwner(owner)
+    setForProfile(profileId)
     setOpen(false)
     setDismissed(false)
     setReturning(null)
-  } else if (forOwner !== owner) {
-    setForOwner(owner)
+  } else if (forProfile !== profileId) {
+    setForProfile(profileId)
     setReturning(null)
-    if (open) setDismissed(true)
+    // A switch is from one profile to another. The step from "not known
+    // yet" to the profile the server has bound (at startup) is the same
+    // session becoming known: a dialog opened before it is this profile's.
+    if (open && forProfile !== null) setDismissed(true)
   }
   if (!enabled && (open || dismissed || returning !== null)) {
     setOpen(false)
