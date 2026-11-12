@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
-import type { MediaRequest } from '@/lib/api'
+import { APIError, type MediaRequest } from '@/lib/api'
 
 const api = vi.hoisted(() => ({
   createRequest: vi.fn<(body: Record<string, unknown>) => Promise<unknown>>(),
@@ -358,7 +358,7 @@ describe('the delete question and the keyboard', () => {
     expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }))
   })
 
-  it('keeps its buttons focusable while the delete is out, and takes no second press', async () => {
+  it('keeps its buttons focusable while the delete is out, and takes no second press and no Escape', async () => {
     let done!: () => void
     api.deleteRequest.mockImplementationOnce(() => new Promise<void>(r => { done = r }))
     render(page(SIX))
@@ -371,6 +371,14 @@ describe('the delete question and the keyboard', () => {
     fireEvent.click(keepBtn('The Glass Orchard'))
     expect(api.deleteRequest).toHaveBeenCalledTimes(1)
     expect(row(1).querySelector('.req-confirm')).not.toBeNull()
+    // Escape is Keep's key, and like Keep answers nothing while the delete
+    // is out; it is still not the page's behind.
+    const behind = vi.fn()
+    window.addEventListener('keydown', behind)
+    fireEvent.keyDown(del, { key: 'Escape' })
+    window.removeEventListener('keydown', behind)
+    expect(row(1).querySelector('.req-confirm')).not.toBeNull()
+    expect(behind).not.toHaveBeenCalled()
     done()
     await flush()
     expect(calls.deleted).toHaveBeenCalledWith(1)
@@ -406,6 +414,54 @@ describe('what a refusal says on the requests page', () => {
     expect(row(1).querySelector('.req-confirm')).toBeNull()
     expect(within(row(1)).queryByRole('button')).toBeNull()
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Ask for Second again' }))
+  })
+
+  // With the Pending filter on, the row that is put right is no longer in
+  // the list shown, and what it says would go with it.
+  it('says it above the list, with the title, when the row it is about has left the list shown', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' }), request(3, { title: 'Third', status: 'failed' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Pending · 2' }))
+    expect(document.querySelector('[data-requests-wrong]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(names()).toEqual(['Second'])
+    const said = screen.getByRole('alert')
+    expect(said.textContent).toBe('First: It is with the downloader now and can no longer be deleted. It is listed under Processing now.')
+    expect(said.closest('[data-request-id]')).toBeNull()
+    // Shown where the row is, it is said on the row, once.
+    fireEvent.click(screen.getByRole('button', { name: 'All · 3' }))
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
+  })
+
+  // Deleted already, from another tab or by an admin: the server has no
+  // such request. It is gone, which is what was asked for.
+  it('counts a request the server no longer has as deleted, where "try again" could never work', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new APIError(404, 'request not found', null))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second', status: 'failed' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(calls.deleted).toHaveBeenCalledWith(1)
+    expect(names()).toEqual(['Second'])
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Ask for Second again' }))
+    // The same for the failed row a retry clears away.
+    api.deleteRequest.mockRejectedValueOnce(new APIError(404, 'request not found', null))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for Second again' }))
+    await flush()
+    expect(calls.deleted).toHaveBeenLastCalledWith(2)
+    expect(names()).toEqual([])
+    // Any other status is a failure, and says so.
+    cleanup()
+    api.deleteRequest.mockRejectedValueOnce(new APIError(500, 'failed to delete request', null))
+    render(<Kept start={[request(1, { title: 'First' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(within(row(1)).getByRole('alert').textContent).toBe('It could not be deleted. Try again in a moment.')
   })
 
   it('says only "could not be deleted" for any other failure, and for that refusal on a row that was not pending', async () => {

@@ -1383,6 +1383,8 @@ html[data-effects="reduced"] .stage-topnav {
   font-size: 13px;
   color: var(--danger-ink);
 }
+/* Said above the list when the row it is about is not in the list shown. */
+.req-wrong-page { margin: 16px 0 0; overflow-wrap: anywhere; }
 .req-acts {
   flex: none;
   display: flex;

@@ -23,6 +23,7 @@ import { Icon } from '@/components/Icon'
 import { formatRequestDay } from '@/lib/format'
 import { REQUEST_STATUS, REQUEST_STATUSES, requestRefusalSays } from '@/lib/requestStatus'
 import {
+  APIError,
   createRequest,
   deleteRequest,
   tmdbPosterURL,
@@ -151,6 +152,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   const [busy, setBusy] = useState<number | null>(null)
   const busyRef = useRef<number | null>(null)
   const [wrong, setWrong] = useState<{ id: number; says: string } | null>(null)
+  // The server's answer to a delete of a request that is not there: someone
+  // (another tab, an admin) deleted it first. It is deleted, which is what
+  // was asked for; "try again" could never work.
+  const alreadyGone = (err: unknown) => err instanceof APIError && err.status === 404
 
   // Where the keyboard's focus goes when the control that holds it is about
   // to leave the page. The question's buttons take the bin's place and the
@@ -202,7 +207,11 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       // the server deletes only a pending or a failed one. That refusal is
       // not something to try again: the row is put right and says why.
       const raw = err instanceof Error ? err.message.toLowerCase() : ''
-      if (req.status === 'pending' && raw.includes('can only delete')) {
+      if (alreadyGone(err)) {
+        setConfirming(null)
+        setFocusTo({ kind: 'after', ids: after })
+        onRequestDeleted(req.id)
+      } else if (req.status === 'pending' && raw.includes('can only delete')) {
         setConfirming(null)
         setFocusTo({ kind: 'after', ids: [req.id, ...after] })
         onRequestMoved?.(req.id, 'processing')
@@ -241,7 +250,14 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         await deleteRequest(req.id)
         setFocusTo({ kind: 'after', ids: after })
         onRequestDeleted(req.id, true)
-      } catch { /* the failed row stays */ }
+      } catch (err) {
+        // Deleted elsewhere meanwhile: gone all the same. Anything else,
+        // the failed row stays.
+        if (alreadyGone(err)) {
+          setFocusTo({ kind: 'after', ids: after })
+          onRequestDeleted(req.id, true)
+        }
+      }
     } catch (err) {
       // In the server's own terms where it gave them (already asked for
       // again from the search page; requests switched off): "try again in a
@@ -272,6 +288,14 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   }
 
   const filtered = filteredNow
+  // What went wrong is said on its row. A row can leave the list being
+  // shown as it is put right (a pending request found to be processing,
+  // under the Pending filter): then it is said here, above the list, with
+  // the title it is about and where the request is listed now.
+  const wrongRow = wrong ? requests.find(r => r.id === wrong.id) : undefined
+  const wrongOutOfView = wrong && wrongRow && !filtered.some(r => r.id === wrong.id)
+    ? `${wrongRow.title}: ${wrong.says} It is listed under ${REQUEST_STATUS[wrongRow.status]?.label ?? wrongRow.status} now.`
+    : ''
   const filters: { id: Filter; label: string; count: number }[] = [
     { id: 'all', label: 'All', count: requests.length },
     ...REQUEST_STATUSES.map(id => ({ id, label: REQUEST_STATUS[id].label, count: counts[id] ?? 0 })),
@@ -299,6 +323,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
           </span>
         </>
       )}
+
+      {wrongOutOfView && <p className="req-wrong req-wrong-page" role="alert" data-requests-wrong="">{wrongOutOfView}</p>}
 
       {filtered.length === 0 ? (
         <div className="req-none" data-requests-none="">
@@ -337,6 +363,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
             // would be deleted with it; and one press would undo a denial
             // (under the limit, the server sends it straight on).
             const mine = userId === undefined ? !everyone : req.user_id === userId
+            // A denial is known only by the words the server stores for it
+            // (internal/api/request_handlers.go, "denied by admin"); no
+            // field says so. If those words change this fails open: "Try
+            // again" is offered on a denied request, as it was before.
             const denied = (req.error_message ?? '').toLowerCase().includes('denied by admin')
             const retryable = req.status === 'failed' && mine && !denied
             // `completed_at` is also written when a request fails, so one
@@ -373,9 +403,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                 </div>
                 <div
                   className="req-acts"
-                  // Escape answers the question as Keep does. (Stopped here:
-                  // the app's own Escape is for the page behind.)
-                  onKeyDown={e => { if (confirming === req.id && e.key === 'Escape') { e.stopPropagation(); keep(req.id) } }}
+                  // Escape answers the question as Keep does, and like Keep
+                  // does nothing while the delete is out. (Stopped here
+                  // either way: the app's own Escape is for the page behind.)
+                  onKeyDown={e => { if (confirming === req.id && e.key === 'Escape') { e.stopPropagation(); if (busy === null) keep(req.id) } }}
                 >
                   {confirming === req.id ? (
                     // Asked on the row itself, where the request is: no
