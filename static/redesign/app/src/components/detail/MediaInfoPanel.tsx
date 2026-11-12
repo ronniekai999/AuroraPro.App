@@ -1,7 +1,6 @@
-// Aurora V2 — Media Info panel (audio tracks + subtitle languages).
-//
-// Two glass cards. Hides itself entirely when there's nothing to show
-// (preserves the old graceful-hide behavior).
+// The technical side of a title: the versions on disk, its audio tracks and
+// its subtitles. Lives inside a closed disclosure at the foot of the title
+// page; nothing here is needed to press Play.
 
 export interface AudioRowVM {
   language: string // uppercased, e.g. "ENG"
@@ -16,81 +15,74 @@ export interface SubtitleVM {
   default?: boolean
 }
 
+export interface VersionVM {
+  id: number
+  name: string // "4K HDR", "1080p"
+  detail?: string // "hevc/truehd · 55.0 GB"
+  note?: string // the library it is in
+}
+
 interface MediaInfoPanelProps {
+  versions?: VersionVM[]
   audio: AudioRowVM[]
   subtitles: SubtitleVM[]
   subtitleFormat?: string // e.g. "PGS / image-based" | "SRT / text"
-  className?: string
 }
 
-function LangChip({ children }: { children: React.ReactNode }) {
+function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <span className="inline-flex px-2.5 py-1 rounded-lg text-[11.5px] font-semibold bg-white/5 border border-white/10 text-white/80">
-      {children}
-    </span>
+    <div className="min-w-0">
+      <h3 className="mb-2 text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-3">{title}</h3>
+      <ul>{children}</ul>
+    </div>
   )
 }
 
-export function MediaInfoPanel({ audio, subtitles, subtitleFormat, className }: MediaInfoPanelProps) {
-  if (audio.length === 0 && subtitles.length === 0) return null
+function Row({ name, detail, note }: { name: string; detail?: string; note?: string }) {
   return (
-    <section className={className}>
-      <h3 className="text-lg font-semibold font-display mb-5">Media Info</h3>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {audio.length > 0 && (
-          <div className="glass-card rounded-2xl p-5">
-            <div className="text-[11px] uppercase tracking-[.16em] text-white/50 mb-3 font-semibold">
-              Audio Tracks
-            </div>
-            {audio.map((a, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between py-2 border-b border-white/[0.05] last:border-0"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <LangChip>{a.language}</LangChip>
-                  <span className="text-[14px] text-white/85 font-medium">{a.codec}</span>
-                  {a.detail && <span className="text-[13px] text-white/50 truncate">{a.detail}</span>}
-                </div>
-                {a.isDefault && (
-                  <span className="text-[10px] px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded font-semibold flex-shrink-0 ml-2">
-                    Default
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {subtitles.length > 0 && (
-          <div className="glass-card rounded-2xl p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-[11px] uppercase tracking-[.16em] text-white/50 font-semibold">
-                Subtitles · {subtitles.length}
-              </div>
-              {subtitleFormat && <span className="text-[11px] text-white/50">{subtitleFormat}</span>}
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {subtitles.map((s, i) => (
-                <span
-                  key={i}
-                  title={[s.forced && 'Forced', s.default && 'Default'].filter(Boolean).join(' · ') || undefined}
-                  className={
-                    'inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold border ' +
-                    (s.forced
-                      ? 'bg-amber-500/[0.12] border-amber-400/25 text-amber-200'
-                      : s.default
-                        ? 'bg-purple-500/[0.12] border-purple-400/25 text-purple-200'
-                        : 'bg-white/5 border-white/10 text-white/80')
-                  }
-                >
-                  {s.language}
-                  {s.forced && <span className="text-[9px] uppercase opacity-80">F</span>}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </section>
+    <li className="min-h-[40px] py-2 flex items-center gap-2.5 border-t border-line text-[14px]">
+      <span className="font-semibold text-ink flex-none">{name}</span>
+      <span className="flex-1 min-w-0 truncate text-ink-2">{detail}</span>
+      {note && <span className="text-[12px] text-ink-3 flex-none">{note}</span>}
+    </li>
+  )
+}
+
+export function mediaInfoSummary(versions: number, audio: number, subtitles: number): string {
+  const parts: string[] = []
+  if (versions > 1) parts.push(`${versions} versions`)
+  if (audio > 0) parts.push(`${audio} audio track${audio === 1 ? '' : 's'}`)
+  if (subtitles > 0) parts.push(`${subtitles} subtitle${subtitles === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
+
+export function MediaInfoPanel({ versions = [], audio, subtitles, subtitleFormat }: MediaInfoPanelProps) {
+  if (versions.length === 0 && audio.length === 0 && subtitles.length === 0) return null
+  return (
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(300px,100%),1fr))] gap-x-10 gap-y-6">
+      {versions.length > 0 && (
+        <Group title="Versions">
+          {versions.map(v => <Row key={v.id} name={v.name} detail={v.detail} note={v.note} />)}
+        </Group>
+      )}
+      {audio.length > 0 && (
+        <Group title="Audio">
+          {audio.map((a, i) => (
+            <Row key={i} name={a.language} detail={[a.codec, a.detail].filter(Boolean).join(' · ')} note={a.isDefault ? 'Default' : undefined} />
+          ))}
+        </Group>
+      )}
+      {subtitles.length > 0 && (
+        <Group title={subtitleFormat ? `Subtitles · ${subtitleFormat}` : 'Subtitles'}>
+          {subtitles.map((s, i) => (
+            <Row
+              key={i}
+              name={s.language}
+              note={[s.forced && 'Forced', s.default && 'Default'].filter(Boolean).join(' · ') || undefined}
+            />
+          ))}
+        </Group>
+      )}
+    </div>
   )
 }

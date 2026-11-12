@@ -476,18 +476,6 @@
   .aurora-bg {
     background: var(--surface-page);
   }
-  /* DetailView hero floor: a soft radial of --ambient at the bottom-left
-     of the backdrop. --ambient is transparent unless the hero sets it, and
-     the gradient is already soft, so this carries no blur filter. */
-  .aurora-floor {
-    position: absolute;
-    left: -10%;
-    right: -10%;
-    bottom: -25%;
-    height: 60%;
-    background: radial-gradient(55% 100% at 28% 100%, var(--ambient), transparent 70%);
-    pointer-events: none;
-  }
 
   /* Display type scale utilities. Every Option B headline reads its size
      from a token (see :root) so the editorial voice is tunable in one
@@ -1332,40 +1320,288 @@ html:has(.stage-toolbar) {
   scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 80px);
 }
 
-/* ── Detail hero (Aurora Stage Phase 5) ─────────────────────────────
-   Two-layer scrim, same construction as .stage-hero-scrim but tuned for the
-   detail page: the left ramp is stronger (the title column is narrower and
-   sits further left) and the bottom fade reaches higher, because the poster
-   rail overlaps UP into this hero and needs a dark floor to sit against. */
+/* ── Title page ──────────────────────────────────────────────────────
+   One column. The hero holds the artwork, the title and the action row; the
+   page below it is the synopsis, episodes, cast, details and two closed
+   panels. Layout that depends on a breakpoint is written here in one place
+   rather than as utilities at the call sites, so the hero's art, its minimum
+   height and the title's size cannot drift apart. */
+
+/* The artwork's colour, washed over the page under the hero. `--ambient` is
+   set on .stage-detail by DetailView once the artwork has loaded (lib/ambient
+   clamps it dark and low in saturation), and is transparent until then, so
+   this paints nothing rather than a guess.
+
+   It starts at nothing on the body's top edge and swells below it. The hero
+   above ends in the opaque page colour (that is what hides the bottom of the
+   art), so a wash that was already there at that edge drew a line across the
+   page where the hero stopped. */
+.stage-detail-wash {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 720px;
+  max-height: 100%;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent 0, var(--ambient) 240px, transparent 100%);
+}
+
+/* The hero. On a phone the art is a band at the top and the content flows on
+   below it; from lg the art fills the hero and the content sits at its foot.
+
+   The picture is the colour on this page, so the dark that keeps the text
+   readable is confined to the text, and has no edge of its own:
+   - Back is a pill with its own fill, not a band across the top of the art.
+   - The art's own scrim only fades the picture into the page at its bottom
+     edge, on an eased curve (a straight ramp starts with a visible line).
+   - The text has a backing that follows its size, so it is under the text
+     however many lines the title takes and however many rows the actions
+     wrap to.
+     From lg it is an ELLIPSE round the block the poster and the text make:
+     full strength over the whole block, then gone within a fixed 200px.
+     Nothing about it is straight, and beyond that distance the picture is
+     untouched, so it reads as the picture getting darker round the text and
+     not as a panel laid on a photo. The block is as wide as its content, up
+     to a cap that narrows with the window, so a short title darkens less
+     and the right-hand side of the art is always left.
+     Below lg the text is as wide as the window; the backing is a band, and
+     what keeps the picture is height: the art is 360px, the title starts
+     low on it, and the band does not begin until the art's lower half.
+
+   `--detail-foot-fade` is how far below its own top the row's content
+   starts. Below lg the band reaches full strength at exactly that distance,
+   having started `--detail-foot-ramp` before it. */
+.stage-detail-hero {
+  min-height: 300px;
+  --detail-foot-fade: 232px;
+  --detail-foot-ramp: 112px;
+  /* The most the text column may be, from lg. */
+  --detail-text-w: clamp(480px, 44vw, 640px);
+  /* How much of the art's foot fades into the page. Short on a phone, where
+     the art is a 360px band and the text's backing already covers its lower
+     half. */
+  --detail-art-fade: 120px;
+}
+.stage-detail-art {
+  height: 360px;
+}
+/* The backing runs past the window's edges; the foot clips it there.
+   `clip`, not `hidden`: no scroll container, and nothing is cut off above
+   or below. */
+.stage-detail-foot {
+  overflow-x: clip;
+}
+.stage-detail-herorow {
+  position: relative;
+  padding-top: var(--detail-foot-fade);
+}
+.stage-detail-title {
+  font-size: 2.75rem;
+  line-height: 0.98;
+  letter-spacing: -0.02em;
+  /* A title that is one long unbroken word wraps inside the column instead
+     of running out of it (and out of its backing). */
+  overflow-wrap: anywhere;
+}
+@media (min-width: 640px) {
+  .stage-detail-title { font-size: 3.5rem; }
+}
+@media (min-width: 1024px) {
+  .stage-detail-hero {
+    min-height: min(72vh, 620px);
+    --detail-foot-fade: 120px;
+    --detail-art-fade: 240px;
+  }
+  .stage-detail-art { height: 100%; }
+  .stage-detail-title { font-size: clamp(3.5rem, 1.9rem + 2.5vw, 4.5rem); line-height: 0.95; }
+  /* As wide as what is in it, and no wider than the cap. */
+  .stage-detail-block {
+    position: relative;
+    width: fit-content;
+    max-width: 100%;
+  }
+  .stage-detail-text { flex: 0 1 auto; max-width: var(--detail-text-w); }
+}
+
+/* Measured by scripts/verify-title-contrast.mjs, which lays out the tallest
+   hero the page makes at 390, 1024, 1200, 1280 and 1440 wide and reads
+   pixels. Over a pure white frame, the lowest across those widths:
+     title         --ink, 44px and up    13.60:1
+     facts line    --ink, 15px           13.60:1
+     tagline       --ink-2, 15px          7.37:1
+     quiet actions --ink, 15px           15.51:1
+     Back          --ink, 14px            8.88:1 (on its own pill)
+   and, over a mid-grey frame, that the picture outside the backing is still
+   a picture and that the backing has no hard edge (the script's header has
+   the regions, the floors and what each measured). */
 .stage-detail-scrim {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(14, 15, 17, 0.92) 0%, rgba(14, 15, 17, 0.55) 45%, rgba(14, 15, 17, 0.15) 75%, rgba(14, 15, 17, 0.4) 100%),
-    /* Vertical ramp, restrengthened. The first cut of this file replaced two
-       inline gradient divs with one element and, in doing so, WEAKENED the
-       bottom fade (0.2 at 38% against the old pair's 0.49) — the file's own
-       comment recorded that correction. The consequence showed up as a
-       contrast failure: the badge row sits ~237px off the frame's floor,
-       i.e. 42–54% of the way up depending on viewport height, exactly where
-       the ramp had gone thin, so a chip with an alpha fill lost its backing.
+  /* The page colour for the last 16px (the foot's own padding sits there,
+     under nothing else), then 1 - smoothstep over `--detail-art-fade`: no
+     kink where it starts or ends. */
+  background: linear-gradient(
+    0deg,
+    var(--surface-page) 0,
+    var(--surface-page) 16px,
+    rgb(14 15 17 / 0.926) calc(16px + var(--detail-art-fade) / 6),
+    rgb(14 15 17 / 0.741) calc(16px + var(--detail-art-fade) / 3),
+    rgb(14 15 17 / 0.5) calc(16px + var(--detail-art-fade) / 2),
+    rgb(14 15 17 / 0.259) calc(16px + var(--detail-art-fade) * 2 / 3),
+    rgb(14 15 17 / 0.074) calc(16px + var(--detail-art-fade) * 5 / 6),
+    rgb(14 15 17 / 0) calc(16px + var(--detail-art-fade))
+  );
+}
+/* Below lg: a band the width of the window behind the row's content.
+   STACKING CONTEXT: the hero's foot, `.stage-detail-foot`, which the call
+   site makes `relative z-10`. A positioned box with a z-index is a stacking
+   context by that alone, with no animation involved, so the backing stays
+   where it is under prefers-reduced-motion.
+   Only inside the foot, which clips it at the window's edges. */
+@media not all and (min-width: 1024px) {
+  .stage-detail-foot > .stage-detail-herorow::before {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    pointer-events: none;
+    top: 0;
+    /* Past the foot's own bottom padding, to the hero's edge. */
+    bottom: -8px;
+    left: -100vw;
+    right: -100vw;
+    /* Nothing until the ramp, up to 0.9 on a smoothstep, the page colour at
+       the bottom. */
+    background: linear-gradient(
+      180deg,
+      rgb(14 15 17 / 0) 0,
+      rgb(14 15 17 / 0) calc(var(--detail-foot-fade) - var(--detail-foot-ramp)),
+      rgb(14 15 17 / 0.067) calc(var(--detail-foot-fade) - var(--detail-foot-ramp) * 0.833),
+      rgb(14 15 17 / 0.233) calc(var(--detail-foot-fade) - var(--detail-foot-ramp) * 0.667),
+      rgb(14 15 17 / 0.45) calc(var(--detail-foot-fade) - var(--detail-foot-ramp) * 0.5),
+      rgb(14 15 17 / 0.667) calc(var(--detail-foot-fade) - var(--detail-foot-ramp) * 0.333),
+      rgb(14 15 17 / 0.833) calc(var(--detail-foot-fade) - var(--detail-foot-ramp) * 0.167),
+      rgb(14 15 17 / 0.9) var(--detail-foot-fade),
+      var(--surface-page) 100%
+    );
+  }
+}
+/* From lg: the ellipse, round the block (W wide, H tall).
 
-       0.55 at 38% with an intermediate 0.15 at 62% restores the old pair's
-       weight low down while keeping the reach the single-element version
-       bought. At the badge row that is 0.285–0.478 alpha against the old
-       0.082–0.168. Combined with the left ramp (0.725 at the text column's
-       x on a 1280px viewport) the effective floor there goes 0.748 → 0.803. */
-    linear-gradient(0deg, #0e0f11 3%, rgba(14, 15, 17, 0.55) 38%, rgba(14, 15, 17, 0.15) 62%, transparent 78%);
+   Across, it is full strength out to 0.7286 W from the block's centre and
+   gone `--f` (200px) further on. 0.7286 is sqrt(2)/2 with 3% to spare: the
+   ellipse through a box's corners has sqrt(2)/2 of its sides as radii, so
+   the corners are just inside the full-strength zone.
+   Upwards, the radius is 0.7286 H + `--fv` (140px), and the same share of
+   it is at full strength. With F / W = Fv / H the corners would be exactly
+   as far inside as they are across; Fv is a fixed 140px, which is at least
+   that whenever the block is no taller than 0.7 of its width. The tallest
+   block the page makes is about 0.6 of it (the script measures it at every
+   width), and the corners stay inside the full-strength zone until 0.87.
+
+   The falloff is a DISTANCE, not a share of the block: a share of a column
+   several hundred px wide ran off the window's edge at every size and
+   dimmed the whole hero. On a smoothstep of twelve stops (a gradient is
+   straight between its stops, and with six each stop was a faint line).
+
+   How the box is built, because Chromium rejects a gradient RADIUS that
+   mixes a percentage and a length in one calc() (and silently drops the
+   whole mask), while positions and stops may mix them:
+     across  the box is the block plus 0.2286 W + F on each side, so the
+             radius is exactly half of it: 50%.
+     up      the box ends at the block's bottom edge (the page under the
+             hero must not be painted on) and is 1.2286 H + 1.686 Fv tall,
+             of which the radius, 0.7286 H + Fv, is 59.3%; the centre, H / 2
+             above the bottom, is 59.305% + 0.68625 Fv from the top.
+
+   STACKING CONTEXT: the hero's foot, `.stage-detail-foot`, which the call
+   site makes `relative z-10`. A positioned box with a z-index is a stacking
+   context by that alone, with no animation involved, so the backing stays
+   where it is under prefers-reduced-motion. */
+@media (min-width: 1024px) {
+  .stage-detail-foot .stage-detail-block::before {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    pointer-events: none;
+    --f: 200px;
+    --fv: 140px;
+    left: calc(-22.86% - var(--f));
+    right: calc(-22.86% - var(--f));
+    top: calc(-22.86% - 1.686 * var(--fv));
+    bottom: 0;
+    background: linear-gradient(
+      180deg,
+      rgb(14 15 17 / 0.9) 0,
+      rgb(14 15 17 / 0.9) calc(100% - 96px),
+      var(--surface-page) 100%
+    );
+    --detail-backing-mask: radial-gradient(
+      ellipse 50% 59.3% at 50% calc(59.305% + 0.68625 * var(--fv)),
+      #000 0,
+      #000 calc(100% - var(--f)),
+      rgb(0 0 0 / 0.98) calc(100% - var(--f) * 0.9167),
+      rgb(0 0 0 / 0.926) calc(100% - var(--f) * 0.8333),
+      rgb(0 0 0 / 0.844) calc(100% - var(--f) * 0.75),
+      rgb(0 0 0 / 0.741) calc(100% - var(--f) * 0.6667),
+      rgb(0 0 0 / 0.624) calc(100% - var(--f) * 0.5833),
+      rgb(0 0 0 / 0.5) calc(100% - var(--f) * 0.5),
+      rgb(0 0 0 / 0.376) calc(100% - var(--f) * 0.4167),
+      rgb(0 0 0 / 0.259) calc(100% - var(--f) * 0.3333),
+      rgb(0 0 0 / 0.156) calc(100% - var(--f) * 0.25),
+      rgb(0 0 0 / 0.074) calc(100% - var(--f) * 0.1667),
+      rgb(0 0 0 / 0.02) calc(100% - var(--f) * 0.0833),
+      rgb(0 0 0 / 0) 100%
+    );
+    -webkit-mask-image: var(--detail-backing-mask);
+    mask-image: var(--detail-backing-mask);
+  }
 }
 
-/* NOTE — the hero↔rail overlap is expressed with Tailwind utilities at the
-   call sites in DetailView/DetailRail (`lg:-mt-[238px]`, `lg:z-20`,
-   `lg:pt-[252px]`), not as classes here. An earlier draft put them in this
-   block and `.stage-detail-rail{position:relative}` then raced Tailwind's
-   `lg:sticky` at equal specificity — sticky won only because Tailwind hoists
-   its variants later in the file. That is the same ordering trap the CASCADE
-   HAZARD note above describes; keeping the overlap in one system removes it. */
+/* The poster beside the title (lg up; the call site hides it below). */
+.stage-detail-poster {
+  width: 176px;
+  height: 264px;
+  border-radius: var(--radius-art);
+  overflow: hidden;
+  background: var(--surface-raised);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+
+/* Quiet controls in the action row: no fill at rest (they are on the text's
+   backing), one under the pointer. Back is alone on the picture, so it
+   carries a fill of its own. */
+.stage-detail-back,
+.stage-detail-action {
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.stage-detail-action:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.stage-detail-back {
+  background: rgb(14 15 17 / 0.78);
+}
+.stage-detail-back:hover {
+  background: var(--surface-raised-2);
+}
+/* A control drawn at 36px keeps its size and gets a 44px target on a touch
+   screen: the area reaches 4px past it on every side. Call sites keep 8px
+   between neighbours so two areas never overlap. By class at each call site,
+   never through a shared button class: that would put the box on every
+   button of that kind in the app, the ones over artwork included. */
+@media (hover: none), (pointer: coarse) {
+  .stage-hit44 { position: relative; }
+  .stage-hit44::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+  }
+  /* An inset is measured from the padding edge, so a control with a 1px
+     border needs one more to reach the same 44px. */
+  .stage-hit44.border::before,
+  .stage-btn.stage-hit44::before {
+    inset: -5px;
+  }
+}
 
 /* The profile unlock prompt's two fields. The app's global
    `input:not([type="range"])` rule is (0,1,1), unlayered and later in this
@@ -1383,6 +1619,57 @@ input.profile-unlock-field:not([type="range"]) {
 input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([hidden]) {
   border-color: var(--danger-ink);
 }
+
+/* Episode rows: the whole row lights up, and its title underlines, so the
+   target is obvious without a play button on every line. */
+.stage-ep-main { border-radius: var(--radius-control); min-height: 72px; transition: background-color var(--dur-fast) var(--ease-standard); }
+.stage-ep-main:hover { background: var(--surface-raised); }
+.stage-ep-main:hover .stage-ep-title { text-decoration: underline; text-underline-offset: 3px; }
+@media (min-width: 640px) {
+  .stage-ep-main { min-height: 88px; }
+}
+.stage-ep-continue { transition: background-color var(--dur-fast) var(--ease-standard); }
+.stage-ep-continue:hover { background: var(--surface-raised-2); }
+.stage-disclosure-head:hover { background: var(--surface-raised-2); }
+
+/* The recap sheet: a panel on the right edge that leaves the title page in
+   view beside it; on a phone it takes the screen. It restates the dialog
+   primitive's position (centred, via top/left 50% and a translate) as plain
+   edge offsets, at higher specificity than the utilities that set them.
+
+   No entrance of its own: the primitive's fade and zoom are motion-safe
+   utilities already. */
+.recap-sheet[data-slot="dialog-content"] {
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  left: auto;
+  width: 540px;
+  max-width: calc(100% - 24px);
+  max-height: none;
+  translate: none;
+  transform: none;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+/* The cast rail bleeds one page gutter past the column on both sides and
+   puts its first face back on the page's left edge with padding, so a face
+   is cut off at the edge of the page, never by an invisible margin. It reads
+   the base gutter, not --page-pad-x: that token carries a percentage, which
+   here would resolve against this column rather than the window. The
+   scrollbar is hidden: the cut-off face at the edge is the cue that it
+   scrolls. */
+.stage-detail-rail {
+  --bleed: 18px;
+  margin-inline: calc(-1 * var(--bleed));
+  padding: 4px var(--bleed);
+  scroll-padding-left: var(--bleed);
+  scrollbar-width: none;
+}
+@media (min-width: 768px) {
+  .stage-detail-rail { --bleed: var(--page-gutter); }
+}
+.stage-detail-rail::-webkit-scrollbar { display: none; }
 
 /* ── Browse toolbar, now sticky ─────────────────────────────────────
    The toolbar was deliberately left in-flow with a comment explaining why:
@@ -3501,27 +3788,10 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   .media-card-cinema .card-act { border: 1px solid ButtonText; }
 }
 
-/* Detail tabs move instead of jumping (Stage refresh, DT3). DetailView keys
-   the tab panel's content on the active tab, so a switch fades it up 6px.
-   `backwards`, not `both` or `forwards`: a held `to { transform: none }`
-   computes to an identity matrix, which would leave the panel a stacking
-   context and a containing block for anything fixed inside it. */
-@keyframes panelIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-.stage-panel-in {
-  animation: panelIn var(--dur-enter) var(--ease-emphasized) backwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  .stage-panel-in { animation: none; }
-}
-
-/* Detail art fades in on decode (Stage refresh, DT1): the 58vh DetailHero
-   backdrop and the DetailRail poster used to pop in over their fill whenever
-   the download finished. Same contract as the card posters above — `img.`
-   so nothing that never fires onLoad can match, opacity only (DetailHero's
-   scale-105 utility keeps the transform), a transition rather than an
+/* Title-page art fades in on decode: the hero's backdrop and its poster
+   would otherwise pop in over their fill whenever the download finished.
+   Same contract as the card posters above: `img.` so nothing that never
+   fires onLoad can match, opacity only, a transition rather than an
    animation, stilled under reduced motion. */
 img.stage-img-fade {
   transition: opacity 420ms var(--ease-emphasized);

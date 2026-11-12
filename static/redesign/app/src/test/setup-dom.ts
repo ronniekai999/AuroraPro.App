@@ -31,9 +31,9 @@ if (hasDom) {
   // fires and the stub is what keeps the keyboard tests running.
   //
   // The reviewer WAS right about the rest of the original comment, which claimed
-  // `matchMedia` was also missing and that DetailTabs calls `scrollIntoView`.
-  // Neither is true: DetailTabs contains no such call, and nothing under test
-  // calls matchMedia. The matchMedia stub is kept only because the next component
+  // `matchMedia` was also missing and that the title page's tab strip (since
+  // removed) called `scrollIntoView`. Neither was true: it contained no such
+  // call, and nothing under test called matchMedia. The matchMedia stub is kept only because the next component
   // to be tested here will need it, and it is now labelled as forward-looking
   // rather than as a fix for a problem that exists.
   //

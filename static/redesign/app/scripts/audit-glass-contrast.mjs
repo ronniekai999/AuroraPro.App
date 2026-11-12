@@ -760,11 +760,6 @@ const EXEMPT = [
     why: 'the eye before the hidden-history message, which says it in words' },
   { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
     why: 'the glyph a match candidate shows where its poster is missing' },
-  // ── detail ──
-  { file: 'src/components/detail/DetailHero.tsx', anchor: '{i > 0 && <span className="text-white/45" aria-hidden="true">·</span>}', kind: 'decorative',
-    why: 'the dots between the hero\'s metadata items' },
-  { file: 'src/components/detail/DetailRail.tsx', anchor: "n <= shown ? 'text-yellow-400' : 'text-white/35 hover:text-white/50',", kind: 'non-text',
-    why: 'an unfilled rating star; each star is a "rate N stars" button (raised from /25, about 2:1)' },
   // ── admin ──
   { file: 'src/components/admin/AdminView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={16} className=\"text-white/25\" />", kind: 'decorative',
     why: 'the glyph a held request shows where its poster is missing' },

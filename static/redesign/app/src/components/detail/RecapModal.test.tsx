@@ -419,3 +419,20 @@ describe('RecapModal Ask Previously', () => {
 		expect(onRefreshRecap).not.toHaveBeenCalled()
 	})
 })
+
+describe('RecapModal and the app\'s Escape handler', () => {
+  it('closes on Escape without the press reaching window, where the app would also leave the title page', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn(), appHandler = vi.fn()
+    window.addEventListener('keydown', appHandler)
+    try {
+      render(<RecapModal mediaId={42} profileId={7} title="Charmed" loading={false} recap="A recap." onClose={onClose} />)
+      await screen.findByText('A recap.')
+      await user.keyboard('{Escape}')
+      expect(onClose).toHaveBeenCalledOnce()
+      expect(appHandler.mock.calls.filter(([e]) => (e as KeyboardEvent).key === 'Escape')).toHaveLength(0)
+    } finally {
+      window.removeEventListener('keydown', appHandler)
+    }
+  })
+})

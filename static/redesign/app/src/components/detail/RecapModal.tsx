@@ -1,8 +1,10 @@
-// Aurora V2 — "Previously" recap + spoiler-safe conversational Q&A.
+// "Previously on": the recap Aurora writes of what a profile has finished,
+// and the spoiler-safe questions a viewer can ask about it. A sheet on the
+// right edge of the title page; full screen on a phone.
 
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { MessageCircleQuestion, Play, ShieldCheck, Sparkles } from 'lucide-react'
+import { MessageCircleQuestion, Play, X } from 'lucide-react'
 import type { RecapUpTo } from '@/lib/api'
 import { AskPreviouslyPanel } from '@/components/detail/AskPreviouslyPanel'
 import { boundaryLabel, recapReasonCopy } from '@/components/detail/recapPresentation'
@@ -170,76 +172,86 @@ function RecapModalSession({
       <Dialog open onOpenChange={open => { if (!open) onClose() }}>
         <DialogContent
           showCloseButton={false}
-          overlayClassName="z-[80] bg-black/85 backdrop-blur-md"
-          className="z-[81] !flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[760px] flex-col gap-0 overflow-hidden rounded-[var(--r-2xl)] border border-purple-400/30 bg-[#15131f] p-0 text-white shadow-[shadow:var(--shadow-modal)]"
+          overlayClassName="z-[80]"
+          // A sheet on the right edge rather than a centred box: the title
+          // page stays in view beside it, and on a phone it fills the screen.
+          className="recap-sheet z-[81] !flex flex-col gap-0 overflow-hidden rounded-sheet border-0 p-0"
+          // Escape closes the sheet and only the sheet: the app's own Escape
+          // handler, on window, would otherwise also leave the title page.
+          onEscapeKeyDown={event => event.stopPropagation()}
           aria-label={view === 'ask' ? `Ask Previously about ${title}` : `Previously, on ${title}`}
         >
           {view === 'recap' ? (
             <>
-              <header className="border-b border-white/10 px-6 pb-4 pt-6 sm:px-7">
-                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-purple-300">
-                  <Sparkles aria-hidden="true" size={14} /> Previously
+              <header className="flex items-start gap-3 pl-6 pr-3 pt-5 sm:pl-7">
+                <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                  {/* The aurora dot is the app's mark for "Aurora wrote this". */}
+                  <p className="flex items-center gap-2 text-[13px] font-semibold text-ink-2">
+                    <i aria-hidden="true" className="w-2 h-2 rounded-full [background:var(--aurora)]" /> Written by Aurora
+                  </p>
+                  <DialogTitle className="font-display text-[26px] sm:text-[28px] font-bold leading-[1.15] tracking-[-0.015em]">
+                    Previously, on {title}
+                  </DialogTitle>
+                  <DialogDescription className="text-[13px] text-ink-2">
+                    {upTo
+                      ? `Covers what this profile has finished: up to ${boundaryLabel(upTo)}. Nothing past that.`
+                      : 'A spoiler-safe recap of the episodes this profile has finished.'}
+                  </DialogDescription>
                 </div>
-                <DialogTitle className="mt-1.5 font-display text-2xl font-bold leading-tight sm:text-[1.7rem]">
-                  Previously, on <span className="text-purple-200">{title}</span>
-                </DialogTitle>
-                <DialogDescription className="sr-only">A spoiler-safe recap based on episodes completed by this profile.</DialogDescription>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="badge-glass inline-flex items-center gap-1.5 border border-emerald-400/30 bg-emerald-500/10 text-emerald-200">
-                    <ShieldCheck aria-hidden="true" size={13} /> Spoiler-safe
-                  </span>
-                  {upTo && <span className="badge-glass border border-white/10 bg-white/5 text-white/60">Caught up to {boundaryLabel(upTo)}</span>}
-                  <span className="badge-glass inline-flex items-center gap-1.5 border border-purple-500/25 bg-purple-500/10 text-purple-200">
-                    <Sparkles aria-hidden="true" size={13} /> Aurora AI
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close"
+                  className="w-11 h-11 grid place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft transition-colors flex-none"
+                >
+                  <X aria-hidden="true" size={20} />
+                </button>
               </header>
 
               <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 sm:px-7">
                 {loading && (
                   <div className="space-y-3 animate-pulse" aria-label="Generating recap">
-                    <div className="h-4 w-[92%] rounded bg-white/10" />
-                    <div className="h-4 w-[97%] rounded bg-white/10" />
-                    <div className="h-4 w-[85%] rounded bg-white/10" />
-                    <div className="h-4 w-[60%] rounded bg-white/10" />
-                    <p className="pt-1 text-xs text-white/50">Catching you up…</p>
+                    <div className="h-4 w-[92%] rounded bg-action-soft" />
+                    <div className="h-4 w-[97%] rounded bg-action-soft" />
+                    <div className="h-4 w-[85%] rounded bg-action-soft" />
+                    <div className="h-4 w-[60%] rounded bg-action-soft" />
+                    <p className="pt-1 text-[13px] text-ink-2">Catching you up…</p>
                   </div>
                 )}
                 {!loading && error && (
                   <div className="py-7 text-center">
-                    <p className="font-medium text-red-300/90">Couldn’t build the recap</p>
-                    <p className="mt-1 text-sm text-white/50">{error}</p>
+                    <p className="font-semibold text-danger-ink">Couldn’t build the recap</p>
+                    <p className="mt-1 text-[14px] text-ink-2">{error}</p>
                   </div>
                 )}
                 {!loading && !error && unavailableReason && (
                   <div className="py-7 text-center">
-                    <p className="font-medium text-white/90">{recapReasonCopy(unavailableReason).head}</p>
-                    <p className="mx-auto mt-1.5 max-w-sm text-sm text-white/55">{recapReasonCopy(unavailableReason).body}</p>
+                    <p className="font-semibold text-ink">{recapReasonCopy(unavailableReason).head}</p>
+                    <p className="mx-auto mt-1.5 max-w-sm text-[14px] text-ink-2">{recapReasonCopy(unavailableReason).body}</p>
                   </div>
                 )}
                 {!loading && !error && recap && (
-                  <p className="text-[16px] leading-[1.7] text-white/90">
+                  <p className="text-[16px] leading-[1.6] text-ink whitespace-pre-line">
                     {shown}
-                    {shown.length < recap.length && <span className="ml-0.5 inline-block w-2 animate-pulse bg-purple-400">&nbsp;</span>}
+                    {shown.length < recap.length && <span className="ml-0.5 inline-block w-2 animate-pulse bg-ink">&nbsp;</span>}
                   </p>
                 )}
               </div>
 
-              <footer className="flex flex-col gap-3 border-t border-white/10 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7">
-                <p className="max-w-[290px] text-[11.5px] text-white/50">Based on what you’ve watched — never reveals anything past your spot.</p>
+              <footer className="flex flex-col gap-3 border-t border-line-strong px-6 py-4 sm:px-7">
                 <div className="flex flex-wrap items-center justify-end gap-2.5">
-                  <button type="button" onClick={onClose} className="rounded-full border border-white/[0.08] bg-white/[0.06] px-4 py-2 text-sm font-medium text-white/85 transition-colors hover:bg-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300">Close</button>
                   {canOpenAsk && (
-                    <button ref={askButtonRef} type="button" onClick={() => setView('ask')} className="inline-flex items-center gap-2 rounded-full border border-purple-400/45 bg-purple-500/10 px-4 py-2 text-sm font-semibold text-purple-100 transition-colors hover:bg-purple-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300">
-                      <MessageCircleQuestion aria-hidden="true" size={15} /> {canAsk ? 'Ask Previously' : 'Ask history'}
+                    <button ref={askButtonRef} type="button" onClick={() => setView('ask')} className="stage-btn stage-btn-ghost">
+                      <MessageCircleQuestion aria-hidden="true" size={17} /> {canAsk ? 'Ask Previously' : 'Ask history'}
                     </button>
                   )}
                   {onStart && (
-                    <button type="button" onClick={onStart} className="inline-flex items-center gap-2 rounded-full bg-purple-600 px-4 py-2 text-sm font-semibold shadow-[0_0_20px_rgba(168,85,247,0.45)] transition-colors hover:bg-purple-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-200">
-                      <Play aria-hidden="true" fill="currentColor" size={15} /> {resumeLabel || 'Resume'}
+                    <button type="button" onClick={onStart} className="stage-btn stage-btn-primary">
+                      <Play aria-hidden="true" fill="currentColor" strokeWidth={0} size={16} /> {resumeLabel || 'Resume'}
                     </button>
                   )}
                 </div>
+                <p className="text-[12px] text-ink-3">Based on what you’ve watched. It never reveals anything past your spot.</p>
               </footer>
             </>
           ) : (
@@ -254,6 +266,7 @@ function RecapModalSession({
               currentUpTo={ask.currentUpTo}
               headingRef={askHeadingRef}
               onBack={backToRecap}
+              onClose={onClose}
               onComposerChange={ask.setComposer}
               onComposerKeyDown={handleComposerKeyDown}
               onConfirm={requestConfirmation}
@@ -275,8 +288,9 @@ function RecapModalSession({
 
       <AlertDialog open={!!ask.confirmAction} onOpenChange={open => { if (!open && !ask.actionBusy) ask.setConfirmAction(undefined) }}>
         <AlertDialogContent
-          overlayClassName="z-[90] bg-black/70 backdrop-blur-sm"
-          className="z-[91] border-white/10 bg-[#17141f] text-white shadow-[shadow:var(--shadow-modal)]"
+          overlayClassName="z-[90]"
+          className="z-[91]"
+          onEscapeKeyDown={event => event.stopPropagation()}
           onCloseAutoFocus={event => {
             event.preventDefault()
             confirmReturnFocusRef.current?.focus()
@@ -284,11 +298,17 @@ function RecapModalSession({
         >
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmation.title}</AlertDialogTitle>
-            <AlertDialogDescription className="text-white/55">{confirmation.body}</AlertDialogDescription>
+            <AlertDialogDescription className="text-ink-2">{confirmation.body}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={ask.actionBusy} className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]">Cancel</AlertDialogCancel>
-            <AlertDialogAction disabled={ask.actionBusy} onClick={() => void ask.runConfirmedAction()} className={ask.confirmAction === 'restore-progress' ? 'bg-purple-600 text-white hover:bg-purple-500' : 'bg-red-600 text-white hover:bg-red-500'}>
+            <AlertDialogCancel disabled={ask.actionBusy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={ask.actionBusy}
+              onClick={() => void ask.runConfirmedAction()}
+              // Restoring progress is the constructive choice; the other two
+              // delete answers for good.
+              className={ask.confirmAction === 'restore-progress' ? 'bg-action text-action-on hover:brightness-95' : 'bg-danger text-white hover:brightness-110'}
+            >
               {ask.actionBusy ? 'Working…' : confirmation.action}
             </AlertDialogAction>
           </AlertDialogFooter>

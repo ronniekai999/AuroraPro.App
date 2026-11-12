@@ -22,12 +22,6 @@ vi.mock('@/lib/api', async () => {
   }
 })
 
-vi.mock('@/components/detail/DetailRail', () => ({
-  DetailRail: ({ onPrevious }: { onPrevious?: () => void }) => (
-    <div>{onPrevious && <button type="button" onClick={onPrevious}>Previously</button>}</div>
-  ),
-}))
-
 const show: Media = {
   id: 42,
   title: 'Charmed',
@@ -70,7 +64,7 @@ describe('DetailView Previously affordance', () => {
     api.getRecapStatus.mockResolvedValue({ available: true, has_ask_history: false })
     renderDetail(7)
 
-    expect(await screen.findByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Previously on' })).toBeInTheDocument()
     expect(api.getRecapStatus).toHaveBeenCalledWith(42, 7, expect.any(AbortSignal))
   })
 
@@ -79,7 +73,7 @@ describe('DetailView Previously affordance', () => {
       .mockResolvedValueOnce({ available: true, has_ask_history: false })
       .mockResolvedValueOnce({ available: false, reason: 'no_history', has_ask_history: true })
     const rendered = renderDetail(7)
-    expect(await screen.findByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Previously on' })).toBeInTheDocument()
 
     rendered.rerender(
       <DetailView
@@ -94,7 +88,7 @@ describe('DetailView Previously affordance', () => {
       />,
     )
     await waitFor(() => expect(api.getRecapStatus).toHaveBeenLastCalledWith(42, 8, expect.any(AbortSignal)))
-    expect(screen.getByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previously on' })).toBeInTheDocument()
   })
 
   it('never renders the previous profile recap while the new profile loads', async () => {
@@ -109,7 +103,7 @@ describe('DetailView Previously affordance', () => {
       })
       .mockReturnValueOnce(new Promise(() => {}))
     const rendered = renderDetail(7)
-    await user.click(await screen.findByRole('button', { name: 'Previously' }))
+    await user.click(await screen.findByRole('button', { name: 'Previously on' }))
     expect(await screen.findByText('Private recap for profile seven.')).toBeInTheDocument()
 
     rendered.rerender(

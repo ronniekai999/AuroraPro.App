@@ -165,46 +165,46 @@ export function RailSkeleton({ aspect = 'poster', count = 8, subtitle = false }:
   )
 }
 
-/** The detail page's shape while its chunk or data loads: the 58vh hero
- *  band, then the body grid — poster column with the action stack, and the
- *  tab strip plus storyline lines on the right. Class strings mirror
- *  DetailView / DetailRail so the real page replaces this without moving:
- *  `stage-gutter pt-9 pb-12` and the 216px grid template are the same
- *  literals the page uses. (verify-page-alignment counts those literals
- *  per FILE, so reusing them here is fine; duplicating them inside
- *  DetailView.tsx itself would not be.) */
+/** The title page's shape while its chunk or data loads: the hero with the
+ *  title, the facts line and the action row at its foot, then the synopsis
+ *  and a few rows, in one column. The hero and column classes are the ones
+ *  DetailHero and DetailView use (`stage-detail-hero`, `stage-detail-herorow`,
+ *  `stage-gutter pt-8 pb-16`, the 1304px measure), so the real page replaces
+ *  this without moving. (verify-page-alignment counts those literals per
+ *  FILE, so reusing them here is fine.) */
 export function DetailSkeleton() {
   return (
     <div aria-hidden="true">
-      <div className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden bg-surface-raised">
-        <div className="absolute bottom-7 left-[var(--page-pad-x)] right-[var(--page-pad-x)] max-md:left-[18px] max-md:right-[18px] space-y-4">
-          <SkeletonBlock className="h-4 w-24 rounded-md" />
-          <SkeletonBlock className="h-12 w-[min(560px,80%)] rounded-lg" />
-          <SkeletonBlock className="h-4 w-[min(360px,60%)] rounded-md" />
-        </div>
-      </div>
-      <div className="stage-gutter pt-9 pb-12">
-        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
-          <div className="space-y-5 max-lg:hidden">
-            <SkeletonBlock className="aspect-[2/3] rounded-2xl" />
-            <div className="space-y-2.5">
-              <SkeletonBlock className="h-12 rounded-full" />
-              <SkeletonBlock className="h-11 rounded-full" />
-              <SkeletonBlock className="h-10 rounded-xl" />
+      <div className="stage-detail-hero relative flex flex-col bg-surface-raised">
+        {/* The hero's Back row, at its height, so the page below does not
+            drop when the real hero replaces this. */}
+        <div className="stage-gutter pt-3 lg:pt-4"><div className="h-11" /></div>
+        <div className="relative mt-auto stage-gutter pb-2">
+          <div className="stage-detail-herorow flex items-end gap-8 max-w-[1304px]">
+            <SkeletonBlock className="hidden lg:block w-[176px] h-[264px] rounded-art flex-none" />
+            <div className="flex-1 min-w-0 flex flex-col gap-3.5">
+              <SkeletonBlock className="h-12 lg:h-16 w-[min(560px,80%)] rounded-lg" />
+              <SkeletonBlock className="h-4 w-[min(360px,60%)] rounded-md" />
+              <div className="flex flex-wrap gap-2">
+                <SkeletonBlock className="h-11 w-full sm:w-40 rounded-full" />
+                <SkeletonBlock className="h-11 w-28 rounded-control" />
+                <SkeletonBlock className="h-11 w-28 rounded-control" />
+              </div>
             </div>
           </div>
-          <div className="space-y-6">
-            <div className="flex gap-2">
-              <SkeletonBlock className="h-9 w-24 rounded-full" />
-              <SkeletonBlock className="h-9 w-24 rounded-full" />
-              <SkeletonBlock className="h-9 w-28 rounded-full" />
-            </div>
-            <div className="space-y-3 max-w-3xl">
-              <SkeletonBlock className="h-5 w-32 rounded-md" />
-              <SkeletonBlock className="h-4 w-full rounded-md" />
-              <SkeletonBlock className="h-4 w-[92%] rounded-md" />
-              <SkeletonBlock className="h-4 w-[78%] rounded-md" />
-            </div>
+        </div>
+      </div>
+      <div className="stage-gutter pt-8 pb-16">
+        <div className="flex flex-col gap-12 max-w-[1304px]">
+          <div className="space-y-3 max-w-[820px]">
+            <SkeletonBlock className="h-4 w-full rounded-md" />
+            <SkeletonBlock className="h-4 w-[92%] rounded-md" />
+            <SkeletonBlock className="h-4 w-[78%] rounded-md" />
+          </div>
+          <div className="space-y-3">
+            <SkeletonBlock className="h-6 w-32 rounded-md" />
+            <SkeletonBlock className="h-[72px] rounded-control" />
+            <SkeletonBlock className="h-[72px] rounded-control" />
           </div>
         </div>
       </div>

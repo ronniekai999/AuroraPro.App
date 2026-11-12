@@ -292,14 +292,15 @@ describe('Watch together, from a card', () => {
   // lowest season number, which is Specials, while the card tried them last.
   it('the title page of a show with Specials opens on its first regular season, and its party opens on the card\'s episode', async () => {
     const server = renderAt(`/title/${SPECIALS.id}`)
-    // The season showing is the regular one (the section's heading names it);
-    // the picker still lists the seasons in number order.
-    await screen.findByRole('heading', { name: /^Season 1\b/ }, find)
-    const chips = screen.getAllByRole('button', { name: /^S\d+$/ })
-    expect(chips.map(b => b.textContent)).toEqual(['S0', 'S1'])
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    // Listed in number order (season 0 is named Specials); the regular
+    // season is the one showing.
+    const buttons = within(seasons).getAllByRole('button')
+    expect(buttons.map(b => b.textContent)).toEqual(['Specials', 'Season 1'])
+    expect(buttons.map(b => b.getAttribute('aria-pressed'))).toEqual(['false', 'true'])
     expect(server.asks).toContain(`/api/media/${SPECIALS.id}/seasons/1/episodes`)
     expect(server.asks).not.toContain(`/api/media/${SPECIALS.id}/seasons/0/episodes`)
-    fireEvent.click(await screen.findByRole('button', { name: 'Party' }, find))
+    fireEvent.click(await screen.findByRole('button', { name: 'Watch together' }, find))
     const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
     const actions = within(composer).getAllByRole('button')
     fireEvent.click(actions[actions.length - 1])
@@ -358,7 +359,8 @@ describe('Play on the poster and the menu agree', () => {
 
   it('and the title page\'s Play starts the season it is showing', async () => {
     renderAt(`/title/${SPECIALS.id}`)
-    await screen.findByRole('heading', { name: /^Season 1\b/ }, find)
+    const seasons = await screen.findByRole('group', { name: 'Season' }, find)
+    await waitFor(() => expect(within(seasons).getByRole('button', { name: 'Season 1' }).getAttribute('aria-pressed')).toBe('true'), find)
     fireEvent.click(await screen.findByRole('button', { name: 'Play' }, find))
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.getAttribute('data-season')).toBe('1')

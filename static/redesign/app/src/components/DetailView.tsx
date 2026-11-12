@@ -1,22 +1,23 @@
-// DetailView — the title detail page (hero, tabs, episodes, cast, files,
-// recap, trailer). Extracted from App.tsx (2026-06-17 app split, Phase 2.5)
-// and lazy-loaded so the detail experience leaves the main chunk. App owns
-// all data + handlers and passes them as props; the inline `resume` IIFE and
-// `onEpisodeUnavailable` closure STAY in App's render block (they close over
-// App state) and are threaded in as props — NOT moved here. DetailViewProps
-// is module-private. DetailView fetches its own "Previously" recap (getRecap)
-// so the recap modal stays presentational.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+// DetailView: a title's page. One column: the hero (artwork, title, the
+// action row), the synopsis, episodes for a show, the cast, the details, and
+// last, closed, the technical media info and the admin tools.
+//
+// Lazy-loaded, so it stays out of the main chunk. App owns the data and the
+// handlers and passes them as props; the `resume` object and the
+// `onEpisodeUnavailable` closure are built in App's render (they close over
+// App state). DetailView fetches its own "Previously on" recap and the
+// profile's star rating, so their modals and controls stay presentational.
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { DetailHero } from '@/components/detail/DetailHero'
-import { DetailRail } from '@/components/detail/DetailRail'
+import { DetailActions } from '@/components/detail/DetailActions'
 import { TrailerModal } from '@/components/detail/TrailerModal'
 import { RecapModal } from '@/components/detail/RecapModal'
-import { DetailTabs, type DetailTab } from '@/components/detail/DetailTabs'
 import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
 import { TextSkeleton } from '@/components/Skeletons'
-import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
-import { CastGrid } from '@/components/detail/CastGrid'
+import { MediaInfoPanel, mediaInfoSummary } from '@/components/detail/MediaInfoPanel'
+import { CastRail } from '@/components/detail/CastRail'
+import { Disclosure } from '@/components/detail/Disclosure'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { getRecap, getRecapStatus, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type RecapStatusResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
@@ -106,18 +107,38 @@ interface DetailViewProps {
 }
 export default function DetailView({
   media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId, profileReady = true, onRated,
-  detail, apiEpisodes, onPlayEpisode, onEpisodeUnavailable, loading, error,
+  detail: detailFromApp, apiEpisodes: episodesFromApp, onPlayEpisode, onEpisodeUnavailable, loading, error,
   onStartParty, inParty,
   seasons, selectedSeason, onSelectSeason,
   onAddToWatchlist,
   onRefreshMetadata,
   onIdentify,
   onDeleteMedia,
-  files, onPlayFile,
+  files: filesFromApp, onPlayFile,
   resume,
 }: DetailViewProps) {
-  // Trailer modal (YouTube embed) — opened from the rail's "Watch Trailer".
+  // Detail data is this title's or it is not used. Going from one title
+  // straight to another (the search palette, a cast link) leaves the host
+  // holding the previous title's payload until the new one arrives, and the
+  // page drew the old backdrop, synopsis and cast under the new name.
+  const detail = detailFromApp && detailFromApp.id === media.id ? detailFromApp : undefined
+  // The same for the season's episodes and a film's files, which the host
+  // clears only when the title page is left: the previous show's rows were
+  // drawn under the new name, and pressing one played the old show's
+  // episode; a film's "Play in" chips played the old film's file.
+  // Episodes carry their show's id. A file can be another item's on purpose
+  // (the same title in a second library is offered as a version), so a list
+  // of files is this title's when at least one of them is its own.
+  const apiEpisodes = episodesFromApp?.every(e => e.media_item_id === media.id) ? episodesFromApp : undefined
+  const files = filesFromApp?.some(f => f.media_item_id === media.id) ? filesFromApp : undefined
+  // Trailer modal (YouTube embed), opened from the action row.
   const [trailerOpen, setTrailerOpen] = useState(false)
+  // The artwork's ambient colour, with the title AND the picture it came
+  // from. A colour is shown only while both still hold: the sample is taken
+  // after the picture has loaded, and by then the page may be showing another
+  // title, or this title with its real backdrop in place of the card's
+  // poster.
+  const [ambientState, setAmbient] = useState<{ id: number; src: string; color: string | null } | null>(null)
   // "Previously" recap modal. DetailView owns the fetch so the modal stays
   // presentational; one fetch per open (the server caches across opens).
   const [recapOpen, setRecapOpen] = useState(false)
@@ -204,8 +225,8 @@ export default function DetailView({
   // "My Rating" star widget. DetailView owns the fetch + submit (like the
   // recap) so App's involvement is one optional onRated callback. null = not
   // yet loaded — clicks no-op until the server value arrives so they can't
-  // clobber an unseen rating (the card still renders, so the rail doesn't
-  // layout-shift when the value lands). Optimistic submit with
+  // clobber an unseen rating (the stars still render, so the action row does
+  // not shift when the value lands). Optimistic submit with
   // revert-on-error; the server invalidates the profile's rec caches and the
   // hero/rails refetch on the next Home visit (homeReloadNonce), with onRated
   // scrubbing the already-loaded hero pool immediately.
@@ -245,12 +266,10 @@ export default function DetailView({
   const rating = detail?.rating ?? media.rating
   const realPoster = detail ? posterURL(detail.poster_path) : media.poster
   const realBackdrop = detail ? backdropURL(detail.backdrop_path) : (media.backdrop || media.poster)
-  // 2026-05-28 — Removed poster-derived accent tinting of the primary
-  // CTA. Deriving the button color from the artwork made the action
-  // bar a different color on every title (green on Drake & Josh, red
-  // elsewhere) and clashed with Aurora's purple brand. The primary
-  // now uses a fixed Aurora purple for a consistent, professional bar
-  // on every page — see the action buttons below.
+  // The wash is this title's, from a picture the hero is still showing.
+  const ambient = ambientState && ambientState.id === media.id
+    && (ambientState.src === realBackdrop || ambientState.src === realPoster)
+    ? ambientState : null
   const realGenre = (detail?.genres && detail.genres[0]) || media.genre
   // QA BUG-013 — TMDB's TV detail returns per-episode runtime, not
   // the series total. Append "/ep" for any episodic type (shows AND
@@ -310,17 +329,12 @@ export default function DetailView({
       // the primary res chip always describe the same source.
       : ((detail?.files?.length ? detail.files : files) ?? [])
   const otherResolutions = secondaryResolutionLabels(resolutionPool, resolutionPool[0])
-  // ───────────── view-models for the editorial layout ─────────────
-  // 2026-05-31 — DetailView rebuilt into the "editorial split-view":
-  // a tall hero banner, a sticky left rail (poster + actions + a credits
-  // card), and a tabbed content column. The heavy derivation lives above;
-  // here we shape it into plain props for the presentational components in
-  // components/detail/*. See the detail component contract.
+  // ───────────── view-models ─────────────
+  // The heavy derivation lives above; here it is shaped into plain props for
+  // the presentational components in components/detail/*.
   const isShow = media.type === 'show'
-  const [activeTab, setActiveTab] = useState('overview')
-  const [showAllCast, setShowAllCast] = useState(false)
   const heroMetaMiddle = isShow
-    ? (detail?.season_count ? `${detail.season_count} Season${detail.season_count === 1 ? '' : 's'}` : undefined)
+    ? (detail?.season_count ? `${detail.season_count} season${detail.season_count === 1 ? '' : 's'}` : undefined)
     : (realRuntime || undefined)
 
   // Quality chips (descriptive) from the resolved track file, plus any
@@ -328,45 +342,44 @@ export default function DetailView({
   // next to the 2160p one).
   const qualityChips = deriveQualityChips(trackFile, subtitleTracks.length, otherResolutions)
 
-  // Rail Resume mapping — reuse the existing resume formatters.
+  // Resume mapping, on the existing resume formatters.
   const resumeShown = !!resume && isResumable(resume.item)
   const ri = resume?.item
   const hasPreviously = !!recapStatus && (recapStatus.available || recapStatus.has_ask_history)
   const currentRecapState = recapState.identity === recapIdentity
     ? recapState
     : { identity: recapIdentity, loading: true }
-  const railResumeFraction = resumeShown && ri && ri.duration_ms
+  const resumeFraction = resumeShown && ri && ri.duration_ms
     ? Math.min(1, ri.position_ms / ri.duration_ms)
     : undefined
-  const railResumeLeft = resumeShown && ri
-    ? (ri.type === 'show' && ri.season_number !== undefined
-        ? `S${ri.season_number}·E${ri.episode_number} · ${formatResumeTime(ri.position_ms)}`
-        : `Resume · ${formatResumeTime(ri.position_ms)}`)
+  const resumeLeftLabel = resumeShown && ri && ri.duration_ms
+    ? minutesLeft(ri.duration_ms - ri.position_ms)
     : undefined
-  const railResumeRight = resumeShown && ri && ri.duration_ms ? formatResumeTime(ri.duration_ms) : undefined
 
-  // Credits card — only rows we actually have data for (no fabrication).
-  const railDetailRows: { label: string; value: string }[] = []
-  if (directors.length) railDetailRows.push({ label: 'Director', value: directors.map(d => d.name).join(', ') })
-  if (creators.length) railDetailRows.push({ label: 'Created by', value: creators.map(c => c.name).join(', ') })
-  if (writers.length && !isShow) railDetailRows.push({ label: 'Writers', value: writers.map(w => w.name).join(', ') })
-  if (!isShow && detail?.studio) railDetailRows.push({ label: 'Studio', value: detail.studio })
-  if (isShow && detail?.network) railDetailRows.push({ label: 'Network', value: detail.network })
+  // Details: only rows there is data for (nothing is made up).
+  const detailRows: { label: string; value: string }[] = []
+  if (directors.length) detailRows.push({ label: 'Director', value: directors.map(d => d.name).join(', ') })
+  if (creators.length) detailRows.push({ label: 'Created by', value: creators.map(c => c.name).join(', ') })
+  if (writers.length && !isShow) detailRows.push({ label: 'Writers', value: writers.map(w => w.name).join(', ') })
+  if (!isShow && detail?.studio) detailRows.push({ label: 'Studio', value: detail.studio })
+  if (isShow && detail?.network) detailRows.push({ label: 'Network', value: detail.network })
   const releasedValue = detail?.release_date ? formatReleaseDate(detail.release_date) : (media.year > 0 ? String(media.year) : '')
-  if (releasedValue) railDetailRows.push({ label: isShow ? 'Premiered' : 'Released', value: releasedValue })
-  if (isShow && detail?.season_count) railDetailRows.push({ label: 'Seasons', value: String(detail.season_count) })
-  if (isShow && detail?.episode_count) railDetailRows.push({ label: 'Episodes', value: String(detail.episode_count) })
-  if (realRuntime) railDetailRows.push({ label: isShow ? 'Episode' : 'Runtime', value: realRuntime })
+  if (releasedValue) detailRows.push({ label: isShow ? 'Premiered' : 'Released', value: releasedValue })
+  if (isShow && detail?.season_count) detailRows.push({ label: 'Seasons', value: String(detail.season_count) })
+  if (isShow && detail?.episode_count) detailRows.push({ label: 'Episodes', value: String(detail.episode_count) })
+  if (realRuntime) detailRows.push({ label: isShow ? 'Episode length' : 'Runtime', value: realRuntime })
+  if (detail?.genres?.length) detailRows.push({ label: detail.genres.length === 1 ? 'Genre' : 'Genres', value: detail.genres.join(', ') })
 
-  // Cast VMs (first 12; the rest behind "View all").
-  const castVMs = (showAllCast ? castMembers : castMembers.slice(0, 12)).map(c => ({
+  // The whole cast: the rail scrolls sideways, so there is nothing to hide
+  // behind a "view all".
+  const castVMs = castMembers.map(c => ({
     id: c.id,
     name: c.name,
     character: c.character,
     profileUrl: c.profile_path ? posterURL(c.profile_path, 'w185') : undefined,
   }))
 
-  // Episode VMs — per-episode watch state from the (now-typed) progress.
+  // Episode VMs, with per-episode watch state from the progress.
   const episodeRows = (apiEpisodes || []).map(ep => {
     const p = ep.progress
     const state = episodeWatchState(p)
@@ -381,23 +394,17 @@ export default function DetailView({
       hasFile: !!(ep.files && ep.files.length > 0),
       state,
       progressPct: episodeProgressPct(p),
-      leftLabel: state === 'in-progress' && p?.duration_ms
-        ? `${formatResumeTime(leftMs)} left${rt ? ' of ' + rt + 'm' : ''}`
-        : undefined,
-      watchedLabel: state === 'watched' ? `Watched${rt ? ' · ' + rt + 'm' : ''}` : undefined,
-      plainLabel: state === 'unwatched' && rt ? `${rt}m` : undefined,
-      // Multi-version chips. The server returns all of an episode's
-      // files 4K-first (queries_phase2 ORDER BY version_tag); before
-      // this, the detail page silently played files[0] (the 4K) and
-      // never surfaced that a 1080p also existed. We dedupe by visible
-      // label so two same-resolution files (rare) don't draw two
-      // identical chips, and only attach `versions` when 2+ distinct
-      // labels remain — single-version episodes render no chips.
+      leftLabel: state === 'in-progress' && p?.duration_ms ? minutesLeft(leftMs) : undefined,
+      plainLabel: rt ? `${rt} min` : undefined,
+      // Multi-version chips. The server returns all of an episode's files
+      // 4K-first; without these the page silently played files[0] and never
+      // showed that a 1080p also existed. Deduped by visible label, and
+      // attached only when 2+ distinct labels remain.
       versions: episodeVersions(ep.files),
     }
   })
 
-  // Media Info VMs (preserve the channels>0 guard from the old code).
+  // Media info VMs (the channels > 0 guard is deliberate: 0 means unknown).
   const channelLayout = (ch?: number) =>
     ch === 8 ? '7.1' : ch === 7 ? '6.1' : ch === 6 ? '5.1' : ch === 3 ? '2.1' : ch === 2 ? '2.0' : ch === 1 ? 'Mono' : ''
   const audioVMs = audioTracks.map(t => ({
@@ -419,188 +426,147 @@ export default function DetailView({
   const subtitleFormat = subtitleTracks[0]
     ? `${subtitleTracks[0].codec.toUpperCase()} / ${subtitleTracks[0].bitmap ? 'image-based' : 'text'}`
     : undefined
+  // A film's files on disk. (A show's are per episode and sit on its rows.)
+  const versionVMs = media.type !== 'show'
+    ? ((detail?.files?.length ? detail.files : files) ?? []).map(f => ({
+        id: f.id,
+        name: f.version_tag || f.resolution || 'Unknown',
+        detail: [
+          [f.video_codec, f.audio_codec].filter(Boolean).join('/'),
+          f.size_bytes ? (f.size_bytes / 1024 / 1024 / 1024).toFixed(1) + ' GB' : '',
+        ].filter(Boolean).join(' · ') || undefined,
+        note: f.library_name,
+      }))
+    : []
+  const hasMediaInfo = versionVMs.length > 0 || audioVMs.length > 0 || subtitleVMs.length > 0
+  const canManage = !!(onRefreshMetadata || onIdentify || onDeleteMedia)
 
-  // While the detail payload is in flight the storyline holds its shape with
-  // text-line placeholders rather than the words "Loading details…" — the
-  // hero, poster and tab strip are already real, so a sentence of status text
-  // was the one element that then changed size when the copy arrived.
+  // While the payload is in flight the synopsis holds its shape with
+  // text-line placeholders rather than the words "Loading details…": the
+  // hero is already real, so a sentence of status text was the one element
+  // that then changed size when the copy arrived.
   const overviewLoading = loading && !detail
   const overviewText = description || 'No description available.'
 
-  // Tabs: Overview always; Episodes (shows), Cast, Media only when present.
-  // Default tab = Overview, which renders the full stacked column.
-  const tabs: DetailTab[] = [{ id: 'overview', label: 'Overview' }]
-  if (isShow) tabs.push({ id: 'episodes', label: 'Episodes' })
-  if (castVMs.length) tabs.push({ id: 'cast', label: 'Cast & Crew' })
-  if (audioVMs.length || subtitleVMs.length) tabs.push({ id: 'media', label: 'Media Info' })
-
-  const storylineNode = (
-    <section>
-      <h3 className="text-lg font-semibold font-display mb-3">Storyline</h3>
-      {overviewLoading
-        ? <TextSkeleton lines={4} />
-        : <p className="text-white/75 text-[15.5px] leading-[1.75] max-w-3xl">{overviewText}</p>}
-    </section>
-  )
-  const episodesNode = isShow ? (
-    <EpisodeList
-      count={apiEpisodes?.length || 0}
-      seasons={seasons}
-      selectedSeason={selectedSeason}
-      onSelectSeason={onSelectSeason}
-      rows={episodeRows}
-      onPlay={(id, fileId) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep, fileId) }}
-      onUnavailable={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onEpisodeUnavailable?.(ep) }}
-      loading={loading}
-      emptyText="No episodes available yet."
-    />
-  ) : null
-  const castNode = <CastGrid cast={castVMs} totalCount={castMembers.length} onViewAll={() => setShowAllCast(true)} />
-  const mediaNode = <MediaInfoPanel audio={audioVMs} subtitles={subtitleVMs} subtitleFormat={subtitleFormat} />
-
   return (
-    // 2026-07-25 (Aurora Stage Phase 2) — the `-mx-8 -mt-8` bleed is gone.
-    // App's content wrapper no longer applies a global `p-8`, and the
-    // `detail` view opts out of the .stage-page gutter entirely, so there
-    // is nothing left to escape. Keeping the negative margins would now
-    // push the hero 32px past the viewport edge and cause a horizontal
-    // scrollbar.
-    <div className="animate-fade-in">
+    // `--ambient` is this title's artwork colour (lib/ambient), set here so
+    // the wash under the hero and anything else on the page that reads it
+    // share one value. Transparent until the artwork has loaded, and again when the
+    // title changes.
+    <div
+      className="stage-detail relative animate-fade-in"
+      style={{ '--ambient': ambient?.color ?? 'transparent' } as CSSProperties}
+    >
       <DetailHero
         backdrop={realBackdrop}
         title={media.title}
-        kindLabel={isShow ? 'Series' : 'Movie'}
-        contentRating={detail?.content_rating}
+        facts={[media.year > 0 ? String(media.year) : undefined, detail?.content_rating, heroMetaMiddle, realGenre]}
         rating={rating}
-        year={media.year}
-        metaMiddle={heroMetaMiddle}
-        genre={realGenre}
         tagline={detail?.tagline}
         error={error}
         onBack={onBack}
         // The poster, as the hero's art whenever there is no backdrop or the
-        // backdrop fails to load. Below lg DetailRail always drops its poster,
-        // so the hero is then the page's only artwork and must not go blank.
-        // The SAME w500 URL the card and the rail use, deliberately. A larger
-        // size (w780 was tried) differs from the card poster the hero already
-        // shows pre-payload, so a backdrop-less title's hero remounted and
-        // blinked when the payload landed, and fetched the art a second time
-        // (a third at lg, where the rail loads the w500). Softer on a wide
-        // desktop hero — which is exactly what the pre-payload hero shows.
+        // backdrop fails to load. Below lg the poster beside the title is
+        // dropped, so the hero's backdrop is then the page's only artwork and
+        // must not go blank. The SAME w500 URL the card and the hero's poster
+        // use, deliberately: a larger size differs from the card poster the
+        // hero already shows pre-payload, so a backdrop-less title's hero
+        // remounted and blinked when the payload landed, and fetched the art
+        // again.
         fallback={realPoster}
-      />
+        poster={realPoster}
+        // The hero reports from a ref callback, which React re-runs on every
+        // render: the state must not change (and so re-render) for a colour it
+        // already holds, or a cached image loops the page to death.
+        onAmbient={(color, src) => setAmbient(prev => (
+          prev && prev.id === media.id && prev.src === src && prev.color === color ? prev : { id: media.id, src, color }
+        ))}
+      >
+        <DetailActions
+          primaryLabel={resumeShown && ri ? formatResumeLabel(ri) : 'Play'}
+          onPrimary={resumeShown && ri ? () => resume!.onPlay(ri) : () => onPlay(media)}
+          onPrimaryIntent={onPlayIntent ? () => onPlayIntent(media, resumeShown && ri ? ri : undefined) : undefined}
+          primaryAriaLabel={resumeShown && ri ? formatResumeAriaLabel(ri) : undefined}
+          primaryTitle={resumeShown && ri ? `Resume from your last position (${formatResumeTime(ri.position_ms)})` : undefined}
+          secondaryLabel={resumeShown ? 'Play from start' : undefined}
+          onSecondary={resumeShown ? () => onPlay(media) : undefined}
+          onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
+          onPrevious={isShow && hasPreviously ? openRecap : undefined}
+          inLibrary={inLibrary}
+          onToggleLibrary={() => onToggleLib(media)}
+          onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
+          onParty={onStartParty ? () => {
+            // For a show, pass the resume episode if there is one, else the
+            // first episode that has files. Without it the party is created
+            // with no episode, and guests who join one already playing
+            // cannot open the right episode. The choice is shared with the
+            // card menu's "Watch together" (lib/partyEpisode), so the two
+            // cannot drift apart.
+            onStartParty(media, partyEpisodeId(media, ri, apiEpisodes))
+          } : undefined}
+          inParty={inParty}
+          userRating={myRating ?? 0}
+          onRate={handleRate}
+          resumeFraction={resumeFraction}
+          resumeLeftLabel={resumeLeftLabel}
+        />
+      </DetailHero>
 
-      {/* `.stage-gutter` for the PADDING, `max-w-[1304px]` on the grid inside for
-          the MEASURE. Phase 12 fix pass, and the split is the whole point.
-          This was `px-[…] max-w-[1400px]` on one element, left-aligned. Once the
-          other pages gained an ultra-wide cap that left detail hugging the left
-          while they centred: measured 0px apart at 1920, 272px at 2560, 912px at
-          3840 — a visible jump on an ordinary Home→title click.
-          Centring the 1400 box was considered and is WORSE, not better: at 2560 a
-          centred box puts detail's content at 628 against the page's 320, a 308px
-          jump. The narrower measure and the shared left edge are independent
-          things, and only separating them gets both.
-          So the outer element takes the same padding as every other page (so the
-          left edge always matches) and the inner grid caps the measure at 1304 =
-          the content width `max-w-[1400px]` used to yield at md+ (1400 − 2×48).
-          That also makes DetailHero's `lg:max-w-[1048px]` derivable rather than
-          magic: 1304 − 216 (poster col) − 40 (gap) = 1048 exactly.
-          Gutter reads the page token so detail lines up with every other
-          page. It was px-8 (32px) to match the old global p-8; after the
-          Phase 2 shell change every other page moved to 48px and detail
-          alone stayed behind, shifting content 16px on navigation. */}
-      {/* lg:-mt-[238px] pulls this column up so the poster rail overlaps the
-          hero's lower third (the mockup's composition). Gated to lg — below
-          it the grid is one column and the same negative margin would drag
-          the poster onto the hero's title.
+      {trailerOpen && detail?.trailer_key && (
+        <TrailerModal
+          youtubeKey={detail.trailer_key}
+          title={media.title}
+          onClose={() => setTrailerOpen(false)}
+        />
+      )}
+      {recapOpen && (
+        <RecapModal
+          mediaId={media.id}
+          profileId={profileId ?? undefined}
+          title={media.title}
+          loading={currentRecapState.loading}
+          error={currentRecapState.error}
+          recap={currentRecapState.data?.available ? currentRecapState.data.recap : undefined}
+          suggestedQuestions={currentRecapState.data?.available ? currentRecapState.data.suggested_questions : undefined}
+          upTo={currentRecapState.data?.up_to}
+          unavailableReason={currentRecapState.data && !currentRecapState.data.available ? currentRecapState.data.reason : undefined}
+          hasAskHistory={currentRecapState.data?.has_ask_history ?? recapStatus?.has_ask_history}
+          onClose={() => setRecapOpen(false)}
+          onStart={resumeShown && ri ? () => { setRecapOpen(false); resume!.onPlay(ri) } : undefined}
+          resumeLabel={ri?.season_number && ri.episode_number ? `Resume S${ri.season_number} · E${ri.episode_number}` : undefined}
+          onRefreshRecap={refreshRecap}
+          onHistoryChanged={handleAskHistoryChanged}
+        />
+      )}
 
-          Deliberately NOT `relative`: the overlap needs no positioning here
-          (the rail's own lg:sticky + lg:z-20 lifts the poster), and making
-          this div positioned put its main column's transparent 252px of
-          padding over the hero's title block — killing text selection there.
-
-          px-[18px] md:… matches home and browse, which drop to an 18px gutter
-          on phones; detail was keeping 48px, a 30px jump on navigation. */}
-      <div className="stage-gutter pt-9 pb-12 lg:-mt-[238px]">
-        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10 max-w-[1304px]">
-          <DetailRail
-            poster={realPoster}
-            title={media.title}
-            resumeFraction={railResumeFraction}
-            resumeLeftLabel={railResumeLeft}
-            resumeRightLabel={railResumeRight}
-            primaryLabel={resumeShown && ri ? formatResumeLabel(ri) : 'Play'}
-            onPrimary={resumeShown && ri ? () => resume!.onPlay(ri) : () => onPlay(media)}
-            onPrimaryIntent={onPlayIntent ? () => onPlayIntent(media, resumeShown && ri ? ri : undefined) : undefined}
-            primaryAriaLabel={resumeShown && ri ? formatResumeAriaLabel(ri) : undefined}
-            primaryTitle={resumeShown && ri ? `Resume from your last position (${formatResumeTime(ri.position_ms)})` : undefined}
-            secondaryLabel={resumeShown ? 'Play from start' : undefined}
-            onSecondary={resumeShown ? () => onPlay(media) : undefined}
-            onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
-            onPrevious={isShow && hasPreviously ? openRecap : undefined}
-            inLibrary={inLibrary}
-            onToggleLibrary={() => onToggleLib(media)}
-            onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
-            onParty={onStartParty ? () => {
-              // For shows, pass the resume episode (ri) if available, else the
-              // first episode that has files. Without this the party is created
-              // with episode_id=null and guests who join an already-playing
-              // party can't auto-open the correct episode (they hit an empty
-              // /api/media/{id}/files response and bail silently).
-              // The choice is shared with the card menu's "Watch together"
-              // (lib/partyEpisode), so the two cannot drift apart.
-              onStartParty(media, partyEpisodeId(media, ri, apiEpisodes))
-            } : undefined}
-            inParty={inParty}
-            userRating={myRating ?? 0}
-            onRate={handleRate}
-            detailRows={railDetailRows}
-            onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
-            onIdentify={onIdentify ? () => onIdentify(media) : undefined}
-            onDelete={onDeleteMedia ? () => onDeleteMedia(media) : undefined}
-          />
-          {trailerOpen && detail?.trailer_key && (
-            <TrailerModal
-              youtubeKey={detail.trailer_key}
-              title={media.title}
-              onClose={() => setTrailerOpen(false)}
-            />
-          )}
-          {recapOpen && (
-            <RecapModal
-              mediaId={media.id}
-              profileId={profileId ?? undefined}
-              title={media.title}
-              loading={currentRecapState.loading}
-              error={currentRecapState.error}
-              recap={currentRecapState.data?.available ? currentRecapState.data.recap : undefined}
-              suggestedQuestions={currentRecapState.data?.available ? currentRecapState.data.suggested_questions : undefined}
-              upTo={currentRecapState.data?.up_to}
-              unavailableReason={currentRecapState.data && !currentRecapState.data.available ? currentRecapState.data.reason : undefined}
-              hasAskHistory={currentRecapState.data?.has_ask_history ?? recapStatus?.has_ask_history}
-              onClose={() => setRecapOpen(false)}
-              onStart={resumeShown && ri ? () => { setRecapOpen(false); resume!.onPlay(ri) } : undefined}
-              resumeLabel={ri?.season_number && ri.episode_number ? `Resume S${ri.season_number} · E${ri.episode_number}` : undefined}
-              onRefreshRecap={refreshRecap}
-              onHistoryChanged={handleAskHistoryChanged}
-            />
-          )}
-
-          {/* stage-detail-main adds the compensating padding-top from lg, so
-              the tabs start below the hero even though the shared parent was
-              pulled up. */}
-          <div className="min-w-0 pt-1 lg:pt-[252px]">
-            <DetailTabs tabs={tabs} active={activeTab} onChange={setActiveTab} className="mb-6" />
-
-            {/* Multi-file version chooser (actionable — plays a specific
-                file). Distinct from the descriptive QualityChips below.
-                Movies with 2+ files only. */}
+      {/* The body: one column on the page's own left edge. `.stage-gutter`
+          takes the PADDING every page shares, so this page starts where the
+          others do at every width; the element inside caps the MEASURE.
+          Kept as two elements because the two are independent: on an
+          ultra-wide window a single padded-and-capped box either hugs the
+          left while the other pages centre or centres and jumps sideways on
+          an ordinary poster click. scripts/verify-page-alignment.mjs holds
+          this column and the hero's row to one left edge and one width. */}
+      <div className="relative stage-gutter pt-8 pb-16">
+        {/* The artwork's colour, under the hero. Before the column in the
+            DOM and the column positioned, so the column paints over it. */}
+        <div className="stage-detail-wash" aria-hidden="true" />
+        <div className="stage-detail-col relative flex flex-col gap-12 max-w-[1304px]">
+          <section aria-label="Synopsis" className="max-w-[820px] flex flex-col gap-5">
+            {/* The synopsis comes first under the hero, at every width; what
+                the files are and which one to play follow it. */}
+            {overviewLoading
+              ? <TextSkeleton lines={4} />
+              : <p className="text-ink text-[15px] sm:text-[17px] leading-[1.55] [text-wrap:pretty]">{overviewText}</p>}
+            <QualityChips chips={qualityChips} />
+            {/* A film with more than one file: each chip plays that file
+                (the 4K, the other cut). Distinct from the descriptive chips
+                above. */}
             {media.type !== 'show' && files && files.length > 1 && onPlayFile && (
-              <div className="mb-6 flex items-center gap-2 flex-wrap">
-                <span className="text-white/50 text-xs uppercase tracking-wider mr-1">Play in</span>
+              <div className="flex items-center gap-2 flex-wrap" role="group" aria-label="Play a specific version">
+                <span className="text-ink-2 text-[13px] mr-1">Play in</span>
                 {files.map(f => {
                   const tag = f.version_tag || f.resolution || 'Unknown'
-                  const is4K = /4k|2160|uhd/i.test(`${f.version_tag || ''} ${f.resolution || ''}`)
                   const sizeGB = f.size_bytes ? (f.size_bytes / 1024 / 1024 / 1024).toFixed(1) + ' GB' : ''
                   const codec = [f.video_codec, f.audio_codec].filter(Boolean).join('/')
                   return (
@@ -609,52 +575,103 @@ export default function DetailView({
                       type="button"
                       onClick={() => onPlayFile(media, f.id)}
                       title={[codec, sizeGB, f.library_name].filter(Boolean).join(' · ')}
-                      className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors border whitespace-nowrap ${
-                        is4K
-                          ? 'bg-purple-600/25 border-purple-500/50 text-purple-100 hover:bg-purple-600/40 hover:border-purple-400'
-                          : 'bg-white/[0.06] border-white/[0.1] text-white/85 hover:bg-white/[0.1] hover:text-white'
-                      }`}
+                      className="stage-hit44 h-9 px-3.5 rounded-full bg-surface-raised-2 text-ink text-[13px] font-semibold hover:bg-white/[0.16] transition-colors whitespace-nowrap"
                     >
                       {tag}
-                      {f.library_name && <span className="text-white/50 ml-1 font-normal">[{f.library_name}]</span>}
+                      {f.library_name && <span className="text-ink-2 ml-1.5 font-normal">{f.library_name}</span>}
                     </button>
                   )
                 })}
               </div>
             )}
+          </section>
 
-            <QualityChips chips={qualityChips} className="mb-7" />
+          {isShow && (
+            <EpisodeList
+              count={apiEpisodes?.length || 0}
+              seasons={seasons}
+              selectedSeason={selectedSeason}
+              onSelectSeason={onSelectSeason}
+              rows={episodeRows}
+              continueEpisodeId={resumeShown && ri?.type === 'show' ? ri.episode_id : undefined}
+              onPlay={(id, fileId) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep, fileId) }}
+              onUnavailable={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onEpisodeUnavailable?.(ep) }}
+              loading={loading}
+              emptyText="No episodes available yet."
+            />
+          )}
 
-            {/* A CONSTANT id, not `detail-panel-${activeTab}`. Only one panel is
-                ever rendered, so an id that changed identity on every tab switch
-                bought nothing and forced the tabs to either dangle their
-                `aria-controls` or drop it. See the note in DetailTabs. */}
-            <div role="tabpanel" id="detail-panel" aria-labelledby={`detail-tab-${activeTab}`}>
-              {/* Keyed on the tab (Stage refresh, DT3) so a switch replays
-                  .stage-panel-in instead of swapping the panel in one frame.
-                  Every tab already renders a different component type at this
-                  position, so each switch remounted its content before the key
-                  existed; the key adds the entrance, not a remount. */}
-              <div key={activeTab} className="stage-panel-in">
-              {activeTab === 'overview' ? (
-                <div className="space-y-10">
-                  {storylineNode}
-                  {episodesNode}
-                  {castNode}
-                  {mediaNode}
-                </div>
-              ) : activeTab === 'episodes' ? (
-                episodesNode
-              ) : activeTab === 'cast' ? (
-                castNode
-              ) : activeTab === 'media' ? (
-                mediaNode
-              ) : null}
-              </div>
-            </div>
-          </div>
+          <CastRail cast={castVMs} />
+
+          {detailRows.length > 0 && (
+            <section aria-labelledby="detail-details-heading">
+              <h2 id="detail-details-heading" className="font-display text-[22px] leading-tight font-semibold tracking-[-0.01em]">Details</h2>
+              <dl className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(280px,100%),1fr))] gap-x-8 gap-y-5">
+                {detailRows.map(r => (
+                  <div key={r.label} className="flex flex-col gap-0.5 pt-3 border-t border-line">
+                    <dt className="text-[12px] text-ink-3">{r.label}</dt>
+                    <dd className="text-[15px] text-ink">{r.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          )}
+
+          {(hasMediaInfo || canManage) && (
+            <section aria-label="Media info and management" className="flex flex-col gap-4">
+              {hasMediaInfo && (
+                <Disclosure title="Media info" summary={mediaInfoSummary(versionVMs.length, audioVMs.length, subtitleVMs.length)}>
+                  <MediaInfoPanel versions={versionVMs} audio={audioVMs} subtitles={subtitleVMs} subtitleFormat={subtitleFormat} />
+                </Disclosure>
+              )}
+              {/* Admin tools, last and closed. The handlers are only passed
+                  when admin UI may show (App decides), so this renders for
+                  nobody else. */}
+              {canManage && (
+                <Disclosure title="Manage" summary="Admins only">
+                  <div className="flex flex-wrap items-center gap-3">
+                    {onRefreshMetadata && (
+                      <button
+                        type="button"
+                        onClick={() => onRefreshMetadata(media)}
+                        title="Fetch this title's metadata again from TMDB/TVDB"
+                        className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
+                      >
+                        Refresh metadata
+                      </button>
+                    )}
+                    {onIdentify && (
+                      <button
+                        type="button"
+                        onClick={() => onIdentify(media)}
+                        title="Search TMDB/TVDB and pick the correct match by hand"
+                        className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
+                      >
+                        Fix match
+                      </button>
+                    )}
+                    {onDeleteMedia && (
+                      <button
+                        type="button"
+                        onClick={() => onDeleteMedia(media)}
+                        title="Remove this title's entry from the library. Files on disk are kept."
+                        className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger sm:ml-auto"
+                      >
+                        Remove from library
+                      </button>
+                    )}
+                  </div>
+                </Disclosure>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </div>
   )
+}
+
+// "37 min left"; under a minute still reads as a minute.
+function minutesLeft(ms: number): string {
+  return `${Math.max(1, Math.round(ms / 60000))} min left`
 }

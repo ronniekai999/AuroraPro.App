@@ -67,14 +67,18 @@ function classesOf(file, marker) {
 const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
 const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar')
 const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0 left-0 right-0 z-20')
-const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-9 pb-12')
-const DETAIL_GRID = classesOf('src/components/DetailView.tsx', 'lg:grid-cols-[216px_minmax(0,1fr)]')
-// DetailHero's text column. Added after a reviewer showed its token swap was
+// The title page is one column: a gutter element that takes the page padding
+// and, inside it, an element that caps the measure. The hero's content row is
+// built the same way, and the two must agree.
+const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-8 pb-16')
+const DETAIL_COL = classesOf('src/components/DetailView.tsx', 'stage-detail-col')
+// DetailHero's content row (poster, title, actions) and the gutter around it.
+// A probe on the hero exists because a reviewer once showed its token swap was
 // entirely uncovered: reverting `--page-pad-x` back to `--page-gutter` left a
 // 272px stair-step at 2560 and 912px at 3840 against the detail body it is
-// supposed to align with, and this check reported zero problems — in the very
-// commit whose message claims "both are asserted now".
-const HERO_TEXT = classesOf('src/components/detail/DetailHero.tsx', 'absolute bottom-7 z-10')
+// supposed to align with, and this check reported zero problems.
+const HERO_GUTTER = classesOf('src/components/detail/DetailHero.tsx', 'mt-auto stage-gutter')
+const HERO_ROW = classesOf('src/components/detail/DetailHero.tsx', 'stage-detail-herorow')
 
 const html = `<!doctype html><html><head><style>${css}</style>
 <style>body{margin:0}.probe{outline:0}</style></head><body>
@@ -84,8 +88,8 @@ const html = `<!doctype html><html><head><style>${css}</style>
     <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
   </div>
   <div id="rail" class="stage-gutter">rail</div>
-  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_GRID}"><div>poster</div><div id="detailmain">main</div></div></div>
-  <section style="position:relative;height:200px"><div id="herotext" class="${HERO_TEXT}">hero text</div></section>
+  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_COL}"><div>synopsis</div><div>episodes</div></div></div>
+  <section style="position:relative;display:flex;flex-direction:column;min-height:200px"><div class="${HERO_GUTTER}"><div id="herotext" class="${HERO_ROW}"><div>poster</div><div style="flex:1">hero text</div></div></div></section>
   <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
   <section style="position:relative;height:200px;overflow:hidden">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
@@ -122,7 +126,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
                boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
     }
-    return { nav: box('nav'), detail: box('detail'), detailmain: box('detailmain'),
+    return { nav: box('nav'), detail: box('detail'),
              herotext: box('herotext'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
              admintb: box('admintb'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
@@ -254,11 +258,18 @@ for (const r of out) {
   }
 
   // The bleed now reaches the VIEWPORT, not the capped page.
-  // 7. THE DETAIL HERO's text column must sit on the body's MAIN column, which is
-  //    the whole reason it reads the page token. Only meaningful at lg+, where the
-  //    poster column exists and the offset applies.
-  if (vw >= 1024 && Math.abs(r.herotext.boxLeft - r.detailmain.boxLeft) > 0.5) {
-    console.log(`   *** hero text starts at ${r.herotext.boxLeft}, detail's main column at ${r.detailmain.boxLeft}`)
+  // 7. THE DETAIL HERO's content row must sit on the body's column: the same
+  //    left edge AND the same right edge, at every width. The page is one
+  //    column, so there is no breakpoint below which this stops applying. A
+  //    row that kept measuring from the viewport while the body stopped at its
+  //    measure let the headline and the action row cantilever past the
+  //    synopsis they sit above, by up to a page width on an ultra-wide window.
+  if (Math.abs(r.herotext.boxLeft - r.detail.boxLeft) > 0.5) {
+    console.log(`   *** hero row starts at ${r.herotext.boxLeft}, the detail column at ${r.detail.boxLeft}`)
+    problems++
+  }
+  if (Math.abs(r.herotext.boxRight - r.detail.boxRight) > 0.5) {
+    console.log(`   *** hero row ends at ${r.herotext.boxRight}, the detail column at ${r.detail.boxRight}`)
     problems++
   }
 
