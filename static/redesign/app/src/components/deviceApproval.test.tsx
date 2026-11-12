@@ -21,6 +21,10 @@ const card = () => screen.getByText('wants to sign in to your AuroraPro account.
 const AFTER = 'After you approve, go back to the TV and choose who is watching.'
 const field = () => screen.getByLabelText('Code from the TV')
 const alertText = () => screen.getByRole('alert').textContent
+// Where Sign out is: the identity panel, and on a phone the Me page.
+const SIGN_OUT = 'If that TV is not yours, use Sign out (in the account menu, or under Me on a phone): that signs out every device on this account, that TV included.'
+const UNKNOWN = `An approval was sent from this page a moment ago, and it is not known whether it went through. ${SIGN_OUT}`
+const USED = `That code has just been used, most likely by the approval sent from this page a moment ago, so that TV is probably signed in. ${SIGN_OUT}`
 
 describe('TV device approval', () => {
   it('requires lookup and explicit approval, with account and code visible', async () => {
@@ -305,8 +309,9 @@ describe('TV device approval', () => {
 
   // An approval that got a gateway's error, or no answer, may have been
   // written all the same. "Not my TV" after one must not say nothing was
-  // approved, or take down the warning that it might have been: it says
-  // what is known and what stops a TV that did get in.
+  // approved, or let go of the warning that it might have been: the status
+  // line says what is known and what stops a TV that did get in. The alert
+  // goes: its "find it again here" was for someone who wants the TV in.
   it.each([
     ['no answer came back', new TypeError('Failed to fetch'), 'No answer came back from the server, so the TV may or may not have been approved. If it does not sign in, check the connection and find it again here.'],
     ['a gateway answered 502', refused(502, 'Bad Gateway'), 'The server did not confirm the approval, so the TV may or may not have been approved. If it does not sign in, find it again here.'],
@@ -317,18 +322,24 @@ describe('TV device approval', () => {
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
     await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
     await waitFor(() => expect(alertText()).toBe(warning))
+    // With the TV still on screen the warning is the alert's; the status
+    // line is about the TV that was found.
+    expect(screen.queryByText(UNKNOWN)).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Not my TV' }))
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
-    const said = screen.getByText('An approval was sent from this page a moment ago, and it is not known whether it went through. If that TV is not yours, sign out from the account menu: that signs out every device on this account, that TV included.')
+    const said = screen.getByText(UNKNOWN)
     expect(said).toHaveAttribute('role', 'status')
     expect(said.className).not.toMatch(/sr-only/)
     expect(screen.getAllByRole('status')).toHaveLength(1)
     expect(screen.queryByText(/Nothing was approved/)).toBeNull()
-    // The warning stays.
-    expect(alertText()).toBe(warning)
+    // Said once, in one place: nothing is left telling someone who has just
+    // said the TV is not theirs to find it again.
+    expect(alertText()).toBe('')
+    expect(screen.queryByText(/find it again here/)).toBeNull()
     await waitFor(() => expect(field()).toHaveFocus())
-    // A new lookup starts clean: the next "Not my TV" is an ordinary one.
+    // The TV is found waiting again, so that approval was not written: the
+    // next "Not my TV" is an ordinary one.
     fetch.mockResolvedValueOnce(tv)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
     await screen.findByRole('button', { name: 'Approve this TV' })
@@ -336,6 +347,84 @@ describe('TV device approval', () => {
     await user.click(screen.getByRole('button', { name: 'Not my TV' }))
     expect(screen.getByText('Nothing was approved from this page.')).toBeInTheDocument()
     expect(screen.queryByText(/An approval was sent/)).toBeNull()
+  })
+
+  // The server answers "no such code" for a code that has run out, and for
+  // one whose approval was written. Moments after an approval of unknown
+  // outcome the second is what it most likely means, and that is when the
+  // page must not go back to "expired, start again" and drop the one thing
+  // worth knowing: the TV is probably in, and Sign out puts it out.
+  it('says a second approval that finds the code gone most likely means the first went through', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(new TypeError('Failed to fetch')).mockRejectedValueOnce(refused(404, 'invalid or expired device code'))
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/may or may not have been approved/))
+    await user.click(screen.getByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toBe(USED))
+    expect(screen.queryByText(/has expired or was already used/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
+    // The code is not mistyped, and the advice is in the alert: the status
+    // line does not say it a second time.
+    expect(field()).toHaveAttribute('aria-invalid', 'false')
+    expect(screen.getByRole('status')).toHaveTextContent('')
+    await waitFor(() => expect(field()).toHaveFocus())
+  })
+
+  it('says the same when the code is looked up again and is gone, and for as long as it is that code', async () => {
+    const user = userEvent.setup()
+    const gone = () => refused(404, 'invalid or expired device code')
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(refused(502, 'Bad Gateway')).mockRejectedValueOnce(gone()).mockRejectedValueOnce(gone()).mockRejectedValueOnce(gone())
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/may or may not have been approved/))
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await waitFor(() => expect(alertText()).toBe(USED))
+    expect(screen.queryByText(/No TV is waiting with that code/)).toBeNull()
+    expect(field()).toHaveAttribute('aria-invalid', 'false')
+    expect(screen.getByRole('status')).toHaveTextContent('')
+    // Asked again, the same answer.
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(alertText()).toBe(USED))
+    // Another code is another matter: it is the ordinary "not found".
+    await user.clear(field())
+    await user.type(field(), 'WXYZ-9876')
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/^No TV is waiting with that code/))
+    expect(field()).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  // With no approval of unknown outcome behind it, a code that is gone is
+  // only that.
+  it('keeps the ordinary words for a code that is gone when no approval of unknown outcome was sent', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(refused(429, 'too many device sign-in attempts; try again in a minute', undefined, 60)).mockRejectedValueOnce(refused(404, 'invalid or expired device code'))
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/^Too many tries/))
+    await user.click(screen.getByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toBe('That code has expired or was already used. Start sign-in again on the TV to get a new one.'))
+    expect(screen.queryByText(/most likely by the approval/)).toBeNull()
+  })
+
+  // The warning is not let go of while nothing has answered it: a lookup
+  // that fails for another reason leaves it on the page, beside the failure.
+  it('keeps the warning in sight when the TV has left the screen and nothing has settled it', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(new TypeError('Failed to fetch')).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/may or may not have been approved/))
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await waitFor(() => expect(alertText()).toBe('The server could not be reached. Check the connection and try again.'))
+    const said = screen.getByText(UNKNOWN)
+    expect(said).toHaveAttribute('role', 'status')
+    expect(said.className).not.toMatch(/sr-only/)
   })
 
   // A refusal the server's own handler sends comes before anything is

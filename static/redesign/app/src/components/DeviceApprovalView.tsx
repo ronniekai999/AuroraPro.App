@@ -58,6 +58,17 @@ function pairingRefusal(e: unknown, phase: Phase): string {
   }
 }
 
+/** What stops a TV that did get in. The server's logout ends every session
+ *  on the account, and cancels an approval a TV has not collected yet.
+ *  Sign out is in the identity panel, and on a phone on the Me page. */
+const SIGN_OUT = 'If that TV is not yours, use Sign out (in the account menu, or under Me on a phone): that signs out every device on this account, that TV included.'
+/** An approval was sent and nothing says how it went. */
+const OUTCOME_UNKNOWN = `An approval was sent from this page a moment ago, and it is not known whether it went through. ${SIGN_OUT}`
+/** After that, the server no longer holds the code: it answers so for a code
+ *  that has run out, and for one whose approval was written. Moments after
+ *  an approval was sent, the second is by far the likelier. */
+const CODE_USED = `That code has just been used, most likely by the approval sent from this page a moment ago, so that TV is probably signed in. ${SIGN_OUT}`
+
 /** What happens on the TV after an approval. The TV does not start on a
  *  profile: it opens its own "who is watching" list, whichever profile the
  *  server bound it to. That binding only decides which profile it may enter
@@ -93,16 +104,19 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
   // removed in another tab), so it is forgotten at the next TV found; at
   // worst that costs one more refusal.
   const [locked, setLocked] = useState<string | null>(null)
-  // An approval was sent for the TV now found and no answer says how it
-  // went (a gateway's error, a connection that dropped): the server may have
-  // written it all the same. Forgotten at the next lookup or edit of the
-  // code.
-  const [sentUnknown, setSentUnknown] = useState(false)
+  // What is known of an approval sent for the code in the field. 'unknown':
+  // one was sent and no answer says how it went (a gateway's error, a
+  // connection that dropped), so the server may have written it all the
+  // same. 'used': after that, the server said it no longer holds the code,
+  // which most likely means that approval went through. Forgotten when the
+  // code is edited, and when the TV is found waiting again (an approval
+  // that was written leaves no TV waiting).
+  const [sent, setSent] = useState<'unknown' | 'used' | null>(null)
   // "Not my TV" was pressed: said in the page's status line, in sight, since
   // the TV's card has just gone and nothing else shows that it was heard.
-  // 'unsure' is after an approval of unknown outcome, when "nothing was
-  // approved" is not known to be true.
-  const [putAside, setPutAside] = useState<'plain' | 'unsure' | null>(null)
+  // What the line says depends on `sent` (below): "nothing was approved"
+  // only when nothing was sent that might have been written.
+  const [putAside, setPutAside] = useState(false)
   const request = useRef<AbortController | null>(null)
   useEffect(() => () => request.current?.abort(), [])
   // As the server reads a code: dashes dropped.
@@ -133,18 +147,26 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
     setBusy(true)
     setError(null)
     setDevice(null)
-    setPutAside(null)
-    setSentUnknown(false)
+    setPutAside(false)
     try {
       const result = await apiFetch<{ device_name: string; user_id: number; username: string }>(`/api/auth/device/preview?code=${encodeURIComponent(code.trim())}`, {
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
       setLocked(null)
+      setSent(null)
       setDevice(result)
     } catch (failure) {
       if (controller.signal.aborted) return
-      setError({ text: pairingRefusal(failure, 'lookup'), aboutCode: failure instanceof APIError && failure.status === 404 })
+      const gone = failure instanceof APIError && failure.status === 404
+      // The same code as the approval was sent for: an edit would have
+      // forgotten it. The code is not mistyped, so the field is not marked.
+      if (gone && sent) {
+        setSent('used')
+        setError({ text: CODE_USED, aboutCode: false })
+      } else {
+        setError({ text: pairingRefusal(failure, 'lookup'), aboutCode: gone })
+      }
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
@@ -172,14 +194,18 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
         setLocked(words)
         focusNext.current = 'locked'
       } else {
-        setError({ text: words, aboutCode: false })
+        // A second try after one of unknown outcome, and the code is gone:
+        // the first most likely went through.
+        const used = status === 404 && sent !== null
+        if (used) setSent('used')
+        setError({ text: used ? CODE_USED : words, aboutCode: false })
         if (status === 404) { setDevice(null); focusNext.current = 'field' }
         else if (status === 409) { setDevice(null); focusNext.current = 'find' }
         // Every refusal the server's own handler sends comes before the
         // approval is written. A 5xx can be a gateway's, and an error that
         // is not the server's answer at all says nothing of what happened
         // to the request: after those the approval may have been written.
-        else if (!(failure instanceof APIError) || status >= 500) setSentUnknown(true)
+        else if (!(failure instanceof APIError) || status >= 500) setSent('unknown')
       }
     } finally {
       if (!controller.signal.aborted) setBusy(false)
@@ -189,20 +215,26 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
   // "Not my TV": the found TV is put aside. Nothing is sent: the server has
   // no route to refuse a TV with, and its code runs out by itself. The page
   // says what it knows. Ordinarily that is that nothing was approved from
-  // here. After an approval of unknown outcome it is not: the warning that
-  // it may have gone through stays up, and the page says what stops a TV
-  // that did get in.
+  // here. After an approval of unknown outcome it is not, and the status
+  // line says that instead (below): that one may have gone through, and
+  // what stops a TV that did get in. The alert goes either way: after an
+  // unknown outcome its advice was for someone who wants the TV in ("find
+  // it again here"), and the status line now says the rest.
   function notMine() {
     if (busy) return
     setDevice(null)
     setLocked(null)
-    if (!sentUnknown) setError(null)
-    setPutAside(sentUnknown ? 'unsure' : 'plain')
+    setError(null)
+    setPutAside(true)
     focusNext.current = 'field'
   }
 
   const invalid = error?.aboutCode === true
   const offered = device !== null && !locked
+  // An approval of unknown outcome and no TV on screen, however it left
+  // (put aside, a new lookup on its way or failed, the account changed):
+  // the warning that it may have gone through is not let go of.
+  const unsure = sent === 'unknown' && device === null
 
   return (
     // One column in the middle of the page's width. Its top is fixed, not
@@ -231,7 +263,7 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
                 are typed or pasted: the server takes a code with its ends
                 trimmed, and a space inside one is never part of it. */}
             <input ref={fieldRef} id="device-code" name="device-code" value={code} readOnly={busy}
-              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null); setPutAside(null); setSentUnknown(false) }}
+              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null); setPutAside(false); setSent(null) }}
               autoComplete="off" autoCapitalize="characters" spellCheck={false} placeholder="ABCD-1234"
               aria-invalid={invalid}
               aria-describedby={invalid ? 'device-code-hint device-error' : 'device-code-hint'}
@@ -244,9 +276,9 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
             <button ref={findRef} type="submit" disabled={!codeComplete} aria-disabled={busy}
               className={device ? 'stage-btn stage-btn-ghost mt-4 self-start' : 'stage-btn stage-btn-primary stage-btn-tall mt-5 w-full'}>{busy && !device ? 'Checking…' : 'Find TV'}</button>
           </form>
-          <p role="status" className={putAside ? `text-[14px] leading-snug ${putAside === 'unsure' ? 'text-ink' : 'text-ink-2'}` : 'sr-only'}>
-            {putAside === 'unsure' ? 'An approval was sent from this page a moment ago, and it is not known whether it went through. If that TV is not yours, sign out from the account menu: that signs out every device on this account, that TV included.'
-              : putAside === 'plain' ? 'Nothing was approved from this page.'
+          <p role="status" className={unsure || putAside ? `text-[14px] leading-snug ${unsure ? 'text-ink' : 'text-ink-2'}` : 'sr-only'}>
+            {unsure ? OUTCOME_UNKNOWN
+              : putAside ? 'Nothing was approved from this page.'
               : offered ? `Found ${device.device_name}. Check its code, then approve it below.` : ''}
           </p>
           {device && (
