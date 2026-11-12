@@ -78,7 +78,9 @@ function asShown(code: string): string {
 }
 
 export default function DeviceApprovalView({ username, initialCode, someProfileUnlocked }: Props) {
-  const [code, setCode] = useState(initialCode)
+  // A code can arrive in the link the TV shows. It is read as a typed one
+  // is: no spaces, upper case.
+  const [code, setCode] = useState(() => initialCode.replace(/\s+/g, '').toUpperCase())
   const [device, setDevice] = useState<{ device_name: string; user_id: number; username: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [approved, setApproved] = useState(false)
@@ -91,9 +93,16 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
   // removed in another tab), so it is forgotten at the next TV found; at
   // worst that costs one more refusal.
   const [locked, setLocked] = useState<string | null>(null)
+  // An approval was sent for the TV now found and no answer says how it
+  // went (a gateway's error, a connection that dropped): the server may have
+  // written it all the same. Forgotten at the next lookup or edit of the
+  // code.
+  const [sentUnknown, setSentUnknown] = useState(false)
   // "Not my TV" was pressed: said in the page's status line, in sight, since
   // the TV's card has just gone and nothing else shows that it was heard.
-  const [putAside, setPutAside] = useState(false)
+  // 'unsure' is after an approval of unknown outcome, when "nothing was
+  // approved" is not known to be true.
+  const [putAside, setPutAside] = useState<'plain' | 'unsure' | null>(null)
   const request = useRef<AbortController | null>(null)
   useEffect(() => () => request.current?.abort(), [])
   // As the server reads a code: dashes dropped.
@@ -124,7 +133,8 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
     setBusy(true)
     setError(null)
     setDevice(null)
-    setPutAside(false)
+    setPutAside(null)
+    setSentUnknown(false)
     try {
       const result = await apiFetch<{ device_name: string; user_id: number; username: string }>(`/api/auth/device/preview?code=${encodeURIComponent(code.trim())}`, {
         signal: controller.signal,
@@ -165,21 +175,29 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
         setError({ text: words, aboutCode: false })
         if (status === 404) { setDevice(null); focusNext.current = 'field' }
         else if (status === 409) { setDevice(null); focusNext.current = 'find' }
+        // Every refusal the server's own handler sends comes before the
+        // approval is written. A 5xx can be a gateway's, and an error that
+        // is not the server's answer at all says nothing of what happened
+        // to the request: after those the approval may have been written.
+        else if (!(failure instanceof APIError) || status >= 500) setSentUnknown(true)
       }
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
   }
 
-  // "Not my TV": the found TV is put aside. Nothing is sent, since nothing
-  // was approved and the server has no route to refuse a TV with; its code
-  // runs out by itself.
+  // "Not my TV": the found TV is put aside. Nothing is sent: the server has
+  // no route to refuse a TV with, and its code runs out by itself. The page
+  // says what it knows. Ordinarily that is that nothing was approved from
+  // here. After an approval of unknown outcome it is not: the warning that
+  // it may have gone through stays up, and the page says what stops a TV
+  // that did get in.
   function notMine() {
     if (busy) return
     setDevice(null)
     setLocked(null)
-    setError(null)
-    setPutAside(true)
+    if (!sentUnknown) setError(null)
+    setPutAside(sentUnknown ? 'unsure' : 'plain')
     focusNext.current = 'field'
   }
 
@@ -187,15 +205,16 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
   const offered = device !== null && !locked
 
   return (
-    // One column in the middle of the page's free width and height: what
-    // the window has left under the top bar, above the phone's tab bar and
-    // inside the page's own padding (a little more is left on a phone, where
-    // the page keeps room for the bug report button too).
-    <section className="mx-auto flex min-h-[calc(100dvh-var(--chrome-h,var(--topnav-h))-var(--tabbar-space)-9.5rem)] w-full max-w-[520px] flex-col justify-center gap-7 md:min-h-[calc(100dvh-var(--chrome-h,var(--topnav-h))-var(--tabbar-space)-6.125rem)]">
+    // One column in the middle of the page's width. Its top is fixed, not
+    // centred in the height: centred, the heading and the field moved up
+    // when the TV's card arrived and down when it went, under a focus that
+    // stayed put. The offset from md up puts the page with a TV found about
+    // in the middle of a 900px-high window.
+    <section className="mx-auto flex w-full max-w-[520px] flex-col gap-7 md:pt-16">
       <div>
         <h1 className="font-display text-[clamp(2.25rem,11vw,3.5rem)] font-extrabold leading-none tracking-[-0.02em] text-ink">Connect your TV</h1>
-        <p className="mt-2 text-[17px] leading-snug text-ink-2">Enter the code shown on the TV. It signs the TV in to this account without typing a password on a remote.</p>
-        <p className="mt-1.5 text-[14px] leading-snug text-ink-2">Signing in as {device?.username ?? username}</p>
+        {!approved && <p className="mt-2 text-[17px] leading-snug text-ink-2">Enter the code shown on the TV. It signs the TV in to this account without typing a password on a remote.</p>}
+        <p className={`${approved ? 'mt-2' : 'mt-1.5'} text-[14px] leading-snug text-ink-2`}>Signing in as {device?.username ?? username}</p>
       </div>
       {approved ? (
         // Takes the focus the Approve button had: the button goes with the
@@ -212,7 +231,7 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
                 are typed or pasted: the server takes a code with its ends
                 trimmed, and a space inside one is never part of it. */}
             <input ref={fieldRef} id="device-code" name="device-code" value={code} readOnly={busy}
-              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null); setPutAside(false) }}
+              onChange={event => { setCode(event.target.value.replace(/\s+/g, '').toUpperCase()); setDevice(null); setError(null); setPutAside(null); setSentUnknown(false) }}
               autoComplete="off" autoCapitalize="characters" spellCheck={false} placeholder="ABCD-1234"
               aria-invalid={invalid}
               aria-describedby={invalid ? 'device-code-hint device-error' : 'device-code-hint'}
@@ -225,8 +244,9 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
             <button ref={findRef} type="submit" disabled={!codeComplete} aria-disabled={busy}
               className={device ? 'stage-btn stage-btn-ghost mt-4 self-start' : 'stage-btn stage-btn-primary stage-btn-tall mt-5 w-full'}>{busy && !device ? 'Checking…' : 'Find TV'}</button>
           </form>
-          <p role="status" className={putAside ? 'text-[14px] leading-snug text-ink-2' : 'sr-only'}>
-            {putAside ? 'Nothing was approved. That TV has not been signed in.'
+          <p role="status" className={putAside ? `text-[14px] leading-snug ${putAside === 'unsure' ? 'text-ink' : 'text-ink-2'}` : 'sr-only'}>
+            {putAside === 'unsure' ? 'An approval was sent from this page a moment ago, and it is not known whether it went through. If that TV is not yours, sign out from the account menu: that signs out every device on this account, that TV included.'
+              : putAside === 'plain' ? 'Nothing was approved from this page.'
               : offered ? `Found ${device.device_name}. Check its code, then approve it below.` : ''}
           </p>
           {device && (
@@ -259,14 +279,15 @@ export default function DeviceApprovalView({ username, initialCode, someProfileU
                     dashes it is the same code, and would not fit. */}
                 <span>Approve only if you started sign-in on this TV and its code matches <strong className="whitespace-nowrap font-mono font-semibold tracking-[0.1em] text-ink">{asShown(code)}</strong>.</span>
               </p>
-              {/* Side by side, one part to two; one over the other on the
-                  narrowest phones, where side by side each label broke in
-                  two. In the order they are read either way. */}
-              <div className="flex flex-col gap-3 min-[360px]:flex-row">
+              {/* Two equal halves, side by side; one over the other below
+                  375px, where "Approve this TV" broke in two (measured at
+                  360). In the order they are read either way. Whose
+                  account it is for is said under the heading. */}
+              <div className="flex flex-col gap-3 min-[375px]:flex-row">
                 <button type="button" onClick={notMine} aria-disabled={busy}
-                  className="stage-btn stage-btn-ghost stage-btn-tall stage-btn-wrap flex-1">Not my TV</button>
+                  className="stage-btn stage-btn-ghost stage-btn-tall stage-btn-wrap flex-1 basis-0">Not my TV</button>
                 <button type="button" onClick={() => void approve()} aria-disabled={busy}
-                  className="stage-btn stage-btn-primary stage-btn-tall stage-btn-wrap flex-[2]">{busy ? 'Approving…' : `Approve TV for ${device.username}`}</button>
+                  className="stage-btn stage-btn-primary stage-btn-tall stage-btn-wrap flex-1 basis-0">{busy ? 'Approving…' : 'Approve this TV'}</button>
               </div>
             </>
           )}

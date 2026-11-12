@@ -29,13 +29,13 @@ describe('TV device approval', () => {
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     expect(fetch).not.toHaveBeenCalled()
     expect(screen.getByText('Signing in as alice')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Approve TV for alice' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve this TV' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(card()).toHaveTextContent('Living room TV wants to sign in to your AuroraPro account.')
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0][0]).toBe('/api/auth/device/preview?code=ABCD-1234')
-    await user.click(screen.getByRole('button', { name: 'Approve TV for alice' }))
+    await user.click(screen.getByRole('button', { name: 'Approve this TV' }))
     expect(fetch.mock.calls[1][0]).toBe('/api/auth/device/authorize')
     expect(fetch.mock.calls[1][1]).toMatchObject({ method: 'POST', body: { user_code: 'ABCD-1234', expected_user_id: 7 } })
     expect(await screen.findByRole('status')).toHaveTextContent('TV approved')
@@ -46,9 +46,9 @@ describe('TV device approval', () => {
     fetch.mockResolvedValue({ device_name: 'TV', user_id: 7, username: 'alice' })
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     await user.clear(screen.getByLabelText('Code from the TV'))
-    expect(screen.queryByRole('button', { name: 'Approve TV for alice' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve this TV' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Find TV' })).toBeDisabled()
   })
 
@@ -57,7 +57,12 @@ describe('TV device approval', () => {
     fetch.mockResolvedValueOnce({ device_name: 'TV', user_id: 9, username: 'bob' }).mockResolvedValueOnce({ message: 'device authorized' })
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await user.click(await screen.findByRole('button', { name: 'Approve TV for bob' }))
+    // The button does not name the account; the line under the heading
+    // does, and it names the one the server found the TV under.
+    const approve = await screen.findByRole('button', { name: 'Approve this TV' })
+    expect(screen.getByText('Signing in as bob')).toBeInTheDocument()
+    expect(screen.queryByText('Signing in as alice')).toBeNull()
+    await user.click(approve)
     expect(fetch.mock.calls[1][1]).toMatchObject({ body: { expected_user_id: 9 } })
   })
 
@@ -84,7 +89,7 @@ describe('TV device approval', () => {
     await user.keyboard('{Enter}')
     expect(fetch).toHaveBeenCalledTimes(1)
     found({ device_name: 'Living room TV', user_id: 7, username: 'alice' })
-    const approve = await screen.findByRole('button', { name: 'Approve TV for alice' })
+    const approve = await screen.findByRole('button', { name: 'Approve this TV' })
     expect(screen.getByRole('button', { name: 'Find TV' })).toHaveFocus()
     // Found is said, and the focus is not put on Approve: a second Enter
     // must not approve a TV nobody has looked at.
@@ -116,7 +121,7 @@ describe('TV device approval', () => {
     expect(field()).toHaveValue('ABCD-1234')
     expect(screen.getByRole('button', { name: 'Find TV' })).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(fetch.mock.calls[0][0]).toBe('/api/auth/device/preview?code=ABCD-1234')
     // Without its dash it is still a whole code.
     await user.clear(field())
@@ -138,7 +143,7 @@ describe('TV device approval', () => {
     await waitFor(() => expect(alertText()).toBe(shown))
     expect(field()).toHaveAttribute('aria-invalid', 'true')
     expect(field()).toHaveAccessibleDescription(`8 letters and numbers, as on the TV. The dash is optional. ${shown}`)
-    expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
     await user.type(field(), '{Backspace}')
     expect(field()).not.toHaveAttribute('aria-invalid', 'true')
     expect(alertText()).toBe('')
@@ -170,9 +175,9 @@ describe('TV device approval', () => {
     fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(lockedRefusal())
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await user.click(await screen.findByRole('button', { name: 'Approve TV for alice' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
     const reason = await screen.findByText(LOCKED)
-    expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
     // In the card, with the TV it is about; read once, by taking the focus,
     // and not a second time by a live region.
     expect(reason.parentElement).toBe(card())
@@ -189,12 +194,12 @@ describe('TV device approval', () => {
     // is offered once more.
     fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(lockedRefusal())
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    const again = await screen.findByRole('button', { name: 'Approve TV for alice' })
+    const again = await screen.findByRole('button', { name: 'Approve this TV' })
     expect(screen.queryByText(LOCKED)).toBeNull()
     expect(screen.getByText('Found Living room TV. Check its code, then approve it below.')).toBeInTheDocument()
     await user.click(again)
     expect(await screen.findByText(LOCKED)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
     expect(fetch).toHaveBeenCalledTimes(4)
   })
 
@@ -211,9 +216,9 @@ describe('TV device approval', () => {
     fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(refused(status, serverWords))
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await user.click(await screen.findByRole('button', { name: 'Approve TV for alice' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
     await waitFor(() => expect(alertText()).toBe(shown))
-    await waitFor(() => expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull())
     const target = next === 'field' ? field() : screen.getByRole('button', { name: 'Find TV' })
     await waitFor(() => expect(target).toHaveFocus())
     expect(screen.getByRole('alert')).not.toHaveAttribute('tabindex')
@@ -237,12 +242,12 @@ describe('TV device approval', () => {
     fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(failure)
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    const approve = await screen.findByRole('button', { name: 'Approve TV for alice' })
+    const approve = await screen.findByRole('button', { name: 'Approve this TV' })
     approve.focus()
     await user.keyboard('{Enter}')
     await waitFor(() => expect(alertText()).toBe(shown))
     expect(alertText()).not.toMatch(/was not approved/)
-    expect(screen.getByRole('button', { name: 'Approve TV for alice' })).toHaveFocus()
+    expect(screen.getByRole('button', { name: 'Approve this TV' })).toHaveFocus()
     expect(field()).not.toHaveAttribute('aria-invalid', 'true')
   })
 
@@ -261,7 +266,7 @@ describe('TV device approval', () => {
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" someProfileUnlocked={someProfileUnlocked} />)
     expect(screen.queryByText(/After you approve/)).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(screen.getByText(/After you approve/).textContent).toBe(words)
     expect(screen.getByText(/After you approve/).closest('div')).toBe(card())
     // No profile is named anywhere on the page.
@@ -276,15 +281,15 @@ describe('TV device approval', () => {
     fetch.mockResolvedValue(tv)
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(fetch).toHaveBeenCalledTimes(1)
     const notMine = screen.getByRole('button', { name: 'Not my TV' })
     notMine.focus()
     await user.keyboard('{Enter}')
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(screen.queryByRole('button', { name: /Approve TV/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
     expect(screen.queryByText('wants to sign in to your AuroraPro account.')).toBeNull()
-    const said = screen.getByText('Nothing was approved. That TV has not been signed in.')
+    const said = screen.getByText('Nothing was approved from this page.')
     expect(said).toHaveAttribute('role', 'status')
     expect(said.className).not.toMatch(/sr-only/)
     await waitFor(() => expect(field()).toHaveFocus())
@@ -292,10 +297,84 @@ describe('TV device approval', () => {
     expect(alertText()).toBe('')
     // It is one status line: looking the code up again replaces the words.
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(screen.queryByText(/Nothing was approved/)).toBeNull()
     expect(screen.getAllByRole('status')).toHaveLength(1)
     expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  // An approval that got a gateway's error, or no answer, may have been
+  // written all the same. "Not my TV" after one must not say nothing was
+  // approved, or take down the warning that it might have been: it says
+  // what is known and what stops a TV that did get in.
+  it.each([
+    ['no answer came back', new TypeError('Failed to fetch'), 'No answer came back from the server, so the TV may or may not have been approved. If it does not sign in, check the connection and find it again here.'],
+    ['a gateway answered 502', refused(502, 'Bad Gateway'), 'The server did not confirm the approval, so the TV may or may not have been approved. If it does not sign in, find it again here.'],
+  ] as const)('does not say nothing was approved when "Not my TV" follows an approval that %s', async (_, failure, warning) => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(failure)
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toBe(warning))
+    await user.click(screen.getByRole('button', { name: 'Not my TV' }))
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('button', { name: /Approve this TV/ })).toBeNull()
+    const said = screen.getByText('An approval was sent from this page a moment ago, and it is not known whether it went through. If that TV is not yours, sign out from the account menu: that signs out every device on this account, that TV included.')
+    expect(said).toHaveAttribute('role', 'status')
+    expect(said.className).not.toMatch(/sr-only/)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.queryByText(/Nothing was approved/)).toBeNull()
+    // The warning stays.
+    expect(alertText()).toBe(warning)
+    await waitFor(() => expect(field()).toHaveFocus())
+    // A new lookup starts clean: the next "Not my TV" is an ordinary one.
+    fetch.mockResolvedValueOnce(tv)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await screen.findByRole('button', { name: 'Approve this TV' })
+    expect(alertText()).toBe('')
+    await user.click(screen.getByRole('button', { name: 'Not my TV' }))
+    expect(screen.getByText('Nothing was approved from this page.')).toBeInTheDocument()
+    expect(screen.queryByText(/An approval was sent/)).toBeNull()
+  })
+
+  // A refusal the server's own handler sends comes before anything is
+  // written: after one of those nothing was approved from here.
+  it('says nothing was approved from this page when "Not my TV" follows a refusal that wrote nothing', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockRejectedValueOnce(refused(429, 'too many device sign-in attempts; try again in a minute', undefined, 60))
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    await waitFor(() => expect(alertText()).toMatch(/^Too many tries/))
+    await user.click(screen.getByRole('button', { name: 'Not my TV' }))
+    expect(screen.getByText('Nothing was approved from this page.')).toBeInTheDocument()
+    expect(alertText()).toBe('')
+  })
+
+  // The link a TV shows can be typed by hand, in any case.
+  it('reads a code that arrives in the link as it reads a typed one', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValue(tv)
+    render(<DeviceApprovalView username="alice" initialCode=" abcd-1234 " />)
+    expect(field()).toHaveValue('ABCD-1234')
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await screen.findByRole('button', { name: 'Approve this TV' })
+    expect(fetch.mock.calls[0][0]).toBe('/api/auth/device/preview?code=ABCD-1234')
+    expect(screen.getByText(/Approve only if you started sign-in on this TV/)).toHaveTextContent('its code matches ABCD-1234.')
+  })
+
+  // Once the TV is approved there is no code to enter.
+  it('drops the sentence about entering a code once the TV is approved', async () => {
+    const user = userEvent.setup()
+    fetch.mockResolvedValueOnce(tv).mockResolvedValueOnce({ message: 'device authorized' })
+    render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
+    expect(screen.getByText(/^Enter the code shown on the TV\./)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Find TV' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('TV approved')
+    expect(screen.queryByText(/^Enter the code shown on the TV\./)).toBeNull()
+    expect(screen.getByRole('heading', { level: 1, name: 'Connect your TV' })).toBeInTheDocument()
   })
 
   it('does not put a TV aside while its approval is being sent', async () => {
@@ -303,7 +382,7 @@ describe('TV device approval', () => {
     fetch.mockResolvedValueOnce(tv).mockImplementationOnce(() => new Promise(() => {}))
     render(<DeviceApprovalView username="alice" initialCode="ABCD-1234" />)
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await user.click(await screen.findByRole('button', { name: 'Approve TV for alice' }))
+    await user.click(await screen.findByRole('button', { name: 'Approve this TV' }))
     const notMine = screen.getByRole('button', { name: 'Not my TV' })
     expect(notMine).toHaveAttribute('aria-disabled', 'true')
     await user.click(notMine)
@@ -319,7 +398,7 @@ describe('TV device approval', () => {
     render(<DeviceApprovalView username="alice" initialCode="" />)
     await user.type(field(), 'ab-cd--12-34----')
     await user.click(screen.getByRole('button', { name: 'Find TV' }))
-    await screen.findByRole('button', { name: 'Approve TV for alice' })
+    await screen.findByRole('button', { name: 'Approve this TV' })
     expect(screen.getByText(/Approve only if you started sign-in on this TV/)).toHaveTextContent('its code matches ABCD-1234.')
   })
 
