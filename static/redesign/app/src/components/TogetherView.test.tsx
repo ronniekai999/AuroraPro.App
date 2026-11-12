@@ -351,6 +351,56 @@ describe('the ways into a party', () => {
     await waitFor(() => expect(row).toHaveFocus())
   })
 
+  // The row takes the focus only from its own button, at the moment that
+  // button goes. It used to be remembered as "the room that last had focus"
+  // for good, so at every later change of the party list it took the focus
+  // (and on a phone the page with it) from anyone whose focus was on
+  // nothing: someone who had tapped the page and gone back up to read.
+  it('leaves focus where it is when the person has left a room\'s row before its party ends', async () => {
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '', active_party_code: 'FRD4YC' }])
+    const view = render(<TogetherView {...props({ activeParties: [party({ code: 'FRD4YC', party_name: 'In the room' })] })} />)
+    const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
+    const join = await rooms.findByRole('button', { name: 'Join Friday crew' })
+    join.focus()
+    // A tap on the page: the focus is on nothing.
+    join.blur()
+    expect(document.body).toHaveFocus()
+    api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '' }])
+    view.rerender(<TogetherView {...props({ activeParties: [] })} />)
+    await waitFor(() => expect(rooms.queryByRole('button', { name: 'Join Friday crew' })).toBeNull())
+    await act(async () => {})
+    expect(document.body).toHaveFocus()
+
+    // The same for a row that held the focus itself, as a room just made
+    // does: once left, a later change of the party list does not bring the
+    // focus back to it.
+    const row = rooms.getByText('Friday crew', { selector: 'div' }).closest('li')!
+    row.focus()
+    row.blur()
+    view.rerender(<TogetherView {...props({ activeParties: [party({ code: 'OTHER1', party_name: 'Elsewhere' })] })} />)
+    await waitFor(() => expect(api.listRooms).toHaveBeenCalledTimes(3))
+    await act(async () => {})
+    expect(document.body).toHaveFocus()
+  })
+
+  // "Only the first read failing leaves nothing to show" forgot a room made
+  // after that first read failed: the next failed read emptied the list.
+  it('keeps a room just made when the rooms could not be read before it and cannot be read after', async () => {
+    api.listRooms.mockRejectedValue(new Error('boom'))
+    api.createRoom.mockResolvedValue({ id: 3, code: 'SC7T3N', name: 'Slow cinema', owner_user_id: 1, created_at: '' })
+    const view = render(<TogetherView {...props({ activeParties: [] })} />)
+    const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
+    await rooms.findByText('Your rooms could not be loaded.')
+    fireEvent.click(rooms.getByRole('button', { name: 'New room' }))
+    fireEvent.change(rooms.getByLabelText('Room name'), { target: { value: 'Slow cinema' } })
+    fireEvent.click(rooms.getByRole('button', { name: 'Make room' }))
+    await rooms.findByText('Slow cinema')
+    view.rerender(<TogetherView {...props({ activeParties: [party()] })} />)
+    await waitFor(() => expect(api.listRooms).toHaveBeenCalledTimes(2))
+    await act(async () => {})
+    expect(rooms.getByText('Slow cinema')).toBeInTheDocument()
+  })
+
   // "live now" was only as true as the moment the page opened.
   it('reads the rooms again when the parties running change, and not on a poll that brings the same list', async () => {
     api.listRooms.mockResolvedValue([{ id: 1, code: 'FRD4YC', name: 'Friday crew', owner_user_id: 1, created_at: '' }])

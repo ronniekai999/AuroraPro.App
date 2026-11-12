@@ -551,9 +551,16 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   const [error, setError] = useState<string | null>(null)
   // The room just made, whose row takes the focus the form had.
   const [made, setMade] = useState<number | null>(null)
-  // The room whose row last had the focus. Its Join button goes when a
-  // reload finds its party has ended; the row takes the focus then.
-  const focusedRoom = useRef<number | null>(null)
+  // The control inside a room's row that holds the focus, and its room. A
+  // reload that finds the room's party has ended takes its Join button away,
+  // and the row takes the focus then: when THAT control has gone from the
+  // page while it held the focus, and at no other time. It is forgotten
+  // when the person moves on (the row's blur handler). Kept as "the room
+  // that last had the focus", it took the focus back, and on a phone the
+  // page with it, at every later change of the party list, from anyone
+  // whose focus was on nothing.
+  const heldInRoom = useRef<{ room: number; el: HTMLElement } | null>(null)
+  // There is a list to keep: a read has answered, or a room was made here.
   const loadedOnce = useRef(false)
 
   // Read when the page opens, and again when the parties running change: a
@@ -573,8 +580,10 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
   }, [partyKey])
 
   useEffect(() => {
-    if (focusedRoom.current === null) return
-    focusIfLost(listRef.current?.querySelector<HTMLElement>(`[data-room="${focusedRoom.current}"]`))
+    const held = heldInRoom.current
+    if (!held || held.el.isConnected) return
+    heldInRoom.current = null
+    focusIfLost(listRef.current?.querySelector<HTMLElement>(`[data-room="${held.room}"]`))
   }, [rooms])
 
   useEffect(() => {
@@ -594,6 +603,8 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
     try {
       const room = await createRoom({ name: next })
       setRooms(prev => (prev ? [room, ...prev.filter(r => r.id !== room.id)] : [room]))
+      // A later read that fails keeps this room, also when none has answered.
+      loadedOnce.current = true
       setName('')
       setCreating(false)
       setMade(room.id)
@@ -650,7 +661,26 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
             return (
               // Focusable from code only: a room just made takes the focus
               // its form had, and a room with nothing on has no button.
-              <li key={r.id} data-room={r.id} tabIndex={-1} onFocus={() => { focusedRoom.current = r.id }} className="rounded-control bg-surface-raised px-4 py-2.5">
+              <li
+                key={r.id}
+                data-room={r.id}
+                tabIndex={-1}
+                // A control in the row, not the row itself: the row is never
+                // taken away under the person, its Join button is.
+                onFocus={e => { if (e.target !== e.currentTarget) heldInRoom.current = { room: r.id, el: e.target as HTMLElement } }}
+                // The person moved on. A control taken away must not count:
+                // Chromium fires a blur for a removal too, while the control
+                // is still in the page. React does not hand that one to this
+                // handler today (measured in Chromium), but nothing here
+                // leans on that: the two are told apart a moment later, when
+                // a control that was removed is no longer connected and its
+                // record stays for the effect above.
+                onBlur={e => {
+                  const el = e.target as HTMLElement
+                  queueMicrotask(() => { if (heldInRoom.current?.el === el && el.isConnected) heldInRoom.current = null })
+                }}
+                className="rounded-control bg-surface-raised px-4 py-2.5"
+              >
                 <div className="flex min-h-[40px] items-center gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[15px] font-semibold text-ink">{r.name}</div>
