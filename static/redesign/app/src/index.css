@@ -1137,9 +1137,9 @@ html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) 
    it. There is no `100%`, no cap term and no gutter in this rule.)
 
    RESOLVED, and the resolution is the rule: surfaces span, content caps —
-   the same one `.stage-topnav` follows. BrowseView's identical `.stage-toolbar`
-   sits in a full-bleed view and already ran edge to edge; this one now matches it
-   at every width. (An earlier version of this comment recorded the disagreement
+   the same one `.stage-topnav` follows. (A browse toolbar that sat in a
+   full-bleed view already ran edge to edge; this was made to match it at every
+   width. That toolbar is gone; the rule stands.) (An earlier version of this comment recorded the disagreement
    as an open design call. It was settled one commit later and the note was left
    standing — the sixth time in this file that has happened.)
    */
@@ -1149,10 +1149,10 @@ html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) 
      `50% - 50vw` reaches the true viewport edge from inside ANY padded parent,
      which `calc(var(--page-pad-x) * -1)` could not: that value resolves against
      the parent's already-padded content box, so above the cap it only pulled back
-     one gutter and left the band stopping 272px short at 2560 — while
-     BrowseView's identical `.stage-toolbar`, sitting in a full-bleed view, still
-     ran edge to edge. Two siblings of one class rendering differently, with a
-     hard seam and a border hairline ending in mid-air.
+     one gutter and left the band stopping 272px short at 2560 — while a
+     browse toolbar of the same kind, sitting in a full-bleed view, still ran
+     edge to edge. Two siblings rendering differently, with a hard seam and a
+     border hairline ending in mid-air.
      The box still overruns the layout viewport by half a scrollbar, which
      `body { overflow-x: hidden }` clips. Note what that does NOT do: it hides the
      scrollbar without preventing the scroll, so `documentElement.scrollLeft` can
@@ -1395,17 +1395,12 @@ html[data-bug-launcher] .stage-shell { padding-bottom: calc(var(--tabbar-space) 
 
 /* Focus must not land under the sticky chrome (WCAG 2.2 SC 2.4.11). The
    document is the scroll container, so the browser parks a newly focused
-   element at viewport top — behind the nav, and on the browse pages behind
-   the sticky toolbar as well. `:has()` scopes the larger allowance to pages
-   that actually have a toolbar, so every other page scrolls only as far as
-   the chrome requires instead of over-scrolling by 80px. */
+   element at viewport top, behind the nav. A page with something else stuck
+   under the nav adds that thing's height with a `:has()` rule of its own
+   (the Library's A to Z strip does, where it is defined), so every other
+   page scrolls only as far as the chrome requires. */
 html {
   scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 12px);
-}
-html:has(.stage-toolbar) {
-  /* .stage-toolbar is ~67px: 14px padding top and bottom, a 38px chip row,
-     and its 1px border. 80 leaves slack for the wrapped two-line case. */
-  scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 80px);
 }
 
 /* ── Title page ──────────────────────────────────────────────────────
@@ -1771,46 +1766,6 @@ input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="c
   .stage-detail-rail { --bleed: var(--page-gutter); }
 }
 .stage-detail-rail::-webkit-scrollbar { display: none; }
-
-/* ── Browse toolbar, now sticky ─────────────────────────────────────
-   The toolbar was deliberately left in-flow with a comment explaining why:
-   "the app's top header is itself sticky with a DYNAMIC height (the admin
-   ScanProgressBar appears and disappears), so a fixed sticky offset here
-   would gap/overlap. Sticky is a clean follow-up once that header exposes
-   a stable height."
-   
-   Phase 2 made it expose one. --chrome-h is the MEASURED height of the
-   whole sticky stack (scan bar + nav), republished by a ResizeObserver
-   whenever a scan starts or stops, so this offset tracks it instead of
-   guessing. That is the entire reason this can be sticky now. */
-.stage-toolbar {
-  position: sticky;
-  top: var(--chrome-h, var(--topnav-h));
-  /* Under the nav stack (50) and its drawers (45), above page content. */
-  z-index: 30;
-  padding-top: 14px;
-  padding-bottom: 14px;
-  background: linear-gradient(180deg, rgba(14, 15, 17, 0.92), rgba(14, 15, 17, 0.78));
-  backdrop-filter: blur(18px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-}
-html[data-effects="reduced"] .stage-toolbar {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: #0e0f11;
-}
-/* Not sticky on phones. Below md the toolbar wraps to two rows (the sort
-   group's ~184px doesn't fit beside the density toggle in ~284px), so
-   pinning it under the 64px nav would hold ~186px — about 29% of a 640px
-   viewport — permanently. Scrolling it away is the right trade there. */
-/* Negated form, not `max-width: 767px` — see the md-boundary note above:
-   Tailwind's `md:` is `min-width: 768px`, so the max-width form leaves 767.5px
-   matching neither rule. */
-@media not all and (min-width: 768px) {
-  .stage-toolbar {
-    position: static;
-  }
-}
 
 /* ══ Content views (Aurora Stage Phase 6) ═════════════════════════════
    Requests · My Library · Collections · Calendar · Search.
