@@ -1,0 +1,10 @@
+{
+  "sha": "c1a9bed51f0c046e0a94a0d222b1f77779031d05",
+  "verdict": "lows-only",
+  "summary": "Together (af0ecbf9, two passes: fix-first, then lows-only at 70dcca7, the tree this commit applies) and the Settings leftovers (a8ce3c17, lows-only). Open lows: the 'You were just in' record is written under the browser's remembered profile and read under the acting one; the code field takes focus back unconditionally after a refused join; a room's Join button goes on reload without focus restored; Settings: a save judged before its list read goes on after an overtaking reload (a switch onto that profile in another tab skips the limit-yourself question); an overtaken reload waits for the newer one with no deadline; .stage-btn-wrap lacks overflow-wrap.",
+  "reviewer": "fresh-context-agents-af0ecbf9-a8ce3c17",
+  "findings": "8",
+  "diff_digest": "d78761171438016e3d0afd74c77f1c3248707da43aa40e14e063a45b12675964",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T16:30:09Z"
+}
