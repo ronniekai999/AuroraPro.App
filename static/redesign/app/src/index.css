@@ -1410,8 +1410,10 @@ html[data-effects="reduced"] .stage-topnav {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
-.req-act:where(:not(:disabled)):hover { background: var(--surface-raised-2); }
-.req-act:disabled { opacity: 0.6; cursor: default; }
+.req-act:where(:not([aria-disabled="true"])):hover { background: var(--surface-raised-2); }
+/* While something on the page is still out: there, and not to be pressed. */
+.req-act[aria-disabled="true"],
+.req-del[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 .req-del {
   display: grid;
   place-items: center;
@@ -1422,7 +1424,7 @@ html[data-effects="reduced"] .stage-topnav {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
-.req-del:hover { background: var(--surface-raised-2); color: var(--danger-ink); }
+.req-del:where(:not([aria-disabled="true"])):hover { background: var(--surface-raised-2); color: var(--danger-ink); }
 /* A finger: each of a row's own controls is a 44px target. */
 @media (hover: none), (pointer: coarse) {
   .req-act { height: 44px; }

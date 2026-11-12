@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
 import type { MediaRequest } from '@/lib/api'
 
 const api = vi.hoisted(() => ({
@@ -33,10 +34,23 @@ const SIX = [
   request(5, { title: 'Little Atlas', media_type: 'tv', status: 'available' }),
   request(6, { title: 'Paper Lanterns', status: 'failed', error_message: 'radarr: api error (status 500): connection refused', year: 1998 }),
 ]
-const calls = { submitted: vi.fn(), deleted: vi.fn(), ask: vi.fn(), find: vi.fn() }
+const calls = { submitted: vi.fn(), deleted: vi.fn(), moved: vi.fn(), ask: vi.fn(), find: vi.fn() }
 const page = (requests: MediaRequest[] | null, over: Record<string, unknown> = {}) => (
-  <RequestsView requests={requests} onRequestSubmitted={calls.submitted} onRequestDeleted={calls.deleted} onAsk={calls.ask} onFind={calls.find} {...over} />
+  <RequestsView requests={requests} onRequestSubmitted={calls.submitted} onRequestDeleted={calls.deleted} onRequestMoved={calls.moved} onAsk={calls.ask} onFind={calls.find} {...over} />
 )
+/** The page with the list its parent keeps: a deleted request leaves it, a
+ *  moved one changes status, as App's does. */
+function Kept({ start, ...over }: { start: MediaRequest[] } & Record<string, unknown>) {
+  const [list, setList] = useState(start)
+  return (
+    <RequestsView
+      requests={list} onRequestSubmitted={calls.submitted}
+      onRequestDeleted={id => { calls.deleted(id); setList(l => l.filter(r => r.id !== id)) }}
+      onRequestMoved={(id, status) => { calls.moved(id, status); setList(l => l.map(r => (r.id === id ? { ...r, status } : r))) }}
+      {...over}
+    />
+  )
+}
 const row = (id: number) => document.querySelector<HTMLElement>(`[data-request-id="${id}"]`)!
 const names = () => [...document.querySelectorAll('.req-name')].map(n => n.textContent)
 const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve() })
@@ -258,5 +272,187 @@ describe('a request\'s row', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for The Glass Orchard' }))
     await flush()
     expect(calls.deleted).toHaveBeenCalledWith(1)
+  })
+})
+
+// Review 23.
+describe('whose request can be asked for again', () => {
+  const failedBy = (id: number, user_id: number, extra: Partial<MediaRequest> = {}) =>
+    request(id, { status: 'failed', user_id, title: `Failed ${id}`, username: user_id === 1 ? 'ronnie' : 'Dana', ...extra })
+
+  // In a list of every member's requests, "Try again" would make the new
+  // request the caller's and then delete the member's row.
+  it('only the caller\'s own, in a list that holds every member\'s; a delete stays where the server allows it', () => {
+    render(page([failedBy(1, 1), failedBy(2, 7)], { everyone: true, userId: 1 }))
+    expect(screen.getAllByRole('button', { name: /^Ask for .* again$/ }).map(b => b.getAttribute('aria-label'))).toEqual(['Ask for Failed 1 again'])
+    expect(screen.getAllByRole('button', { name: /^Delete request for / })).toHaveLength(2)
+  })
+
+  it('none in such a list when the page is not told who the caller is', () => {
+    render(page([failedBy(1, 1), failedBy(2, 7)], { everyone: true }))
+    expect(screen.queryByRole('button', { name: /^Ask for .* again$/ })).toBeNull()
+  })
+
+  // One press would undo the denial: under the limit, the server sends a
+  // new request straight to the downloader.
+  it('not one an admin turned down, which can still be deleted', () => {
+    render(page([request(1, { status: 'failed', error_message: 'denied by admin', title: 'Denied' }), request(2, { status: 'failed', title: 'Broke' })], { userId: 1 }))
+    expect(screen.getAllByRole('button', { name: /^Ask for .* again$/ }).map(b => b.getAttribute('aria-label'))).toEqual(['Ask for Broke again'])
+    expect(screen.getByRole('button', { name: 'Delete request for Denied' })).toBeInTheDocument()
+  })
+})
+
+describe('the delete question and the keyboard', () => {
+  const bin = (title: string) => screen.getByRole('button', { name: `Delete request for ${title}` })
+  const keepBtn = (title: string) => screen.getByRole('button', { name: `Keep the request for ${title}` })
+
+  it('puts the focus on Keep when it opens, and back on the bin when it is kept', () => {
+    render(page(SIX))
+    bin('The Glass Orchard').focus()
+    fireEvent.click(bin('The Glass Orchard'))
+    expect(document.activeElement).toBe(keepBtn('The Glass Orchard'))
+    fireEvent.click(keepBtn('The Glass Orchard'))
+    expect(document.activeElement).toBe(bin('The Glass Orchard'))
+    // Also when the focus was nowhere (a pointer's press focuses no button
+    // in Safari): the question still puts it on Keep, and Keep on the bin.
+    // (Without this the two only passed because the bin and Keep happen to
+    // be one element in one place.)
+    ;(document.activeElement as HTMLElement).blur()
+    fireEvent.click(bin('The Glass Orchard'))
+    expect(document.activeElement).toBe(keepBtn('The Glass Orchard'))
+    ;(document.activeElement as HTMLElement).blur()
+    fireEvent.click(keepBtn('The Glass Orchard'))
+    expect(document.activeElement).toBe(bin('The Glass Orchard'))
+  })
+
+  it('takes Escape as Keep, and keeps the key from the page behind', () => {
+    const behind = vi.fn()
+    window.addEventListener('keydown', behind)
+    render(page(SIX))
+    fireEvent.click(bin('The Glass Orchard'))
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(row(1).querySelector('.req-confirm')).toBeNull()
+    expect(document.activeElement).toBe(bin('The Glass Orchard'))
+    expect(api.deleteRequest).not.toHaveBeenCalled()
+    expect(behind).not.toHaveBeenCalled()
+    // With no question up, Escape is the page's own again.
+    fireEvent.keyDown(bin('The Glass Orchard'), { key: 'Escape' })
+    expect(behind).toHaveBeenCalledTimes(1)
+    window.removeEventListener('keydown', behind)
+  })
+
+  it('moves the focus to the next row that has something to press when a row is deleted, or to the heading', async () => {
+    // Rows: a pending one, then one with nothing to press, then a failed one.
+    const list = [request(1, { title: 'First' }), request(2, { title: 'Second', status: 'processing' }), request(3, { title: 'Third', status: 'failed' })]
+    render(<Kept start={list} userId={1} />)
+    fireEvent.click(bin('First'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(names()).toEqual(['Second', 'Third'])
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Ask for Third again' }))
+    // The last row with anything to press: the heading takes the focus.
+    fireEvent.click(bin('Third'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for Third' }))
+    await flush()
+    expect(names()).toEqual(['Second'])
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }))
+  })
+
+  it('keeps its buttons focusable while the delete is out, and takes no second press', async () => {
+    let done!: () => void
+    api.deleteRequest.mockImplementationOnce(() => new Promise<void>(r => { done = r }))
+    render(page(SIX))
+    fireEvent.click(bin('The Glass Orchard'))
+    const del = screen.getByRole('button', { name: 'Delete the request for The Glass Orchard' })
+    fireEvent.click(del)
+    expect(del).not.toBeDisabled()
+    expect(del).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(del)
+    fireEvent.click(keepBtn('The Glass Orchard'))
+    expect(api.deleteRequest).toHaveBeenCalledTimes(1)
+    expect(row(1).querySelector('.req-confirm')).not.toBeNull()
+    done()
+    await flush()
+    expect(calls.deleted).toHaveBeenCalledWith(1)
+  })
+})
+
+describe('what a refusal says on the requests page', () => {
+  it('says why a retry was refused in the server\'s terms, where it gave any', async () => {
+    api.createRequest.mockRejectedValueOnce(new Error('you already have an active request for this media'))
+    render(page(SIX))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for Paper Lanterns again' }))
+    await flush()
+    expect(within(row(6)).getByRole('alert').textContent).toBe('You have already asked for this one.')
+    api.createRequest.mockRejectedValueOnce(new Error('requests feature is not enabled'))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for Paper Lanterns again' }))
+    await flush()
+    expect(within(row(6)).getByRole('alert').textContent).toBe('Requests are not set up on this server.')
+  })
+
+  // A pending request is with the downloader within seconds, and the server
+  // deletes only a pending or a failed one.
+  it('says a pending request has moved on when its delete is refused for that, and puts the row right', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second', status: 'failed' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(calls.moved).toHaveBeenCalledWith(1, 'processing')
+    expect(calls.deleted).not.toHaveBeenCalled()
+    expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
+    expect(row(1).querySelector('.req-status-label')!.textContent).toBe('Processing')
+    // The question and the bin are gone from that row; the focus is on the next thing to press.
+    expect(row(1).querySelector('.req-confirm')).toBeNull()
+    expect(within(row(1)).queryByRole('button')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Ask for Second again' }))
+  })
+
+  it('says only "could not be deleted" for any other failure, and for that refusal on a row that was not pending', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    render(page(SIX))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for Paper Lanterns' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for Paper Lanterns' }))
+    await flush()
+    expect(within(row(6)).getByRole('alert').textContent).toBe('It could not be deleted. Try again in a moment.')
+    expect(calls.moved).not.toHaveBeenCalled()
+  })
+})
+
+describe('one thing at a time on the requests page', () => {
+  it('takes no second retry, on that row or another, while one is out', async () => {
+    let answer!: (r: MediaRequest) => void
+    api.createRequest.mockImplementationOnce(() => new Promise(done => { answer = done as (r: MediaRequest) => void }))
+    render(page([request(1, { status: 'failed', title: 'A' }), request(2, { status: 'failed', title: 'B' })], { userId: 1 }))
+    const a = screen.getByRole('button', { name: 'Ask for A again' })
+    const b = screen.getByRole('button', { name: 'Ask for B again' })
+    fireEvent.click(a)
+    expect(a.textContent).toBe('Asking…')
+    expect(b).toHaveAttribute('aria-disabled', 'true')
+    expect(b).not.toBeDisabled()
+    fireEvent.click(b)
+    fireEvent.click(a)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for B' }))
+    expect(api.createRequest).toHaveBeenCalledTimes(1)
+    expect(row(2).querySelector('.req-confirm')).toBeNull()
+    answer(request(77, { title: 'A' }))
+    await flush()
+    await flush()
+    expect(b).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(b)
+    expect(api.createRequest).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('when a request arrived', () => {
+  // completed_at is written at a failure too: a request that failed and
+  // arrived later would be dated by its failure.
+  it('is not dated on a row that has an error on record', () => {
+    render(page([
+      request(1, { status: 'available', completed_at: ago(26) }),
+      request(2, { status: 'available', completed_at: ago(26), error_message: 'radarr: timeout' }),
+    ]))
+    expect(row(1).querySelector('.req-status-note')!.textContent).toBe('Added to the library yesterday.')
+    expect(row(2).querySelector('.req-status-note')!.textContent).toBe('In the library.')
   })
 })

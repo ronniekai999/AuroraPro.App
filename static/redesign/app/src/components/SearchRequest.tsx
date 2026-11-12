@@ -26,25 +26,13 @@ import {
   type RequestsConfig,
   type TmdbSearchResult,
 } from '@/lib/api'
-import { REQUEST_STATUS } from '@/lib/requestStatus'
+import { REQUEST_STATUS, requestRefusalSays } from '@/lib/requestStatus'
 
 const keyOf = (r: { media_type: string; tmdb_id: number }) => `${r.media_type}:${r.tmdb_id}`
 
 /** The letter a title is filed under, for the tile that stands in for a
  *  poster: its first, past a leading article ("The Glass Orchard" is G). */
 const initialOf = (title: string) => title.trim().replace(/^(the|a|an)\s+/i, '').charAt(0).toUpperCase()
-
-/** A refusal in words: the server's reasons that a person can act on, and
- *  one sentence for the rest. Never a status code. */
-function refusalSays(err: unknown): string {
-  const raw = err instanceof Error ? err.message.toLowerCase() : ''
-  if (raw.includes('already have an active request')) return 'You have already asked for this one.'
-  if (raw.includes('not configured')) return 'This server is not set up to fetch this kind of title.'
-  // Switched off after this page read that they were on: trying again
-  // would get the same answer.
-  if (raw.includes('not enabled')) return 'Requests are not set up on this server.'
-  return 'The request could not be sent. Try again in a moment.'
-}
 
 /** What the request list needs to know that does not change with the words:
  *  whether this server takes requests (and of which kind), and what has been
@@ -169,7 +157,7 @@ export function SearchRequest({ query, userId, state, onRequested, onOpenRequest
       noteMade(made)
       onRequested(made)
     } catch (err) {
-      setRefused({ key, says: refusalSays(err) })
+      setRefused({ key, says: requestRefusalSays(err) })
     } finally {
       setSending(null)
     }

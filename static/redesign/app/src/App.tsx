@@ -2922,7 +2922,8 @@ export default function App() {
   const handleRequestSubmitted = useCallback((r: MediaRequest) => {
     // Not loaded yet (or dropped on a switch): leave it to the fetch, which
     // will include this one, rather than show it alone and cancel the fetch.
-    setRequestsList(prev => prev ? [r, ...prev] : prev)
+    // Not twice: a list fetched while this answer was out already has it.
+    setRequestsList(prev => prev ? (prev.some(x => x.id === r.id) ? prev : [r, ...prev]) : prev)
     const id = nextToastId()
     setToasts(prev => [...prev, { id, message: `Requested "${r.title}"`, type: 'success' }])
   }, [nextToastId])
@@ -2939,6 +2940,33 @@ export default function App() {
     onRequested: (r: MediaRequest) => { if (searchOwnerRef.current === searchOwner) handleRequestSubmitted(r) },
     onOpenRequests: () => handleNavigate('requests'),
   }), [searchUserId, searchOwner, handleRequestSubmitted, handleNavigate])
+  // The requests page's own late answers, stamped the same way: a request
+  // asked for again, a delete, a row found to have moved on.
+  const requestsPage = useMemo(() => {
+    const still = () => searchOwnerRef.current === searchOwner
+    return {
+      submitted: (r: MediaRequest) => { if (still()) handleRequestSubmitted(r) },
+      deleted: (id: number, replaced?: boolean) => {
+        if (!still()) return
+        setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
+        // A failed request that was asked for again goes quietly: the new
+        // request has just been announced.
+        if (replaced) return
+        const tId = nextToastId()
+        setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
+      },
+      moved: (id: number, status: MediaRequest['status']) => {
+        if (still()) setRequestsList(prev => prev ? prev.map(r => (r.id === id ? { ...r, status } : r)) : prev)
+      },
+    }
+  }, [searchOwner, handleRequestSubmitted, nextToastId])
+  // A request that is in the library now is found by its title (a request
+  // holds no id of the title it became): the words, and the search page.
+  // Not through handleNavigate, which ends by clearing the words.
+  const findInLibrary = useCallback((title: string) => {
+    changeSearchQuery(title)
+    setView('search')
+  }, [changeSearchQuery])
   // A collection picked from the search page's results: the Collections
   // scope is opened on it. Owner-stamped, like the ask above, so it is not
   // carried to another profile's Collections.
@@ -7196,22 +7224,15 @@ export default function App() {
               <RequestsView
                 everyone={adminUI}
                 requests={requestsList}
-                onRequestSubmitted={handleRequestSubmitted}
-                onRequestDeleted={(id, replaced) => {
-                  setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
-                  // A failed request that was asked for again goes quietly:
-                  // the new request has just been announced.
-                  if (replaced) return
-                  const tId = nextToastId()
-                  setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
-                }}
+                userId={user.id}
+                onRequestSubmitted={requestsPage.submitted}
+                onRequestDeleted={requestsPage.deleted}
+                onRequestMoved={requestsPage.moved}
                 // Asking for a title is the end of a search that finds
                 // nothing: the page's row opens the search page with its
                 // field ready (the bar's, or on a phone the page's own).
                 onAsk={() => { handleNavigate('search'); searchInputRef.current?.focus() }}
-                // A request that is in the library now is found by its
-                // title: a request holds no id of the title it became.
-                onFind={(title) => { changeSearchQuery(title); handleNavigate('search') }}
+                onFind={findInLibrary}
               />
             </ViewSuspense></HiddenPage>
           )}

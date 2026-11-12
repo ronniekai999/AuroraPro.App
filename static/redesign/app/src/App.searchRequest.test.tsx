@@ -23,13 +23,14 @@ const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', y
 
 /** `bindingUnreadable`: the server cannot say which profile the session acts
  *  as, so the app knows none (it opens the profile picker over the page). */
-function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false, kidFree = false } = {}) {
+function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false, kidFree = false, requests = [] as Record<string, unknown>[] } = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   /** What was looked up outside the library (the server asks TMDB). */
   const lookups: string[] = []
   /** The requests made, as the server was sent them, and as it lists them. */
   const posted: Record<string, unknown>[] = []
-  const listed: Record<string, unknown>[] = []
+  // `requests`: what the account had asked for before this page was opened.
+  const listed: Record<string, unknown>[] = [...requests]
   /** How many times the list of collections was asked for. */
   const collectionLists = { n: 0 }
   const heroAsks = { n: 0 }
@@ -414,5 +415,61 @@ describe('what a search offers besides titles', () => {
     expect(screen.queryByRole('button', { name: /^Start a watch party/ })).toBeNull()
     expect(document.querySelector('[data-search-actions]')).toBeNull()
     expect(server.collectionLists.n).toBe(0)
+  })
+})
+
+// Review 23, against the whole App.
+describe('the requests page, from the account menu', () => {
+  const asked = (id: number, title: string, status: string) =>
+    ({ id, user_id: 1, media_type: 'movie', tmdb_id: 500 + id, title, poster_path: '', overview: '', year: 2022, status, quality_1080p: true, quality_4k: false, requested_at: NOW, updated_at: NOW })
+  async function openRequests() {
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /My requests/ }, find))
+    await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)
+  }
+
+  // "Find it" went through the navigation helper, which ends by clearing
+  // the search words: it opened an empty search page.
+  it('finds a request that has arrived: the search page, with its title in the field and the title\'s results', async () => {
+    renderApp(1, false, { requests: [asked(5, 'Harbor Lights', 'available')] })
+    await screen.findByText('Parent', undefined, find)
+    await openRequests()
+    fireEvent.click(await screen.findByRole('button', { name: 'Find Harbor Lights in the library' }, find))
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).not.toBeNull(), find)
+    expect(document.querySelector<HTMLInputElement>('.stage-navsearch input')!.value).toBe('Harbor Lights')
+    const result = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-results] .mlr-title, [data-search-results] .search-best-title, [data-search-results] .cc-title')
+      if (!el) throw new Error('no result yet')
+      return el
+    }, find)
+    expect(result.textContent).toBe('Harbor Lights')
+  })
+
+  // A retry's answer after the tab has moved to another profile is not told
+  // to whoever is there now (the search page's requests are stamped the same).
+  it('tells the app nothing about a retry answered after the session moved to another profile', async () => {
+    const server = renderApp(1, false, { kidFree: true, requests: [asked(6, 'Paper Lanterns', 'failed')] })
+    await screen.findByText('Parent', undefined, find)
+    await openRequests()
+    const release = server.holdRequest()
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for Paper Lanterns again' }, find))
+    await waitFor(() => expect(server.posted).toHaveLength(1), find)
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name: /Kid/ }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Kid'), find)
+    release()
+    await new Promise(done => setTimeout(done, 400))
+    expect(screen.queryByText('Requested "Paper Lanterns"')).toBeNull()
+  })
+
+  it('tells the app about a retry answered while the session is still the one that made it', async () => {
+    const server = renderApp(1, false, { kidFree: true, requests: [asked(6, 'Paper Lanterns', 'failed')] })
+    await screen.findByText('Parent', undefined, find)
+    await openRequests()
+    const release = server.holdRequest()
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for Paper Lanterns again' }, find))
+    await waitFor(() => expect(server.posted).toHaveLength(1), find)
+    release()
+    expect(await screen.findByText('Requested "Paper Lanterns"', undefined, find)).toBeInTheDocument()
   })
 })

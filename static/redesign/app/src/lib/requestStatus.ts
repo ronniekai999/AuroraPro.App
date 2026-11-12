@@ -30,3 +30,16 @@ export const REQUEST_STATUS: Record<MediaRequest['status'], {
 
 /** The statuses in the order a request moves through them. */
 export const REQUEST_STATUSES = ['pending', 'pending_approval', 'processing', 'available', 'failed'] as const
+
+/** A refused request in words: the server's reasons that a person can act
+ *  on, and one sentence for the rest. Never a status code. Shared by the
+ *  search page's rows and the requests page's "Try again". */
+export function requestRefusalSays(err: unknown): string {
+  const raw = err instanceof Error ? err.message.toLowerCase() : ''
+  if (raw.includes('already have an active request')) return 'You have already asked for this one.'
+  if (raw.includes('not configured')) return 'This server is not set up to fetch this kind of title.'
+  // Switched off after the page read that they were on: trying again would
+  // get the same answer.
+  if (raw.includes('not enabled')) return 'Requests are not set up on this server.'
+  return 'The request could not be sent. Try again in a moment.'
+}

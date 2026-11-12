@@ -18,10 +18,10 @@
 // raw text kept as a tooltip for whoever debugs it) is module-private:
 // this page is its only reader.
 
-import { useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { formatRequestDay } from '@/lib/format'
-import { REQUEST_STATUS, REQUEST_STATUSES } from '@/lib/requestStatus'
+import { REQUEST_STATUS, REQUEST_STATUSES, requestRefusalSays } from '@/lib/requestStatus'
 import {
   createRequest,
   deleteRequest,
@@ -120,7 +120,7 @@ const whenArrived = (iso: string) => { const d = formatRequestDay(iso); return /
 const initialOf = (title: string) => title.trim().replace(/^(the|a|an)\s+/i, '').charAt(0).toUpperCase()
 
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
-export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false, onAsk, onFind }: {
+export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, onRequestMoved, everyone = false, userId, onAsk, onFind }: {
   /** The server lists every member's requests to a session with the admin
    *  powers and only the caller's own to anyone else; the page says which. */
   everyone?: boolean
@@ -129,6 +129,13 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   /** `replaced`: a failed request that was just asked for again, deleted
    *  as housekeeping; nothing needs saying about it. */
   onRequestDeleted: (id: number, replaced?: boolean) => void
+  /** A request turned out to have moved on (a delete was refused because
+   *  the downloader has it now): the list's copy of it is put right. */
+  onRequestMoved?: (id: number, status: MediaRequest['status']) => void
+  /** Whose session this is. A list with every member's requests in it marks
+   *  the caller's own by this: a failed request can be asked for again only
+   *  by whoever asked for it. */
+  userId?: number
   /** Opens the search page with its field ready: where a title is asked for. */
   onAsk?: () => void
   /** Searches the library for a title (a request that is now available). */
@@ -137,10 +144,37 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   const [filter, setFilter] = useState<Filter>('all')
   const heading = everyone ? 'Requests' : 'My requests'
   // The row whose delete was pressed and is waiting to be confirmed; the row
-  // being worked on; and what went wrong on a row, said on that row.
+  // being worked on (one thing at a time on the page: a second press, on
+  // this row or another, does nothing until the first has answered); and
+  // what went wrong on a row, said on that row.
   const [confirming, setConfirming] = useState<number | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
+  const busyRef = useRef<number | null>(null)
   const [wrong, setWrong] = useState<{ id: number; says: string } | null>(null)
+
+  // Where the keyboard's focus goes when the control that holds it is about
+  // to leave the page. The question's buttons take the bin's place and the
+  // bin theirs; a deleted row takes all of its controls with it. (The native
+  // confirm this replaced handed the focus back by itself.)
+  const listRef = useRef<HTMLUListElement | null>(null)
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
+  const [focusTo, setFocusTo] = useState<{ kind: 'keep'; id: number } | { kind: 'bin'; id: number } | { kind: 'after'; ids: number[] } | null>(null)
+  useLayoutEffect(() => {
+    if (!focusTo) return
+    const inRow = (id: number, sel: string) => listRef.current?.querySelector<HTMLElement>(`[data-request-id="${id}"] ${sel}`) ?? null
+    if (focusTo.kind === 'keep') inRow(focusTo.id, '.req-keep')?.focus()
+    else if (focusTo.kind === 'bin') inRow(focusTo.id, '.req-del')?.focus()
+    else {
+      // The first control of a row that came after the deleted one; the
+      // page's heading when there is none (it was the last, or what
+      // follows has nothing to press).
+      const next = focusTo.ids.map(id => inRow(id, 'button')).find(Boolean)
+      ;(next ?? headingRef.current)?.focus()
+    }
+    setFocusTo(null)
+  }, [focusTo])
+  const ask = (id: number) => { setWrong(null); setConfirming(id); setFocusTo({ kind: 'keep', id }) }
+  const keep = (id: number) => { setConfirming(null); setFocusTo({ kind: 'bin', id }) }
 
   // Counts for the filters, in one pass over the list.
   const counts = useMemo(() => {
@@ -149,16 +183,35 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     return c
   }, [requests])
 
+  const filteredNow = requests ? (filter === 'all' ? requests : requests.filter(r => r.status === filter)) : []
   const remove = async (req: MediaRequest) => {
+    if (busyRef.current !== null) return
+    busyRef.current = req.id
     setBusy(req.id)
     setWrong(null)
+    // The rows under this one, as they stand now: where the focus goes.
+    const at = filteredNow.findIndex(r => r.id === req.id)
+    const after = filteredNow.slice(at + 1).map(r => r.id)
     try {
       await deleteRequest(req.id)
       setConfirming(null)
+      setFocusTo({ kind: 'after', ids: after })
       onRequestDeleted(req.id)
-    } catch {
-      setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
+    } catch (err) {
+      // A pending request is handed to the downloader within seconds, and
+      // the server deletes only a pending or a failed one. That refusal is
+      // not something to try again: the row is put right and says why.
+      const raw = err instanceof Error ? err.message.toLowerCase() : ''
+      if (req.status === 'pending' && raw.includes('can only delete')) {
+        setConfirming(null)
+        setFocusTo({ kind: 'after', ids: [req.id, ...after] })
+        onRequestMoved?.(req.id, 'processing')
+        setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.' })
+      } else {
+        setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
+      }
     } finally {
+      busyRef.current = null
       setBusy(null)
     }
   }
@@ -166,8 +219,12 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   // once the new one is made (best effort: if that fails it stays, and can
   // be deleted by hand).
   const again = async (req: MediaRequest) => {
+    if (busyRef.current !== null) return
+    busyRef.current = req.id
     setBusy(req.id)
     setWrong(null)
+    const at = filteredNow.findIndex(r => r.id === req.id)
+    const after = filteredNow.slice(at + 1).map(r => r.id)
     try {
       const made = await createRequest({
         media_type: req.media_type,
@@ -180,10 +237,19 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         quality_4k: req.quality_4k,
       })
       onRequestSubmitted(made)
-      try { await deleteRequest(req.id); onRequestDeleted(req.id, true) } catch { /* the failed row stays */ }
-    } catch {
-      setWrong({ id: req.id, says: 'The request could not be sent again. Try again in a moment.' })
+      try {
+        await deleteRequest(req.id)
+        setFocusTo({ kind: 'after', ids: after })
+        onRequestDeleted(req.id, true)
+      } catch { /* the failed row stays */ }
+    } catch (err) {
+      // In the server's own terms where it gave them (already asked for
+      // again from the search page; requests switched off): "try again in a
+      // moment" would be wrong for those.
+      const says = requestRefusalSays(err)
+      setWrong({ id: req.id, says: says === 'The request could not be sent. Try again in a moment.' ? 'The request could not be sent again. Try again in a moment.' : says })
     } finally {
+      busyRef.current = null
       setBusy(null)
     }
   }
@@ -205,7 +271,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     )
   }
 
-  const filtered = filter === 'all' ? requests : requests.filter(r => r.status === filter)
+  const filtered = filteredNow
   const filters: { id: Filter; label: string; count: number }[] = [
     { id: 'all', label: 'All', count: requests.length },
     ...REQUEST_STATUSES.map(id => ({ id, label: REQUEST_STATUS[id].label, count: counts[id] ?? 0 })),
@@ -213,7 +279,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
 
   return (
     <div className="req-page animate-fade-in">
-      <h1 className="req-title">{heading}</h1>
+      <h1 ref={headingRef} tabIndex={-1} className="req-title">{heading}</h1>
       {askRow}
 
       {requests.length > 0 && (
@@ -248,7 +314,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
           )}
         </div>
       ) : (
-        <ul className="req-list">
+        <ul ref={listRef} className="req-list">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
             const status = REQUEST_STATUS[req.status]
@@ -265,6 +331,18 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
             ].filter(Boolean).join(' · ')
             const failedSays = req.status === 'failed' && req.error_message ? humanizeRequestError(req.error_message, req.media_type) : ''
             const deletable = req.status === 'pending' || req.status === 'failed'
+            // Asked for again by whoever asked for it, and not at all when
+            // an admin turned it down. In a list of every member's requests
+            // the new request would be the caller's and the member's row
+            // would be deleted with it; and one press would undo a denial
+            // (under the limit, the server sends it straight on).
+            const mine = userId === undefined ? !everyone : req.user_id === userId
+            const denied = (req.error_message ?? '').toLowerCase().includes('denied by admin')
+            const retryable = req.status === 'failed' && mine && !denied
+            // `completed_at` is also written when a request fails, so one
+            // that failed and arrived later carries the failure's date:
+            // where the row has an error on record, no date is claimed.
+            const arrived = req.status === 'available' && req.completed_at && !req.error_message ? `Added to the library ${whenArrived(req.completed_at)}.` : ''
             return (
               <li key={req.id} className="req-row" data-request-id={req.id}>
                 <span className="req-art" aria-hidden="true">
@@ -289,20 +367,27 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                       no colour of its own: degrading beats misreporting. */}
                   <span className="req-status-label"><span className="req-dot" aria-hidden="true" />{status?.label ?? req.status}</span>
                   <span className="req-status-note" title={failedSays ? req.error_message : undefined}>
-                    {failedSays || (req.status === 'available' && req.completed_at ? `Added to the library ${whenArrived(req.completed_at)}.` : status?.note ?? '')}
+                    {failedSays || arrived || (status?.note ?? '')}
                   </span>
                   {wrong?.id === req.id && <span className="req-wrong" role="alert">{wrong.says}</span>}
                 </div>
-                <div className="req-acts">
+                <div
+                  className="req-acts"
+                  // Escape answers the question as Keep does. (Stopped here:
+                  // the app's own Escape is for the page behind.)
+                  onKeyDown={e => { if (confirming === req.id && e.key === 'Escape') { e.stopPropagation(); keep(req.id) } }}
+                >
                   {confirming === req.id ? (
                     // Asked on the row itself, where the request is: no
-                    // native dialog over the page.
+                    // native dialog over the page. Keep, the safe answer,
+                    // takes the focus; the buttons stay focusable while the
+                    // delete is out (aria-disabled, a second press refused).
                     <>
                       <span className="req-confirm">Delete this request?</span>
-                      <button type="button" disabled={busy === req.id} onClick={() => { void remove(req) }} className="stage-btn stage-btn-sm stage-btn-danger stage-hit44" aria-label={`Delete the request for ${req.title}`}>
+                      <button type="button" aria-disabled={busy !== null || undefined} onClick={() => { void remove(req) }} className="stage-btn stage-btn-sm stage-btn-danger stage-hit44" aria-label={`Delete the request for ${req.title}`}>
                         {busy === req.id ? 'Deleting…' : 'Delete'}
                       </button>
-                      <button type="button" disabled={busy === req.id} onClick={() => setConfirming(null)} className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44" aria-label={`Keep the request for ${req.title}`}>
+                      <button type="button" aria-disabled={busy !== null || undefined} onClick={() => { if (busy === null) keep(req.id) }} className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44 req-keep" aria-label={`Keep the request for ${req.title}`}>
                         Keep
                       </button>
                     </>
@@ -313,13 +398,13 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                           Find it
                         </button>
                       )}
-                      {req.status === 'failed' && (
-                        <button type="button" disabled={busy === req.id} onClick={() => { void again(req) }} className="req-act" aria-label={`Ask for ${req.title} again`}>
+                      {retryable && (
+                        <button type="button" aria-disabled={busy !== null || undefined} onClick={() => { void again(req) }} className="req-act" aria-label={`Ask for ${req.title} again`}>
                           {busy === req.id ? 'Asking…' : 'Try again'}
                         </button>
                       )}
                       {deletable && (
-                        <button type="button" onClick={() => { setWrong(null); setConfirming(req.id) }} className="req-del" aria-label={`Delete request for ${req.title}`}>
+                        <button type="button" aria-disabled={busy !== null || undefined} onClick={() => { if (busy === null) ask(req.id) }} className="req-del" aria-label={`Delete request for ${req.title}`}>
                           <Icon name="trash" size={16} />
                         </button>
                       )}
