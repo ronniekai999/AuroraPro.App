@@ -15,13 +15,14 @@ export type RefusalReason =
   | 'profile_pin_required'
   | 'profile_pin_invalid'
   | 'profile_pin_locked'
+  | 'profile_locked'
   | 'session_unbound'
   | 'session_ended'
   | 'rate_limited'
 
 const REASONS: readonly RefusalReason[] = [
   'profile_restricted', 'last_unrestricted_profile', 'profile_changed',
-  'profile_pin_required', 'profile_pin_invalid', 'profile_pin_locked',
+  'profile_pin_required', 'profile_pin_invalid', 'profile_pin_locked', 'profile_locked',
   'session_unbound', 'session_ended', 'rate_limited',
 ]
 
@@ -64,6 +65,9 @@ export function refusalMessage(e: unknown, fallback: string): string {
       return 'That PIN or password is not right.'
     case 'profile_pin_locked':
       return `Too many wrong attempts. Try again ${waitPhrase(retryAfter(e), 'in 15 minutes')}.`
+    case 'profile_locked':
+      // Pairing a TV: a device cannot be put on a profile past its PIN.
+      return 'Every profile on this account has a PIN, so a TV cannot be approved from here. Sign in on the TV with the account password instead.'
     case 'session_unbound':
       return 'This session cannot hold a profile yet. Reload the page and try again.'
     case 'session_ended':
