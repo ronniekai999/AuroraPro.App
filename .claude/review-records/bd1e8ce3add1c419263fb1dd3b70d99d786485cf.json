@@ -1,0 +1,10 @@
+{
+  "sha": "bd1e8ce3add1c419263fb1dd3b70d99d786485cf",
+  "verdict": "lows-only",
+  "summary": "Same verdict as recorded for 745c721, re-recorded after rebasing its four commits onto 5bae494 (#556, Requests view only; no file in common): the diff against base is byte-identical (digest fb1e42f7...). Fresh-context read-only adversarial reviews of the diff: (1) a live refresh's switch drop now puts Home's library count version (homeCountVersionRef) back to the version it was asked at before, unless a later count request asked since, so the re-check asks for the count again; new test 'asks for the count again when a switch drops the refresh that carried it' fails without the put-back; (2) the 'after another tab bound Parent back' test waits for the stub's answered binding-read count plus one macrotask inside act instead of a fixed 300 ms; (3) App.tsx comments and CLAUDE.md 'Live catalog updates' updated, count gap removed from known gaps. Round 1 (96db61e) lows-only: count re-asked after the immediate retry, a cancelled PIN prompt and a later Home visit (throwaway tests), no loop with a failing count, a probe showed the switch ended before every delivery; 2 lows and 3 nits, fixed. Round 2 (745c721) lows-only: re-verified the fix, the defensive guard's unreachability (43/43 pass without it), no loop, the test failing without the put-back, both Parent-back cases failing without switchGeneration; 2 optional nits left (exact-count wait could be >=; history text lists only 'the next update'). Implementer ran go build/test and tsc on 96db61e, eslint, 1591 SPA tests and npm run audit on 745c721, and go build plus 1593 SPA tests on the rebased tree.",
+  "reviewer": "independent-subagent-general-purpose-round2",
+  "findings": "2",
+  "diff_digest": "fb1e42f7d1262086ee00e5184159f079e768b1db9db4aed77d2bea2067e628fd",
+  "branch": "claude/exciting-meitner-vy6vp5",
+  "recorded_at": "2026-11-09T17:21:43Z"
+}

@@ -227,6 +227,8 @@ function stubProfiles() {
   let bound = 1
   let failCount = false
   const asked: Record<string, number> = {}
+  // Binding reads answered so far, counted as each answer is handed back.
+  let bindingAnswered = 0
   // Browse-grid requests (Home's Top Rated rails ask for 20 a type).
   let gridAsked = 0
   const sees: Record<number, Item[]> = { 1: [item(1, 'Parentonly Old')], 2: [item(2, 'Kidonly Old')] }
@@ -260,7 +262,7 @@ function stubProfiles() {
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
     if (p === '/api/profiles') return json(PROFILES2)
-    if (p === '/api/profiles/active') return json(PROFILES2.find(x => x.id === bound))
+    if (p === '/api/profiles/active') { bindingAnswered++; return json(PROFILES2.find(x => x.id === bound)) }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
     if (p === '/api/me/hero') return json({ picks: [] })
@@ -309,6 +311,8 @@ function stubProfiles() {
     bindElsewhere(id: number) { bound = id },
     /** The profile the session is bound to. */
     get bound() { return bound },
+    /** Binding reads (/api/profiles/active) answered so far. */
+    get bindingAnswered() { return bindingAnswered },
   }
 }
 
@@ -455,10 +459,15 @@ describe('a live refresh answered for the profile a switch bound', () => {
       await screen.findAllByText('Kidonly Old', undefined, { timeout: 5000 })
       await new Promise(done => setTimeout(done, 300))
     } else {
+      const answered = server.bindingAnswered
       server.bindElsewhere(1)
       read.release()
-      // The read answers Parent: the switch ends with Parent still shown.
-      await new Promise(done => setTimeout(done, 300))
+      // The read answers Parent: the switch ends with Parent still shown. Its
+      // end shows nowhere on the page, but once the read is answered the rest
+      // of the switch runs in microtasks, which a macrotask inside act drains,
+      // so the answer below lands after it.
+      await waitFor(() => expect(server.bindingAnswered).toBe(answered + 1), { timeout: 5000 })
+      await act(async () => { await new Promise(done => setTimeout(done, 0)) })
       expect(label()).toBe('Parent')
       refresh.deliver()
       await new Promise(done => setTimeout(done, 500))
@@ -726,6 +735,34 @@ describe('a full Home load and a live refresh overlapping', () => {
     r.release()
     await waitFor(() => expect(pageText()).toMatch(/\b3 titles in your library/), { timeout: 5000 })
   }, 30000)
+
+  it('asks for the count again when a switch drops the refresh that carried it', async () => {
+    // R (v1) is out, the count recorded as asked at v1; a full load at v1
+    // lands first, so the rails are current; R then lands while a PIN prompt
+    // is open and is dropped whole, its count with it. Cancelling the prompt
+    // re-checks, and only the count, put back to the version it was asked at
+    // before R, is behind: without that, nothing asks for it again.
+    const server = stubProfiles()
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
+    await new Promise(done => setTimeout(done, 500))
+    const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
+    server.addForParent(item(3, 'Alpha New'))
+    scanAdded(1)
+    await waitFor(() => expect(r.sent()).toBe(true), { timeout: 5000 })
+    staleClock()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(main()).toContain('Alpha New'), { timeout: 5000 })
+    pickProfile(/Locked/)
+    const cancel = await screen.findByRole('button', { name: 'Cancel' })
+    r.release()
+    await new Promise(done => setTimeout(done, 500))
+    expect(document.body.textContent).toMatch(/\b1 titles in your library/)
+    fireEvent.click(cancel)
+    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+  }, 20000)
 
   it('runs again when a live refresh lands older than a full load and is dropped', async () => {
     // R (v1) is out; the next update (v2) waits on it; a full load starts at

@@ -4128,18 +4128,17 @@ export default function App() {
   // update or showing, a full Home load, a recompose that changes the rails,
   // or a 👎 or an admin delete (a known gap in CLAUDE.md). A re-check starts a
   // refresh only while the rails or the count is behind (and then asks for
-  // both), and the count is recorded as asked when a refresh starts
-  // (homeCountVersionRef): on a tab that stays on its profile, if no update
-  // has come since the dropped refresh was asked and the rails have caught up
-  // to the version it was asked at (a full load from that version landed
-  // meanwhile, or only the count was behind), nothing asks for the count
-  // again, and a count last asked before that version stays stale until the
-  // next update, a switch to another profile, sign-in or reload (also a known
-  // gap). Where a switch changes the profile shown, the new profile's load
-  // fills Home. Closing the prompt also re-runs this, so a refresh the start
-  // guard refused while it was open starts if Home is still behind. Off Home
-  // it waits: the next showing (view) catches up. A failed refresh leaves the
-  // rails behind until the next update, showing or recompose.
+  // both). The count is recorded as asked when a refresh starts
+  // (homeCountVersionRef), so a switch drop puts it back to the version it was
+  // asked at before, unless a later request has asked for it since: left as
+  // asked, once the rails had caught up to that version (a full load from it
+  // landed meanwhile, or only the count was behind), no re-check asked for the
+  // count again, and a stale count stayed until the next update. Where a
+  // switch changes the profile shown, the new profile's load fills Home.
+  // Closing the prompt also re-runs this, so a refresh the start guard refused
+  // while it was open starts if Home is still behind. Off Home it waits: the
+  // next showing (view) catches up. A failed refresh leaves the rails behind
+  // until the next update, showing or recompose.
   // The library count is tracked apart (homeCountVersionRef): its own effect
   // asks once per user and profile, and only this refresh keeps it current,
   // so a refresh also runs when the count alone is behind (a full load does
@@ -4151,18 +4150,19 @@ export default function App() {
   // cannot put an older count back.
   const homeCountSeqRef = useRef(0)
   const homeCountAppliedRef = useRef(0)
-  // The catalog version the count was last ASKED at, recorded when the
-  // request starts (by this refresh or the count effect), not when an answer
-  // lands: recorded on landing, a count request that kept failing left it
-  // behind, and every recompose ran another full refresh, in a tight loop. A
-  // failed count waits for the next update.
+  // The catalog version the count was last ASKED at, recorded when the request
+  // starts (by this refresh or the count effect), not when an answer lands:
+  // recorded on landing, a count request that kept failing left it behind, and
+  // every recompose ran another full refresh, in a tight loop. A failed count
+  // waits for the next update. A switch drop puts back the version its refresh
+  // replaced here (see the refresh's comment above).
   const homeCountVersionRef = useRef(0)
   // Bumped when a refresh's answer is dropped: its rails because a
   // later-started fetch (a full load) landed first, or all of it because a
   // profile switch has started since it was asked. Neither sets anything the
   // effect depends on (a recompose can set the very array already on screen),
-  // so without this Home's rails could stay a version behind (its count can
-  // still be left stale after a switch drop; see the refresh's comment above).
+  // so without this Home's rails could stay a version behind, and after a
+  // switch drop its count too (see the refresh's comment above).
   const [homeRefreshRetry, setHomeRefreshRetry] = useState(0)
   useEffect(() => () => {
     homeRefreshAcRef.current?.abort()
@@ -4178,6 +4178,7 @@ export default function App() {
     const version = catalogVersion
     const countKey = `${realtimeUserId}:${activeProfileId}`
     const countSeq = ++homeCountSeqRef.current
+    const countAskedBefore = homeCountVersionRef.current
     homeCountVersionRef.current = version
     const railsSeq = ++homeRailsSeqRef.current
     const switchGen = profileSwitchGeneration()
@@ -4201,8 +4202,16 @@ export default function App() {
         // profile's answer (see above). The retry re-runs this effect, which
         // returns at the start guard while a switch or prompt is out; a
         // refresh it does start records the current generation, so this cannot
-        // loop.
-        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) { setHomeRefreshRetry(n => n + 1); return }
+        // loop. The count goes with the rest, so it is put back to the version
+        // it was asked at before this, and the re-check asks for it again if
+        // that is behind. The check for a later count request is defensive:
+        // the count's own effect re-runs only on a change of user, profile or
+        // settle, which aborts this refresh first.
+        if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
+          if (homeCountSeqRef.current === countSeq) homeCountVersionRef.current = countAskedBefore
+          setHomeRefreshRetry(n => n + 1)
+          return
+        }
         if (count && countSeq > homeCountAppliedRef.current) {
           homeCountAppliedRef.current = countSeq
           setHomeLibraryCount({ key: countKey, total: count.total })
@@ -4397,7 +4406,7 @@ export default function App() {
   // re-runs this, such as the next update or visit, a Load More, a sort or
   // genre change or an admin delete (a known gap in CLAUDE.md). Off screen it
   // waits for the next visit. A grid records its version only when an answer
-  // lands, so Home's count gap does not apply.
+  // lands, so a dropped one leaves it behind for the re-check.
   const moviesRefreshAcRef = useRef<AbortController | null>(null)
   const showsRefreshAcRef = useRef<AbortController | null>(null)
   // Bumped when a grid refresh's answer is dropped for a profile switch, so
