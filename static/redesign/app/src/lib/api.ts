@@ -3185,6 +3185,43 @@ export async function createRequest(payload: CreateRequestPayload): Promise<Medi
   return apiFetch<MediaRequest>('/api/requests', { method: 'POST', body: payload })
 }
 
+// Playback health (GET /api/admin/playback-qoe): counts and timings of
+// playback sessions over a recent period. The server keeps them for 30 days
+// and refuses a longer period.
+export interface PlaybackHealthDelivery {
+  /** direct_play | direct_stream | transcode */
+  decision: string
+  count: number
+  /** Null when no session of this kind measured it. */
+  p50_first_frame_ms: number | null
+  p95_first_frame_ms: number | null
+}
+export interface PlaybackHealthSummary {
+  window_hours: number
+  sessions: number
+  p50_first_frame_ms: number | null
+  p95_first_frame_ms: number | null
+  /** Sessions played as they are, as a share of all sessions (0 to 1). */
+  direct_play_ratio: number
+  /** Time spent buffering over time spent watching. */
+  rebuffer_ratio: number
+  /** Failed endings over sessions that reported any ending. */
+  error_rate: number
+  /** Sessions that never reported an ending, over `settled_sessions`. */
+  abandoned_ratio: number
+  /** Sessions old enough to have reported an ending. */
+  settled_sessions: number
+  by_decision: PlaybackHealthDelivery[]
+  /** Sessions with subtitles drawn into the picture. */
+  burn_in_sessions: number
+  /** Why sessions were not played as they are, most common first. */
+  top_reasons: { reason: string; count: number }[]
+}
+export const PLAYBACK_HEALTH_MAX_HOURS = 30 * 24
+export async function getPlaybackHealth(hours: number, signal?: AbortSignal): Promise<PlaybackHealthSummary> {
+  return apiFetch<PlaybackHealthSummary>(`/api/admin/playback-qoe?hours=${hours}`, { signal })
+}
+
 // Admin approval queue (carve-out C). Requests held by the per-user quota
 // gate land in 'pending_approval'; these helpers back the admin Pending
 // Approvals section. All three are admin-gated server-side via the

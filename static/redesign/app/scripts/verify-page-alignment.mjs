@@ -65,7 +65,9 @@ function classesOf(file, marker) {
   return hits[0]
 }
 const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
-const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar')
+// The admin page's frame: a menu of sections beside (or, on a narrow screen,
+// above) the open section. It used to be a sticky full-bleed band of tabs.
+const ADMIN_SHELL = classesOf('src/components/admin/AdminShell.tsx', 'admin-shell')
 // Tonight's hero: its root and, inside it, the row that holds the title block
 // and the picks. The row is in the flow now (the root is a flex column that
 // sets it at the bottom), so the probe is built from both, as the page is.
@@ -89,7 +91,7 @@ const html = `<!doctype html><html><head><style>${css}</style>
 <div class="stage-topnav" id="nav">nav</div>
 <div class="min-h-screen">
   <div id="page" class="stage-page">
-    <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
+    <div id="adminshell" class="${ADMIN_SHELL}">admin shell</div>
   </div>
   <div id="rail" class="stage-gutter">rail</div>
   <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_COL}"><div>synopsis</div><div>episodes</div></div></div>
@@ -132,7 +134,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
     }
     return { nav: box('nav'), detail: box('detail'),
              herotext: box('herotext'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
-             admintb: box('admintb'), page: box('page'),
+             adminshell: box('adminshell'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
              // at 2560 the real inset would be 312.5 while the window width says
@@ -180,7 +182,7 @@ for (const r of out) {
   for (const k of keys) {
     console.log(`   ${k.padEnd(9)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
   }
-  console.log(`   admintb   BOX     ${String(r.admintb.boxLeft).padStart(6)} .. ${String(r.admintb.boxRight).padStart(6)}`)
+  console.log(`   adminshell BOX    ${String(r.adminshell.boxLeft).padStart(6)} .. ${String(r.adminshell.boxRight).padStart(6)}`)
   console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
   console.log(`   detail    box     ${String(r.detail.boxLeft).padStart(6)} .. ${String(r.detail.boxRight).padStart(6)}`)
   console.log(`   herotext  box     ${String(r.herotext.boxLeft).padStart(6)} .. ${String(r.herotext.boxRight).padStart(6)}`)
@@ -217,16 +219,19 @@ for (const r of out) {
     problems++
   }
 
-  // 4. THE BLEED. `.stage-bleed` is what this phase adds, and it was measured,
-  //    printed, and never asserted — so removing it, or removing `.stage-gutter`
-  //    beside it, left four distinct 48px stair-steps between the admin toolbar
-  //    and every other page system, all green. The thing a commit introduces is
-  //    the last thing that should be uncovered.
-  //    Its CONTENT must line up with everything else, and its BOX must reach the
-  //    page edge: 0 while the gutter is the whole padding, and `inset - GUTTER`
-  //    once the cap is contributing (it bleeds to the capped page, not the viewport).
-  if (Math.abs(r.admintb.left - ref.left) > 0.5 || Math.abs(r.admintb.right - ref.right) > 0.5) {
-    console.log(`   *** admintb content ${r.admintb.left}..${r.admintb.right} != ${ref.left}..${ref.right}`)
+  // 4. THE ADMIN PAGE. Its frame (the menu of sections and the open section)
+  //    is the page's own column: both its content and its box start and end
+  //    where every other page system does, at every width. It was a full-bleed
+  //    band of tabs whose content had to line up while its box reached the
+  //    page edge; there is no band any more, so the box is held to the column
+  //    too. A frame that grew padding of its own, or a negative margin, would
+  //    put a stair-step between the admin page and the rest.
+  if (Math.abs(r.adminshell.left - ref.left) > 0.5 || Math.abs(r.adminshell.right - ref.right) > 0.5) {
+    console.log(`   *** admin shell content ${r.adminshell.left}..${r.adminshell.right} != ${ref.left}..${ref.right}`)
+    problems++
+  }
+  if (Math.abs(r.adminshell.boxLeft - ref.left) > 0.5 || Math.abs(r.adminshell.boxRight - ref.right) > 0.5) {
+    console.log(`   *** admin shell box ${r.adminshell.boxLeft}..${r.adminshell.boxRight} is not the page's column ${ref.left}..${ref.right}`)
     problems++
   }
   // 5. The TOP NAV, which is a fifth page system. It shares the page's own
@@ -277,40 +282,12 @@ for (const r of out) {
     problems++
   }
 
-  // The bled box legitimately overruns the layout box by half a scrollbar,
-  // because `50vw` measures the viewport including it. That is the accepted cost
-  // of a true full-bleed band and is clipped by `body { overflow-x: hidden }`.
-  // What must NOT drift is the CONTENT, asserted above — and it no longer does,
-  // now that the padding is the margin's exact inverse rather than a
-  // viewport-space recomputation of the page inset.
-  const expectedBoxLeft = -(r.vwWidth - vw) / 2
-  if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
-    console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
-    problems++
-  }
-  // 3. Horizontal overflow, stated as what it actually covers.
-  //
-  //    `documentElement.scrollWidth > clientWidth` is kept for gross overflow, but
-  //    it CANNOT see the bleed's overrun and never could: `50vw` includes a classic
-  //    scrollbar, so the band spills half a scrollbar past BOTH page edges, and the
-  //    simulated pass narrows `body` — which makes that a LEFT-side spill, and
-  //    left overflow is not scrollable in LTR. A real Chrome measures
-  //    scrollWidth 1275 vs clientWidth 1270 on /admin where this reported clean.
-  //
-  //    So assert the thing that is actually true and worth guarding: the overrun
-  //    exists, it is BOUNDED at half a scrollbar, and nothing else exceeds it. An
-  //    unbounded version would be a real defect; the bounded one is the documented
-  //    cost of a full-bleed band, and a reviewer confirmed nothing is clipped and
-  //    60 Tab presses never move scrollLeft off 0.
+  // 3. Horizontal overflow. No page system bleeds past the page any more (the
+  //    one that did, the admin's band of tabs, is gone, and with it the
+  //    half-scrollbar overrun a `50vw` band was allowed), so nothing may leave
+  //    the layout box at all: not the document, and none of the systems below.
   if (r.docOverflow) { console.log('   *** HORIZONTAL OVERFLOW'); problems++ }
-  const halfBar = (r.vwWidth - vw) / 2
-  const overrunL = -r.admintb.boxLeft
-  const overrunR = r.admintb.boxRight - vw
-  if (overrunL > halfBar + 0.5 || overrunR > halfBar + 0.5) {
-    console.log(`   *** the bled band overruns by ${overrunL}/${overrunR}, more than the ${halfBar} half-scrollbar it is allowed`)
-    problems++
-  }
-  for (const [k, b] of [['rail', ref], ['detail', r.detail], ['nav', r.nav]]) {
+  for (const [k, b] of [['rail', ref], ['detail', r.detail], ['nav', r.nav], ['admin shell', r.adminshell]]) {
     if (b.boxRight > vw + 0.5 || b.boxLeft < -0.5) {
       console.log(`   *** ${k} escapes the layout box: ${b.boxLeft}..${b.boxRight} vs 0..${vw}`)
       problems++

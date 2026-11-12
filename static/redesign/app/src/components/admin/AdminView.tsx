@@ -11,11 +11,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from '@/components/Icon'
-import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
 import { castLabel, castRoles, groupCastStreams } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
+import { AdminShell, type AdminSection } from './AdminShell'
+import { PlaybackHealth } from './PlaybackHealth'
 import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
@@ -2540,29 +2541,9 @@ function StatTile({ label, value, icon, color, hint, sub }: StatTileProps) {
   )
 }
 
-// The thirteen admin sections, in strip order. Hoisted out of the component
-// (Aurora Stage Phase 7a) so the arrow-key handler, the label map and the type
-// can all be derived from ONE list — the type and the array were previously two
-// hand-maintained copies of the same thirteen strings, which is the kind of
-// pair that drifts when a tab is added.
-export const ADMIN_TABS = [
-  'dashboard', 'users', 'libraries', 'rooms', 'requests', 'activity',
-  'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup',
-] as const
-export type AdminTab = typeof ADMIN_TABS[number]
-
-// Tab labels that `capitalize` gets wrong, or that read better renamed.
-// Module scope: this is a constant, and it used to be rebuilt inside the
-// tabs.map callback — thirteen object literals per render.
-//
-// QA BUG-010 follow-up — the Transcodes tab heading inside reads "Active
-// Transcode Streams" but the nav label was just "Sessions", which read as
-// generic and made direct-play streams' absence more confusing.
-const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
-  llm: 'LLM',
-  oauth: 'OAuth',
-  sessions: 'Transcodes',
-}
+// The sections, their names and their grouping live in AdminShell. `AdminTab`
+// is the name this file has always used for one.
+type AdminTab = AdminSection
 
 export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   currentAdminId: number
@@ -2571,14 +2552,6 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   catalogVersion?: number
 }) {
   const [tab, setTab] = useState<AdminTab>('dashboard')
-  // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
-  // MANUAL activation: arrows move focus without switching panels, so the
-  // focused tab and the selected tab diverge until Enter/Space.
-  const [focusedTab, setFocusedTab] = useState<AdminTab>('dashboard')
-  const tabs = ADMIN_TABS
-  // Per-tab refs so arrow-key navigation can move real focus with the roving
-  // index (ARIA tabs pattern — the set is one tab stop).
-  const tabRefs = useRef<Partial<Record<AdminTab, HTMLButtonElement | null>>>({})
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
   // Authorization header (rather than a tokenized anchor) so the
@@ -2847,132 +2820,15 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   }
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Administration" sub="Server management dashboard" />
-
-      {/* Tab strip — a REAL tablist, sticky under the chrome.
-          .stage-toolbar + .stage-tabstrip + .stage-tab, all three already
-          existing primitives, rather than a new .stage-admintabs:
-            - .stage-toolbar is exactly this job (sticky at the MEASURED
-              --chrome-h so it tracks the admin scan bar appearing above the
-              nav, blurred fill, bottom border, and static below md where
-              pinning a wrapped strip would eat a third of the viewport).
-              BrowseView's filter bar is the same pattern.
-            - .stage-tabstrip is the horizontally-scrolling strip TopNav uses,
-              with the padding/margin trick that stops the active tab's
-              underline glow and focus ring being clipped by the scroll box.
-              Thirteen tabs overflow at every width, so this matters more here
-              than in the nav.
-          The old strip was a non-scrolling `flex` of thirteen buttons, which
-          simply overflowed its container.
-
-          role="tablist" + arrow-key navigation, not aria-current: these switch
-          a panel in place, so they are tabs, and ARIA's tabs pattern requires
-          the whole set to be ONE tab stop with Left/Right (plus Home/End)
-          moving between them. Phase 6 rejected role="tab" for the filter pills
-          precisely because that keyboard contract was not implemented; here it
-          is, so the role is honest.
-
-          QA BUG-006 — `capitalize` only uppercases the first letter
-          per word, so "llm" → "Llm" and "oauth" → "Oauth". Override
-          for the acronyms; everything else still falls through to
-          the existing capitalize rule. */}
-      {/* The negative margin cancels .stage-page's side padding so the sticky
-          strip's fill reaches the VIEWPORT edges at every width, and its own
-          padding-inline puts the content back in line with every other page
-          system. `.stage-gutter` is NOT on this element any more — `.stage-bleed`
-          set the same property later in the file and shadowed it, so it was dead
-          and one source-order flip away from reinstating the bug this phase
-          started from.
-          Corrected three times in six commits, twice wrongly: it claimed the
-          viewport edge, then "one gutter outside the capped content above 2016px",
-          then still named a class that had just been removed. It also recorded the
-          BrowseView inconsistency as unresolved after it was settled — measured at
-          HEAD, the two bands are byte-identical at every width. */}
-      <div className="stage-toolbar stage-bleed mb-6">
-        {/* MANUAL activation: arrows move focus, Enter/Space (native on a
-            <button>) selects. Not the automatic variant this started as.
-            APG recommends manual "when the tab panel's content is loaded
-            asynchronously", and every panel here is exactly that — switching
-            tabs fires listAdminUsers / listAdminActivity / listAdminLogs, and
-            the Transcodes and Now-Playing panels each start a 5-second polling
-            interval on mount. With automatic activation, holding ArrowRight
-            from `dashboard` to `backup` mounted and unmounted eleven panels,
-            firing their fetches and spinning two intervals up and down. That
-            cost was paid only by keyboard users. */}
-        <div
-          role="tablist"
-          aria-label="Administration sections"
-          className="stage-tabstrip flex"
-          onKeyDown={e => {
-            // Arrows walk `focusedTab`, which is where the roving tabIndex sits;
-            // `tab` (the selected panel) only moves on click or Enter/Space.
-            const i = tabs.indexOf(focusedTab)
-            let next = -1
-            if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
-            else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length
-            else if (e.key === 'Home') next = 0
-            else if (e.key === 'End') next = tabs.length - 1
-            if (next < 0) return
-            e.preventDefault()
-            setFocusedTab(tabs[next])
-            // focus() scrolls the tab into view inside .stage-tabstrip by
-            // default (preventScroll is false), so no explicit scrollIntoView.
-            tabRefs.current[tabs[next]]?.focus()
-          }}
-        >
-          {tabs.map(t => {
-            const display = ADMIN_TAB_LABELS[t]
-            const selected = tab === t
-            return (
-              <button
-                key={t}
-                ref={el => { tabRefs.current[t] = el }}
-                type="button"
-                role="tab"
-                id={`admin-tab-${t}`}
-                aria-selected={selected}
-                // Only the SELECTED tab's panel exists in the DOM, so pointing
-                // the other twelve at `admin-panel-<t>` was a dangling IDREF.
-                // ARIA requires IDREFs to resolve; omit rather than dangle.
-                aria-controls={selected ? `admin-panel-${t}` : undefined}
-                // Roving tabIndex on the FOCUSED tab, which under manual
-                // activation is not always the selected one. One tab stop for
-                // the set either way.
-                tabIndex={focusedTab === t ? 0 : -1}
-                onClick={() => { setTab(t); setFocusedTab(t) }}
-                // Keeps the roving index honest when focus arrives by click or
-                // by Tab rather than by arrow key.
-                onFocus={() => setFocusedTab(t)}
-                className={`stage-tab ${display ? '' : 'capitalize'}`}
-              >
-                {display ?? t}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* One tabpanel wrapper, not thirteen. Only one section is mounted at a
-          time, so a single element whose id and aria-labelledby track the active
-          tab is both correct and the only version that cannot drift out of sync
-          with the strip above.
-          NO tabIndex and NO focus-visible:outline-none. The first version had
-          both, and the comment justifying them had the behaviour backwards: APG
-          gives a tabpanel tabindex="0" only when it holds NOTHING focusable, and
-          all thirteen of these are full of buttons and inputs — so it ADDED a
-          stop before the content rather than skipping to it. Worse,
-          `focus-visible:outline-none` then hid that stop: Tailwind 3 emits
-          `outline: 2px solid transparent`, and at (0,2,0) it beat index.css's
-          (0,1,0) `:focus-visible` outline floor on both specificity and source
-          order. Focus landed on an invisible full-height container — the third
-          time this exact cascade has shipped here, and index.css documents it
-          twice. */}
-      <div
-        role="tabpanel"
-        id={`admin-panel-${tab}`}
-        aria-labelledby={`admin-tab-${tab}`}
-      >
+    // A section opens when its name is pressed, and only then loads what it
+    // shows (the effects above key on `tab`): two of them poll, so nothing is
+    // mounted that is not on screen.
+    <AdminShell
+      current={tab}
+      onSection={setTab}
+      // Requests waiting for approval, from the overview's own numbers.
+      waiting={{ requests: stats?.pending_requests }}
+    >
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
@@ -3406,7 +3262,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       {tab === 'llm' && <AdminLLMTab />}
       {tab === 'oauth' && <AdminOAuthTab />}
       {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} />}
-      </div>
-    </div>
+      {tab === 'health' && <PlaybackHealth />}
+    </AdminShell>
   )
 }
