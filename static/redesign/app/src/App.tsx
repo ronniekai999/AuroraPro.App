@@ -107,6 +107,7 @@ import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
+import { forgetRecentSearches, readRecentSearches, rememberSearch } from '@/lib/recentSearches'
 import { LibraryHeader, LibraryToolsProvider } from '@/components/LibraryHeader'
 import { BrowseTools, GenreChips, LetterStrip } from '@/components/BrowseControls'
 import { DEFAULT_BROWSE_SORT, fallbackGenres, readBrowseLayout, useGridLayout, writeBrowseLayout, type BrowseLayout } from '@/lib/browseLayout'
@@ -719,6 +720,7 @@ const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
 // (profileSwitchPending), module-level so it is the same array every time.
 const NO_MEDIA: Media[] = []
 const NO_CONTINUE: ContinueWatchingItem[] = []
+const NO_RECENT: string[] = []
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
@@ -1887,14 +1889,27 @@ export default function App() {
   // keeps an ask's answer under it (lib/describedSearch), and a number used
   // twice would show an old answer for a new ask.
   const describeAsksRef = useRef(0)
+  // The profile's recent searches (lib/recentSearches), read for whoever
+  // the page is for now and held with that owner's stamp, so one profile's
+  // list is never drawn for another on the commit a switch lands in.
+  const [recentSearches, setRecentSearches] = useState<{ owner: string; list: string[] }>(() => ({ owner: searchOwner, list: readRecentSearches(searchOwner) }))
+  if (recentSearches.owner !== searchOwner) setRecentSearches({ owner: searchOwner, list: readRecentSearches(searchOwner) })
+  const noteSearch = useCallback((words: string) => {
+    setRecentSearches({ owner: searchOwner, list: rememberSearch(searchOwner, words) })
+  }, [searchOwner])
+  const clearRecentSearches = useCallback(() => {
+    forgetRecentSearches(searchOwner)
+    setRecentSearches({ owner: searchOwner, list: [] })
+  }, [searchOwner])
   const describeSearch = useCallback((q: string) => {
     const query = q.trim()
     if (!query) return
+    noteSearch(query)
     const n = ++describeAsksRef.current
     setSearchQuery(q)
     setSearchDescribe({ query, n, owner: searchOwner })
     setView('search')
-  }, [searchOwner])
+  }, [searchOwner, noteSearch])
   const closeSearch = useCallback(() => {
     setSearchQuery('')
     setSearchDescribe(null)
@@ -6881,11 +6896,18 @@ export default function App() {
                 // a profile with a content limit, which is offered no
                 // requests anywhere.
                 onRequest={navScope === 'restricted' ? undefined : requestFromSearch}
+                // What this profile searched for lately in this browser. A
+                // search is remembered when something is done with it: a
+                // result opened or played, or a search by description asked
+                // for (describeSearch).
+                recent={recentSearches.owner === searchOwner ? recentSearches.list : NO_RECENT}
+                onPickRecent={changeSearchQuery}
+                onClearRecent={clearRecentSearches}
                 focusNonce={searchFocusNonce}
                 takeFocus={takeSearchFieldFocus}
-                onSelect={handleSelect}
+                onSelect={(m) => { noteSearch(searchQuery); handleSelect(m) }}
                 onCardContext={openCardContextMenu}
-                onCardPlay={playOrResume}
+                onCardPlay={(m) => { noteSearch(searchQuery); playOrResume(m) }}
                 resumableIds={profileSwitchPending ? undefined : resumableIds}
                 libraryIds={libraryIds}
                 onToggleLib={handleToggleLib}

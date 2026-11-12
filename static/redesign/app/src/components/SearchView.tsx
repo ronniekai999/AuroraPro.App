@@ -22,7 +22,7 @@ import { describedAnswerFor, keepDescribedAnswer } from '@/lib/describedSearch'
 import { type Media } from '@/lib/types'
 
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
-export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, libraryIds, onToggleLib, onRequest }: {
+export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, libraryIds, onToggleLib, onRequest, recent, onPickRecent, onClearRecent }: {
   query: string
   // Below md the top bar has no search field, so the page carries its own.
   // It is the only way to type a query on a phone.
@@ -54,6 +54,12 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // Where a search that found nothing ends: asking for the title to be
   // added. Not given to a session that is not offered requests.
   onRequest?: (query: string) => void
+  // What this profile searched for lately in this browser (newest first),
+  // offered again while nothing is typed. Picking one searches for it;
+  // "Clear" forgets them.
+  recent?: string[]
+  onPickRecent?: (words: string) => void
+  onClearRecent?: () => void
 }) {
   const [results, setResults] = useState<Media[]>([])
   // Driven by the server's X-Search-Mode response — only show the
@@ -193,7 +199,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
         // category, and a made-up one would be noise.
         title={
           <span className="inline-flex items-baseline gap-3 flex-wrap">
-            Search Results
+            {/* With nothing typed there are no results to head. */}
+            {q ? 'Search Results' : 'Search'}
             {/* Smart chip renders only when the server actually used the
                 semantic path — it is a statement about how the results were
                 produced, so faking it on the lexical path would misreport. */}
@@ -250,6 +257,31 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             <Icon name="sparkle" size={14} /> Search by description
           </button>
         </p>
+      )}
+
+      {/* Nothing typed yet: what this profile looked for lately, to pick up
+          again. */}
+      {!q && recent && recent.length > 0 && onPickRecent && (
+        <section aria-labelledby="search-recent-heading" className="mb-8 max-w-xl" data-search-recent>
+          <div className="mb-1 flex items-center">
+            <h2 id="search-recent-heading" className="flex-1 text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">Recent searches</h2>
+            {onClearRecent && (
+              <button type="button" onClick={onClearRecent} className="stage-btn stage-btn-sm stage-btn-quiet search-recent-clear stage-hit44">
+                Clear
+              </button>
+            )}
+          </div>
+          <ul className="m-0 list-none p-0">
+            {recent.map(words => (
+              <li key={words}>
+                <button type="button" onClick={() => onPickRecent(words)} className="search-recent-row flex w-full items-center text-left">
+                  <Icon name="clock" size={16} className="flex-none text-ink-3" />
+                  <span className="min-w-0 flex-1 truncate">{words}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {loading && results.length === 0 ? (

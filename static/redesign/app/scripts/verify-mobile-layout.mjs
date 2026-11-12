@@ -163,7 +163,8 @@ mustHave(CARD, "'has-reason '")
 // Small buttons outside a card: drawn at 36px, with a 44px target on a touch
 // screen (.stage-hit44). Tonight's live strip (Join; I'm in, Maybe, Open
 // lobby, side by side) and the search page's "Search by description",
-// "Try again" and "Request it". Built from the components' own class lists, in the rows they
+// "Try again" and "Request it", and its recent searches (each row, and
+// "Clear"). Built from the components' own class lists, in the rows they
 // sit in.
 const LIVE = 'src/components/TonightLive.tsx'
 const SEARCH = 'src/components/SearchView.tsx'
@@ -180,6 +181,8 @@ const DESCRIBE_BTN = classesOf(SEARCH, 'search-describe-btn')
 const RETRY_BTN = classesOf(SEARCH, 'search-retry-btn')
 const REQUEST_LINE = classesOf(SEARCH, 'search-request-line')
 const REQUEST_BTN = classesOf(SEARCH, 'search-request-btn')
+const RECENT_CLEAR = classesOf(SEARCH, 'search-recent-clear')
+const RECENT_ROW = classesOf(SEARCH, 'search-recent-row')
 // The Library header: on a phone its scope names are a strip that runs edge
 // to edge and scrolls sideways, with the scope's count and controls on a row
 // under it. It is on this page so that the "no wider than the device" check
@@ -263,7 +266,11 @@ const smallHtml = `
   <p class="${FAILED_LINE}" data-small="failed">Nothing is wrong with what you typed. The server could not run it.
     <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>
   <p class="${REQUEST_LINE}" data-small="request">Not in the library?
-    <button type="button" class="${REQUEST_BTN}" data-small-btn="Request it">Request it</button></p>`
+    <button type="button" class="${REQUEST_BTN}" data-small-btn="Request it">Request it</button></p>
+  <section style="max-width:36rem;margin-top:24px"><div class="mb-1 flex items-center"><h2 class="flex-1 text-xs">Recent searches</h2>
+    <button type="button" class="${RECENT_CLEAR}" data-small-btn="Clear">Clear</button></div>
+    <ul class="m-0 list-none p-0"><li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 1"><span class="min-w-0 flex-1 truncate">night train</span></button></li>
+      <li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 2"><span class="min-w-0 flex-1 truncate">something funny for the kids, not too long, that the grandparents will sit through as well</span></button></li></ul></section>`
 
 // The top bar, from TopNav's own class lists, once per case. The mark and the
 // icons are empty boxes of the size the components draw; the wordmark takes
@@ -694,7 +701,7 @@ for (const touch of [true, false]) {
     // 4. Small buttons outside a card. On a touch screen each is a 44px
     // target by hit-testing, whatever it is drawn at; a neighbour's area
     // laid over it shortens what is measured, so an overlap fails here too.
-    if (r.small.length !== 7) fail(`the small-button probe found ${r.small.length} buttons, expected 7 — this check is out of date`)
+    if (r.small.length !== 10) fail(`the small-button probe found ${r.small.length} buttons, expected 10 — this check is out of date`)
     for (const b of r.small) {
       if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)

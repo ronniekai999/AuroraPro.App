@@ -817,6 +817,21 @@ html[data-effects="reduced"] .stage-topnav {
   font-weight: 600;
   background: var(--ink);
 }
+/* A recent search, on the search page: a row to press, a thumb's height. */
+.search-recent-row {
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  margin-inline: -12px;
+  width: calc(100% + 24px);
+  border-radius: var(--radius-control);
+  font-size: 15px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.search-recent-row:hover { background: var(--surface-raised); }
+
 /* The genres, under the row: as many lines as they need. */
 .stage-genres {
   gap: 8px;

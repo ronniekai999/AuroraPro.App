@@ -333,3 +333,43 @@ describe('a search that finds nothing', () => {
     expect(offer()).toBeNull()
   })
 })
+
+// While nothing is typed, the page offers what this profile searched for
+// lately.
+describe('recent searches', () => {
+  const section = () => document.querySelector<HTMLElement>('[data-search-recent]')
+
+  it('are listed while nothing is typed, newest first, and picking one searches for it', () => {
+    const onPickRecent = vi.fn()
+    render(<SearchView {...base} query="" recent={['night train', 'harbor']} onPickRecent={onPickRecent} onClearRecent={vi.fn()} />)
+    // The page is headed "Search" until there is something to have results for.
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Search')
+    expect(screen.getByRole('heading', { name: 'Recent searches' })).toBeInTheDocument()
+    const rows = [...section()!.querySelectorAll('li button')]
+    expect(rows.map(r => r.textContent)).toEqual(['night train', 'harbor'])
+    fireEvent.click(rows[1])
+    expect(onPickRecent).toHaveBeenCalledWith('harbor')
+  })
+
+  it('go away once something is typed', async () => {
+    render(<SearchView {...base} query="har" recent={['night train']} onPickRecent={vi.fn()} />)
+    await settle(300)
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Search Results')
+    expect(section()).toBeNull()
+  })
+
+  it('are not drawn when there are none', () => {
+    render(<SearchView {...base} query="" recent={[]} onPickRecent={vi.fn()} onClearRecent={vi.fn()} />)
+    expect(section()).toBeNull()
+    cleanup()
+    render(<SearchView {...base} query="" />)
+    expect(section()).toBeNull()
+  })
+
+  it('can be cleared', () => {
+    const onClearRecent = vi.fn()
+    render(<SearchView {...base} query="" recent={['harbor']} onPickRecent={vi.fn()} onClearRecent={onClearRecent} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(onClearRecent).toHaveBeenCalledTimes(1)
+  })
+})

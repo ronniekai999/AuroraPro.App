@@ -19,8 +19,9 @@ vi.mock('@/components/VideoPlayer', async (original) => ({
 const NOW = '2026-10-01T00:00:00Z'
 const PARENT = { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW }
 const KID = { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' }
+const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', year: 2022, rating: 8, overview: 'A harbor.', added_at: NOW, updated_at: NOW }
 
-function renderApp(bound = 1) {
+function renderApp(bound = 1, keep = false) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
   /** What the requests page looked up on TMDB. */
   const lookups: string[] = []
@@ -36,8 +37,12 @@ function renderApp(bound = 1) {
     if (p === '/api/me/hero') return json({ picks: [], slate_token: 's' })
     if (p === '/api/media/recent') return json({ data: [] })
     if (p === '/api/media') return json({ data: [], page: 1, per_page: 30, total_items: 0, total_pages: 1 })
-    // Nothing in the library matches anything.
-    if (p === '/api/media/search') return new Response('[]', { status: 200, headers: { 'content-type': 'application/json', 'X-Search-Mode': 'literal' } })
+    // Nothing in the library matches anything, but "harbor".
+    if (p === '/api/media/search') {
+      const found = (url.searchParams.get('q') ?? '').toLowerCase().includes('harbor') ? [HARBOR] : []
+      return new Response(JSON.stringify(found), { status: 200, headers: { 'content-type': 'application/json', 'X-Search-Mode': 'literal' } })
+    }
+    if (p === `/api/media/${HARBOR.id}`) return json(HARBOR)
     if (p === '/api/requests/search') { lookups.push(url.searchParams.get('q') ?? ''); return json({ results: [] }) }
     if (p === '/api/requests') return json([])
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
@@ -47,10 +52,11 @@ function renderApp(bound = 1) {
   vi.stubGlobal('WebSocket', class { readyState = 3; close() {} send() {} addEventListener() {} removeEventListener() {} })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
-  localStorage.clear()
+  if (!keep) localStorage.clear()
   localStorage.setItem('aurora_user', JSON.stringify(me))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
+  else localStorage.removeItem('aurora_active_profile_id')
   render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
   return { lookups }
 }
@@ -87,5 +93,66 @@ describe('a search that finds nothing in the library', () => {
     await searchFor('the lost reel')
     expect(screen.queryByRole('button', { name: 'Request it' })).toBeNull()
     expect(document.querySelector('[data-search-request]')).toBeNull()
+  })
+})
+
+// What a profile searched for is offered to it again, in this browser, and
+// to no other profile.
+describe('recent searches', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+  const recent = () => [...document.querySelectorAll('[data-search-recent] li button')].map(b => b.textContent)
+  async function typeInBar(words: string) {
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: words } })
+  }
+
+  it('remembers a search once a result is opened, not while it is typed, and offers it again', async () => {
+    renderApp()
+    await screen.findByText('Parent', undefined, find)
+    await typeInBar('harbor')
+    const card = await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    // Typed and answered, and nothing done with it yet: not remembered.
+    expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:1') ?? '[]')).toEqual([])
+    fireEvent.click(card)
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:1') ?? '[]')).toEqual(['harbor']), find)
+  })
+
+  it('lists them on the search page while nothing is typed, and picking one searches for it', async () => {
+    localStorage.clear()
+    localStorage.setItem('aurora_recent_searches:1:1', JSON.stringify(['harbor', 'night train']))
+    renderApp(1, true)
+    await screen.findByText('Parent', undefined, find)
+    await typeInBar('x')
+    await typeInBar('')
+    // Clearing the bar's field leaves the search page; the phone's tab is the way to it with nothing typed.
+    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    await waitFor(() => expect(recent()).toEqual(['harbor', 'night train']), find)
+    fireEvent.click(screen.getByRole('button', { name: 'harbor' }))
+    expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
+  })
+
+  it('shows one profile nothing of what another searched for', async () => {
+    localStorage.clear()
+    localStorage.setItem('aurora_recent_searches:1:1', JSON.stringify(['grown-up thriller']))
+    localStorage.setItem('aurora_recent_searches:1:2', JSON.stringify(['dinosaurs']))
+    renderApp(2, true)
+    await screen.findByText('Kid', undefined, find)
+    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    await waitFor(() => expect(recent()).toEqual(['dinosaurs']), find)
+    expect(document.body.textContent).not.toContain('grown-up thriller')
+  })
+
+  it('forgets them when asked, for that profile alone', async () => {
+    localStorage.clear()
+    localStorage.setItem('aurora_recent_searches:1:1', JSON.stringify(['harbor']))
+    localStorage.setItem('aurora_recent_searches:1:2', JSON.stringify(['dinosaurs']))
+    renderApp(1, true)
+    await screen.findByText('Parent', undefined, find)
+    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    await waitFor(() => expect(recent()).toEqual(['harbor']), find)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(document.querySelector('[data-search-recent]')).toBeNull())
+    expect(localStorage.getItem('aurora_recent_searches:1:1')).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_recent_searches:1:2')!)).toEqual(['dinosaurs'])
   })
 })
