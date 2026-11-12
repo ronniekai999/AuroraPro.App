@@ -2,12 +2,12 @@
 
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { MatchSearchResult, ServerMediaItem } from '@/lib/api'
 
 const searchForMatch = vi.fn<(q: string, type: 'movie' | 'show', signal?: AbortSignal) => Promise<MatchSearchResult[]>>()
-const manualMatch = vi.fn<(id: number, body: { tmdb_id?: number; tvdb_id?: number; type: 'movie' | 'show' }) => Promise<void>>()
+const manualMatch = vi.fn<(id: number, body: { tmdb_id?: number; tvdb_id?: number; type: 'movie' | 'show' }, signal?: AbortSignal) => Promise<void>>()
 vi.mock('@/lib/api', async (original) => ({
   ...(await original<typeof import('@/lib/api')>()),
   searchForMatch: (...a: Parameters<typeof searchForMatch>) => searchForMatch(...a),
@@ -31,7 +31,11 @@ const CANDIDATES: MatchSearchResult[] = [
 
 // A caller as the app has it: a button that sets the item, and the dialog
 // mounted only while one is set.
-function Harness({ item = FILM, onMatched = vi.fn() }: { item?: ServerMediaItem; onMatched?: () => void }) {
+function Harness({ item = FILM, onMatched = vi.fn(), onClose = vi.fn() }: {
+  item?: ServerMediaItem
+  onMatched?: () => void
+  onClose?: (matchInFlight?: boolean) => void
+}) {
   const [target, setTarget] = useState<ServerMediaItem | null>(null)
   return (
     <div>
@@ -39,7 +43,7 @@ function Harness({ item = FILM, onMatched = vi.fn() }: { item?: ServerMediaItem;
       {target && (
         <ManualMatchModal
           target={target}
-          onClose={() => setTarget(null)}
+          onClose={matchInFlight => { setTarget(null); onClose(matchInFlight) }}
           onMatched={() => { setTarget(null); onMatched() }}
         />
       )}
@@ -86,7 +90,7 @@ describe('ManualMatchModal', () => {
     const dialog = await open(user, 'Match “Kestrel”')
     await user.click(await within(dialog).findByRole('button', { name: 'Match Kestrel (1987), from TMDB' }))
     await waitFor(() => expect(onMatched).toHaveBeenCalledTimes(1))
-    expect(manualMatch).toHaveBeenCalledWith(41, { tmdb_id: 901, type: 'movie' })
+    expect(manualMatch.mock.calls[0].slice(0, 2)).toEqual([41, { tmdb_id: 901, type: 'movie' }])
     expect(alertSpy).not.toHaveBeenCalled()
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
@@ -121,12 +125,109 @@ describe('ManualMatchModal', () => {
     await user.click(pick)
     await user.click(within(dialog).getByRole('button', { name: 'Match Kestrel (1987), from TMDB' }))
     expect(manualMatch).toHaveBeenCalledTimes(1)
-    // Escape waits for the answer too: the write is not left running
-    // behind a closed dialog.
-    await user.keyboard('{Escape}')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
     finish()
     await waitFor(() => expect(onMatched).toHaveBeenCalledTimes(1))
+  })
+
+  // A server that does not answer must not hold anyone in the dialog. A
+  // match closed on may have been saved all the same: the caller is told so
+  // (and reads again what it shows), and the dropped request's answer,
+  // whichever it is, reports nothing.
+  it.each([
+    ['Escape', 'answers late'],
+    ['Escape', 'fails late'],
+    ['Close', 'answers late'],
+  ])('can be closed with %s while a match is being sent, and the match that %s reports nothing', async (how, late) => {
+    const user = userEvent.setup()
+    let finish: () => void = () => {}
+    let fail: (e: Error) => void = () => {}
+    manualMatch.mockImplementationOnce(() => new Promise<void>((resolve, reject) => { finish = resolve; fail = reject }))
+    const onMatched = vi.fn()
+    const onClose = vi.fn()
+    render(<Harness onMatched={onMatched} onClose={onClose} />)
+    const opener = screen.getByRole('button', { name: 'Identify' })
+    const dialog = await open(user, 'Match “Kestrel”')
+    await user.click(await within(dialog).findByRole('button', { name: 'Match Kestrel (2019), from TMDB' }))
+    const signal = manualMatch.mock.calls[0][2]
+    expect(signal?.aborted).toBe(false)
+    if (how === 'Escape') await user.keyboard('{Escape}')
+    else await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith(true)
+    expect(signal?.aborted).toBe(true)
+    await waitFor(() => expect(opener).toHaveFocus())
+    if (late === 'answers late') finish()
+    else fail(new Error('boom'))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(onMatched).not.toHaveBeenCalled()
+    expect(alertSpy).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('tells the caller nothing was in flight when it is closed at rest, also after a refused match', async () => {
+    const user = userEvent.setup()
+    manualMatch.mockRejectedValueOnce(new Error('TMDB did not answer'))
+    const onClose = vi.fn()
+    render(<Harness onClose={onClose} />)
+    const dialog = await open(user, 'Match “Kestrel”')
+    await user.click(await within(dialog).findByRole('button', { name: 'Match Kestrel (2019), from TMDB' }))
+    await within(dialog).findByText(/The match was not saved/)
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(onClose).toHaveBeenCalledWith(false)
+  })
+
+  // The search: what one search finds must not be reported as the next
+  // one's, and a field emptied before the search has started is not one.
+  it('does not stay on "Searching…" when the field is emptied before the search starts', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    const dialog = await open(user, 'Match “Kestrel”')
+    await within(dialog).findByRole('button', { name: 'Match Kestrel (2019), from TMDB' })
+    const field = within(dialog).getByRole('searchbox')
+    fireEvent.change(field, { target: { value: 'Kes' } })
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Searching…')
+    fireEvent.change(field, { target: { value: '' } })
+    expect(within(dialog).getByRole('status')).not.toHaveTextContent('Searching…')
+    expect(within(dialog).queryByRole('button', { name: /^Match Kestrel/ })).toBeNull()
+    expect(searchForMatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps "Searching…" up for the newer search when the one before it is dropped', async () => {
+    const user = userEvent.setup()
+    // The first search never answers by itself: it is aborted by the second.
+    searchForMatch.mockReset()
+    searchForMatch.mockImplementationOnce((_q, _t, signal) => new Promise((_, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    }))
+    let found: (r: MatchSearchResult[]) => void = () => {}
+    searchForMatch.mockImplementationOnce(() => new Promise(resolve => { found = resolve }))
+    render(<Harness />)
+    const dialog = await open(user, 'Match “Kestrel”')
+    await waitFor(() => expect(searchForMatch).toHaveBeenCalledTimes(1))
+    fireEvent.change(within(dialog).getByRole('searchbox'), { target: { value: 'Kestrel 2019' } })
+    await waitFor(() => expect(searchForMatch).toHaveBeenCalledTimes(2))
+    // The dropped search's rejection has run by now: it says nothing.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Searching…')
+    expect(within(dialog).queryByText(/Nothing found/)).toBeNull()
+    await act(async () => { found(CANDIDATES) })
+    expect(within(dialog).getByRole('status')).toHaveTextContent('2 found.')
+  })
+
+  it('says a search that failed failed, not that nothing was found', async () => {
+    const user = userEvent.setup()
+    searchForMatch.mockReset().mockRejectedValue(new Error('upstream'))
+    render(<Harness />)
+    const dialog = await open(user, 'Match “Kestrel”')
+    expect(await within(dialog).findByText('The search could not be run. Try again, or match by the id below.')).toHaveAttribute('role', 'status')
+    expect(within(dialog).queryByText(/Nothing found/)).toBeNull()
+    // The next search starts clean.
+    searchForMatch.mockResolvedValue([])
+    fireEvent.change(within(dialog).getByRole('searchbox'), { target: { value: 'Kestrel again' } })
+    expect(await within(dialog).findByText(/Nothing found\./)).toBeInTheDocument()
+    expect(within(dialog).queryByText(/could not be run/)).toBeNull()
   })
 
   it('matches by an id typed in, and only once it is a number', async () => {
@@ -149,7 +250,7 @@ describe('ManualMatchModal', () => {
     expect(within(source).queryByRole('option', { name: 'TVDB' })).toBeNull()
     await user.click(byId)
     await waitFor(() => expect(onMatched).toHaveBeenCalledTimes(1))
-    expect(manualMatch).toHaveBeenCalledWith(41, { tmdb_id: 603, type: 'movie' })
+    expect(manualMatch.mock.calls[0].slice(0, 2)).toEqual([41, { tmdb_id: 603, type: 'movie' }])
   })
 
   it('offers TVDB for a show and sends its id as a TVDB id', async () => {
@@ -165,7 +266,7 @@ describe('ManualMatchModal', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Id' }), '7781')
     await user.click(within(dialog).getByRole('button', { name: 'Match by id' }))
     await waitFor(() => expect(onMatched).toHaveBeenCalledTimes(1))
-    expect(manualMatch).toHaveBeenCalledWith(52, { tvdb_id: 7781, type: 'show' })
+    expect(manualMatch.mock.calls[0].slice(0, 2)).toEqual([52, { tvdb_id: 7781, type: 'show' }])
   })
 
   it('keeps focus inside, closes on Escape and on Close, and gives focus back to what opened it', async () => {

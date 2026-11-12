@@ -5,7 +5,7 @@
 // AdminView chunk into the main bundle — a static import from
 // AdminView.tsx would defeat the code split.
 
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import {
   searchForMatch,
   manualMatch,
@@ -24,9 +24,17 @@ import { useReturnFocus } from '@/lib/returnFocus'
 // The app's dialog: focus goes in and stays in, Escape and the close button
 // leave, and focus goes back to what opened it (it is opened by state, so
 // that last part is said here: lib/returnFocus).
+//
+// It can always be closed, also while a match is being sent: a server that
+// does not answer must not hold anyone in it. A match closed on is dropped
+// here (its request is aborted and a late answer changes nothing), but the
+// server may have saved it all the same, so the caller is told, and reads
+// what it shows again instead of assuming either way.
 export default function ManualMatchModal({ target, onClose, onMatched }: {
   target: ServerMediaItem
-  onClose: () => void
+  /** `matchInFlight`: the dialog was closed while a match was being sent.
+   *  It may or may not have been saved: read again what the page shows. */
+  onClose: (matchInFlight?: boolean) => void
   onMatched: () => void
 }) {
   const ids = useId()
@@ -35,28 +43,38 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
   const [q, setQ] = useState(target.title)
   const [results, setResults] = useState<MatchSearchResult[]>([])
   const [searching, setSearching] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // The match being sent, if one is.
+  const inFlight = useRef<AbortController | null>(null)
+  useEffect(() => () => inFlight.current?.abort(), [])
   // A match the server refused, said in the dialog: the search and the
   // candidates stay as they are for another try.
   const [failed, setFailed] = useState<string | null>(null)
   const [directIdSource, setDirectIdSource] = useState<'tmdb' | 'tvdb'>('tmdb')
   const [directId, setDirectId] = useState('')
+  // Searches a moment after the typing stops. Each search answers for
+  // itself only: one that a newer search (or an emptied field) has replaced
+  // is aborted and sets nothing, so it can neither end the newer one's
+  // "Searching…" nor put "Nothing found" up before its results.
   useEffect(() => {
     const term = q.trim()
-    if (!term) { setResults([]); return }
+    setSearchFailed(false)
+    if (!term) { setResults([]); setSearching(false); return }
     const ac = new AbortController()
     setSearching(true)
     const t = window.setTimeout(() => {
-      void searchForMatch(term, isShow ? 'show' : 'movie', ac.signal)
-        .then(setResults)
-        .catch(() => setResults([]))
-        .finally(() => setSearching(false))
+      searchForMatch(term, isShow ? 'show' : 'movie', ac.signal)
+        .then(found => { if (!ac.signal.aborted) { setResults(found); setSearching(false) } })
+        .catch(() => { if (!ac.signal.aborted) { setResults([]); setSearchFailed(true); setSearching(false) } })
     }, 300)
     return () => { window.clearTimeout(t); ac.abort() }
   }, [q, isShow])
 
   const submit = async (source: 'tmdb' | 'tvdb', id: number) => {
-    if (submitting) return
+    if (inFlight.current) return
+    const ac = new AbortController()
+    inFlight.current = ac
     setSubmitting(true)
     setFailed(null)
     try {
@@ -65,17 +83,29 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
       }
       if (source === 'tvdb') body.tvdb_id = id
       else body.tmdb_id = id
-      await manualMatch(target.id, body)
+      await manualMatch(target.id, body, ac.signal)
+      // Closed meanwhile: the caller has been told, and this answer is not
+      // reported a second time.
+      if (ac.signal.aborted) return
+      inFlight.current = null
       onMatched()
     } catch (err) {
+      if (ac.signal.aborted) return
+      inFlight.current = null
       setFailed(`The match was not saved${err instanceof Error && err.message ? `: ${err.message}` : '.'}`)
       setSubmitting(false)
     }
   }
+  const close = () => {
+    const sending = inFlight.current
+    inFlight.current = null
+    sending?.abort()
+    onClose(sending !== null)
+  }
   const directOk = /^\d+$/.test(directId.trim())
 
   return (
-    <Dialog open onOpenChange={open => { if (!open && !submitting) onClose() }}>
+    <Dialog open onOpenChange={open => { if (!open) close() }}>
       <DialogContent
         {...returnFocus}
         // Above the title page's own layers, where it has always sat.
@@ -100,8 +130,12 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
         />
 
         <div className="relative mt-3 min-h-[5rem] flex-1 overflow-y-auto overflow-x-hidden">
-          <p role="status" className={searching || (q.trim() && results.length === 0) ? 'text-[14px] text-ink-2' : 'sr-only'}>
-            {searching ? 'Searching…' : q.trim() && results.length === 0 ? 'Nothing found. Try the title as TMDB spells it, or its id below.' : `${results.length} found.`}
+          <p role="status" className={searching || (q.trim() && results.length === 0) ? `text-[14px] leading-snug ${searchFailed && !searching ? 'text-danger-ink' : 'text-ink-2'}` : 'sr-only'}>
+            {searching ? 'Searching…'
+              : searchFailed ? 'The search could not be run. Try again, or match by the id below.'
+              : !q.trim() ? ''
+              : results.length === 0 ? 'Nothing found. Try the title as TMDB spells it, or its id below.'
+              : `${results.length} found.`}
           </p>
           <ul className="grid grid-cols-1 gap-2">
             {results.map(r => {
@@ -135,7 +169,7 @@ export default function ManualMatchModal({ target, onClose, onMatched }: {
                     type="button"
                     aria-disabled={submitting}
                     onClick={() => void submit(r.source, r.id)}
-                    className="stage-btn stage-btn-sm stage-btn-ghost flex-none"
+                    className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost flex-none"
                   >
                     Match{' '}<span className="sr-only">{name}, from {r.source.toUpperCase()}</span>
                   </button>

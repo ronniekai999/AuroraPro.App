@@ -1038,8 +1038,9 @@ export async function searchForMatch(
 export async function manualMatch(
   mediaItemId: number,
   body: { tmdb_id?: number; tvdb_id?: number; type: 'movie' | 'show' },
+  signal?: AbortSignal,
 ): Promise<void> {
-  await apiFetch(`/api/media/${mediaItemId}/match`, { method: 'POST', body })
+  await apiFetch(`/api/media/${mediaItemId}/match`, { method: 'POST', body, signal })
 }
 
 // Phase 5.3 — scan status. Mirrors `models.ScanProgress` exactly.

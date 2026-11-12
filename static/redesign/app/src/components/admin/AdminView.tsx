@@ -623,7 +623,7 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
 
   if (!preview) {
     return (
-      <div className="flex gap-2 mt-2">
+      <div className="flex flex-wrap gap-2.5 mt-3">
         {(['movie', 'show'] as const).map(t => (
           <button
             key={t}
@@ -632,7 +632,7 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
             title={t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV Shows' : 'Movies'}: purges any catalog rows that disagree with the library's type, then rescans`
               : `Change this library to ${t === 'show' ? 'TV Shows' : 'Movies'}`}
-            className="stage-btn stage-btn-sm stage-btn-ghost"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
           >
             {busy ? 'Checking…' : t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV' : 'Movies'}`
@@ -665,18 +665,18 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
       {preview.items_to_delete === 0 && (
         <p className="text-ink-2 text-xs mt-2">Nothing to delete — this only changes the type and rescans.</p>
       )}
-      <div className="flex gap-2 mt-3">
+      <div className="flex gap-2.5 mt-3">
         <button
           onClick={() => void confirm()}
           disabled={busy}
-          className="stage-btn stage-btn-sm stage-btn-danger"
+          className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
         >
           {busy ? 'Working…' : 'Delete and rescan'}
         </button>
         <button
           onClick={close}
           disabled={busy}
-          className="stage-btn stage-btn-sm stage-btn-ghost"
+          className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
         >
           Cancel
         </button>
@@ -710,12 +710,12 @@ function AdminLibrariesTab() {
       <div className="bg-surface-raised rounded-control p-5">
         <h3 className="text-ink font-semibold mb-3">Add a library</h3>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
-          <select value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
+          <input aria-label="Library name" value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <select aria-label="Library type" value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
             <option value="movie">Movies</option>
             <option value="show">TV Shows</option>
           </select>
-          <input value={newPaths} onChange={e => setNewPaths(e.target.value)} placeholder="/path/to/library (comma-separated for multi)" className="md:col-span-2 px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <input aria-label="Folders on the server, separated by commas" value={newPaths} onChange={e => setNewPaths(e.target.value)} placeholder="/path/to/library (comma-separated for multi)" className="md:col-span-2 px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </div>
         <button
           disabled={!newName || !newPaths || creating}
@@ -760,8 +760,8 @@ function AdminLibrariesTab() {
                 )}
               </p>
             </div>
-            <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-btn-ghost">Scan</button>
-            <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-btn-danger">Delete</button>
+            <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost">Scan</button>
+            <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Delete</button>
           </div>
           {h?.warning && (
             <p className="mt-2 text-warn text-xs leading-relaxed">{h.warning}</p>
@@ -964,8 +964,8 @@ function AdminRoomsTab() {
         <h3 className="text-ink font-semibold mb-3">Make a room</h3>
         <p className="text-ink-2 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
-          <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Description (optional)" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <input aria-label="Room name" value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <input aria-label="Description (optional)" value={desc} onChange={e => setDesc(e.target.value)} placeholder="Description (optional)" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </div>
         <button
           disabled={!name.trim()}
@@ -1001,7 +1001,7 @@ function AdminRoomsTab() {
                 </p>
               )}
             </div>
-            <button onClick={async () => { if (!window.confirm(`Delete room "${r.name}"?`)) return; try { await deleteRoom(r.id); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }} className="stage-btn stage-btn-sm stage-btn-danger">Delete</button>
+            <button onClick={async () => { if (!window.confirm(`Delete room "${r.name}"?`)) return; try { await deleteRoom(r.id); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Delete</button>
           </div>
         ))}
       </div>
@@ -1078,16 +1078,16 @@ function AdminRequestsTab() {
                   <span className="text-ink-2 text-xs">{formatRequestDate(req.requested_at)}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
+              <div className="flex items-center gap-2.5 flex-shrink-0">
                 <button
                   disabled={busy === req.id}
                   onClick={() => act(req.id, approveRequest)}
-                  className="stage-btn stage-btn-sm stage-btn-ghost"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
                 >Approve</button>
                 <button
                   disabled={busy === req.id}
                   onClick={() => { if (!window.confirm(`Deny request for "${req.title}"?`)) return; void act(req.id, denyRequest) }}
-                  className="stage-btn stage-btn-sm stage-btn-danger"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
                 >Deny</button>
               </div>
             </div>
@@ -1121,34 +1121,48 @@ function sessionRows(items: ActiveStreamRow[]) {
 function AdminSessionsTab() {
   const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Diagnose modal — populated when an admin clicks the "Diag"
-  // button on a transcode row. Surfaces FFmpeg stderr + per-variant
-  // state so operators can debug "variant start failed" 500s
-  // without grepping syslog.
+  // The diagnostic dialog, filled when Diagnose is pressed on a transcode
+  // row: FFmpeg's stderr and each variant's state, so a "variant start
+  // failed" can be read here and not in the syslog.
   const [diag, setDiag] = useState<SessionDiagnostic | null>(null)
   const [diagLoading, setDiagLoading] = useState(false)
   const [diagErr, setDiagErr] = useState<string | null>(null)
-  const diagFocus = useReturnFocus()
+  // Which request the dialog is waiting for. Closing it, or asking about
+  // another stream, moves this on, and an answer for an earlier one is
+  // dropped: it used to open the dialog again after it had been closed.
+  const diagAsked = useRef(0)
+  // Focus goes back to the Diagnose button that was pressed. The list is
+  // read again every five seconds, and a stream that ended meanwhile takes
+  // its row, and that button, away: Refresh is always there.
+  const refreshRef = useRef<HTMLButtonElement | null>(null)
+  const diagFocus = useReturnFocus(() => refreshRef.current)
+  const closeDiagnose = () => {
+    diagAsked.current++
+    setDiag(null); setDiagErr(null); setDiagLoading(false)
+  }
   const reload = useCallback(async () => {
     try { setItems(await listAdminSessions()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload(); const id = window.setInterval(() => void reload(), 5000); return () => window.clearInterval(id) }, [reload])
   const openDiagnose = useCallback(async (sessionID: string) => {
+    const asked = ++diagAsked.current
     setDiag(null); setDiagErr(null); setDiagLoading(true)
     try {
-      setDiag(await diagnoseSession(sessionID))
+      const answer = await diagnoseSession(sessionID)
+      if (diagAsked.current !== asked) return
+      setDiag(answer)
     } catch (e) {
+      if (diagAsked.current !== asked) return
       setDiagErr(e instanceof Error ? e.message : 'failed')
-    } finally {
-      setDiagLoading(false)
     }
+    setDiagLoading(false)
   }, [])
   return (
     <div className="bg-surface-raised rounded-control p-5">
       <div className="flex items-center justify-between mb-3">
         <p className="text-ink-2 text-sm">Everything playing right now, and how the server is delivering it.</p>
-        <button type="button" onClick={() => void reload()} className="stage-btn stage-btn-sm stage-btn-quiet flex-none">Refresh</button>
+        <button ref={refreshRef} type="button" onClick={() => void reload()} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet flex-none">Refresh</button>
       </div>
       {/* Active streams now span BOTH kinds (transcode + direct-play).
           The Kind column tells operators which pipeline is serving
@@ -1188,9 +1202,9 @@ function AdminSessionsTab() {
                     {s.id.slice(0, 10)}
                   </td>
                   <td>
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${
- isTranscode
- ? 'bg-surface-raised-2 text-warn border border-line'
+                    <span className={`inline-block px-2 py-0.5 rounded-chip text-xs font-medium ${
+                      isTranscode
+                        ? 'bg-surface-raised-2 text-warn border border-line'
                         : 'bg-surface-raised-2 text-ok border border-line'
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
@@ -1212,8 +1226,8 @@ function AdminSessionsTab() {
                         which never reaches a keyboard or a screen reader on a
                         non-focusable span. */}
                     {label.badge && (
-                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-full text-xs font-medium ${
- label.badge === 'Cast'
+                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-chip text-xs font-medium ${
+                        label.badge === 'Cast'
                           ? 'bg-surface-raised-2 text-ink border border-line'
                           : 'bg-surface-raised-2 text-ink-2 border border-line'
                       }`}>
@@ -1246,9 +1260,9 @@ function AdminSessionsTab() {
                   <td className="text-ink-2 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
                   <td>
                     {isTranscode ? (
-                      <div className="flex items-center gap-1.5">
-                        <button onClick={() => void openDiagnose(s.id)} className="stage-btn stage-btn-sm stage-btn-ghost" title="Show FFmpeg stderr and variant state">Diagnose</button>
-                        <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-btn-danger">Kill</button>
+                      <div className="flex items-center gap-2.5">
+                        <button onClick={() => void openDiagnose(s.id)} className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost" title="Show FFmpeg stderr and variant state">Diagnose</button>
+                        <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Kill</button>
                       </div>
                     ) : (
                       // Direct-play has no FFmpeg lifecycle to terminate.
@@ -1270,7 +1284,7 @@ function AdminSessionsTab() {
           row's Diagnose button. */}
       <Dialog
         open={!!(diag || diagLoading || diagErr)}
-        onOpenChange={open => { if (!open) { setDiag(null); setDiagErr(null); setDiagLoading(false) } }}
+        onOpenChange={open => { if (!open) closeDiagnose() }}
       >
         <DialogContent
           {...diagFocus}
@@ -1349,7 +1363,23 @@ function AdminFlaggedTab() {
   // closes and the row leaves the list, so without it nothing says a match
   // was saved.
   const [said, setSaid] = useState('')
+  // The same words twice in a row (two items with one title) are still two
+  // things said: a status line whose text does not change is not read out
+  // again, so the repeat differs by a trailing space.
+  const say = (text: string) => setSaid(prev => (prev === text ? `${text}\u00a0` : text))
   const listRef = useRef<HTMLDivElement | null>(null)
+  // The item just matched. Closing the dialog gives the focus back to that
+  // item's Match button; the reload that follows takes the row away, and
+  // the list takes the focus then, when the row has gone and the focus with
+  // it. Checked after each change of the list, since only a commit removes
+  // the row.
+  const matchedId = useRef<number | null>(null)
+  useEffect(() => {
+    const id = matchedId.current
+    if (id === null || !items || items.some(it => it.id === id)) return
+    matchedId.current = null
+    if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus()
+  }, [items])
   // 2026-05-26 — AI re-matcher job status. Polled while a job is
   // active so the operator sees live progress; falls back to
   // single-shot fetch when no job is running. acceptingId tracks the
@@ -1467,7 +1497,7 @@ function AdminFlaggedTab() {
             onClick={() => void startJob()}
             disabled={aiStarting || jobActive}
             title={jobActive ? 'A rematch job is already running' : 'Re-evaluate every flagged item with AI'}
-            className="stage-btn stage-btn-sm stage-btn-primary flex-shrink-0"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-primary flex-shrink-0"
           >
             {aiStarting ? 'Starting…' : jobActive ? 'AI sweep running' : 'Re-match with AI'}
           </button>
@@ -1515,8 +1545,11 @@ function AdminFlaggedTab() {
       <p role="status" className={said ? 'mb-2 text-sm text-ok' : 'sr-only'}>{said}</p>
       {err && <p className="text-danger-ink text-sm">{err}</p>}
       {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-ink-2 text-sm">Nothing flagged — your library is clean.</p>}
+      {/* Takes the focus when the row that had it leaves the list. The
+          line for an empty list is inside it, so that focus never lands on
+          a group with nothing in it. */}
       <div ref={listRef} tabIndex={-1} aria-label="Flagged items" role="group" className="rounded-control">
+      {items && items.length === 0 && <p className="text-ink-2 text-sm">Nothing flagged — your library is clean.</p>}
       {items && items.map(it => {
         const hasSuggestion = !!it.ai_suggested_tmdb_id
         const confidence = it.ai_match_confidence ?? 0
@@ -1531,7 +1564,7 @@ function AdminFlaggedTab() {
               </div>
               <button
                 onClick={() => setMatchTarget(it)}
-                className="stage-btn stage-btn-sm stage-btn-ghost flex-shrink-0"
+                className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost flex-shrink-0"
               >
                 Match{' '}<span className="sr-only">{it.title}</span>
               </button>
@@ -1559,7 +1592,7 @@ function AdminFlaggedTab() {
                 <button
                   disabled={acceptingId === it.id}
                   onClick={() => void acceptSuggestion(it)}
-                  className="stage-btn stage-btn-sm stage-btn-ghost flex-shrink-0"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost flex-shrink-0"
                 >
                   {acceptingId === it.id ? 'Accepting…' : 'Accept'}
                 </button>
@@ -1580,16 +1613,21 @@ function AdminFlaggedTab() {
       {matchTarget && (
         <ManualMatchModal
           target={matchTarget}
-          onClose={() => setMatchTarget(null)}
-          onMatched={() => {
+          onClose={matchInFlight => {
             const title = matchTarget.title
             setMatchTarget(null)
-            setSaid(`Matched ${title}.`)
-            // The row whose button opened the dialog leaves with the
-            // reload; focus goes to the list when it was on that row.
-            void reload().then(() => {
-              if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus()
-            })
+            if (!matchInFlight) return
+            // Closed on a match that was still being sent: the server may
+            // have saved it or not. Nothing is claimed; the list is read
+            // again and shows which.
+            say(`The dialog was closed while the match for ${title} was still being sent, so it may or may not have been saved. This list has been read again.`)
+            void reload()
+          }}
+          onMatched={() => {
+            matchedId.current = matchTarget.id
+            setMatchTarget(null)
+            say(`Matched ${matchTarget.title}.`)
+            void reload()
           }}
         />
       )}
@@ -2073,7 +2111,7 @@ function ReferralPromptSection() {
             type="button"
             onClick={() => { setRows(p => [...p, { key: '', label: '', rowId: nextRowId.current++ }]); setSaved(false) }}
             disabled={rows.length >= 12}
-            className="stage-btn stage-btn-sm stage-btn-ghost"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
           >
             + Add option
           </button>
@@ -2376,12 +2414,11 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
 // Replaces the bare "Delete" button so role changes get a home too.
 //
 // The menu renders into a document.body portal with fixed positioning anchored
-// to the trigger's bounding rect. That's deliberate: the Users table lives in a
-// .bg-surface-raised with `overflow-hidden` (clips an absolutely-positioned child)
-// AND a backdrop-filter (which makes `position: fixed` resolve against the
-// panel, not the viewport). A body portal escapes both traps so the menu is
-// never clipped, including on the last row. Closes on outside click, Escape,
-// and scroll/resize (the anchor would otherwise drift).
+// to the trigger's bounding rect. That's deliberate: the Users table scrolls
+// sideways inside its panel, and a scroller clips an absolutely positioned
+// child. A body portal escapes that, so the menu is never clipped, including
+// on the last row. Closes on outside click, Escape, and scroll/resize (the
+// anchor would otherwise drift).
 function UserRowMenu({
   user,
   onRoleChanged,
@@ -2840,12 +2877,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
     // A section opens when its name is pressed, and only then loads what it
     // shows (the effects above key on `tab`): two of them poll, so nothing is
     // mounted that is not on screen.
-    <AdminShell
-      current={tab}
-      onSection={setTab}
-      // Requests waiting for approval, from the overview's own numbers.
-      waiting={{ requests: stats?.pending_requests }}
-    >
+    <AdminShell current={tab} onSection={setTab}>
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
@@ -3024,7 +3056,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                     try { await navigator.clipboard.writeText(inviteCode); setInviteCopied(true); setTimeout(() => setInviteCopied(false), 2000) }
                     catch { /* clipboard API may be unavailable on http:// — silently no-op */ }
                   }}
-                  className="stage-btn stage-btn-sm stage-btn-ghost"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
                 >{inviteCopied ? '✓ Copied' : 'Copy'}</button>
               </div>
             )}
@@ -3253,7 +3285,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                   <div key={i} className="flex gap-3">
                     <span className="text-ink-2 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
                     <span className={`flex-shrink-0 ${
- entry.level === 'ERROR' || entry.level === 'error' ? 'text-danger-ink' :
+                      entry.level === 'ERROR' || entry.level === 'error' ? 'text-danger-ink' :
                       entry.level === 'WARN' || entry.level === 'warn' ? 'text-warn' :
                       'text-ink'
                     }`}>

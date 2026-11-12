@@ -56,12 +56,9 @@ const itemClass = (current: boolean) =>
     current ? 'bg-surface-raised-2 font-semibold text-ink' : 'font-medium text-ink-2 hover:bg-surface-raised hover:text-ink'
   }`
 
-export function AdminShell({ current, onSection, waiting = {}, children }: {
+export function AdminShell({ current, onSection, children }: {
   current: AdminSection
   onSection: (section: AdminSection) => void
-  /** How many things wait for the admin in a section (requests to approve),
-   *  shown beside its name. Nothing is shown for zero or an unknown count. */
-  waiting?: Partial<Record<AdminSection, number>>
   children: ReactNode
 }) {
   const ids = useId()
@@ -86,7 +83,16 @@ export function AdminShell({ current, onSection, waiting = {}, children }: {
           // which makes them absolutely positioned. Without a positioned
           // scroller they are placed against the page, far to the right in
           // the strip's unscrolled width, and widen the page on a phone.
-          className="scrollbar-hide relative -mx-1 mb-6 flex gap-1 overflow-x-auto px-1 pb-1 lg:sticky lg:top-24 lg:mx-0 lg:mb-0 lg:block lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto lg:p-0 lg:pr-1"
+          //
+          // The strip scrolls sideways and the column scrolls down, so each
+          // clips on its other axis too: the padding all round (taken back
+          // by the margin) is room for a focused entry's ring.
+          //
+          // The column sticks under the top bar AS MEASURED (--chrome-h): the
+          // bar grows by a row for each library being scanned, and under a
+          // fixed offset it covered the first entries. The column's height
+          // comes off the same figure, so its last entry is reachable.
+          className="scrollbar-hide relative -m-1 mb-5 flex gap-1 overflow-x-auto p-1 lg:sticky lg:top-[calc(var(--chrome-h,var(--topnav-h))_+_1.75rem)] lg:mb-0 lg:block lg:max-h-[calc(100vh_-_var(--chrome-h,var(--topnav-h))_-_2.5rem)] lg:overflow-y-auto"
         >
           {ADMIN_GROUPS.map((group, i) => (
             <div
@@ -97,7 +103,7 @@ export function AdminShell({ current, onSection, waiting = {}, children }: {
             >
               {/* The groups' names take a line each in the column. In the
                   strip there is no room for them: a rule marks the break. */}
-              {i > 0 && <span aria-hidden="true" className="mx-1 my-2 w-px flex-none self-stretch bg-line lg:hidden" />}
+              {i > 0 && <span aria-hidden="true" className="mx-1 my-2 flex-none self-stretch border-l border-line lg:hidden" />}
               {group.title && (
                 <p id={`${ids}-g${i}`} className="sr-only px-3.5 pb-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-ink-2 lg:not-sr-only lg:block">
                   {group.title}
@@ -113,14 +119,6 @@ export function AdminShell({ current, onSection, waiting = {}, children }: {
                   className={itemClass(s.id === current)}
                 >
                   {s.label}
-                  {(waiting[s.id] ?? 0) > 0 && (
-                    <>
-                      {' '}
-                      <span className="ml-2 grid h-6 min-w-6 flex-none place-items-center rounded-full bg-action px-1.5 text-xs font-semibold tabular-nums text-action-on lg:ml-auto">
-                        {waiting[s.id]}{' '}<span className="sr-only">waiting</span>
-                      </span>
-                    </>
-                  )}
                 </button>
               ))}
             </div>

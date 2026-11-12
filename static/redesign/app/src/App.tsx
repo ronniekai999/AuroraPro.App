@@ -5237,7 +5237,18 @@ export default function App() {
       updated_at: '',
     } as ServerMediaItem)
   }, [])
-  const handleIdentifyClose = useCallback(() => setIdentifyTarget(null), [])
+  const handleIdentifyClose = useCallback((matchInFlight?: boolean) => {
+    const id = identifyTarget?.id
+    setIdentifyTarget(null)
+    if (!matchInFlight || !id) return
+    // Closed while a match was still being sent: the server may have saved
+    // it or not. The title is read again and shows which; nothing is
+    // claimed either way.
+    void getMedia(id)
+      // Only onto the title it was read for: the person may have moved on.
+      .then(detail => setDetailItem(shown => (shown && shown.id === id ? detail : shown)))
+      .catch(() => { /* the page keeps what it has */ })
+  }, [identifyTarget])
   const handleIdentifyMatched = useCallback(async () => {
     const id = identifyTarget?.id
     setIdentifyTarget(null)

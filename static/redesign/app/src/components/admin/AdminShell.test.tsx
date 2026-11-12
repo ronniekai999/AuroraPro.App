@@ -5,9 +5,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { ADMIN_GROUPS, ADMIN_SECTIONS, AdminShell, adminSectionLabel, type AdminSection } from './AdminShell'
 
-function Page({ start = 'dashboard', waiting }: { start?: AdminSection; waiting?: Partial<Record<AdminSection, number>> }) {
+function Page({ start = 'dashboard' }: { start?: AdminSection }) {
   const [section, setSection] = useState<AdminSection>(start)
-  return <AdminShell current={section} onSection={setSection} waiting={waiting}><p>content of {section}</p></AdminShell>
+  return <AdminShell current={section} onSection={setSection}><p>content of {section}</p></AdminShell>
 }
 
 describe('the admin page\'s menu', () => {
@@ -61,13 +61,13 @@ describe('the admin page\'s menu', () => {
     expect(screen.getByRole('button', { name: 'Users' })).toHaveAttribute('aria-current', 'page')
   })
 
-  it('shows how many requests wait, in the button\'s name too, and nothing for none', () => {
-    const view = render(<Page waiting={{ requests: 3 }} />)
-    expect(screen.getByRole('button', { name: 'Requests 3 waiting' })).toBeInTheDocument()
-    view.rerender(<Page waiting={{ requests: 0 }} />)
-    expect(screen.getByRole('button', { name: 'Requests' })).toBeInTheDocument()
-    view.rerender(<Page waiting={{}} />)
-    expect(screen.getByRole('button', { name: 'Requests' })).toBeInTheDocument()
+  // No entry carries a count. The one number the page had to hand for
+  // Requests counts requests already sent on to be downloaded, not the ones
+  // waiting for an answer here, and it was read only by the overview.
+  it('names every entry by its section alone', () => {
+    render(<Page />)
+    const names = within(screen.getByRole('navigation', { name: 'Admin sections' })).getAllByRole('button').map(b => b.textContent)
+    expect(names).toEqual(ADMIN_SECTIONS.map(s => s.label))
   })
 
   it('names each section the way its menu entry does', () => {
