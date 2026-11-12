@@ -745,7 +745,9 @@ describe('a full Home load and a live refresh overlapping', () => {
     const server = stubProfiles()
     render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    // pageText, not textContent: the count is Tonight's closing line now, and
+    // textContent runs the last card's year straight into it ("20201 titles").
+    await waitFor(() => expect(pageText()).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     await new Promise(done => setTimeout(done, 500))
     const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
@@ -759,9 +761,9 @@ describe('a full Home load and a live refresh overlapping', () => {
     const cancel = await screen.findByRole('button', { name: 'Cancel' })
     r.release()
     await new Promise(done => setTimeout(done, 500))
-    expect(document.body.textContent).toMatch(/\b1 titles in your library/)
+    expect(pageText()).toMatch(/\b1 titles in your library/)
     fireEvent.click(cancel)
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b2 titles in your library/), { timeout: 5000 })
   }, 20000)
 
   it('runs again when a live refresh lands older than a full load and is dropped', async () => {
