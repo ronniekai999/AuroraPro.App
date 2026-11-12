@@ -1087,6 +1087,152 @@ html[data-effects="reduced"] .stage-topnav {
   line-height: 1.6;
   color: var(--ink-3);
 }
+/* A search that found nothing in the library, and the titles that can be
+   asked for in their place (SearchRequest): a heading at a page's size, a
+   lead, then one box of rows, a hairline between them. */
+.search-none {
+  max-width: 760px;
+  margin-top: 32px;
+}
+.search-none-back { margin: 0 0 16px -10px; }
+.search-none-title {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.search-none-lead {
+  margin-top: 12px;
+  font-size: 17px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+@media not all and (min-width: 768px) {
+  .search-none { margin-top: 24px; }
+  .search-none-title { font-size: 28px; }
+  .search-none-lead { font-size: 15px; }
+}
+.search-req-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 24px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.search-req-note:empty { display: none; }
+.search-req-4k {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.search-req-list {
+  margin-top: 24px;
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+}
+.search-req-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  min-height: 104px;
+  padding: 16px 20px;
+}
+.search-req-row + .search-req-row { border-top: 1px solid var(--line); }
+/* The poster, over the title's initial: the initial is what shows while the
+   poster loads, and when there is none. */
+.search-req-art {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 72px;
+  overflow: hidden;
+  border-radius: var(--radius-chip);
+  background: var(--surface-raised-2);
+}
+.search-req-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.search-req-initial {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+.search-req-text {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.search-req-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.search-req-facts {
+  font-size: 13px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.search-req-overview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+/* What became of a request already made: the app's amber for "under way",
+   green once it is in the library. */
+.search-req-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--warn);
+}
+.search-req-state[data-status="available"] { color: var(--ok); }
+.search-req-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.search-req-refused {
+  font-size: 13px;
+  color: var(--danger-ink);
+}
+.search-req-btn { min-width: 104px; justify-content: center; }
+.search-req-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
 /* Alone in its column (nothing to do, nothing searched for lately), it
    closes nothing: no rule above it. */
 .search-hint:first-child {

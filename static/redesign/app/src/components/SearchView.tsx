@@ -24,7 +24,8 @@ import { GridSkeleton } from '@/components/Skeletons'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { MediaListRow, contentRatingOf, type RowProgress } from '@/components/MediaListRow'
 import { useLongPress } from '@/hooks/useLongPress'
-import { listCollections, posterURL, searchMedia, type Collection } from '@/lib/api'
+import { SearchRequest } from '@/components/SearchRequest'
+import { listCollections, posterURL, searchMedia, type Collection, type MediaRequest } from '@/lib/api'
 import { describedAnswerFor, keepDescribedAnswer } from '@/lib/describedSearch'
 import { type Media } from '@/lib/types'
 
@@ -90,7 +91,9 @@ function BestMatch({ item, resumable, where, onSelect, onCardContext, onPlay }: 
   onPlay?: (m: Media) => void
 }) {
   const longPress = useLongPress(e => onCardContext(e, item), item.id, '.search-best-acts')
+  // The kind first, as on the cards under it and a phone's rows.
   const facts = [
+    isShow(item) ? 'Show' : 'Movie',
     item.year > 0 ? String(item.year) : '',
     contentRatingOf(item.tags),
     item.duration,
@@ -148,7 +151,7 @@ function BestMatch({ item, resumable, where, onSelect, onCardContext, onPlay }: 
 }
 
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
-export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, progressById, libraryIds, onToggleLib, onRequest, onWatchTogether, onOpenCollection, recent, onPickRecent, onClearRecent }: {
+export default function SearchView({ query, onQueryChange, describe, onDescribe, focusNonce, takeFocus, onSelect, onCardContext, onCardPlay, resumableIds, progressById, libraryIds, onToggleLib, requesting, onWatchTogether, onOpenCollection, recent, onPickRecent, onClearRecent }: {
   query: string
   // Below md the top bar has no search field, so the page carries its own.
   // It is the only way to type a query on a phone.
@@ -180,8 +183,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
   // Where a search that found nothing ends: asking for the title to be
-  // added. Not given to a session that is not offered requests.
-  onRequest?: (query: string) => void
+  // added, here on this page (SearchRequest). Whose requests they are, what
+  // the app does when one is made, and the way to the requests page. Not
+  // given to a session that is not offered requests.
+  requesting?: { userId: number; onRequested: (r: MediaRequest) => void; onOpenRequests: () => void }
   // "Start a watch party with" the best match. Not given to a session that
   // is not offered Together.
   onWatchTogether?: (m: Media) => void
@@ -227,6 +232,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   const [kind, setKind] = useState<Kind>('all')
   const hasQuery = !!query.trim()
   if (!hasQuery && kind !== 'all') setKind('all')
+  // "Not here? Request a title", pressed while the search HAS results: the
+  // words it was pressed for. The titles that can be requested take the
+  // results' place until the words change or the viewer goes back.
+  const [asking, setAsking] = useState<string | null>(null)
   // The collections this session may open, read once: a search matches
   // their names and descriptions here, as the server's search is of titles.
   // A failed read lists none, which is what the page shows without them.
@@ -332,8 +341,29 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // (Titles, not collections: those are matched here on plain words, and
   // the model had nothing to do with them.)
   const readAsMood = !loading && !failed && results.length > 0 && searchMode === 'semantic'
-  const empty = !loading && !!q && found === 0 && !failed
+  // Nothing found FOR THESE WORDS: the answer on screen is theirs. Without
+  // that, the commit between a keystroke and the search starting counted as
+  // an empty search, and the page (and the lookup of what can be requested)
+  // came up for one frame on the first key of every search.
+  const empty = !loading && !!q && found === 0 && !failed && answered?.query === q
+  const askingNow = !!requesting && !!q && asking === q
   const kinds = KINDS.filter(k => k.id !== 'collection' || mayOpenCollections)
+
+  // The other way to search these words, said where the results are (or
+  // where there are none): nothing on the page otherwise tells a pointer or
+  // touch user that Enter does something typing did not. Also when only a
+  // collection matched: the empty page is not shown then, and the line must
+  // not say a title matched. Above the results; on the empty page, under its
+  // opening sentence.
+  const describeLine = canDescribe && !askingNow ? (
+            <p className="search-describe-line mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-describe>
+              {results.length > 0 ? 'These match the title.' : found > 0 ? 'No title matches these words.' : 'Meant a mood, not a title?'}
+              {/* Drawn at 36px; a touch screen gets the 44px target. */}
+              <button type="button" onClick={() => onDescribe?.(query)} className="stage-btn stage-btn-sm stage-btn-ghost search-describe-btn stage-hit44">
+                <Icon name="sparkle" size={14} /> Search by description
+              </button>
+            </p>
+  ) : null
 
   return (
     // data-search-results: lets TopNav's outside-click-to-close handler
@@ -381,7 +411,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               whether the search ran, found nothing, or is still going.
               aria-atomic so the whole sentence is re-read rather than just
               the changed number, which otherwise announces as a bare "12". */}
-          <p className="search-status" role="status" aria-live="polite" aria-atomic="true">
+          {/* While the page below is the one that says nothing was found (a
+              heading and a sentence), this line is for assistive tech only:
+              drawn as well, it said the same thing twice, above it. */}
+          <p className={empty ? 'search-status sr-only' : 'search-status'} role="status" aria-live="polite" aria-atomic="true">
             {/* The mark for "Aurora did this", only when the server says
                 the description search is what ran: it is a statement about
                 how the results were produced. */}
@@ -413,22 +446,9 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               {results.length > 0 ? 'These match the title. ' : ''}A search by description found nothing for these words, or is not set up on this server.
             </p>
           )}
-          {canDescribe && found > 0 && (
-            // The other way to search these words, said where the results are:
-            // nothing on the page otherwise tells a pointer or touch user that
-            // Enter does something typing did not. Also when only a
-            // collection matched: the empty page, which makes the same offer,
-            // is not shown then, and this line was the only cue left.
-            <p className="search-describe-line mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-describe>
-              {results.length > 0 ? 'These match the title.' : 'No title matches these words.'}
-              {/* Drawn at 36px; a touch screen gets the 44px target. */}
-              <button type="button" onClick={() => onDescribe?.(query)} className="stage-btn stage-btn-sm stage-btn-ghost search-describe-btn stage-hit44">
-                <Icon name="sparkle" size={14} /> Search by description
-              </button>
-            </p>
-          )}
+          {!empty && describeLine}
           {/* Narrowing to a kind, once there is something to narrow. */}
-          {wide && !loading && found > 0 && (
+          {wide && !loading && found > 0 && !askingNow && (
             <div role="group" aria-label="Filter results" className="search-filters" data-search-filters="">
               {kinds.map(k => (
                 <button key={k.id} type="button" className="genre-chip" aria-pressed={kindShown === k.id} onClick={() => setKind(k.id)}>
@@ -438,37 +458,37 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             </div>
           )}
 
-          {loading && found === 0 ? (
+          {askingNow && requesting ? (
+            // Asked for while the search has results: the titles that can be
+            // requested for these words, in the results' place.
+            <div className="search-none" data-search-asking="">
+              <button type="button" onClick={() => setAsking(null)} className="stage-btn stage-btn-sm stage-btn-quiet search-none-back stage-hit44">
+                <Icon name="arrowLeft" size={14} /> Back to the results
+              </button>
+              <h2 className="search-none-title">Request a title</h2>
+              <p className="search-none-lead">
+                If what you want is not among the results for &ldquo;{q}&rdquo;, it may be one of these. Request it and you will get a notification when it is ready to watch.
+              </p>
+              <SearchRequest query={q} userId={requesting.userId} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
+            </div>
+          ) : loading && found === 0 ? (
             // First search (or a new query after an empty result): hold the
             // grid's shape. With results already on screen the previous
             // results stay up until the new ones land, as before.
             <div className="mt-8"><GridSkeleton /></div>
           ) : empty ? (
-            <div className="text-center py-20" data-search-empty>
-              <Icon name="search" size={48} className="mx-auto mb-4 text-ink-3" />
-              {canDescribe ? (
-                <>
-                  <h2 className="break-words text-lg text-ink">No title matches &ldquo;{query}&rdquo;</h2>
-                  <p className="mt-1 text-sm text-ink-2">If that describes what you want to watch, search by description.</p>
-                  <button type="button" onClick={() => onDescribe?.(query)} className="stage-btn stage-btn-primary mt-5">
-                    <Icon name="sparkle" size={16} /> Search by description
-                  </button>
-                </>
-              ) : (
-                <>
-                  <h2 className="text-lg text-ink">Nothing found</h2>
-                  <p className="mt-1 text-sm text-ink-2">Try other words, or a title.</p>
-                </>
-              )}
-              {/* Requesting has no page of its own to go looking for: it is
-                  offered here, where a search has just come up empty. */}
-              {onRequest && (
-                <p className="search-request-line mt-8 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-request>
-                  Not in the library?
-                  <button type="button" onClick={() => onRequest(q)} className="stage-btn stage-btn-sm stage-btn-ghost search-request-btn stage-hit44">
-                    Request it
-                  </button>
-                </p>
+            // Nothing in the library. Requesting has no page of its own to
+            // go looking for: the titles that can be asked for are listed
+            // here, where a search has just come up empty.
+            <div className="search-none" data-search-empty>
+              <h2 className="search-none-title">Not in your library yet</h2>
+              <p className="search-none-lead">
+                {described ? <>Nothing here matches &ldquo;{q}&rdquo;, by title or by description.</> : <>Nothing here matches &ldquo;{q}&rdquo;.</>}
+                {requesting && ' If it is one of these, request it and you will get a notification when it is ready to watch.'}
+              </p>
+              {describeLine}
+              {requesting && (
+                <SearchRequest query={q} userId={requesting.userId} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
               )}
             </div>
           ) : (
@@ -563,7 +583,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             below it: what can be done with this search, and what was
             searched for lately. */}
         <aside className="search-aside" aria-label="Search actions and recent searches">
-          {q && !loading && found > 0 && ((onWatchTogether && titles.length > 0) || onRequest) && (
+          {q && !loading && found > 0 && !askingNow && ((onWatchTogether && titles.length > 0) || requesting) && (
             <section aria-labelledby="search-actions-heading" data-search-actions="">
               {/* Under the results on a phone, where it is what else there is. */}
               <h2 id="search-actions-heading" className="search-aside-h">{wide ? 'Actions' : 'More'}</h2>
@@ -573,8 +593,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                   <span className="min-w-0 flex-1">Start a watch party with {titles[0].title}</span>
                 </button>
               )}
-              {onRequest && (
-                <button type="button" className="search-action-row" onClick={() => onRequest(q)}>
+              {requesting && (
+                <button type="button" className="search-action-row" onClick={() => setAsking(q)}>
                   <Icon name="download" size={18} className="flex-none text-ink-2" />
                   <span className="min-w-0 flex-1">Not here? Request a title</span>
                 </button>

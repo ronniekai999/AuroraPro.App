@@ -953,12 +953,36 @@ const SURFACES = [
     alpha: () => twText(SEARCH, 'data-search-describe').a,
     px: 14, on: () => [INK],
   },
+  // ── The empty search: "Not in your library yet", its opening sentence,
+  //    and the titles that can be requested (SearchRequest), whose rows sit
+  //    on a raised box. It was one hint line ("If that describes what you
+  //    want to watch…"); every text colour of what replaced it is here. ──
   {
-    what: 'search page empty-state hint', where: `${SEARCH} (no title matches)`,
-    color: () => twText(SEARCH, 'If that describes what you want to watch').rgb,
-    alpha: () => twText(SEARCH, 'If that describes what you want to watch').a,
+    what: 'empty search: its opening sentence', where: `${CSS} (.search-none-lead)`,
+    color: () => cssColor('.search-none-lead', 'color').rgb,
+    alpha: () => cssColor('.search-none-lead', 'color').a,
+    px: 15, on: () => [INK],
+  },
+  {
+    what: 'empty search: the line above the list (looking, nothing found)', where: `${CSS} (.search-req-note)`,
+    color: () => cssColor('.search-req-note', 'color').rgb,
+    alpha: () => cssColor('.search-req-note', 'color').a,
     px: 14, on: () => [INK],
   },
+  {
+    what: 'empty search: the line under the list', where: `${CSS} (.search-req-foot)`,
+    color: () => cssColor('.search-req-foot', 'color').rgb,
+    alpha: () => cssColor('.search-req-foot', 'color').a,
+    px: 13, on: () => [INK],
+  },
+  ...['.search-req-facts', '.search-req-overview', '.search-req-state', '.search-req-state[data-status="available"]', '.search-req-refused', '.search-req-initial'].map(sel => ({
+    what: `a title that can be requested: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    // The initial is 22px bold on its tile; the rest are 13px.
+    px: sel === '.search-req-initial' ? 22 : 13,
+    on: () => [sel === '.search-req-initial' ? rootToken('--surface-raised-2').rgb : rootToken('--surface-raised').rgb],
+  })),
   // ── The top bar. Its search field is where "describe a mood" lives, so
   //    its placeholder is the text this script was first written for. The
   //    bar is translucent and content scrolls under it, so each surface is

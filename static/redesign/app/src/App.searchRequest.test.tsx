@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 //
 // Requesting, against the whole App: it has no tab, and is where a search
-// that finds nothing in the library ends. The search page offers it, and the
-// requests page opens with its composer up and the words already looked up.
-// A profile with a content limit is offered no requests anywhere, here
-// included.
+// that finds nothing in the library ends. The search page lists the titles
+// that can be asked for and takes the request there; the requests page then
+// has it. A profile with a content limit is offered no requests anywhere,
+// here included.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -25,15 +25,18 @@ const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', y
  *  as, so the app knows none (it opens the profile picker over the page). */
 function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false } = {}) {
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
-  /** What the requests page looked up on TMDB. */
+  /** What was looked up outside the library (the server asks TMDB). */
   const lookups: string[] = []
+  /** The requests made, as the server was sent them, and as it lists them. */
+  const posted: Record<string, unknown>[] = []
+  const listed: Record<string, unknown>[] = []
   /** How many times the list of collections was asked for. */
   const collectionLists = { n: 0 }
   const heroAsks = { n: 0 }
   const TOWNS = { id: 5, owner_user_id: 1, name: 'Harbor towns', kind: 'manual', is_public: false, item_count: 1, created_at: NOW, updated_at: NOW }
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-  vi.stubGlobal('fetch', async (input: string) => {
+  vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
     if (p === '/api/auth/me') return json(me)
@@ -52,8 +55,19 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
       return new Response(JSON.stringify(found), { status: 200, headers: { 'content-type': 'application/json', 'X-Search-Mode': 'literal' } })
     }
     if (p === `/api/media/${HARBOR.id}`) return json(HARBOR)
-    if (p === '/api/requests/search') { lookups.push(url.searchParams.get('q') ?? ''); return json({ results: [] }) }
-    if (p === '/api/requests') return json([])
+    if (p === '/api/requests/config') return json({ enabled: true, has_radarr: true, has_sonarr: true })
+    if (p === '/api/requests/search') {
+      lookups.push(url.searchParams.get('q') ?? '')
+      return json({ results: [{ id: 501, media_type: 'movie', title: 'The Lost Reel', release_date: '2025-03-01', overview: 'A reel goes missing.' }] })
+    }
+    if (p === '/api/requests' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>
+      posted.push(body)
+      const made = { id: 31, user_id: 1, ...body, status: 'pending', requested_at: NOW, updated_at: NOW }
+      listed.unshift(made)
+      return json(made, 201)
+    }
+    if (p === '/api/requests') return json(listed)
     if (p === '/api/collections') { collectionLists.n++; return json([TOWNS]) }
     if (p === '/api/collections/5') return json({ collection: TOWNS, items: [HARBOR] })
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
@@ -69,7 +83,7 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
   render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
-  return { lookups, collectionLists, heroAsks }
+  return { lookups, collectionLists, heroAsks, posted }
 }
 
 const find = { timeout: 8000 }
@@ -80,30 +94,43 @@ async function searchFor(words: string) {
     return el
   }, find)
   fireEvent.change(field, { target: { value: words } })
-  await screen.findByRole('heading', { name: `No title matches “${words}”` }, find)
+  await screen.findByRole('heading', { name: 'Not in your library yet' }, find)
+  expect(document.querySelector('.search-none-lead')!.textContent).toContain(`Nothing here matches “${words}”.`)
 }
 
 vi.setConfig({ testTimeout: 30_000 })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('a search that finds nothing in the library', () => {
-  it('ends in a request: the requests page opens with its composer up and the words looked up', async () => {
+  it('ends in a request, made on the search page: the title is looked up, asked for where it stands, and is then on the requests page', async () => {
     const server = renderApp()
     await screen.findByText('Parent', undefined, find)
     await searchFor('the lost reel')
-    fireEvent.click(screen.getByRole('button', { name: 'Request it' }))
-    const field = await screen.findByPlaceholderText('Search TMDB for title…', undefined, find) as HTMLInputElement
-    expect(field.value).toBe('the lost reel')
-    await waitFor(() => expect(server.lookups).toEqual(['the lost reel']), find)
+    // Looked up outside the library, once, for the words searched for.
+    const ask = await screen.findByRole('button', { name: 'Request The Lost Reel (2025)' }, find)
+    expect(server.lookups).toEqual(['the lost reel'])
+    fireEvent.click(ask)
+    await waitFor(() => expect(server.posted).toHaveLength(1), find)
+    expect(server.posted[0]).toMatchObject({ media_type: 'movie', tmdb_id: 501, title: 'The Lost Reel', year: 2025, quality_1080p: true, quality_4k: false })
+    // The row says what became of it, and the app says so too.
+    await waitFor(() => expect(document.querySelector('.search-req-state')?.textContent).toBe('Requested · sent, nothing found yet'), find)
+    expect(await screen.findByText('Requested "The Lost Reel"', undefined, find)).toBeInTheDocument()
+    // The way on is the requests page, which has it.
+    fireEvent.click(screen.getByRole('button', { name: 'See my requests' }))
     expect(await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)).toBeInTheDocument()
+    expect(await screen.findByText('The Lost Reel', undefined, find)).toBeInTheDocument()
   })
 
   it('offers no request to a profile with a content limit', async () => {
-    renderApp(2)
+    const server = renderApp(2)
     await screen.findByText('Kid', undefined, find)
     await searchFor('the lost reel')
-    expect(screen.queryByRole('button', { name: 'Request it' })).toBeNull()
+    await new Promise(done => setTimeout(done, 900))
     expect(document.querySelector('[data-search-request]')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Request / })).toBeNull()
+    // Nothing was looked up on its behalf, and the page does not speak of requesting.
+    expect(server.lookups).toEqual([])
+    expect(document.querySelector('[data-search-empty]')!.textContent).not.toMatch(/request/i)
   })
 })
 
@@ -111,8 +138,8 @@ describe('a search that finds nothing in the library', () => {
 // offered nothing a profile with a content limit lacks: the session may be a
 // child's. Requests are one of those things.
 describe('a search that finds nothing, while the session\'s profile is not known', () => {
-  it('offers no request', async () => {
-    renderApp(1, false, { bindingUnreadable: true })
+  it('offers no request, and looks nothing up outside the library', async () => {
+    const server = renderApp(1, false, { bindingUnreadable: true })
     // The picker is up (the binding could not be read); the page is behind it.
     await screen.findByRole('heading', { name: /Who.s watching/ }, find)
     const field = await waitFor(() => {
@@ -122,8 +149,11 @@ describe('a search that finds nothing, while the session\'s profile is not known
     }, find)
     fireEvent.change(field, { target: { value: 'the lost reel' } })
     await waitFor(() => expect(document.querySelector('[data-search-empty]')).not.toBeNull(), find)
+    await new Promise(done => setTimeout(done, 900))
     expect(document.querySelector('[data-search-request]')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Request it' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Request / })).toBeNull()
+    expect(server.lookups).toEqual([])
+    expect(document.querySelector('[data-search-empty]')!.textContent).not.toMatch(/request/i)
   })
 })
 

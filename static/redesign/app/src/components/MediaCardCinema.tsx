@@ -223,8 +223,11 @@ function MediaCardCinemaInner<T extends MediaLike>({
     if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress()
   }
 
+  // The year is said once: after the title, unless the caller's own line
+  // of facts already says it (a search result's "Show · 2024").
+  const subtitleSaysYear = !!subtitle && !!item.year && subtitle.includes(String(item.year))
   const name = [
-    `${item.title}${item.year ? ` (${item.year})` : ''}`,
+    `${item.title}${item.year && !subtitleSaysYear ? ` (${item.year})` : ''}`,
     metaTokens.length > 0
       ? metaTokens.map(t => (t.kind === 'rating' ? `rated ${t.value}` : t.value)).join(', ')
       : '',

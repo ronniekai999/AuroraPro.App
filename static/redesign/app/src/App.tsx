@@ -2915,19 +2915,22 @@ export default function App() {
     rememberScroll(location.key)
     navigate(`/${v}`)
   }, [view, navigate, closePlayer, location.key, navScope])
-  // Where a search that found nothing in the library ends: the requests
-  // page, with its composer open and the words already searched for. The
-  // ask is stamped with whose it is and handed over only to them, and is
-  // forgotten once the page has taken it.
-  const [requestAsk, setRequestAsk] = useState<{ query: string; n: number; owner: string } | null>(null)
-  const requestAsksRef = useRef(0)
-  const requestFromSearch = useCallback((q: string) => {
-    const query = q.trim()
-    if (!query) return
-    setRequestAsk({ query, n: ++requestAsksRef.current, owner: searchOwner })
-    handleNavigate('requests')
-  }, [searchOwner, handleNavigate])
-  const forgetRequestAsk = useCallback(() => setRequestAsk(null), [])
+  // A request was made (on the search page, or the requests page's own
+  // composer): the list this tab holds learns of it, and a toast says so.
+  const handleRequestSubmitted = useCallback((r: MediaRequest) => {
+    // Not loaded yet (or dropped on a switch): leave it to the fetch, which
+    // will include this one, rather than show it alone and cancel the fetch.
+    setRequestsList(prev => prev ? [r, ...prev] : prev)
+    const id = nextToastId()
+    setToasts(prev => [...prev, { id, message: `Requested "${r.title}"`, type: 'success' }])
+  }, [nextToastId])
+  // What the search page needs to take requests where a search ends.
+  const searchUserId = user ? user.id : 0
+  const searchRequesting = useMemo(() => ({
+    userId: searchUserId,
+    onRequested: handleRequestSubmitted,
+    onOpenRequests: () => handleNavigate('requests'),
+  }), [searchUserId, handleRequestSubmitted, handleNavigate])
   // A collection picked from the search page's results: the Collections
   // scope is opened on it. Owner-stamped, like the ask above, so it is not
   // carried to another profile's Collections.
@@ -6931,11 +6934,12 @@ export default function App() {
                 // button; handed over only while it is still this session's.
                 describe={searchDescribe && searchDescribe.owner === searchOwner ? searchDescribe : null}
                 onDescribe={describeSearch}
-                // A search that finds nothing ends in "Request it". For a
-                // session known to be offered requests: not a profile with
-                // a content limit, and not one whose profile is not known
-                // yet (the identity menu offers Requests to the same).
-                onRequest={navScope === 'full' ? requestFromSearch : undefined}
+                // A search that finds nothing ends in the titles that can
+                // be requested, on the page itself. For a session known to
+                // be offered requests: not a profile with a content limit,
+                // and not one whose profile is not known yet (the identity
+                // menu offers Requests to the same).
+                requesting={navScope === 'full' ? searchRequesting : undefined}
                 // What this profile searched for lately in this browser. A
                 // search is remembered when something is done with it: a
                 // result opened or played, or a search by description asked
@@ -7159,21 +7163,7 @@ export default function App() {
               <RequestsView
                 everyone={adminUI}
                 requests={requestsList}
-                // Handed over only while it is still this session's.
-                ask={requestAsk && requestAsk.owner === searchOwner ? requestAsk : null}
-                onAskTaken={forgetRequestAsk}
-                onRequestSubmitted={(r) => {
-                  // Not loaded yet (or dropped on a switch): leave it to the
-                  // fetch, which will include this one, rather than show it
-                  // alone and cancel the fetch.
-                  setRequestsList(prev => prev ? [r, ...prev] : prev)
-                  const id = nextToastId()
-                  setToasts(prev => [...prev, {
-                    id,
-                    message: `Requested "${r.title}"`,
-                    type: 'success',
-                  }])
-                }}
+                onRequestSubmitted={handleRequestSubmitted}
                 onRequestDeleted={(id) => {
                   setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
                   const tId = nextToastId()

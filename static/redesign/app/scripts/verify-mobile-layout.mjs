@@ -163,10 +163,11 @@ mustHave(CARD, "'has-reason '")
 // Small buttons outside a card: drawn at 36px, with a 44px target on a touch
 // screen (.stage-hit44). Tonight's live strip (Join; I'm in, Maybe, Open
 // lobby, side by side) and the search page's "Search by description",
-// "Try again" and "Request it", its recent searches (each row, and
-// "Clear"), its best match's Play and More, and the rows of what can be
-// done with a search. Built from the components' own class lists, in the
-// rows they sit in.
+// "Try again", the titles that can be requested where a search found
+// nothing (Request, See my requests, Try again, Back to the results), its
+// recent searches (each row, and "Clear"), its best match's Play and More,
+// and the rows of what can be done with a search. Built from the
+// components' own class lists, in the rows they sit in.
 const LIVE = 'src/components/TonightLive.tsx'
 const SEARCH = 'src/components/SearchView.tsx'
 const LIVE_JOIN = classesOf(LIVE, 'tonight-live-act stage-hit44')
@@ -180,8 +181,24 @@ const DESCRIBE_LINE = classesOf(SEARCH, 'search-describe-line')
 const FAILED_LINE = classesOf(SEARCH, 'search-failed-line')
 const DESCRIBE_BTN = classesOf(SEARCH, 'search-describe-btn')
 const RETRY_BTN = classesOf(SEARCH, 'search-retry-btn')
-const REQUEST_LINE = classesOf(SEARCH, 'search-request-line')
-const REQUEST_BTN = classesOf(SEARCH, 'search-request-btn')
+// Where a search that found nothing ends (SearchRequest): a row per title
+// that can be asked for, with Request or, for one already asked for, the
+// way to the requests page; the same under the list; "Try again" when the
+// list could not be loaded; and the way back to the results when the list
+// was asked for beside them.
+const REQUESTS = 'src/components/SearchRequest.tsx'
+const REQ_SEE = classesOf(REQUESTS, 'search-req-see')
+const REQ_ALL = classesOf(REQUESTS, 'search-req-all')
+const REQ_RETRY = classesOf(REQUESTS, 'search-req-retry')
+const NONE_BACK = classesOf(SEARCH, 'search-none-back')
+mustHave(REQUESTS, "'stage-btn stage-btn-primary search-req-btn'")
+mustHave(REQUESTS, "'stage-btn stage-btn-ghost search-req-btn'")
+mustHave(REQUESTS, 'className="search-req-row"')
+mustHave(REQUESTS, 'className="search-req-list"')
+mustHave(REQUESTS, 'className="search-req-text"')
+mustHave(REQUESTS, 'className="search-req-art"')
+mustHave(REQUESTS, 'className="search-req-foot"')
+mustHave(REQUESTS, 'className="search-req-note"')
 const RECENT_CLEAR = classesOf(SEARCH, 'search-recent-clear')
 const RECENT_ROW = classesOf(SEARCH, 'search-recent-row')
 // The search page's best match (Play and More beside its title) and the
@@ -273,8 +290,18 @@ const smallHtml = `
     <button type="button" class="${DESCRIBE_BTN}" data-small-btn="Search by description">Search by description</button></p>
   <p class="${FAILED_LINE}" data-small="failed">Nothing is wrong with what you typed. The server could not run it.
     <button type="button" class="${RETRY_BTN}" data-small-btn="Try again">Try again</button></p>
-  <p class="${REQUEST_LINE}" data-small="request">Not in the library?
-    <button type="button" class="${REQUEST_BTN}" data-small-btn="Request it">Request it</button></p>
+  <div class="search-none" data-small="request"><button type="button" class="${NONE_BACK}" data-small-btn="Back to the results">Back to the results</button>
+    <p class="search-req-note">The titles that can be requested could not be loaded.
+      <button type="button" class="${REQ_RETRY}" data-small-btn="Try again (requests)">Try again</button></p>
+    <ul class="search-req-list">
+      <li class="search-req-row"><span class="search-req-art"></span><span class="search-req-text"><span class="search-req-title">The Glass Orchard</span></span>
+        <button type="button" class="stage-btn stage-btn-primary search-req-btn" data-small-btn="Request (first)">Request</button></li>
+      <li class="search-req-row"><span class="search-req-art"></span><span class="search-req-text"><span class="search-req-title">The Assassination of Jesse James by the Coward Robert Ford</span></span>
+        <button type="button" class="stage-btn stage-btn-ghost search-req-btn" data-small-btn="Request (second)">Request</button></li>
+      <li class="search-req-row"><span class="search-req-art"></span><span class="search-req-text"><span class="search-req-title">Orchard of Glass</span></span>
+        <button type="button" class="${REQ_SEE}" data-small-btn="See my requests (row)">See my requests</button></li></ul>
+    <p class="search-req-foot">Past the server's limit, a request waits for an admin to approve it.
+      <button type="button" class="${REQ_ALL}" data-small-btn="See my requests">See my requests</button></p></div>
   <section style="max-width:36rem;margin-top:24px"><div class="mb-1 flex items-center"><h2 class="flex-1 text-xs">Recent searches</h2>
     <button type="button" class="${RECENT_CLEAR}" data-small-btn="Clear">Clear</button></div>
     <ul class="m-0 list-none p-0"><li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 1"><span class="min-w-0 flex-1 truncate">night train</span></button></li>
@@ -715,7 +742,7 @@ for (const touch of [true, false]) {
     // 4. Small buttons outside a card. On a touch screen each is a 44px
     // target by hit-testing, whatever it is drawn at; a neighbour's area
     // laid over it shortens what is measured, so an overlap fails here too.
-    if (r.small.length !== 14) fail(`the small-button probe found ${r.small.length} buttons, expected 14 — this check is out of date`)
+    if (r.small.length !== 19) fail(`the small-button probe found ${r.small.length} buttons, expected 19 — this check is out of date`)
     for (const b of r.small) {
       if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)

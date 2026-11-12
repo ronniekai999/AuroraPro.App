@@ -3040,6 +3040,8 @@ export interface RequestsConfig {
   enabled: boolean
   has_radarr: boolean
   has_sonarr: boolean
+  /** A 4K downloader is set up for movies or shows. */
+  has_4k?: boolean
 }
 
 export async function listRequests(signal?: AbortSignal): Promise<MediaRequest[]> {

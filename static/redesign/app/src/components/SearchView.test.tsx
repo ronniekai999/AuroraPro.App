@@ -31,6 +31,22 @@ vi.mock('@/lib/api', async (original) => ({
     }),
 }))
 
+// The list of titles that can be requested has tests of its own
+// (SearchRequest.test.tsx). Here it is a stand-in that shows what the page
+// hands it and lets its two calls be made.
+const MADE = { id: 900, title: 'The Lost Reel' }
+/** How many times the list was drawn, in any commit: a list that comes up
+ *  for one frame has already asked the server its questions. */
+const requestList = { drawn: 0 }
+vi.mock('@/components/SearchRequest', () => ({
+  SearchRequest: (p: { query: string; userId: number; onRequested: (r: unknown) => void; onOpenRequests: () => void }) => (requestList.drawn++,
+    <div data-search-request="" data-query={p.query} data-user={p.userId}>
+      <button type="button" onClick={() => p.onRequested(MADE)}>request the first</button>
+      <button type="button" onClick={p.onOpenRequests}>see requests</button>
+    </div>
+  ),
+}))
+
 import SearchView from './SearchView'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
 
@@ -96,7 +112,11 @@ describe('typing', () => {
     await settle(300)
     asks[0].answer([])
     await settle()
-    expect(screen.getByRole('heading', { name: /No title matches .a slow mystery for a rainy night./ })).toBeInTheDocument()
+    const none = document.querySelector<HTMLElement>('[data-search-empty]')!
+    expect(within(none).getByRole('heading', { name: 'Not in your library yet' })).toBeInTheDocument()
+    expect(none.querySelector('.search-none-lead')!.textContent).toBe('Nothing here matches “a slow mystery for a rainy night”.')
+    // The offer is the same line the results have, worded for having none.
+    expect(document.querySelector('[data-search-describe]')!.textContent).toContain('Meant a mood, not a title?')
     fireEvent.click(screen.getByRole('button', { name: 'Search by description' }))
     expect(onDescribe).toHaveBeenCalledWith('a slow mystery for a rainy night')
   })
@@ -156,7 +176,8 @@ describe('asking for a search by description', () => {
     expect(status()).toBe('The search by description did not work.')
     expect(document.body.textContent).not.toMatch(/HTTP|500/)
     // Not "nothing found", and no offer of the search that just failed.
-    expect(screen.queryByRole('heading', { name: /Nothing found|No title matches/ })).toBeNull()
+    expect(document.querySelector('[data-search-empty]')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Not in your library yet' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Search by description' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(onDescribe).toHaveBeenCalledWith('cozy mystery')
@@ -206,7 +227,8 @@ describe('asking for a search by description', () => {
     await settle()
     expect(document.querySelector('[data-search-by-title-instead]')!.textContent)
       .toBe('A search by description found nothing for these words, or is not set up on this server.')
-    expect(screen.getByRole('heading', { name: 'Nothing found' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Not in your library yet' })).toBeInTheDocument()
+    expect(document.querySelector('.search-none-lead')!.textContent).toBe('Nothing here matches “cozy mystery”, by title or by description.')
   })
 
   // Opening a result unmounts this page; Back mounts it again with the same
@@ -298,58 +320,90 @@ describe('words with a space at either end', () => {
 })
 
 // Requesting has no tab of its own: it is where a search that found nothing
-// ends.
+// ends. The titles that can be asked for are listed on the page itself.
 describe('a search that finds nothing', () => {
-  const offer = () => document.querySelector('[data-search-request]')
+  const list = () => document.querySelector<HTMLElement>('[data-search-request]')
+  const requesting = () => ({ userId: 7, onRequested: vi.fn(), onOpenRequests: vi.fn() })
   async function searchFor(words: string, props: Record<string, unknown> = {}) {
     const view = render(<SearchView {...base} query={words} {...props} />)
     await settle(300)
     return view
   }
 
-  it('offers to request it, with the words that were searched for', async () => {
-    const onRequest = vi.fn()
-    await searchFor('  the lost reel ', { onRequest, onDescribe: vi.fn() })
+  it('lists what can be requested for the words that were searched for, and passes on what is done there', async () => {
+    const r = requesting()
+    await searchFor('  the lost reel ', { requesting: r, onDescribe: vi.fn() })
     asks[0].answer([])
     await settle()
-    expect(offer()!.textContent).toContain('Not in the library?')
-    fireEvent.click(screen.getByRole('button', { name: 'Request it' }))
-    expect(onRequest).toHaveBeenCalledWith('the lost reel')
+    const none = document.querySelector<HTMLElement>('[data-search-empty]')!
+    expect(within(none).getByRole('heading', { name: 'Not in your library yet' })).toBeInTheDocument()
+    expect(none.querySelector('.search-none-lead')!.textContent)
+      .toBe('Nothing here matches “the lost reel”. If it is one of these, request it and you will get a notification when it is ready to watch.')
+    // The heading says it: the count line above is for assistive tech only
+    // there, and the offer of the other way to search sits under the lead.
+    expect(document.querySelector('[role="status"]')).toHaveClass('sr-only')
+    expect(status()).toBe('0 results for "  the lost reel "')
+    expect(none.querySelector('[data-search-describe]')!.textContent).toContain('Meant a mood, not a title?')
+    expect(document.querySelectorAll('[data-search-describe]')).toHaveLength(1)
+    // The words as searched for (trimmed), and whose requests they are.
+    expect(list()!.dataset.query).toBe('the lost reel')
+    expect(list()!.dataset.user).toBe('7')
+    fireEvent.click(screen.getByRole('button', { name: 'request the first' }))
+    expect(r.onRequested).toHaveBeenCalledWith(MADE)
+    fireEvent.click(screen.getByRole('button', { name: 'see requests' }))
+    expect(r.onOpenRequests).toHaveBeenCalledTimes(1)
   })
 
-  it('still offers it after a search by description has found nothing either', async () => {
-    const onRequest = vi.fn()
-    await searchFor('cozy mystery', { onRequest, describe: { query: 'cozy mystery', n: 1 }, onDescribe: vi.fn() })
+  it('still lists them after a search by description has found nothing either', async () => {
+    await searchFor('cozy mystery', { requesting: requesting(), describe: { query: 'cozy mystery', n: 1 }, onDescribe: vi.fn() })
     asks[0].answer([], 'semantic')
     await settle()
-    expect(screen.getByRole('heading', { name: 'Nothing found' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Request it' }))
-    expect(onRequest).toHaveBeenCalledWith('cozy mystery')
+    expect(screen.getByRole('heading', { name: 'Not in your library yet' })).toBeInTheDocument()
+    expect(list()!.dataset.query).toBe('cozy mystery')
   })
 
-  // A profile that is not offered requests is given no handler.
-  it('does not offer it to a session that has no requests', async () => {
+  // The commit between a keystroke and the search starting has no results
+  // and is not loading yet. It is not an empty search: nothing is said to
+  // be missing, and nothing is looked up, for words nobody has answered for.
+  it('is not taken for one before the words have been answered for, not even for one frame', async () => {
+    requestList.drawn = 0
+    render(<SearchView {...base} query="the lost reel" requesting={requesting()} onDescribe={vi.fn()} />)
+    expect(document.querySelector('[data-search-empty]')).toBeNull()
+    expect(list()).toBeNull()
+    await settle(300)
+    expect(requestList.drawn).toBe(0)
+    asks[0].answer([])
+    await settle()
+    expect(requestList.drawn).toBeGreaterThan(0)
+  })
+
+  // A profile that is not offered requests is given nothing to request with.
+  it('lists nothing to request for a session that has no requests, and does not speak of requesting', async () => {
     await searchFor('the lost reel', { onDescribe: vi.fn() })
     asks[0].answer([])
     await settle()
     expect(document.querySelector('[data-search-empty]')).not.toBeNull()
-    expect(offer()).toBeNull()
+    expect(list()).toBeNull()
+    expect(document.querySelector('.search-none-lead')!.textContent).toBe('Nothing here matches “the lost reel”.')
+    expect(document.body.textContent).not.toMatch(/request/i)
   })
 
-  it('does not offer it while there are results, while it is still looking, or when the search failed', async () => {
-    const onRequest = vi.fn()
-    await searchFor('harbor', { onRequest })
+  it('lists nothing to request while there are results, while it is still looking, or when the search failed', async () => {
+    const r = requesting()
+    await searchFor('harbor', { requesting: r })
     // Still looking.
-    expect(offer()).toBeNull()
+    expect(list()).toBeNull()
     asks[0].answer([media(1, 'Harbor Lights')])
     await settle()
-    expect(offer()).toBeNull()
+    expect(list()).toBeNull()
+    // With results the count line is drawn, and the offer is above them.
+    expect(document.querySelector('[role="status"]')).not.toHaveClass('sr-only')
     cleanup()
     asks.length = 0
-    await searchFor('harbor', { onRequest })
+    await searchFor('harbor', { requesting: r })
     asks[0].fail(new Error('HTTP 500'))
     await settle()
-    expect(offer()).toBeNull()
+    expect(list()).toBeNull()
   })
 })
 
@@ -434,8 +488,8 @@ describe('the results', () => {
     expect(within(best).getByRole('heading', { name: 'Best match' })).toBeInTheDocument()
     const row = best.querySelector<HTMLElement>('.search-best')!
     expect(row.querySelector('.search-best-title')!.textContent).toBe('Harbor Lights')
-    // Year, content rating (not the quality mark), length, genre.
-    expect(row.querySelector('.search-best-facts')!.textContent).toBe('2021 · PG-13 · 1h 52m · Drama')
+    // Kind, year, content rating (not the quality mark), length, genre.
+    expect(row.querySelector('.search-best-facts')!.textContent).toBe('Movie · 2021 · PG-13 · 1h 52m · Drama')
     expect(row.querySelector('.search-best-line')!.textContent).toBe('A lighthouse keeper comes home.')
     // The title is the button; Play and More are beside it.
     const open = within(row).getByRole('button', { name: /^Harbor Lights/ })
@@ -466,7 +520,7 @@ describe('the results', () => {
     await answered({ onCardPlay, resumableIds: new Set([1]), progressById: new Map([[1, { label: '41 min left', fraction: 0.6 }]]) })
     const row = section('best')!.querySelector<HTMLElement>('.search-best')!
     expect(within(row).getByRole('button', { name: 'Resume Harbor Lights' }).textContent).toContain('Resume')
-    expect(row.querySelector('.search-best-facts')!.textContent).toBe('2021 · PG-13 · 1h 52m · Drama · 41 min left')
+    expect(row.querySelector('.search-best-facts')!.textContent).toBe('Movie · 2021 · PG-13 · 1h 52m · Drama · 41 min left')
   })
 
   it('opens the menu on a long press of the best match, and the finger lifting does not open the title', async () => {
@@ -498,6 +552,9 @@ describe('the results', () => {
     // its year, and no quality or rating chips.
     expect([...titles.querySelectorAll('.co-meta')].map(m => m.textContent)).toEqual(['Show · 2024', 'Show · 2024', 'Movie · 2024'])
     expect(titles.querySelector('.co-chip')).toBeNull()
+    // A card's spoken name says the year once: the line of facts has it.
+    expect(within(titles).getAllByRole('button', { name: /^Harbor / }).map(b => b.getAttribute('aria-label')))
+      .toEqual(['Harbor Nights — Show · 2024', 'Harbor Days — Show · 2024', 'Harbor Dawn — Movie · 2024'])
     // The best match is not also one of the cards.
     expect(titles.textContent).not.toContain('Harbor Lights')
     view.unmount()
@@ -626,7 +683,7 @@ describe('the results', () => {
     })
 
     it('are a result by themselves: a search that matches no title but a collection is not an empty one', async () => {
-      await answered({ onOpenCollection: vi.fn(), onRequest: vi.fn() }, [], 'rainy')
+      await answered({ onOpenCollection: vi.fn(), requesting: { userId: 1, onRequested: vi.fn(), onOpenRequests: vi.fn() } }, [], 'rainy')
       expect(document.querySelector('[data-search-empty]')).toBeNull()
       expect([...section('collections')!.querySelectorAll('.search-colrow-name')].map(n => n.textContent)).toEqual(['Rainy Sunday'])
       expect(status()).toBe('1 result for "rainy"')
@@ -665,23 +722,23 @@ describe('the results', () => {
   })
 
   describe('what can be done with a search', () => {
+    const requesting = () => ({ userId: 7, onRequested: vi.fn(), onOpenRequests: vi.fn() })
+
     it('offers a watch party with the best match and a request, each only to a session that may', async () => {
       const onWatchTogether = vi.fn()
-      const onRequest = vi.fn()
-      const view = await answered({ onWatchTogether, onRequest })
+      const view = await answered({ onWatchTogether, requesting: requesting() })
       const actions = section('actions')!
       expect(actions.closest('aside')).not.toBeNull()
       expect(within(actions).getByRole('heading', { name: 'Actions' })).toBeInTheDocument()
       fireEvent.click(within(actions).getByRole('button', { name: 'Start a watch party with Harbor Lights' }))
       expect(onWatchTogether).toHaveBeenCalledWith(found[0])
-      fireEvent.click(within(actions).getByRole('button', { name: 'Not here? Request a title' }))
-      expect(onRequest).toHaveBeenCalledWith('harbor')
+      expect(within(actions).getByRole('button', { name: 'Not here? Request a title' })).toBeInTheDocument()
       // The party is with what the filter leaves first.
       fireEvent.click(screen.getByRole('button', { name: 'TV Shows' }))
       fireEvent.click(within(section('actions')!).getByRole('button', { name: 'Start a watch party with Harbor Nights' }))
       expect(onWatchTogether).toHaveBeenLastCalledWith(found[1])
       view.unmount()
-      await answered({ onRequest })
+      await answered({ requesting: requesting() })
       expect(screen.queryByRole('button', { name: /^Start a watch party/ })).toBeNull()
       expect(screen.getByRole('button', { name: 'Not here? Request a title' })).toBeInTheDocument()
       cleanup()
@@ -689,14 +746,47 @@ describe('the results', () => {
       expect(section('actions')).toBeNull()
     })
 
+    // "Not here?" while the search has results: the titles that can be
+    // requested for these words take the results' place, until the viewer
+    // goes back or searches for something else.
+    it('lists what can be requested in the results\' place when asked, and gives the results back', async () => {
+      const r = requesting()
+      const view = await answered({ requesting: r, onDescribe: vi.fn() })
+      expect(document.querySelector('[data-search-request]')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Not here? Request a title' }))
+      const asking = document.querySelector<HTMLElement>('[data-search-asking]')!
+      expect(within(asking).getByRole('heading', { name: 'Request a title' })).toBeInTheDocument()
+      expect(asking.querySelector<HTMLElement>('[data-search-request]')!.dataset.query).toBe('harbor')
+      // The results, their filter, the other way to search and the actions step aside.
+      expect(section('best')).toBeNull()
+      expect(section('titles')).toBeNull()
+      expect(screen.queryByRole('group', { name: 'Filter results' })).toBeNull()
+      expect(document.querySelector('[data-search-describe]')).toBeNull()
+      expect(section('actions')).toBeNull()
+      fireEvent.click(within(asking).getByRole('button', { name: 'request the first' }))
+      expect(r.onRequested).toHaveBeenCalledWith(MADE)
+      fireEvent.click(within(asking).getByRole('button', { name: 'Back to the results' }))
+      expect(document.querySelector('[data-search-asking]')).toBeNull()
+      expect(section('best')).not.toBeNull()
+      // Asked again, then the words change: the new words' results, not a
+      // request list nobody asked for.
+      fireEvent.click(screen.getByRole('button', { name: 'Not here? Request a title' }))
+      view.rerender(<SearchView {...base} query="harbo" requesting={r} />)
+      await settle(300)
+      asks[asks.length - 1].answer(found)
+      await settle()
+      expect(document.querySelector('[data-search-asking]')).toBeNull()
+      expect(section('best')).not.toBeNull()
+    })
+
     it('offers nothing to do while nothing is found or typed', async () => {
-      render(<SearchView {...base} query="" onWatchTogether={vi.fn()} onRequest={vi.fn()} />)
+      render(<SearchView {...base} query="" onWatchTogether={vi.fn()} requesting={requesting()} />)
       expect(section('actions')).toBeNull()
       cleanup()
-      await answered({ onWatchTogether: vi.fn(), onRequest: vi.fn() }, [])
-      // The empty page makes its own offer to request.
+      await answered({ onWatchTogether: vi.fn(), requesting: requesting() }, [])
+      // The empty page lists what can be requested itself.
       expect(section('actions')).toBeNull()
-      expect(document.querySelector('[data-search-request]')).not.toBeNull()
+      expect(document.querySelector('[data-search-empty] [data-search-request]')).not.toBeNull()
     })
 
     it('says how the two ways of searching differ, only where there are two, and names the key the screen has', () => {

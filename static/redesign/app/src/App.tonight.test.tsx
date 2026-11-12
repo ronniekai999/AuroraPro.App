@@ -602,7 +602,7 @@ describe('the page around the hero', () => {
 
     // Typing matches titles, and only titles: no model call per keystroke.
     fireEvent.change(field, { target: { value: 'a slow mystery' } })
-    await screen.findByRole('heading', { name: /No title matches .a slow mystery./ }, find)
+    await waitFor(() => expect(document.querySelector('[data-search-empty] .search-none-lead')?.textContent).toContain('Nothing here matches “a slow mystery”.'), find)
     expect(page.searches).toEqual([{ q: 'a slow mystery', mode: 'literal' }])
 
     // Enter asks for the search by description, once.
@@ -615,7 +615,7 @@ describe('the page around the hero', () => {
 
     // Editing the words is a new query: by title again, until asked.
     fireEvent.change(field, { target: { value: 'a slow mystery film' } })
-    await screen.findByRole('heading', { name: /No title matches .a slow mystery film./ }, find)
+    await waitFor(() => expect(document.querySelector('[data-search-empty] .search-none-lead')?.textContent).toContain('Nothing here matches “a slow mystery film”.'), find)
     expect(page.searches.map(x => x.mode)).toEqual(['literal', 'semantic', 'literal'])
     // The page's own button asks too, for the words now in the field.
     fireEvent.click(screen.getByRole('button', { name: 'Search by description' }))
@@ -638,7 +638,7 @@ describe('the page around the hero', () => {
     // model again: an ask is spent once the field changes.
     fireEvent.change(field, { target: { value: 'a slow mystery fil' } })
     fireEvent.change(field, { target: { value: 'a slow mystery film' } })
-    await screen.findByRole('heading', { name: /No title matches .a slow mystery film./ }, find)
+    await waitFor(() => expect(document.querySelector('[data-search-empty] .search-none-lead')?.textContent).toContain('Nothing here matches “a slow mystery film”.'), find)
     expect(page.searches.slice(4).map(x => x.mode)).toEqual(['literal'])
   })
 
