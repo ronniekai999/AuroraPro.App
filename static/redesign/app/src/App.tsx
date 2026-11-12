@@ -50,8 +50,6 @@ import {
   listProfiles,
   activateProfile,
   getActiveProfile,
-  setProfileMaturity,
-  updateProfile,
   listWatchlists,
   addToWatchlist,
   submitMediaFeedback,
@@ -7033,25 +7031,7 @@ export default function App() {
                 profileKnown={activeProfileId !== null
                   ? profiles.some(p => p.id === activeProfileId)
                   : profilesLoaded && profiles.length === 0}
-                onMaturityChange={(pref) => {
-                  if (!activeProfileId) return
-                  // Return the promise so SettingsView can roll back its optimistic
-                  // selection on failure; re-throw after toasting so that .catch fires.
-                  return setProfileMaturity(activeProfileId, pref)
-                    .then(() => listProfiles())
-                    .then(setProfiles)
-                    .then(() => addToast('Content tone updated — your feed will re-curate', 'success'))
-                    .catch((e) => { addToast('Failed to update content tone', 'error'); throw e })
-                }}
-                onAvatarChange={(avatarUrl) => {
-                  if (!activeProfileId) return
-                  return updateProfile(activeProfileId, { avatar_url: avatarUrl })
-                    .then(() => listProfiles())
-                    .then(setProfiles)
-                    .then(() => addToast('Avatar updated', 'success'))
-                    .catch((e) => { addToast('Failed to update avatar', 'error'); throw e })
-                }}
-                onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
+                onOpenProfilePage={() => handleNavigate('profile')}
                 onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
               />
             </ViewSuspense>
@@ -7121,7 +7101,9 @@ export default function App() {
                 activeProfile={profileSwitchPending ? null : profiles.find(p => p.id === activeProfileId) ?? null}
                 profileKnown={personalProfileReady && !profileSwitchPending}
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
-                onOpenSettings={() => handleNavigate('settings')}
+                onOpenSettings={(pane) => (pane ? navigate(settingsPath(pane)) : handleNavigate('settings'))}
+                onToast={addToast}
+                onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
               />
             </ViewSuspense></HiddenPage>
           )}

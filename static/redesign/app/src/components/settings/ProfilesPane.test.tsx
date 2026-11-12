@@ -248,7 +248,7 @@ describe('managing profiles, from a profile without a limit', () => {
   it('warns about the unlocked profiles a limited profile could switch into', async () => {
     await open()
     expect(screen.getByText(/Parent and Sam have no PIN\./)).toBeInTheDocument()
-    expect(screen.getByText(/Kid can switch to them without one/)).toBeInTheDocument()
+    expect(screen.getByText(/A profile with a limit can switch to them without one/)).toBeInTheDocument()
   })
   it('does not warn when every profile a limited one could switch into is locked', async () => {
     api.listProfiles.mockResolvedValue([{ ...parent, has_pin: true }, kid, { ...sam, has_pin: true }])
@@ -330,7 +330,7 @@ describe('managing profiles, from a profile without a limit', () => {
 
     fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Delete the list Rainy days' }))
     expect(api.deleteWatchlist).not.toHaveBeenCalled()
-    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Delete “Rainy days”' }))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Delete “Rainy days” and what is in it' }))
     await waitFor(() => expect(api.deleteWatchlist).toHaveBeenCalledWith(3, 7))
   })
 

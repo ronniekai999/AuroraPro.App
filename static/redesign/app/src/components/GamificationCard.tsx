@@ -1,11 +1,40 @@
-// Phase 6 — Gamification UI: XP card + achievements grid.
-//
-// Renders on the Settings/Profile area. Two pieces:
-//   ProfileXPCard — current level, XP progress bar, streak flame.
-//   AchievementsGrid — unlocked vs locked, sorted by xp_reward asc.
+// Watching statistics and achievements, on the profile page: level and
+// points, this week, the streak, the genre finished most, and every
+// achievement, earned or still to go.
 
 import { useEffect, useState } from 'react'
 import { getGamificationStats, type GamificationStats } from '@/lib/api'
+
+/** How far through the CURRENT level the points are, as a percentage. Both
+ *  ends of the level are used (the points it starts and ends at), so the bar
+ *  shows progress through this level's slice and not the share of all points
+ *  ever needed: at level 3 with 350 points, a level running 300 to 600, that
+ *  is 50 of 300, about 17%, not 58%. */
+export function levelProgressPct(xp: { xp: number; prev_level_total?: number; next_level_total?: number }): number {
+  const prev = xp.prev_level_total ?? 0
+  const next = xp.next_level_total ?? 0
+  const slice = Math.max(1, next - prev)
+  return Math.min(100, Math.max(0, ((xp.xp - prev) / slice) * 100))
+}
+
+/** Minutes finished this week as hours: one decimal under ten, whole above. */
+export function weekHours(minutes: number | undefined): string | null {
+  if (minutes == null) return null
+  if (minutes === 0) return '0'
+  return minutes >= 600 ? String(Math.round(minutes / 60)) : (minutes / 60).toFixed(1)
+}
+
+function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
+  return (
+    <div>
+      <dt className="text-xs text-ink-2">{label}</dt>
+      <dd className="mt-0.5 text-[17px] font-semibold tabular-nums text-ink">
+        {value}
+        {note && <span className="ml-2 text-[13px] font-normal text-ink-2">{note}</span>}
+      </dd>
+    </div>
+  )
+}
 
 export function GamificationCard() {
   const [stats, setStats] = useState<GamificationStats | null>(null)
@@ -15,140 +44,94 @@ export function GamificationCard() {
     let cancelled = false
     const ac = new AbortController()
     getGamificationStats(ac.signal)
-      .then((s) => { if (!cancelled) setStats(s) })
-      .catch((e) => {
-        if (!cancelled && e.name !== 'AbortError') {
-          setError(e instanceof Error ? e.message : 'Failed to load stats')
-        }
+      .then(s => { if (!cancelled) setStats(s) })
+      .catch(e => {
+        if (!cancelled && e.name !== 'AbortError') setError('Your progress could not be loaded.')
       })
     return () => { cancelled = true; ac.abort() }
   }, [])
 
-  if (error) return <p className="text-red-300 text-sm">{error}</p>
-  if (!stats) return <p className="text-white/50 text-sm">Loading…</p>
+  if (error) return <p role="alert" className="text-[14px] text-danger-ink">{error}</p>
+  if (!stats) return <p className="text-[14px] text-ink-2">Loading…</p>
 
   const { xp, unlocked, achievement_catalog } = stats
-  // Audit H1 fix — per-level progress now uses BOTH endpoints
-  // (prev_level_total + next_level_total) so the bar reflects
-  // progress through THIS level's slice, not absolute XP%. For an
-  // L3 user at 350 XP with prev=300 next=600, we render 50/300 =
-  // 16.7%, not the misleading 58% of the old formula.
-  const prevTotal = xp.prev_level_total ?? 0
-  const nextTotal = xp.next_level_total ?? 0
-  const slice = Math.max(1, nextTotal - prevTotal)
-  const pct = Math.min(100, Math.max(0, ((xp.xp - prevTotal) / slice) * 100))
-  const unlockedKeys = new Set(unlocked.map((u) => u.achievement_key))
+  const pct = levelProgressPct(xp)
+  const unlockedKeys = new Set(unlocked.map(u => u.achievement_key))
+  const hours = weekHours(stats.minutes_this_week)
 
   return (
-    <div className="space-y-6">
-      {/* XP Card */}
-      <div className="rounded-2xl p-6 border border-purple-500/20 bg-gradient-to-br from-purple-900/30 via-[#0a0a0f] to-[#050505] relative overflow-hidden">
-        <div className="absolute -top-20 -right-20 w-[300px] h-[300px] rounded-full bg-purple-500/15 blur-3xl pointer-events-none" />
-        <div className="relative">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <p className="text-purple-200/80 text-xs uppercase tracking-wider mb-1">
-                Level
-              </p>
-              <p className="text-white text-5xl font-bold font-display">
-                {xp.level}
-              </p>
-            </div>
-            {xp.current_streak > 0 && (
-              <div className="text-right">
-                <p className="text-orange-300/80 text-xs uppercase tracking-wider mb-1">
-                  Streak
-                </p>
-                <p className="text-white text-3xl font-bold font-display">
-                  🔥 {xp.current_streak}
-                </p>
-                <p className="text-white/50 text-xs mt-1">
-                  Longest: {xp.longest_streak}
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* XP progress bar */}
-          <div>
-            <div className="flex items-center justify-between text-xs text-white/60 mb-1.5">
-              <span>{xp.xp.toLocaleString()} XP</span>
-              {xp.next_level_total && (
-                <span>
-                  {(xp.xp_to_next_level || 0).toLocaleString()} XP to L{xp.level + 1}
-                </span>
-              )}
-            </div>
-            <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between mt-4 pt-4 border-t border-white/[0.04]">
-            <div>
-              {/* QA BUG-003 — "Total watches" only increments on
-                  ≥90% completion (see internal/db/queries_gamification.go
-                  BumpWatchCount). Mid-watch Continue Watching items
-                  don't bump it. Relabel as "Completed" so users
-                  don't read 0 here while seeing 4 in-progress
-                  watches on the Library page as a sync bug.
-                  2026-05-25 — added tooltip so the 90% threshold
-                  is discoverable. Previous QA round confused this
-                  zero with a counter bug ("CW has 5 items, Completed
-                  reads 0"); CW items are by definition in-progress,
-                  so they're correctly excluded — but only the code
-                  comment said so, the user-facing label did not. */}
-              <p
-                className="text-white/50 text-xs cursor-help"
-                title="Counts items you've watched to ≥90% of their runtime. In-progress items in Continue Watching are excluded by design."
-              >
-                Completed
-              </p>
-              <p className="text-white/90 text-lg font-semibold">{xp.total_watches}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-white/50 text-xs">Achievements</p>
-              <p className="text-white/90 text-lg font-semibold">
-                {unlocked.length} / {achievement_catalog.length}
-              </p>
+    <div>
+      <div className="rounded-control bg-surface-raised p-5">
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <p>
+            <span className="block text-xs text-ink-2">Level</span>
+            <span className="block font-display text-[40px] font-bold leading-none tabular-nums text-ink">{xp.level}</span>
+          </p>
+          <div className="min-w-0 flex-1 basis-[14rem]">
+            <p className="flex justify-between gap-4 text-[13px] tabular-nums text-ink-2">
+              <span>{xp.xp.toLocaleString()} points</span>
+              {xp.next_level_total ? <span>{(xp.xp_to_next_level || 0).toLocaleString()} to level {xp.level + 1}</span> : null}
+            </p>
+            <div
+              role="progressbar"
+              aria-label={`Progress through level ${xp.level}`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(pct)}
+              className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--track)]"
+            >
+              <div className="h-full bg-action motion-safe:transition-[width] motion-safe:duration-700" style={{ width: `${pct}%` }} />
             </div>
           </div>
         </div>
+        <dl className="mt-5 grid gap-x-6 gap-y-4 [grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr))]">
+          <Stat label="Finished" value={`${xp.total_watches.toLocaleString()} ${xp.total_watches === 1 ? 'title' : 'titles'}`} />
+          {(hours !== null || stats.titles_this_week != null) && (
+            <Stat
+              label="This week"
+              value={`${stats.titles_this_week ?? 0} finished`}
+              note={hours !== null ? `${hours} ${hours === '1.0' ? 'hour' : 'hours'}` : undefined}
+            />
+          )}
+          <Stat
+            label="Streak"
+            value={`${xp.current_streak} ${xp.current_streak === 1 ? 'day' : 'days'}`}
+            note={`longest ${xp.longest_streak}`}
+          />
+          {stats.top_genre ? <Stat label="Finished most" value={stats.top_genre} /> : null}
+          <Stat label="Achievements" value={`${unlocked.length} of ${achievement_catalog.length}`} />
+        </dl>
+        {/* Said, because Continue Watching can hold several titles while
+            this number reads 0, and that looks like a counter gone wrong. */}
+        <p className="mt-4 text-[13px] leading-snug text-ink-2">
+          A title counts as finished once it is watched to 90% of its length, so what is still in Continue Watching is not in these numbers.
+        </p>
       </div>
 
-      {/* Achievements */}
-      <div>
-        <h3 className="text-white text-lg font-semibold mb-4">Achievements</h3>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {achievement_catalog.map((a) => {
-            const isUnlocked = unlockedKeys.has(a.key)
-            return (
-              <div
-                key={a.key}
-                className={`p-4 rounded-xl border text-center transition-ui ${
-                  isUnlocked
-                    ? 'bg-purple-500/10 border-purple-500/30 text-white'
-                    : 'bg-white/[0.02] border-white/[0.06] text-white/60 grayscale'
-                }`}
-                title={a.description}
-              >
-                <div className="text-3xl mb-2">{a.icon}</div>
-                <p className="text-sm font-medium">{a.title}</p>
-                {/* One step under the title either way. On a locked tile that is
-                    /50 outright: opacity-70 would stack on the tile's /60 and
-                    drop the description under 4.5:1. */}
-                <p className={`text-xs mt-1${isUnlocked ? ' opacity-70' : ' text-white/50'}`}>{a.description}</p>
-                <p className="text-[10px] uppercase tracking-wider mt-2 text-purple-300/70">
-                  +{a.xp_reward} XP
-                </p>
-              </div>
-            )
-          })}
-        </div>
-      </div>
+      {achievement_catalog.length > 0 && (
+        <>
+          <h3 className="mb-3 mt-6 font-display text-[17px] font-semibold text-ink">Achievements</h3>
+          <ul className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(200px,100%),1fr))]">
+            {achievement_catalog.map(a => {
+              const earned = unlockedKeys.has(a.key)
+              return (
+                <li key={a.key} className={`rounded-control border p-4 ${earned ? 'border-line-strong bg-surface-raised' : 'border-line'}`}>
+                  <p className="flex items-start gap-3">
+                    <span aria-hidden="true" className={`flex-none text-[24px] leading-none ${earned ? '' : 'opacity-50 grayscale'}`}>{a.icon}</span>
+                    <span className="min-w-0">
+                      <span className="block text-[15px] font-semibold text-ink">{a.title}</span>
+                      <span className="mt-0.5 block text-[13px] leading-snug text-ink-2">{a.description}</span>
+                      <span className="mt-1.5 block text-xs tabular-nums text-ink-3">
+                        {earned ? 'Earned' : 'Not yet'} · {a.xp_reward} points
+                      </span>
+                    </span>
+                  </p>
+                </li>
+              )
+            })}
+          </ul>
+        </>
+      )}
     </div>
   )
 }

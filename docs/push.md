@@ -36,10 +36,10 @@ generates a VAPID keypair and stores it as **one** `server_settings` row
 halves can never be torn by a race). The row is masked in the admin settings
 listing and cannot be written through the admin API.
 
-Users enable push per device: **Settings → Notifications → Push to this
-device**, which asks browser permission (only ever on that tap), subscribes,
-and registers the subscription. **Settings → Send test notification** proves
-the pipe end-to-end.
+Users enable push per device: **Settings → App and notifications → Push to
+this device**, which asks browser permission (only ever on that tap),
+subscribes, and registers the subscription. **Send a test**, in the same
+section once push is on, proves the pipe end-to-end.
 
 ## The operator switch
 

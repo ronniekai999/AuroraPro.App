@@ -1,5 +1,5 @@
 // Human-readable OAuth provider labels, shared by the Connected
-// Accounts UI (SettingsView's ConnectedAccountsCard) and App's OAuth
+// Accounts UI (Settings' sign-in methods) and App's OAuth
 // link-mode return toast. Extracted from App.tsx (2026-06-17 app split,
 // Phase 2.2) so the lazy SettingsView chunk and App can both reach it
 // without one importing the other. Keys match the provider Name()

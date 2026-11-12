@@ -770,9 +770,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     profile is stricter); their
     progress and feedback writes land on that profile. A backup restore can
     leave tokens in the same state.
-  - The web app has no screen for changing another profile's ceiling or the
-    default profile; ceilings are set in a profile's own onboarding or
-    through the API.
+  - The web app's Settings ("Profiles and parental controls") offers four
+    ceilings (none, TV-G, TV-PG, TV-14); any other rating on the ladder is
+    set through the API or by onboarding (which writes PG), and is shown
+    there as stored.
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's

@@ -2145,56 +2145,38 @@ html[data-effects="reduced"] .stage-toolbar {
 }
 .stage-calchip-p { background: var(--ink); color: var(--on-action); }
 
-/* ══ Settings (Aurora Stage Phase 7a) ═════════════════════════════════
-   The mockup's .opt — the selected-state chip used by both Appearance
-   radiogroups (glow and typeface).
-
-   NOT a .stage-setcard / .stage-setgrid to go with it, deliberately:
-   - the card surface is already `.glass-panel` (border + halo + blur, and it
-     tracks --glow-border/--glow-halo so the Glow dial keeps working on it).
-     Adding a second near-identical panel class is the .stage-badge-vs-
-     .badge-glass mistake Phase 5 had to unpick.
-   - the two-column grid stays as Tailwind at the call site, because it has to
-     collapse to one column below md. Baking `grid-template-columns` into a
-     primitive would put it out of reach of `md:` variants entirely — see the
-     second correction in the CASCADE HAZARD note.
-
-   State is driven off [aria-checked="true"], the real accessible state for
-   role="radio", so the visual and the announced state cannot disagree. */
+/* ══ Settings ════════════════════════════════════════════════════════
+   One of a few choices, drawn as a block with a title and a line under it
+   (what a profile's suggestions lean towards; onboarding's steps). State is
+   driven off [aria-checked="true"], the real accessible state for
+   role="radio", so what is shown and what is announced cannot disagree. */
 .stage-opt {
-  padding: 13px 14px;
-  border-radius: var(--r-md);
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  padding: 12px 16px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  border: 1px solid transparent;
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
 }
-.stage-opt:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.18); }
-/* Declared after :hover so hovering the selected chip keeps its purple — the
-   same (0,2,0)-vs-(0,2,0) order dependency .stage-fpill documents. The border
-   is 0.8 rather than the mockup's 1.0-on---primary for the 1.4.11 3:1 floor
-   (3.60:1), and the weight/fill pair is a second, non-colour cue. */
+.stage-opt:hover { background: var(--surface-raised-2); }
+/* Declared after :hover so hovering the chosen one keeps its edge. The
+   chosen option is told from the others by its edge alone (the two fills are
+   one step apart), so the edge is the ink colour, 13:1 on either fill, and
+   not a hairline. */
 .stage-opt[aria-checked="true"] {
-  background: rgba(168, 85, 247, 0.14);
-  /* Full alpha, NOT the 0.8 this shipped with. The comment there claimed 0.8 was
-     chosen "for the 1.4.11 3:1 floor" — the arithmetic is the other way round.
-     The border is border-box clipped over the chip's OWN selected fill, so the
-     adjacency that matters is border-vs-fill, and the two fills are only 1.07:1
-     apart, which means this 1px border is the entire state cue. At 0.8 it
-     measured 3.23:1 against the fill (3.01:1 over the page's purple radial —
-     half a percent of margin); at full alpha it is 4.31:1. Reducing the alpha
-     LOWERED contrast. */
-  border-color: rgb(168, 85, 247);
-  box-shadow: 0 0 18px rgba(168, 85, 247, 0.15);
+  background: var(--surface-raised-2);
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
 }
-/* Focus ADDS a ring, it does not repaint the border.
-   This used to set `border-color`, which at (0,2,0) after the [aria-checked]
-   rule meant a chip that was both selected and focused lost its selected purple
-   border for the duration of focus — removing the one cue the state rests on.
-   A box-shadow ring stacks with the border instead of replacing it, and the
-   global :focus-visible outline (deliberately not suppressed) still applies. */
+/* Focus is the app's own ring, outside the box, so a chosen option that has
+   focus keeps the edge that says it is chosen. Restated because the rule
+   above sets box-shadow, where the ring's dark band lives. */
 .stage-opt:focus-visible {
-  box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.9), 0 0 18px rgba(168, 85, 247, 0.15);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+.stage-opt[aria-checked="true"]:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--ink), var(--focus-band);
 }
 
 /* ══ Player ═══════════════════════════════════════════════════════════
