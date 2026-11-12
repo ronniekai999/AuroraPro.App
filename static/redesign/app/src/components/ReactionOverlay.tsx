@@ -13,6 +13,7 @@
 // we don't have to round-trip a stylesheet edit for Phase 4.5.
 
 import { useEffect, useRef, useState } from 'react'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 import type { ReactionEvent } from '@/lib/party'
 
 const ANIM_DURATION_MS = 3000
@@ -206,18 +207,14 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
     setOpen(false)
     if (hadFocus) triggerRef.current?.focus({ preventScroll: true })
   }
-  // Escape closes the row of emoji and nothing else. Capture phase, stopped:
-  // the app's own Escape handler is on window and would close the player or
-  // leave the page.
+  // Escape closes the row of emoji and nothing else: not the player or the
+  // page (the app's own Escape handler is on window), and not a layer under
+  // this one (lib/escapeLayers gives each press to the newest).
+  const closeRef = useRef(close)
+  useEffect(() => { closeRef.current = close })
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      close()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
+    return pushEscapeLayer(() => closeRef.current())
   }, [open])
   return (
     <div className="relative flex-none">

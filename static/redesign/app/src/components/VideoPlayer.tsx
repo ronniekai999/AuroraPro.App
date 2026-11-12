@@ -59,6 +59,7 @@ import {
   timelineRanges,
   type TapState,
 } from '@/lib/playerChrome'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 import { playerSurface } from '@/lib/playerSurface'
 import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
 import { currentMaxStreamBps, writePrefKey } from '@/lib/appearance'
@@ -2374,18 +2375,12 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   useEffect(() => {
     if (errorMsg) setOpenMenu(null)
   }, [errorMsg])
-  // Escape closes the open menu, wherever focus is, and nothing else. In the
-  // capture phase and stopped there: App's own Escape handler is on window
-  // and closes the whole player.
+  // Escape closes the open menu, wherever focus is, and nothing else: not
+  // the player (App's own Escape handler is on window), and not another
+  // layer opened after it (lib/escapeLayers gives each press to the newest).
   useEffect(() => {
     if (openMenu === null) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      setOpenMenu(null)
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
+    return pushEscapeLayer(() => setOpenMenu(null))
   }, [openMenu])
 
   // ── Cast end-of-life ──────────────────────────────────────────────────
@@ -7067,6 +7062,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
     return null
   })()
+  // Whether the Up next card, or the series-end notice that replaces it, is
+  // actually on screen. A guest in a party is shown neither (only the host's
+  // press moves a room), whatever phase the countdown reached before joining.
+  const upNextOnScreen = (nextUpPhase === 'countdown' || nextUpPhase === 'prompt' || nextUpPhase === 'finale')
+    && (!party || partyAdvanceHost)
   const skipLabel = activeSkipMarker?.kind === 'recap'
     ? 'Skip recap'
     : activeSkipMarker?.kind === 'credits' ? 'Skip credits' : 'Skip intro'
@@ -7553,11 +7553,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   a socket event, not a click). Not tied to the controls'
                   visibility: it stays until the viewer acts. On the right
                   of the lane: the Skip button has the left, and centred it
-                  ran into it on a phone and beside the party rail. The Up
-                  next card and the series-end notice take the same corner
-                  when they come, and the muted speaker in the transport row
-                  still says why there is no sound. */}
-              {autoStartedMuted && !(nextUpPhase === 'countdown' || nextUpPhase === 'prompt' || nextUpPhase === 'finale') && (
+                  ran into it on a phone and beside the party rail. Where
+                  even that is too narrow for the two side by side (the rail
+                  open on a small window) it goes one row up while a Skip
+                  button is showing. The Up next card and the series-end
+                  notice take the same corner when they are on screen, and
+                  the muted speaker in the transport row still says why there
+                  is no sound. */}
+              {autoStartedMuted && !upNextOnScreen && (
                 <button
                   type="button"
                   aria-label="Playback started muted — tap for sound"
@@ -7569,7 +7572,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     }
                     setAutoStartedMuted(false)
                   }}
-                  className="player-lane player-float-right absolute z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg"
+                  data-tap-for-sound=""
+                  className={`${activeSkipMarker ? 'player-lane-upper' : 'player-lane'} player-float-right absolute z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg`}
                 >
                   <VolumeX size={18} />
                   Tap for sound

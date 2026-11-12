@@ -11,6 +11,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import { useExitTransition } from '@/hooks/useExitTransition'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
@@ -106,12 +107,14 @@ export function PartyPanel({
   // closes and re-opens it within one test).
   const leaveExit = useExitTransition(showLeaveConfirm)
   // The confirm says it is modal (`aria-modal`), so it has to behave like
-  // one: focus goes into it, stays in it, Escape closes it, and focus goes
-  // back to the button that opened it. Without the first, a screen reader
-  // that honours `aria-modal` hides everything but a dialog the user is not
-  // in. Done here, not through a portalled dialog: this renders inside the
-  // rail, so it is drawn wherever the rail is, and a portal to <body> would
-  // not be drawn inside a native-fullscreen element.
+  // one: focus goes into it and stays in it, keys pressed while it is up are
+  // its own, Escape closes it, and focus goes back to the button that opened
+  // it. Without the first, a screen reader that honours `aria-modal` hides
+  // everything but a dialog the user is not in. Done here with a few lines
+  // rather than through a portalled dialog component: the confirm is three
+  // buttons inside the rail and needs nothing a portal gives. (The rail is a
+  // sibling of the player, outside the element that goes fullscreen, so
+  // neither it nor this is drawn in native fullscreen either way.)
   const leaveButtonRef = useRef<HTMLButtonElement | null>(null)
   const leaveDialogRef = useRef<HTMLDivElement | null>(null)
   const leaveConfirmUp = showLeaveConfirm && leaveExit.mounted
@@ -122,15 +125,28 @@ export function PartyPanel({
     const dialog = leaveDialogRef.current
     // The safe answer first: the first button is always "Keep watching".
     dialog?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
-    // Escape closes the confirm and nothing else. Capture phase, stopped:
-    // the app's own Escape handler is on window and would close the player.
+    // Escape closes the confirm, and only the confirm (lib/escapeLayers).
+    const dropEscape = pushEscapeLayer(() => setShowLeaveConfirm(false))
+    // Every other key pressed while it is up stops here, in the capture
+    // phase on window: the player behind it listens on window for its
+    // shortcuts, and an arrow or a k pressed at "End the party?" was seeking
+    // and pausing the film for everyone. Tab is kept among the confirm's
+    // buttons, wrapping at the ends, and brings focus in if it is outside.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key === 'Escape') return
       e.stopPropagation()
-      setShowLeaveConfirm(false)
+      if (e.key !== 'Tab' || !dialog) return
+      const stops = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled])')]
+      if (stops.length === 0) return
+      const first = stops[0], last = stops[stops.length - 1]
+      const active = document.activeElement
+      if (!dialog.contains(active)) { e.preventDefault(); first.focus() }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus() }
+      else if (e.shiftKey && active === first) { e.preventDefault(); last.focus() }
     }
     window.addEventListener('keydown', onKey, true)
     return () => {
+      dropEscape()
       window.removeEventListener('keydown', onKey, true)
       // Back to the leave button, unless focus has already gone somewhere
       // of the viewer's choosing (or the panel is going away with it).
@@ -580,17 +596,6 @@ export function PartyPanel({
               aria-describedby="party-leave-text"
               className="w-full max-w-sm bg-surface-raised-2 rounded-sheet p-6"
               onClick={e => e.stopPropagation()}
-              // Tab stays among the confirm's own buttons.
-              onKeyDown={e => {
-                if (e.key !== 'Tab') return
-                const stops = [...(leaveDialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])]
-                if (stops.length === 0) return
-                const first = stops[0], last = stops[stops.length - 1]
-                const active = document.activeElement
-                if (!e.shiftKey && active === last) { e.preventDefault(); first.focus() }
-                else if (e.shiftKey && active === first) { e.preventDefault(); last.focus() }
-                else if (!leaveDialogRef.current?.contains(active)) { e.preventDefault(); first.focus() }
-              }}
             >
               {canHandOff ? (
                 <>

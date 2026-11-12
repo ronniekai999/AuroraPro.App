@@ -688,6 +688,21 @@ describe('the overflow menu', () => {
     expect(sheet).toHaveTextContent('Playback details')
   })
 
+  it('puts the marker editor away with its own Done control, draft kept', async () => {
+    render(<VideoPlayer target={movie} isAdmin onClose={() => {}} />); await bootHls()
+    video().currentTime = 42; fireEvent.timeUpdate(video())
+    openMore()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    const editor = () => document.querySelector<HTMLElement>('[data-player-sheet][aria-label="Edit skip markers"]')!
+    fireEvent.click(within(editor()).getAllByRole('button', { name: 'End = now' })[1])
+    fireEvent.click(within(editor()).getByRole('button', { name: 'Done' })); await settle()
+    expect(editor()).toHaveAttribute('hidden')
+    openMore()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Edit skip markers/ })); await settle()
+    expect(editor()).not.toHaveAttribute('hidden')
+    expect(editor()).toHaveTextContent('0:00 to 0:42')
+  })
+
   it('keeps an unsaved marker draft across closing the editor to scrub', async () => {
     render(<VideoPlayer target={movie} isAdmin onClose={() => {}} />); await bootHls()
     video().currentTime = 42; fireEvent.timeUpdate(video())
@@ -958,6 +973,36 @@ describe('menus and the things around the player', () => {
     }
   })
 
+  // The app closes the player by taking its target away, not by unmounting
+  // it: a menu open at that moment must not leave the mark behind.
+  it('clears the mark when the app closes the player by removing its target', async () => {
+    const view = render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    expect(document.documentElement.hasAttribute('data-player-menu')).toBe(true)
+    view.rerender(<VideoPlayer target={null} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await settle()
+    expect(document.documentElement.hasAttribute('data-player-menu')).toBe(false)
+    const reachedApp = vi.fn()
+    window.addEventListener('keydown', reachedApp)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    window.removeEventListener('keydown', reachedApp)
+    expect(reachedApp).toHaveBeenCalledTimes(1)
+  })
+
+  // The picker and a menu each close on Escape. With both open, one press
+  // closes one: the one opened last.
+  it('closes one layer per Escape, newest first', async () => {
+    render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send a reaction' }))
+    const menuOpen = () => document.querySelector('[data-player-sheet]:not([hidden])') !== null
+    const pickerOpen = () => screen.queryAllByRole('button', { name: /^React with / }).length > 0
+    expect([menuOpen(), pickerOpen()]).toEqual([true, true])
+    fireEvent.keyDown(document.body, { key: 'Escape' }); await settle()
+    expect([menuOpen(), pickerOpen()]).toEqual([true, false])
+    fireEvent.keyDown(document.body, { key: 'Escape' }); await settle()
+    expect([menuOpen(), pickerOpen()]).toEqual([false, false])
+  })
+
   // A dead session looks exactly like a paused picture once the bars fade.
   it('keeps a notice the viewer must act on in view after the bars have gone', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
@@ -972,6 +1017,65 @@ describe('menus and the things around the player', () => {
     expect(float()?.textContent).toBe(SESSION_ENDED_NOTICE)
     // An ordinary notice does not.
     expect(noticeNeedsAction('Reconnecting…')).toBe(false)
+  })
+})
+
+describe('"Tap for sound" and what shares its row', () => {
+  // A browser refuses a sounded play that no gesture asked for; a party
+  // start is such a play, and the player falls back to starting muted.
+  const blockSound = () => vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (this: HTMLMediaElement) {
+    if (!this.muted) return Promise.reject(new DOMException('play() failed', 'NotAllowedError'))
+    paused.set(this, false); this.dispatchEvent(new Event('play')); return Promise.resolve()
+  })
+  const tap = () => document.querySelector<HTMLElement>('[data-tap-for-sound]')
+
+  it('gives way to the Up next card while the card is on screen, and comes back when it is dismissed', async () => {
+    blockSound()
+    const party = partyOf({ partyMediaItemId: 3, partyEpisodeId: 31 })
+    render(<VideoPlayer target={episode} party={party} onPartyAdvance={vi.fn(async () => 'advanced' as const)} onClose={() => {}} />); await bootHls()
+    expect(tap()).not.toBeNull()
+    video().currentTime = 900; fireEvent.timeUpdate(video()); await settle()
+    expect(screen.getByRole('button', { name: 'Play for all' })).toBeInTheDocument()
+    expect(tap()).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss next-episode card' })); await settle()
+    expect(tap()).not.toBeNull()
+  })
+
+  // A guest is shown no Up next card (only the host's press moves a room),
+  // so nothing takes the corner and the way to get sound must stay.
+  it('stays for a party guest near the end, who is shown no card', async () => {
+    blockSound()
+    const party = partyOf({ isHost: false, partyMediaItemId: 3, partyEpisodeId: 31 })
+    render(<VideoPlayer target={episode} party={party} onPartyAdvance={vi.fn(async () => 'advanced' as const)} onClose={() => {}} />); await bootHls()
+    video().currentTime = 900; fireEvent.timeUpdate(video()); await settle()
+    expect(screen.queryByRole('button', { name: /Play for all|Play now/ })).toBeNull()
+    expect(tap()).not.toBeNull()
+  })
+
+  // Beside the party rail on a small window there is no room for it next to
+  // the Skip button, so it takes the row above while one is showing.
+  it('moves up a row while a Skip button is showing, and back when it is not', async () => {
+    blockSound()
+    vi.mocked(getStreamInfo).mockResolvedValue(info({ markers: [{ kind: 'intro', start_ms: 5_000, end_ms: 60_000 }] }))
+    render(<VideoPlayer target={movie} party={partyOf()} onClose={() => {}} />); await bootHls()
+    expect(tap()!.className).toMatch(/(^|\s)player-lane(\s|$)/)
+    video().currentTime = 10; fireEvent.timeUpdate(video()); await settle()
+    expect(screen.getByRole('button', { name: 'Skip intro' })).toBeInTheDocument()
+    expect(tap()!.className).toMatch(/(^|\s)player-lane-upper(\s|$)/)
+    expect(tap()!.className).not.toMatch(/(^|\s)player-lane(\s|$)/)
+  })
+
+  it('puts a subtitle error in the row above the lane, off its buttons', async () => {
+    render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /English subs/ })); await settle()
+    const track = document.querySelector('track')
+    expect(track).not.toBeNull()
+    await act(async () => { fireEvent.error(track!) }); await settle()
+    const said = [...document.querySelectorAll<HTMLElement>('[role="status"]')].find(el => /subtitle|English subs|failed|load/i.test(el.textContent ?? '') && el.className.includes('player-lane'))
+    expect(said, 'the subtitle error is on screen').toBeTruthy()
+    expect(said!.className).toMatch(/(^|\s)player-lane-upper(\s|$)/)
+    expect(said!.className).not.toMatch(/(^|\s)player-lane(\s|$)/)
   })
 })
 

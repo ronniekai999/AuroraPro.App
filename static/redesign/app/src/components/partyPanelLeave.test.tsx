@@ -206,3 +206,34 @@ describe('the host\u2019s leave confirmation as a modal', () => {
     expect(appHandler).toHaveBeenCalledTimes(1)
   })
 })
+
+// The player listens on window for its shortcuts. With the confirm open, a
+// key is the confirm's: an arrow or a "k" pressed at "End the party?" was
+// seeking and pausing the film for everyone.
+describe('keys while the host\u2019s leave confirmation is open', () => {
+  it('do not reach a shortcut listener on window, and reach it again once it is closed', async () => {
+    const user = userEvent.setup()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })
+    const shortcuts = vi.fn()
+    window.addEventListener('keydown', shortcuts)
+    await user.click(screen.getByRole('button', { name: 'Leave Party' }))
+    shortcuts.mockClear()
+    for (const key of ['ArrowLeft', 'k', 'f', 'm', ' ', 'Tab']) fireEvent.keyDown(document.activeElement!, { key })
+    expect(shortcuts).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Keep watching' }))
+    shortcuts.mockClear()
+    fireEvent.keyDown(document.body, { key: 'k' })
+    expect(shortcuts).toHaveBeenCalledTimes(1)
+    window.removeEventListener('keydown', shortcuts)
+  })
+
+  it('bring focus into the confirm when Tab is pressed with focus outside it', async () => {
+    const user = userEvent.setup()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })
+    await user.click(screen.getByRole('button', { name: 'Leave Party' }))
+    const outside = screen.getByPlaceholderText(/Message the party/)
+    outside.focus()
+    expect(fireEvent.keyDown(outside, { key: 'Tab' })).toBe(false)
+    expect(screen.getByRole('button', { name: 'Keep watching' })).toHaveFocus()
+  })
+})
