@@ -1,9 +1,10 @@
 # Bug Report Feature — Admin Setup
 
 The in-app "Report a Bug" feature lets authenticated Aurora users file
-GitHub issues directly from the SPA. A floating launcher in the bottom-
-right opens a modal with name / title / description fields plus an
-optional screenshot or short recording attachment. On submit, the
+GitHub issues directly from the SPA. "Report a bug", in the account
+menu (and on the Me page on a phone), opens a dialog with name / title /
+description fields plus an optional screenshot or short recording
+attachment. On submit, the
 Aurora server creates a labeled issue in your configured GitHub repo
 and links the user to it.
 
@@ -128,9 +129,20 @@ Restart Aurora to pick up the env changes.
 
 ## Step 3 — Verify
 
-Sign in to Aurora as any authenticated user. You should see a small
-"Report bug" button in the bottom-right corner of any view. Clicking it
-opens the dialog.
+Sign in to Aurora as any authenticated user. "Report a bug" is in the
+account menu at the top right, with Settings; on a phone it is a row on
+the Me page (the last tab). Every profile has it, a profile with a
+content limit included. Nothing floats over the page: if you see no such
+entry, the server is not taking reports (check the four variables and
+the restart).
+
+The dialog describes the page it is opened over: "Capture this page"
+draws that page, and the report records its address. From the account
+menu that is the page you are on. From the phone's Me page the app first
+goes back to the page you came from, and opens the dialog there. To check
+it: open Movies, scroll down, go to Me, press "Report a bug". You should
+be back on Movies where you were, with the dialog open, and the issue's
+"URL" line should read `/v2/movies`, not `/v2/me`.
 
 To smoke-test the full flow:
 1. Fill in title + description
@@ -242,7 +254,7 @@ use a Cloudflare Tunnel) to fix.
 ## Disabling
 
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
-The launcher button disappears immediately on the next user session.
+The "Report a bug" entries disappear on the next user session.
 Already-filed issues remain in GitHub. Already-uploaded attachments stay
 on disk **indefinitely**: the janitor only runs while
 `BUG_REPORT_ENABLED=true`, so neither the TTL nor the byte budget applies
@@ -251,7 +263,7 @@ want the disk back.
 
 ## Capabilities across phases (all in current build)
 
-- **Phase 1:** flag, launcher button, modal, file upload from disk,
+- **Phase 1:** flag, the entry that opens the dialog, modal, file upload from disk,
   server endpoint, GitHub issue creation, attachment hosting, this
   doc.
 - **Phase 2:** "Capture this page" button in the modal (in-browser

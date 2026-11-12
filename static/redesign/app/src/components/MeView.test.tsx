@@ -6,7 +6,7 @@
 // which is the fact the line is there to state.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import MeView, { type MeViewProps } from './MeView'
 import type { Profile } from '@/lib/api'
 
@@ -41,5 +41,31 @@ describe("the Me page's header", () => {
   it('says who is signed in when no profile is bound', () => {
     render(<MeView {...props({ activeProfileId: null, navScope: 'unknown' })} />)
     expect(summary()).toHaveTextContent(/^Signed in as owner$/)
+  })
+})
+
+// "Report a bug" is among the account's rows, for whoever is watching: App
+// hands the row its press only while the server takes reports.
+describe("the Me page's \"Report a bug\" row", () => {
+  const rows = () => within(screen.getByRole('navigation', { name: 'Account' })).getAllByRole('button').map(b => b.textContent)
+
+  it('is there when reports are taken, between Settings and what follows it', () => {
+    const onReportBug = vi.fn()
+    render(<MeView {...props({ adminUI: true, onReportBug })} />)
+    expect(rows()).toEqual(['Notifications', 'Settings', 'Report a bug', 'Admin', 'Server status', 'Sign outSigns out every device on this account'])
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }))
+    expect(onReportBug).toHaveBeenCalledTimes(1)
+  })
+
+  it('is not there when they are not', () => {
+    render(<MeView {...props()} />)
+    expect(screen.queryByRole('button', { name: 'Report a bug' })).toBeNull()
+    expect(rows()).toEqual(['Notifications', 'Settings', 'Sign outSigns out every device on this account'])
+  })
+
+  // A profile with a content limit had the corner button too.
+  it('is there for a profile with a content limit, above Sign out', () => {
+    render(<MeView {...props({ activeProfileId: 2, navScope: 'restricted', onReportBug: noop })} />)
+    expect(rows()).toEqual(['Notifications', 'Settings', 'Report a bug', 'Sign outSigns out every device on this account'])
   })
 })

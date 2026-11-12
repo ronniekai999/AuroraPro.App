@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 //
-// The bug report button and its dialog: what opens it, what the dialog says
-// to whom, and where the focus is while a report is sent.
+// The bug report dialog in its host: what it says to whom, where the focus
+// is while a report is sent, and where the focus goes when it closes. What
+// opens it, and over which page, is App's (hooks/useBugReportEntry and
+// App.bugReport.test.tsx).
 
+import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -11,72 +14,93 @@ import type { BugReportSubmitResult } from '@/lib/api'
 const submitBugReport = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), submitBugReport }))
 
-import { BugReportButton } from './BugReportButton'
+import { BugReportHost } from './BugReportHost'
 
 const SENT: BugReportSubmitResult = { issue_number: 512, issue_url: 'https://example.test/issues/512' } as BugReportSubmitResult
 
 beforeEach(() => { submitBugReport.mockReset().mockResolvedValue(SENT) })
 
-function setup(props: Partial<Parameters<typeof BugReportButton>[0]> = {}) {
-  const onToast = vi.fn()
-  const onRefreshConfig = vi.fn()
-  const view = render(<BugReportButton prefillName="morgan" onToast={onToast} onRefreshConfig={onRefreshConfig} {...props} />)
-  return { onToast, onRefreshConfig, view }
+type HostProps = Parameters<typeof BugReportHost>[0]
+/** The host as App holds it: open by a state the page owns, and opened by
+ *  a control of the page's. `keepOpener` false takes that control off the
+ *  page once the dialog is open, as going back from the Me page does. */
+function Page({ onToast, keepOpener = true, ...props }: Partial<HostProps> & { onToast: HostProps['onToast']; keepOpener?: boolean }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <main>
+      <h1>Movies</h1>
+      {(keepOpener || !open) && <button type="button" onClick={() => setOpen(true)}>Report a bug</button>}
+      <BugReportHost open={open} onClose={() => setOpen(false)} prefillName="morgan" onToast={onToast} {...props} />
+    </main>
+  )
 }
-// As a person finds it: by role and name, in the accessibility tree. A
-// button that is `display: none` or hidden from it is not found.
-const launcher = () => screen.getByRole('button', { name: 'Report bug' })
+function setup(props: Partial<HostProps> & { keepOpener?: boolean } = {}) {
+  const onToast = vi.fn()
+  const view = render(<Page onToast={onToast} {...props} />)
+  return { onToast, view }
+}
+const launcher = () => screen.getByRole('button', { name: 'Report a bug' })
 
 async function fill(user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) {
   await user.type(within(dialog).getByLabelText(/^Title/), 'Wrong episode opens')
   await user.type(within(dialog).getByLabelText(/^Description/), 'It opened episode 4, not 5.')
 }
 
-describe('the bug report button', () => {
-  it('opens the dialog with the focus on the title, asks for the config again, and gives the focus back when it closes', async () => {
+describe('the bug report dialog in its host', () => {
+  it('opens with the focus on the title and the sender’s name filled in, and gives the focus back to what opened it', async () => {
     const user = userEvent.setup()
-    const { onRefreshConfig } = setup()
+    const focusFallback = vi.fn()
+    setup({ focusFallback })
     expect(screen.queryByRole('dialog')).toBeNull()
     await user.click(launcher())
     const dialog = screen.getByRole('dialog', { name: 'Report a bug' })
-    expect(onRefreshConfig).toHaveBeenCalledTimes(1)
     expect(within(dialog).getByLabelText(/^Title/)).toHaveFocus()
     expect(within(dialog).getByLabelText(/^Your name/)).toHaveValue('morgan')
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(launcher()).toHaveFocus()
+    // What opened it took the focus back: nothing else was asked to.
+    expect(focusFallback).not.toHaveBeenCalled()
   })
 
-  // Hidden, not unmounted: a recording in flight must outlive a player
-  // opening over the page.
-  it('stays mounted, with its dialog, while it is hidden', async () => {
+  // From the Me page the app goes back to the page the report is about, and
+  // the row that was pressed is not on that page.
+  it('asks where the focus goes when what opened it is gone from the page', async () => {
     const user = userEvent.setup()
-    const { view, onToast } = setup()
+    const focusFallback = vi.fn()
+    setup({ focusFallback, keepOpener: false })
     await user.click(launcher())
-    expect(launcher().style.display).toBe('')
-    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} hidden />)
-    // Out of the accessibility tree, and still in the page. By its title:
-    // an element that is not displayed has no accessible name to be found
-    // by.
-    expect(screen.queryByRole('button', { name: 'Report bug' })).toBeNull()
-    expect(screen.getByTitle('Report a bug or share feedback').style.display).toBe('none')
-    expect(screen.getByRole('dialog', { name: 'Report a bug' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Report a bug' })).toBeNull()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(focusFallback).toHaveBeenCalledTimes(1)
   })
 
-  // The button floats over the end of the page, and the page leaves room
-  // for it there (index.css reads this). For as long as the button is
-  // mounted, hidden or not: App hides it under the player and every panel,
-  // and taking the room away then shortened the page under whoever was at
-  // its end.
-  it('tells the page for as long as it is mounted, also while it is hidden, and not once it is gone', () => {
-    const { view, onToast } = setup()
-    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
-    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} hidden />)
-    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
-    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} />)
-    expect(document.documentElement).toHaveAttribute('data-bug-launcher')
-    view.unmount()
+  // Nothing had the focus when the dialog opened (a page that had just been
+  // drawn): there is nothing to give it back to.
+  it('asks the same when nothing had the focus as it opened', () => {
+    const focusFallback = vi.fn()
+    const onToast = vi.fn()
+    const view = render(<main><BugReportHost open={false} onClose={() => {}} onToast={onToast} focusFallback={focusFallback} /></main>)
+    expect(document.body).toHaveFocus()
+    view.rerender(<main><BugReportHost open onClose={() => {}} onToast={onToast} focusFallback={focusFallback} /></main>)
+    expect(within(screen.getByRole('dialog')).getByLabelText(/^Title/)).toHaveFocus()
+    view.rerender(<main><BugReportHost open={false} onClose={() => {}} onToast={onToast} focusFallback={focusFallback} /></main>)
+    expect(focusFallback).toHaveBeenCalledTimes(1)
+  })
+
+  // The dialog is App's to open and close, and nothing else's: it has no
+  // launcher of its own, puts nothing on the page while it is closed, and
+  // marks nothing on the document for a button that is no longer there.
+  it('is nothing on the page while it is closed, and leaves no mark on the document open or closed', () => {
+    const onToast = vi.fn()
+    const view = render(<BugReportHost open={false} onClose={() => {}} onToast={onToast} />)
+    expect(view.container).toBeEmptyDOMElement()
     expect(document.documentElement).not.toHaveAttribute('data-bug-launcher')
+    view.rerender(<BugReportHost open onClose={() => {}} onToast={onToast} />)
+    expect(screen.getByRole('dialog', { name: 'Report a bug' })).toBeInTheDocument()
+    expect(document.documentElement).not.toHaveAttribute('data-bug-launcher')
+    expect(screen.queryByRole('button', { name: /^Report (a )?bug$/ })).toBeNull()
   })
 
   // The server sends the token's health only to a session with admin
@@ -86,9 +110,9 @@ describe('the bug report button', () => {
     const { view, onToast } = setup()
     await user.click(launcher())
     expect(screen.queryByText(/GitHub token issue/)).toBeNull()
-    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} tokenHealthy />)
+    view.rerender(<Page onToast={onToast} tokenHealthy />)
     expect(screen.queryByText(/GitHub token issue/)).toBeNull()
-    view.rerender(<BugReportButton prefillName="morgan" onToast={onToast} tokenHealthy={false} tokenHealthReason="GitHub answered 401." />)
+    view.rerender(<Page onToast={onToast} tokenHealthy={false} tokenHealthReason="GitHub answered 401." />)
     expect(screen.getByText(/GitHub token issue/).closest('[role="alert"]')).toHaveTextContent('Admin notice — GitHub token issue: GitHub answered 401. Nobody can send a bug report until this is resolved.')
   })
 })

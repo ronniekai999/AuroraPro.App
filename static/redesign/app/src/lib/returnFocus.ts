@@ -29,3 +29,21 @@ export function useReturnFocus(fallback?: () => HTMLElement | null | undefined) 
     },
   }
 }
+
+/** Puts the focus at the start of the page on screen, for a dialog that
+ *  closes over a page none of whose controls opened it: on the page's main
+ *  heading, made focusable for the purpose, else on the first control in
+ *  the page. The page is not scrolled: the person stays where they were. */
+export function focusPageStart(): void {
+  const main = document.querySelector('main')
+  if (!main) return
+  const heading = main.querySelector<HTMLElement>('h1')
+  if (heading) {
+    if (!heading.hasAttribute('tabindex')) heading.tabIndex = -1
+    heading.focus({ preventScroll: true })
+    // A heading that is not drawn does not take the focus.
+    if (document.activeElement === heading) return
+  }
+  main.querySelector<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')
+    ?.focus({ preventScroll: true })
+}

@@ -408,3 +408,43 @@ describe('BottomTabBar', () => {
     expect(onNavigate.mock.calls.map(c => c[0])).toEqual(['search', 'me'])
   })
 })
+
+// "Report a bug" is one of the panel's rows, for whoever is watching: App
+// hands the panel its press only while the server takes reports.
+describe('the identity panel\'s "Report a bug"', () => {
+  // The panel's rows below the profiles and their two buttons.
+  const rows = () => menu().getAllByRole('button').filter(b => !b.closest('[data-profiles]')).map(b => b.textContent).filter(t => t !== 'Full picker' && t !== 'Manage profiles')
+
+  it('is offered when reports are taken, with Settings and above Sign out', () => {
+    render(<TopNav {...props({ onReportBug: noop })} />)
+    openMenu()
+    expect(rows()).toEqual(['Notifications', 'Your profile', 'My requests', 'Settings', 'Report a bug', 'Admin', 'Server status', 'Sign outSigns out every device on this account'])
+  })
+
+  it('is not offered when they are not', () => {
+    render(<TopNav {...props()} />)
+    openMenu()
+    expect(menu().queryByRole('button', { name: 'Report a bug' })).toBeNull()
+  })
+
+  it('is offered to a profile with a content limit', () => {
+    render(<TopNav {...props({ adminUI: false, navScope: 'restricted', activeProfileId: 2, onReportBug: noop })} />)
+    openMenu()
+    expect(rows()).toEqual(['Notifications', 'Settings', 'Report a bug', 'Sign outSigns out every device on this account'])
+  })
+
+  // The dialog gives the focus back to what had it as it opened. The panel
+  // closes on the press, so that must be the panel's own control, not a row
+  // that is about to leave the page.
+  it('closes the panel and puts the focus on its control before it asks for the dialog', () => {
+    let focusAtAsk: Element | null = null
+    const onReportBug = vi.fn(() => { focusAtAsk = document.activeElement })
+    render(<TopNav {...props({ onReportBug })} />)
+    openMenu()
+    expect(trigger()).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(menu().getByRole('button', { name: 'Report a bug' }))
+    expect(onReportBug).toHaveBeenCalledTimes(1)
+    expect(focusAtAsk).toBe(trigger())
+    expect(trigger()).toHaveAttribute('aria-expanded', 'false')
+  })
+})

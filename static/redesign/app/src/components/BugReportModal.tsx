@@ -16,8 +16,8 @@
 //   - Escape closes the modal (unless submitting; matches the
 //     click-outside behavior)
 //   - Auto-focus the Title field on open
-//   - Restore focus to the launcher on close (handled by React via
-//     last-focused tracking — see useEffect below)
+//   - Restore focus on close to what opened the dialog, or where the
+//     caller says when that is gone (see the mount effect below)
 //   - role/aria already set; aria-live error region announces
 //     validation failures
 
@@ -52,6 +52,11 @@ interface Props {
   // 5xx. Undefined for non-admins / pre-first-check.
   tokenHealthy?: boolean
   tokenHealthReason?: string
+  // Puts the focus somewhere when the dialog closes and what opened it
+  // cannot take it back: it is gone from the page (the Me page's row, once
+  // the app has gone back to the page the report is about), or nothing had
+  // the focus when the dialog opened.
+  focusFallback?: () => void
 }
 
 // Match server-side limits (internal/api/feedback_handlers.go) so the
@@ -170,7 +175,7 @@ async function compressImageIfLarge(file: File): Promise<File> {
 // expiry; user can also stop early via the in-recording UI.
 const MAX_RECORDING_MS = 30_000
 
-export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason }: Props) {
+export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason, focusFallback }: Props) {
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -361,8 +366,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     const cleanupAbortController = submitAcRef
     return () => {
       document.removeEventListener('keydown', onKeyDown)
-      // Restore focus to the element that opened us (the launcher).
-      opener?.focus?.()
+      // Give the focus back to what opened the dialog. When that is gone
+      // or never had it, the caller says where it goes instead.
+      if (opener && opener !== document.body && opener.isConnected) opener.focus?.()
+      else focusFallback?.()
       // Abort any in-flight submit if the modal unmounts while a
       // request is pending (Cancel click, parent close, etc.).
       cleanupAbortController.current?.abort()
@@ -559,7 +566,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             transform: `translate(-${window.scrollX}px, -${window.scrollY}px)`,
             transformOrigin: 'top left',
           },
-          // Skip excluded elements (launcher, modal overlay, toast,
+          // Skip excluded elements (this dialog's overlay, toasts, the
           // reaction overlay). True = keep, false = skip (inverse of
           // html2canvas's ignoreElements).
           filter: (node) =>
@@ -1038,7 +1045,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       // visible even when the modal subtree is hidden.
       //
       // data-screenshot-exclude carries the html-to-image opt-out
-      // (`filter` predicate matches launcher + modal + toasts).
+      // (`filter` predicate matches this overlay and the toasts).
       className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--scrim)] p-4 stage-scrim-in"
       style={
         recording

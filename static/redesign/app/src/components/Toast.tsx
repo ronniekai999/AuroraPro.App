@@ -20,16 +20,10 @@ export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove
     // 2026-05-27 (holistic deep-debug H1) — opt out of html2canvas
     // bug-report captures. Toasts are transient meta-UI, not the
     // page content the user is trying to demo, so they shouldn't
-    // leak into bug evidence. Matches the launcher + modal opt-out.
+    // leak into bug evidence. Matches the bug report dialog's opt-out.
     //
-    // 2026-05-27 polish pass — `bottom-[5.5rem]` (was `bottom-6`)
-    // so the toast column stacks ABOVE the bug-report launcher pill
-    // (which sits at `bottom-5` = 1.25rem in BugReportButton).
-    // Previously the launcher was at `bottom: 5rem` to clear the
-    // toast column; that flipped the natural "launcher in corner,
-    // toasts stack above" pattern users expect. Now the launcher
-    // owns the corner and toasts respect it.
-    <div className="fixed bottom-[calc(5.5rem+var(--tabbar-space,0px))] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
+    // In the corner, above the phone's tab bar where there is one.
+    <div className="fixed bottom-[calc(1.5rem+var(--tabbar-space,0px))] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
       {toasts.map(t => (
         <ToastItem key={t.id} t={t} onRemove={onRemove} />
       ))}

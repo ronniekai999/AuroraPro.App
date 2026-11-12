@@ -25,6 +25,8 @@ export interface MeViewProps {
   /** "My requests", or "Requests" for a session that is listed everyone's. */
   requestsLabel?: string
   onOpenSettings: () => void
+  /** "Report a bug", when the server takes reports. */
+  onReportBug?: () => void
   onOpenAdmin: () => void
   onOpenServer: () => void
   onSignOut: () => void
@@ -33,7 +35,7 @@ export interface MeViewProps {
 export default function MeView({
   user, navScope, adminUI, profiles, activeProfileId, notifCount,
   onSelectProfile, onManageProfiles, onOpenNotifications,
-  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onOpenSettings, onReportBug, onOpenAdmin, onOpenServer, onSignOut,
 }: MeViewProps) {
   const active = profiles.find(p => p.id === activeProfileId) ?? null
   const others = profiles.filter(p => p.id !== activeProfileId)
@@ -45,6 +47,8 @@ export default function MeView({
     ...(full && onOpenMyProfile ? [{ key: 'profile', label: 'Your profile', icon: 'user', onClick: onOpenMyProfile }] : []),
     ...(full && onOpenRequests ? [{ key: 'requests', label: requestsLabel, icon: 'download', onClick: onOpenRequests }] : []),
     { key: 'settings', label: 'Settings', icon: 'settings', onClick: onOpenSettings },
+    // For every session, a profile with a content limit included.
+    ...(onReportBug ? [{ key: 'bug', label: 'Report a bug', icon: 'bug', onClick: onReportBug }] : []),
     ...(adminUI ? [
       { key: 'admin', label: 'Admin', icon: 'shield', onClick: onOpenAdmin },
       { key: 'server', label: 'Server status', icon: 'server', onClick: onOpenServer },

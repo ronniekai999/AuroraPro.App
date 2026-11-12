@@ -72,6 +72,7 @@ interface IdentityMenuProps {
   onOpenRequests?: () => void
   requestsLabel: string
   onOpenSettings: () => void
+  onReportBug?: () => void
   onOpenAdmin: () => void
   onOpenServer: () => void
   onSignOut: () => void
@@ -80,7 +81,7 @@ interface IdentityMenuProps {
 function IdentityMenu({
   user, navScope, adminUI, profiles, activeProfileId, notifCount,
   onSelectProfile, onOpenProfilesGate, onManageProfiles, onOpenNotifications,
-  onOpenMyProfile, onOpenRequests, requestsLabel, onOpenSettings, onOpenAdmin, onOpenServer, onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel, onOpenSettings, onReportBug, onOpenAdmin, onOpenServer, onSignOut,
 }: IdentityMenuProps) {
   const [open, setOpen] = useState(false)
   // The popover stays mounted for its exit fade after `open` flips false.
@@ -285,6 +286,15 @@ function IdentityMenu({
             <Icon name="settings" size={18} className="flex-none text-ink-2" />
             Settings
           </button>
+          {/* For every session, a profile with a content limit included. The
+              panel closes first and its control takes the focus, so that is
+              where the focus returns when the report's dialog closes. */}
+          {onReportBug && (
+            <button type="button" onClick={run(onReportBug)} className={row}>
+              <Icon name="bug" size={18} className="flex-none text-ink-2" />
+              Report a bug
+            </button>
+          )}
 
           {adminUI && (
             <>
@@ -359,6 +369,8 @@ export interface TopNavProps {
   onOpenRequests?: () => void
   /** "My requests", or "Requests" for a session that is listed everyone's. */
   requestsLabel?: string
+  /** "Report a bug" in the identity panel, when the server takes reports. */
+  onReportBug?: () => void
   onSignOut: () => void
 }
 
@@ -367,7 +379,7 @@ export function TopNav({
   searchQuery, onSearchQueryChange, onSearchFocus, onSearchSubmit, onSearchClose, searchInputRef,
   presence, onPresenceClick, notifCount, onOpenNotificationsPanel, onOpenServerPanel,
   profiles, activeProfileId, onSelectProfile, onOpenProfilesGate, onManageProfiles,
-  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onSignOut,
+  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onReportBug, onSignOut,
 }: TopNavProps) {
   const destinations = navDestinationsFor(navScope)
   const current = destinationForView(currentView, navScope)
@@ -538,6 +550,7 @@ export function TopNav({
             onOpenRequests={onOpenRequests}
             requestsLabel={requestsLabel}
             onOpenSettings={() => onNavigate('settings')}
+            onReportBug={onReportBug}
             onOpenAdmin={() => onNavigate('admin')}
             onOpenServer={onOpenServerPanel}
             onSignOut={onSignOut}

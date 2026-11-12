@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
-import { useNavigate, useLocation } from 'react-router'
+import { useNavigate, useLocation, useNavigationType } from 'react-router'
 import { consumeDevicePairing, rememberDevicePairing } from '@/lib/devicePairing'
 import {
   fetchMe,
@@ -91,7 +91,9 @@ import {
 import { HeroSection } from '@/components/HeroSection'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
-import { BugReportButton } from '@/components/BugReportButton'
+import { BugReportHost } from '@/components/BugReportHost'
+import { useBugReportEntry } from '@/hooks/useBugReportEntry'
+import { focusPageStart } from '@/lib/returnFocus'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
@@ -2307,9 +2309,9 @@ export default function App() {
   const continueItemsRef = useRef(continueItems)
   useLayoutEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
   // 2026-05-27 — Bug-report config. Holds the full server response so
-  // the BugReportButton + modal can both gate on `enabled` AND surface
-  // admin-only token-health diagnostics (added 2026-05-27 PAT health
-  // check). The BugReportButton renders only when `enabled` is true.
+  // the "Report a bug" entries and the dialog can both gate on `enabled`
+  // AND surface admin-only token-health diagnostics (added 2026-05-27 PAT
+  // health check). The entries are offered only when `enabled` is true.
   const [bugReportConfig, setBugReportConfig] = useState<BugReportConfig | null>(null)
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
@@ -6297,13 +6299,10 @@ export default function App() {
   // is User | null | false; null and false are both falsy), so the
   // truthy check alone gives us `user.id` safely.
   const userIdForBugReport = user ? user.id : undefined
-  // Deep-debug M1 — on-demand refresh callable so the launcher can
-  // re-fetch when the user opens the modal. The server's PAT
-  // health check updates every 6h on its own ticker; without the
-  // on-demand refresh an admin who stays logged in past a token
-  // expiry never sees the banner until next login. Stable identity
-  // via useCallback so the BugReportButton's `onRefreshConfig`
-  // prop reference doesn't churn.
+  // Deep-debug M1 — on-demand refresh, asked for each time the dialog
+  // is. The server's PAT health check updates every 6h on its own
+  // ticker; without the on-demand refresh an admin who stays logged in
+  // past a token expiry never sees the banner until next login.
   const refreshBugReportConfig = useCallback(() => {
     if (!userIdForBugReport) return
     getBugReportConfig()
@@ -6323,12 +6322,38 @@ export default function App() {
       })
       .catch(err => {
         if (err && (err as Error).name === 'AbortError') return
-        // Non-fatal — the launcher just stays hidden.
+        // Non-fatal — the entries just stay hidden.
         console.warn('[Aurora] bug-report config fetch failed', err)
       })
     return () => { ac.abort() }
     // adminUI: the server sends the token's health only with admin powers.
   }, [userIdForBugReport, adminUI])
+
+  // "Report a bug" is in the identity panel and on the Me page. The dialog
+  // describes the page it is over (its capture, and the address a report
+  // carries), so from Me the app first goes back to the page the person
+  // came from: hooks/useBugReportEntry. Only to a page this session's
+  // routes would show it now, by the gates the routes themselves use.
+  const navigationType = useNavigationType()
+  const mayReturnTo = (pathname: string) => {
+    const v = pathToView(pathname)
+    if (hiddenFromRestricted(v) && !hiddenOk) return false
+    if (v === 'admin' && (!user || user.role !== 'admin' || (actingRestricted && !adminUI))) return false
+    return true
+  }
+  const bugReport = useBugReportEntry({
+    userId: userIdForBugReport ?? null,
+    profileId: activeProfileId,
+    location,
+    arrivedBy: navigationType,
+    viewOf: pathToView,
+    shownView: view,
+    mayShow: mayReturnTo,
+    goTo: path => { navigate(path) },
+    goBack: () => { navigate(-1) },
+    onAsk: refreshBugReportConfig,
+  })
+  const reportsOn = !!bugReportConfig?.enabled
 
   // An admin's list holds every member's requests (with their usernames) and
   // a restricted session's only the account's own, so it is dropped when the
@@ -6580,6 +6605,7 @@ export default function App() {
             onOpenMyProfile={() => handleNavigate('profile')}
             onOpenRequests={() => handleNavigate('requests')}
             requestsLabel={requestsLabel}
+            onReportBug={reportsOn ? bugReport.openHere : undefined}
             onSignOut={() => { void handleLogout() }}
           />
         </div>{/* /sticky stack */}
@@ -7074,6 +7100,7 @@ export default function App() {
                 onOpenRequests={() => handleNavigate('requests')}
                 requestsLabel={requestsLabel}
                 onOpenSettings={() => handleNavigate('settings')}
+                onReportBug={reportsOn ? bugReport.openFromMe : undefined}
                 onOpenAdmin={() => handleNavigate('admin')}
                 onOpenServer={() => { setServerOpen(true); setNotifOpen(false) }}
                 onSignOut={() => { void handleLogout() }}
@@ -7577,51 +7604,24 @@ export default function App() {
         />
       )}
 
-      {/* 2026-05-27 — Bug-report launcher. Gated on the server-side
-          BUG_REPORT_ENABLED env var so a misconfigured deploy doesn't
-          dangle a non-functional button.
-          - prefillName uses the user's display username, NOT email,
-            so a public-repo deploy doesn't leak emails into issue
-            bodies that anyone with repo read access can see (deep-
-            debug #7).
-          - `hidden` props (was: gate on `!playerTarget`) — moved
-            INTO the component so the modal stays mounted across
-            player open/close events. This keeps an in-flight screen
-            recording or capture from being silently aborted if a
-            watch-party teleports the user into the host's player
-            mid-recording (holistic deep-debug M1).
-          - Component itself also hides when admin panels open
-            (Server / Notifications at z-[45] cover the launcher
-            on mobile — holistic deep-debug H2). */}
-      {bugReportConfig?.enabled && (
-        <BugReportButton
+      {/* The bug report dialog. Mounted while the server takes reports
+          (BUG_REPORT_ENABLED), so a misconfigured deploy offers nothing
+          that cannot work, and for nothing else: not the player, not a
+          panel. A recording or a capture in progress must outlive a player
+          that a watch party opens over the page.
+          - prefillName is the display username, NOT the email, so a
+            public-repository deploy does not put emails into issue bodies.
+          - The token's health is an admin's; a switch to a restricted
+            profile hides it at once, ahead of the refetch above. */}
+      {reportsOn && (
+        <BugReportHost
+          open={bugReport.open}
+          onClose={bugReport.close}
           prefillName={user.username}
           onToast={addToast}
-          // 2026-05-27 (PR #107 follow-up — deep-debug H1/M1):
-          // Restored serverOpen / notifOpen and added partyPanelOpen.
-          // The previous PR's reasoning "panels anchor LEFT" is only
-          // true on desktop — below md both panels span `left-2 right-2`
-          // (full viewport width). PartyPanel is a right-edge drawer at
-          // z-70 that covers the launcher on every viewport when open.
-          // Hiding the launcher in these cases is the cheap, correct fix
-          // — the admin can close the panel and reopen the bug-report
-          // flow.
-          //
-          // 2026-07-25 (Aurora Stage Phase 2) — the two drawers moved
-          // from bottom-anchored to top-anchored (they follow their
-          // trigger, which moved to the TopNav), so on a normal viewport
-          // they no longer reach the bottom-right launcher. Keeping them
-          // in this list anyway: it still holds on short viewports, where
-          // top + max-h-[70vh] can run into the launcher.
-          hidden={!!playerTarget || serverOpen || notifOpen || partyPanelOpen}
-          // 2026-05-27 — PAT health diagnostics. Server populates
-          // these fields only for admin requesters; the modal shows
-          // a warning banner when token_healthy === false.
-          // The token's health is an admin's; a switch to a restricted
-          // profile hides it at once, ahead of the refetch below.
-          tokenHealthy={adminUI ? bugReportConfig.token_healthy : undefined}
-          tokenHealthReason={adminUI ? bugReportConfig.token_health_reason : undefined}
-          onRefreshConfig={refreshBugReportConfig}
+          tokenHealthy={adminUI ? bugReportConfig?.token_healthy : undefined}
+          tokenHealthReason={adminUI ? bugReportConfig?.token_health_reason : undefined}
+          focusFallback={focusPageStart}
         />
       )}
 

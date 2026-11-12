@@ -62,6 +62,13 @@
 //      everything drawn inside it, and the hint is drawn only where it
 //      leaves 100px of input (and IS drawn in a wide window).
 //
+//   6. THE PAGE'S END. The page's shell leaves room at its end for the
+//      phone's tab bar and for nothing else: its end padding is exactly the
+//      tab bar's space, at phone width and wide. There was a "Report bug"
+//      button floating in the corner and a band of padding reserved for it
+//      under every page (set through a root attribute); both are gone, and
+//      that attribute must change nothing.
+//
 // Class lists are READ FROM THE SOURCE (see classesOf / mustHave), so a call
 // site drifting away from the fix fails here rather than passing against a
 // stale copy. The page is served over HTTP, not setContent: the built CSS
@@ -844,6 +851,44 @@ for (const width of NAV_WIDTHS) {
     widths.push(`${bar.id} ${bar.field.w.toFixed(0)}${bar.hint ? '+hint' : ''}`)
   }
   console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} · page ${r.sw}px · field: ${widths.join(' · ')}`)
+  await ctx.close()
+}
+// 6. The page's end: the shell's end padding against the tab bar's space,
+// with and without the root attribute that used to add a band to it.
+const END_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/v2/assets/${cssFile}">
+<style>body{margin:0}</style></head><body>
+<main class="stage-shell" id="shell"><p>The end of the page.</p></main>
+<div id="bar" style="height:var(--tabbar-space)"></div>
+</body></html>`
+console.log('\n══ the page\'s end')
+for (const width of [320, 390, 767, 768, 1440]) {
+  const before = problems
+  const ctx = await browser.newContext({ viewport: { width, height: 700 } })
+  await ctx.route(`${ORIGIN}/**`, route => {
+    const p = new URL(route.request().url()).pathname
+    if (p === '/') return route.fulfill({ body: END_PAGE_HTML, contentType: 'text/html' })
+    const f = path.join(ASSETS, path.basename(p))
+    if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
+      return route.fulfill({ body: fs.readFileSync(f), contentType: f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream' })
+    }
+    return route.fulfill({ status: 404, body: '' })
+  })
+  const page = await ctx.newPage()
+  await page.goto(`${ORIGIN}/`)
+  const r = await page.evaluate(() => {
+    const end = () => parseFloat(getComputedStyle(document.getElementById('shell')).paddingBottom)
+    const plain = end()
+    document.documentElement.setAttribute('data-bug-launcher', '')
+    const marked = end()
+    return { plain, marked, bar: document.getElementById('bar').getBoundingClientRect().height }
+  })
+  if (width < 768 && r.bar < 44) fail(`${width}px: the tab bar's space is ${r.bar}px, which is no tab bar — this check is out of date`)
+  if (width >= 768 && r.bar !== 0) fail(`${width}px: the tab bar's space is ${r.bar}px where there is no tab bar — this check is out of date`)
+  if (Math.abs(r.plain - r.bar) > 0.5) fail(`${width}px: the page ends with ${r.plain}px of padding, and the tab bar's space is ${r.bar}px — something else is reserved there`)
+  if (Math.abs(r.marked - r.plain) > 0.5) fail(`${width}px: with data-bug-launcher on the root the page ends with ${r.marked}px, not ${r.plain}px — the band for the corner button is back`)
+  console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   end padding ${r.plain}px · tab bar's space ${r.bar}px`)
   await ctx.close()
 }
 await browser.close()
