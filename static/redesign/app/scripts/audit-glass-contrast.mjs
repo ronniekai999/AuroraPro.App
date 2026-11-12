@@ -731,10 +731,6 @@ const EXEMPT = [
   // ── companion, browse ──
   { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
     why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
-  { file: 'src/components/BrowseView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
-    why: 'the bullet between the page subtitle and its count' },
-  { file: 'src/components/CalendarView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
-    why: 'the bullet between the page subtitle and its count' },
   { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
     why: 'the attachment\'s icon-only "×" remove button' },
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',

@@ -437,8 +437,7 @@
       CANNOT override a rule that is more specific — no matter where it sits.
       That makes every property set by a descendant or attribute selector
       here permanently unreachable from a call site except via `!important`.
-      Currently that applies to `.stage-seg > button` (0,1,1),
-      `.stage-fpill .c` (0,2,0), `.stage-caldate .today` (0,2,0),
+      Currently that applies to `.stage-fpill .c` (0,2,0), `.stage-caldate .today` (0,2,0),
       `.stage-opt:hover` / `[aria-checked="true"]` / `:focus-visible` (0,2,0),
       and `.stage-tab[aria-selected="true"]` plus its `::after` (0,2,0 / 0,2,1).
       Nothing collides today because those call sites carry no competing
@@ -639,36 +638,286 @@ html[data-effects="reduced"] .stage-topnav {
   background: var(--action);
 }
 
-/* The Library's scope row: text links, the current one a light pill. No
-   `display` here or on the tab bar below (CASCADE HAZARD, above): the call
-   sites set it, so a responsive utility there can still hide them. */
-.stage-scopebar {
-  gap: 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  padding-top: 16px;
+/* ── The Library's header ───────────────────────────────────────────
+   One slim row: the scope names (Movies, TV Shows, Collections, My Library,
+   Upcoming) set as the page's titles, the current one underlined; at the
+   right, the controls of the scope on screen; under it, a second row when
+   the scope has one (a grid's genres). It replaced a page title, a featured
+   band and a sticky toolbar, so a grid's first screen is its grid.
+   No `display` on the scope row or on the tab bar below (CASCADE HAZARD,
+   above): the call sites set it, so a responsive utility there can still
+   hide them. */
+.stage-libhead {
+  padding-top: 24px;
 }
-.stage-scopebar::-webkit-scrollbar { display: none; }
+.stage-libhead-row {
+  gap: 12px 28px;
+  min-height: 40px;
+}
+/* Where there are no scope names (a profile with a limit reaches Movies and
+   Shows from the bar): the page's name, in their place and their type. */
+.stage-libhead-title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 40px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.stage-scopebar {
+  flex-wrap: wrap;
+  gap: 4px 28px;
+}
 .stage-scope {
   flex: none;
-  padding: 8px 12px;
-  border-radius: var(--radius-art);
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--ink-2);
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 40px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: var(--ink-3);
   white-space: nowrap;
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
-/* A thumb needs 44px; a pointer row can be tighter. */
-@media not all and (min-width: 768px) {
-  .stage-scope { min-height: 44px; }
-}
-.stage-scope:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.stage-scope:hover { color: var(--ink); }
 .stage-scope[aria-current="page"] {
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--ink);
+}
+.stage-libhead-tools {
+  margin-left: auto;
+  gap: 16px;
+}
+/* The slot a scope's own controls are handed into: nothing until they are
+   (a phone would otherwise keep an empty row for it). */
+.stage-libhead-tools:empty { display: none; }
+/* A scope's count or summary, at the row's right. */
+.stage-libhead-note {
+  font-size: 14px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The profile's name in that line: never wider than the line can spare. */
+.stage-libhead-name {
+  display: inline-block;
+  max-width: min(22ch, 38vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+/* A phone has no room for five 28px names in a row: they become a strip of
+   pills that scrolls sideways, edge to edge, each a thumb's height, with the
+   count and the Filters button on a row of their own under it. */
+@media not all and (min-width: 768px) {
+  .stage-libhead { padding-top: 12px; }
+  .stage-libhead-row { gap: 4px 12px; }
+  .stage-scopebar {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 8px;
+    /* Edge to edge: out by the page's padding at this width and back in by
+       the same. --page-pad-x, which below md is a plain length (18px); the
+       desktop gutter (48px) here made the strip, and so the page, 30px wider
+       than the phone on each side. */
+    width: calc(100% + 2 * var(--page-pad-x));
+    margin-inline: calc(-1 * var(--page-pad-x));
+    padding-inline: var(--page-pad-x);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .stage-scopebar::-webkit-scrollbar { display: none; }
+  .stage-scope {
+    min-height: 44px;
+    padding: 0 16px;
+    border-radius: 9999px;
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 44px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--ink-2);
+    background: var(--surface-raised-2);
+  }
+  .stage-scope[aria-current="page"] {
+    color: var(--on-action);
+    font-weight: 600;
+    background: var(--ink);
+    box-shadow: none;
+  }
+  .stage-libhead-title { font-size: 26px; line-height: 44px; }
+  .stage-libhead-tools {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    margin-left: 0;
+    min-height: 48px;
+    gap: 8px;
+  }
+}
+/* A grid's controls in that row. */
+.stage-browse-count {
+  font-size: 14px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+@media not all and (min-width: 768px) {
+  .stage-browse-count { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}
+.stage-browse-sort {
+  gap: 8px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+/* A segmented choice: one of a few, the chosen one a light tile. */
+.stage-seg {
+  padding: 3px;
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+}
+.stage-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+}
+.stage-seg-btn.is-touch {
+  flex: 1;
+  width: auto;
+  height: 44px;
+  font-size: 15px;
+}
+.stage-seg-btn.is-label {
+  width: auto;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* How many a segment holds, after its name. */
+.stage-seg-count {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.stage-seg-btn[aria-pressed="true"] .stage-seg-count { color: inherit; }
+.stage-seg-btn:hover { color: var(--ink); }
+.stage-seg-btn[aria-pressed="true"] {
   color: var(--on-action);
   font-weight: 600;
   background: var(--ink);
+}
+/* The genres, under the row: as many lines as they need. */
+.stage-genres {
+  gap: 8px;
+  margin-top: 20px;
+}
+/* The A to Z strip of a grid sorted by title. It is a page system of its
+   own (App renders it between the Library header and the grid, with the
+   gutter), because it sticks under the top bar while the grid scrolls: the
+   place a jump is wanted is deep in the list. The page's own colour behind
+   it, edge to edge, so the cards pass under a clean edge. Its bottom margin
+   is negative: the grid's own top padding is the gap under it. */
+.stage-jumpbar {
+  position: sticky;
+  top: var(--chrome-h, var(--topnav-h));
+  /* Under the nav stack (50) and its drawers (45), above the cards. */
+  z-index: 30;
+  margin-top: 8px;
+  margin-bottom: -12px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: var(--surface-page);
+}
+.stage-jump { gap: 2px; }
+.stage-jump-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+}
+/* Not seen in the pages loaded so far, with pages still to come: it can be
+   pressed, and loads them. Quieter than a letter that is already here. */
+.stage-jump-btn[data-state="further"] { color: var(--ink-2); }
+.stage-jump-btn:hover:not([aria-disabled="true"]),
+.stage-jump-btn[aria-busy="true"] {
+  color: var(--ink);
+  background: var(--surface-raised-2);
+}
+/* No title in the whole list. aria-disabled, not disabled: see LetterStrip. */
+.stage-jump-btn[aria-disabled="true"] {
+  color: var(--ink-3);
+  opacity: 0.45;
+  cursor: default;
+}
+.stage-jump-status {
+  margin-left: 12px;
+  font-size: 13px;
+  line-height: 32px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+/* A touch screen: each letter is a 44px target, so the strip is two rows on
+   a tablet. (The size is the button's own: neighbours 34px apart could not
+   each reach 44px sideways with an extended hit area.) */
+@media (pointer: coarse) {
+  .stage-jump { gap: 4px; }
+  .stage-jump-btn { width: 44px; height: 44px; font-size: 15px; }
+  .stage-jump-status { line-height: 44px; }
+}
+/* A title the strip scrolls to must stop under the strip, not behind it:
+   the strip's own height (LetterStrip measures it; one row is 48px), and
+   the 12px the page keeps under its chrome. Only where the strip is drawn. */
+@media (min-width: 768px) {
+  html:has(.stage-jumpbar) {
+    scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + var(--jumpbar-h, 48px) + 12px);
+  }
+}
+.stage-filters-btn {
+  position: relative;
+  flex: none;
+  gap: 8px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: var(--radius-control);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+/* Says a filter is on, beside the word. */
+.stage-filters-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+/* A group of choices in the Filters sheet. */
+.stage-sheet-set {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.stage-sheet-set > legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
 
 /* The phone tab bar. Fixed to the bottom edge and padded by the device's
@@ -1690,8 +1939,8 @@ html[data-effects="reduced"] .stage-toolbar {
    background at (0,1,0) in this unlayered block and plain utilities lose. By
    the same rule this phase applied to .stage-calchip, three `!` at a call site
    means the primitive is missing a variant, not that the call site needs
-   escaping. Every other colour family here (.stage-stb-*, .stage-cbadge-*,
-   .stage-calchip-p) already works this way. */
+   escaping. Every other colour family here (.stage-stb-*, .stage-calchip-p)
+   already works this way. */
 .stage-typetag-4k {
   background: rgba(255, 255, 255, 0.083);
   border-color: rgba(255, 255, 255, 0.22);
@@ -1703,131 +1952,64 @@ html[data-effects="reduced"] .stage-toolbar {
    The scrim runs horizontally (not the usual bottom-up) because the text
    sits bottom-LEFT and the badges top-RIGHT: a vertical ramp would leave
    the badges unbacked. */
-.stage-colcard {
-  position: relative;
-  height: 118px;
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0b0b12;
+/* A collection, in the Collections grid: its members' posters side by side,
+   and under them its name and one line of facts. The card is a container;
+   the button inside it is the click target (CollectionsView). */
+.stage-colgrid {
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 40px 24px;
+}
+.stage-colcard-open {
+  gap: 12px;
+  border-radius: var(--radius-art);
   cursor: pointer;
-  /* `transform` deliberately NOT transitioned: nothing sets it, so it was a
-     dead declaration — and a latent trap, since a future `hover:scale-*` would
-     make this card a stacking context and change how its z-[2] click target
-     and z-[3] badge row resolve against each other. */
-  transition: border-color var(--dur-fast) var(--ease-standard);
 }
-.stage-colcard:hover { border-color: rgba(255, 255, 255, 0.275); }
-/* NO `outline: none` here — this rule used to have it, and that made focus
-   WORSE than not writing the rule at all. The app has an unlayered
-   `:focus-visible { outline: 2px solid rgba(168,85,247,.75) }` floor further
-   down this file which measures 3.28:1 against the page; this selector is
-   (0,2,0) against its (0,1,0), so `outline: none` won and left a 1px border
-   recolour plus a 3px glow at 1.40:1 as the only indicator on a 118px card.
-   Keeping the floor and adding the border/glow as a SUPPLEMENTARY cue is the
-   whole intent. Same correction applied to .stage-calcell below. */
-.stage-colcard:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-  box-shadow: var(--focus-band);
+.stage-colcard-art {
+  gap: 2px;
+  aspect-ratio: 8 / 3;
+  overflow: hidden;
+  border-radius: var(--radius-art);
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
-/* The mockup's ramp, restored.
-   An earlier version raised the far-edge stop from 0.1 to 0.55 and justified it
-   with "the badges are text on artwork and the mockup's ramp left them at 2.4:1
-   over a bright poster." That number is reproducible for NEITHER badge: at the
-   mockup's 0.1, -pub measures 7.63:1 over a white poster (its own fill is 85%
-   opaque teal, which does all the work) and -ai measures 1.74:1 — a real
-   failure, but one the scrim moved by 0.10, because -ai's fill is 95% opaque
-   too. So 0.55 was darkening the card's right third, costing exactly the
-   artwork this card exists to show, in exchange for nothing measurable. The
-   fix for -ai belongs in -ai's fill, and is below. */
-.stage-colcard-scrim {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(90deg, rgba(14, 15, 17, 0.9) 0%, rgba(14, 15, 17, 0.35) 70%, rgba(14, 15, 17, 0.1) 100%);
-}
-.stage-cbadge {
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  padding: 3px 8px;
-  border-radius: 6px;
-  white-space: nowrap;
-  /* Transparent border so -ai and -pub are the same height. -pub carries a 1px
-     border and -ai did not, which made the AI chip 2px shorter than the Public
-     chip sitting next to it in the same flex row. */
-  border: 1px solid transparent;
-}
-/* The AI chip: an opaque raised fill, so its text does not depend on the
-   artwork under it. */
-.stage-cbadge-ai {
-  background: var(--surface-raised-2);
-  border-color: var(--line-strong);
-  color: var(--ink);
-}
-.stage-cbadge-pub {
-  background: rgba(8, 47, 54, 0.85);
-  border-color: rgba(34, 211, 238, 0.5);
-  color: #a5f3fc;
-}
-/* Dashed "New Collection" tile. */
-.stage-newcol {
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 44px;
-  border-radius: var(--r-md);
-  border: 1px dashed rgba(255, 255, 255, 0.248);
-  background: rgba(255, 255, 255, 0.033);
-  color: var(--ink);
-  font-size: 13px;
+.stage-colcard-name {
+  font-size: 17px;
   font-weight: 600;
-  cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
-}
-.stage-newcol:hover { background: rgba(255, 255, 255, 0.077); border-color: rgba(255, 255, 255, 0.413); }
-.stage-newcol:focus-visible {
-  border-style: solid;
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-  box-shadow: var(--focus-band);
-}
-
-/* ── Segmented control (List ⇄ Month) ─────────────────────────────────
-   No `display` here — the call site sets `inline-flex`. */
-.stage-seg {
-  border-radius: var(--r-sm);
+  color: var(--ink);
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
-.stage-seg > button {
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.62);
-  background: rgba(255, 255, 255, 0.04);
-  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+.stage-colcard-open:hover .stage-colcard-name { text-decoration: underline; }
+.stage-colcard-meta {
+  gap: 8px;
+  margin-top: -10px;
+  font-size: 13px;
+  color: var(--ink-2);
 }
-.stage-seg > button:hover { color: rgba(255, 255, 255, 0.9); }
-/* Same aria-pressed-drives-style argument as .stage-fpill.
-   Three cues, not one. The first draft distinguished the selected segment by
-   COLOUR ALONE — both states were font-weight 600 with no border, shape or
-   weight change, and the two fills were 1.16:1 apart, which is WCAG 1.4.1 (Use
-   of Color) plus a 1.4.11 failure on state identification. A solid #7C3AED
-   raises fill separation to 3.36:1, the 500→700 weight step is a non-colour
-   cue that survives a monochrome display, and the inset top rule gives a third
-   that survives both. */
-.stage-seg > button[aria-pressed="true"] {
-  background: var(--ink);
-  color: var(--on-action);
-  font-weight: 700;
+/* A collection's own page: its name, at the size of a title. */
+.stage-coltitle {
+  font-family: var(--font-display);
+  font-size: 56px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
 }
-.stage-seg > button:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: -3px;
-  box-shadow: inset 0 0 0 5px var(--surface-page);
+@media not all and (min-width: 768px) {
+  .stage-coltitle { font-size: 34px; line-height: 1.08; }
 }
+.stage-colcard-delete {
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  color: var(--ink);
+  background: var(--surface-page);
+  cursor: pointer;
+}
+.stage-colcard-delete:hover { background: var(--surface-raised-2); }
 
 /* ── Calendar ─────────────────────────────────────────────────────────
    Date-group headers, episode rows, and the month grid. */
@@ -3803,6 +3985,22 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   .poster-grid.is-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 10px; }
 }
 
+/* The compact grid's card: a smaller caption, and its quality and content
+   rating as chips after the year. */
+.media-card-cinema.is-compact .cc-title { font-size: 13px; }
+.media-card-cinema.is-compact .co-meta { column-gap: 6px; }
+.media-card-cinema .co-chip {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--radius-chip);
+  font-size: 12px;
+  line-height: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
 /* The children's presentation: larger captions under larger posters. */
 .media-card-cinema.is-large .cc-title { font-size: 18px; }
 .media-card-cinema.is-large .co-meta { font-size: 15px; height: 20px; line-height: 20px; }
@@ -4042,118 +4240,120 @@ textarea:focus-visible {
   animation: toastIn 320ms var(--ease-emphasized) forwards;
 }
 
-/* ── Browse toolbar: genre chips + density toggle ──────────────────── */
-.browse-toolbar .genre-chips {
-  scrollbar-width: none;
-}
-.browse-toolbar .genre-chips::-webkit-scrollbar { display: none; }
+/* ── A chip that is one of several choices (a genre, a sort) ───────── */
 .genre-chip {
-  padding: 7px 15px;
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 16px;
   border-radius: 9999px;
   white-space: nowrap;
-  font-size: 0.8125rem;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink-2);
   background: var(--surface-raised-2);
-  border: 1px solid transparent;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  transition: color 0.15s, background 0.15s;
   cursor: pointer;
   flex: none;
 }
-.genre-chip:hover {
-  color: var(--ink);
-  background: var(--line);
+/* In a sheet, on the sheet's own raised fill, at a thumb's height. */
+.genre-chip.is-touch {
+  height: 44px;
+  font-size: 15px;
+  background: var(--surface-raised);
 }
-.genre-chip.is-active {
+.genre-chip:hover { color: var(--ink); }
+.genre-chip[aria-pressed="true"] {
   color: var(--on-action);
   background: var(--ink);
   font-weight: 600;
 }
-.density-toggle {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 11px;
-  padding: 3px;
-}
-.density-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 32px;
-  border-radius: var(--r-sm);
-  color: rgba(255, 255, 255, 0.55);
-  transition: color 0.15s, background 0.15s;
-  cursor: pointer;
-}
-.density-btn:hover { color: #fff; }
-.density-btn.is-active {
-  color: var(--on-action);
-  background: var(--ink);
+
+/* The Library's small controls on a touch screen, a phone or a tablet: each
+   is a 44px target by its own size (the layout and kind controls, the
+   genres, a collection's delete, and from md up the scope names, which a
+   phone already draws at 44px). Declared here, after every rule they
+   adjust: same specificity, later in the file. A collection's delete is
+   also always drawn there: it is shown on hover, and a touch screen has
+   none. */
+@media (hover: none), (pointer: coarse) {
+  .stage-seg-btn {
+    min-width: 44px;
+    height: 44px;
+  }
+  .genre-chip { height: 44px; }
+  .stage-scope {
+    min-height: 44px;
+    line-height: 44px;
+  }
+  .stage-colcard-delete {
+    width: 44px;
+    height: 44px;
+    opacity: 1;
+  }
 }
 
-/* ── List view (density = list) ────────────────────────────────────
-   A dense, scannable table. The grid-template-columns drives both the
-   header row and each MediaListRow so columns line up. The trailing
-   44px column is the quick-add button. */
+/* ── List view ─────────────────────────────────────────────────────
+   A Library grid as a table of rows. One grid-template-columns drives the
+   header row and every MediaListRow, so the columns line up: title (with a
+   small poster), genre, length, year, content rating, score, where the
+   viewer is, and the 44px quick-add. No box around it: each row has a
+   hairline above, and the page is its ground. */
 .media-list {
   display: flex;
   flex-direction: column;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.015);
 }
 .media-list-head,
 .media-list-row {
   display: grid;
-  grid-template-columns: 52px 1fr 150px 96px 70px 84px 44px;
+  grid-template-columns: minmax(240px, 1fr) 150px 96px 64px 76px 56px 200px 108px;
   align-items: center;
   gap: 16px;
-  padding: 12px 18px;
+  padding: 0 12px;
 }
 .media-list-head {
+  height: 36px;
   font-size: 12px;
-  letter-spacing: 0.14em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5); /* column labels: 0.4 was ~3.7:1 */
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  color: var(--ink-3);
 }
-/* The head has no thumb column label; its first cell aligns over the
-   row's thumb+title pair. Shift the head's first (Title) label to sit
-   over the title, not the thumb, by spanning the thumb gutter. */
-.media-list-head > span:first-child { grid-column: 1 / 3; }
 .media-list-row {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  height: 64px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background-color var(--dur-fast) var(--ease-standard);
 }
-.media-list-row:last-child { border-bottom: none; }
-.media-list-row:hover { background: rgba(255, 255, 255, 0.039); }
-/* 0.75 alpha, matching the global :focus-visible floor, not the 0.6 this shipped
-   at. At (0,2,0) this rule REPLACES the (0,1,0) floor rather than adding to it,
-   so the lower alpha was a silent downgrade for list rows only: 2.45:1 against
-   the row, where the floor gives 3.19:1. Grid cards, which do not override,
-   were unaffected — so the two card layouts had different focus contrast and
-   only one of them passed 1.4.11. The negative offset is kept (the row clips). */
+.media-list-row:hover { background: var(--surface-raised); }
+.media-list-row:hover .mlr-title { text-decoration: underline; }
+/* At (0,2,0) this rule REPLACES the global :focus-visible floor at (0,1,0)
+   rather than adding to it, so it restates the floor's full white (a lower
+   alpha here once left list rows at 2.45:1 where grid cards had 3.19:1).
+   The negative offset keeps the ring inside the row. */
 .media-list-row:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: -2px;
 }
+.media-list-row .mlr-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
 .media-list-row .mlr-thumb {
-  /* The thumb sits in the row grid's fixed 52px first column, so its 40px
-     width is stable regardless of title length. position:relative +
-     overflow:hidden clip the img to the rounded box; the gradient stays as
-     the box background so it shows through while the lazy img loads and
-     when an item has no poster. */
+  /* The fill is the placeholder while the image loads lazily, and what
+     shows when a title has no poster. */
   position: relative;
+  flex: none;
   overflow: hidden;
-  width: 40px;
-  height: 58px;
-  border-radius: var(--r-sm);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.121), rgba(14, 12, 22, 0.9));
+  width: 32px;
+  height: 48px;
+  border-radius: 4px;
+  background: var(--surface-raised-2);
 }
 .media-list-row .mlr-thumb-img {
   position: absolute;
@@ -4163,114 +4363,144 @@ textarea:focus-visible {
   object-fit: cover;
   display: block;
 }
-.media-list-row .mlr-main { min-width: 0; }
-.media-list-row .mlr-title {
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.96);
+.media-list-row .mlr-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+/* The phone's line under the title; a wider row has columns for these. */
+.media-list-row .mlr-sub {
+  display: none;
+  font-size: 13px;
+  color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.media-list-row .mlr-tags {
-  display: flex;
-  gap: 6px;
-  margin-top: 4px;
-}
-.media-list-row .mlr-tag {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 5px;
-  color: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-.media-list-row .mlr-tag.is-quality {
+.media-list-row .mlr-title {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--ink);
-  border-color: rgba(255, 255, 255, 0.248);
-  background: rgba(255, 255, 255, 0.066);
-}
-.media-list-row .mlr-tag.is-hdr {
-  color: #fde68a;
-  border-color: rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .media-list-row .mlr-cell {
-  font-size: 0.82rem;
-  color: rgba(220, 220, 232, 0.65);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.media-list-row .mlr-genre { color: rgba(255, 255, 255, 0.562); }
-.media-list-row .mlr-star {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: #facc15;
-  font-weight: 700;
+.media-list-row .mlr-where {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.media-list-row .mlr-add {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--r-sm);
+.media-list-row .mlr-where-label {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-list-row .mlr-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  /* --track, the token for the unfilled part of a bar (not a --line token:
+     those are for borders). */
+  background: var(--track);
+}
+.media-list-row .mlr-bar-fill {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ink);
+}
+/* A row's actions, at its end: what a card offers. Play, Add and More. */
+.media-list-row .mlr-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.media-list-row .mlr-act {
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  color: var(--ink-2);
+  transition: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
   cursor: pointer;
 }
-.media-list-row .mlr-add:hover {
-  color: var(--on-action);
-  background: var(--action);
-  border-color: transparent;
+.media-list-row .mlr-act:hover {
+  color: var(--ink);
+  background: var(--surface-raised-2);
 }
-.media-list-row .mlr-add.in-lib {
-  color: var(--on-action);
-  background: var(--action);
-  border-color: transparent;
+.media-list-row .mlr-add.in-lib { color: var(--ink); }
+/* A touch screen: Play and Add are pointer conveniences and are not drawn
+   (the menu More opens holds both, and so does a long press on the row);
+   More is a 44px target. */
+@media (hover: none), (pointer: coarse) {
+  .media-list-row .mlr-play,
+  .media-list-row .mlr-add {
+    display: none;
+  }
+  .media-list-row .mlr-more {
+    width: 44px;
+    height: 44px;
+  }
 }
-.media-list-row .mlr-add.in-lib:hover {
-  background: linear-gradient(135deg, #f87171, #b91c1c);
-  border-color: rgba(255, 200, 200, 0.6);
+
+/* Narrower than the eight columns need: genre and score go first, then
+   length and the viewer's place.
+
+   Neither boundary is a Tailwind breakpoint, and that is deliberate. The
+   lower one shipped as `max-width: 768px`, which overlapped `md:` at exactly
+   768px; its "fix" (`not all and (min-width: 768px)`) handed 768px, iPad
+   portrait, to a grid that did not fit there and cut titles to "The…". The
+   honest boundary is where a layout becomes readable: 924px for the
+   five-column one, 1200px for all eight. No Tailwind `min-width` breakpoint
+   sits at either, so there is no overlap and no gap to create, and none of
+   the media-list elements carries a responsive utility that could compete. */
+@media not all and (min-width: 1200px) {
+  .media-list-head,
+  .media-list-row {
+    grid-template-columns: minmax(220px, 1fr) 96px 64px 76px 180px 108px;
+  }
+  .media-list-row .mlr-genre,
+  .media-list-row .mlr-score,
+  .media-list-head > span:nth-child(2),
+  .media-list-head > span:nth-child(6) {
+    display: none;
+  }
 }
-
-/* Narrow viewports: drop the genre + length columns so the list stays
-   readable on tablet/phone (title + year + rating + add remain).
-
-   The boundary is 924px, and it is NOT tied to a Tailwind breakpoint. Two
-   corrections got it here:
-
-   1. It shipped as `max-width: 768px`, which OVERLAPPED `md:` at exactly 768px.
-   2. Phase 8 "fixed" that with `not all and (min-width: 768px)` — which handed
-      768px to the WIDE grid, and the wide grid does not fit there. Its fixed
-      columns plus gaps and padding come to 628px, so in a 672px-wide list `1fr`
-      leaves the title column **42px**: measured, rows rendered as "The…" and
-      "Eve…" at 768px where 767px showed the full titles. 768px is iPad portrait.
-      Trading a one-pixel cosmetic inconsistency for a truncated title column at
-      the single most common tablet width is a worse deal than the bug.
-
-   The honest boundary is where the wide grid actually becomes readable, which is
-   ~924px, so that is the boundary. No Tailwind `min-width` breakpoint sits at
-   924, so there is no overlap and no gap to create; and none of the media-list
-   elements carries a responsive utility that could compete (verified — no `md:`
-   utility sets anything on any of them), which is what makes a non-standard
-   boundary safe here rather than merely convenient. */
 @media not all and (min-width: 924px) {
   .media-list-head,
   .media-list-row {
-    grid-template-columns: 52px 1fr 64px 84px 44px;
+    grid-template-columns: minmax(0, 1fr) 48px 64px 108px;
+    gap: 12px;
   }
-  .media-list-row .mlr-genre,
   .media-list-row .mlr-length,
-  .media-list-head > span:nth-child(2),
-  .media-list-head > span:nth-child(3) {
+  .media-list-row .mlr-where,
+  .media-list-head > span:nth-child(3),
+  .media-list-head > span:nth-child(7) {
     display: none;
   }
+}
+/* A phone: the title has the row, with the year, the rating and the
+   viewer's place on a line under it, and the quick-add beside it. Two more
+   columns left a title ninety pixels ("Amber Al…"). */
+@media not all and (min-width: 768px) {
+  .media-list-head { display: none; }
+  .media-list-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .media-list-row .mlr-year,
+  .media-list-row .mlr-rated {
+    display: none;
+  }
+  .media-list-row .mlr-sub { display: block; }
 }
 
 /* ============================================================

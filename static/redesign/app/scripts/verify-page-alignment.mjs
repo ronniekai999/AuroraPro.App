@@ -64,7 +64,31 @@ function classesOf(file, marker) {
   }
   return hits[0]
 }
-const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
+// A Library grid is three page systems, one above the other: the Library's
+// header (the scope names, the count, sort and layout, the genres), which App
+// renders; under the title sort, the A to Z strip, which sticks under the top
+// bar; and the grid's own body. Each takes the gutter by itself, so each is
+// probed: they used to be one element (BrowseView's sticky toolbar, whose
+// restated gutter was Phase 11.4's stair-step).
+const LIB_HEAD = classesOf('src/components/LibraryHeader.tsx', 'stage-gutter stage-libhead')
+const BROWSE_BODY = classesOf('src/components/BrowseView.tsx', 'stage-gutter pt-6')
+const JUMP_BAR = classesOf('src/components/BrowseControls.tsx', 'stage-gutter stage-jumpbar')
+// The strip's row and its letters, as LetterStrip draws them: 27 buttons and
+// a status line at its longest. Where they do not fit one row the strip
+// wraps, and a title it scrolls to must still stop UNDER it: the page's
+// scroll padding takes the strip's height from --jumpbar-h, which
+// LetterStrip measures and publishes. This page publishes it the same way
+// (one line, below) and then checks that a scrolled-to target is not
+// covered. With the padding fixed at one row's height, as it first shipped,
+// the target's top and its focus ring sat about 22px under a two-row strip
+// between 768px and about 1040px.
+const JUMP_ROW = classesOf('src/components/BrowseControls.tsx', 'stage-jump flex')
+for (const text of ['className="stage-jump-btn"', 'className="stage-jump-status"', "root.style.setProperty('--jumpbar-h'"]) {
+  if (!fs.readFileSync('src/components/BrowseControls.tsx', 'utf8').includes(text)) {
+    throw new Error(`verify: BrowseControls.tsx no longer contains ${JSON.stringify(text)} — this check is out of date, not passing`)
+  }
+}
+const JUMP_LETTERS = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
 // The admin page's frame: a menu of sections beside (or, on a narrow screen,
 // above) the open section. It used to be a sticky full-bleed band of tabs.
 const ADMIN_SHELL = classesOf('src/components/admin/AdminShell.tsx', 'admin-shell')
@@ -96,10 +120,15 @@ const html = `<!doctype html><html><head><style>${css}</style>
   <div id="rail" class="stage-gutter">rail</div>
   <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_COL}"><div>synopsis</div><div>episodes</div></div></div>
   <section style="position:relative;display:flex;flex-direction:column;min-height:200px"><div class="${HERO_GUTTER}"><div id="herotext" class="${HERO_ROW}"><div>poster</div><div style="flex:1">hero text</div></div></div></section>
-  <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
+  <header id="libhead" class="${LIB_HEAD}">library header</header>
+  <div id="jumpbar" class="${JUMP_BAR}"><div class="${JUMP_ROW}">${JUMP_LETTERS.map(l => `<button type="button" class="stage-jump-btn">${l}</button>`).join('')}<span class="stage-jump-status">Loading titles to find W… 1,200 of 4,800</span></div></div>
+  <div id="browsegrid" class="${BROWSE_BODY}">browse grid</div>
   <section class="${HERO_SECTION}">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
   </section>
+  <div style="height:1400px"></div>
+  <div id="jumptarget" style="height:60px">a title the strip scrolls to</div>
+  <div style="height:3000px"></div>
 </div></body></html>`
 
 // TWO passes: this environment's headless Chromium has ZERO-WIDTH overlay
@@ -117,7 +146,7 @@ const browser = await chromium.launch({ executablePath: EXE })
 const out = []
 const SCROLLBAR = 15
 for (const scrollbar of [0, SCROLLBAR]) {
-for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
+for (const width of [320, 390, 767, 768, 834, 1024, 1440, 1920, 2000, 2560, 3840]) {
   const page = await browser.newPage({ viewport: { width, height: 900 } })
   // Simulated classic scrollbar: narrow the layout viewport the way a
   // space-taking scrollbar does, so `100vw` and `100%` diverge exactly as they
@@ -130,10 +159,26 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
       const b = e.getBoundingClientRect(); const cs = getComputedStyle(e)
       return { left: +(b.left + parseFloat(cs.paddingLeft)).toFixed(1),
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
-               boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
+               boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1),
+               shown: cs.display !== 'none' }
     }
-    return { nav: box('nav'), detail: box('detail'),
-             herotext: box('herotext'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
+    // The strip and a title it scrolls to. Measured last and undone, so the
+    // boxes above are read with the page at its top.
+    const cover = () => {
+      const bar = document.getElementById('jumpbar')
+      if (getComputedStyle(bar).display === 'none') return null
+      // As LetterStrip does it.
+      document.documentElement.style.setProperty('--jumpbar-h', `${Math.ceil(bar.getBoundingClientRect().height)}px`)
+      const target = document.getElementById('jumptarget')
+      target.scrollIntoView({ block: 'start' })
+      const b = bar.getBoundingClientRect(), t = target.getBoundingClientRect()
+      const out = { barTop: +b.top.toFixed(1), barBottom: +b.bottom.toFixed(1), barHeight: +b.height.toFixed(1), targetTop: +t.top.toFixed(1) }
+      window.scrollTo(0, 0)
+      document.documentElement.style.removeProperty('--jumpbar-h')
+      return out
+    }
+    const boxes = { nav: box('nav'), detail: box('detail'),
+             herotext: box('herotext'), rail: box('rail'), libhead: box('libhead'), jumpbar: box('jumpbar'), browsegrid: box('browsegrid'), herofoot: box('herofoot'),
              adminshell: box('adminshell'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
@@ -158,6 +203,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
              // scrollbar pass.
              vwWidth: window.innerWidth,
              docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth }
+    return { ...boxes, cover: cover() }
   })
   out.push({ width, scrollbar, ...r })
   await page.close()
@@ -177,10 +223,11 @@ const GUTTER = num(/--page-gutter:\s*(\d+)px/, '--page-gutter')
 const MOBILE = num(/min-width:\s*768px\)\s*\{\s*:root\s*\{\s*--page-pad-x:\s*(\d+)px/, 'the mobile --page-pad-x')
 let problems = 0
 for (const r of out) {
-  const keys = ['rail', 'browsetb', 'herofoot', 'page']
+  const keys = ['rail', 'libhead', 'jumpbar', 'browsegrid', 'herofoot', 'page']
   console.log(`\n── ${r.width}px${r.scrollbar ? `  (with a ${r.scrollbar}px classic scrollbar)` : ''}`)
   for (const k of keys) {
-    console.log(`   ${k.padEnd(9)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
+    if (!r[k].shown) { console.log(`   ${k.padEnd(10)} not drawn`); continue }
+    console.log(`   ${k.padEnd(10)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
   }
   console.log(`   adminshell BOX    ${String(r.adminshell.boxLeft).padStart(6)} .. ${String(r.adminshell.boxRight).padStart(6)}`)
   console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
@@ -189,7 +236,31 @@ for (const r of out) {
 
   // 1. Every page system shares both content edges. This is the stair-step check.
   const ref = r[keys[0]]
+  // The A to Z strip is a wide screen's (a phone's row has no room for it):
+  // not drawn below md, where it has no edges to compare, and drawn from md
+  // up, where it is held to them like the rest.
+  const stripWanted = r.mqWidth >= 768
+  if (r.jumpbar.shown !== stripWanted) {
+    console.log(`   *** the A to Z strip is ${r.jumpbar.shown ? 'drawn' : 'not drawn'} at this width; it is a wide screen's (md and up) only`)
+    problems++
+  }
+  // Where it is drawn, a title it scrolls to stops under it, whatever the
+  // strip's height (it is two rows where 27 letters do not fit one).
+  if (stripWanted) {
+    const c = r.cover
+    if (!c) {
+      console.log('   *** the A to Z strip could not be measured against a scrolled-to title')
+      problems++
+    } else {
+      console.log(`   strip      ${c.barHeight}px tall, stuck at ${c.barTop}..${c.barBottom}; a title it scrolls to stops at ${c.targetTop}`)
+      if (c.targetTop < c.barBottom - 0.5) {
+        console.log(`   *** a title the A to Z strip scrolls to stops at ${c.targetTop}, under the strip (which ends at ${c.barBottom}): its top and its focus ring are covered`)
+        problems++
+      }
+    }
+  }
   for (const k of keys.slice(1)) {
+    if (k === 'jumpbar' && !stripWanted) continue
     if (r[k].left !== ref.left || r[k].right !== ref.right) {
       console.log(`   *** ${k} is misaligned with ${keys[0]}: ${r[k].left}..${r[k].right} vs ${ref.left}..${ref.right}`)
       problems++

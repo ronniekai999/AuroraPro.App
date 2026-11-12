@@ -29,7 +29,10 @@
 // Every class list is READ FROM THE SOURCE, each found exactly once (or, for
 // a list written at several call sites, the same at each), so a call site
 // that drifts from this model fails as out of date rather than passing
-// against a stale copy.
+// against a stale copy. The NESTING is not read: which element holds which
+// is copied here by hand from HeroSection.tsx. An element given another
+// parent there (moved out of the picture band, say) keeps its class list, so
+// this check would go on measuring it where it used to be.
 //
 // MUTATION-TESTED by passing a changed stylesheet as the first argument
 // (each run fails at all six widths):

@@ -81,6 +81,11 @@ export interface MediaCardCinemaProps<T extends MediaLike = MediaLike> {
   showLength?: boolean
   // Larger caption, for the children's presentation.
   size?: 'default' | 'large'
+  // The compact library grid: a smaller card whose facts line is the year
+  // and, as chips, the title's quality (4K, HDR) and content rating. They
+  // are what a person scanning a large library chooses by, and a narrow card
+  // has no room for the comfortable line as well.
+  compact?: boolean
   // Load the art eagerly (the first cards of a rail above the fold).
   eager?: boolean
 }
@@ -91,12 +96,14 @@ export interface CardMetaToken {
 }
 
 /** The facts line, as tokens: rating → year → runtime → genre, or the
- *  caller's subtitle alone. Never an empty token. Exported for tests. */
+ *  caller's subtitle alone; compact, the year alone (the chips say the
+ *  rest). Never an empty token. Exported for tests. */
 export function buildCardMeta(
   item: Pick<MediaLike, 'rating' | 'year' | 'genre' | 'duration'>,
-  opts: { subtitle?: string; showLength?: boolean } = {},
+  opts: { subtitle?: string; showLength?: boolean; compact?: boolean } = {},
 ): CardMetaToken[] {
   if (opts.subtitle) return [{ kind: 'text', value: opts.subtitle }]
+  if (opts.compact) return item.year !== undefined && item.year > 0 ? [{ kind: 'text', value: String(item.year) }] : []
 
   const tokens: CardMetaToken[] = []
   if (item.rating !== undefined && item.rating > 0) {
@@ -153,7 +160,7 @@ function MovieSvg() {
 function MediaCardCinemaInner<T extends MediaLike>({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
   className = '', subtitle, aspect = 'poster', topRightOverlay, onPlay, resumable = false,
-  showLength = false, size = 'default', eager = false,
+  showLength = false, size = 'default', eager = false, compact = false,
 }: MediaCardCinemaProps<T>) {
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
@@ -168,7 +175,10 @@ function MediaCardCinemaInner<T extends MediaLike>({
   const markLoaded = (el: HTMLImageElement | null) => {
     if (el && el.complete && el.naturalWidth > 0) el.setAttribute('data-loaded', '')
   }
-  const metaTokens = buildCardMeta(item, { subtitle, showLength })
+  const metaTokens = buildCardMeta(item, { subtitle, showLength, compact })
+  // Quality and the content rating: chips on a compact card, and always in
+  // the card's name.
+  const chips = compact && !subtitle ? (item.tags ?? []) : []
   // A fraction, 0..1. Drawn as a percentage of the bar.
   const progressPct = Math.round(Math.min(1, Math.max(0, item.progress ?? 0)) * 100)
   const hasProgress = progressPct > 0
@@ -218,15 +228,18 @@ function MediaCardCinemaInner<T extends MediaLike>({
     metaTokens.length > 0
       ? metaTokens.map(t => (t.kind === 'rating' ? `rated ${t.value}` : t.value)).join(', ')
       : '',
-    // Quality and the content rating are not drawn on a card; they stay in
-    // its name.
+    // Quality and the content rating are drawn only on a compact card;
+    // they are in every card's name.
     item.tags && item.tags.length > 0 ? item.tags.join(', ') : '',
     isInLib ? 'in My Library' : '',
   ].filter(Boolean).join(' — ')
 
   return (
     <div
-      className={`media-card-cinema group ${size === 'large' ? 'is-large ' : ''}${item.reason ? 'has-reason ' : ''}${className}`}
+      className={`media-card-cinema group ${size === 'large' ? 'is-large ' : ''}${compact ? 'is-compact ' : ''}${item.reason ? 'has-reason ' : ''}${className}`}
+      // Which title this card is, for code that has to find it on the page
+      // (a Library grid's jump to a letter).
+      data-media-id={item.id}
       // Not a control itself: the art below is the button. This catches a
       // click on the caption (and the art button's own, as it bubbles), the
       // right click and the long press.
@@ -342,7 +355,7 @@ function MediaCardCinemaInner<T extends MediaLike>({
       {/* Hidden from assistive tech: the art button's name says all of it. */}
       <div className="card-caption" aria-hidden="true">
         <div className="cc-title" title={item.title}>{item.title}</div>
-        {(metaTokens.length > 0 || isInLib) && (
+        {(metaTokens.length > 0 || isInLib || chips.length > 0) && (
           <div className="co-meta">
             {/* The saved mark leads the row as a sibling of the tokens, so
                 the tokens stay exactly one element each. */}
@@ -360,6 +373,8 @@ function MediaCardCinemaInner<T extends MediaLike>({
                 )}
               </span>
             ))}
+            {/* Compact only: quality, then the content rating, as chips. */}
+            {chips.map(c => <span key={c} className="co-chip">{c}</span>)}
           </div>
         )}
         {/* Why Aurora picked it. In place of the facts line while the card

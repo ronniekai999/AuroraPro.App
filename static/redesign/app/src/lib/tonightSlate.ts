@@ -99,6 +99,20 @@ export function timeLeftLabel(positionMs: number, durationMs: number): string {
   return m ? `${h} h ${m} min left` : `${h} h left`
 }
 
+/** Where the viewer is in a title they have started, for a Library list's
+ *  "Where you are" column: "S2 E4 · 29 min left" for a show, "37 min left"
+ *  for a film, and how far through it they are (0 to 1). When the length is
+ *  unknown there is no time to give: a show still names its episode, and a
+ *  film says "Started". */
+export function whereYouAre(c: { type: string; season_number?: number; episode_number?: number; position_ms: number; duration_ms: number }): { label: string; fraction: number } {
+  const left = timeLeftLabel(c.position_ms, c.duration_ms)
+  const episode = c.type === 'show' && c.season_number !== undefined && c.episode_number !== undefined
+    ? `S${c.season_number} E${c.episode_number}`
+    : ''
+  const fraction = c.duration_ms > 0 ? Math.min(1, Math.max(0, c.position_ms / c.duration_ms)) : 0
+  return { label: [episode, left].filter(Boolean).join(' · ') || 'Started', fraction }
+}
+
 /** The line under the lead's title: where in a show it is, or the film's
  *  year and genre. */
 export function resumeLine(c: ContinueWatchingItem): string {

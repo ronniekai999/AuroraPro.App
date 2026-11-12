@@ -148,10 +148,10 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   }
 }
 
-function renderAt(path: string, opts: { bound?: number; role?: string } = {}) {
+function renderAt(path: string, opts: { bound?: number; role?: string; prefs?: Record<string, unknown> } = {}) {
   localStorage.clear()
   localStorage.setItem('aurora_user', JSON.stringify({ id: 1, username: 'ronnie', email: 'r@example.test', role: opts.role ?? 'user' }))
-  localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
+  localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true, ...opts.prefs }))
   const server = stubServer(opts)
   render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
   return server
@@ -187,6 +187,25 @@ describe('every page that draws a card gives it the menu', () => {
     const { rows } = await openMenu('Never Started')
     expect(rows).toContain('Play')
     expect(rows).toContain('Add to My Library')
+  })
+
+  // The list layout is a kept choice, for both grids. Its rows are not
+  // cards, and had none of this: no More button, no long press, no Play.
+  it('the Movies grid as a list', async () => {
+    renderAt('/movies', { prefs: { library_view: 'list' } })
+    await screen.findByText('Never Started', {}, find)
+    expect(document.querySelector('[data-browse-layout="list"]')).not.toBeNull()
+    const { rows, menu } = await openMenu('Never Started')
+    expect(rows).toContain('Play')
+    expect(rows).toContain('Add to My Library')
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    // A title with a saved position: the row's own button and the menu's
+    // first row both say Resume, and the button resumes.
+    expect((await openMenu('Half Watched')).rows[0]).toMatch(/^Resume/)
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: 'Resume Half Watched' }))
+    await waitFor(() => expect(document.querySelector('[data-test-player]')).not.toBeNull(), find)
+    expect(document.querySelector('[data-test-player]')!.getAttribute('data-resume')).toBe('600000')
   })
 
   // The only way a keyboard or a phone takes a title back out of My Library.

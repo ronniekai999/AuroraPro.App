@@ -1,7 +1,7 @@
 // Tonight's slate: the resume-first rule, and the order the filmstrip shows.
 
 import { describe, expect, it } from 'vitest'
-import { buildSlate, RESUME_LEAD_MAX_AGE_MS, resumeLead, resumeLine, shownSlateIndex, timeLeftLabel } from './tonightSlate'
+import { buildSlate, RESUME_LEAD_MAX_AGE_MS, resumeLead, resumeLine, shownSlateIndex, timeLeftLabel, whereYouAre } from './tonightSlate'
 import type { ContinueWatchingItem, HeroPick } from './api'
 import type { Media } from './types'
 
@@ -118,5 +118,30 @@ describe('the lead\'s lines', () => {
     expect(resumeLine(cw(1, { type: 'show', season_number: 0, episode_number: 0 }))).toBe('Season 0, episode 0')
     expect(resumeLine(cw(1, { year: 2025, genre: 'Thriller' }))).toBe('2025 · Thriller')
     expect(resumeLine(cw(1))).toBe('')
+  })
+})
+
+describe('where the viewer is in a title, for a list', () => {
+  it('names a show\'s episode and the time left in it, and how far through it is', () => {
+    expect(whereYouAre({ type: 'show', season_number: 2, episode_number: 4, position_ms: 23 * 60000, duration_ms: 52 * 60000 }))
+      .toEqual({ label: 'S2 E4 · 29 min left', fraction: 23 / 52 })
+  })
+
+  it('gives a film its time left', () => {
+    expect(whereYouAre({ type: 'movie', position_ms: 70 * 60000, duration_ms: 141 * 60000 }).label).toBe('1 h 11 min left')
+  })
+
+  // A Special is season 0, and a pilot can be episode 0.
+  it('names season 0 and episode 0', () => {
+    expect(whereYouAre({ type: 'show', season_number: 0, episode_number: 0, position_ms: 60000, duration_ms: 600000 }).label).toBe('S0 E0 · 9 min left')
+  })
+
+  it('says what it can when the length is unknown', () => {
+    expect(whereYouAre({ type: 'show', season_number: 1, episode_number: 3, position_ms: 60000, duration_ms: 0 })).toEqual({ label: 'S1 E3', fraction: 0 })
+    expect(whereYouAre({ type: 'movie', position_ms: 60000, duration_ms: 0 })).toEqual({ label: 'Started', fraction: 0 })
+  })
+
+  it('never reports more than the whole of it', () => {
+    expect(whereYouAre({ type: 'movie', position_ms: 700000, duration_ms: 600000 }).fraction).toBe(1)
   })
 })

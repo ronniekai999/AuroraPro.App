@@ -19,7 +19,7 @@ import {
   type UpcomingEpisode,
 } from '@/lib/api'
 import { localDateKey } from '@/lib/partyInvites'
-import { PageHeader } from '@/components/PageHeader'
+import { LibraryTools } from '@/components/LibraryHeader'
 import { Icon } from '@/components/Icon'
 
 interface Props {
@@ -128,6 +128,31 @@ export function groupDateParts(iso: string): { relative: string; monthDay: strin
 function formatGroupDate(iso: string): string {
   const { relative, monthDay } = groupDateParts(iso)
   return `${relative} · ${monthDay}`
+}
+
+/** The line at the header's right: the window on screen and how many
+ *  episodes fall in it. "Next 30 days · 9 episodes", "November 2026 · 1
+ *  episode", "Next 30 days · no upcoming episodes".
+ *
+ *  The month view FETCHES the days of the neighbouring months that pad its
+ *  grid, so its count is restricted to the month named: "May 2026 · 98
+ *  episodes" must not include late April and early June. */
+export function calendarSummary(viewMode: ViewMode, cursorMonth: Date, episodes: readonly { air_date: string }[]): string {
+  let counted = episodes.length
+  if (viewMode === 'grid') {
+    const monthStart = firstOfMonthUTC(cursorMonth).getTime()
+    // lastOfMonthUTC is the last day at 00:00 UTC; a day more is the
+    // exclusive end of the month.
+    const monthEnd = lastOfMonthUTC(cursorMonth).getTime() + 86_400_000
+    counted = episodes.filter(e => {
+      const t = new Date(e.air_date).getTime()
+      return t >= monthStart && t < monthEnd
+    }).length
+  }
+  const range = viewMode === 'list'
+    ? `Next ${LIST_WINDOW_DAYS} days`
+    : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  return `${range} · ${counted === 0 ? 'no upcoming episodes' : `${counted.toLocaleString()} episode${counted === 1 ? '' : 's'}`}`
 }
 
 export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }: Props) {
@@ -250,73 +275,31 @@ export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }
   const groups = useMemoGroups(episodes)
   const partyGroups = usePartyGroups(partyEntries)
 
-  if (error) return <p className="text-red-300 p-8">{error}</p>
+  // In words, never the transport's own message.
+  if (error) return <><h1 className="sr-only">Upcoming</h1><p className="py-8 text-sm text-ink-2" role="alert">The calendar could not be loaded. Reload the page to try again.</p></>
 
   return (
     <div className="animate-fade-in">
-      <PageHeader
-        eyebrow={viewMode === 'list' ? 'Upcoming' : 'Month view'}
-        title="Calendar"
-        sub={episodes && (() => {
-            // QA BUG-004 — make the window explicit + leading in both
-            // views, in matching shape, so the count delta between
-            // List ("next 30 days") and Grid ("May 2026") is
-            // self-explanatory rather than surprising.
-            //
-            // The grid mode's FETCH window includes lead/trail days
-            // padding from adjacent months (so chips render on the
-            // full visible grid). For the subtitle COUNT we must
-            // restrict to the cursorMonth's actual boundaries —
-            // otherwise "May 2026 · 98 episodes" silently includes
-            // late-April and early-June airdates and is wrong.
-            let displayed = episodes
-            if (viewMode === 'grid') {
-              const monthStart = firstOfMonthUTC(cursorMonth).getTime()
-              // lastOfMonthUTC returns the LAST day at 00:00 UTC; +1d
-              // gives an exclusive upper bound covering the whole day.
-              const monthEnd = lastOfMonthUTC(cursorMonth).getTime() + 86_400_000
-              displayed = episodes.filter(e => {
-                const t = new Date(e.air_date).getTime()
-                return t >= monthStart && t < monthEnd
-              })
-            }
-            const rangeLabel = viewMode === 'list'
-              ? `Next ${LIST_WINDOW_DAYS} days`
-              : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
-            const epWord = `episode${displayed.length === 1 ? '' : 's'}`
-            // Returned as a fragment, not a template literal. This subline is
-            // mixed markup (a highlighted range label plus a separator dot)
-            // and PageHeader's `sub` is typed ReactNode precisely so it can be
-            // — the Phase 4 `[object Object]` bug was a JSX fragment forced
-            // through a string-typed prop.
-            return (
-              <>
-                <span className="text-white/85 font-medium">{rangeLabel}</span>
-                <span className="text-white/30 mx-1.5">•</span>
-                {displayed.length === 0
-                  ? 'no upcoming episodes from shows in your library'
-                  : `${displayed.length} ${epWord} from shows in your library`}
-              </>
-            )
-          })()}
-        action={
-          // The mockup's .lm-seg: a hard-edged two-up segment, not two pills
-          // in a rounded tray. Labels are "List" and "Month" — the old second
-          // label was "Calendar", which named the page rather than the mode
-          // it switches to.
-          <div className="stage-seg inline-flex" role="group" aria-label="Calendar view mode">
-            <button type="button" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'}>
-              List
-            </button>
-            <button type="button" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'}>
-              Month
-            </button>
-          </div>
-        }
-      />
+      {/* No heading block of its own: the Library header's row names the
+          page, and carries this summary and the List / Month control at its
+          right. */}
+      <h1 className="sr-only">Upcoming</h1>
+      <LibraryTools>
+        <p className="stage-libhead-note" role="status" data-calendar-summary="">
+          {episodes ? calendarSummary(viewMode, cursorMonth, episodes) : ''}
+        </p>
+        <div className="stage-seg flex" role="group" aria-label="Calendar view">
+          <button type="button" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'} className="stage-seg-btn is-label">
+            List
+          </button>
+          <button type="button" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'} className="stage-seg-btn is-label">
+            Month
+          </button>
+        </div>
+      </LibraryTools>
 
       {episodes === null ? (
-        <p className="text-white/50">Loading calendar…</p>
+        <p className="text-sm text-ink-2" role="status">Loading the calendar…</p>
       ) : viewMode === 'list' ? (
         <ListView
           episodes={episodes}

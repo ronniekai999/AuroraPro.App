@@ -157,6 +157,66 @@ const DESCRIBE_LINE = classesOf(SEARCH, 'search-describe-line')
 const FAILED_LINE = classesOf(SEARCH, 'search-failed-line')
 const DESCRIBE_BTN = classesOf(SEARCH, 'search-describe-btn')
 const RETRY_BTN = classesOf(SEARCH, 'search-retry-btn')
+// The Library header: on a phone its scope names are a strip that runs edge
+// to edge and scrolls sideways, with the scope's count and controls on a row
+// under it. It is on this page so that the "no wider than the device" check
+// below covers it: the strip once bled by the desktop gutter, which made the
+// whole page 30px wider than the phone on each side.
+const LIBHEAD = 'src/components/LibraryHeader.tsx'
+const LIB_HEAD = classesOf(LIBHEAD, 'stage-gutter stage-libhead')
+const LIB_ROW = classesOf(LIBHEAD, 'stage-libhead-row')
+const LIB_BAR = classesOf(LIBHEAD, 'stage-scopebar')
+mustHave(LIBHEAD, 'className="stage-scope"')
+mustHave(LIBHEAD, 'className="stage-libhead-tools flex items-center"')
+// The Library's small controls, each built from its component's own class
+// list: on a touch screen, a phone or a tablet, every one is a 44px target.
+// `data-lib-min` is the width a control is first drawn at (the layout
+// control, the genres and the A to Z strip are a wide screen's; a phone has
+// the Filters sheet), and a long profile name is in the count, which must
+// not push the page wider than the phone.
+const CONTROLS = 'src/components/BrowseControls.tsx'
+const COLLECTIONS = 'src/components/CollectionsView.tsx'
+const LIB_SEG = classesOf(CONTROLS, 'stage-seg flex max-md:hidden')
+const LIB_GENRES = classesOf(CONTROLS, 'stage-genres')
+const LIB_JUMPBAR = classesOf(CONTROLS, 'stage-gutter stage-jumpbar')
+const LIB_JUMP = classesOf(CONTROLS, 'stage-jump flex')
+const COL_NEW = classesOf(COLLECTIONS, 'stage-btn stage-btn-sm stage-btn-ghost stage-hit44')
+const COL_DELETE = classesOf(COLLECTIONS, 'stage-colcard-delete')
+mustHave(CONTROLS, 'className="stage-seg-btn"')
+mustHave(CONTROLS, 'className="stage-jump-btn"')
+mustHave(CONTROLS, "className={touch ? 'genre-chip is-touch' : 'genre-chip'}")
+mustHave('src/components/LibraryView.tsx', 'className="stage-seg-btn is-label"')
+mustHave('src/components/LibraryView.tsx', 'className="stage-libhead-note"')
+mustHave('src/components/LibraryView.tsx', 'className="stage-libhead-name"')
+mustHave('src/components/CalendarView.tsx', 'className="stage-seg-btn is-label"')
+const LONG_NAME = 'Bartholomew-Alexander von Hohenzollern-Sigmaringen the Third, Esquire, of the Northern Marches'
+const libBtn = (cls, name, min = 0, extra = '') =>
+  `<button type="button" class="${cls}" data-lib-btn="${name}" data-lib-min="${min}"${extra}>${name}</button>`
+const libHtml = `
+  <header class="${LIB_HEAD}" id="libhead"><div class="${LIB_ROW}">
+    <nav class="${LIB_BAR}" id="scopebar">${['Movies', 'TV Shows', 'Collections', 'My Library', 'Upcoming'].map((n, i) =>
+      libBtn('stage-scope', n, 0, i === 0 ? ' aria-current="page"' : '')).join('')}</nav>
+    <div class="stage-libhead-tools flex items-center">
+      <p class="stage-libhead-note" id="libnote">8 saved for <span class="stage-libhead-name">${LONG_NAME}</span></p>
+      <div class="stage-seg flex">${['All', 'Movies', 'TV Shows'].map(n => libBtn('stage-seg-btn is-label', n)).join('')}</div>
+    </div>
+  </div>
+  <!-- A second scope's controls, in a row of their own: one page never
+       carries both sets at once. -->
+  <div class="${LIB_ROW}" style="margin-top:16px">
+    <div class="stage-libhead-tools flex items-center">
+      <div class="${LIB_SEG}">${['Comfortable', 'Compact', 'List'].map(n => libBtn('stage-seg-btn', n[0], 768)).join('')}</div>
+      ${libBtn(COL_NEW, 'New collection')}
+    </div>
+  </div>
+  <div class="${LIB_GENRES}">${['All genres', 'Action', 'Science Fiction'].map(n => libBtn('genre-chip', n, 768)).join('')}</div>
+  </header>
+  <!-- The strip, in the flow here (it is sticky on its page) but still its
+       own layer, as there: its bottom margin is negative, and what follows
+       must not be laid over its last row. -->
+  <div class="${LIB_JUMPBAR}" style="position:relative;top:0"><div class="${LIB_JUMP}">${['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map(l => libBtn('stage-jump-btn', l, 768)).join('')}</div></div>
+  <div class="stage-gutter" style="margin-top:40px"><div style="position:relative;width:280px;height:60px">${libBtn(COL_DELETE, 'Delete')}</div></div>`
+
 const smallHtml = `
   <section class="tonight-live" data-small="live">
     <div class="tonight-live-row"><div class="tonight-live-text"><span class="tonight-live-title">3 watching Night Train to Meridian</span></div>
@@ -253,6 +313,7 @@ const PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 /* End states only: the actions layer fades in over 150ms, and a computed
    opacity read in the same task as the focus would be the fade's first frame. */
 *,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
+${libHtml}
 <div class="stage-gutter" id="rails">${railHtml}</div>
 <div class="stage-gutter" id="cards" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start">${cardHtml}</div>
 <div class="stage-gutter" id="small" style="padding-top:40px;padding-bottom:40px">${smallHtml}</div>
@@ -265,7 +326,7 @@ const fail = msg => { console.log(`   *** ${msg}`); problems++ }
 // a pointer (hover: all three actions show under it).
 for (const touch of [true, false]) {
   console.log(`\n══ ${touch ? 'touch (no hover)' : 'pointer (hover)'}`)
-  for (const width of [320, 360, 390, 430, 767, 1440]) {
+  for (const width of [320, 360, 390, 430, 767, 834, 1440]) {
     // isMobile: a phone browser WIDENS the layout viewport to fit overflowing
     // content (the 407px symptom) where a desktop viewport would just scroll, so
     // this is the mode in which the original defect is visible at all.
@@ -416,7 +477,18 @@ for (const touch of [true, false]) {
         b.scrollIntoView({ block: 'center' })
         return { name: b.dataset.smallBtn, ...boxOf(b), hit: hitArea(b) }
       })
-      return { rails, cards, small, fontErrors, fontsLoaded, bodyFamily, titleFamily, hover, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
+      // The Library header's scope strip: where it starts and ends, and
+      // whether it can scroll to its last name.
+      const bar = document.getElementById('scopebar').getBoundingClientRect()
+      // The Library's small controls: each one's drawn box and its target.
+      const lib = [...document.querySelectorAll('[data-lib-btn]')].map(b => {
+        b.scrollIntoView({ block: 'center' })
+        return { name: b.dataset.libBtn, min: Number(b.dataset.libMin), ...boxOf(b), hit: hitArea(b), opacity: getComputedStyle(b).opacity }
+      })
+      window.scrollTo(0, 0)
+      const note = document.getElementById('libnote').getBoundingClientRect()
+      const strip = { noteRight: note.right, left: bar.left, right: bar.right, scrolls: document.getElementById('scopebar').scrollWidth > document.getElementById('scopebar').clientWidth }
+      return { lib, strip, rails, cards, small, fontErrors, fontsLoaded, bodyFamily, titleFamily, hover, iw: window.innerWidth, sw: document.documentElement.scrollWidth }
     })
 
     const before = problems
@@ -453,6 +525,23 @@ for (const touch of [true, false]) {
     if (!r.fontsLoaded.includes(r.bodyFamily)) fail(`body font "${r.bodyFamily}" did not load (loaded: ${[...new Set(r.fontsLoaded)].join(', ') || 'none'}) — measurements would use a fallback font`)
     if (!r.fontsLoaded.includes(r.titleFamily)) fail(`rail title font "${r.titleFamily}" did not load (loaded: ${[...new Set(r.fontsLoaded)].join(', ') || 'none'}) — the title would be measured in a fallback font`)
     if (r.iw !== width || r.sw > width) fail(`the page is wider than the device: ${r.sw}px on a ${width}px viewport`)
+    // Below md the scope strip runs from one edge of the screen to the
+    // other, exactly, and scrolls inside itself when its names do not fit.
+    if (width < 768 && (Math.abs(r.strip.left) > 0.5 || Math.abs(r.strip.right - width) > 0.5)) fail(`the Library's scope strip runs ${r.strip.left}..${r.strip.right} on a ${width}px screen, not edge to edge`)
+    if (width <= 430 && !r.strip.scrolls) fail(`the Library's scope strip does not scroll at ${width}px, where its five names cannot fit`)
+    // A scope's count names the profile, and a name can be a hundred
+    // characters: the line ends inside the page.
+    if (r.strip.noteRight > width + 0.5) fail(`the Library header's count runs to ${r.strip.noteRight.toFixed(0)}px with a long profile name, past a ${width}px screen`)
+    // The Library's small controls. Each is drawn from the width it is
+    // meant for and not below it, and on a touch screen is a 44px target.
+    for (const b of r.lib) {
+      const drawn = b.w >= 1 && b.h >= 1
+      if (drawn !== (width >= b.min)) { fail(`Library control "${b.name}" is ${drawn ? 'drawn' : 'not drawn'} at ${width}px; it is meant from ${b.min}px up`); continue }
+      if (!drawn) continue
+      if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`Library control "${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}) at ${width}px, under the 44px a touch target needs`)
+      if (touch && b.opacity !== '1') fail(`Library control "${b.name}" is at opacity ${b.opacity} on a touch screen, which has no hover to show it`)
+    }
+    if (r.lib.length !== 5 + 3 + 3 + 1 + 3 + 27 + 1) fail(`the Library controls probe found ${r.lib.length} controls, expected 43 — this check is out of date`)
     for (const rail of r.rails) {
       if (rail.worst > rail.contentRight + 0.5) fail(`rail ${rail.i}: header reaches ${rail.worst}, past the rail's content edge ${rail.contentRight}`)
       if (rail.spilling.length) fail(`rail ${rail.i}: text overruns its box in ${rail.spilling.join(', ')}`)

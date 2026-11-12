@@ -8,7 +8,7 @@
 
 import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
-import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
+import { LibraryTools } from '@/components/LibraryHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { GridSkeleton } from '@/components/Skeletons'
 import { isResumable } from '@/lib/format'
@@ -20,7 +20,7 @@ import { type Media } from '@/lib/types'
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, onCardContext, onCardPlay, resumableIds, loading = false }: {
+export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, onCardContext, onCardPlay, resumableIds, loading = false, profileName }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
@@ -45,16 +45,18 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
   // on hover (same pattern as the home CW rail). Optional so the
   // type stays compatible with callers that don't wire it.
   onPlayContinue?: (c: ContinueWatchingItem) => void
+  // Whose list this is, for the count in the header ("11 saved for Morgan").
+  profileName?: string
 }) {
   const [filter, setFilter] = useState<'all' | 'movie' | 'show'>('all')
   const filteredLibrary = filter === 'all'
     ? library
     : library.filter(m => (filter === 'show' ? (m.type === 'show' || m.type === 'anime') : m.type === filter))
   const libraryIds = useMemo(() => new Set(library.map(m => m.id)), [library])
-  // Pill counts. `show` folds in `anime` to match the filter predicate above —
-  // if the count and the predicate disagreed, a pill would advertise a number
-  // the grid beneath it doesn't produce.
-  const filterOptions: FilterPillOption<typeof filter>[] = useMemo(() => {
+  // The kinds on offer, each with how many saved titles it holds. `show`
+  // folds in `anime`, as the filter above does: a count and the grid under
+  // it must not disagree.
+  const kinds = useMemo(() => {
     let movies = 0
     let shows = 0
     for (const m of library) {
@@ -65,8 +67,9 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       { value: 'all', label: 'All', count: library.length },
       { value: 'movie', label: 'Movies', count: movies },
       { value: 'show', label: 'TV Shows', count: shows },
-    ]
+    ] as const
   }, [library])
+  const shown = kinds.find(k => k.value === filter)!
   // Deep-debug H3 — latest-continueItems ref so the Resume pill
   // click handler resolves the freshest record at click-time, not
   // render-time. Without this, a mid-hover refetch (e.g. cross-tab
@@ -79,31 +82,33 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
 
   return (
     <div className="animate-fade-in">
-      <PageHeader
-        eyebrow="Saved by you"
-        title="My Library"
-        sub={
-          library.length === 0
-            // Device-neutral: phones have no hover, and the + is always
-            // visible (on every device — it has no hover gating), so "hover …
-            // and click" was wrong for exactly the users reading it on a phone.
-            ? 'Use the + on any card to save titles here.'
-            : library.length === 1
-              ? '1 saved title'
-              : `${library.length} saved titles`
-        }
-      />
-
-      {/* Filter pills — only relevant when there are saved items */}
-      {library.length > 0 && (
-        <FilterPills
-          options={filterOptions}
-          value={filter}
-          onChange={setFilter}
-          label="Filter saved titles by kind"
-          className="mb-6"
-        />
-      )}
+      {/* The page has no heading of its own: the Library header's row names
+          it, and carries this count and the kind control at its right. */}
+      <h1 className="sr-only">My Library</h1>
+      <LibraryTools>
+        <p className="stage-libhead-note" role="status" data-library-count="">
+          {loading && library.length === 0 ? '' : <>
+            {/* The line is the page's live region: with a kind chosen it
+                says how many of them are showing, out of all that is saved. */}
+            {filter !== 'all' && `${shown.count.toLocaleString()} ${shown.label} of `}
+            {library.length.toLocaleString()} saved
+            {/* A name can be a hundred characters: it is cut with an
+                ellipsis, and whole in the title. */}
+            {profileName && <> for <span className="stage-libhead-name" title={profileName}>{profileName}</span></>}
+          </>}
+        </p>
+        {/* Only relevant when there is something saved. */}
+        {library.length > 0 && (
+          <div className="stage-seg flex" role="group" aria-label="Kind">
+            {kinds.map(k => (
+              <button key={k.value} type="button" aria-pressed={filter === k.value} onClick={() => setFilter(k.value)} className="stage-seg-btn is-label">
+                {k.label}
+                <span className="stage-seg-count">{k.count.toLocaleString()}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </LibraryTools>
 
       {/* Saved items grid.
           QA BUG-003 — the empty-state copy was "Your library is empty",
@@ -113,15 +118,17 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       {library.length === 0 && loading ? (
         <GridSkeleton className="mb-12" />
       ) : library.length === 0 ? (
-        <div className="text-center py-16">
-          <Icon name="library" size={48} className="mx-auto text-ink-3 mb-4" />
-          <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
-          <p className="text-white/50 text-sm max-w-md mx-auto">
-            Use the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white/15 border border-line-strong text-white text-xs font-bold align-middle mx-0.5">+</span> in the top-left of any title to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
+        // data-library-empty: what a test of a profile switch looks for, so
+        // that rewording this cannot quietly blind it.
+        <div className="py-16 text-center" data-library-empty="">
+          <Icon name="library" size={48} className="mx-auto mb-4 text-ink-3" />
+          <h2 className="mb-2 text-lg text-ink">Nothing saved yet</h2>
+          <p className="mx-auto max-w-md text-sm text-ink-2">
+            Add a title from its card or its page and it is kept here.{continueItems.length > 0 ? ' What you have started is below.' : ''}
           </p>
         </div>
       ) : filteredLibrary.length === 0 ? (
-        <p className="text-white/50 text-sm">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
+        <p className="text-sm text-ink-2">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
       ) : (
         // Every card here IS in the library, so its Add button reads
         // "Remove" and its caption carries the saved tick. Removing is also
@@ -150,8 +157,8 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
             {/* .type-section (--fs-section, 24px) rather than text-xl, so this
                 secondary head sits on the same display scale as every other
                 section head in the app instead of one arbitrary step below. */}
-            <h2 className="text-white font-display font-bold type-section">Continue Watching</h2>
-            <span className="text-white/50 text-sm">({continueItems.length})</span>
+            <h2 className="font-display font-bold text-ink type-section">Continue Watching</h2>
+            <span className="text-sm text-ink-2">({continueItems.length})</span>
           </div>
           <div className="poster-grid">
             {continueItems.map(c => {

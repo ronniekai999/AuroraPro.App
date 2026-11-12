@@ -1,53 +1,34 @@
-// BrowseView — Movies / TV Shows browse grid: hero, sort, genre filter,
-// pagination, and a Continue Watching rail. Lazy-loaded (Phase 2.4 of the
-// 2026-06-17 app split) so the browse experience leaves the main chunk. App
-// keeps the data gate (list === null → <BrowseLoadingState/>) and wraps this
-// view in <ViewSuspense fallback={<BrowseLoadingState/>}> so the chunk-load
-// fallback is visually identical to the data-load fallback — no two-phase
-// flash. BrowseSort is module-private.
-import { useMemo, useState, type MouseEvent } from 'react'
-import { Icon } from '@/components/Icon'
-import { MediaRail } from '@/components/MediaRail'
+// BrowseView — the body of a Library grid (Movies, TV Shows): the titles, as
+// comfortable posters, compact posters or a list, and "Load more". Its
+// header (the scope names, the count, the sort, the layout, the genres) is
+// LibraryHeader's, which App renders above it so it stays put while the grid
+// reloads. A browse page has no featured band (the hero is Tonight's alone)
+// and no Continue Watching rail (that is Tonight's too): its first screen is
+// its grid.
+//
+// Lazy-loaded. App keeps the data gate (list === null → <BrowseLoadingState/>)
+// and wraps this view in <ViewSuspense fallback={<BrowseLoadingState/>}> so
+// the chunk-load fallback is the data-load fallback.
+import { type MouseEvent } from 'react'
 import { Spinner } from '@/components/ui/spinner'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
-import { MediaListRow } from '@/components/MediaListRow'
-import { isResumable } from '@/lib/format'
-import { mapContinueToMedia, type ContinueWatchingItem } from '@/lib/api'
+import { MediaListRow, type RowProgress } from '@/components/MediaListRow'
+import { type BrowseLayout } from '@/lib/browseLayout'
 import { type Media } from '@/lib/types'
 
-type BrowseSort = 'rating' | 'title' | 'year' | 'recent'
 export default function BrowseView({
-  items, title, subtitle, total, sortBy, onSortChange,
-  genreFilter, onGenreChange, availableGenres,
+  items, total, layout,
   onLoadMore, isLoadingMore,
-  onSelect, onCardContext, onCardPlay, resumableIds,
+  onSelect, onCardContext, onCardPlay, resumableIds, progressById,
   libraryIds, onToggleLib,
-  mediaType, continueItems,
 }: {
   items: Media[]
-  title: string
-  subtitle: string
   // Real catalog count from the server (paginated total_items). When
   // null the page is still loading; fall back to items.length.
   total?: number | null
-  // Sort is parent-controlled: changing it triggers a re-fetch from
-  // page 1. Client-side sort is not safe across paginated loads
-  // (later pages arrive in server-order and would concat after a
-  // re-sorted page 1).
-  sortBy: BrowseSort
-  onSortChange: (s: BrowseSort) => void
-  // Genre is ALSO parent-controlled (QA BUG-003) so it survives
-  // the moviesList=null intermediate state on sort changes. Empty
-  // string = "All Genres". Genre is now also server-side: changing
-  // it clears items and re-fetches page 1, same lifecycle as sort.
-  genreFilter: string
-  onGenreChange: (g: string) => void
-  // Canonical genre catalog from /api/media/genres. Stable across
-  // pagination + sort changes so the dropdown never offers a filter
-  // that returns zero results, and never hides a genre that exists
-  // in the library but hasn't been paginated into view yet. Null
-  // while loading.
-  availableGenres: string[] | null
+  // Comfortable posters, compact posters, or a list. App owns the choice
+  // (it is the header's control) and resolves the default by library size.
+  layout: BrowseLayout
   // Load More — appends the next page. Button is rendered only
   // when items.length < total. While in flight isLoadingMore is
   // true so the button can disable + show a spinner.
@@ -60,236 +41,32 @@ export default function BrowseView({
   // title (App decides); resumableIds says which cards that is.
   onCardPlay: (m: Media) => void
   resumableIds?: Set<number>
+  // The list's "Where you are" column: the viewer's place in each title
+  // they have started.
+  progressById?: Map<number, RowProgress>
   // My Library + button on cards. Same contract as MediaRail.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
-  // 2026-05-31 — 'movie' | 'show' so the header's eyebrow + Continue
-  // Watching filter know which catalog this is. (title is display-only;
-  // don't branch behavior on it.)
-  mediaType: 'movie' | 'show'
-  // Continue Watching records (App-level). BrowseView shows a CW rail
-  // in grid view, filtered to this view's media type. Empty/absent just
-  // hides the rail.
-  continueItems?: ContinueWatchingItem[]
 }) {
-  // Genre is now server-side (Batch A 2026-05-25). The server filters
-  // + paginates against the FULL catalog, so `items.length` is already
-  // the count of horror titles loaded so far and `total` is the real
-  // horror catalog size — not "horror within the loaded page" which
-  // was the previous bug (Top-Rated returned 3, A-Z returned 11 for
-  // the same Horror filter because the loaded subsets differed).
-  //
-  // availableGenres comes from /api/media/genres and is stable
-  // regardless of pagination. Falls back to deriving from items
-  // while the genres fetch is in flight, so first paint isn't blocked.
-  const genres = availableGenres && availableGenres.length > 0
-    ? ['All Genres', ...availableGenres]
-    : ['All Genres', ...Array.from(new Set(items.map(i => i.genre).filter(Boolean)))]
-
-  // No client-side filter — items array already reflects the server's
-  // (type + genre + sort) filter set.
-  const filtered = items
+  // No client-side sort or filter: the items already reflect the server's
+  // (type + genre + sort) set, and a client-side sort would be wrong across
+  // paginated loads (later pages arrive in server order).
   const hasMore = total != null && items.length < total
   const remaining = total != null ? Math.max(0, total - items.length) : 0
 
-  // ── Density (Grid ⇄ List) ─────────────────────────────────────────
-  // Persisted in localStorage, NOT React state alone: changing sort or
-  // genre sets moviesList=null in the parent, which UNMOUNTS BrowseView
-  // and would reset a plain useState back to 'grid' on every sort
-  // change. A lazy initializer that reads localStorage on each mount
-  // survives that remount. Writes happen in the toggle handler.
-  const DENSITY_KEY = 'aurora.browse.density'
-  const [density, setDensity] = useState<'grid' | 'list'>(() => {
-    try {
-      return localStorage.getItem(DENSITY_KEY) === 'list' ? 'list' : 'grid'
-    } catch {
-      return 'grid'
-    }
-  })
-  const changeDensity = (d: 'grid' | 'list') => {
-    setDensity(d)
-    try { localStorage.setItem(DENSITY_KEY, d) } catch { /* ignore quota/denied */ }
-  }
-
-  // ── Continue Watching rail (grid view only) ───────────────────────
-  // Filter App-level CW records to THIS view's media type, dedupe by
-  // media_item_id (a show with progress on several episodes surfaces
-  // once), and map to the card's Media shape. Mirrors the Home rail.
-  const cwRailItems = useMemo(() => {
-    if (!continueItems || continueItems.length === 0) return []
-    const seen = new Set<number>()
-    return continueItems
-      .filter(c => c.type === mediaType && isResumable(c))
-      .filter(c => {
-        if (seen.has(c.media_item_id)) return false
-        seen.add(c.media_item_id)
-        return true
-      })
-      .map(c => mapContinueToMedia(c) as Media)
-  }, [continueItems, mediaType])
-  // Phase 5.3 final QA — pill identifier above the page headline.
-  // "TV Shows" and "Movies" pages both use the same pattern. Built
-  // from the page title for now; could be derived from view if we
-  // grow more browse pages.
-  const pillLabel = title === 'TV Shows' ? 'BROWSE SERIES' : title === 'Movies' ? 'BROWSE FILMS' : 'BROWSE'
-  // Count label fragment, reused under the title in both densities.
-  const countLabel = total != null && total > items.length ? (
-    <>
-      Showing {items.length.toLocaleString()} of{' '}
-      <span className="text-white/90 font-medium">{total.toLocaleString()}</span>
-      {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{total === 1 ? '' : 's'}
-    </>
-  ) : (
-    <>
-      <span className="text-white/90 font-medium">{(total ?? items.length).toLocaleString()}</span>
-      {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{(total ?? items.length) === 1 ? '' : 's'}
-    </>
-  )
-
   return (
     <div className="animate-fade-in relative">
-      {/* The page's header: what this is and how many there are. A browse
-          page has no featured band: the hero is Tonight's alone, and a grid's
-          first screen is its grid. */}
-      <div className="stage-gutter relative pt-8 mb-5">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-line mb-3">
-          <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-ink" />
-          <span className="text-ink text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
-        </div>
-        {/* PageHeader's title scale (text-3xl → --fs-page at md), so this
-            fallback heading matches My Library / Search / Requests. */}
-        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
-        <p className="text-white/60 text-sm mt-2">
-          {subtitle}
-          <span className="text-white/30 mx-1.5">•</span>
-          {countLabel}
-        </p>
-      </div>
-
-      {/* ── Toolbar: genre chips · density toggle · sort ─────────────
-          STICKY as of Aurora Stage Phase 4. This was deliberately left
-          in-flow, with a comment naming the blocker: "the app's top header
-          is itself sticky with a DYNAMIC height (the admin
-          ScanProgressBar appears and disappears), so a fixed sticky offset
-          here would gap/overlap. Sticky is a clean follow-up once that
-          header exposes a stable height."
-          
-          Phase 2 made it expose one — --chrome-h is the MEASURED height of
-          the scan bar + nav, republished by a ResizeObserver when a scan
-          starts or stops — so .stage-toolbar can anchor to it instead of
-          guessing. It is a direct child of the full-bleed root, so its
-          blurred backdrop already spans the viewport; it only needs the
-          gutter as PADDING to line its contents up with the grid below.
-          (No negative margins — those would push it past the edge.)
-          
-          Deliberately NO `relative` in the class list: nothing inside is
-          absolutely positioned, and `.relative{position:relative}` ties
-          `.stage-toolbar{position:sticky}` at single-class specificity — so
-          sticky would win only by source order. Reordering the Stage block,
-          or moving it into a @layer, would silently un-stick this. */}
-      {/* `.stage-gutter`, not `px-[var(--page-gutter)] max-md:px-[18px]` (Phase 12).
-          This toolbar restated the gutter itself, so the Phase 12 cap would have
-          landed on the grid below it and not on this — at 2560 the genre chips
-          would sit at x=48 while the grid they filter started at x=368, a 320px
-          stair-step between a control and the thing it controls. That is the
-          defect the Phase 11.4 attempt actually shipped, and using the shared
-          class is what makes it structurally impossible rather than remembered. */}
-      <div className="stage-toolbar browse-toolbar stage-gutter mb-6 flex items-center gap-3 flex-wrap">
-        {/* Genre chips — replaces the old <select>. Horizontally
-            scrollable so a long genre list never wraps into a tall
-            block. "All Genres" maps to the empty-string filter the
-            server expects. */}
-        <div className="genre-chips flex items-center gap-2 overflow-x-auto flex-1 min-w-0 pb-1">
-          {genres.map(g => {
-            const value = g === 'All Genres' ? '' : g
-            const active = genreFilter === value || (g === 'All Genres' && !genreFilter)
-            return (
-              <button
-                key={g}
-                type="button"
-                onClick={() => onGenreChange(value)}
-                className={`genre-chip ${active ? 'is-active' : ''}`}
-                aria-pressed={active}
-              >
-                {g}
-              </button>
-            )
-          })}
-        </div>
-
-        {/* Density toggle (Grid ⇄ List) */}
-        <div className="density-toggle flex items-center gap-1 flex-none" role="group" aria-label="View density">
-          <button
-            type="button"
-            onClick={() => changeDensity('grid')}
-            className={`density-btn ${density === 'grid' ? 'is-active' : ''}`}
-            aria-pressed={density === 'grid'}
-            aria-label="Grid view"
-            title="Grid view"
-          >
-            <Icon name="grid" size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={() => changeDensity('list')}
-            className={`density-btn ${density === 'list' ? 'is-active' : ''}`}
-            aria-pressed={density === 'list'}
-            aria-label="List view"
-            title="List view"
-          >
-            <Icon name="list" size={16} />
-          </button>
-        </div>
-
-        {/* Sort — kept as a native select (accessible, compact). */}
-        <div className="flex items-center gap-2 flex-none">
-          <span className="text-white/50 text-sm">Sort</span>
-          <select
-            value={sortBy}
-            onChange={(e) => onSortChange(e.target.value as BrowseSort)}
-            // Native select, styled to the glass toolbar (.stage-select) —
-            // it sat here as the one platform-chrome form control among
-            // bespoke chips. Still native: iOS keeps its picker.
-            className="stage-select"
-            aria-label="Sort titles"
-          >
-            <option value="rating">Top Rated</option>
-            <option value="year">Newest</option>
-            <option value="title">A-Z</option>
-            <option value="recent">Recently Added</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Content opts back into the page gutter — BrowseView is full-bleed
-          (FULL_BLEED_VIEWS) so its compact hero reaches the viewport edge,
-          and the sticky toolbar spans full width via negative margins. */}
-      <div className="stage-gutter">
-      {/* ── Continue Watching rail (grid view only) ──────────────────
-          Hidden in list view (which is the lean, no-chrome density
-          mode) and when there's nothing in progress for this type. */}
-      {density === 'grid' && cwRailItems.length > 0 && (
-        <MediaRail
-          title="Continue Watching"
-          items={cwRailItems}
-          onSelect={onSelect}
-          aspect="poster"
-          onCardContext={onCardContext}
-          libraryIds={libraryIds}
-          onToggleLib={onToggleLib}
-          onPlay={onCardPlay}
-          resumableIds={resumableIds}
-        />
-      )}
-
+      <div className="stage-gutter pt-6">
       {/* ── Body: grid OR list ───────────────────────────────────────
-          Grid uses the shared cinema card with the browse-only
-          enrichments (length in meta, quality/maturity badges, hover
-          preview). List uses MediaListRow for a dense, scannable
-          table. */}
-      {density === 'grid' ? (
-        <div className="poster-grid">
-          {filtered.map((item) => (
+          The shared card. Comfortable: its facts line with the runtime.
+          Compact: more, smaller posters, and under each the year with its
+          quality and content rating as chips, which is what a person
+          scanning a thousand films is choosing by. List: MediaListRow, a
+          table of them: genre, length, year, content rating, score and,
+          for a title the viewer has started, where they are in it. */}
+      {layout !== 'list' ? (
+        <div className={layout === 'compact' ? 'poster-grid is-compact' : 'poster-grid'} data-browse-layout={layout}>
+          {items.map((item) => (
             <MediaCardCinema
               key={item.id}
               item={item}
@@ -299,7 +76,8 @@ export default function BrowseView({
               onToggleLib={onToggleLib}
               onPlay={onCardPlay}
               resumable={resumableIds?.has(item.id)}
-              showLength
+              showLength={layout === 'comfortable'}
+              compact={layout === 'compact'}
             />
           ))}
         </div>
@@ -310,16 +88,18 @@ export default function BrowseView({
         // is decorative (aria-hidden) — each row carries its own
         // accessible name via the row's title + the +/✓ button's
         // aria-label.
-        <div className="media-list">
+        <div className="media-list" data-browse-layout="list">
           <div className="media-list-head" aria-hidden="true">
             <span>Title</span>
             <span>Genre</span>
             <span>Length</span>
             <span>Year</span>
             <span>Rating</span>
+            <span>Score</span>
+            <span>Where you are</span>
             <span />
           </div>
-          {filtered.map((item) => (
+          {items.map((item) => (
             <MediaListRow
               key={item.id}
               item={item}
@@ -327,6 +107,9 @@ export default function BrowseView({
               onCardContext={(e) => onCardContext(e, item)}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              progress={progressById?.get(item.id)}
+              onPlay={() => onCardPlay(item)}
+              resumable={resumableIds?.has(item.id)}
             />
           ))}
         </div>

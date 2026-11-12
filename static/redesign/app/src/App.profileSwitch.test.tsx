@@ -115,6 +115,9 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   let bound = 1
   const holds = new Map<string, Promise<void>>()
   const counts: number[] = []
+  /** Each request for a page of a grid: its type, page, and the profile the
+   *  server answered it for (`movie-p2-1`). */
+  const gridAsks: string[] = []
   const activations: number[] = []
   const heroPools: number[] = []
   // Profiles whose own list ("My Library") the server fails to answer for.
@@ -159,6 +162,11 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     if (activate && init?.method === 'POST') {
       bound = Number(activate[1])
       activations.push(bound)
+      // 'activated' holds the ANSWER back after the server has bound: the
+      // window in which the tab still names the old profile and the server
+      // already answers for the new one.
+      const answered = holds.get('activated')
+      if (answered) await answered
       return new Response(null, { status: 204 })
     }
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
@@ -172,6 +180,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     if (p === '/api/media/recent') return json({ data: [sees.catalog] })
     if (isCount && homeCountFails) return json({ error: 'unavailable' }, 503)
     if (p === '/api/media') {
+      if (!isCount) gridAsks.push(`${url.searchParams.get('type')}-p${page}-${asked}`)
       return json({ data: [page === 1 ? sees.catalog : sees.page2], page, per_page: 1, total_items: asked === 1 ? 37 : 2, total_pages: 2 })
     }
     if (p === '/api/media/search') return json([sees.vibe])
@@ -212,6 +221,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   vi.stubGlobal('scrollTo', () => {})
   return {
     counts,
+    gridAsks,
     activations,
     heroPools,
     searches,
@@ -240,6 +250,10 @@ interface Commit {
   railsOrSkeleton: boolean
   /** My Library's empty-state message. */
   libraryEmpty: boolean
+  /** What a grid's A to Z strip is saying ("Loading titles to find Z…"). */
+  jumpStatus: string
+  /** One of the Kid's titles is on the page. */
+  kidTitles: boolean
   /** The Parent's catalog total in Tonight's closing line. */
   parentTotal: boolean
   /** The title Tonight's hero names, when it is up. */
@@ -270,7 +284,11 @@ function renderApp(path: string) {
       // The skeleton keeps this heading too, but only for assistive tech.
       noPickCard: [...document.querySelectorAll('h2')].some(h => h.textContent === 'Welcome to Aurora' && !h.classList.contains('sr-only')),
       railsOrSkeleton: !!document.querySelector('.rail-title') || text.includes('Loading your library…'),
-      libraryEmpty: text.includes('No saved titles yet'),
+      // By the page's own marker, not its wording: the words changed once
+      // and this went on looking for the old ones, passing whatever was drawn.
+      libraryEmpty: document.querySelector('[data-library-empty]') !== null,
+      jumpStatus: document.querySelector('.stage-jump-status')?.textContent ?? '',
+      kidTitles: `${text} ${named.join(' ')}`.includes('Kidonly'),
       parentTotal: /\b37 titles in your library/.test(text),
       heroTitle: document.querySelector('section[data-hero-kind] h2')?.textContent ?? null,
     })
@@ -534,6 +552,57 @@ describe('a profile switch never commits the new name over the previous profile�
       expect(kidOverParent(commits)).toBe(0)
       // The Kid's own Load More is not left spinning: the Parent's handler no
       // longer owns the loading flag, so only the switch's reset clears it.
+      expect(screen.getByRole('button', { name: 'Load 1 more' })).toBeEnabled()
+    })
+
+  // The window a switch opens: the server has bound the Kid, and the tab
+  // still names the Parent until the activation's answer arrives. A page
+  // asked for then would be the Kid's, appended under the Parent's name. The
+  // live refresh has always stood down for it; Load More, and a jump to a
+  // letter (which is Load More, asked for by the strip), now do too.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'asks for no page of the %s grid while a switch is out, by Load More or by a jump', async (_name, path, type) => {
+      const commits = renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const strip = await screen.findByRole('toolbar', { name: 'Jump to letter' }, { timeout: 5000 })
+      const answer = server.hold('activated')
+      switchToKid()
+      // Bound on the server; the tab does not know yet.
+      await waitFor(() => expect(server.activations).toEqual([2]), { timeout: 5000 })
+      expect(identityName()).toBe('Parent')
+      fireEvent.click(screen.getByRole('button', { name: /^Load \d+ more$/ }))
+      fireEvent.click(within(strip).getByRole('button', { name: 'Z' }))
+      await new Promise(done => setTimeout(done, 300))
+      expect(server.gridAsks.filter(a => a.startsWith(`${type}-p2-`))).toEqual([])
+      // Nothing of the Kid's was drawn under the Parent's name.
+      expect(commits.filter(c => c.label === 'Parent' && c.kidTitles)).toEqual([])
+      answer()
+      await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+      expect(kidOverParent(commits)).toBe(0)
+    })
+
+  // A jump to a letter asks for pages by itself, so a switch must drop it as
+  // it drops a Load More: no page of the Parent's under the Kid's name, and
+  // nothing of the jump (its "Loading titles to find Z…", or its answer)
+  // said under the Kid's name either.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'drops a jump to a letter on the %s grid that was still loading', async (_name, path, type) => {
+      const commits = renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const release = server.hold(`${type}-p2-1`)
+      const strip = await screen.findByRole('toolbar', { name: 'Jump to letter' }, { timeout: 5000 })
+      fireEvent.click(within(strip).getByRole('button', { name: 'Z' }))
+      // Not vacuous: the jump was under way, and said so, under the Parent's name.
+      await waitFor(() => expect(commits.some(c => c.label === 'Parent' && c.jumpStatus.startsWith('Loading titles to find Z'))).toBe(true), { timeout: 5000 })
+      switchToKid()
+      await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+      release()
+      await new Promise(done => setTimeout(done, 150))
+      expect(screen.queryAllByText('Parentonly Page Two')).toEqual([])
+      expect(kidOverParent(commits)).toBe(0)
+      expect(kid(commits).filter(c => c.jumpStatus !== '')).toEqual([])
+      expect(kid(commits).length).toBeGreaterThan(0)
+      // The Kid's own Load More is not left spinning by the Parent's jump.
       expect(screen.getByRole('button', { name: 'Load 1 more' })).toBeEnabled()
     })
 

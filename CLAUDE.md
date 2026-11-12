@@ -952,8 +952,13 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     nothing does, beyond Home's rails (`railsUserRef`), the notification
     count, and Tonight's hero, Continue Watching and wait (the signed-out
     effect). What else App keeps for the previous user on that path (the
-    browse grids, an open title) has not been audited: the next sign-in on
-    the tab may be shown it until its own answers land.
+    browse grids and their totals, an open title) has not been audited: the
+    next sign-in on the tab may be shown it until its own answers land. The
+    grids' totals are not kept per owner. What reads them: a grid's count
+    in the Library header and in the Filters sheet's "Show N movies"
+    button, the layout a grid opens with and whether it has an A to Z strip
+    (both by size), and Tonight's closing line, which falls back to them
+    while Home's own count has not answered.
 
 ### Member profiles and follows
 
@@ -1763,9 +1768,29 @@ New titles reach open web apps without a reload. Code:
     genre change abort it, and it stands down on a switch's first commit. A
     grid deeper than 5 pages is left stale rather than refetched or dropped.
     A grid has no featured band (the hero is Tonight's alone), so a refresh
-    has no title at the top of the page to swap: the page's heading and
-    count are its own, and nothing on it rotates
-    (`BrowseView.header.test.tsx`).
+    has no title at the top of the page to swap: its name, count, sort,
+    layout and genres are in the Library header, which App renders above
+    the grid and keeps mounted while the grid reloads, and nothing on the
+    page rotates (`BrowseView.header.test.tsx`).
+    Under the title sort, a grid whose whole list fits in the pages a grid
+    keeps live (`CATALOG_REFRESH_MAX_PAGES`, read by `fitsInPages` in
+    `lib/letterJump.ts`) has an A to Z strip; a longer list has none, and
+    nothing in its place. The server has no request for "titles from M", so
+    a letter with no loaded title is reached by asking for the pages that
+    are left, in order, with the requests Load More makes
+    (`hooks/useLetterJump.ts`): a few at most, never one past the last, and
+    the grid is still live-refreshed afterwards. A jump is dropped when its
+    list goes (another sort or genre, a profile switch, leaving the page),
+    and stops when a page does not come. Nothing is read into the order the
+    server lists titles in (its collation follows the machine's locale): a
+    letter is on when a loaded title files under it, one not seen yet may
+    still be further on until the whole list is loaded, after which the
+    letters are exact, and a jump goes to the first title in the list as it
+    is that files under the letter. Load More, and so a jump, stands down
+    while a profile switch is out and drops an answer if one has started
+    since it was asked, as the live refresh does (the start guard is pinned
+    on both grids in `App.profileSwitch.test.tsx`; the drop is not, beyond
+    what the switch's own abort already covers) (`App.library.test.tsx`).
   - The admin dashboard refetches its counts while its tab shows.
   - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
     and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or

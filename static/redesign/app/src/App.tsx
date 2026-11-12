@@ -80,7 +80,7 @@ import { PartyInvite } from '@/components/PartyInvite'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
 import { firstEpisodeToPlay, regularSeasonsFirst, resolvePartyEpisodeId, startsLaterNotice } from '@/lib/partyEpisode'
-import { buildSlate, resumeLead, shownSlateIndex, type SlateEntry } from '@/lib/tonightSlate'
+import { buildSlate, resumeLead, shownSlateIndex, whereYouAre, type SlateEntry } from '@/lib/tonightSlate'
 import { TonightLive } from '@/components/TonightLive'
 import {
   isPlaybackResolutionCurrent,
@@ -106,8 +106,10 @@ import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
 import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
-import { LibraryScopeBar } from '@/components/LibraryScopeBar'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
+import { LibraryHeader, LibraryToolsProvider } from '@/components/LibraryHeader'
+import { BrowseTools, GenreChips, LetterStrip } from '@/components/BrowseControls'
+import { DEFAULT_BROWSE_SORT, fallbackGenres, readBrowseLayout, useGridLayout, writeBrowseLayout, type BrowseLayout } from '@/lib/browseLayout'
 import { LIBRARY_DESTINATION, hiddenFromRestricted, isLibraryView, libraryScopesFor, mayRenderHidden, navScopeFor } from '@/lib/navScope'
 import { settingsPaneFromPath, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
 import { partyPresence, useActiveParties } from '@/hooks/useActiveParties'
@@ -118,6 +120,8 @@ import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useCatalogVersion } from '@/hooks/useCatalogVersion'
+import { useLetterJump } from '@/hooks/useLetterJump'
+import { fitsInPages } from '@/lib/letterJump'
 import { abortAfter, CATALOG_REFRESH_MAX_PAGES, loadedPageCount, refetchLoadedPages, withoutRemoved } from '@/lib/catalogUpdates'
 import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
@@ -138,7 +142,7 @@ import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefre
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
-import { DetailSkeleton, GridSkeleton, RailSkeleton, SkeletonBlock } from '@/components/Skeletons'
+import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -1465,31 +1469,18 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 }
 
 // Quiet placeholder while a browse list is in flight.
-function BrowseLoadingState({ title }: { title: string }) {
+function BrowseLoadingState({ compact = false }: { compact?: boolean }) {
   return (
-    // The browse page's own layout, as shapes: its header with the real
-    // <h1> in it (the page's name is known before the list), a toolbar row
-    // at .stage-toolbar's 14px padding, then the grid at the gutter, so
-    // BrowseView lands on exactly this frame.
-    // The gutter on every row: movies/shows are in FULL_BLEED_VIEWS, so this
-    // does not inherit .stage-page's padding. It renders on every sort and
-    // genre change (the parent resets the list to null), so without the
-    // gutter the skeleton flashed edge-to-edge and then snapped in by 48px.
+    // The grid's own frame, as shapes, so BrowseView lands on exactly this.
+    // The page's header (its name, count and controls) is LibraryHeader's
+    // and stays up above it. The gutter is here because movies/shows are in
+    // FULL_BLEED_VIEWS and do not inherit .stage-page's padding: this renders
+    // on every sort and genre change (the parent resets the list to null),
+    // and without it the skeleton flashed edge to edge and snapped in.
     <div className="animate-fade-in relative">
-      <div className="stage-gutter relative pt-8 mb-5">
-        <SkeletonBlock className="mb-3 h-[26px] w-32 rounded-full" />
-        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">{title}</h1>
-        <p className="mt-2 text-sm text-ink-2" role="status">Loading your library…</p>
-      </div>
-      <div className="stage-gutter mb-6 flex items-center gap-3 py-3.5 border-b border-white/[0.05]" aria-hidden="true">
-        <SkeletonBlock className="h-9 w-16 rounded-full" />
-        <SkeletonBlock className="h-9 w-20 rounded-full" />
-        <SkeletonBlock className="h-9 w-24 rounded-full max-sm:hidden" />
-        <SkeletonBlock className="h-9 w-20 rounded-full max-md:hidden" />
-        <SkeletonBlock className="ml-auto h-9 w-36 rounded-xl" />
-      </div>
-      <div className="stage-gutter">
-        <GridSkeleton />
+      <div className="stage-gutter pt-6">
+        <p className="sr-only" role="status">Loading your library…</p>
+        <GridSkeleton compact={compact} />
       </div>
     </div>
   )
@@ -2179,8 +2170,8 @@ export default function App() {
   // Sort lives here (not in BrowseView) because changing sort
   // triggers a re-fetch from page 1, and the parent owns the cache.
   type MediaSort = 'rating' | 'title' | 'year' | 'recent'
-  const [moviesSort, setMoviesSort] = useState<MediaSort>('title')
-  const [showsSort, setShowsSort] = useState<MediaSort>('title')
+  const [moviesSort, setMoviesSort] = useState<MediaSort>(DEFAULT_BROWSE_SORT)
+  const [showsSort, setShowsSort] = useState<MediaSort>(DEFAULT_BROWSE_SORT)
   // Genre filter — QA BUG-003 fix. Previously this lived inside
   // BrowseView, but changing Sort sets moviesList=null which
   // unmounts BrowseView and resets its local state. Lifting to
@@ -2188,12 +2179,27 @@ export default function App() {
   // changes (and across the loading-skeleton intermediate state).
   const [moviesGenre, setMoviesGenre] = useState('')
   const [showsGenre, setShowsGenre] = useState('')
-  // Canonical genre catalogs from /api/media/genres — populated once
-  // per browse view, used to render the dropdown so it doesn't shift
-  // as the user paginates. Null while in flight; BrowseView falls
-  // back to deriving from items so first paint isn't blocked.
+  // The library's genres, from /api/media/genres: asked for once per grid,
+  // so the list does not shift as pages load. Null while in flight (no
+  // genre control is drawn yet). When that request FAILS the control is
+  // drawn from the genres of the titles the grid holds (lib/browseLayout
+  // fallbackGenres), as the old toolbar did: fewer genres than the library
+  // has, which is better than no way to filter at all.
   const [moviesGenres, setMoviesGenres] = useState<string[] | null>(null)
   const [showsGenres, setShowsGenres] = useState<string[] | null>(null)
+  const [genresFailed, setGenresFailed] = useState<{ movie: boolean; show: boolean }>({ movie: false, show: false })
+  // How the Library's grids are laid out: the viewer's choice, or null for
+  // "by library size" (lib/browseLayout). One choice for both grids.
+  const [browseLayout, setBrowseLayout] = useState<BrowseLayout | null>(readBrowseLayout)
+  // The element in the Library header's row that a scope's own controls are
+  // drawn into (My Library's kind, Upcoming's List or Month).
+  const [libraryToolsEl, setLibraryToolsEl] = useState<HTMLElement | null>(null)
+  const changeBrowseLayout = useCallback((layout: BrowseLayout) => {
+    setBrowseLayout(layout)
+    writeBrowseLayout(layout)
+  }, [])
+  const moviesLayout = useGridLayout(browseLayout, moviesTotal, moviesGenre)
+  const showsLayout = useGridLayout(browseLayout, showsTotal, showsGenre)
   const [moviesLoadingMore, setMoviesLoadingMore] = useState(false)
   const [showsLoadingMore, setShowsLoadingMore] = useState(false)
   // Track next-page-to-fetch in state rather than deriving from
@@ -3607,8 +3613,11 @@ export default function App() {
     setShowsTotal(null)
     // Pagination state reset on logout. Sort preference is per-user
     // so default it back; loading flags are per-session.
-    setMoviesSort('rating')
-    setShowsSort('rating')
+    // What a grid opens with, not a sort of its own: after signing out and
+    // in again the grid opened on "Top rated" with Filters saying something
+    // was applied.
+    setMoviesSort(DEFAULT_BROWSE_SORT)
+    setShowsSort(DEFAULT_BROWSE_SORT)
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setMoviesNextPage(1)
@@ -4337,8 +4346,9 @@ export default function App() {
     let cancelled = false
     const ac = new AbortController()
     listGenres('movie', ac.signal)
-      .then(gs => { if (!cancelled) setMoviesGenres(gs) })
-      .catch(() => { /* dropdown falls back to deriving from items */ })
+      .then(gs => { if (!cancelled) { setMoviesGenres(gs); setGenresFailed(f => (f.movie ? { ...f, movie: false } : f)) } })
+      // The control is then drawn from the loaded titles' own genres.
+      .catch(() => { if (!cancelled) setGenresFailed(f => (f.movie ? f : { ...f, movie: true })) })
     return () => { cancelled = true; ac.abort() }
   }, [user, view, moviesGenres])
 
@@ -4371,8 +4381,8 @@ export default function App() {
     let cancelled = false
     const ac = new AbortController()
     listGenres('show', ac.signal)
-      .then(gs => { if (!cancelled) setShowsGenres(gs) })
-      .catch(() => { /* fallback path */ })
+      .then(gs => { if (!cancelled) { setShowsGenres(gs); setGenresFailed(f => (f.show ? { ...f, show: false } : f)) } })
+      .catch(() => { if (!cancelled) setGenresFailed(f => (f.show ? f : { ...f, show: true })) })
     return () => { cancelled = true; ac.abort() }
   }, [user, view, showsGenres])
 
@@ -4500,6 +4510,13 @@ export default function App() {
   const handleLoadMoreMovies = useCallback(async () => {
     if (!moviesList || moviesTotal == null || moviesLoadingMore) return
     if (moviesList.length >= moviesTotal) return
+    // Not while a profile switch or its PIN prompt is out, and an answer is
+    // dropped if one has started since it was asked: the server may have
+    // answered it for a profile other than the one this tab still names. The
+    // live refresh has had this guard; Load More had a narrow window for a
+    // press, and a jump to a letter (which asks by itself) made it wide.
+    if (isProfileSwitching()) return
+    const switchGen = profileSwitchGeneration()
     // A live refresh landing after this would replace the list without the
     // page appended here; it runs again once this page has landed.
     moviesRefreshAcRef.current?.abort()
@@ -4523,6 +4540,7 @@ export default function App() {
       // swapped (sort change replaced the ref), discard the result
       // even though the request itself wasn't aborted in time.
       if (moviesLoadMoreAcRef.current !== ac) return
+      if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
       setMoviesList(prev => [...(prev ?? []), ...(items as Media[])])
       // Audit HIGH-1 — advance the cursor from server's page field,
       // not derived from list length. Survives variable page sizes.
@@ -4542,11 +4560,14 @@ export default function App() {
         moviesLoadMoreAcRef.current = null
       }
     }
-  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesGenre, moviesNextPage, nextToastId])
+  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesGenre, moviesNextPage, nextToastId, isProfileSwitching, profileSwitchGeneration])
 
   const handleLoadMoreShows = useCallback(async () => {
     if (!showsList || showsTotal == null || showsLoadingMore) return
     if (showsList.length >= showsTotal) return
+    // As for the Movies grid, above.
+    if (isProfileSwitching()) return
+    const switchGen = profileSwitchGeneration()
     showsRefreshAcRef.current?.abort()
     showsRefreshAcRef.current = null
     showsLoadMoreAcRef.current?.abort()
@@ -4562,6 +4583,7 @@ export default function App() {
         genre: genreAtFetch || undefined, signal: ac.signal,
       })
       if (showsLoadMoreAcRef.current !== ac) return
+      if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
       setShowsList(prev => [...(prev ?? []), ...(items as Media[])])
       setShowsNextPage(page + 1)
     } catch (err) {
@@ -4574,7 +4596,7 @@ export default function App() {
         showsLoadMoreAcRef.current = null
       }
     }
-  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsGenre, showsNextPage, nextToastId])
+  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsGenre, showsNextPage, nextToastId, isProfileSwitching, profileSwitchGeneration])
 
   // Sort-change handlers. Setting null on the items list triggers
   // the fetch effect above to re-run with the new sort, fetching
@@ -4583,6 +4605,47 @@ export default function App() {
   // refetch window. Audit HIGH-2 — also abort any in-flight Load
   // More + reset the nextPage cursor so a fresh sort always starts
   // at page 1.
+
+  // A grid sorted by title has an A to Z strip (LetterStrip). A letter that
+  // is further on than the loaded pages is reached by asking for the next
+  // ones, through the handlers above: the requests "Load more" makes. Each
+  // grid's jump reads its list only while its page is on screen and settled,
+  // so leaving the page, another sort or genre, or a profile switch drops a
+  // jump that is still loading.
+  const revealInGrid = useCallback((m: Media) => {
+    const card = document.querySelector<HTMLElement>(`[data-browse-layout] [data-media-id="${m.id}"]`)
+    if (!card) return
+    // To the top, under the chrome and the strip (the page's scroll padding).
+    card.scrollIntoView?.({ block: 'start' })
+    // And the keyboard's place with it: Tab goes on from this title.
+    const control = card.matches('[tabindex]') ? card : card.querySelector<HTMLElement>('button')
+    control?.focus({ preventScroll: true })
+  }, [])
+  const loadMoreMovies = useCallback(() => { void handleLoadMoreMovies() }, [handleLoadMoreMovies])
+  const loadMoreShows = useCallback(() => { void handleLoadMoreShows() }, [handleLoadMoreShows])
+  // Each grid's genres for its controls: the server's list, or, when that
+  // could not be read, the genres of the titles the grid holds.
+  const moviesGenreList = useMemo(
+    () => moviesGenres ?? (genresFailed.movie ? fallbackGenres(moviesList, moviesGenre) : null),
+    [moviesGenres, genresFailed.movie, moviesList, moviesGenre],
+  )
+  const showsGenreList = useMemo(
+    () => showsGenres ?? (genresFailed.show ? fallbackGenres(showsList, showsGenre) : null),
+    [showsGenres, genresFailed.show, showsList, showsGenre],
+  )
+  // Whether each grid has the strip: sorted by title, settled, and short
+  // enough (see where the strip is drawn).
+  const moviesStrip = moviesSort === 'title' && !profileSwitchPending && fitsInPages(moviesTotal, BROWSE_PER_PAGE, CATALOG_REFRESH_MAX_PAGES)
+  const showsStrip = showsSort === 'title' && !profileSwitchPending && fitsInPages(showsTotal, BROWSE_PER_PAGE, CATALOG_REFRESH_MAX_PAGES)
+  const moviesJump = useLetterJump({
+    items: view === 'movies' && !profileSwitchPending ? moviesList : null, total: moviesTotal,
+    enabled: moviesStrip, loadingMore: moviesLoadingMore, loadMore: loadMoreMovies, reveal: revealInGrid,
+  })
+  const showsJump = useLetterJump({
+    items: view === 'shows' && !profileSwitchPending ? showsList : null, total: showsTotal,
+    enabled: showsStrip, loadingMore: showsLoadingMore, loadMore: loadMoreShows, reveal: revealInGrid,
+  })
+
   const handleMoviesSortChange = useCallback((s: MediaSort) => {
     if (s === moviesSort) return
     moviesLoadMoreAcRef.current?.abort()
@@ -5177,6 +5240,15 @@ export default function App() {
     () => new Set(continueItems.filter(isResumable).map(c => c.media_item_id)),
     [continueItems],
   )
+  // A Library list's "Where you are" column: for each title with a position
+  // worth resuming, the record a card's Resume would use (the first found).
+  const listProgressById = useMemo(() => {
+    const byId = new Map<number, { label: string; fraction: number }>()
+    for (const c of continueItems) {
+      if (isResumable(c) && !byId.has(c.media_item_id)) byId.set(c.media_item_id, whereYouAre(c))
+    }
+    return byId
+  }, [continueItems])
 
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
@@ -6435,8 +6507,57 @@ export default function App() {
             instead (Phase 4 added home/movies/shows to what was just
             `detail`). Everything else keeps the standard page pad. */}
         {isLibraryView(view) && (!hiddenFromRestricted(view) || hiddenOk) && (
-          <LibraryScopeBar current={view} navScope={navScope} onNavigate={handleNavigate} onPrefetch={prefetchView} />
+          <LibraryHeader
+            current={view}
+            navScope={navScope}
+            onNavigate={handleNavigate}
+            onPrefetch={prefetchView}
+            // A grid has no heading or toolbar of its own: its name, count,
+            // sort, layout and genres are this row's, which stays mounted
+            // while the grid reloads for a new sort or genre.
+            title={view === 'movies' ? 'Movies' : view === 'shows' ? 'TV Shows' : undefined}
+            tools={view === 'movies' ? (
+              <BrowseTools
+                noun="movie" total={profileSwitchPending ? null : moviesTotal}
+                sortBy={moviesSort} onSortChange={handleMoviesSortChange}
+                layout={moviesLayout} onLayoutChange={changeBrowseLayout}
+                genre={moviesGenre} onGenreChange={handleMoviesGenreChange} genres={moviesGenreList}
+              />
+            ) : view === 'shows' ? (
+              <BrowseTools
+                noun="show" total={profileSwitchPending ? null : showsTotal}
+                sortBy={showsSort} onSortChange={handleShowsSortChange}
+                layout={showsLayout} onLayoutChange={changeBrowseLayout}
+                genre={showsGenre} onGenreChange={handleShowsGenreChange} genres={showsGenreList}
+              />
+            ) : undefined}
+            toolsRef={setLibraryToolsEl}
+          >
+            {view === 'movies' && <GenreChips genre={moviesGenre} onGenreChange={handleMoviesGenreChange} genres={moviesGenreList} />}
+            {view === 'shows' && <GenreChips genre={showsGenre} onGenreChange={handleShowsGenreChange} genres={showsGenreList} />}
+          </LibraryHeader>
         )}
+        {/* A grid sorted by title: its A to Z strip, between the header and
+            the grid and a sibling of both, so it can stay under the top bar
+            while the grid scrolls. Not while the grid loads, and not for an
+            empty one.
+
+            Only for a list that can be loaded whole in the pages a grid
+            keeps live (CATALOG_REFRESH_MAX_PAGES): a jump then asks for the
+            few pages that are left at most, and the grid is still refreshed
+            afterwards. A longer list gets no strip at all: a jump there
+            would be a long chain of requests that are each a pass over the
+            whole library, and needs a "titles from a letter" request the
+            server does not have. */}
+        {view === 'movies' && moviesStrip && !!moviesList?.length && (
+          <LetterStrip states={moviesJump.states} pending={moviesJump.pending} progress={moviesJump.progress} missing={moviesJump.missing} onJump={moviesJump.jump} />
+        )}
+        {view === 'shows' && showsStrip && !!showsList?.length && (
+          <LetterStrip states={showsJump.states} pending={showsJump.pending} progress={showsJump.progress} missing={showsJump.missing} onJump={showsJump.jump} />
+        )}
+        {/* A Library scope that keeps its own state hands its controls to the
+            header through this (LibraryTools). */}
+        <LibraryToolsProvider value={isLibraryView(view) ? libraryToolsEl : null}>
         <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
@@ -6559,57 +6680,43 @@ export default function App() {
               While loading, show a brief loading state instead of
               flashing the prototype's mock library to the user. */}
           {view === 'movies' && (
-            <ViewSuspense fallback={<BrowseLoadingState title="Movies" />}>
+            <ViewSuspense fallback={<BrowseLoadingState compact={moviesLayout === 'compact'} />}>
               {moviesList === null || profileSwitchPending
-                ? <BrowseLoadingState title="Movies" />
+                ? <BrowseLoadingState compact={moviesLayout === 'compact'} />
                 : <BrowseView
                     items={moviesList}
                     total={moviesTotal}
-                    title="Movies"
-                    subtitle="Browse your movie collection"
-                    mediaType="movie"
-                    sortBy={moviesSort}
-                    onSortChange={handleMoviesSortChange}
-                    genreFilter={moviesGenre}
-                    onGenreChange={handleMoviesGenreChange}
-                    availableGenres={moviesGenres}
+                    layout={moviesLayout}
                     onLoadMore={handleLoadMoreMovies}
                     isLoadingMore={moviesLoadingMore}
                     onSelect={handleSelect}
                     onCardContext={openCardContextMenu}
                     onCardPlay={playOrResume}
                     resumableIds={profileSwitchPending ? undefined : resumableIds}
+                    progressById={profileSwitchPending ? undefined : listProgressById}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
-                    continueItems={continueItems}
                   />
               }
             </ViewSuspense>
           )}
           {view === 'shows' && (
-            <ViewSuspense fallback={<BrowseLoadingState title="TV Shows" />}>
+            <ViewSuspense fallback={<BrowseLoadingState compact={showsLayout === 'compact'} />}>
               {showsList === null || profileSwitchPending
-                ? <BrowseLoadingState title="TV Shows" />
+                ? <BrowseLoadingState compact={showsLayout === 'compact'} />
                 : <BrowseView
                     items={showsList}
                     total={showsTotal}
-                    title="TV Shows"
-                    subtitle="Browse your series collection"
-                    mediaType="show"
-                    sortBy={showsSort}
-                    onSortChange={handleShowsSortChange}
-                    genreFilter={showsGenre}
-                    onGenreChange={handleShowsGenreChange}
-                    availableGenres={showsGenres}
+                    layout={showsLayout}
                     onLoadMore={handleLoadMoreShows}
                     isLoadingMore={showsLoadingMore}
                     onSelect={handleSelect}
                     onCardContext={openCardContextMenu}
                     onCardPlay={playOrResume}
                     resumableIds={profileSwitchPending ? undefined : resumableIds}
+                    progressById={profileSwitchPending ? undefined : listProgressById}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
-                    continueItems={continueItems}
                   />
               }
             </ViewSuspense>
@@ -6628,6 +6735,7 @@ export default function App() {
                 resumableIds={profileSwitchPending ? undefined : resumableIds}
                 // The Continue Watching grid's Play resumes its own record.
                 onPlayContinue={handlePlayContinue}
+                profileName={profileSwitchPending ? undefined : profiles.find(p => p.id === activeProfileId)?.name}
               />
             </ViewSuspense></HiddenPage>
           )}
@@ -6984,6 +7092,7 @@ export default function App() {
             </p>
           )}
         </div>
+        </LibraryToolsProvider>
         <BottomTabBar
           currentView={view}
           navScope={navScope}

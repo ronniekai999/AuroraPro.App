@@ -132,6 +132,8 @@ export interface UIMedia {
   progress?: number
   cast?: string[]
   tags?: string[]
+  // The server's sort key for the title, when it sent one.
+  sortTitle?: string
   // LLM-generated per-pick reason — populated for Discover-rail items
   // and Hero picks (recommender/discover.go:406 + hero rerank). Lets the
   // card surface "why this was picked for you" as a hover tooltip
@@ -554,6 +556,7 @@ export function mapMedia(item: ServerMediaItem): UIMedia {
       ...(item.has_hdr ? ['HDR'] : []),
       ...(item.content_rating ? [item.content_rating] : []),
     ],
+    ...(item.sort_title ? { sortTitle: item.sort_title } : {}),
     // Carry the LLM-generated reason through to the UI layer. For
     // non-personalized endpoints (listMedia, search, etc.) the field
     // is absent on the server response and the spread leaves it

@@ -20,6 +20,10 @@ export interface Media {
   episodes?: Episode[]
   cast?: string[]
   tags?: string[]
+  // What the server sorts the title by (the title without a leading
+  // article, unless an admin set another). Present on catalog list items;
+  // lib/letterJump files a title under its first letter.
+  sortTitle?: string
   // LLM-generated per-pick reason. Populated for items that came from
   // a personalized endpoint (Hero rerank, Discover rails). MediaCard
   // surfaces this as a hover tooltip on cards in those rails.
