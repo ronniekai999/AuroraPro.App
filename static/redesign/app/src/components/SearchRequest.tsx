@@ -26,21 +26,13 @@ import {
   type RequestsConfig,
   type TmdbSearchResult,
 } from '@/lib/api'
+import { REQUEST_STATUS } from '@/lib/requestStatus'
 
 const keyOf = (r: { media_type: string; tmdb_id: number }) => `${r.media_type}:${r.tmdb_id}`
 
 /** The letter a title is filed under, for the tile that stands in for a
  *  poster: its first, past a leading article ("The Glass Orchard" is G). */
 const initialOf = (title: string) => title.trim().replace(/^(the|a|an)\s+/i, '').charAt(0).toUpperCase()
-
-/** What a request's status means to the person who asked. */
-const STATUS_SAYS: Record<MediaRequest['status'], string> = {
-  pending: 'sent, nothing found yet',
-  pending_approval: 'waiting for an admin to approve it',
-  processing: 'being fetched',
-  available: 'in the library now',
-  failed: 'it could not be fetched',
-}
 
 /** A refusal in words: the server's reasons that a person can act on, and
  *  one sentence for the rest. Never a status code. */
@@ -250,9 +242,9 @@ export function SearchRequest({ query, userId, state, onRequested, onOpenRequest
                   <span className="search-req-title">{r.title}</span>
                   <span className="search-req-facts">{[r.media_type === 'tv' ? 'TV show' : 'Movie', r.year ? String(r.year) : ''].filter(Boolean).join(' · ')}</span>
                   {said ? (
-                    <span className="search-req-state" data-status={said.status}>
+                    <span className="search-req-state" data-tone={REQUEST_STATUS[said.status]?.tone ?? 'wait'}>
                       <span className="search-req-dot" aria-hidden="true" />
-                      {said === theirs && theirs?.username ? `Already requested by ${theirs.username}` : said === theirs ? 'Already requested' : 'Requested'} · {STATUS_SAYS[said.status]}
+                      {said === theirs && theirs?.username ? `Already requested by ${theirs.username}` : said === theirs ? 'Already requested' : 'Requested'} · {REQUEST_STATUS[said.status]?.says ?? said.status}
                     </span>
                   ) : !fetchable ? (
                     <span className="search-req-overview">This server is not set up to fetch {r.media_type === 'tv' ? 'TV shows' : 'movies'}.</span>

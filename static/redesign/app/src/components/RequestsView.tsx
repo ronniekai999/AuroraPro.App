@@ -1,22 +1,32 @@
-// Requests view — submitted requests with status, plus an inline TMDB
-// search + create dialog. Extracted from App.tsx (2026-06-17 app split,
-// Phase 2.3). humanizeRequestError (raw server error -> a short friendly
-// sentence, raw kept as a tooltip for admin debugging) rides along as a
-// module-private helper — RequestsView is its only consumer. The status/
-// date formatting uses formatRequestDate (shared leaf, Phase 0a).
+// Requests view: what this account has asked for, and what became of each.
+// ("My requests"; for a session with the admin powers, every member's.)
+//
+// One row per request: its poster, what it is and when it was asked for,
+// its status with one sentence about it, and what can be done with it. The
+// page makes no request itself: asking is the end of a search that finds
+// nothing, so the row at the top opens the search page (it used to open a
+// modal composer with a search of its own).
+//
+// What a row can do is what the routes allow. DELETE /api/requests/{id}
+// takes only a pending or a failed request, so only those have a delete. A
+// request carries no id of the title it became in the library, so one that
+// is available is found by searching for its title. A failed one is asked
+// for again with the same details (POST /api/requests), and the failed row
+// is then deleted.
+//
+// humanizeRequestError (raw server error -> a short friendly sentence, the
+// raw text kept as a tooltip for whoever debugs it) is module-private:
+// this page is its only reader.
 
-import { useState, useEffect, useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Icon } from '@/components/Icon'
-import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
-import { formatRequestDate } from '@/lib/format'
-import { useExitTransition } from '@/hooks/useExitTransition'
+import { formatRequestDay } from '@/lib/format'
+import { REQUEST_STATUS, REQUEST_STATUSES } from '@/lib/requestStatus'
 import {
   createRequest,
   deleteRequest,
-  searchTmdb,
   tmdbPosterURL,
   type MediaRequest,
-  type TmdbSearchResult,
 } from '@/lib/api'
 
 /* ─────────────────────── REQUEST ERROR HUMANIZER ─────────────────────── */
@@ -28,6 +38,9 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
   if (!raw) return ''
   const r = raw.toLowerCase()
   const kind = mediaType === 'tv' ? 'show' : 'movie'
+
+  // An admin said no to a request that was waiting for approval.
+  if (r.includes('denied by admin')) return 'An admin turned this request down.'
 
   // Already-added: Radarr's MovieExistsValidator / Sonarr's
   // SeriesExistsValidator. Common when a user re-requests after a
@@ -100,406 +113,211 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
   return 'Something went wrong on the download server. Hover for technical details.'
 }
 
-// Status → .stage-stb variant. The five colours are UNCHANGED from the Tailwind
-// map this replaces (amber pending / orange pending-approval / blue processing /
-// emerald available / red failed) — they moved into index.css because each is a
-// coordinated fill+border+text triple, and the mockup's own badge palette
-// happens to agree with all five. The semantics are the server's, so this is a
-// relocation of the colours, not a recolour. (The badge TYPOGRAPHY did change:
-// .stage-stb is uppercase where the old Tailwind badge was `capitalize`.)
-//
-// Module scope, not rebuilt per render: both maps are constants that close over
-// nothing.
-const STATUS_BADGE: Record<string, string> = {
-  pending: 'stage-stb-pending',
-  // Held for admin approval (carve-out C) — distinct orange so it reads
-  // apart from the amber "pending" (admitted, awaiting dispatch).
-  pending_approval: 'stage-stb-approval',
-  processing: 'stage-stb-processing',
-  available: 'stage-stb-available',
-  failed: 'stage-stb-failed',
-}
-// Status display labels. snake_case statuses (pending_approval) need an
-// explicit human label since the badge otherwise renders the raw value.
-const STATUS_LABELS: Record<string, string> = {
-  pending_approval: 'Pending approval',
-}
+type Filter = 'all' | MediaRequest['status']
+/** "today", "yesterday", "3 days ago", or "on Nov 6": after "Added to the library". */
+const whenArrived = (iso: string) => { const d = formatRequestDay(iso); return /^[A-Z]/.test(d) ? `on ${d}` : d }
+/** The letter a title is filed under, past a leading article. */
+const initialOf = (title: string) => title.trim().replace(/^(the|a|an)\s+/i, '').charAt(0).toUpperCase()
 
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
-// RequestsView — submitted requests with status. Includes an inline
-// TMDB search + create dialog.
-export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false }: {
+export default function RequestsView({ requests, onRequestSubmitted, onRequestDeleted, everyone = false, onAsk, onFind }: {
+  /** The server lists every member's requests to a session with the admin
+   *  powers and only the caller's own to anyone else; the page says which. */
   everyone?: boolean
   requests: MediaRequest[] | null
   onRequestSubmitted: (r: MediaRequest) => void
-  onRequestDeleted: (id: number) => void
+  /** `replaced`: a failed request that was just asked for again, deleted
+   *  as housekeeping; nothing needs saying about it. */
+  onRequestDeleted: (id: number, replaced?: boolean) => void
+  /** Opens the search page with its field ready: where a title is asked for. */
+  onAsk?: () => void
+  /** Searches the library for a title (a request that is now available). */
+  onFind?: (title: string) => void
 }) {
-  const [filter, setFilter] = useState<'all' | 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'>('all')
-  // The server lists every member's requests to a session with the admin
-  // powers and only the caller's own to anyone else; the page says which.
+  const [filter, setFilter] = useState<Filter>('all')
   const heading = everyone ? 'Requests' : 'My requests'
-  // Inline TMDB search + create dialog.
-  const [createOpen, setCreateOpen] = useState(false)
-  // The composer stays mounted for its exit fade after createOpen flips false.
-  const createExit = useExitTransition(createOpen)
-  const [searchQ, setSearchQ] = useState('')
-  const [searchResults, setSearchResults] = useState<TmdbSearchResult[]>([])
-  const [searching, setSearching] = useState(false)
-  const [submitting, setSubmitting] = useState<number | null>(null) // tmdb_id currently submitting
-  // 4K toggle — default false. We can't easily probe whether a 4K
-  // ARR service is configured here, so we always offer it.
-  const [requestQuality4K, setRequestQuality4K] = useState(false)
-  useEffect(() => {
-    if (!createOpen) return
-    const q = searchQ.trim()
-    if (!q) { setSearchResults([]); return }
-    setSearching(true)
-    const ac = new AbortController()
-    const id = window.setTimeout(() => {
-      void searchTmdb(q, ac.signal).then(r => setSearchResults(r)).catch(() => setSearchResults([])).finally(() => setSearching(false))
-    }, 300)
-    return () => { window.clearTimeout(id); ac.abort() }
-  }, [searchQ, createOpen])
+  // The row whose delete was pressed and is waiting to be confirmed; the row
+  // being worked on; and what went wrong on a row, said on that row.
+  const [confirming, setConfirming] = useState<number | null>(null)
+  const [busy, setBusy] = useState<number | null>(null)
+  const [wrong, setWrong] = useState<{ id: number; says: string } | null>(null)
 
-  // Counts for the filter pills. Computed in one pass over the list rather
-  // than a .filter() per pill inside the render (which is what the previous
-  // inline version did — six passes over every request on every keystroke of
-  // the unrelated TMDB search box, because that state lives in this
-  // component). Keyed on `requests` so it recomputes only when the data does.
-  const statusCounts = useMemo(() => {
+  // Counts for the filters, in one pass over the list.
+  const counts = useMemo(() => {
     const c: Record<string, number> = {}
     for (const r of requests ?? []) c[r.status] = (c[r.status] ?? 0) + 1
     return c
   }, [requests])
 
-  const filterOptions: FilterPillOption<typeof filter>[] = [
-    { value: 'all', label: 'All', count: requests?.length ?? 0 },
-    { value: 'pending', label: 'Pending', count: statusCounts.pending ?? 0 },
-    { value: 'pending_approval', label: 'Pending approval', count: statusCounts.pending_approval ?? 0 },
-    { value: 'processing', label: 'Processing', count: statusCounts.processing ?? 0 },
-    { value: 'available', label: 'Available', count: statusCounts.available ?? 0 },
-    { value: 'failed', label: 'Failed', count: statusCounts.failed ?? 0 },
-  ]
+  const remove = async (req: MediaRequest) => {
+    setBusy(req.id)
+    setWrong(null)
+    try {
+      await deleteRequest(req.id)
+      setConfirming(null)
+      onRequestDeleted(req.id)
+    } catch {
+      setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
+    } finally {
+      setBusy(null)
+    }
+  }
+  // Asked for again with what the first request held. The failed row goes
+  // once the new one is made (best effort: if that fails it stays, and can
+  // be deleted by hand).
+  const again = async (req: MediaRequest) => {
+    setBusy(req.id)
+    setWrong(null)
+    try {
+      const made = await createRequest({
+        media_type: req.media_type,
+        tmdb_id: req.tmdb_id,
+        title: req.title,
+        poster_path: req.poster_path || '',
+        overview: req.overview || '',
+        year: req.year || 0,
+        quality_1080p: req.quality_1080p,
+        quality_4k: req.quality_4k,
+      })
+      onRequestSubmitted(made)
+      try { await deleteRequest(req.id); onRequestDeleted(req.id, true) } catch { /* the failed row stays */ }
+    } catch {
+      setWrong({ id: req.id, says: 'The request could not be sent again. Try again in a moment.' })
+    } finally {
+      setBusy(null)
+    }
+  }
 
-  const newRequestButton = (
-    <button
-      type="button"
-      onClick={() => setCreateOpen(true)}
-      className="stage-btn stage-btn-primary"
-    >
-      <Icon name="plus" size={15} />
-      Request New
+  const askRow = onAsk && (
+    <button type="button" onClick={onAsk} className="req-ask" data-requests-ask="">
+      <Icon name="search" size={18} className="flex-none text-ink-2" />
+      <span className="min-w-0 flex-1">Ask for a movie or show that is not in the library</span>
     </button>
   )
 
   if (requests === null) {
     return (
-      <div className="animate-fade-in">
-        <PageHeader title={heading} sub="Loading requests…" />
+      <div className="req-page animate-fade-in">
+        <h1 className="req-title">{heading}</h1>
+        {askRow}
+        <p className="req-note mt-8" role="status">Loading requests…</p>
       </div>
     )
   }
 
   const filtered = filter === 'all' ? requests : requests.filter(r => r.status === filter)
+  const filters: { id: Filter; label: string; count: number }[] = [
+    { id: 'all', label: 'All', count: requests.length },
+    ...REQUEST_STATUSES.map(id => ({ id, label: REQUEST_STATUS[id].label, count: counts[id] ?? 0 })),
+  ]
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader
-        title={heading}
-        sub={everyone ? `${requests.length} from every member` : `${requests.length} total`}
-        action={newRequestButton}
-      />
+    <div className="req-page animate-fade-in">
+      <h1 className="req-title">{heading}</h1>
+      {askRow}
 
-      {/* Phase 4.6 — TMDB search + create dialog. Small modal so
-          users don't lose scroll position in the requests list. */}
-      {createExit.mounted && (
-        <div className={`fixed inset-0 z-[70] bg-[var(--scrim)] flex items-start justify-center p-4 pt-20 stage-scrim-in${createExit.closing ? ' is-closing' : ''}`} onClick={() => setCreateOpen(false)}>
-          <div className="w-full max-w-xl bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[80vh] flex flex-col overscroll-contain stage-dialog-in" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-white text-lg font-semibold">Request a Movie or TV Show</h2>
-              <button onClick={() => setCreateOpen(false)} className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center">×</button>
-            </div>
-            <input
-              type="text"
-              autoFocus
-              value={searchQ}
-              onChange={e => setSearchQ(e.target.value)}
-              placeholder="Search TMDB for title…"
-              className="w-full px-4 py-2.5 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm focus:outline-none focus:bg-white/[0.06] mb-3"
-            />
-            {/* 4K request toggle. Server-side, this routes to the
-                configured *_4k Radarr/Sonarr; without one it falls
-                back to the 1080p ARR. */}
-            <label className="flex items-center gap-2 mb-3 text-sm text-white/70">
-              <input type="checkbox" checked={requestQuality4K} onChange={e => setRequestQuality4K(e.target.checked)} />
-              Request in 4K when available
-            </label>
-            <div className="flex-1 overflow-y-auto space-y-2">
-              {searching && <p className="text-white/50 text-sm">Searching…</p>}
-              {!searching && searchResults.length === 0 && searchQ.trim() && <p className="text-white/50 text-sm">No matches.</p>}
-              {searchResults.map(r => (
-                <div key={`${r.media_type}-${r.tmdb_id}`} className="flex items-center gap-3 p-2 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04]">
-                  {/* QA 2026-05-25 — explicit placeholder for entries
-                      with no TMDB poster (older + obscure titles).
-                      Previously rendered as an empty box; now shows
-                      a film/TV glyph centered in the same frame, so
-                      the row layout stays consistent. */}
-                  <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
-                    {r.poster_path ? (
-                      // 2026-05-27 — Dropped crossOrigin="anonymous".
-                      // The previous comment claimed "TMDB serves
-                      // Access-Control-Allow-Origin: * so the request
-                      // succeeds" — that's only true for popular
-                      // posters whose CloudFront edge cached the
-                      // CORS-headered response first. For lower-traffic
-                      // posters, an earlier non-CORS request can cache
-                      // a response WITHOUT the header, and every
-                      // subsequent crossorigin request fails (visible
-                      // as broken alt-text in the card; verified on
-                      // "In the City (2026)" 2026-05-27). Without the
-                      // attribute the image always loads in normal
-                      // viewing; the trade-off is that bug-report
-                      // screenshots won't include the poster pixels
-                      // (it'll render as an empty square), which is
-                      // acceptable since the screenshot's purpose is
-                      // UI state, not pixel-perfect imagery.
-                      // onError hides the broken-image icon if the
-                      // image genuinely 404s; the wrapper's bg-white/5
-                      // backdrop takes over so the row layout stays
-                      // consistent.
-                      <img
-                        // Deep-debug M1 — key the img on src so React
-                        // unmounts/remounts when poster_path changes
-                        // for the same row. Without this, the onError
-                        // handler's direct DOM mutation (style.display
-                        // = 'none') would persist across a re-render
-                        // with a new src, hiding a perfectly good
-                        // poster.
-                        key={r.poster_path}
-                        src={tmdbPosterURL(r.poster_path)}
-                        alt=""
-                        className="w-full h-full object-cover"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
-                      />
-                    ) : (
-                      <Icon name={r.media_type === 'tv' ? 'tv' : 'film'} size={20} className="text-white/25" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-white/90 text-sm font-medium truncate">{r.title}{r.year ? ` (${r.year})` : ''}</p>
-                    <p className="text-white/50 text-xs uppercase">{r.media_type === 'tv' ? 'TV' : 'Movie'}</p>
-                  </div>
-                  <button
-                    disabled={submitting === r.tmdb_id}
-                    onClick={async () => {
-                      setSubmitting(r.tmdb_id)
-                      try {
-                        const created = await createRequest({
-                          media_type: r.media_type,
-                          tmdb_id: r.tmdb_id,
-                          title: r.title,
-                          poster_path: r.poster_path || '',
-                          overview: r.overview || '',
-                          year: r.year || 0,
-                          quality_1080p: !requestQuality4K,
-                          quality_4k: requestQuality4K,
-                        })
-                        onRequestSubmitted(created)
-                        setCreateOpen(false)
-                        setSearchQ('')
-                      } catch (err) {
-                        const msg = err instanceof Error ? err.message : 'Failed to submit'
-                        window.alert('Request failed: ' + msg)
-                      } finally {
-                        setSubmitting(null)
-                      }
-                    }}
-                    className="px-3 py-1.5 bg-action hover:bg-white/90 text-action-on rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {submitting === r.tmdb_id ? 'Submitting…' : 'Request'}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
+      {requests.length > 0 && (
+        <div role="group" aria-label="Filter requests by status" className="req-filters">
+          {filters.map(f => (
+            <button key={f.id} type="button" className="genre-chip" aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
+              {f.label} · {f.count.toLocaleString()}
+            </button>
+          ))}
         </div>
       )}
 
-      <FilterPills
-        options={filterOptions}
-        value={filter}
-        onChange={setFilter}
-        label="Filter requests by status"
-        className="mb-6"
-      />
-
       {filtered.length === 0 ? (
-        <div className="text-center py-20">
-          <Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />
-          <h2 className="text-white/60 text-lg mb-2">
-            No requests {filter !== 'all' ? `in "${STATUS_LABELS[filter] ?? filter}"` : 'yet'}
+        <div className="req-none" data-requests-none="">
+          <h2 className="req-none-title">
+            {requests.length === 0
+              ? everyone ? 'Nobody has asked for anything yet' : 'Nothing requested yet'
+              : `No requests are ${REQUEST_STATUS[filter as MediaRequest['status']]?.label.toLowerCase() ?? filter} right now`}
           </h2>
-          <p className="text-white/50 text-sm">Use the "Request New" button above to submit one.</p>
+          {requests.length === 0 && (
+            <p className="req-note">
+              Search for a title. When the library does not have it, the search page lists what can be requested.
+            </p>
+          )}
         </div>
       ) : (
-        // Single column, not the previous 2-up grid: the mockup's request row
-        // is wide (70×105 poster, a title line that carries year + kind + 4K +
-        // status, a meta line, and a right-hand date/delete stack), and half a
-        // page cannot hold that without the title line wrapping on almost
-        // every entry. A two-up variant is deliberately not restored even at
-        // 1400px, where the row still wants ~700px.
-        //
-        // (That sentence used to name the Tailwind class for the two-up grid.
-        // Tailwind's extractor scans comments, so naming it SHIPPED it as a dead
-        // rule — a comment explaining that a class is unused is what caused the
-        // class to exist. Same trap as the md:left-[252px] one Phase 5 found.)
-        // <ul>/<li>, not divs: this is a list of N requests and announcing it
-        // as one ("list, 14 items") is how a screen-reader user knows how many
-        // there are and where they are in it. The row titles were <h3> under an
-        // <h1> — a skipped level (WCAG 1.3.1) that also made heading navigation
-        // the only way to move between rows. List semantics are the honest
-        // structure; the titles are no longer headings.
-        <ul className="flex flex-col gap-3 list-none p-0 m-0">
+        <ul className="req-list">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
+            const status = REQUEST_STATUS[req.status]
             const hasOverview = !!req.overview && req.overview.trim().length > 0
+            const kind = req.media_type === 'tv' ? 'Show' : 'Movie'
+            const asked = formatRequestDay(req.requested_at)
+            const meta = [
+              kind,
+              req.year > 0 ? String(req.year) : '',
+              req.quality_4k ? '4K' : '',
+              // `username` is on a row only in the list a session with the
+              // admin powers is given.
+              req.username ? `asked by ${req.username}${asked ? ` ${asked}` : ''}` : asked ? `asked ${asked}` : '',
+            ].filter(Boolean).join(' · ')
+            const failedSays = req.status === 'failed' && req.error_message ? humanizeRequestError(req.error_message, req.media_type) : ''
+            const deletable = req.status === 'pending' || req.status === 'failed'
             return (
-              // The ROW is a plain container. Do not give it role="button":
-              // that role is Children Presentational (ARIA 1.2 §5.2.8), so the
-              // whole subtree stops being exposed and a screen-reader user
-              // hears only the row's name — not the status, the humanized
-              // error, or the overview — and the delete <button> inside it
-              // becomes a focusable control in a presentational subtree.
-              <li key={req.id} className="stage-req flex gap-4 sm:gap-[18px] p-3 sm:pr-[18px]">
-                <div className="stage-req-poster flex-shrink-0 flex items-center justify-center">
-                  {/* Layout invariant: the img and the fallback div
-                      are mutually-exclusive flex siblings — only one
-                      is `display: flex/block` at a time. Don't add a
-                      third sibling here without rewiring the onError
-                      handler's nextElementSibling lookup. */}
-                  {poster ? (
-                    // 2026-05-27 — Dropped crossOrigin="anonymous"
-                    // (see RequestsView search row above for full
-                    // rationale; tl;dr: TMDB's edge cache occasionally
-                    // serves responses without the CORS header so the
-                    // crossorigin request fails for less-popular
-                    // posters, which is exactly what showed up on
-                    // "In the City (2026)" — broken alt-text rendered
-                    // in the card). alt="" so the card doesn't echo
-                    // the title twice (the title span below already shows
-                    // it). onError swaps in the film/tv glyph from
-                    // the no-poster path.
-                    <img
-                      // Deep-debug M1 — key on src so a future
-                      // poster_path update remounts the img and
-                      // resets the inline display:none mutation.
-                      key={poster}
-                      src={poster}
-                      alt=""
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        const img = e.currentTarget as HTMLImageElement
-                        img.style.display = 'none'
-                        // Reveal the fallback glyph we always render
-                        // below the img (hidden when img is visible).
-                        const fallback = img.nextElementSibling as HTMLElement | null
-                        if (fallback) fallback.style.display = 'flex'
-                      }}
-                    />
-                  ) : null}
-                  <div
-                    className="w-full h-full items-center justify-center"
-                    style={{ display: poster ? 'none' : 'flex' }}
-                    aria-hidden="true"
-                  >
-                    <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={22} className="text-white/25" />
-                  </div>
+              <li key={req.id} className="req-row" data-request-id={req.id}>
+                <span className="req-art" aria-hidden="true">
+                  {poster
+                    // key: the handler hides a poster that fails, and must
+                    // not go on hiding the next one drawn in this row.
+                    ? <img key={poster} src={poster} alt="" loading="lazy" decoding="async" onError={e => { e.currentTarget.style.display = 'none' }} />
+                    : null}
+                  <span className="req-initial">{initialOf(req.title)}</span>
+                </span>
+                <div className="req-text">
+                  <span className="req-name">{req.title}</span>
+                  <span className="req-meta">{meta}</span>
+                  {/* The TMDB overview, always shown and never clamped, with
+                      nothing to press: by the owner's choice (it used to sit
+                      behind a Show/Hide toggle). Some older entries have
+                      none: nothing renders. */}
+                  {hasOverview && <p className="req-overview">{req.overview}</p>}
                 </div>
-                {/* Info column. The mockup puts everything that identifies the
-                    request on ONE line — title, year, kind, quality, status —
-                    with a secondary meta line under it. The old layout split
-                    those across three rows and pushed the status badge into a
-                    justify-between footer, which meant the two things you scan
-                    for (what it is, where it's up to) were at opposite ends of
-                    the card. */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-x-[9px] gap-y-1.5 flex-wrap">
-                    <span className="text-[15px] font-semibold text-white min-w-0 truncate max-w-full">{req.title}</span>
-                    {req.year > 0 && <span className="text-white/55 text-[13px]">({req.year})</span>}
-                    <span className="stage-typetag">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
-                    {req.quality_4k && <span className="stage-typetag stage-typetag-4k">4K</span>}
-                    {req.quality_1080p && <span className="stage-typetag">1080p</span>}
-                    {/* No `?? 'stage-stb-pending'` fallback. An unknown status
-                        would then be REPORTED AS PENDING in amber — a fallback
-                        that lies. Bare .stage-stb renders an uncoloured badge
-                        showing the raw value, which is what the old
-                        `statusColors[req.status]` lookup did by accident when it
-                        produced undefined. Degrading beats misreporting. */}
-                    <span className={`stage-stb ${STATUS_BADGE[req.status] ?? ''}`}>
-                      {STATUS_LABELS[req.status] ?? req.status}
-                    </span>
-                  </div>
-                  {/* Meta line. `username` is populated only on the ADMIN branch
-                      of the requests handler (request_handlers.go), so an
-                      ordinary user's row shows just the date — the conditional
-                      is load-bearing for every non-admin, not an edge case for
-                      deleted users as an earlier version of this comment
-                      claimed. */}
-                  <div className="mt-1.5 flex items-center gap-x-[9px] gap-y-1 flex-wrap text-xs text-white/55">
-                    {req.username && <span>requested by {req.username}</span>}
-                    {req.username && <span className="text-white/25">·</span>}
-                    <span>{formatRequestDate(req.requested_at)}</span>
-                  </div>
-                  {req.error_message && (
-                    // Phase 5.3 final QA — show humanized error in
-                    // the body; keep the raw server response in the
-                    // tooltip so admins can still debug.
-                    <p className="text-red-300 text-xs mt-2 line-clamp-2 flex items-start gap-1.5" title={req.error_message}>
-                      <Icon name="alertTriangle" size={13} className="shrink-0 mt-px" />
-                      {humanizeRequestError(req.error_message, req.media_type)}
-                    </p>
-                  )}
-                  {/* The TMDB overview, always shown and never clamped. It used
-                      to sit behind a Show/Hide overview toggle; by the owner's
-                      choice it no longer does. On a phone a typical overview
-                      wraps to a dozen or more lines, so cards there are much
-                      taller than the poster; a clamp would hide text again with
-                      no way to reveal it. Some older TMDB entries have no
-                      overview: nothing renders. */}
-                  {hasOverview && (
-                    <p className="text-white/65 text-xs mt-2 leading-relaxed">
-                      {req.overview}
-                    </p>
+                <div className="req-status" data-tone={status?.tone ?? 'unknown'}>
+                  {/* An unknown status is shown as the server sent it, with
+                      no colour of its own: degrading beats misreporting. */}
+                  <span className="req-status-label"><span className="req-dot" aria-hidden="true" />{status?.label ?? req.status}</span>
+                  <span className="req-status-note" title={failedSays ? req.error_message : undefined}>
+                    {failedSays || (req.status === 'available' && req.completed_at ? `Added to the library ${whenArrived(req.completed_at)}.` : status?.note ?? '')}
+                  </span>
+                  {wrong?.id === req.id && <span className="req-wrong" role="alert">{wrong.says}</span>}
+                </div>
+                <div className="req-acts">
+                  {confirming === req.id ? (
+                    // Asked on the row itself, where the request is: no
+                    // native dialog over the page.
+                    <>
+                      <span className="req-confirm">Delete this request?</span>
+                      <button type="button" disabled={busy === req.id} onClick={() => { void remove(req) }} className="stage-btn stage-btn-sm stage-btn-danger stage-hit44" aria-label={`Delete the request for ${req.title}`}>
+                        {busy === req.id ? 'Deleting…' : 'Delete'}
+                      </button>
+                      <button type="button" disabled={busy === req.id} onClick={() => setConfirming(null)} className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44" aria-label={`Keep the request for ${req.title}`}>
+                        Keep
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      {req.status === 'available' && onFind && (
+                        <button type="button" onClick={() => onFind(req.title)} className="req-act" aria-label={`Find ${req.title} in the library`}>
+                          Find it
+                        </button>
+                      )}
+                      {req.status === 'failed' && (
+                        <button type="button" disabled={busy === req.id} onClick={() => { void again(req) }} className="req-act" aria-label={`Ask for ${req.title} again`}>
+                          {busy === req.id ? 'Asking…' : 'Try again'}
+                        </button>
+                      )}
+                      {deletable && (
+                        <button type="button" onClick={() => { setWrong(null); setConfirming(req.id) }} className="req-del" aria-label={`Delete request for ${req.title}`}>
+                          <Icon name="trash" size={16} />
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
-                {/* Right stack — delete above, nothing below. Kept as a
-                    column so a future second control lands in the mockup's
-                    intended place; the requested-at date moved to the meta
-                    line, where it reads with "requested by".
-
-                    No stopPropagation needed: the row is a plain <li> with no
-                    click or key handler of its own. */}
-                {(req.status === 'pending' || req.status === 'failed') && (
-                  <div className="flex-none flex flex-col items-end gap-2.5">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (!window.confirm(`Delete request for "${req.title}"?`)) return
-                        try {
-                          await deleteRequest(req.id)
-                          onRequestDeleted(req.id)
-                        } catch (err) {
-                          window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                        }
-                      }}
-                      className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04] border border-white/[0.08] hover:text-red-300 hover:border-red-500/40 transition-colors"
-                      title="Delete request"
-                      aria-label={`Delete request for ${req.title}`}
-                    >
-                      <Icon name="trash" size={15} />
-                    </button>
-                  </div>
-                )}
               </li>
             )
           })}

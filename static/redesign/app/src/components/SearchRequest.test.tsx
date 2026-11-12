@@ -127,7 +127,7 @@ describe('the titles that can be requested', () => {
     expect(calls.requested).toHaveBeenCalledTimes(1)
     expect(calls.requested.mock.calls[0][0]).toMatchObject({ id: 900, tmdb_id: 11 })
     const tv = row('tv:11')
-    expect(tv.querySelector('.search-req-state')!.textContent).toBe('Requested · sent, nothing found yet')
+    expect(tv.querySelector('.search-req-state')!.textContent).toBe('Requested · waiting to be sent to the downloader')
     // It cannot be asked for twice; the way on is the requests page.
     expect(within(tv).queryByRole('button', { name: /^Request / })).toBeNull()
     fireEvent.click(within(tv).getByRole('button', { name: /^See my requests/ }))
@@ -218,7 +218,7 @@ describe('the titles that can be requested', () => {
     await settle(500)
     await settle()
     expect(row('movie:10').querySelector('.search-req-state')!.textContent).toBe('Requested · being fetched')
-    expect(row('tv:11').querySelector('.search-req-state')!.textContent).toBe('Already requested by Dana · sent, nothing found yet')
+    expect(row('tv:11').querySelector('.search-req-state')!.textContent).toBe('Already requested by Dana · waiting to be sent to the downloader')
     // That list names who asked on every row, the caller's own included:
     // their own is still just "Requested".
     cleanup()
@@ -245,7 +245,7 @@ describe('the titles that can be requested', () => {
     expect(within(row('tv:11')).queryByRole('button', { name: /^See my requests/ })).toBeNull()
     expect(within(row('movie:10')).getByRole('button', { name: /^See my requests/ })).toBeInTheDocument()
     // The amber of "under way", and green for one that has arrived.
-    expect(row('movie:10').querySelector('.search-req-state')).toHaveAttribute('data-status', 'processing')
+    expect(row('movie:10').querySelector('.search-req-state')).toHaveAttribute('data-tone', 'wait')
   })
 
   it('says a request that is now in the library is', async () => {
@@ -256,7 +256,7 @@ describe('the titles that can be requested', () => {
     await settle()
     const state = row('movie:10').querySelector('.search-req-state')!
     expect(state.textContent).toBe('Requested · in the library now')
-    expect(state).toHaveAttribute('data-status', 'available')
+    expect(state).toHaveAttribute('data-tone', 'ok')
   })
 
   it('says a refusal in words on its row, never the transport\'s, and leaves the buttons usable', async () => {
@@ -280,7 +280,7 @@ describe('the titles that can be requested', () => {
     // Asked again, it goes through: the row says so, and no longer says it was refused.
     fireEvent.click(screen.getByRole('button', { name: 'Request Orchard of Glass' }))
     await settle()
-    expect(row('movie:12').querySelector('.search-req-state')!.textContent).toBe('Requested · sent, nothing found yet')
+    expect(row('movie:12').querySelector('.search-req-state')!.textContent).toBe('Requested · waiting to be sent to the downloader')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
@@ -474,6 +474,6 @@ describe('what the search page holds for the list', () => {
     await settle()
     await settle(500)
     await settle()
-    expect(row('movie:10').querySelector('.search-req-state')!.textContent).toBe('Requested · sent, nothing found yet')
+    expect(row('movie:10').querySelector('.search-req-state')!.textContent).toBe('Requested · waiting to be sent to the downloader')
   })
 })

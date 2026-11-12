@@ -1210,7 +1210,7 @@ html[data-effects="reduced"] .stage-topnav {
   font-size: 13px;
   color: var(--warn);
 }
-.search-req-state[data-status="available"] { color: var(--ok); }
+.search-req-state[data-tone="ok"] { color: var(--ok); }
 .search-req-dot {
   flex: none;
   width: 8px;
@@ -1231,6 +1231,202 @@ html[data-effects="reduced"] .stage-topnav {
   margin-top: 16px;
   font-size: 13px;
   color: var(--ink-3);
+}
+/* ── The requests page ──────────────────────────────────────────────
+   What this account asked for and what became of each: a title, the row
+   that opens the search page (asking is the end of a search), the status
+   filters, then one row per request under a hairline. A row is the poster,
+   what it is, its status with one sentence, and what can be done with it;
+   it wraps where its parts no longer fit side by side (a phone). */
+.req-page { max-width: 1040px; }
+.req-title {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+@media not all and (min-width: 768px) {
+  .req-title { font-size: 28px; }
+}
+.req-ask {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  margin-top: 24px;
+  padding: 8px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  font-size: 16px;
+  color: var(--ink-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.req-ask:hover { background: var(--surface-raised-2); color: var(--ink); }
+.req-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 24px;
+}
+.req-note {
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.req-none { padding: 56px 0; }
+.req-none-title {
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.req-list { margin-top: 24px; }
+.req-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  min-height: 88px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+/* The poster, over the title's initial (what shows while it loads, and
+   when there is none). */
+.req-art {
+  position: relative;
+  flex: none;
+  align-self: flex-start;
+  display: grid;
+  place-items: center;
+  width: 43px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: var(--radius-chip);
+  background: var(--surface-raised-2);
+}
+.req-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.req-initial {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+.req-text {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.req-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.req-meta {
+  font-size: 13px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.req-overview {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+.req-status {
+  flex: 0 1 300px;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.req-status-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+/* The status is said in words; the dot's colour says the same at a glance:
+   amber while it is under way, green once it is in the library, red when it
+   failed. Grey for a status this page does not know. */
+.req-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.req-status[data-tone="ok"] .req-dot { background: var(--ok); }
+.req-status[data-tone="bad"] .req-dot { background: var(--danger-ink); }
+.req-status[data-tone="unknown"] .req-dot { background: var(--ink-3); }
+.req-status-note {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.req-wrong {
+  font-size: 13px;
+  color: var(--danger-ink);
+}
+.req-acts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 144px;
+  justify-content: flex-end;
+}
+.req-confirm {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.req-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: var(--radius-control);
+  background: var(--action-soft);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.req-act:where(:not(:disabled)):hover { background: var(--surface-raised-2); }
+.req-act:disabled { opacity: 0.6; cursor: default; }
+.req-del {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-control);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.req-del:hover { background: var(--surface-raised-2); color: var(--danger-ink); }
+/* A finger: each of a row's own controls is a 44px target. */
+@media (hover: none), (pointer: coarse) {
+  .req-act { height: 44px; }
+  .req-del { width: 44px; height: 44px; }
 }
 /* Alone in its column (nothing to do, nothing searched for lately), it
    closes nothing: no rule above it. */

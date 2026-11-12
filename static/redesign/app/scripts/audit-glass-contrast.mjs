@@ -733,17 +733,10 @@ const EXEMPT = [
     why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
     why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
-  // ── requests, search, top bar ──
-  { file: 'src/components/RequestsView.tsx', anchor: "r.media_type === 'tv' ? 'tv' : 'film'} size={20} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the glyph a search result shows where its poster is missing; the title and "TV"/"Movie" are beside it' },
-  { file: 'src/components/RequestsView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={22} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the same glyph on a request row without a poster' },
-  { file: 'src/components/RequestsView.tsx', anchor: '<Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
-    why: 'the illustration above the empty requests list\'s message' },
-  { file: 'src/components/RequestsView.tsx', anchor: '{req.username && <span className="text-white/25">·</span>}', kind: 'decorative',
-    why: 'the dot between a request\'s requester and its date' },
-  { file: 'src/components/RequestsView.tsx', anchor: 'className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04]', kind: 'non-text',
-    why: 'a request\'s icon-only delete button' },
+  // ── search ──
+  // (The requests page had five lines here: a glyph where a poster was
+  // missing, twice; an illustration; a dot; an icon-only delete. The page
+  // was rebuilt on the tokens and draws none of them.)
   { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
     why: 'the dots between the key legend\'s entries' },
   // ── index.css ──
@@ -975,7 +968,7 @@ const SURFACES = [
     alpha: () => cssColor('.search-req-foot', 'color').a,
     px: 13, on: () => [INK],
   },
-  ...['.search-req-facts', '.search-req-overview', '.search-req-state', '.search-req-state[data-status="available"]', '.search-req-refused', '.search-req-initial'].map(sel => ({
+  ...['.search-req-facts', '.search-req-overview', '.search-req-state', '.search-req-state[data-tone="ok"]', '.search-req-refused', '.search-req-initial'].map(sel => ({
     what: `a title that can be requested: ${sel}`, where: `${CSS} (${sel})`,
     color: () => cssColor(sel, 'color').rgb,
     alpha: () => cssColor(sel, 'color').a,
@@ -983,6 +976,27 @@ const SURFACES = [
     px: sel === '.search-req-initial' ? 22 : 13,
     on: () => [sel === '.search-req-initial' ? rootToken('--surface-raised-2').rgb : rootToken('--surface-raised').rgb],
   })),
+  // ── The requests page: every text colour of a row, on the page; the row
+  //    that opens the search page, on its raised fill; the initial that
+  //    stands in for a poster, on its tile. ──
+  ...['.req-meta', '.req-overview', '.req-status-note', '.req-note', '.req-wrong', '.req-confirm'].map(sel => ({
+    what: `requests page: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px: sel === '.req-note' ? 14 : 13, on: () => [INK],
+  })),
+  {
+    what: 'requests page: the row that opens the search page', where: `${CSS} (.req-ask)`,
+    color: () => cssColor('.req-ask', 'color').rgb,
+    alpha: () => cssColor('.req-ask', 'color').a,
+    px: 16, on: () => [rootToken('--surface-raised').rgb, rootToken('--surface-raised-2').rgb],
+  },
+  {
+    what: 'requests page: the initial on a poster\'s tile', where: `${CSS} (.req-initial)`,
+    color: () => cssColor('.req-initial', 'color').rgb,
+    alpha: () => cssColor('.req-initial', 'color').a,
+    px: 20, on: () => [rootToken('--surface-raised-2').rgb],
+  },
   // ── The top bar. Its search field is where "describe a mood" lives, so
   //    its placeholder is the text this script was first written for. The
   //    bar is translucent and content scrolls under it, so each surface is

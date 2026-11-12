@@ -173,8 +173,9 @@ mustHave(CARD, "'has-reason '")
 // "Try again", the titles that can be requested where a search found
 // nothing (Request, See my requests, Try again, Back to the results), its
 // recent searches (each row, and "Clear"), its best match's Play and More,
-// and the rows of what can be done with a search. Built from the
-// components' own class lists, in the rows they sit in.
+// the rows of what can be done with a search, and the requests page's own
+// controls. Built from the components' own class lists, in the rows they
+// sit in.
 const LIVE = 'src/components/TonightLive.tsx'
 const SEARCH = 'src/components/SearchView.tsx'
 const LIVE_JOIN = classesOf(LIVE, 'tonight-live-act stage-hit44')
@@ -208,6 +209,18 @@ mustHave(REQUESTS, 'className="search-req-foot"')
 mustHave(REQUESTS, 'className="search-req-note"')
 const RECENT_CLEAR = classesOf(SEARCH, 'search-recent-clear')
 const RECENT_ROW = classesOf(SEARCH, 'search-recent-row')
+// The requests page: the row that opens the search page, a request's own
+// actions (Find it or Try again, and delete), and the question a delete
+// asks on the row (Delete, Keep).
+const REQPAGE = 'src/components/RequestsView.tsx'
+const REQ_DANGER = classesOf(REQPAGE, 'stage-btn-danger')
+const REQ_KEEP = classesOf(REQPAGE, 'stage-btn stage-btn-sm stage-btn-ghost stage-hit44')
+mustHave(REQPAGE, 'className="req-ask"')
+mustHave(REQPAGE, 'className="req-act"')
+mustHave(REQPAGE, 'className="req-del"')
+mustHave(REQPAGE, 'className="req-acts"')
+mustHave(REQPAGE, 'className="req-row"')
+mustHave(REQPAGE, 'className="req-confirm"')
 // The search page's best match (Play and More beside its title) and the
 // rows of what can be done with a search.
 const BEST_MORE = classesOf(SEARCH, 'search-best-more')
@@ -313,6 +326,15 @@ const smallHtml = `
     <button type="button" class="${RECENT_CLEAR}" data-small-btn="Clear">Clear</button></div>
     <ul class="m-0 list-none p-0"><li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 1"><span class="min-w-0 flex-1 truncate">night train</span></button></li>
       <li><button type="button" class="${RECENT_ROW}" data-small-btn="recent 2"><span class="min-w-0 flex-1 truncate">something funny for the kids, not too long, that the grandparents will sit through as well</span></button></li></ul></section>
+  <div class="req-page" style="margin-top:24px"><button type="button" class="req-ask" data-small-btn="Ask for a title"><span class="min-w-0 flex-1">Ask for a movie or show that is not in the library</span></button>
+    <ul class="req-list">
+      <li class="req-row"><div class="req-text"><span class="req-name">Copper Sky</span></div><div class="req-acts">
+        <button type="button" class="req-act" data-small-btn="Find it">Find it</button>
+        <button type="button" class="req-del" data-small-btn="Delete request">x</button></div></li>
+      <li class="req-row"><div class="req-text"><span class="req-name">The Assassination of Jesse James by the Coward Robert Ford</span></div><div class="req-acts">
+        <span class="req-confirm">Delete this request?</span>
+        <button type="button" class="${REQ_DANGER}" data-small-btn="Delete (asked)">Delete</button>
+        <button type="button" class="${REQ_KEEP}" data-small-btn="Keep">Keep</button></div></li></ul></div>
   <div class="search-best" style="margin-top:24px"><div class="search-best-acts">
     <button type="button" class="stage-btn stage-btn-primary" data-small-btn="best match Play">Play</button>
     <button type="button" class="${BEST_MORE}" data-small-btn="best match More">More</button></div></div>
@@ -749,7 +771,7 @@ for (const touch of [true, false]) {
     // 4. Small buttons outside a card. On a touch screen each is a 44px
     // target by hit-testing, whatever it is drawn at; a neighbour's area
     // laid over it shortens what is measured, so an overlap fails here too.
-    if (r.small.length !== 19) fail(`the small-button probe found ${r.small.length} buttons, expected 19 — this check is out of date`)
+    if (r.small.length !== 24) fail(`the small-button probe found ${r.small.length} buttons, expected 24 — this check is out of date`)
     for (const b of r.small) {
       if (b.w < 1 || b.h < 1) { fail(`"${b.name}" is not drawn`); continue }
       if (touch && (b.hit.w < 44 || b.hit.h < 44)) fail(`"${b.name}": its target is ${b.hit.w}x${b.hit.h}px by hit-testing (drawn ${b.w.toFixed(0)}x${b.h.toFixed(0)}), under the 44px a touch target needs`)

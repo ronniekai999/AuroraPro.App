@@ -7197,11 +7197,21 @@ export default function App() {
                 everyone={adminUI}
                 requests={requestsList}
                 onRequestSubmitted={handleRequestSubmitted}
-                onRequestDeleted={(id) => {
+                onRequestDeleted={(id, replaced) => {
                   setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
+                  // A failed request that was asked for again goes quietly:
+                  // the new request has just been announced.
+                  if (replaced) return
                   const tId = nextToastId()
                   setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
                 }}
+                // Asking for a title is the end of a search that finds
+                // nothing: the page's row opens the search page with its
+                // field ready (the bar's, or on a phone the page's own).
+                onAsk={() => { handleNavigate('search'); searchInputRef.current?.focus() }}
+                // A request that is in the library now is found by its
+                // title: a request holds no id of the title it became.
+                onFind={(title) => { changeSearchQuery(title); handleNavigate('search') }}
               />
             </ViewSuspense></HiddenPage>
           )}

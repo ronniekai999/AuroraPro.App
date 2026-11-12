@@ -129,7 +129,7 @@ describe('a search that finds nothing in the library', () => {
     await waitFor(() => expect(server.posted).toHaveLength(1), find)
     expect(server.posted[0]).toMatchObject({ media_type: 'movie', tmdb_id: 501, title: 'The Lost Reel', year: 2025, quality_1080p: true, quality_4k: false })
     // The row says what became of it, and the app says so too.
-    await waitFor(() => expect(document.querySelector('.search-req-state')?.textContent).toBe('Requested · sent, nothing found yet'), find)
+    await waitFor(() => expect(document.querySelector('.search-req-state')?.textContent).toBe('Requested · waiting to be sent to the downloader'), find)
     expect(await screen.findByText('Requested "The Lost Reel"', undefined, find)).toBeInTheDocument()
     // The way on is the requests page, which has it.
     fireEvent.click(screen.getByRole('button', { name: 'See my requests' }))
@@ -167,6 +167,29 @@ describe('a search that finds nothing in the library', () => {
     await new Promise(done => setTimeout(done, 300))
     release()
     expect(await screen.findByText('Requested "The Lost Reel"', undefined, find)).toBeInTheDocument()
+  })
+
+  // The requests page makes no request itself: its first row opens the
+  // search page with the field ready, and a request that has arrived is
+  // found by searching for its title.
+  it('is where the requests page sends someone who wants to ask, and to find what has arrived', async () => {
+    renderApp()
+    await screen.findByText('Parent', undefined, find)
+    await searchFor('the lost reel')
+    fireEvent.click(await screen.findByRole('button', { name: 'Request The Lost Reel (2025)' }, find))
+    await waitFor(() => expect(document.querySelector('.search-req-state')).not.toBeNull(), find)
+    fireEvent.click(screen.getByRole('button', { name: 'See my requests' }))
+    await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)
+    // No composer on the page.
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for a movie or show that is not in the library' }, find))
+    // The search page, with a search field holding the focus: the bar's
+    // from md up, the page's own on a phone (only one of the two is drawn
+    // at any width; with no stylesheet here both exist, and the page's,
+    // focused last, has it).
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).not.toBeNull(), find)
+    await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Search titles'), find)
+    expect(document.activeElement?.tagName).toBe('INPUT')
   })
 
   it('offers no request to a profile with a content limit', async () => {
