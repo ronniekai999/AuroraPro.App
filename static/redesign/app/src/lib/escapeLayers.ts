@@ -12,10 +12,26 @@ type Close = () => void
 
 const layers: Close[] = []
 
+/** Marks a surface whose layers register here: the player, the party's leave
+ *  confirmation, the trailer. */
+export const ESCAPE_LAYERS_ATTR = 'data-escape-layers'
+
+/** Whether a key's target sits in a dialog that is none of those surfaces: a
+ *  prompt the app opened above them from somewhere else (the profile picker
+ *  or a PIN prompt, when another tab switches the profile). Its keys are its
+ *  own: taking its Escape would close a layer underneath it and leave it up,
+ *  and pulling its Tab would take focus out from under it. */
+export function inForeignDialog(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  return !!target.closest('[role="dialog"], [role="alertdialog"]') && !target.closest(`[${ESCAPE_LAYERS_ATTR}]`)
+}
+
 function onKeyDown(e: KeyboardEvent) {
   if (e.key !== 'Escape' || layers.length === 0) return
-  // Capture phase on window, so nothing below has seen it yet; stopped for
-  // the app's handler and for any other listener on window.
+  if (inForeignDialog(e.target)) return
+  // Capture phase on window, so nothing below has seen it yet. Stopped for
+  // the app's handler and for the listeners on window registered after this
+  // one; a capture listener added to window EARLIER has already run.
   e.stopImmediatePropagation()
   layers[layers.length - 1]()
 }
@@ -23,11 +39,15 @@ function onKeyDown(e: KeyboardEvent) {
 /** Register something Escape should close. Returns the function that
  *  unregisters it (when it closes for any reason, or unmounts). */
 export function pushEscapeLayer(close: Close): () => void {
-  layers.push(close)
+  // Each registration is its own entry, so the same function registered
+  // twice is two layers, and calling an unregister twice removes one.
+  const entry: Close = () => close()
+  layers.push(entry)
   if (layers.length === 1) window.addEventListener('keydown', onKeyDown, true)
   return () => {
-    const i = layers.lastIndexOf(close)
-    if (i >= 0) layers.splice(i, 1)
+    const i = layers.indexOf(entry)
+    if (i < 0) return
+    layers.splice(i, 1)
     if (layers.length === 0) window.removeEventListener('keydown', onKeyDown, true)
   }
 }

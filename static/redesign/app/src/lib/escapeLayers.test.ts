@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { pushEscapeLayer } from './escapeLayers'
+import { ESCAPE_LAYERS_ATTR, inForeignDialog, pushEscapeLayer } from './escapeLayers'
 
 const press = (key = 'Escape') => {
   const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
@@ -44,5 +44,54 @@ describe('escape layers', () => {
     press()
     expect([lower.mock.calls.length, upper.mock.calls.length]).toEqual([0, 1])
     dropUpper()
+  })
+
+  // The same function registered twice is two layers, and an unregister
+  // called twice (an effect cleanup after an explicit close) removes one.
+  it('counts each registration on its own', () => {
+    const close = vi.fn()
+    const dropFirst = pushEscapeLayer(close)
+    const dropSecond = pushEscapeLayer(close)
+    dropSecond()
+    dropSecond()
+    press()
+    expect(close).toHaveBeenCalledTimes(1)
+    dropFirst()
+    const app = vi.fn()
+    window.addEventListener('keydown', app)
+    press()
+    window.removeEventListener('keydown', app)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(app).toHaveBeenCalledTimes(1)
+  })
+
+  // A prompt the app opens above everything from elsewhere (the profile
+  // picker or a PIN prompt, when another tab switches the profile) closes
+  // itself on Escape. Taking the key would close a layer under it instead.
+  it('leaves an Escape pressed inside a dialog that is none of its surfaces to that dialog', () => {
+    const layer = vi.fn(), prompt = vi.fn()
+    const drop = pushEscapeLayer(layer)
+    const foreign = document.createElement('div')
+    foreign.setAttribute('role', 'dialog')
+    foreign.innerHTML = '<button>ok</button>'
+    foreign.addEventListener('keydown', prompt)
+    const ours = document.createElement('div')
+    ours.setAttribute('role', 'dialog')
+    ours.setAttribute(ESCAPE_LAYERS_ATTR, '')
+    // A sheet inside one of the surfaces is a dialog too, and is ours.
+    ours.innerHTML = '<div role="dialog"><button>item</button></div>'
+    document.body.append(foreign, ours)
+    const esc = (el: Element) => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+    esc(foreign.querySelector('button')!)
+    expect([layer.mock.calls.length, prompt.mock.calls.length]).toEqual([0, 1])
+    esc(ours.querySelector('button')!)
+    expect(layer).toHaveBeenCalledTimes(1)
+
+    expect(inForeignDialog(foreign.querySelector('button'))).toBe(true)
+    expect(inForeignDialog(ours.querySelector('button'))).toBe(false)
+    expect(inForeignDialog(document.body)).toBe(false)
+    expect(inForeignDialog(null)).toBe(false)
+    drop(); foreign.remove(); ours.remove()
   })
 })

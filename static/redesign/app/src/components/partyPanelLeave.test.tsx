@@ -227,6 +227,64 @@ describe('keys while the host\u2019s leave confirmation is open', () => {
     window.removeEventListener('keydown', shortcuts)
   })
 
+  // The rail is outside the element that goes fullscreen, so in browser
+  // fullscreen the confirm is not drawn, but focus can still be on the leave
+  // button: a Space there opened it unseen, and the player's keys were dead
+  // until it closed.
+  it('are left alone while the confirm is not drawn, in browser fullscreen', async () => {
+    const user = userEvent.setup()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })
+    const shortcuts = vi.fn()
+    window.addEventListener('keydown', shortcuts)
+    await user.click(screen.getByRole('button', { name: 'Leave Party' }))
+    const elsewhere = document.createElement('div')
+    document.body.append(elsewhere)
+    // jsdom has no Fullscreen API; this is what a browser reports.
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => elsewhere })
+    shortcuts.mockClear()
+    for (const key of ['ArrowLeft', 'k', 'f']) fireEvent.keyDown(document.body, { key })
+    expect(shortcuts).toHaveBeenCalledTimes(3)
+    // Tab is not pulled into a confirm nobody can see.
+    const outside = screen.getByPlaceholderText(/Message the party/)
+    outside.focus()
+    expect(fireEvent.keyDown(outside, { key: 'Tab' })).toBe(true)
+    expect(outside).toHaveFocus()
+    delete (document as unknown as { fullscreenElement?: Element }).fullscreenElement
+    elsewhere.remove()
+    window.removeEventListener('keydown', shortcuts)
+  })
+
+  // A prompt the app opens above the confirm from elsewhere keeps its keys:
+  // its Tab is not pulled under it, and what it listens for arrives.
+  it('are left to a dialog opened above the confirm from elsewhere', async () => {
+    const user = userEvent.setup()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })
+    await user.click(screen.getByRole('button', { name: 'Leave Party' }))
+    const prompt = document.createElement('div')
+    prompt.setAttribute('role', 'dialog')
+    prompt.innerHTML = '<input aria-label="PIN" /><button>Unlock</button>'
+    document.body.append(prompt)
+    const reached = vi.fn()
+    window.addEventListener('keydown', reached)
+    const pin = prompt.querySelector('input')!
+    pin.focus()
+    expect(fireEvent.keyDown(pin, { key: 'Tab' })).toBe(true)
+    expect(pin).toHaveFocus()
+    fireEvent.keyDown(pin, { key: '4' })
+    expect(reached).toHaveBeenCalledTimes(2)
+    window.removeEventListener('keydown', reached); prompt.remove()
+  })
+
+  it('leave a Tab with a modifier to the browser', async () => {
+    const user = userEvent.setup()
+    renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })
+    await user.click(screen.getByRole('button', { name: 'Leave Party' }))
+    const outside = screen.getByPlaceholderText(/Message the party/)
+    outside.focus()
+    expect(fireEvent.keyDown(outside, { key: 'Tab', ctrlKey: true })).toBe(true)
+    expect(outside).toHaveFocus()
+  })
+
   it('bring focus into the confirm when Tab is pressed with focus outside it', async () => {
     const user = userEvent.setup()
     renderPanel({ participants: [HOST, GUEST], currentUserId: 1 })

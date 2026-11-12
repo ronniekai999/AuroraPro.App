@@ -7316,6 +7316,8 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // Naming the surface is also what announces that playback started.
       role={minimizedActive ? undefined : 'dialog'}
       aria-modal={minimizedActive ? undefined : true}
+      // Its menus close through lib/escapeLayers; see inForeignDialog there.
+      data-escape-layers=""
       aria-label={minimizedActive ? undefined : `Playing ${target?.title ?? 'video'}`}
       // Focusable so the surface can take focus on open; never a tab stop.
       tabIndex={minimizedActive ? undefined : -1}
@@ -7461,18 +7463,23 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               onOpenChange={onReactionPickerOpenChange}
             />
           )}
-          <button
-            type="button"
-            onClick={() => toggleMenu('more')}
-            aria-label="More"
-            aria-haspopup="dialog"
-            aria-expanded={openMenu === 'more' || openMenu === 'markers'}
-            title="More: playback details"
-            className="stage-tr-btn grid flex-none"
-            data-open={openMenu === 'more' || openMenu === 'markers' || undefined}
-          >
-            <MoreHorizontal size={24} />
-          </button>
+          {/* Not on the error screen: its sheet is not drawn there, so a
+              press opened nothing, hid the party's dock and took the next
+              Escape. */}
+          {!errorMsg && (
+            <button
+              type="button"
+              onClick={() => toggleMenu('more')}
+              aria-label="More"
+              aria-haspopup="dialog"
+              aria-expanded={openMenu === 'more' || openMenu === 'markers'}
+              title="More: playback details"
+              className="stage-tr-btn grid flex-none"
+              data-open={openMenu === 'more' || openMenu === 'markers' || undefined}
+            >
+              <MoreHorizontal size={24} />
+            </button>
+          )}
         </div>
 
         {/* Video.
@@ -7553,13 +7560,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                   a socket event, not a click). Not tied to the controls'
                   visibility: it stays until the viewer acts. On the right
                   of the lane: the Skip button has the left, and centred it
-                  ran into it on a phone and beside the party rail. Where
-                  even that is too narrow for the two side by side (the rail
-                  open on a small window) it goes one row up while a Skip
-                  button is showing. The Up next card and the series-end
-                  notice take the same corner when they are on screen, and
-                  the muted speaker in the transport row still says why there
-                  is no sound. */}
+                  ran into it on a phone and beside the party rail. It never
+                  changes rows. Where the lane is too narrow for the two side
+                  by side (the stylesheet says where, from `data-beside-skip`)
+                  it gives up its words and stays put as a round button: the
+                  row above belongs to other things, and a button that moved
+                  when a marker began would be missed by the thumb reaching
+                  for it, which for a party's host lands on the picture and
+                  pauses the room. The Up next card and the series-end notice
+                  take the same corner when they are on screen, and the muted
+                  speaker in the transport row still says why there is no
+                  sound. */}
               {autoStartedMuted && !upNextOnScreen && (
                 <button
                   type="button"
@@ -7573,10 +7584,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     setAutoStartedMuted(false)
                   }}
                   data-tap-for-sound=""
-                  className={`${activeSkipMarker ? 'player-lane-upper' : 'player-lane'} player-float-right absolute z-[55] inline-flex items-center gap-2 rounded-full bg-action text-action-on px-5 h-12 text-[15px] font-semibold shadow-lg`}
+                  data-beside-skip={activeSkipMarker ? '' : undefined}
+                  className="stage-tap-sound player-lane player-float-right absolute z-[55] inline-flex items-center justify-center gap-2 rounded-full bg-action text-action-on px-5 h-12 min-w-12 text-[15px] font-semibold shadow-lg"
                 >
-                  <VolumeX size={18} />
-                  Tap for sound
+                  <VolumeX size={18} className="flex-none" />
+                  <span className="stage-tap-sound-label">Tap for sound</span>
                 </button>
               )}
               {/* A refused cast (the pre-flight above). Local playback is
@@ -7763,7 +7775,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                 <div
                   role="status"
                   // One row above the lane, which the Skip button, "Tap for
-                  // sound" and the Up next card share.
+                  // sound" and the Up next card share and never leave.
                   className="player-lane-upper player-float-center absolute -translate-x-1/2 z-[55] max-w-[calc(100%-24px)] truncate px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px] pointer-events-none"
                 >
                   {subError}

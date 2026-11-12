@@ -2414,9 +2414,30 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   bottom: calc(var(--player-timeline-top) + 28px + var(--player-dock-lift));
 }
 /* The row above the lane, for a passing message that must not sit on the
-   lane's buttons. */
+   lane's buttons (the subtitle error). Nothing pressable goes here: in a
+   short window this row is the voice pill's and the top bar's buttons'. */
 .player-lane-upper {
   bottom: calc(var(--player-timeline-top) + 88px + var(--player-dock-lift));
+}
+/* "Tap for sound" and the Skip button share the lane, one at each end, and
+   while a Skip button shows the other carries `data-beside-skip`. Where the
+   picture left uncovered is too narrow for both, it keeps its place and
+   gives up its words: a 48px round button with the muted speaker alone (it
+   keeps its name for a screen reader). Too narrow is:
+     - a window under 360px wide (the two need about 320 plus a gap);
+     - the party rail open over the picture from 640 to 767px wide, which
+       leaves 284 to 411px and they need about 390. From 768 they fit. */
+@media not all and (min-width: 360px) {
+  .stage-tap-sound[data-beside-skip] { width: 48px; padding: 0; }
+  .stage-tap-sound[data-beside-skip] .stage-tap-sound-label { display: none; }
+}
+@media (min-width: 640px) {
+  html[data-player-surface="theater"][data-party-rail] .stage-tap-sound[data-beside-skip] { width: 48px; padding: 0; }
+  html[data-player-surface="theater"][data-party-rail] .stage-tap-sound[data-beside-skip] .stage-tap-sound-label { display: none; }
+}
+@media (min-width: 768px) {
+  html[data-player-surface="theater"][data-party-rail] .stage-tap-sound[data-beside-skip] { width: auto; padding: 0 20px; }
+  html[data-player-surface="theater"][data-party-rail] .stage-tap-sound[data-beside-skip] .stage-tap-sound-label { display: inline; }
 }
 .player-float-left { left: 12px; }
 .player-float-right { right: calc(12px + var(--theater-rail-cover)); }
@@ -2437,6 +2458,22 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   }
   .player-lane-upper {
     bottom: calc(var(--player-timeline-top) + 64px + var(--player-dock-lift));
+  }
+  /* Two things keep the lane out of the row the party's chip and voice pill
+     share, where a press meant for "Tap for sound" or Skip would land on
+     them (they are fixed above the player):
+     - No row of range names under the timeline. Its 20px are what pushed
+       the lane into that row when the transport wraps to two rows, as it
+       does for a party's host from 768 to about 830px wide. The ranges
+       themselves stay on the bar. (`html` in the selector: the row's own
+       `md:block` is emitted later and would win at equal specificity.)
+     - The chip's row sits 12px nearer the title bar, which leaves a window
+       360px high clear of a voice pill with people in it (48px tall). */
+  html [data-range-labels] {
+    display: none;
+  }
+  :root {
+    --theater-chip-top: 92px;
   }
 }
 

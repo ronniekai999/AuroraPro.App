@@ -9,6 +9,7 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 
 interface Props {
   youtubeKey: string
@@ -20,28 +21,30 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const closeRef = useRef<HTMLButtonElement | null>(null)
 
-  // Escape closes the dialog and only the dialog. In the capture phase and
-  // stopped there: the app has its own Escape handler on window, which on a
-  // title page goes back, and without this one press did both. (Keys pressed
-  // while focus is inside the embed belong to YouTube's page and never reach
-  // this one.)
+  // Escape closes the dialog and only the dialog: the app has its own Escape
+  // handler on window, which on a title page goes back, and one press used
+  // to do both. Through the shared layers (lib/escapeLayers), so that with
+  // something of the party's still open underneath (a reaction picker left
+  // open in the rail), one press closes the trailer, which is on top, and
+  // not the thing under it. (Keys pressed while focus is inside the embed
+  // belong to YouTube's page and never reach this one.)
   //
   // The search shortcut stops here too. The app's palette opens inside the
   // page, which is inert while the trailer is up: it appeared over the
   // trailer and could not be typed in.
   useEffect(() => {
+    const dropEscape = pushEscapeLayer(onClose)
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.stopPropagation()
         e.preventDefault()
-        return
       }
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      onClose()
     }
     window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
+    return () => {
+      dropEscape()
+      window.removeEventListener('keydown', onKey, true)
+    }
   }, [onClose])
 
   // While the dialog is open the page behind it is out of reach, and focus
@@ -89,6 +92,7 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
       onClick={onClose}
       role="dialog"
       aria-modal="true"
+      data-escape-layers=""
       aria-label={label}
       // Tab wraps at the dialog's ends instead of leaving for the browser's
       // chrome.

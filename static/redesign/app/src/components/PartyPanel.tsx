@@ -11,7 +11,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import { useExitTransition } from '@/hooks/useExitTransition'
-import { pushEscapeLayer } from '@/lib/escapeLayers'
+import { inForeignDialog, pushEscapeLayer } from '@/lib/escapeLayers'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
@@ -117,7 +117,8 @@ export function PartyPanel({
   // neither it nor this is drawn in native fullscreen either way.)
   const leaveButtonRef = useRef<HTMLButtonElement | null>(null)
   const leaveDialogRef = useRef<HTMLDivElement | null>(null)
-  const leaveConfirmUp = showLeaveConfirm && leaveExit.mounted
+  // Only the rail draws the confirm; the minimal face has no leave button.
+  const leaveConfirmUp = variant === 'rail' && showLeaveConfirm && leaveExit.mounted
   useEffect(() => {
     // Not until it is in the document: it mounts a render after the flag.
     if (!leaveConfirmUp) return
@@ -132,10 +133,21 @@ export function PartyPanel({
     // shortcuts, and an arrow or a k pressed at "End the party?" was seeking
     // and pausing the film for everyone. Tab is kept among the confirm's
     // buttons, wrapping at the ends, and brings focus in if it is outside.
+    //
+    // Only while the confirm is what the viewer is looking at. The rail is
+    // not drawn in browser fullscreen (it is outside the element that goes
+    // fullscreen), but focus can still be on its leave button there, and a
+    // Space would open a confirm nobody can see and leave the player's keys
+    // dead until it closed. And a prompt the app opens above it from
+    // elsewhere (the profile picker, a PIN prompt) keeps its own keys.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') return
+      const fullscreen = document.fullscreenElement
+      if (fullscreen && !(dialog && fullscreen.contains(dialog))) return
+      if (inForeignDialog(e.target)) return
       e.stopPropagation()
-      if (e.key !== 'Tab' || !dialog) return
+      // Tab with a modifier is the browser's or the system's.
+      if (e.key !== 'Tab' || e.altKey || e.ctrlKey || e.metaKey || !dialog) return
       const stops = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled])')]
       if (stops.length === 0) return
       const first = stops[0], last = stops[stops.length - 1]
@@ -592,6 +604,7 @@ export function PartyPanel({
               ref={leaveDialogRef}
               role="alertdialog"
               aria-modal="true"
+              data-escape-layers=""
               aria-labelledby="party-leave-title"
               aria-describedby="party-leave-text"
               className="w-full max-w-sm bg-surface-raised-2 rounded-sheet p-6"

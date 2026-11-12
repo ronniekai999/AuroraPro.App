@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { TrailerModal } from './TrailerModal'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 
 afterEach(cleanup)
 
@@ -93,6 +94,21 @@ describe('TrailerModal', () => {
     window.removeEventListener('keydown', appHandler)
     expect(onClose).toHaveBeenCalledOnce()
     expect(appHandler.mock.calls.map(([e]) => (e as KeyboardEvent).key)).toEqual(['a'])
+  })
+
+  // Something of the party's left open underneath (a reaction picker in the
+  // rail) closes on Escape too. One press closes the trailer, which is on
+  // top; the thing under it takes the next.
+  it('is the top layer: one Escape closes the trailer and not what was open under it', () => {
+    const under = vi.fn(), onClose = vi.fn()
+    const dropUnder = pushEscapeLayer(under)
+    const view = render(<TrailerModal youtubeKey="abc" title="Kestrel" onClose={onClose} />)
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Close trailer' }), { key: 'Escape' })
+    expect([onClose.mock.calls.length, under.mock.calls.length]).toEqual([1, 0])
+    view.unmount()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect([onClose.mock.calls.length, under.mock.calls.length]).toEqual([1, 1])
+    dropUnder()
   })
 
   // The palette opens inside the page, which is inert under the trailer.
