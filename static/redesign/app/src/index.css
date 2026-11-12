@@ -2857,12 +2857,19 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   justify-content: flex-start;
   text-align: left;
   white-space: normal;
+  /* One long unbroken word (a name can be one) breaks rather than runs off. */
+  overflow-wrap: anywhere;
 }
 .stage-btn:disabled,
 .stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 /* Press feedback: a 3% settle over 90ms is the smallest tactile cue that
    reads; the release eases back on the base transition above. */
-.stage-btn:not(:disabled):active { transform: scale(0.97); transition-duration: 90ms; }
+/* Neither this nor the hovers below apply to a button that is off through
+   aria-disabled (one that must keep its focus through a request): it refuses
+   presses, so it must not look as if it takes them. Inside :where() so the
+   selectors weigh what they did: `.stage-btn-ghost.is-on:hover` further down
+   ties with the ghost hover and wins by coming later, and must keep doing so. */
+.stage-btn:not(:disabled):where(:not([aria-disabled="true"])):active { transform: scale(0.97); transition-duration: 90ms; }
 /* The global two-tone ring, restated because the variants below are (0,1,0)
    rules later in the file and one of them sets box-shadow. */
 .stage-btn:focus-visible {
@@ -2877,14 +2884,14 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   color: var(--on-action);
   border-radius: var(--r-pill);
 }
-.stage-btn-primary:not(:disabled):hover { background: rgba(255, 255, 255, 0.9); }
+.stage-btn-primary:not(:disabled):where(:not([aria-disabled="true"])):hover { background: rgba(255, 255, 255, 0.9); }
 /* Secondary: a quiet fill. No blur: it reads on the page and on a scrim
    alike, and blur is kept for chrome that content scrolls under. */
 .stage-btn-ghost {
   background: var(--action-soft);
   color: var(--ink);
 }
-.stage-btn-ghost:not(:disabled):hover { background: rgba(255, 255, 255, 0.16); }
+.stage-btn-ghost:not(:disabled):where(:not([aria-disabled="true"])):hover { background: rgba(255, 255, 255, 0.16); }
 /* Tertiary: text only. */
 .stage-btn-quiet {
   background: transparent;
@@ -2898,7 +2905,7 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   color: var(--ink-2);
   border-color: var(--line-strong);
 }
-.stage-btn-outline:not(:disabled):hover { background: var(--action-soft); color: var(--ink); }
+.stage-btn-outline:not(:disabled):where(:not([aria-disabled="true"])):hover { background: var(--action-soft); color: var(--ink); }
 /* Secondary's toggled-on state (the hero's "In My List"): a stronger fill,
    as a modifier here so a caller does not need `!important` utilities to
    beat .stage-btn-ghost's. */
@@ -2918,12 +2925,12 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   background: var(--danger);
   color: #ffffff;
 }
-.stage-btn-destructive:not(:disabled):hover { filter: brightness(1.12); }
+.stage-btn-destructive:not(:disabled):where(:not([aria-disabled="true"])):hover { filter: brightness(1.12); }
 
 /* Reduced motion — the settle on press is decorative. */
 @media (prefers-reduced-motion: reduce) {
   .stage-btn { transition: none; }
-  .stage-btn:not(:disabled):active { transform: none; }
+  .stage-btn:not(:disabled):where(:not([aria-disabled="true"])):active { transform: none; }
 }
 
 /* Native <select> styled to the toolbar (BrowseView's sort). Kept NATIVE

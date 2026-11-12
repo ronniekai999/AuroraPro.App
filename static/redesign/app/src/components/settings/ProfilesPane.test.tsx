@@ -374,6 +374,52 @@ describe('managing profiles, from a profile without a limit', () => {
     expect(screen.queryByText(/could not be checked/)).toBeNull()
   })
 
+  // Save reads the list before it writes, and the read takes time. Another
+  // tab can move this session onto the very profile being limited meanwhile:
+  // judged at the press, nothing needed asking; judged when the read is
+  // back, this device is about to limit itself.
+  it('asks "limit yourself" when the session moves onto the profile while Save is checking', async () => {
+    const view = render(<ProfilesPane actingProfile={parent} profileKnown onProfilesChanged={vi.fn()} onToast={vi.fn()} />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    pick('Sam', 'TV-PG')
+    let answer!: (list: Profile[]) => void
+    api.listProfiles.mockReturnValueOnce(new Promise<Profile[]>(resolve => { answer = resolve }))
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Save limit for Sam' }))
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    // The switch, made elsewhere, reaches this page while the read is out.
+    view.rerender(<ProfilesPane actingProfile={sam} profileKnown onProfilesChanged={vi.fn()} onToast={vi.fn()} />)
+    await act(async () => { answer([parent, kid, sam]) })
+    expect(within(await asked()).getByRole('heading', { name: 'Limit Sam?' })).toBeInTheDocument()
+    expect(confirm()).toHaveTextContent('You are watching as Sam.')
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    fireEvent.click(within(confirm()).getByRole('button', { name: 'Keep it as it is' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(api.updateProfile).not.toHaveBeenCalled()
+  })
+
+  // The write is done when the server answers it. A reload of the list that
+  // then does not answer must not hold the row busy for good.
+  it('frees a row whose write has finished when the reload after it does not answer', async () => {
+    await open()
+    fireEvent.click(rowOf('Sam').getByRole('button', { name: 'Edit Sam' }))
+    fireEvent.change(rowOf('Sam').getByRole('textbox', { name: 'Name' }), { target: { value: 'Sammy' } })
+    const save = rowOf('Sam').getByRole('button', { name: 'Save name' })
+    vi.useFakeTimers()
+    try {
+      api.listProfiles.mockReturnValue(new Promise(() => {}))
+      fireEvent.click(save)
+      await act(async () => {})
+      expect(api.updateProfile).toHaveBeenCalledWith(3, { name: 'Sammy' })
+      expect(save).toHaveAttribute('aria-disabled', 'true')
+      await act(async () => { vi.advanceTimersByTime(LIMIT_CHECK_TIMEOUT_MS - 1) })
+      expect(save).toHaveAttribute('aria-disabled', 'true')
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(save).toHaveAttribute('aria-disabled', 'false')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // The question's words are about one stored limit. When a reload brings
   // another while it is up, it is withdrawn, not left asking "Loosen …: up
   // to G and TV-G. The limit now is: up to G and TV-G".

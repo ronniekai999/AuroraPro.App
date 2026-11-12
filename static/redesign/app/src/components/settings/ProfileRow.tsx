@@ -37,8 +37,19 @@ import { AvatarPicker, LeanPicker } from './ProfilePickers'
 type OnToast = (message: string, type?: Toast['type']) => void
 type Run = (write: () => Promise<unknown>, fallback: string, done?: string, onRefusal?: (e: unknown) => string | null) => Promise<boolean>
 
-/** How long Save waits for the list it reads before a limit is written. */
+/** How long Save waits for the list it reads before a limit is written, and
+ *  how long a row waits for the list to reload after a write. */
 export const LIMIT_CHECK_TIMEOUT_MS = 10_000
+
+/** `work`, or nothing once `ms` have passed. The work goes on either way;
+ *  only the wait for it ends. */
+function waitAtMost<T>(work: Promise<T>, ms: number): Promise<T | void> {
+  let timer = 0
+  return Promise.race([
+    work,
+    new Promise<void>(resolve => { timer = window.setTimeout(resolve, ms) }),
+  ]).finally(() => window.clearTimeout(timer))
+}
 
 /** The server counts a name's bytes (100 at most), not its characters. */
 const NAME_MAX_BYTES = 100
@@ -105,7 +116,9 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
     setSignedOut(false)
     try {
       await write()
-      await onChanged()
+      // The write is done. The list is read again, but a read that does not
+      // answer must not keep the row busy after its own work has finished.
+      await waitAtMost(onChanged(), LIMIT_CHECK_TIMEOUT_MS)
       if (done) onToast?.(done, 'success')
       return true
     } catch (e) {
@@ -166,7 +179,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
     setNewPin('')
     setPinFormOpen(false)
     setError(null)
-    await onChanged()
+    await waitAtMost(onChanged(), LIMIT_CHECK_TIMEOUT_MS)
     onToast?.(
       what.kind === 'change-pin' ? `PIN changed for ${name}` : what.kind === 'remove-pin' ? `PIN removed from ${name}` : `${name} is the default profile now`,
       'success',
@@ -446,6 +459,13 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
   const [stopped, setStopped] = useState<string | null>(null)
   const selectRef = useRef<HTMLSpanElement | null>(null)
   const focusSelect = () => selectRef.current?.querySelector('select')?.focus()
+  // The facts as they are NOW, for Save to read after its wait: whether this
+  // device watches as this profile, and whether this control is still on the
+  // page. What Save saw when it was pressed can be out of date by then.
+  const actingNow = useRef(acting)
+  useEffect(() => { actingNow.current = acting }, [acting])
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const dirty = draft !== stored
   const loosens = loosensLimit(stored, draft)
   // Limiting the profile this session acts as takes these controls away
@@ -483,6 +503,9 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
       new Promise<'slow'>(resolve => { timer = window.setTimeout(() => resolve('slow'), LIMIT_CHECK_TIMEOUT_MS) }),
     ])
     window.clearTimeout(timer)
+    // The control left the page while the list was read (this device may no
+    // longer manage profiles): nothing is saved.
+    if (!mounted.current) return
     setChecking(false)
     if (fresh === 'slow') {
       setStopped(`The server took too long to say what the limit for ${name} is now, so nothing was saved. Try again.`)
@@ -501,7 +524,12 @@ function LimitControl({ profile, acting, soleUnrestricted, busy, run, onRefresh 
       focusSelect()
       return
     }
-    if (loosens || limitsSelf) setAsking(true)
+    // "Limit yourself" is judged on who this device watches as now, not at
+    // the press: another tab can move the session onto this profile while
+    // the list is read, and a limit written then would limit this device
+    // without its having been asked.
+    const limitsSelfNow = actingNow.current && stored === NO_LIMIT && draft !== NO_LIMIT
+    if (loosens || limitsSelfNow) setAsking(true)
     else void save()
   }
 
