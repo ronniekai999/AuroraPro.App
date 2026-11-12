@@ -1,0 +1,10 @@
+{
+  "sha": "fc5a3a29138bf6000bc9cd34ffe822072cfcf43e",
+  "verdict": "lows-only",
+  "summary": "Follow-ups (five commits over dc884f9), each checked by the fresh-context reviewer of its area. Player and party (72c09f3, 7d77ac5; reviewer ab59ed55, two passes): pass 1 fix-first, Tap for sound was raised a row whenever Skip showed, which in a short window put it under the voice pill for a party host; pass 2 lows-only (it never leaves its lane now and becomes icon-only where it cannot sit beside Skip); Escape layering, the leave confirmation's key sink and the VideoPlayer hunk found sound, the hunk presentation and key routing only; lows: range names hidden for every viewer in a short window, thin margins under 356px high with no automated guard, the cast widgets treated as foreign dialogs by the Escape layers, no title or edge on the icon-only button, the fullscreen guard ignoring the webkit name. Profile summary (cf1c308, c04b212; reviewer aa6f9651): lows-only, the limit is stated exactly once by every caller; low: the limit is last in a truncating line. Title probe (2c5f10e; reviewer a5d2bade): lows-only, the probe fails past a height-to-width ratio of 0.8 measured on the laid-out block; it cannot see an element added to the hero but not to its model. Applied by cherry-pick; every reviewed file byte-identical to the reviewed head except index.css, which lacks another builder's unlanded Tonight rules.",
+  "reviewer": "fresh-context-agents-ab59ed55-aa6f9651-a5d2bade",
+  "findings": "9",
+  "diff_digest": "32261fae6ef8ad78da5651e265a61dbacd50743bc44d5cf11b6461b22fb6f651",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T03:32:14Z"
+}
