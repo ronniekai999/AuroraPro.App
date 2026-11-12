@@ -643,6 +643,67 @@ describe('the results', () => {
     expect(screen.getByRole('button', { name: 'Everything' })).toHaveAttribute('aria-pressed', 'true')
   })
 
+  // The keyboard (lib/searchKeys has the rules; this is the page's wiring).
+  // Each result is a button, so the focus moves for real and Enter is the
+  // button's own press.
+  describe('the arrow keys', () => {
+    const focused = () => document.activeElement as HTMLElement
+    const key = (k: string) => fireEvent.keyDown(focused(), { key: k })
+
+    it('move the focus from the best match through the cards and the collections, and back', async () => {
+      collectionList.items = [{ id: 1, owner_user_id: 1, name: 'Harbor towns', kind: 'manual', is_public: false, item_count: 3, created_at: '', updated_at: '' }]
+      await answered({ onOpenCollection: vi.fn(), onCardPlay: vi.fn() })
+      section('best')!.querySelector<HTMLElement>('.search-best-open')!.focus()
+      const seen = [focused().textContent]
+      for (let i = 0; i < 4; i++) { key('ArrowDown'); seen.push(focused().className.includes('search-colrow') ? 'collection: Harbor towns' : focused().getAttribute('aria-label') ?? focused().textContent) }
+      expect(seen).toEqual([expect.stringContaining('Harbor Lights'), 'Harbor Nights — Show · 2024', 'Harbor Days — Show · 2024', 'Harbor Dawn — Movie · 2024', 'collection: Harbor towns'])
+      // The last: Down stays.
+      key('ArrowDown')
+      expect(focused().className).toContain('search-colrow')
+      key('ArrowUp')
+      expect(focused().getAttribute('aria-label')).toBe('Harbor Dawn — Movie · 2024')
+      key('Home')
+      expect(focused().className).toContain('search-best-open')
+      // Play and More are not results: a key on them is theirs.
+      const play = screen.getByRole('button', { name: 'Play Harbor Lights' })
+      play.focus()
+      key('ArrowDown')
+      expect(focused()).toBe(play)
+    })
+
+    it('go from the page\'s own field into its rows on a phone, and back to the field', async () => {
+      screenIs(false)
+      await answered({ onQueryChange: vi.fn() })
+      const own = screen.getByRole('searchbox', { name: 'Search titles' })
+      own.focus()
+      expect(fireEvent.keyDown(own, { key: 'ArrowDown' })).toBe(false)
+      expect(focused().className).toContain('mlr-main')
+      expect(focused().textContent).toContain('Harbor Lights')
+      key('ArrowDown')
+      expect(focused().textContent).toContain('Harbor Nights')
+      key('ArrowUp'); key('ArrowUp')
+      expect(focused()).toBe(own)
+    })
+
+    it('leave Down in the field alone while there is nothing to go to', () => {
+      screenIs(false)
+      render(<SearchView {...base} query="" />)
+      const own = screen.getByRole('searchbox', { name: 'Search titles' })
+      own.focus()
+      expect(fireEvent.keyDown(own, { key: 'ArrowDown' })).toBe(true)
+      expect(focused()).toBe(own)
+    })
+
+    it('are named in the hint where there is a keyboard to press them on', () => {
+      render(<SearchView {...base} query="" onDescribe={vi.fn()} />)
+      expect(document.querySelector('.search-hint')!.textContent).toContain('Arrow keys move through the results, Enter opens one, Esc clears the field.')
+      cleanup()
+      screenIs(false)
+      render(<SearchView {...base} query="" onDescribe={vi.fn()} />)
+      expect(document.querySelector('.search-hint')!.textContent).not.toContain('Arrow keys')
+    })
+  })
+
   describe('collections', () => {
     const col = (id: number, name: string, over: Record<string, unknown> = {}) =>
       ({ id, owner_user_id: 1, name, kind: 'manual', is_public: false, item_count: 3, created_at: '', updated_at: '', ...over })

@@ -29,9 +29,10 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
   // not the thing under it. (Keys pressed while focus is inside the embed
   // belong to YouTube's page and never reach this one.)
   //
-  // The search shortcut stops here too. The app's palette opens inside the
-  // page, which is inert while the trailer is up: it appeared over the
-  // trailer and could not be typed in.
+  // The search shortcut stops here too. It puts the focus in the top bar's
+  // search field, which is in the page, inert while the trailer is up. (It
+  // used to open a palette there: it appeared over the trailer and could not
+  // be typed in.)
   useEffect(() => {
     const dropEscape = pushEscapeLayer(onClose)
     const onKey = (e: KeyboardEvent) => {

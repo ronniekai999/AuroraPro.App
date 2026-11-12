@@ -1584,12 +1584,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         they're working. Pulsing red dot + countdown leaves no
         ambiguity. */}
     {recording && typeof document !== 'undefined' && createPortal(
-      // Deep-debug H2 — z-[210] sits ABOVE the search palette
-      // (z-[200]), toasts (z-[200]), and every other Aurora overlay.
-      // Background-page interaction is the whole point during
-      // recording, but if the user accidentally opens ⌘K palette
-      // or fires a toast during their 30s window, the Stop control
-      // must remain visible.
+      // Deep-debug H2 — z-[210] sits ABOVE toasts (z-[200]) and every
+      // other Aurora overlay. Background-page interaction is the whole
+      // point during recording, but if a toast fires during the user's
+      // 30s window, the Stop control must remain visible.
       // Deep-debug S8 — role="status" with aria-live so SR users
       // hear the "Recording · Xs left" countdown periodically.
       // Deep-debug L6 — border-rose-500/80 (was /50) so the widget

@@ -297,8 +297,8 @@ if (!m) {
 // :focus-within indicator", and then never looked. The block only console.log'd —
 // it never touched `problems`. So deleting `.convo-search:focus-within` outright,
 // which was the vibe search bar's ONLY focus indicator once the global rule was
-// nulled at (0,3,1) (that bar has since been folded into search; the top bar's
-// field and the palette's are the containers today), left the gate at exit 0 with the words "must supply their own
+// nulled at (0,3,1) (that bar has since been folded into search, and so has the
+// palette; the top bar's field is the container today), left the gate at exit 0 with the words "must supply their own
 // :focus-within indicator" still printed in its own passing output.
 //
 // That is precisely the defect class this file's header says it exists to catch,

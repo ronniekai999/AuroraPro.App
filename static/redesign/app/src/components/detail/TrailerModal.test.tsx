@@ -111,7 +111,7 @@ describe('TrailerModal', () => {
     dropUnder()
   })
 
-  // The palette opens inside the page, which is inert under the trailer.
+  // The shortcut is for the top bar's search field, in the page, inert under the trailer.
   it('keeps the search shortcut from the app while it is open', () => {
     const appHandler = vi.fn()
     window.addEventListener('keydown', appHandler)

@@ -23,9 +23,10 @@
 //   - Play on the poster and the menu's first row agree: with a position
 //     saved, both resume, on any rail, not only Continue Watching.
 
+import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useNavigate } from 'react-router'
 import App from './App'
 
 // The player is replaced by a marker that says what it was asked to play.
@@ -153,8 +154,15 @@ function renderAt(path: string, opts: { bound?: number; role?: string; prefs?: R
   localStorage.setItem('aurora_user', JSON.stringify({ id: 1, username: 'ronnie', email: 'r@example.test', role: opts.role ?? 'user' }))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true, ...opts.prefs }))
   const server = stubServer(opts)
-  render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
+  render(<MemoryRouter initialEntries={[path]}><GoBack /><App /></MemoryRouter>)
   return server
+}
+/** The browser's Back button. */
+const browser = { back: () => {} }
+function GoBack() {
+  const navigate = useNavigate()
+  useEffect(() => { browser.back = () => navigate(-1) }, [navigate])
+  return null
 }
 
 const find = { timeout: 5000 }
@@ -445,6 +453,35 @@ describe('Play on the poster and the menu agree', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find))[0])
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.getAttribute('data-resume')).toBe('600000')
+  })
+
+  // The search page takes its address (/search) as its viewer types. Every
+  // other change of address closes a player; a minimized one has always
+  // gone on playing while its viewer typed in the bar.
+  it('a player that is on stays on while its viewer types a search, and goes when they open a result', async () => {
+    renderAt('/movies')
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find))[0])
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    fireEvent.change(screen.getByPlaceholderText(/Search/), { target: { value: 'found' } })
+    const result = await screen.findByRole('button', { name: /^Found By Search/ }, find)
+    // The page is the search page now, at its own address, and the player is still there.
+    expect(document.querySelector('[data-search-results]')).not.toBeNull()
+    expect(player()).not.toBeNull()
+    fireEvent.click(result)
+    await waitFor(() => expect(player()).toBeNull(), find)
+  })
+
+  // Only the address change the typing itself made is let off: coming Back
+  // to the search page later is a change of address like any other.
+  it('and one started on a title opened from a search goes when the viewer goes Back to the results', async () => {
+    renderAt('/movies')
+    fireEvent.change(await screen.findByPlaceholderText(/Search/, undefined, find), { target: { value: 'found' } })
+    fireEvent.click(await screen.findByRole('button', { name: /^Found By Search/ }, find))
+    fireEvent.click(await screen.findByRole('button', { name: 'Play' }, find))
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    browser.back()
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).not.toBeNull(), find)
+    await waitFor(() => expect(player()).toBeNull(), find)
   })
 
   // Season 0 is Specials: the lowest number, and not where a show starts.

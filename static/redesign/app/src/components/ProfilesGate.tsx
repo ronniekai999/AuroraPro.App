@@ -50,9 +50,11 @@ interface ProfilesGateProps {
    * cannot otherwise know — and it needs to: App's Cmd+K handler guards on
    * every other blocking surface (`playerTarget`, `contextMenu`,
    * `addToListMedia`) and the gate was missing from the list,
-   * while SearchPalette renders at z-200 over it. So Cmd+K opened the palette
-   * on top of the gate and selecting a result navigated the app behind a gate
-   * that stayed up — the same family as the Escape-bubbling bug above.
+   * while the search palette rendered at z-200 over it. So Cmd+K opened the
+   * palette on top of the gate and selecting a result navigated the app behind
+   * a gate that stayed up — the same family as the Escape-bubbling bug above.
+   * (The palette is gone: Cmd+K now puts the focus in the top bar's search
+   * field, which is behind the gate just the same, so the guard stays.)
    */
   onOpenChange?: (open: boolean) => void
 }

@@ -22,13 +22,14 @@ if (hasDom) {
   // test's document and `getByRole` starts matching elements from a previous test.
   afterEach(() => { cleanup() })
 
-  // `scrollIntoView` IS required. A reviewer measured `Element.prototype
-  // .scrollIntoView` as a native function under jsdom 30 and concluded this block
-  // was dead code with a false rationale. Removing it fails four tests with
-  // "row?.scrollIntoView is not a function" — SearchPalette's highlight-follow
-  // effect calls it on every arrow press. Whatever the prototype reports in
-  // isolation, it is not callable on the elements under test here, so the guard
-  // fires and the stub is what keeps the keyboard tests running.
+  // `scrollIntoView` was required while the search palette existed: its
+  // highlight-follow effect called it on every arrow press, and removing this
+  // stub failed four tests with "row?.scrollIntoView is not a function"
+  // (whatever the prototype reports in isolation, it was not callable on the
+  // elements under test). The palette is gone (the search page's arrow keys
+  // move the real focus, lib/searchKeys.ts) and today's callers all use
+  // `scrollIntoView?.()`, so nothing is known to need the stub now; it is
+  // kept because jsdom still does not implement the method.
   //
   // The reviewer WAS right about the rest of the original comment, which claimed
   // `matchMedia` was also missing and that the title page's tab strip (since

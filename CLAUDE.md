@@ -494,7 +494,24 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   server answers a description search with title matches both when it has
   no model and when its description search finds nothing, and says
   "literal" either way, so the page says exactly that and does not call
-  them results by description. Those resets run in passive effects, after the commit that
+  them results by description. The search page has its own address: the
+  first key typed in the top bar's field, Enter there from another page and
+  a request's "Find it" push `/search` once (`showSearchPage`), so Back from
+  a result is the results and Back from the results is where the viewer
+  was. It used to be drawn over the address the viewer was typing at: Back
+  from a result skipped the results and left the words in the bar over
+  another page. The words are App state, never in the address (a reload of
+  `/search` is the page with nothing typed); they stay in the bar on a
+  title, a collection or My requests opened from the results
+  (`keepSearch`), and go on any other way off the page. Ctrl or Cmd K puts
+  the focus in the search field (there is no palette; `lib/searchKeys.ts`
+  moves the real focus through the results with the arrow keys) and does
+  nothing from another text field or while the player, a card's menu, the
+  add-to-list sheet, the profile picker, a PIN prompt or any modal dialog
+  is over the page. Typing is the one change of address that leaves a
+  minimized player on. Pinned by `App.searchRequest.test.tsx` and
+  `App.cardMenu.test.tsx` against a memory router; a real browser's history
+  was checked by hand only. Those resets run in passive effects, after the commit that
   already names the new profile, and React could paint that commit: the
   previous profile's hero showed under the new name for a frame. Until they
   run (`profileSwitchPending`), Home, the grids, My Library and an open title

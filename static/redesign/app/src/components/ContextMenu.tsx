@@ -324,7 +324,7 @@ export function ContextMenu({ x, y, items, onClose, title, reason, opener }: Pro
             break
           case 'Escape':
             // Stopped HERE as well as handled by the window listener. App's
-            // Escape handler guards only on `paletteOpen`, so with a context menu
+            // Escape handler does not know a menu is open, so with a context menu
             // open on a detail page the fall-through reached
             // `else if (view === 'detail') handleBack()` — pressing Escape to
             // dismiss the menu dismissed it AND navigated back off the title.

@@ -713,13 +713,16 @@ export interface SearchResult {
 }
 export async function searchMedia(
   query: string,
-  limit = 30,
-  signal?: AbortSignal,
-  mode?: 'literal' | 'semantic',
+  limit: number,
+  signal: AbortSignal | undefined,
+  // Always named. Left out, the server chooses by itself whether the words
+  // are a title or a description, and a description costs it a model call:
+  // a search asked for at every keystroke must never leave it that choice.
+  // (The palette this app had did, on every key.)
+  mode: 'literal' | 'semantic',
 ): Promise<SearchResult> {
   if (!query.trim()) return { items: [], mode: 'literal' }
-  const params = new URLSearchParams({ q: query, limit: String(limit) })
-  if (mode) params.set('mode', mode)
+  const params = new URLSearchParams({ q: query, limit: String(limit), mode })
   const res = await apiFetchResponse(`/api/media/search?${params.toString()}`, {
     signal,
   })

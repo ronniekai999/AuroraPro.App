@@ -635,22 +635,10 @@ const ONB_INK = (() => {
   return hex(m[1])
 })()
 
-// The search palette (Stage refresh audit-gap fix). Its secondary text sat at
-// 2.59:1 and 3.77:1 for as long as the palette existed and this script passed,
-// because this script measures ONLY the surfaces listed in SURFACES below and
-// the palette was never listed — the same structural blind spot this file's
-// header describes for the on-art audit and the vibe bar. Modelled, bottom-up:
-// the page's `.aurora-bg`, the full-viewport scrim, then the panel's own fill;
-// the scrim and panel are read from the component. NOT modelled: whatever
-// view is on screen beneath the scrim (hero art, a backdrop, video). That is
-// sound only while the panel's fill is opaque, which is asserted below: a
-// translucent panel would let the view beneath reach the text.
-const PAL = 'src/components/SearchPalette.tsx'
+// The search page. (A separate palette used to be modelled here: a scrim, an
+// opaque panel and eight kinds of text on it. It was folded into this page,
+// whose own text is measured below, on the page and on its raised boxes.)
 const SEARCH = 'src/components/SearchView.tsx'
-const PAL_SCRIM = [[twFill(PAL, 'data-palette-scrim')]]
-const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
-if (PAL_PANEL[0][0].a !== 1) throw new Error(`audit: the palette panel's fill is no longer opaque (alpha ${PAL_PANEL[0][0].a}); the view beneath the scrim would show through the text's backdrop — model it, do not pass`)
-const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 
 // ── 1. Faint white text, everywhere, against a computed floor ────────────────
 //
@@ -735,8 +723,6 @@ const EXEMPT = [
   // (The requests page had five lines here: a glyph where a poster was
   // missing, twice; an illustration; a dot; an icon-only delete. The page
   // was rebuilt on the tokens and draws none of them.)
-  { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
-    why: 'the dots between the key legend\'s entries' },
   // ── index.css ──
 ]
 
@@ -1037,50 +1023,25 @@ const SURFACES = [
     // The tab bar's own fill over a white frame: content scrolls under it too.
     on: () => { const bar = parseColor(cssValue('.stage-tabbar', 'background')); return [over(bar.rgb, bar.a, W)] },
   },
-  // ── The search palette. ──
-  {
-    what: 'palette query placeholder', where: `${PAL} (combobox)`,
-    color: W, alpha: () => twAlpha(PAL, 'placeholder="Search Aurora', 'placeholder-white'),
-    px: 16, on: onPalette,
-  },
-  {
-    what: 'palette "Esc" hint', where: `${PAL} (header kbd)`,
-    color: () => twText(PAL, 'uppercase tracking-wider text-[color:').rgb,
-    alpha: () => twText(PAL, 'uppercase tracking-wider text-[color:').a,
-    px: 12, on: onPalette,
-  },
-  {
-    what: 'palette empty-state line', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'Start typing to search').rgb,
-    alpha: () => twText(PAL, 'Start typing to search').a,
-    px: 16, on: onPalette,
-  },
-  {
-    what: 'palette "Try a title…" hint', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'Try <span').rgb, alpha: () => twText(PAL, 'Try <span').a,
-    px: 12, on: onPalette,
-  },
-  {
-    what: 'palette key legend', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
-    alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
-    px: 12, on: onPalette,
-  },
-  {
-    what: 'palette no-match line', where: `${PAL} (no results)`,
-    color: () => twText(PAL, 'No matches for "{query}"').rgb, alpha: () => twText(PAL, 'No matches for "{query}"').a,
-    px: 16, on: onPalette,
-  },
-  {
-    what: 'palette no-match hint', where: `${PAL} (no results)`,
-    color: () => twText(PAL, 'Check spelling or try').rgb, alpha: () => twText(PAL, 'Check spelling or try').a,
-    px: 12, on: onPalette,
-  },
-  {
-    what: 'palette result meta', where: `${PAL} (result row)`,
-    color: () => twText(PAL, '{m.year > 0 &&').rgb, alpha: () => twText(PAL, '{m.year > 0 &&').a,
-    px: 12, on: onPalette,
-  },
+  // ── The search page's own text (it took the palette's place): the line
+  //    that says what was found, the best match's facts and its line on
+  //    the raised row, the note beside "Titles", a collection's facts on
+  //    its raised row, and the second column's headings, rows and hint. ──
+  ...[
+    ['.search-status', 14, 'page'], ['.search-h2-note', 14, 'page'], ['.search-aside-h', 12, 'page'], ['.search-hint', 12, 'page'],
+    ['.search-recent-row', 15, 'page'], ['.search-action-row', 14, 'page'],
+    ['.search-best-facts', 14, 'raised'], ['.search-best-line', 14, 'raised'],
+    ['.search-colrow-facts', 12, 'raised'], ['.search-colrow-name', 15, 'raised'],
+  ].map(([sel, px, ground]) => ({
+    what: `search page: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px,
+    // A row to press is also drawn on its hover fill.
+    on: () => ground === 'raised'
+      ? [rootToken('--surface-raised').rgb, rootToken('--surface-raised-2').rgb]
+      : sel.endsWith('-row') ? [INK, rootToken('--surface-raised').rgb] : [INK],
+  })),
   // ── A rail's header, on the page: its title (which is also the "see all"
   //    link when the rail has one, so there is no separate link text), the
   //    one line under it, and the chevron that marks the title as a link. ──

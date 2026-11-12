@@ -189,8 +189,8 @@ describe('usePanelDismiss', () => {
     // the focused element), so without a guard it flings a focus ring onto a
     // trigger the user was walking away from — the policy ProfileSwitcher's
     // handler already spells out. It is not merely cosmetic: any outside target
-    // that preventDefaults mousedown to keep focus put, as SearchPalette's
-    // options do, has that focus stolen by the restore.
+    // that preventDefaults mousedown to keep focus put (as the search
+    // palette's options did) has that focus stolen by the restore.
     //
     // `fireEvent`, not `user.click`: user-event also runs the browser's own
     // post-mousedown focus behaviour (blur to <body> when the target isn't
@@ -246,7 +246,7 @@ describe('usePanelDismiss', () => {
     await user.click(screen.getByRole('button', { name: 'Open panel' }))
     await waitFor(() => expect(screen.getByRole('dialog')).toHaveFocus())
 
-    // App's window-level Escape handler guards only on `paletteOpen`, so a leak
+    // App's window-level Escape handler does not know a panel is open, so a leak
     // here reaches `view === 'detail' && handleBack()` — dismissing the panel AND
     // navigating off the title.
     const windowSpy = vi.fn()

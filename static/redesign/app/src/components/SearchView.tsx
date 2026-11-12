@@ -27,6 +27,7 @@ import { useLongPress } from '@/hooks/useLongPress'
 import { SearchRequest, useRequesting } from '@/components/SearchRequest'
 import { listCollections, posterURL, searchMedia, type Collection, type MediaRequest } from '@/lib/api'
 import { describedAnswerFor, keepDescribedAnswer } from '@/lib/describedSearch'
+import { focusResult, onResultsKeyDown } from '@/lib/searchKeys'
 import { type Media } from '@/lib/types'
 
 /** The kinds the results can be narrowed to. Titles carry their kind;
@@ -408,6 +409,8 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             ref={fieldRef}
             value={query}
             onChange={e => onQueryChange(e.target.value)}
+            // Down goes from the field into the results, as from the bar's.
+            onKeyDown={e => { if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing && focusResult('first')) e.preventDefault() }}
             placeholder="Search, or describe a mood"
             aria-label="Search titles"
             className="h-full min-w-0 flex-1 !border-0 !bg-transparent !p-0 text-base text-ink !shadow-none"
@@ -420,7 +423,11 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
         </form>
       )}
       <div className="search-cols">
-        <div className="search-main">
+        {/* The arrows move through the results (lib/searchKeys): from the
+            field into the first, on through the rest, and back to the
+            field from the first. Each result is a button, so Enter opens
+            the one in focus. */}
+        <div className="search-main" onKeyDown={onResultsKeyDown}>
           {/* The page's name, for a heading to land on: what is on screen
               is the search's own line below, as the design has it. With
               nothing typed there are no results to head. */}
@@ -649,6 +656,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
           {onDescribe && (
             <p className="search-hint">
               Titles appear as you type. {wide ? 'Press Enter' : 'Use the Search key on your keyboard'} to search by mood or description, which takes a few seconds longer.
+              {wide && ' Arrow keys move through the results, Enter opens one, Esc clears the field.'}
             </p>
           )}
         </aside>

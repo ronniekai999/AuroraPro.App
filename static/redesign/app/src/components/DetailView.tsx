@@ -118,7 +118,7 @@ export default function DetailView({
   resume,
 }: DetailViewProps) {
   // Detail data is this title's or it is not used. Going from one title
-  // straight to another (the search palette, a cast link) leaves the host
+  // straight to another (a search from the top bar, a cast link) leaves the host
   // holding the previous title's payload until the new one arrives, and the
   // page drew the old backdrop, synopsis and cast under the new name.
   const detail = detailFromApp && detailFromApp.id === media.id ? detailFromApp : undefined

@@ -303,7 +303,7 @@ describe('DetailView — episodes', () => {
   })
 })
 
-// Going from one title straight to another (a cast link, the search palette),
+// Going from one title straight to another (a cast link, a search from the top bar),
 // the host still holds the previous title's episodes and files when the new
 // page first renders: it clears them only on leaving the title page.
 describe('DetailView — the previous title\u2019s rows are not shown under the next title', () => {

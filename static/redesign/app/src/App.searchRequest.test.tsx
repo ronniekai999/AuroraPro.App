@@ -6,15 +6,26 @@
 // has it. A profile with a content limit is offered no requests anywhere,
 // here included.
 
+import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import App from './App'
+import { forgetDescribedAnswer } from '@/lib/describedSearch'
 
 vi.mock('@/components/VideoPlayer', async (original) => ({
   ...(await original<typeof import('@/components/VideoPlayer')>()),
   VideoPlayer: () => null,
 }))
+
+// The router's address after each commit, and its Back button.
+const where = { path: '', back: () => {}, forward: () => {} }
+function Where() {
+  const { pathname } = useLocation()
+  const navigate = useNavigate()
+  useEffect(() => { where.path = pathname; where.back = () => navigate(-1); where.forward = () => navigate(1) }, [pathname, navigate])
+  return null
+}
 
 const NOW = '2026-10-01T00:00:00Z'
 const PARENT = { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW }
@@ -34,6 +45,8 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   /** How many times the list of collections was asked for. */
   const collectionLists = { n: 0 }
   const heroAsks = { n: 0 }
+  /** How each search asked to be run (`mode`), or null where it did not say. */
+  const searchModes: (string | null)[] = []
   /** The profile the session acts as (a switch moves it). */
   const acting = { id: bound }
   /** Holds the answer to the next request made until let go. */
@@ -60,6 +73,7 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
     if (p === '/api/media') return json({ data: [], page: 1, per_page: 30, total_items: 0, total_pages: 1 })
     // Nothing in the library matches anything, but "harbor".
     if (p === '/api/media/search') {
+      searchModes.push(url.searchParams.get('mode'))
       const found = (url.searchParams.get('q') ?? '').toLowerCase().includes('harbor') ? [HARBOR] : []
       return new Response(JSON.stringify(found), { status: 200, headers: { 'content-type': 'application/json', 'X-Search-Mode': 'literal' } })
     }
@@ -92,9 +106,9 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
-  render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+  render(<MemoryRouter initialEntries={['/']}><Where /><App /></MemoryRouter>)
   return {
-    lookups, collectionLists, heroAsks, posted,
+    lookups, collectionLists, heroAsks, posted, searchModes,
     holdRequest() {
       let release!: () => void
       held.answer = new Promise<void>(done => { release = done })
@@ -116,7 +130,9 @@ async function searchFor(words: string) {
 }
 
 vi.setConfig({ testTimeout: 30_000 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+// A described search's answer is kept for the life of the page (one entry,
+// lib/describedSearch); a test's ask must not be answered by the last one's.
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); forgetDescribedAnswer() })
 
 describe('a search that finds nothing in the library', () => {
   it('ends in a request, made on the search page: the title is looked up, asked for where it stands, and is then on the requests page', async () => {
@@ -257,8 +273,7 @@ describe('recent searches', () => {
     await screen.findByText('Parent', undefined, find)
     await typeInBar('x')
     await typeInBar('')
-    // Clearing the bar's field leaves the search page; the phone's tab is the way to it with nothing typed.
-    fireEvent.click(document.querySelector('nav.stage-tabbar [data-nav="search"]')!)
+    // With the bar's field emptied the search page stays, and lists them.
     await waitFor(() => expect(recent()).toEqual(['harbor', 'night train']), find)
     fireEvent.click(screen.getByRole('button', { name: 'harbor' }))
     expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
@@ -471,5 +486,303 @@ describe('the requests page, from the account menu', () => {
     await waitFor(() => expect(server.posted).toHaveLength(1), find)
     release()
     expect(await screen.findByText('Requested "Paper Lanterns"', undefined, find)).toBeInTheDocument()
+  })
+})
+
+// The keyboard. There was a palette on Ctrl or Cmd K: a modal with a field
+// and a list of its own, which searched on every key without saying how.
+// There is one field and one page now: the key puts the focus in the field,
+// the arrows move through the page's results, a result opens as the button
+// it is, and Escape clears the field, then leaves it.
+describe('searching from the keyboard', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+  const focused = () => document.activeElement as HTMLElement
+  /** True when the key was taken (its default prevented). */
+  const press = (on: Element, init: KeyboardEventInit) => !fireEvent.keyDown(on, init)
+  async function ready() {
+    const server = renderApp()
+    await screen.findByText('Parent', undefined, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    return server
+  }
+
+  it('puts the focus in the search field on Ctrl or Cmd K, and opens nothing over the page', async () => {
+    await ready()
+    expect(focused()).not.toBe(field())
+    const focus = vi.spyOn(field(), 'focus')
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(true)
+    expect(focused()).toBe(field())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    // The bar is sticky: focused plainly, the browser scrolls the page to
+    // the top, where the bar sits in the document. The page is left alone.
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    focus.mockRestore()
+    field().blur()
+    expect(press(document.body, { key: 'k', ctrlKey: true })).toBe(true)
+    expect(focused()).toBe(field())
+    // From the field itself: still the field, with what is in it selected.
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    expect(press(field(), { key: 'k', metaKey: true })).toBe(true)
+    expect(focused()).toBe(field())
+    expect([field().selectionStart, field().selectionEnd]).toEqual([0, 6])
+    // A plain "k" is a letter.
+    expect(press(document.body, { key: 'k' })).toBe(false)
+  })
+
+  it('leaves the key alone from another text field, under a modal dialog, and while the profile picker is over the page', async () => {
+    await ready()
+    const other = document.createElement('input')
+    document.body.append(other)
+    other.focus()
+    expect(press(other, { key: 'k', metaKey: true })).toBe(false)
+    expect(focused()).toBe(other)
+    other.remove()
+    // Nor under a modal dialog: the field is in the page behind it.
+    const modal = document.createElement('div')
+    modal.setAttribute('role', 'dialog')
+    modal.setAttribute('aria-modal', 'true')
+    document.body.append(modal)
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    expect(focused()).not.toBe(field())
+    modal.remove()
+    // Nor while the page the field is in is hidden from assistive tech or
+    // inert (how a dialog that says nothing of being modal covers the page).
+    const bar = field().closest('header')!
+    bar.setAttribute('aria-hidden', 'true')
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    bar.removeAttribute('aria-hidden')
+    bar.setAttribute('inert', '')
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    bar.removeAttribute('inert')
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(true)
+    expect(focused()).toBe(field())
+    field().blur()
+    cleanup()
+    vi.unstubAllGlobals()
+    renderApp(1, false, { bindingUnreadable: true })
+    await screen.findByRole('heading', { name: /Who.s watching/ }, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    expect(focused()).not.toBe(field())
+  })
+
+  it('moves from the field through the results with the arrows and back, and opens the one in focus', async () => {
+    await ready()
+    press(document.body, { key: 'k', metaKey: true })
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    await waitFor(() => expect(document.querySelector('[data-search-collections] .search-colrow')).not.toBeNull(), find)
+    // Down: out of the field, onto the first result.
+    expect(press(field(), { key: 'ArrowDown' })).toBe(true)
+    expect(focused().textContent).toContain('Harbor Lights')
+    expect(focused().tagName).toBe('BUTTON')
+    expect(press(focused(), { key: 'ArrowDown' })).toBe(true)
+    expect(focused().textContent).toContain('Harbor towns')
+    press(focused(), { key: 'ArrowUp' })
+    expect(focused().textContent).toContain('Harbor Lights')
+    // Up from the first: a search field again.
+    press(focused(), { key: 'ArrowUp' })
+    expect(focused().getAttribute('aria-label')).toBe('Search titles')
+    // A result is a button: Enter is its press. It opens the title.
+    press(field(), { key: 'ArrowDown' })
+    fireEvent.click(focused())
+    expect(await screen.findByRole('heading', { level: 1, name: 'Harbor Lights' }, find)).toBeInTheDocument()
+  })
+
+  it('does nothing with Down in the field while there is nothing to go to', async () => {
+    await ready()
+    field().focus()
+    expect(press(field(), { key: 'ArrowDown' })).toBe(false)
+    expect(focused()).toBe(field())
+  })
+
+  it('clears the field on Escape, with the focus kept in it and the page still up, then goes back to where the viewer was', async () => {
+    await ready()
+    press(document.body, { key: 'k', metaKey: true })
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    fireEvent.keyDown(field(), { key: 'Escape' })
+    expect(field().value).toBe('')
+    expect(focused()).toBe(field())
+    // The page stays for the next try (it used to drop to Tonight).
+    expect(document.querySelector('[data-search-results]')).not.toBeNull()
+    expect(where.path).toBe('/search')
+    fireEvent.keyDown(field(), { key: 'Escape' })
+    expect(focused()).not.toBe(field())
+    await waitFor(() => expect(where.path).toBe('/'), find)
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).toBeNull(), find)
+  })
+
+  it('only leaves the field on Escape anywhere else, and keeps what is typed on a title opened from a search', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
+    await screen.findByRole('heading', { level: 1, name: 'Harbor Lights' }, find)
+    await waitFor(() => expect(where.path).toBe('/title/77'), find)
+    field().focus()
+    fireEvent.keyDown(field(), { key: 'Escape' })
+    expect(focused()).not.toBe(field())
+    expect(field().value).toBe('harbor')
+    expect(where.path).toBe('/title/77')
+    // With the field left, Escape is the title page's own: back to the results.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
+  })
+
+  it('clears on Escape from a result too, and puts the focus back in the field', async () => {
+    await ready()
+    field().focus()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    press(field(), { key: 'ArrowDown' })
+    expect(focused()).not.toBe(field())
+    fireEvent.keyDown(focused(), { key: 'Escape' })
+    expect(field().value).toBe('')
+    expect(focused()).toBe(field())
+  })
+
+  // The palette asked the server on every key without naming how to search,
+  // which leaves the server to decide whether to spend a model call.
+  it('names how to search on every request: by title as it is typed, by description when asked', async () => {
+    const server = await ready()
+    press(document.body, { key: 'k', metaKey: true })
+    fireEvent.change(field(), { target: { value: 'har' } })
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    await waitFor(() => expect(server.searchModes).toContain('semantic'), find)
+    expect(server.searchModes.every(m => m === 'literal' || m === 'semantic')).toBe(true)
+    expect(server.searchModes.filter(m => m === 'semantic')).toHaveLength(1)
+  })
+})
+
+// The search page used to be drawn over whatever address the viewer was
+// typing at: Back from a result skipped the results and left the words in
+// the bar over another page.
+describe('the search page has its own address', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+  const results = () => document.querySelector('[data-search-results]')
+  async function ready(options: Parameters<typeof renderApp>[2] = {}) {
+    const server = renderApp(1, false, options)
+    await screen.findByText('Parent', undefined, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    return server
+  }
+  const back = async (to: string) => {
+    where.back()
+    await waitFor(() => expect(where.path).toBe(to), find)
+  }
+
+  it('takes it on the first key, once, and Back from a result is the results again, then where the viewer was', async () => {
+    await ready()
+    expect(where.path).toBe('/')
+    fireEvent.change(field(), { target: { value: 'har' } })
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
+    await waitFor(() => expect(where.path).toBe('/title/77'), find)
+    // The words stay in the bar on the title: they are what Back returns to.
+    expect(field().value).toBe('harbor')
+    await back('/search')
+    expect(field().value).toBe('harbor')
+    expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
+    // Forward to the title and Back once more: still its results.
+    where.forward()
+    await waitFor(() => expect(where.path).toBe('/title/77'), find)
+    expect(field().value).toBe('harbor')
+    await back('/search')
+    expect(field().value).toBe('harbor')
+    // One entry for the page, however many keys were typed: Back again is Tonight,
+    await back('/')
+    await waitFor(() => expect(results()).toBeNull(), find)
+    // and the words went with the results they were for.
+    expect(field().value).toBe('')
+  })
+
+  it('stays, with nothing typed, when the words are deleted or cleared, and the cursor stays in the field', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    fireEvent.change(field(), { target: { value: '' } })
+    expect(results()).not.toBeNull()
+    expect(where.path).toBe('/search')
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    fireEvent.click(within(field().closest('.stage-navsearch') as HTMLElement).getByRole('button', { name: 'Clear search' }))
+    expect(field().value).toBe('')
+    expect(document.activeElement).toBe(field())
+    expect(results()).not.toBeNull()
+    expect(where.path).toBe('/search')
+    // Still the one entry: Back is where the typing began.
+    await back('/')
+  })
+
+  it('is not dismissed by a press elsewhere on the page', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    fireEvent.mouseDown(document.querySelector('header.stage-topnav')!)
+    fireEvent.mouseDown(document.querySelector('main') ?? document.body)
+    expect(field().value).toBe('harbor')
+    expect(results()).not.toBeNull()
+    expect(where.path).toBe('/search')
+  })
+
+  it('takes it for a search by description asked for from another page', async () => {
+    const server = await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
+    await waitFor(() => expect(where.path).toBe('/title/77'), find)
+    // On the title, with the words still in the bar: Enter asks by description.
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    await waitFor(() => expect(server.searchModes.filter(m => m === 'semantic')).toHaveLength(1), find)
+    await back('/title/77')
+  })
+
+  it('keeps the words when the page itself sends the viewer on, so Back from a collection is its results', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    fireEvent.click(await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-search-collections] .search-colrow')
+      if (!el) throw new Error('no collection yet')
+      return el
+    }, find))
+    await waitFor(() => expect(where.path).toBe('/collections'), find)
+    expect(field().value).toBe('harbor')
+    await back('/search')
+    expect(field().value).toBe('harbor')
+    expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
+    // Any other way off the page drops them: a destination in the bar.
+    fireEvent.click(document.querySelector<HTMLElement>('header.stage-topnav [data-nav="home"]')!)
+    await waitFor(() => expect(where.path).toBe('/home'), find)
+    expect(field().value).toBe('')
+  })
+
+  it('keeps them on the way to My requests from a search that found nothing, so Back is the list being asked from', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'lost reel' } })
+    fireEvent.click(await screen.findByRole('button', { name: 'See my requests' }, find))
+    await waitFor(() => expect(where.path).toBe('/requests'), find)
+    expect(field().value).toBe('lost reel')
+    await back('/search')
+    expect(field().value).toBe('lost reel')
+    expect(await screen.findByRole('button', { name: 'See my requests' }, find)).toBeInTheDocument()
+  })
+
+  it('is where "Find it" on a request goes, and Back from it is the request', async () => {
+    const asked = { id: 5, user_id: 1, media_type: 'movie', tmdb_id: 505, title: 'Harbor Lights', poster_path: '', overview: '', year: 2022, status: 'available', quality_1080p: true, quality_4k: false, requested_at: NOW, updated_at: NOW }
+    await ready({ requests: [asked] })
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /My requests/ }, find))
+    await waitFor(() => expect(where.path).toBe('/requests'), find)
+    fireEvent.click(await screen.findByRole('button', { name: 'Find Harbor Lights in the library' }, find))
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    expect(field().value).toBe('Harbor Lights')
+    await back('/requests')
+    await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)
+    expect(field().value).toBe('')
   })
 })

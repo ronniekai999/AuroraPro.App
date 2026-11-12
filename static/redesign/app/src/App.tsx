@@ -97,7 +97,7 @@ import { focusPageStart } from '@/lib/returnFocus'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
-import { SearchPalette } from '@/components/SearchPalette'
+import { searchField } from '@/lib/searchKeys'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
@@ -1867,7 +1867,6 @@ export default function App() {
     return () => { cancelled = true }
   }, [addToListMedia, activeProfileId])
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
   // A described search: the words the viewer asked to have searched by what
   // they describe (Enter in a search field, or the search page's button),
   // rather than matched against titles. The search page runs the
@@ -1879,10 +1878,6 @@ export default function App() {
   const [searchDescribe, setSearchDescribe] = useState<{ query: string; n: number; owner: string } | null>(null)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
-  // Shared "leave the nav search" routine — the X/clear button, an
-  // outside click, and Escape (below) all need to do the exact same
-  // thing: drop the query, fall back to Home if that's what the query
-  // was driving, and give the input back its resting (unfocused) look.
   const searchOwner = `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`
   // Typing is a new query: whatever was described before is not asked again
   // until the viewer asks.
@@ -1916,25 +1911,6 @@ export default function App() {
     forgetRecentSearches(recentOwner)
     setRecentSearches({ owner: recentOwner, list: [], known: true })
   }, [recentOwner])
-  const describeSearch = useCallback((q: string) => {
-    const query = q.trim()
-    if (!query) return
-    noteSearch(query)
-    const n = ++describeAsksRef.current
-    setSearchQuery(q)
-    setSearchDescribe({ query, n, owner: searchOwner })
-    setView('search')
-  }, [searchOwner, noteSearch])
-  const closeSearch = useCallback(() => {
-    setSearchQuery('')
-    setSearchDescribe(null)
-    setSearchOpen(false)
-    setView(v => (v === 'search' ? 'home' : v))
-    searchInputRef.current?.blur()
-  }, [])
-  // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
-  // input stays for click-to-search flows).
-  const [paletteOpen, setPaletteOpen] = useState(false)
   // 2026-07-25 (Aurora Stage Phase 2, debug-review fix) — publish the
   // measured height of the sticky chrome stack as --chrome-h so every
   // thing placed under it (the drawers, the sticky browse and admin
@@ -1952,7 +1928,7 @@ export default function App() {
   // Set by the switcher's "Who's watching?" item; the gate self-gates otherwise.
   const [profilesGateForced, setProfilesGateForced] = useState(false)
   // Reported UP by the gate, which owns the policy. App needs it only to keep
-  // Cmd+K from opening the palette (z-200) on top of the gate (z-85).
+  // Cmd+K from putting the focus in the search field behind the gate.
   const [profilesGateOpen, setProfilesGateOpen] = useState(false)
   const theaterActive = playerSurface === 'theater'
   // Whether a page a restricted session is not shown may render on THIS
@@ -2464,7 +2440,13 @@ export default function App() {
   useEffect(() => {
     const previousPathname = previousPathnameRef.current
     previousPathnameRef.current = location.pathname
-    if (shouldClosePlayerOnPathChange(
+    const target = pathToView(location.pathname)
+    // The one change of address that is not a navigation away from what is
+    // playing: the search page taking its address as its viewer types
+    // (showSearchPage).
+    const typedIntoSearch = enteringSearchRef.current && target === 'search'
+    enteringSearchRef.current = false
+    if (!typedIntoSearch && shouldClosePlayerOnPathChange(
       previousPathname,
       location.pathname,
       playerRemoteActiveRef.current,
@@ -2474,9 +2456,16 @@ export default function App() {
       // a player target yet.
       closePlayer(true)
     }
-    const target = pathToView(location.pathname)
     if (target !== view) {
       setView(target)
+      // Back (or Forward) out of the search page to anything but a title:
+      // the words in the bar were for the results, and go with them. A
+      // title keeps them, so Back from it is the results again. (In-app
+      // navigation has set `view` already and does its own clearing.)
+      if (view === 'search' && target !== 'detail') {
+        setSearchQuery('')
+        setSearchDescribe(null)
+      }
     }
     // Leaving a /title/:id URL (browser Back, sidebar nav, history
     // traversal) is the moment the detail selection stops being current.
@@ -2860,7 +2849,10 @@ export default function App() {
   useEffect(() => {
     if (view !== 'search') searchFieldFocusRef.current = false
   }, [view])
-  const handleNavigate = useCallback((dest: string) => {
+  // `keepSearch`: the search page itself is sending the viewer on (to a
+  // collection it listed, to My requests), so the words stay, and Back
+  // returns to the results they were for. Any other navigation drops them.
+  const handleNavigate = useCallback((dest: string, { keepSearch = false }: { keepSearch?: boolean } = {}) => {
     if (dest === 'search') {
       searchFieldFocusRef.current = true
       setSearchFocusNonce(n => n + 1)
@@ -2904,11 +2896,10 @@ export default function App() {
     }
     setView(v)
     setSelectedMedia(null)
-    setSearchOpen(false)
     // Clear the search input on navigate. It's a controlled input on
     // `searchQuery`, so this prevents the text from sticking after
     // leaving the search view.
-    setSearchQuery('')
+    if (!keepSearch) setSearchQuery('')
     // Close the player on nav so the URL and rendered state stay in
     // sync (matters for programmatic history.replaceState calls).
     // While a cast/AirPlay receiver is active,
@@ -2920,6 +2911,45 @@ export default function App() {
     rememberScroll(location.key)
     navigate(`/${v}`)
   }, [view, navigate, closePlayer, location.key, navScope])
+  // The search page is a place: shown, it has its address (/search). It used
+  // to be drawn over whatever address the viewer was typing at, so Back from
+  // a result skipped the results and left the words in the bar over another
+  // page, and a reload showed that other page. Now Back from a result is the
+  // results, Back from the results is where the viewer was, and the words
+  // stay in the bar exactly while the results they are for are one Back
+  // away. The words themselves are never in the address (a description of a
+  // mood is not something to leave in a browser's history), so a reload of
+  // /search is the page with nothing typed.
+  //
+  // Entered by typing, by Enter, and by a request's "Find it": one history
+  // entry however many keys follow (`view` is already 'search' for those).
+  const enteringSearchRef = useRef(false)
+  const showSearchPage = useCallback(() => {
+    if (view === 'search') return
+    setView('search')
+    // A player minimized over the page keeps playing while its viewer types,
+    // as it always has (any other change of address closes it).
+    enteringSearchRef.current = true
+    rememberScroll(location.key)
+    navigate('/search')
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [view, navigate, location.key])
+  const describeSearch = useCallback((q: string) => {
+    const query = q.trim()
+    if (!query) return
+    noteSearch(query)
+    const n = ++describeAsksRef.current
+    setSearchQuery(q)
+    setSearchDescribe({ query, n, owner: searchOwner })
+    showSearchPage()
+  }, [searchOwner, noteSearch, showSearchPage])
+  // The field's clear button, and the first Escape: the words go, the page
+  // stays (it lists the recent searches), and the cursor is in the field.
+  const clearSearch = useCallback(() => {
+    const field = searchField()
+    changeSearchQuery('')
+    field?.focus({ preventScroll: field === searchInputRef.current })
+  }, [changeSearchQuery])
   // A request was made (on the search page, or the requests page's own
   // composer): the list this tab holds learns of it, and a toast says so.
   const handleRequestSubmitted = useCallback((r: MediaRequest) => {
@@ -2941,7 +2971,7 @@ export default function App() {
   const searchRequesting = useMemo(() => ({
     userId: searchUserId,
     onRequested: (r: MediaRequest) => { if (searchOwnerRef.current === searchOwner) handleRequestSubmitted(r) },
-    onOpenRequests: () => handleNavigate('requests'),
+    onOpenRequests: () => handleNavigate('requests', { keepSearch: true }),
   }), [searchUserId, searchOwner, handleRequestSubmitted, handleNavigate])
   // The requests page's own late answers, stamped the same way: a request
   // asked for again, a delete, a row found to have moved on.
@@ -2964,12 +2994,13 @@ export default function App() {
     }
   }, [searchOwner, handleRequestSubmitted, nextToastId])
   // A request that is in the library now is found by its title (a request
-  // holds no id of the title it became): the words, and the search page.
+  // holds no id of the title it became): the words, and the search page,
+  // at its address, so Back returns to the request.
   // Not through handleNavigate, which ends by clearing the words.
   const findInLibrary = useCallback((title: string) => {
     changeSearchQuery(title)
-    setView('search')
-  }, [changeSearchQuery])
+    showSearchPage()
+  }, [changeSearchQuery, showSearchPage])
   // A collection picked from the search page's results: the Collections
   // scope is opened on it. Owner-stamped, like the ask above, so it is not
   // carried to another profile's Collections.
@@ -2977,7 +3008,7 @@ export default function App() {
   const collectionAsksRef = useRef(0)
   const openCollectionFromSearch = useCallback((id: number) => {
     setCollectionAsk({ id, n: ++collectionAsksRef.current, owner: searchOwner })
-    handleNavigate('collections')
+    handleNavigate('collections', { keepSearch: true })
   }, [handleNavigate, searchOwner])
   const forgetCollectionAsk = useCallback(() => setCollectionAsk(null), [])
 
@@ -3231,10 +3262,6 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        // Palette has its own Escape handler — let it close the
-        // palette without ALSO triggering the page-level back/etc.
-        // navigation here.
-        if (paletteOpen) return
         // The PIN prompt's Escape cancels it (Radix); it must not also navigate
         // the page behind it.
         if (pinTarget) return
@@ -3242,14 +3269,32 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
-        else if (searchOpen) closeSearch()
+        else if (view === 'search') {
+          // On the search page Escape clears the field, then leaves: the
+          // first press takes the words (the focus goes to the field; it may
+          // have been on a result, which is about to go), and with none left
+          // the next goes back to where the viewer was.
+          if (searchQuery) clearSearch()
+          else {
+            (document.activeElement as HTMLElement | null)?.blur?.()
+            handleBack()
+          }
+        }
+        // Anywhere else, Escape in the bar's field only leaves the field.
+        // What is typed there stays: on a title opened from a search, those
+        // are the words Back returns to.
+        else if (searchInputRef.current && document.activeElement === searchInputRef.current) searchInputRef.current.blur()
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        // Cmd+K opens the SearchPalette overlay. Guard against:
-        //   - unauthenticated (no user)
-        //   - typing in another editable element
-        //   - any modal already open
+        // Ctrl or Cmd K puts the focus in the search field (it used to
+        // open a palette with a field of its own). It does nothing:
+        //   - signed out;
+        //   - from another text field (it is that field's key);
+        //   - while something is over the page: the player, a card's
+        //     menu, the add-to-list sheet, the profile picker or a PIN
+        //     prompt. Typing in the bar behind any of those would move
+        //     the page under it.
         if (!user) return
         const target = e.target as HTMLElement | null
         const inEditable = !!target && (
@@ -3257,16 +3302,24 @@ export default function App() {
           target.tagName === 'TEXTAREA' ||
           target.isContentEditable
         )
-        // Allow Cmd+K from inside our own top-bar search input
-        // (acts as "upgrade to palette" affordance).
         if (inEditable && target !== searchInputRef.current) return
         if (playerTarget || contextMenu || addToListMedia) return
-        // The profile gate belongs in this list too. SearchPalette is z-200 and
-        // the gate is z-85, so Cmd+K opened the palette over it, and picking a
-        // result navigated the app behind a gate that stayed up.
         if (profilesGateOpen || pinTarget) return
+        // Nor under any other modal dialog. (The palette opened over one,
+        // with a field of its own; this field is in the page behind it, and
+        // a dialog that holds the focus would hand the key on to the
+        // fallback below, which moves the page.)
+        const field = searchField()
+        if (document.querySelector('[aria-modal="true"]') || field?.closest('[inert], [aria-hidden="true"]')) return
         e.preventDefault()
-        setPaletteOpen(true)
+        // The bar is always on screen (it is sticky), and a plain focus()
+        // on something sticky scrolls the page to where the bar sits in the
+        // document: the top. The page stays where its viewer has it.
+        if (field) { field.focus({ preventScroll: field === searchInputRef.current }); field.select() }
+        // Below md the bar has no field (focusing one that is not drawn
+        // does nothing): the Search tab's page has its own, and takes the
+        // focus when it is opened this way.
+        if (!field || document.activeElement !== field) handleNavigate('search')
       }
     }
     window.addEventListener('keydown', handler)
@@ -3274,7 +3327,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, pinTarget, closePlayer, closeSearch])
+  }, [playerTarget, playerLoading, searchQuery, view, handleBack, contextMenu, addToListMedia, user, profilesGateOpen, pinTarget, closePlayer, clearSearch, handleNavigate])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -6540,18 +6593,6 @@ export default function App() {
         }}
       />
 
-      {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}
-      <SearchPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        onSelect={(m) => {
-          setPaletteOpen(false)
-          // Reuse handleSelect so the palette pushes the same
-          // /title/:id history entry as a card click.
-          handleSelect(m as Media)
-        }}
-      />
-
       {/* Main Content. No left offset any more — the sidebar is gone, so
           pages run the full width of the viewport (Aurora Stage M2).
 
@@ -6571,7 +6612,7 @@ export default function App() {
           TWO KNOWN GAPS, both deliberate, both worth knowing about:
 
           1. `<main>` is not the whole app. ServerPanel, NotificationPanel,
-             SearchPalette, the toasts, both gates and the party surfaces all
+             the toasts, both gates and the party surfaces all
              render as siblings AFTER it, so none of them goes inert — they stay
              tabbable behind the veil. That is right for the party surfaces
              (a watch-party host has to keep using them mid-playback) and it is
@@ -6613,16 +6654,14 @@ export default function App() {
             onPrefetch={prefetchView}
             searchQuery={searchQuery}
             onSearchQueryChange={(v) => {
+              // The first key shows the search page (at its address). With
+              // the words deleted the page stays, listing recent searches:
+              // it used to drop to Tonight between two tries at a title.
               changeSearchQuery(v)
-              if (v) {
-                setView('search')
-              } else if (view === 'search') {
-                setView('home')
-              }
+              if (v) showSearchPage()
             }}
             onSearchSubmit={() => describeSearch(searchQuery)}
-            onSearchFocus={() => setSearchOpen(true)}
-            onSearchClose={closeSearch}
+            onSearchClear={clearSearch}
             searchInputRef={searchInputRef}
             presence={navPresence}
             onPresenceClick={() => {

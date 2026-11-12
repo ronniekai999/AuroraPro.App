@@ -22,6 +22,7 @@ import { ProfileAvatar } from '@/components/ProfileAvatar'
 import type { Profile, User as ApiUser } from '@/lib/api'
 import { destinationForView, navDestinationsFor, profileSummary, type NavDestination, type NavScope } from '@/lib/navScope'
 import { useExitTransition } from '@/hooks/useExitTransition'
+import { focusResult } from '@/lib/searchKeys'
 
 export function AuroraMark({ size = 28 }: { size?: number }) {
   return (
@@ -346,11 +347,10 @@ export interface TopNavProps {
   pageTitle: string
   searchQuery: string
   onSearchQueryChange: (v: string) => void
-  onSearchFocus: () => void
   /** Enter in the field: search by what the words describe. */
   onSearchSubmit?: () => void
-  /** Clear the query and leave search. */
-  onSearchClose: () => void
+  /** The field's clear button: the words go, the page and the cursor stay. */
+  onSearchClear: () => void
   searchInputRef: React.RefObject<HTMLInputElement | null>
   /** Null when nothing is live. */
   presence: NavPresence | null
@@ -376,7 +376,7 @@ export interface TopNavProps {
 
 export function TopNav({
   user, currentView, navScope, adminUI, onNavigate, onPrefetch, pageTitle,
-  searchQuery, onSearchQueryChange, onSearchFocus, onSearchSubmit, onSearchClose, searchInputRef,
+  searchQuery, onSearchQueryChange, onSearchSubmit, onSearchClear, searchInputRef,
   presence, onPresenceClick, notifCount, onOpenNotificationsPanel, onOpenServerPanel,
   profiles, activeProfileId, onSelectProfile, onOpenProfilesGate, onManageProfiles,
   onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onReportBug, onSignOut,
@@ -403,34 +403,6 @@ export function TopNav({
       if (raf) cancelAnimationFrame(raf)
     }
   }, [])
-  const searchPillRef = useRef<HTMLDivElement | null>(null)
-
-  // Click outside the search field closes it, same as its X button. Only
-  // armed while there is a query to close.
-  useEffect(() => {
-    if (!searchQuery) return
-    const onDocMouseDown = (e: MouseEvent) => {
-      // Below md this field is `display:none` (no offsetParent) and the
-      // search page carries its own field, which this ref never covers:
-      // without the guard every tap on that page read as "outside" and
-      // wiped the query.
-      if (!searchPillRef.current?.offsetParent) return
-      const target = e.target as Node
-      if (searchPillRef.current.contains(target)) return
-      // A scrollbar drag targets <html>/<body>, not real page content.
-      if (target === document.documentElement || target === document.body) return
-      // Bails on the search RESULTS (a page-level sibling, not a descendant
-      // of the field): this fires on `mousedown`, before a result's own
-      // `click`, so without the exemption every result click would clear the
-      // query and swap the view out from under it. Also bails on any dialog
-      // or menu overlay opened from a result.
-      if ((target as Element).closest?.('[data-search-results], [role="dialog"], [role="menu"]')) return
-      onSearchClose()
-    }
-    document.addEventListener('mousedown', onDocMouseDown)
-    return () => document.removeEventListener('mousedown', onDocMouseDown)
-  }, [searchQuery, onSearchClose])
-
   const link = (d: NavDestination) => {
     const active = current === d.id
     return (
@@ -476,7 +448,10 @@ export function TopNav({
         {destinations.map(link)}
       </nav>
 
-      <div ref={searchPillRef} className="stage-navsearch hidden md:flex">
+      {/* The search field. What is typed shows on the search page, which is a
+          page with its own address: a press elsewhere does not dismiss it
+          (it used to, back when the results were drawn over another page). */}
+      <div className="stage-navsearch hidden md:flex">
         <Icon name="search" size={16} className="flex-none text-ink-2" />
         <input
           ref={searchInputRef}
@@ -485,19 +460,24 @@ export function TopNav({
           aria-label="Search titles"
           value={searchQuery}
           onChange={(e) => onSearchQueryChange(e.target.value)}
-          onFocus={onSearchFocus}
           // Typing matches titles as you go. Enter asks for more: a search
           // by what the words describe, which takes the server a model call,
           // so it is run only when asked for.
           enterKeyHint="search"
           onKeyDown={(e) => {
+            // Down goes from the field into the results on the page (the
+            // field has nowhere else for it to go).
+            if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
+              if (focusResult('first')) e.preventDefault()
+              return
+            }
             if (e.key !== 'Enter' || e.nativeEvent.isComposing || !searchQuery.trim()) return
             e.preventDefault()
             onSearchSubmit?.()
           }}
         />
         {searchQuery ? (
-          <button type="button" className="stage-navsearch-clear" onClick={onSearchClose} aria-label="Clear search">
+          <button type="button" className="stage-navsearch-clear" onClick={onSearchClear} aria-label="Clear search">
             <Icon name="x" size={14} />
           </button>
         ) : (

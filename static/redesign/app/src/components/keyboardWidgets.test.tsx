@@ -11,7 +11,7 @@
 //     which broke page scroll on a HORIZONTAL tablist. The strip is gone; the
 //     same "do not swallow the arrow keys" rule is held for what replaced it.
 //   - ContextMenu's Escape dismissed the menu AND navigated back off the title,
-//     because App's handler guarded only on `paletteOpen`.
+//     because App's handler did not know a menu was open.
 
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
@@ -96,7 +96,7 @@ describe('ContextMenu — APG menu contract', () => {
     window.addEventListener('keydown', windowSpy)
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
-    // App's Escape handler guards only on `paletteOpen`, so an Escape that reached
+    // App's Escape handler does not know a menu is open, so an Escape that reached
     // the window fell through to `view === 'detail' && handleBack()` — dismissing
     // the menu AND navigating off the title. stopPropagation is the fix.
     const escapes = windowSpy.mock.calls.filter(c => (c[0] as KeyboardEvent).key === 'Escape')
