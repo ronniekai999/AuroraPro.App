@@ -7,12 +7,13 @@
 // off, and when the server still refuses (another device got there first)
 // shows that refusal under the row instead of losing it in a toast.
 
-import { useCallback, useEffect, useId, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfilePinDialog } from '@/components/ProfilePinDialog'
 import { type Toast } from '@/components/Toast'
 import {
+  APIError,
   createWatchlist,
   deleteProfile,
   deleteWatchlist,
@@ -26,15 +27,21 @@ import {
   type Watchlist,
 } from '@/lib/api'
 import { profileSummary } from '@/lib/navScope'
-import { canonicalLimit, limitOptionsFor, limitPhrase, NO_LIMIT } from '@/lib/profileLimits'
+import { limitOptionValue, limitOptionsFor, limitPhrase, loosensLimit, NO_LIMIT } from '@/lib/profileLimits'
 import { refusalMessage, refusalReason } from '@/lib/profileRefusal'
-import { isSoleUnrestrictedProfile } from '@/lib/profileSession'
+import { isRestrictedProfile, isSoleUnrestrictedProfile } from '@/lib/profileSession'
+import { ConfirmDialog } from './ConfirmDialog'
 import { SettingSelect } from './controls'
 import { AvatarPicker, LeanPicker } from './ProfilePickers'
 
 type OnToast = (message: string, type?: Toast['type']) => void
+type Run = (write: () => Promise<unknown>, fallback: string, done?: string, onRefusal?: (e: unknown) => string | null) => Promise<boolean>
 
-export function ProfileRow({ profile, profiles, acting, manages, openDoor, onChanged, onToast }: {
+/** The server counts a name's bytes (100 at most), not its characters. */
+const NAME_MAX_BYTES = 100
+const byteLength = (text: string) => new TextEncoder().encode(text).length
+
+export function ProfileRow({ profile, profiles, acting, manages, openDoor, onChanged, onDeleted, onSignInAgain, onToast }: {
   profile: Profile
   /** Every profile on the account (for the rules that count them). */
   profiles: Profile[]
@@ -46,6 +53,12 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   openDoor: boolean
   /** Reload the list (and tell the app its copy is stale). */
   onChanged: () => Promise<void>
+  /** This profile was deleted here and the list reloaded: this row is gone,
+   *  and focus with it unless the list takes it. */
+  onDeleted?: () => void
+  /** Leave for the sign-in page, when the server says this device has been
+   *  signed out. */
+  onSignInAgain?: () => void
   onToast?: OnToast
 }) {
   const ids = useId()
@@ -55,8 +68,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   const open = editing || !manages
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // A limit picked for the profile being watched as, waiting to be confirmed.
-  const [pendingLimit, setPendingLimit] = useState<string | null>(null)
+  const [signedOut, setSignedOut] = useState(false)
   const [pinFormOpen, setPinFormOpen] = useState(false)
   const [newPin, setNewPin] = useState('')
   // A write that needs the profile's current PIN or the account password.
@@ -64,43 +76,36 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   const name = profile.name
-  const limit = canonicalLimit(profile.max_age_rating)
   const soleUnrestricted = isSoleUnrestrictedProfile(profiles, profile.id)
 
-  /** Runs one write. A refusal is shown under the row; one that says the
-   *  profile changed elsewhere also reloads the list it was judged against. */
-  const run = async (write: () => Promise<unknown>, fallback: string, done?: string): Promise<boolean> => {
+  /** Runs one write. A refusal is shown under the row. One that means the
+   *  list this row was drawn from is out of date (the profile changed or was
+   *  deleted elsewhere, a PIN appeared, the session's own profile gained a
+   *  limit, the count of unlimited profiles moved) also reloads it, which
+   *  tells the app to read its copy again. */
+  const run: Run = async (write, fallback, done, onRefusal) => {
     setBusy(true)
     setError(null)
+    setSignedOut(false)
     try {
       await write()
       await onChanged()
       if (done) onToast?.(done, 'success')
       return true
     } catch (e) {
-      setError(refusalMessage(e, fallback))
       const reason = refusalReason(e)
-      if (reason === 'profile_changed' || reason === 'profile_pin_required') void onChanged().catch(() => { /* the row keeps what it has */ })
+      const gone = e instanceof APIError && e.status === 404
+      setError(onRefusal?.(e) ?? (gone
+        ? `${name} was deleted on another device. The list has been reloaded.`
+        : refusalMessage(e, fallback)))
+      setSignedOut(reason === 'session_ended')
+      if (gone || reason === 'profile_changed' || reason === 'profile_pin_required' || reason === 'profile_restricted' || reason === 'last_unrestricted_profile') {
+        void onChanged().catch(() => { /* the row keeps what it has */ })
+      }
       return false
     } finally {
       setBusy(false)
     }
-  }
-
-  const applyLimit = (value: string) => {
-    setPendingLimit(null)
-    void run(
-      () => updateProfile(profile.id, { max_age_rating: value }),
-      `${name}’s limit could not be changed.`,
-      value === NO_LIMIT ? `${name} has no limit now` : `${name} is limited: ${limitPhrase(value)}`,
-    )
-  }
-  const pickLimit = (value: string) => {
-    if (value === limit) return
-    // Limiting the profile this session acts as takes these controls away
-    // from it, so that one is asked about first.
-    if (acting && limit === NO_LIMIT && value !== NO_LIMIT) { setError(null); setPendingLimit(value); return }
-    applyLimit(value)
   }
 
   const pinOk = /^[0-9]{4}$/.test(newPin)
@@ -109,8 +114,16 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
     if (!pinOk || busy) return
     // An existing PIN is confirmed first; a first PIN needs nothing.
     if (profile.has_pin) { setUnlockFor({ kind: 'change-pin', pin: newPin }); return }
-    void run(() => setProfilePin(profile.id, newPin), `The PIN for ${name} could not be set.`, `PIN set for ${name}`)
-      .then(ok => { if (ok) { setNewPin(''); setPinFormOpen(false) } })
+    void run(
+      () => setProfilePin(profile.id, newPin),
+      `The PIN for ${name} could not be set.`,
+      `PIN set for ${name}`,
+      // The row said "no PIN", so there is no field here for the one the
+      // server now asks for.
+      e2 => (refusalReason(e2) === 'profile_pin_required'
+        ? `Another device set a PIN on ${name} a moment ago, so this one was not set. The row has been reloaded: change the PIN with that one, or with the account password.`
+        : null),
+    ).then(ok => { if (ok) { setNewPin(''); setPinFormOpen(false) } })
   }
   const makeDefault = () => {
     // A locked profile becomes the default only with its PIN or the account
@@ -144,13 +157,23 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
     : [profileSummary(profile), acting ? 'watching now' : null]
   ).filter((part): part is string => !!part).join(' · ')
 
+  // What making this profile the default would do beyond the obvious.
+  const noDefaultYet = !profiles.some(p => p.is_default)
+  const defaultNote = profile.is_default
+    ? `${name} is the default: the profile a new sign-in with the password starts on.`
+    : [
+        'The default is the profile a new sign-in with the password starts on.',
+        isRestrictedProfile(profile) ? `${name} has a limit, so those sign-ins would start limited.` : null,
+        noDefaultYet && profile.has_pin ? 'This account has no default yet, so devices that never picked a profile will be signed out.' : null,
+      ].filter(Boolean).join(' ')
+
   return (
     <li className="border-t border-line py-4 first:border-t-0" data-profile-row={profile.id}>
       {/* One line from lg, in columns that are the same in every row, so
           the limits and the PINs read down the page as lists. Below that it
           wraps: the name, then the limit and the PIN, then the buttons. */}
-      <div className={`flex flex-wrap items-end gap-x-4 gap-y-3 ${manages ? 'lg:grid lg:grid-cols-[minmax(0,1fr)_16rem_5.5rem_8.5rem_5.5rem]' : ''}`}>
-        <div className="flex min-w-0 flex-1 basis-[12rem] items-center gap-3 self-center">
+      <div className={`flex flex-wrap items-start gap-x-4 gap-y-3 ${manages ? 'lg:grid lg:grid-cols-[minmax(0,1fr)_16rem_5.5rem_8.5rem_5.5rem]' : ''}`}>
+        <div className="flex min-h-[68px] min-w-0 flex-1 basis-[12rem] items-center gap-3">
           <ProfileAvatar avatarUrl={profile.avatar_url} name={name} colorKey={profile.id} size={48} />
           <div className="min-w-0">
             <p className="truncate text-[17px] font-semibold leading-tight text-ink">{name}</p>
@@ -160,18 +183,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
 
         {manages && (
           <>
-            <div>
-              <p className="mb-1 text-xs font-medium text-ink-2" aria-hidden="true">Limit</p>
-              <SettingSelect
-                wide
-                aria-label={`Limit for ${name}`}
-                aria-describedby={soleUnrestricted ? `${ids}-sole` : undefined}
-                value={pendingLimit ?? limit}
-                options={limitOptionsFor(profile.max_age_rating)}
-                disabled={busy || soleUnrestricted}
-                onChange={pickLimit}
-              />
-            </div>
+            <LimitControl profile={profile} acting={acting} soleUnrestricted={soleUnrestricted} busy={busy} run={run} />
             <div>
               <p className="mb-1 text-xs font-medium text-ink-2" aria-hidden="true">PIN</p>
               <p className={`flex h-11 items-center gap-1.5 whitespace-nowrap text-[14px] ${profile.has_pin ? 'text-ink' : openDoor ? 'text-warn' : 'text-ink-2'}`}>
@@ -182,45 +194,26 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
             <button
               type="button"
               aria-expanded={pinFormOpen}
-              aria-controls={`${ids}-pin`}
+              // Only while there is a form to point at.
+              aria-controls={pinFormOpen ? `${ids}-pin` : undefined}
               disabled={busy}
               onClick={() => { setPinFormOpen(o => !o); setNewPin(''); setError(null) }}
-              className="stage-btn stage-btn-ghost px-4 lg:w-full"
+              className="stage-btn stage-btn-ghost px-4 lg:mt-5 lg:w-full"
             >
               {profile.has_pin ? 'Change PIN' : 'Set a PIN'}{' '}<span className="sr-only">for {name}</span>
             </button>
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={open ? `${ids}-panel` : undefined}
+              onClick={() => setEditing(o => !o)}
+              className="stage-btn stage-btn-outline px-4 lg:mt-5 lg:w-full"
+            >
+              {open ? 'Close' : 'Edit'}{' '}<span className="sr-only">{name}</span>
+            </button>
           </>
         )}
-        {manages && (
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-controls={`${ids}-panel`}
-            onClick={() => setEditing(o => !o)}
-            className="stage-btn stage-btn-outline px-4 lg:w-full"
-          >
-            {open ? 'Close' : 'Edit'}{' '}<span className="sr-only">{name}</span>
-          </button>
-        )}
       </div>
-
-      {manages && soleUnrestricted && (
-        <p id={`${ids}-sole`} className="mt-2 text-[13px] leading-snug text-ink-2">
-          {name} is the only profile without a limit. One has to stay that way, so that someone can manage the others.
-        </p>
-      )}
-
-      {pendingLimit !== null && (
-        <div className="mt-3 rounded-control bg-surface-raised p-4">
-          <p className="max-w-[60ch] text-[14px] leading-snug text-ink">
-            You are watching as {name}. With a limit ({limitPhrase(pendingLimit)}), this device can no longer manage profiles until it switches to one without a limit.
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button type="button" disabled={busy} onClick={() => applyLimit(pendingLimit)} className="stage-btn stage-btn-ghost">Limit {name}</button>
-            <button type="button" disabled={busy} onClick={() => setPendingLimit(null)} className="stage-btn stage-btn-quiet">Cancel</button>
-          </div>
-        </div>
-      )}
 
       {manages && pinFormOpen && (
         <form id={`${ids}-pin`} onSubmit={submitPin} className="mt-3 rounded-control bg-surface-raised p-4">
@@ -267,7 +260,12 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
         </form>
       )}
 
-      <p role="alert" className={error ? 'mt-2 max-w-[62ch] text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error ?? ''}</p>
+      <div role="alert" className={error ? 'mt-2 flex max-w-[62ch] flex-wrap items-center gap-x-4 gap-y-2 text-[14px] leading-snug text-danger-ink' : 'sr-only'}>
+        {error ?? ''}
+        {error && signedOut && onSignInAgain && (
+          <button type="button" onClick={onSignInAgain} className="stage-btn stage-btn-ghost px-4">Sign in again</button>
+        )}
+      </div>
 
       {open && (
         // A ruled indent, not a filled card: the fields and the options in
@@ -303,38 +301,26 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
           {manages && (
             <div className="flex flex-wrap items-start gap-x-8 gap-y-4 border-t border-line pt-5">
               <div className="min-w-0 flex-1 basis-[14rem]">
-                <button type="button" disabled={busy || profile.is_default} onClick={makeDefault} className="stage-btn stage-btn-ghost">
+                {/* The name can be long: the label wraps instead of running
+                    off a phone. */}
+                <button type="button" disabled={busy || profile.is_default} onClick={makeDefault} className="stage-btn stage-btn-ghost h-auto min-h-11 whitespace-normal py-2 text-left">
                   Make {name} the default
                 </button>
-                <p className="mt-2 max-w-[44ch] text-[13px] leading-snug text-ink-2">
-                  {profile.is_default
-                    ? `${name} is the default: the profile a new sign-in with the password starts on.`
-                    : 'The default is the profile a new sign-in with the password starts on.'}
-                </p>
+                <p className="mt-2 max-w-[44ch] text-[13px] leading-snug text-ink-2">{defaultNote}</p>
               </div>
               <div className="min-w-0 flex-1 basis-[14rem]">
-                {confirmDelete ? (
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => { setConfirmDelete(false); void run(() => deleteProfile(profile.id), `${name} could not be deleted.`, `${name} is deleted`) }}
-                      className="stage-btn stage-btn-destructive"
-                    >
-                      Delete {name} for good
-                    </button>
-                    <button type="button" disabled={busy} onClick={() => setConfirmDelete(false)} className="stage-btn stage-btn-quiet">Keep</button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={busy || profile.is_default || acting || soleUnrestricted}
-                    onClick={() => setConfirmDelete(true)}
-                    className="stage-btn stage-btn-danger"
-                  >
-                    Delete {name}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  disabled={profile.is_default || acting || soleUnrestricted}
+                  // Not `disabled` for the length of a write: the dialog
+                  // hands focus back to this button, and a disabled one
+                  // cannot hold it.
+                  aria-disabled={busy}
+                  onClick={() => { if (!busy) setConfirmDelete(true) }}
+                  className="stage-btn stage-btn-danger h-auto min-h-11 whitespace-normal py-2 text-left"
+                >
+                  Delete {name}
+                </button>
                 <p className="mt-2 max-w-[44ch] text-[13px] leading-snug text-ink-2">
                   {profile.is_default
                     ? 'The default profile cannot be deleted. Make another profile the default first.'
@@ -342,7 +328,7 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
                       ? `You are watching as ${name}. Switch to another profile to delete this one.`
                       : soleUnrestricted
                         ? 'The only profile without a limit cannot be deleted.'
-                        : 'Its watch history, lists and picks are deleted with it, and devices using it are signed out. This cannot be undone.'}
+                        : 'Its watch history, lists and picks go with it. This cannot be undone.'}
                 </p>
               </div>
             </div>
@@ -350,10 +336,25 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
         </div>
       )}
 
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${name}?`}
+        confirmLabel={`Delete ${name}`}
+        cancelLabel={`Keep ${name}`}
+        destructive
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          setConfirmDelete(false)
+          void run(() => deleteProfile(profile.id), `${name} could not be deleted.`, `${name} is deleted`).then(ok => { if (ok) onDeleted?.() })
+        }}
+      >
+        The watch history, lists, ratings and picks of {name} are deleted with it, and the devices using it are signed out. This cannot be undone.
+      </ConfirmDialog>
+
       {unlockFor && (
         <ProfilePinDialog
           profile={profile}
-          title={unlockFor.kind === 'change-pin' ? `Change ${name}’s PIN` : unlockFor.kind === 'remove-pin' ? `Remove ${name}’s PIN` : `Make ${name} the default`}
+          title={unlockFor.kind === 'change-pin' ? `Change the PIN for ${name}` : unlockFor.kind === 'remove-pin' ? `Remove the PIN from ${name}` : `Make ${name} the default`}
           description="Enter the current PIN, or the account password, to confirm."
           submitLabel={unlockFor.kind === 'change-pin' ? 'Change PIN' : unlockFor.kind === 'remove-pin' ? 'Remove PIN' : 'Make default'}
           onSubmit={submitUnlock}
@@ -364,16 +365,118 @@ export function ProfileRow({ profile, profiles, acting, manages, openDoor, onCha
   )
 }
 
-function RenameForm({ profile, busy, run }: {
+// A profile's limit. Choosing in the dropdown changes nothing by itself: on
+// Windows and Linux an arrow key or a typed letter on a closed dropdown
+// "changes" it at once, and one stray key must not lift a child's limit. The
+// choice is held here until Save is pressed, and a choice that lets MORE
+// through, or that limits the profile this device is watching as, is asked
+// about first.
+function LimitControl({ profile, acting, soleUnrestricted, busy, run }: {
   profile: Profile
+  acting: boolean
+  soleUnrestricted: boolean
   busy: boolean
-  run: (write: () => Promise<unknown>, fallback: string, done?: string) => Promise<boolean>
+  run: Run
 }) {
+  const ids = useId()
+  const name = profile.name
+  const stored = limitOptionValue(profile.max_age_rating)
+  const [draft, setDraft] = useState(stored)
+  // The stored limit changed under the control (saved here, or on another
+  // device and reloaded): the control shows it.
+  useEffect(() => { setDraft(stored) }, [stored, profile.id])
+  const [asking, setAsking] = useState(false)
+  const selectRef = useRef<HTMLSpanElement | null>(null)
+  const dirty = draft !== stored
+  const loosens = loosensLimit(stored, draft)
+  // Limiting the profile this session acts as takes these controls away
+  // from it.
+  const limitsSelf = acting && stored === NO_LIMIT && draft !== NO_LIMIT
+
+  const save = async () => {
+    setAsking(false)
+    const ok = await run(
+      () => updateProfile(profile.id, { max_age_rating: draft }),
+      `The limit for ${name} could not be changed.`,
+      draft === NO_LIMIT ? `${name} has no limit now` : `${name} is limited: ${limitPhrase(draft)}`,
+    )
+    // Refused: back to what the server has.
+    if (!ok) setDraft(stored)
+    // The Save button is gone either way; focus goes to the control it
+    // belonged to instead of nowhere.
+    selectRef.current?.querySelector('select')?.focus()
+  }
+  const pressSave = () => {
+    if (!dirty || busy) return
+    if (loosens || limitsSelf) setAsking(true)
+    else void save()
+  }
+
+  return (
+    <div>
+      <p className="mb-1 text-xs font-medium text-ink-2" aria-hidden="true">Limit</p>
+      <span ref={selectRef} className="block">
+        <SettingSelect
+          wide
+          aria-label={`Limit for ${name}`}
+          aria-describedby={soleUnrestricted ? `${ids}-sole` : dirty ? `${ids}-unsaved` : undefined}
+          value={draft}
+          options={limitOptionsFor(profile.max_age_rating)}
+          // Not disabled while a write is out: that would drop the focus.
+          disabled={soleUnrestricted}
+          onChange={v => { if (!busy) setDraft(v) }}
+        />
+      </span>
+      {soleUnrestricted && (
+        <p id={`${ids}-sole`} className="mt-2 max-w-[16rem] text-[13px] leading-snug text-ink-2">
+          {name} is the only profile without a limit. One has to stay that way, so that someone can manage the others.
+        </p>
+      )}
+      {dirty && (
+        <div className="mt-2 max-w-[16rem]">
+          <p id={`${ids}-unsaved`} className="text-[13px] leading-snug text-ink-2">
+            Not saved. The limit for {name} is still: {limitPhrase(stored)}.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" aria-disabled={busy} onClick={pressSave} className="stage-btn stage-btn-primary px-4">
+              Save limit{' '}<span className="sr-only">for {name}</span>
+            </button>
+            <button type="button" aria-disabled={busy} onClick={() => { if (!busy) setDraft(stored) }} className="stage-btn stage-btn-quiet px-3">
+              Undo
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={asking}
+        title={draft === NO_LIMIT ? `Take the limit off ${name}?` : limitsSelf ? `Limit ${name}?` : `Loosen the limit for ${name}?`}
+        confirmLabel={draft === NO_LIMIT ? 'Remove the limit' : limitsSelf ? `Limit ${name}` : 'Loosen the limit'}
+        cancelLabel="Keep it as it is"
+        onCancel={() => { setAsking(false); setDraft(stored) }}
+        onConfirm={() => { void save() }}
+        // The Save button that opened this goes with the choice it saved.
+        fallbackFocus={() => selectRef.current?.querySelector('select')}
+      >
+        {limitsSelf
+          ? `You are watching as ${name}. With a limit (${limitPhrase(draft)}), this device can no longer manage profiles until it switches to one without a limit.`
+          : draft === NO_LIMIT
+            ? `${name} will be able to see and play everything on this server. The limit now is: ${limitPhrase(stored)}.`
+            : `${name} will be able to see and play more: ${limitPhrase(draft)}. The limit now is: ${limitPhrase(stored)}.`}
+      </ConfirmDialog>
+    </div>
+  )
+}
+
+function RenameForm({ profile, busy, run }: { profile: Profile; busy: boolean; run: Run }) {
   const id = useId()
   const [name, setName] = useState(profile.name)
   useEffect(() => { setName(profile.name) }, [profile.id, profile.name])
   const next = name.trim()
-  const changed = next.length > 0 && next !== profile.name
+  // The server refuses a name over 100 bytes, which an accented or
+  // non-Latin name reaches well before 100 characters.
+  const tooLong = byteLength(next) > NAME_MAX_BYTES
+  const changed = next.length > 0 && next !== profile.name && !tooLong
   return (
     <form
       onSubmit={e => {
@@ -384,9 +487,19 @@ function RenameForm({ profile, busy, run }: {
     >
       <label htmlFor={id} className="block text-[13px] font-semibold text-ink">Name</label>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        <input id={id} value={name} maxLength={100} disabled={busy} onChange={e => setName(e.target.value)} className="h-11 w-64 max-w-full py-0" />
+        <input
+          id={id}
+          value={name}
+          maxLength={NAME_MAX_BYTES}
+          disabled={busy}
+          aria-invalid={tooLong}
+          aria-describedby={tooLong ? `${id}-long` : undefined}
+          onChange={e => setName(e.target.value)}
+          className="h-11 w-64 max-w-full py-0"
+        />
         <button type="submit" disabled={!changed || busy} className="stage-btn stage-btn-ghost">Save name</button>
       </div>
+      {tooLong && <p id={`${id}-long`} className="mt-1.5 text-[13px] text-danger-ink">That name is too long. Shorten it a little.</p>}
     </form>
   )
 }
@@ -402,7 +515,10 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [confirming, setConfirming] = useState<number | null>(null)
+  const [confirming, setConfirming] = useState<Watchlist | null>(null)
+  // Takes focus when a list is deleted: its row, and the button that was
+  // pressed, are gone.
+  const headingRef = useRef<HTMLParagraphElement | null>(null)
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -438,7 +554,7 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
 
   return (
     <div>
-      <p className="text-[13px] font-semibold text-ink">Lists</p>
+      <p ref={headingRef} tabIndex={-1} className="text-[13px] font-semibold text-ink">Lists</p>
       <p className="mb-2 mt-0.5 text-[13px] leading-snug text-ink-2">A title’s List button adds it to one of these.</p>
       {failed && <p className="text-[14px] text-danger-ink">The lists for {profileName} could not be loaded.</p>}
       {!failed && lists === null && <p className="text-[14px] text-ink-2">Loading…</p>}
@@ -446,25 +562,11 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
       {lists !== null && lists.length > 0 && (
         <ul aria-label={`Lists for ${profileName}`} className="mb-3">
           {lists.map(l => (
-            <li key={l.id} className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-t border-line py-1 first:border-t-0">
-              <span className="min-w-0 truncate text-[15px] text-ink">{l.name}</span>
-              {confirming === l.id ? (
-                <span className="flex gap-2">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => { setConfirming(null); void write(() => deleteWatchlist(profileId, l.id), `“${l.name}” could not be deleted.`) }}
-                    className="stage-btn stage-btn-danger px-4"
-                  >
-                    Delete “{l.name}” and what is in it
-                  </button>
-                  <button type="button" onClick={() => setConfirming(null)} className="stage-btn stage-btn-quiet px-3">Keep</button>
-                </span>
-              ) : (
-                <button type="button" disabled={busy} onClick={() => setConfirming(l.id)} className="stage-btn stage-btn-quiet px-3">
-                  Delete{' '}<span className="sr-only">the list {l.name}</span>
-                </button>
-              )}
+            <li key={l.id} className="flex min-h-11 items-center justify-between gap-2 border-t border-line py-1 first:border-t-0">
+              <span className="min-w-0 break-words text-[15px] text-ink">{l.name}</span>
+              <button type="button" aria-disabled={busy} onClick={() => { if (!busy) setConfirming(l) }} className="stage-btn stage-btn-quiet flex-none px-3">
+                Delete{' '}<span className="sr-only">the list {l.name}</span>
+              </button>
             </li>
           ))}
         </ul>
@@ -483,6 +585,23 @@ function ProfileLists({ profileId, profileName }: { profileId: number; profileNa
         <button type="submit" disabled={!name.trim() || busy} className="stage-btn stage-btn-ghost">Add list</button>
       </form>
       <p role="alert" className={error ? 'mt-2 text-[14px] text-danger-ink' : 'sr-only'}>{error ?? ''}</p>
+
+      <ConfirmDialog
+        open={confirming !== null}
+        title={`Delete the list “${confirming?.name ?? ''}”?`}
+        confirmLabel="Delete the list"
+        cancelLabel="Keep it"
+        destructive
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          const l = confirming
+          setConfirming(null)
+          if (l) void write(() => deleteWatchlist(profileId, l.id), `“${l.name}” could not be deleted.`).then(ok => { if (ok) headingRef.current?.focus() })
+        }}
+        fallbackFocus={() => headingRef.current}
+      >
+        The list and what {profileName} saved in it are deleted. The titles themselves stay on the server.
+      </ConfirmDialog>
     </div>
   )
 }

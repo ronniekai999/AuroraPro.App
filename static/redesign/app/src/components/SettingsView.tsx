@@ -25,6 +25,10 @@ interface SettingsViewProps {
    *  controls stay hidden, as for a restricted profile, since the session
    *  could be acting as one. */
   profileKnown?: boolean
+  /** Whether the app has finished finding out which profile the session
+   *  acts as. Until it has, the sections that depend on it say they are
+   *  loading, not that the profile could not be confirmed. */
+  profileSettled?: boolean
   /** Opens "Your profile" (/profile). Not offered to a session acting as a
    *  profile with a content limit, which is not shown that page. */
   onOpenProfilePage?: () => void
@@ -40,7 +44,7 @@ interface SettingsViewProps {
 }
 
 export default function SettingsView({
-  user, onLogout, onToast, activeProfile = null, profileKnown = false, onOpenProfilePage, onProfilesChanged, pane, onPaneChange,
+  user, onLogout, onToast, activeProfile = null, profileKnown = false, profileSettled = true, onOpenProfilePage, onProfilesChanged, pane, onPaneChange,
 }: SettingsViewProps = {}) {
   const [ownPane, setOwnPane] = useState<SettingsPane>(pane ?? DEFAULT_SETTINGS_PANE)
   const current = onPaneChange ? (pane ?? DEFAULT_SETTINGS_PANE) : ownPane
@@ -56,10 +60,17 @@ export default function SettingsView({
       {current === 'playback' && <PlaybackPane />}
       {current === 'app' && <AppPane onToast={onToast} />}
       {current === 'account' && (
-        <AccountPane user={user} activeProfile={activeProfile} profileKnown={profileKnown} onLogout={onLogout} onToast={onToast} />
+        <AccountPane user={user} activeProfile={activeProfile} profileKnown={profileKnown} profileSettled={profileSettled} onLogout={onLogout} onToast={onToast} />
       )}
       {current === 'profiles' && (
-        <ProfilesPane actingProfile={activeProfile} profileKnown={profileKnown} onToast={onToast} onProfilesChanged={onProfilesChanged} />
+        <ProfilesPane
+          actingProfile={activeProfile}
+          profileKnown={profileKnown}
+          profileSettled={profileSettled}
+          onToast={onToast}
+          onProfilesChanged={onProfilesChanged}
+          onSignInAgain={onLogout}
+        />
       )}
     </SettingsShell>
   )

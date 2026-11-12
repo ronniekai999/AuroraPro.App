@@ -2997,7 +2997,8 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 .stage-btn-pill {
   border-radius: var(--r-pill);
 }
-.stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stage-btn:disabled,
+.stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 /* Press feedback: a 3% settle over 90ms is the smallest tactile cue that
    reads; the release eases back on the base transition above. */
 .stage-btn:not(:disabled):active { transform: scale(0.97); transition-duration: 90ms; }

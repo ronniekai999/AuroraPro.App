@@ -3,9 +3,9 @@
 // is a page of its own (/profile) that sits in the same list, so it uses this
 // frame too and the two read as one place.
 
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useRef, type MouseEvent, type ReactNode } from 'react'
 import { PageHeader } from '@/components/PageHeader'
-import { SETTINGS_PANES, type SettingsPane } from '@/lib/settingsPanes'
+import { SETTINGS_PANES, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
 
 export type SettingsPlace = SettingsPane | 'your-profile'
 
@@ -27,22 +27,30 @@ export function SettingsShell({ current, onPane, onOpenProfilePage, wide = false
   // On a narrow screen the list is a strip that scrolls sideways: bring the
   // current section's name into view, or the page opens on a strip that does
   // not show where you are.
-  const currentRef = useRef<HTMLButtonElement | null>(null)
+  const currentRef = useRef<HTMLAnchorElement | null>(null)
   useEffect(() => {
     currentRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
   }, [current])
 
+  // Links, with the address each section has, so one can be opened in a new
+  // tab or copied. A plain press moves within the app; a press with a
+  // modifier, or with another mouse button, is the browser's.
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '')
   const item = (place: SettingsPlace, label: string, onClick: () => void) => (
-    <button
+    <a
       key={place}
-      type="button"
+      href={`${base}${place === 'your-profile' ? '/profile' : settingsPath(place)}`}
       ref={place === current ? currentRef : undefined}
       aria-current={place === current ? 'page' : undefined}
-      onClick={onClick}
+      onClick={(e: MouseEvent<HTMLAnchorElement>) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+        e.preventDefault()
+        onClick()
+      }}
       className={itemClass(place === current)}
     >
       {label}
-    </button>
+    </a>
   )
   // The account's own sections, then the ones about people.
   const [playback, app, account, profiles] = SETTINGS_PANES

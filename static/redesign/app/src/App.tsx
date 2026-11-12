@@ -7031,6 +7031,7 @@ export default function App() {
                 profileKnown={activeProfileId !== null
                   ? profiles.some(p => p.id === activeProfileId)
                   : profilesLoaded && profiles.length === 0}
+                profileSettled={catalogProfileSettled}
                 onOpenProfilePage={() => handleNavigate('profile')}
                 onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
               />
@@ -7564,7 +7565,7 @@ export default function App() {
             {addToListLists === null && <p className="text-white/50 text-sm">Loading…</p>}
             {addToListLists && addToListLists.length === 0 && (
               <div className="text-white/50 text-sm mb-3">
-                No watchlists yet. Create one in Settings → Profiles &amp; Watchlists first.
+                No lists yet. Make one in Settings, under Profiles and parental controls: open a profile and add a list.
               </div>
             )}
             {addToListLists && addToListLists.map(l => (

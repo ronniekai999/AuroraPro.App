@@ -211,17 +211,17 @@ describe('every old tab URL still opens its page, in its new place', () => {
     await screen.findByRole('heading', { level: 1, name: 'Settings' }, { timeout: 5000 })
     await screen.findByRole('heading', { level: 2, name: 'Profiles and parental controls' }, { timeout: 5000 })
     const sections = () => within(screen.getByRole('navigation', { name: 'Settings sections' }))
-    expect(sections().getByRole('button', { name: 'Profiles and parental controls' })).toHaveAttribute('aria-current', 'page')
+    expect(sections().getByRole('link', { name: 'Profiles and parental controls' })).toHaveAttribute('aria-current', 'page')
     expect(screen.queryByRole('heading', { level: 2, name: 'Playback' })).toBeNull()
     // Another section's entry moves the URL and the page together.
-    fireEvent.click(sections().getByRole('button', { name: 'Account and sign-in' }))
+    fireEvent.click(sections().getByRole('link', { name: 'Account and sign-in' }))
     await waitFor(() => expect(where.path).toBe('/settings/account'))
     await screen.findByRole('heading', { level: 2, name: 'Sign-in methods' })
     cleanup()
     renderAt('/settings')
     await settled('Parent')
     await screen.findByRole('heading', { level: 2, name: 'Playback' }, { timeout: 5000 })
-    expect(sections().getByRole('button', { name: 'Playback' })).toHaveAttribute('aria-current', 'page')
+    expect(sections().getByRole('link', { name: 'Playback' })).toHaveAttribute('aria-current', 'page')
   })
 
   it('"Manage profiles" in the identity menu opens the profiles section, with the account\'s profiles in it', async () => {
@@ -233,11 +233,11 @@ describe('every old tab URL still opens its page, in its new place', () => {
     await screen.findByRole('heading', { level: 2, name: 'Profiles and parental controls' }, { timeout: 5000 })
     await screen.findByRole('combobox', { name: 'Limit for Kid' }, { timeout: 5000 })
     // Your profile, in the same list, is the profile page.
-    fireEvent.click(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('button', { name: 'Your profile' }))
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('link', { name: 'Your profile' }))
     await waitFor(() => expect(where.path).toBe('/profile'))
     await screen.findByRole('heading', { level: 2, name: 'How other members see you' }, { timeout: 5000 })
     // And from there a Settings section is one press away.
-    fireEvent.click(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('button', { name: 'App and notifications' }))
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('link', { name: 'App and notifications' }))
     await waitFor(() => expect(where.path).toBe('/settings/app'))
   })
 })

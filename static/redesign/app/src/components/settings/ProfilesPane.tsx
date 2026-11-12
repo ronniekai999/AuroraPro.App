@@ -24,12 +24,20 @@ function nameList(names: string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
-export function ProfilesPane({ actingProfile, profileKnown, onToast, onProfilesChanged }: {
+export function ProfilesPane({ actingProfile, profileKnown, profileSettled = true, onToast, onProfilesChanged, onSignInAgain }: {
   /** The profile the session is acting as, or null. */
   actingProfile: Profile | null
   /** False while the session's profile is unknown: then it is treated as
    *  restricted, since it could be acting as a restricted one. */
   profileKnown: boolean
+  /** False while the app is still finding out which profile the session
+   *  acts as. Until it has, this says it is loading, not that the profile
+   *  "could not be confirmed", which is only true once the startup read has
+   *  finished without an answer. */
+  profileSettled?: boolean
+  /** Leave for the sign-in page (when the server says this device has been
+   *  signed out). */
+  onSignInAgain?: () => void
   onToast?: OnToast
   /** Called after a change to profiles the app also holds (a PIN, a limit, a
    *  name, a new or deleted profile), so its copy, which decides what the
@@ -37,10 +45,14 @@ export function ProfilesPane({ actingProfile, profileKnown, onToast, onProfilesC
   onProfilesChanged?: () => void
 }) {
   const headingId = useId()
-  const restricted = !profileKnown || isRestrictedProfile(actingProfile)
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
   const actingId = actingProfile?.id ?? null
   const [all, setAll] = useState<Profile[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  // The acting profile as this page last read it, which can be newer than
+  // the app's copy: another device may have given it a limit since.
+  const acting = all?.find(p => p.id === actingId) ?? actingProfile
+  const restricted = !profileKnown || isRestrictedProfile(acting)
 
   // Each load supersedes the ones before it, so an older answer cannot land
   // last and put back a list a newer one replaced.
@@ -74,17 +86,22 @@ export function ProfilesPane({ actingProfile, profileKnown, onToast, onProfilesC
 
   return (
     <section aria-labelledby={headingId}>
-      <h2 id={headingId} className="font-display text-[22px] font-semibold leading-tight text-ink">Profiles and parental controls</h2>
+      <h2 id={headingId} ref={headingRef} tabIndex={-1} className="font-display text-[22px] font-semibold leading-tight text-ink">Profiles and parental controls</h2>
       <p className="mt-1.5 max-w-[62ch] text-[14px] leading-snug text-ink-2">
-        Every profile has its own history, picks and limit. A limit hides titles rated above it, and titles with no rating at all.
-        The account password also unlocks any profile.
+        Every profile has its own history, picks and limit. A limit hides titles rated above it, titles with no rating, and titles
+        with a rating Aurora does not recognise.
+        {/* The password is the key to every profile: said to the people who
+            manage them, not to a session with a limit. */}
+        {!restricted && ' The account password also unlocks any profile.'}
       </p>
 
-      {restricted && (
+      {!profileSettled ? (
+        <p className="mt-5 text-[14px] text-ink-2">Loading…</p>
+      ) : restricted && (
         <div className="mt-5">
           <PaneNote>
-            {actingProfile
-              ? `${actingProfile.name} has a content limit, so limits, PINs and the other profiles can only be managed from a profile without one.`
+            {acting
+              ? `${acting.name} has a content limit, so limits, PINs and the other profiles can only be managed from a profile without one.`
               : 'This device’s profile could not be confirmed, so profiles can only be managed after a reload.'}
           </PaneNote>
         </div>
@@ -102,8 +119,8 @@ export function ProfilesPane({ actingProfile, profileKnown, onToast, onProfilesC
       )}
 
       {err && <p role="alert" className="mt-5 text-[14px] text-danger-ink">{err}</p>}
-      {profiles === null && !err && <p className="mt-5 text-[14px] text-ink-2">Loading…</p>}
-      {profiles !== null && all !== null && (
+      {profileSettled && profiles === null && !err && <p className="mt-5 text-[14px] text-ink-2">Loading…</p>}
+      {profileSettled && profiles !== null && all !== null && (
         <>
           <ul aria-label="Profiles" className="mt-5">
             {profiles.map(p => (
@@ -115,41 +132,66 @@ export function ProfilesPane({ actingProfile, profileKnown, onToast, onProfilesC
                 manages={!restricted}
                 openDoor={openDoors.some(o => o.id === p.id)}
                 onChanged={changed}
+                // The deleted profile's row took the focus with it.
+                onDeleted={() => headingRef.current?.focus()}
+                onSignInAgain={onSignInAgain}
                 onToast={onToast}
               />
             ))}
           </ul>
           {!restricted && profiles.length === 0 && <p className="mt-2 text-[14px] text-ink-2">This account has no profiles yet.</p>}
-          {!restricted && <AddProfile onAdded={changed} onToast={onToast} />}
+          {!restricted && <AddProfile first={all.length === 0} onAdded={changed} onToast={onToast} />}
         </>
       )}
     </section>
   )
 }
 
-function AddProfile({ onAdded, onToast }: { onAdded: () => Promise<void>; onToast?: OnToast }) {
+/** The server counts a name's bytes (100 at most), not its characters. */
+const NAME_MAX_BYTES = 100
+const byteLength = (text: string) => new TextEncoder().encode(text).length
+
+/** What to say when adding a profile is refused. The server words its
+ *  profile count limit for a log. */
+export function addProfileRefusal(e: unknown): string {
+  if (e instanceof Error && /maximum number of profiles/i.test(e.message)) {
+    return 'This account has as many profiles as the server allows. Delete one to add another.'
+  }
+  return refusalMessage(e, 'The profile could not be added.')
+}
+
+function AddProfile({ first, onAdded, onToast }: {
+  /** The account has no profile yet. Its first cannot have a limit: the
+   *  server refuses one, since an account whose only profile is limited has
+   *  nobody who can manage profiles. */
+  first: boolean
+  onAdded: () => Promise<void>
+  onToast?: OnToast
+}) {
   const ids = useId()
   const [name, setName] = useState('')
   const [limit, setLimit] = useState(NO_LIMIT)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const next = name.trim()
+  const tooLong = byteLength(next) > NAME_MAX_BYTES
+  const useLimit = first ? NO_LIMIT : limit
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!next || busy) return
+    if (!next || tooLong || busy) return
     setBusy(true)
     setError(null)
     try {
       // The limit goes with the create, so a child's profile never exists
       // without it.
-      await createProfile(next, limit === NO_LIMIT ? {} : { max_age_rating: limit })
+      await createProfile(next, useLimit === NO_LIMIT ? {} : { max_age_rating: useLimit })
       setName('')
       setLimit(NO_LIMIT)
       await onAdded()
       onToast?.(`${next} is added`, 'success')
     } catch (err) {
-      setError(refusalMessage(err, 'The profile could not be added.'))
+      setError(addProfileRefusal(err))
     } finally {
       setBusy(false)
     }
@@ -159,19 +201,32 @@ function AddProfile({ onAdded, onToast }: { onAdded: () => Promise<void>; onToas
     <form onSubmit={submit} aria-labelledby={`${ids}-title`} className="mt-6 rounded-control bg-surface-raised p-5">
       <h3 id={`${ids}-title`} className="font-display text-[17px] font-semibold text-ink">Add a profile</h3>
       <p className="mt-1 max-w-[60ch] text-[13px] leading-snug text-ink-2">
-        For a child, pick a limit now. A limit only holds while the child cannot switch to a profile without one, so give those a PIN.
+        {first
+          ? 'The first profile has no limit, so that someone can manage the others. Add it, then add a profile with a limit for a child.'
+          : 'For a child, pick a limit now. A limit only holds while the child cannot switch to a profile without one, so give those a PIN.'}
       </p>
       <div className="mt-4 flex flex-wrap items-end gap-3">
         <label htmlFor={`${ids}-name`} className="block text-[13px] font-semibold text-ink">
           Name
-          <input id={`${ids}-name`} value={name} maxLength={100} disabled={busy} onChange={e => setName(e.target.value)} className="mt-1.5 block h-11 w-56 max-w-full py-0" />
+          <input
+            id={`${ids}-name`}
+            value={name}
+            maxLength={NAME_MAX_BYTES}
+            disabled={busy}
+            aria-invalid={tooLong}
+            onChange={e => setName(e.target.value)}
+            className="mt-1.5 block h-11 w-56 max-w-full py-0"
+          />
         </label>
-        <div>
-          <label htmlFor={`${ids}-limit`} className="mb-1.5 block text-[13px] font-semibold text-ink">Limit</label>
-          <SettingSelect id={`${ids}-limit`} wide value={limit} options={LIMIT_OPTIONS} disabled={busy} onChange={setLimit} />
-        </div>
-        <button type="submit" disabled={!next || busy} className="stage-btn stage-btn-primary">{busy ? 'Adding…' : 'Add profile'}</button>
+        {!first && (
+          <div>
+            <label htmlFor={`${ids}-limit`} className="mb-1.5 block text-[13px] font-semibold text-ink">Limit</label>
+            <SettingSelect id={`${ids}-limit`} wide value={limit} options={LIMIT_OPTIONS} disabled={busy} onChange={setLimit} />
+          </div>
+        )}
+        <button type="submit" disabled={!next || tooLong || busy} className="stage-btn stage-btn-primary">{busy ? 'Adding…' : 'Add profile'}</button>
       </div>
+      {tooLong && <p className="mt-2 text-[13px] text-danger-ink">That name is too long. Shorten it a little.</p>}
       <p role="alert" className={error ? 'mt-3 max-w-[62ch] text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error ?? ''}</p>
     </form>
   )

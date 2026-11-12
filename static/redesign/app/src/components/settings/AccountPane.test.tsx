@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { APIError, WRONG_CURRENT_PASSWORD, type Profile, type User } from '@/lib/api'
-import { AccountPane, SignInMethodsCard, passwordErrorMessage } from './AccountPane'
+import { AccountPane, SignInMethodsCard, passwordBytes, passwordErrorMessage } from './AccountPane'
 
 const api = vi.hoisted(() => ({ listOAuthLinks: vi.fn(), unlinkOAuth: vi.fn(), startOAuthLink: vi.fn(), changePassword: vi.fn() }))
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
@@ -54,15 +55,43 @@ describe('AccountPane', () => {
   })
 
   // The server's logout ends every session on the account. The control must
-  // never read as signing out one device: that does not exist.
-  it('says that signing out signs out every device, and nothing about one device only', () => {
+  // never read as signing out one device: that does not exist. And since it
+  // reaches every device, one press is not enough.
+  it('says that signing out signs out every device, and asks before doing it', async () => {
+    const user = userEvent.setup()
     const onLogout = vi.fn()
     render(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={onLogout} />)
     const region = screen.getByRole('region', { name: 'Sign out' })
     expect(region).toHaveTextContent('Signs out every device on this account, this one included.')
     expect(document.body.textContent).not.toMatch(/on this device|this browser only|other devices stay/i)
-    fireEvent.click(within(region).getByRole('button', { name: 'Sign out' }))
+    const signOut = within(region).getByRole('button', { name: 'Sign out' })
+    await user.click(signOut)
+    expect(onLogout).not.toHaveBeenCalled()
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByRole('heading', { name: 'Sign out of every device?' })).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('This signs out every device on this account: this one, and every other browser, phone and TV that is signed in.')
+    // Focus is on the answer that changes nothing; Escape gives it, and
+    // focus goes back to the button.
+    expect(within(dialog).getByRole('button', { name: 'Stay signed in' })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(onLogout).not.toHaveBeenCalled()
+    await waitFor(() => expect(signOut).toHaveFocus())
+
+    await user.click(signOut)
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Sign out everywhere' }))
     expect(onLogout).toHaveBeenCalledTimes(1)
+  })
+
+  // A link straight to this page arrives before the app knows the session's
+  // profile; "can only be managed from…" would be wrong for a parent.
+  it('says the sign-in methods are loading until the app has settled which profile the session acts as', async () => {
+    const view = render(<AccountPane user={USER} activeProfile={null} profileKnown={false} profileSettled={false} />)
+    expect(within(screen.getByRole('region', { name: 'Sign-in methods' })).getByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByText(/can only be managed from a profile without a content limit/)).toBeNull()
+    expect(api.listOAuthLinks).not.toHaveBeenCalled()
+    view.rerender(<AccountPane user={USER} activeProfile={profile()} profileKnown profileSettled />)
+    expect(await screen.findByRole('button', { name: 'Change password' })).toBeInTheDocument()
   })
 
   it('names the account and its role', () => {
@@ -71,12 +100,20 @@ describe('AccountPane', () => {
     expect(screen.getByText('Admin of this server')).toBeInTheDocument()
   })
 
-  it('changes the password with the current one, says first that every device is signed out, then signs out', async () => {
+  it('changes the password with the current one, says first that every device is signed out, and says it worked before leaving', async () => {
     const onLogout = vi.fn()
     render(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={onLogout} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Change password' }))
     const form = screen.getByRole('form', { name: 'Change the password' })
     expect(form).toHaveTextContent('Signs out every device on this account, this one included. You sign in again with the new password.')
+    // Focus goes to the first field, not nowhere with the button that left.
+    expect(within(form).getByLabelText('Current password')).toHaveFocus()
+    // A password manager is told whose password this is.
+    const who = form.querySelector('input[autocomplete="username"]') as HTMLInputElement
+    expect(who.value).toBe('morgan')
+    expect(who.hidden).toBe(true)
+    expect(within(form).getByLabelText('Current password')).toHaveAttribute('autocomplete', 'current-password')
+    expect(within(form).getByLabelText('New password')).toHaveAttribute('autocomplete', 'new-password')
     const submit = within(form).getByRole('button', { name: 'Change password' })
     fireEvent.change(within(form).getByLabelText('Current password'), { target: { value: 'old secret' } })
     fireEvent.change(within(form).getByLabelText('New password'), { target: { value: 'short' } })
@@ -86,7 +123,34 @@ describe('AccountPane', () => {
     fireEvent.change(within(form).getByLabelText('New password'), { target: { value: 'a longer secret' } })
     fireEvent.click(submit)
     await waitFor(() => expect(api.changePassword).toHaveBeenCalledWith('old secret', 'a longer secret'))
-    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1))
+    // The page says the change took, and leaves only when asked: the app
+    // going straight to the sign-in page read as the change having failed.
+    const done = await screen.findByRole('status')
+    expect(done).toHaveTextContent('The password is changed.')
+    expect(done).toHaveTextContent('Every device on this account has been signed out, this one included. Sign in again with the new password.')
+    await act(async () => {})
+    expect(onLogout).not.toHaveBeenCalled()
+    fireEvent.click(within(done).getByRole('button', { name: 'Sign in again' }))
+    expect(onLogout).toHaveBeenCalledTimes(1)
+  })
+
+  // The server counts a password's bytes, 8 to 128.
+  it('counts a new password the way the server does, in bytes', async () => {
+    expect(passwordBytes('pässword')).toBe(9)
+    render(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Change password' }))
+    const form = screen.getByRole('form', { name: 'Change the password' })
+    const submit = within(form).getByRole('button', { name: 'Change password' })
+    fireEvent.change(within(form).getByLabelText('Current password'), { target: { value: 'old secret' } })
+    // Four characters, eight bytes: long enough for the server.
+    fireEvent.change(within(form).getByLabelText('New password'), { target: { value: 'éééé' } })
+    expect(submit).toBeEnabled()
+    // 65 characters, 130 bytes: the server would refuse it.
+    fireEvent.change(within(form).getByLabelText('New password'), { target: { value: 'é'.repeat(65) } })
+    expect(submit).toBeDisabled()
+    expect(within(form).getByText('That is too long for a password here. Shorten it.')).toBeInTheDocument()
+    fireEvent.change(within(form).getByLabelText('New password'), { target: { value: 'é'.repeat(64) } })
+    expect(submit).toBeEnabled()
   })
 
   it('says a wrong current password plainly, stays signed in, and keeps the form', async () => {
@@ -118,7 +182,7 @@ describe('AccountPane', () => {
     expect(await screen.findByText(/This account has no password\. It signs in through a linked account/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Change password' })).toBeNull()
     // Its only way in cannot be disconnected, and the row says why.
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Disconnect Google' })).toBeDisabled()
     expect(screen.getByText(/It is the only way to sign in to this account/)).toBeInTheDocument()
   })
 
@@ -133,17 +197,32 @@ describe('AccountPane', () => {
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
   })
 
-  it('disconnects a linked account only on a second press, and connects one on the first', async () => {
+  it('disconnects a linked account only through a dialog, gives focus back when it is cancelled, and connects one directly', async () => {
+    const user = userEvent.setup()
     render(<AccountPane user={USER} activeProfile={profile()} profileKnown />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    const disconnect = await screen.findByRole('button', { name: 'Disconnect Google' })
+    await user.click(disconnect)
     expect(api.unlinkOAuth).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Keep' }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByRole('heading', { name: 'Disconnect Google?' })).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('You will no longer be able to sign in to Aurora with your Google account. You can connect it again later.')
+    expect(within(dialog).getByRole('button', { name: 'Keep it' })).toHaveFocus()
+    await user.click(within(dialog).getByRole('button', { name: 'Keep it' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(api.unlinkOAuth).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect Google' }))
+    await waitFor(() => expect(disconnect).toHaveFocus())
+
+    // Confirmed: the request goes, the row now offers Connect, and that
+    // button has the focus the Disconnect button took with it.
+    api.listOAuthLinks.mockResolvedValue({ linked: [], available: ['discord', 'google'], hasPassword: true, canUnlinkAny: false })
+    await user.click(disconnect)
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }))
     await waitFor(() => expect(api.unlinkOAuth).toHaveBeenCalledWith('google'))
+    expect(api.unlinkOAuth).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect Google' })).toHaveFocus())
+
     api.startOAuthLink.mockReturnValue(new Promise(() => {}))
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Discord' }))
     expect(api.startOAuthLink).toHaveBeenCalledWith('discord')
   })
 })

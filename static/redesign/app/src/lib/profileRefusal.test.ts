@@ -38,7 +38,7 @@ describe('refusalMessage', () => {
     expect(refusalMessage(refusal('profile_pin_locked', 429, 540), 'x')).toBe('Too many wrong attempts. Try again in about 9 minutes.')
     expect(refusalMessage(refusal('profile_pin_locked', 429, 40), 'x')).toBe('Too many wrong attempts. Try again in about a minute.')
     expect(refusalMessage(refusal('profile_pin_locked', 429), 'x')).toBe('Too many wrong attempts. Try again in 15 minutes.')
-    expect(refusalMessage(refusal('rate_limited', 429, 900), 'x')).toBe('Too many PIN changes in a short time. Try again in about 15 minutes.')
+    expect(refusalMessage(refusal('rate_limited', 429, 900), 'x')).toBe('Too many tries at changing a PIN in a short time. Try again in about 15 minutes.')
   })
 
   it('keeps the server\'s message for a refusal with no reason it knows, and the fallback for none at all', () => {

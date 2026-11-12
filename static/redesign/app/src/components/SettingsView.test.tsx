@@ -17,7 +17,7 @@ const profile = (extra: Partial<Profile> = {}): Profile => ({
 })
 const prefs = () => JSON.parse(localStorage.getItem('aurora_prefs') ?? '{}') as Record<string, unknown>
 const sections = () => within(screen.getByRole('navigation', { name: 'Settings sections' }))
-const current = () => sections().getAllByRole('button').filter(b => b.getAttribute('aria-current') === 'page').map(b => b.textContent)
+const current = () => sections().getAllByRole('link').filter(b => b.getAttribute('aria-current') === 'page').map(b => b.textContent)
 
 beforeEach(() => {
   localStorage.clear()
@@ -52,15 +52,30 @@ describe('which section is open', () => {
   it('asks the app for another section instead of switching by itself', () => {
     const onPaneChange = vi.fn()
     render(<SettingsView pane="playback" onPaneChange={onPaneChange} activeProfile={profile()} profileKnown />)
-    fireEvent.click(sections().getByRole('button', { name: 'Profiles and parental controls' }))
+    fireEvent.click(sections().getByRole('link', { name: 'Profiles and parental controls' }))
     expect(onPaneChange).toHaveBeenCalledWith('profiles')
     // The URL has not changed, so neither has the page.
     expect(current()).toEqual(['Playback'])
   })
 
+  // A press with a modifier, or the middle button, is the browser's: it
+  // opens the section's address in a new tab, and this page stays put.
+  it('leaves a modified press to the browser', () => {
+    const onPaneChange = vi.fn()
+    render(<SettingsView pane="playback" onPaneChange={onPaneChange} activeProfile={profile()} profileKnown />)
+    const link = sections().getByRole('link', { name: 'App and notifications' })
+    // (jsdom cannot follow a link; the handler not preventing it is the point.)
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true)
+    expect(fireEvent.click(link, { metaKey: true })).toBe(true)
+    expect(fireEvent.click(link, { button: 1 })).toBe(true)
+    expect(onPaneChange).not.toHaveBeenCalled()
+    expect(fireEvent.click(link)).toBe(false)
+    expect(onPaneChange).toHaveBeenCalledWith('app')
+  })
+
   it('keeps the choice itself when nothing owns the URL', () => {
     render(<SettingsView activeProfile={profile()} profileKnown />)
-    fireEvent.click(sections().getByRole('button', { name: 'App and notifications' }))
+    fireEvent.click(sections().getByRole('link', { name: 'App and notifications' }))
     expect(current()).toEqual(['App and notifications'])
   })
 })
@@ -69,10 +84,14 @@ describe('the list of sections', () => {
   it('lists the four sections and Your profile, and no Devices', () => {
     const onOpenProfilePage = vi.fn()
     render(<SettingsView pane="playback" onPaneChange={vi.fn()} activeProfile={profile()} profileKnown onOpenProfilePage={onOpenProfilePage} />)
-    expect(sections().getAllByRole('button').map(b => b.textContent)).toEqual([
+    expect(sections().getAllByRole('link').map(b => b.textContent)).toEqual([
       'Playback', 'App and notifications', 'Account and sign-in', 'Your profile', 'Profiles and parental controls',
     ])
-    fireEvent.click(sections().getByRole('button', { name: 'Your profile' }))
+    // Each has its own address, so it can be opened in a new tab.
+    expect(sections().getAllByRole('link').map(b => b.getAttribute('href'))).toEqual([
+      '/settings/playback', '/settings/app', '/settings/account', '/profile', '/settings/profiles',
+    ])
+    fireEvent.click(sections().getByRole('link', { name: 'Your profile' }))
     expect(onOpenProfilePage).toHaveBeenCalledTimes(1)
   })
 
@@ -80,9 +99,9 @@ describe('the list of sections', () => {
   // not offered the way to it; nor is one whose profile is not known yet.
   it('does not offer Your profile to a session with a content limit, or one whose profile is unknown', () => {
     const view = render(<SettingsView pane="playback" onPaneChange={vi.fn()} activeProfile={profile({ max_age_rating: 'PG' })} profileKnown onOpenProfilePage={vi.fn()} />)
-    expect(sections().queryByRole('button', { name: 'Your profile' })).toBeNull()
+    expect(sections().queryByRole('link', { name: 'Your profile' })).toBeNull()
     view.rerender(<SettingsView pane="playback" onPaneChange={vi.fn()} activeProfile={profile()} profileKnown={false} onOpenProfilePage={vi.fn()} />)
-    expect(sections().queryByRole('button', { name: 'Your profile' })).toBeNull()
+    expect(sections().queryByRole('link', { name: 'Your profile' })).toBeNull()
   })
 })
 

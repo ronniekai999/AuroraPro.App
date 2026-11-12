@@ -69,7 +69,7 @@ export function refusalMessage(e: unknown, fallback: string): string {
     case 'session_ended':
       return 'This device has been signed out. Sign in again to go on.'
     case 'rate_limited':
-      return `Too many PIN changes in a short time. Try again ${waitPhrase(retryAfter(e), 'in a few minutes')}.`
+      return `Too many tries at changing a PIN in a short time. Try again ${waitPhrase(retryAfter(e), 'in a few minutes')}.`
     default:
       return e instanceof Error && e.message ? e.message : fallback
   }
