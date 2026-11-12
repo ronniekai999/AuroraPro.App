@@ -28,6 +28,18 @@ describe('ErrorBoundary', () => {
     expect(heard).toHaveBeenCalledTimes(1)
   })
 
+  // It is drawn with inline values (the stylesheet may be what failed), and
+  // they are the app's: its page colour, a white primary action, a quiet
+  // second one. It used to be a violet button on a blue-black of its own.
+  it('is drawn in the app\'s own colours, with nothing violet', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(<ErrorBoundary><Throws message="Cannot read properties of undefined" /></ErrorBoundary>)
+    expect(screen.getByRole('alert')).toHaveStyle({ background: 'rgb(14, 15, 17)', color: 'rgb(244, 244, 245)' })
+    expect(screen.getByRole('button', { name: 'Reload page' })).toHaveStyle({ background: 'rgb(255, 255, 255)', color: 'rgb(14, 15, 17)' })
+    expect(screen.getByRole('button', { name: 'Try again' })).toHaveStyle({ background: 'rgb(32, 34, 38)', color: 'rgb(244, 244, 245)' })
+    expect(screen.getByRole('alert').outerHTML).not.toMatch(/7c3aed|124, 58, 237/i)
+  })
+
   it('keeps the general message and retry for any other error', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     render(<ErrorBoundary><Throws message="Cannot read properties of undefined" /></ErrorBoundary>)

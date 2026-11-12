@@ -79,7 +79,11 @@ export class ErrorBoundary extends Component<Props, State> {
 
     // Default fallback. Kept inline + minimal so it doesn't depend
     // on Tailwind classes, fonts, or other app chrome — it has to
-    // render even if the failure was in the styling layer.
+    // render even if the failure was in the styling layer. The values are
+    // the app's own tokens written out (--surface-page, --ink, --ink-2,
+    // --surface-raised): the page's colours, a white primary action and a
+    // quiet second one, as everywhere else. The stylesheet may be what
+    // failed, so they cannot be read from it.
     return (
       <div
         role="alert"
@@ -88,17 +92,17 @@ export class ErrorBoundary extends Component<Props, State> {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: '#0a0a0f',
-          color: '#e9e9f0',
-          fontFamily: 'system-ui, sans-serif',
+          background: '#0e0f11',
+          color: '#f4f4f5',
+          fontFamily: 'Inter, system-ui, sans-serif',
           padding: '24px',
         }}
       >
         <div style={{ maxWidth: 480, textAlign: 'center' }}>
-          <h1 style={{ fontSize: 22, marginBottom: 12, fontWeight: 600 }}>
+          <h1 style={{ margin: '0 0 12px', fontFamily: "'Bricolage Grotesque', system-ui, sans-serif", fontSize: 'clamp(28px, 6vw, 40px)', lineHeight: 1.05, fontWeight: 800, letterSpacing: '-0.02em' }}>
             {stale ? "Part of Aurora couldn't load" : 'Aurora hit an unexpected error'}
           </h1>
-          <p style={{ fontSize: 14, opacity: 0.7, marginBottom: 24, lineHeight: 1.5 }}>
+          <p style={{ margin: '0 0 24px', fontSize: 16, color: '#b4b6bc', lineHeight: 1.5 }}>
             {stale
               ? 'This usually means Aurora was updated while this page was open, or the connection dropped. Reload to continue. Your data is safe.'
               : 'Something went wrong rendering this page. Your data is safe — only the in-memory view is affected.'}
@@ -107,9 +111,10 @@ export class ErrorBoundary extends Component<Props, State> {
             <pre
               style={{
                 textAlign: 'left',
-                background: '#1a1a24',
+                background: '#17181b',
+                color: '#b4b6bc',
                 padding: 12,
-                borderRadius: 8,
+                borderRadius: 12,
                 fontSize: 12,
                 overflow: 'auto',
                 marginBottom: 24,
@@ -124,14 +129,15 @@ export class ErrorBoundary extends Component<Props, State> {
             type="button"
             onClick={() => window.location.reload()}
             style={{
-              background: '#7c3aed',
-              color: 'white',
+              background: '#ffffff',
+              color: '#0e0f11',
               border: 'none',
-              padding: '10px 20px',
-              borderRadius: 8,
-              fontSize: 14,
+              height: 48,
+              padding: '0 24px',
+              borderRadius: 999,
+              fontSize: 15,
               cursor: 'pointer',
-              fontWeight: 500,
+              fontWeight: 600,
               marginRight: 8,
             }}
           >
@@ -141,12 +147,14 @@ export class ErrorBoundary extends Component<Props, State> {
             type="button"
             onClick={this.retry}
             style={{
-              background: 'transparent',
-              color: '#e9e9f0',
-              border: '1px solid rgba(255,255,255,0.2)',
-              padding: '10px 20px',
-              borderRadius: 8,
-              fontSize: 14,
+              background: '#202226',
+              color: '#f4f4f5',
+              border: 'none',
+              height: 48,
+              padding: '0 20px',
+              borderRadius: 12,
+              fontSize: 15,
+              fontWeight: 600,
               cursor: 'pointer',
             }}
           >
