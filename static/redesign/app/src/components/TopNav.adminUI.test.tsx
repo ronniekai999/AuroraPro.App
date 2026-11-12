@@ -344,6 +344,27 @@ describe('the presence pill', () => {
     fireEvent.click(pill)
     expect(onPresenceClick).toHaveBeenCalledTimes(1)
   })
+
+  // Below xl the pill draws "3 watching" alone. What is on stays in its
+  // name: the short text as drawn, then the rest for assistive tech, and at
+  // xl the whole label is drawn instead.
+  it('keeps what is on in the pill\'s name where only the count is drawn', () => {
+    render(<TopNav {...props({ presence: { label: '3 watching Night Train', short: '3 watching' } })} />)
+    const pill = document.querySelector<HTMLElement>('[data-presence]')!
+    const [short, rest, whole] = [...pill.querySelectorAll('span:not([aria-hidden])')]
+    expect([short.textContent, short.className]).toEqual(['3 watching', 'truncate xl:hidden'])
+    expect([rest.textContent, rest.className]).toEqual([' Night Train', 'sr-only xl:hidden'])
+    expect([whole.textContent, whole.className]).toEqual(['3 watching Night Train', 'hidden truncate xl:inline'])
+    expect(pill).not.toHaveAttribute('aria-label')
+  })
+
+  it('adds nothing where the short text is not the start of the label, or is all of it', () => {
+    const { unmount } = render(<TopNav {...props({ presence: { label: 'In a watch party', short: 'In a party', expanded: false } })} />)
+    expect(document.querySelector('[data-presence-rest]')).toBeNull()
+    unmount()
+    render(<TopNav {...props({ presence: { label: '3 watching', short: '3 watching' } })} />)
+    expect(document.querySelector('[data-presence-rest]')).toBeNull()
+  })
 })
 
 describe('BottomTabBar', () => {

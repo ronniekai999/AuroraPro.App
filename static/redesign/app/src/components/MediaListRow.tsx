@@ -90,6 +90,14 @@ export function MediaListRow({
   const isInLib = !!libraryIds?.has(item.id)
   const rated = contentRatingOf(item.tags)
   const sub = [item.year && item.year > 0 ? String(item.year) : '', rated, progress?.label ?? ''].filter(Boolean).join(' · ')
+  const said = [
+    item.year && item.year > 0 ? String(item.year) : '',
+    rated,
+    item.genre ?? '',
+    item.duration ?? '',
+    item.rating !== undefined && item.rating > 0 ? `score ${item.rating.toFixed(1)}` : '',
+    progress?.label ?? '',
+  ].filter(Boolean).join(', ')
 
   // Long press, as on a card: touch only (hooks/useLongPress). A press that
   // starts on one of the row's actions is that button's. (The title is a
@@ -139,10 +147,16 @@ export function MediaListRow({
         </span>
         <span className="mlr-text">
           <span className="mlr-title">{item.title}</span>
+          {/* What the row's cells say, as part of the button's name: the
+              cells are outside the button and their header is not read, so
+              without this a keyboard user heard the title alone where a
+              card says the year and the rating too. */}
+          {said && <span className="sr-only">, {said}</span>}
           {/* A phone's row has room for the title and little else: the
               year, the rating and the viewer's place go under it there,
-              and their columns are not drawn (index.css). */}
-          {sub && <span className="mlr-sub">{sub}</span>}
+              and their columns are not drawn (index.css). For the eye
+              only: the line above already says it. */}
+          {sub && <span className="mlr-sub" aria-hidden="true">{sub}</span>}
         </span>
       </button>
 

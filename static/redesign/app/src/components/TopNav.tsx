@@ -512,6 +512,13 @@ export function TopNav({
             {/* What is on is named from xl up. Below that the bar cannot
                 hold the title AND a search field wide enough to type in. */}
             <span className="truncate xl:hidden">{presence.short}</span>
+            {/* What is on is still part of the pill's name where it is not
+                drawn: the rest of the label, for assistive tech only. (Not an
+                aria-label: the name must go on containing the words on
+                screen, and "In a party" is not in "In a watch party".) */}
+            {presence.label.startsWith(presence.short) && presence.label.length > presence.short.length && (
+              <span className="sr-only xl:hidden" data-presence-rest="">{presence.label.slice(presence.short.length)}</span>
+            )}
             <span className="hidden truncate xl:inline">{presence.label}</span>
           </button>
         )}

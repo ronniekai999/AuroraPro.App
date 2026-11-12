@@ -4633,6 +4633,8 @@ textarea:focus-visible {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
+/* A long press is the row's own (the title's menu), not iOS's link sheet. */
+.media-list-row { -webkit-touch-callout: none; }
 .media-list-row:hover { background: var(--surface-raised); }
 .media-list-row:hover .mlr-title { text-decoration: underline; }
 /* The row's focus is its title button's. At (0,3,0) this rule REPLACES the

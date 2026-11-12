@@ -316,6 +316,25 @@ describe('a list row\'s actions', () => {
     expect(calls.select).toHaveBeenCalledTimes(2)
   })
 
+  // The cells sit outside the title's button and their header is not read:
+  // the button's own name says them, as a card's does.
+  it('names the title button with what the row\'s cells say, and the phone\'s line is for the eye only', () => {
+    cleanup()
+    render(
+      <BrowseView
+        items={[{ ...m(1, 'Alpha'), year: 2021, genre: 'Drama', duration: '1h 52m', rating: 7.94, tags: ['4K', 'PG-13'] }, { ...m(2, 'Bravo'), year: 0, genre: '', duration: '', rating: 0, tags: [] }]}
+        total={2} layout="list" onLoadMore={noop} isLoadingMore={false} onSelect={noop} onCardContext={noop} onCardPlay={noop}
+        progressById={new Map([[1, { label: '41 min left', fraction: 0.6 }]])}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Alpha, 2021, PG-13, Drama, 1h 52m, score 7.9, 41 min left' })).toBeInTheDocument()
+    // Nothing known about it: the title alone, with no stray comma.
+    expect(screen.getByRole('button', { name: 'Bravo' })).toBeInTheDocument()
+    const sub = document.querySelector('.media-list-row .mlr-sub')!
+    expect(sub.textContent).toBe('2021 · PG-13 · 41 min left')
+    expect(sub).toHaveAttribute('aria-hidden', 'true')
+  })
+
   // Children of a button are presentational to assistive tech: a More
   // button inside one can be dropped from the accessibility tree while it
   // stays in the tab order. The row is a plain container, its title is the
