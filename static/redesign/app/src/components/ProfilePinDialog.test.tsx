@@ -16,6 +16,22 @@ describe('unlockErrorMessage', () => {
     expect(unlockErrorMessage(refusal('profile_pin_locked', 429), 'pin')).toMatch(/15 minutes/)
     expect(unlockErrorMessage(new Error('network down'), 'pin')).toBe('network down')
   })
+
+  // The server says how long a lockout has left (Retry-After). A fixed "15
+  // minutes" was wrong for everyone who came back part of the way through.
+  it('says how long a lockout lasts when the server says', () => {
+    const locked = new APIError(429, 'server words', { error: { code: 429, message: 'server words', reason: 'profile_pin_locked' } }, 200)
+    expect(unlockErrorMessage(locked, 'pin')).toBe('Too many wrong attempts. Try again in about 4 minutes.')
+  })
+
+  // The prompt also confirms PIN changes and a new default, which can be
+  // refused for reasons a switch never meets.
+  it('has plain words for the refusals a confirmation can meet', () => {
+    expect(unlockErrorMessage(refusal('session_ended', 401), 'pin')).toMatch(/signed out\. Sign in again/)
+    expect(unlockErrorMessage(refusal('profile_restricted', 403), 'pin')).toMatch(/has a content limit, so it cannot change this/)
+    expect(unlockErrorMessage(refusal('profile_changed', 409), 'password')).toMatch(/changed on another device/)
+    expect(unlockErrorMessage(refusal('profile_pin_required', 403), 'password')).toBe('Enter the account password.')
+  })
 })
 
 describe('ProfilePinDialog', () => {

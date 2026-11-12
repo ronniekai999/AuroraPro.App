@@ -14,7 +14,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Lock } from 'lucide-react'
 import { ProfileAvatar } from './ProfileAvatar'
-import { profileErrorReason, type Profile, type ProfileUnlock } from '@/lib/api'
+import { type Profile, type ProfileUnlock } from '@/lib/api'
+import { refusalMessage, refusalReason } from '@/lib/profileRefusal'
 
 interface ProfilePinDialogProps {
   // `id` picks the avatar's colour, so the disc here is the one in the picker.
@@ -33,17 +34,15 @@ interface ProfilePinDialogProps {
 // unlockErrorMessage turns a rejected unlock into what to tell the person.
 // Exported for the tests: the wording for each server reason is the contract.
 export function unlockErrorMessage(e: unknown, mode: 'pin' | 'password'): string {
-  switch (profileErrorReason(e)) {
+  switch (refusalReason(e)) {
     case 'profile_pin_invalid':
       return mode === 'pin' ? 'That PIN is not right.' : 'That password is not right.'
-    case 'profile_pin_locked':
-      return 'Too many wrong attempts. Try again in 15 minutes.'
     case 'profile_pin_required':
       return mode === 'pin' ? 'Enter the profile’s PIN.' : 'Enter the account password.'
-    case 'profile_restricted':
-      return 'This profile can’t change that.'
     default:
-      return e instanceof Error && e.message ? e.message : 'Something went wrong. Try again.'
+      // The lockout (with how long to wait), a session the server has ended,
+      // a profile changed elsewhere: the words every profile refusal gets.
+      return refusalMessage(e, 'Something went wrong. Try again.')
   }
 }
 

@@ -327,11 +327,21 @@ export function backdropSrcSet(url: string | undefined): string | undefined {
 export class APIError extends Error {
   status: number
   body: unknown
-  constructor(status: number, message: string, body: unknown) {
+  /** The response's Retry-After, in seconds, when it sent a usable one. */
+  retryAfterSec?: number
+  constructor(status: number, message: string, body: unknown, retryAfterSec?: number) {
     super(message)
     this.status = status
     this.body = body
+    this.retryAfterSec = retryAfterSec
   }
+}
+
+/** A Retry-After header as whole seconds; undefined for none, a date, or junk. */
+function retryAfterSeconds(res: Response): number | undefined {
+  const raw = res.headers.get('Retry-After')
+  if (!raw || !/^\d+$/.test(raw.trim())) return undefined
+  return Number(raw.trim())
 }
 
 // Exported for components that need to proactively refresh the
@@ -510,7 +520,7 @@ export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}):
         if (typeof nested === 'string') message = nested
       }
     }
-    throw new APIError(res.status, message, body)
+    throw new APIError(res.status, message, body, retryAfterSeconds(res))
   }
   return (await parseBody()) as T
 }
@@ -566,6 +576,44 @@ export async function login(username: string, password: string): Promise<User> {
   // pass silently, putting us back to polling forever.
   resetSessionEndedLatch()
   return tokens.user
+}
+
+// Changes the account password. The server then ends EVERY session on the
+// account, this one included, so the caller signs the app out afterwards.
+//
+// Not through apiFetch: that answers any 401 by refreshing the session and
+// sending the request again, and here a 401 is also how the server says the
+// current password is wrong, so each wrong try would be made, counted against
+// the route's limit and logged twice. Only a 401 that is NOT that answer (an
+// expired access token) is refreshed and retried, once.
+export const WRONG_CURRENT_PASSWORD = 'current password is incorrect'
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const send = () => fetch('/api/auth/change-password', {
+    method: 'POST',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    credentials: 'same-origin',
+  })
+  const read = async (res: Response): Promise<{ body: unknown; message: string }> => {
+    let body: unknown = null
+    try { body = await res.json() } catch { /* not JSON */ }
+    const errField = body && typeof body === 'object' ? (body as Record<string, unknown>).error : undefined
+    const message = typeof errField === 'string'
+      ? errField
+      : errField && typeof errField === 'object' && typeof (errField as Record<string, unknown>).message === 'string'
+        ? (errField as Record<string, unknown>).message as string
+        : `HTTP ${res.status}`
+    return { body, message }
+  }
+  let res = await send()
+  if (res.ok) return
+  let failure = await read(res)
+  if (res.status === 401 && failure.message !== WRONG_CURRENT_PASSWORD && await tryRefresh()) {
+    res = await send()
+    if (res.ok) return
+    failure = await read(res)
+  }
+  throw new APIError(res.status, failure.message, failure.body, retryAfterSeconds(res))
 }
 
 export async function logout(): Promise<void> {
@@ -2103,8 +2151,10 @@ export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
   const res = await apiFetch<Profile[]>('/api/profiles', { signal })
   return res || []
 }
-export async function createProfile(name: string): Promise<Profile> {
-  return apiFetch<Profile>('/api/profiles', { method: 'POST', body: { name } })
+// `extra.max_age_rating` creates the profile with a content limit already on
+// it, so there is no moment at which a child's new profile has none.
+export async function createProfile(name: string, extra: { max_age_rating?: string } = {}): Promise<Profile> {
+  return apiFetch<Profile>('/api/profiles', { method: 'POST', body: { name, ...extra } })
 }
 // updateProfile patches one profile — only the keys provided are written
 // (the server's UpdateProfileRequest uses optional pointers). The onboarding
@@ -2124,7 +2174,7 @@ export async function deleteProfile(id: number): Promise<void> {
 // Account-level identity shown to OTHER signed-in members — distinct from
 // the Netflix-style sub-profiles above (Profile), which stay private to the
 // account. Server: /api/me/profile (self) + /api/members/{username} (any
-// member). Social handles travel bare; SettingsView normalizes pasted
+// member). Social handles travel bare; the profile page normalizes pasted
 // URLs/@s via lib/socialLinks before submit and the server re-validates.
 
 export interface MemberProfile {
@@ -2233,8 +2283,11 @@ export async function getMemberProfile(username: string, signal?: AbortSignal): 
   return apiFetch<MemberProfileResponse>(`/api/members/${encodeURIComponent(username)}`, { signal })
 }
 
-export async function setDefaultProfile(id: number): Promise<void> {
-  await apiFetch(`/api/profiles/${id}/default`, { method: 'POST' })
+// Making a LOCKED profile the default needs its PIN or the account password
+// (`unlock`), unless the session already acts as it: every session with no
+// binding acts as the default.
+export async function setDefaultProfile(id: number, unlock?: ProfileUnlock): Promise<void> {
+  await apiFetch(`/api/profiles/${id}/default`, { method: 'POST', body: unlock })
 }
 
 // Binds `id` as this session's server-side acting profile (issue #462) —
