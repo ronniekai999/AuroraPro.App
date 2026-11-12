@@ -3592,6 +3592,7 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
    been sampled (lib/ambient clamps it dark and low in saturation), and is
    transparent until then, so this paints nothing rather than a guess. */
 .companion-wash {
+  display: none;
   position: absolute;
   inset: 0 0 auto 0;
   height: 320px;
@@ -3599,12 +3600,13 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   background: radial-gradient(420px 320px at 50% 0px, var(--ambient), transparent 100%);
 }
 /* What the companion's room shows only when the window is tall enough for
-   it: what is playing and who is here. On a phone held on its side they
-   would leave the chat no room, and the message field would fall off the
-   end of a screen that does not scroll. */
+   it: what is playing and who is here, and with the poster its colour. On
+   a phone held on its side they would leave the chat no room, and the
+   message field would fall off the end of a screen that does not scroll. */
 .companion-tall-only { display: none; }
 @media (min-height: 560px) {
   .companion-tall-only { display: flex; }
+  .companion-wash { display: block; }
 }
 .stage-btn:disabled,
 .stage-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }

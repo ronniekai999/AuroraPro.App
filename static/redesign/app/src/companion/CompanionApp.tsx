@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import {
+  APIError,
   fetchMe,
   getSetupStatus,
   getStoredUser,
@@ -20,6 +21,7 @@ import {
   type SetupStatus,
   type User,
 } from '@/lib/api'
+import { waitPhrase } from '@/lib/profileRefusal'
 import { useCompanion } from '@/hooks/useCompanion'
 import { JoinScreen } from './JoinScreen'
 import { CompanionRoom } from './CompanionRoom'
@@ -163,6 +165,22 @@ function BootSplash() {
   )
 }
 
+/** Why a sign-in did not work, in the app's words. The server's own are
+ *  written for logs ("invalid credentials", "rate limit exceeded, try again
+ *  later"), and a request that never arrived is the browser's "Failed to
+ *  fetch". It never says which of the username and the password was wrong:
+ *  the server does not, on purpose. */
+function signInRefusal(err: unknown): string {
+  if (err instanceof APIError) {
+    if (err.status === 401) return 'That username and password do not match an account.'
+    if (err.status === 429) return `Too many tries. Try again ${waitPhrase(err.retryAfterSec, 'in a minute')}.`
+    if (err.status >= 500) return 'The server could not sign you in just now. Try again.'
+    return 'Sign-in did not work. Try again.'
+  }
+  if (err instanceof TypeError) return 'The server could not be reached. Check the connection and try again.'
+  return 'Sign-in did not work. Try again.'
+}
+
 // The sign-in: one button for each provider the server has on, and a
 // username and password form behind one press. There is no guest path.
 //
@@ -212,7 +230,7 @@ function SignInSlot({
       const u = await apiLogin(username, password)
       onLogin(u)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed.')
+      setError(signInRefusal(err))
     } finally {
       sending.current = false
       setSubmitting(false)
@@ -258,6 +276,7 @@ function SignInSlot({
             autoCapitalize="off"
             autoCorrect="off"
             autoComplete="username"
+            name="username"
             aria-label="Username"
             // The button that opened the form is gone; the focus it held
             // goes to the first thing to fill in.
@@ -271,6 +290,7 @@ function SignInSlot({
             onChange={e => { setError(null); setPassword(e.target.value) }}
             placeholder="Password"
             autoComplete="current-password"
+            name="password"
             aria-label="Password"
             readOnly={submitting}
             className="companion-field w-full"

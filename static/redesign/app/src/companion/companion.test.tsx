@@ -9,7 +9,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { User } from '@/lib/api'
+import { APIError, type User } from '@/lib/api'
+import { QUICK_REACTIONS } from '@/lib/reactions'
 import type { VoiceState } from '@/lib/voice'
 import type { CompanionState, UseCompanion } from '@/hooks/useCompanion'
 
@@ -91,6 +92,8 @@ beforeEach(() => {
   api.getStoredUser.mockReset().mockReturnValue(null)
   api.login.mockReset()
   ambient.ambientFor.mockReset().mockResolvedValue(null)
+  // A browser that can use the microphone: jsdom has no media devices.
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } })
 })
 afterEach(() => { vi.useRealTimers() })
 
@@ -156,7 +159,7 @@ describe('the companion’s join screen', () => {
 
   it('shows what is on in the party a complete code names, and asks about no incomplete one', async () => {
     const user = userEvent.setup()
-    api.getCompanionPartyPreview.mockResolvedValue({ code: 'FRD4YC', partyName: 'Friday crew', mediaTitle: 'Night Train to Meridian', participantCount: 3 })
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'FRD4YC', partyName: 'Friday crew', mediaTitle: 'Night Train to Meridian', participantCount: 3, startedAt: '2026-10-01T19:00:00Z', scheduledStartAt: null })
     render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} />)
     const code = screen.getByLabelText('Party code')
     await user.type(code, 'frd4y')
@@ -164,7 +167,8 @@ describe('the companion’s join screen', () => {
     expect(api.getCompanionPartyPreview).not.toHaveBeenCalled()
     await user.type(code, 'c')
     expect(await screen.findByText('Friday crew is live')).toBeInTheDocument()
-    expect(screen.getByText('Night Train to Meridian · 3 watching')).toBeInTheDocument()
+    // Everyone in the room, phones included: "here", not "watching".
+    expect(screen.getByText('Night Train to Meridian · 3 here')).toBeInTheDocument()
     expect(api.getCompanionPartyPreview).toHaveBeenCalledTimes(1)
     expect(api.getCompanionPartyPreview.mock.calls[0][0]).toBe('FRD4YC')
     // The card goes with the code it was for.
@@ -173,10 +177,70 @@ describe('the companion’s join screen', () => {
   })
 
   it('names a party that has no name by what it is', async () => {
-    api.getCompanionPartyPreview.mockResolvedValue({ code: 'NONAME', mediaTitle: 'The Orchard' })
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'NONAME', mediaTitle: 'The Orchard', startedAt: '2026-10-01T19:00:00Z' })
     render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="NONAME" />)
     expect(await screen.findByText('This party is live')).toBeInTheDocument()
     expect(screen.getByText('The Orchard')).toBeInTheDocument()
+  })
+
+  // A code is pasted more often than typed: with its dash, or as the link
+  // the TV's QR code holds. The field has no length limit of its own, which
+  // used to cut the paste before the dash was taken out.
+  it('takes a code pasted with a separator or as a join link whole', async () => {
+    const user = userEvent.setup()
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} />)
+    const code = screen.getByLabelText('Party code')
+    expect(code).not.toHaveAttribute('maxlength')
+    await user.click(code)
+    await user.paste('frd-4yc')
+    expect(code).toHaveValue('FRD4YC')
+    await user.clear(code)
+    await user.paste('https://aurora.example.test/join/moon42')
+    expect(code).toHaveValue('MOON42')
+    await user.clear(code)
+    await user.paste('https://aurora.example.test/p/Later7/')
+    expect(code).toHaveValue('LATER7')
+    // And never more than six, however much is pasted.
+    await user.clear(code)
+    await user.paste('abcdefghij')
+    expect(code).toHaveValue('ABCDEF')
+  })
+
+  // The server holds a planned party before it starts, and answers for it
+  // as it does for a live one.
+  it('does not call a party live before it has started, and says when it starts', async () => {
+    const at = new Date(Date.now() + 26 * 3600e3)
+    at.setMinutes(0, 0, 0)
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', partyName: 'Sunday film', mediaTitle: 'The Orchard', participantCount: 0, startedAt: null, scheduledStartAt: at.toISOString() })
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
+    expect(await screen.findByText('Sunday film has not started')).toBeInTheDocument()
+    expect(screen.queryByText(/is live/)).toBeNull()
+    expect(screen.queryByText(/0 (here|watching)/)).toBeNull()
+    expect(screen.getByText(/^The Orchard, starts (tomorrow|[A-Z][a-z]{2}, )/)).toBeInTheDocument()
+  })
+
+  it('says only that a party has not started when it has no planned time', async () => {
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', mediaTitle: 'The Orchard', participantCount: 1, startedAt: null, scheduledStartAt: null })
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
+    expect(await screen.findByText('This party has not started')).toBeInTheDocument()
+    expect(screen.getByText('The Orchard')).toBeInTheDocument()
+  })
+
+  // The danger border is the field's way of saying its code is wrong. A
+  // complete code with nobody signed in, or a join the app refused, is not
+  // that.
+  it('marks the field only for a problem with the code itself', async () => {
+    const user = userEvent.setup()
+    const onJoin = vi.fn<(code: string) => { ok: boolean; error?: string }>(() => ({ ok: false, error: 'You are not signed in.' }))
+    const { rerender } = render(<JoinScreen user={null} onJoin={onJoin} initialCode="FRD4YC" />)
+    const code = screen.getByLabelText('Party code')
+    await user.type(code, '{Enter}')
+    expect(said('alert')).toEqual(['Sign in to join the party.'])
+    expect(code).toHaveAttribute('aria-invalid', 'false')
+    rerender(<JoinScreen user={MORGAN} onJoin={onJoin} initialCode="FRD4YC" />)
+    await user.click(screen.getByRole('button', { name: 'Join' }))
+    expect(said('alert')).toEqual(['You are not signed in.'])
+    expect(code).toHaveAttribute('aria-invalid', 'false')
   })
 
   it('shows why the phone was sent back here', () => {
@@ -266,17 +330,17 @@ describe('the companion’s room', () => {
     expect(people.map(li => li.textContent)).toEqual([
       'PpriyaHost, talking',
       'JjonahIn voice',
-      'DdanaWatching',
+      'DdanaHere',
       'MYouIn voice, on phone',
     ])
     // The ring is on the one who is speaking, and on nobody else.
     expect(people.map(li => li.querySelector('[data-speaking]') !== null)).toEqual([true, false, false, false])
   })
 
-  it('does not call someone it knows nothing more about anything but watching, or host', () => {
+  it('says only that someone is here, or the host, when it knows nothing more of them', () => {
     room()
     const people = within(screen.getByRole('list', { name: 'Participants' })).getAllByRole('listitem')
-    expect(people.map(li => li.textContent)).toEqual(['PpriyaHost', 'JjonahWatching', 'DdanaWatching', 'MYouOn phone'])
+    expect(people.map(li => li.textContent)).toEqual(['PpriyaHost', 'JjonahHere', 'DdanaHere', 'MYouOn phone'])
   })
 
   it('shows the chat a line a message, the viewer’s own as "You"', () => {
@@ -291,12 +355,20 @@ describe('the companion’s room', () => {
     const user = userEvent.setup()
     const { props } = room()
     const reactions = within(screen.getByRole('group', { name: 'Quick reactions' })).getAllByRole('button')
-    expect(reactions.map(b => b.getAttribute('aria-label'))).toEqual(
-      ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉'].map(e => `React with ${e}`),
-    )
-    await user.click(screen.getByRole('button', { name: 'React with 🔥' }))
-    expect(props.sendReaction).toHaveBeenCalledTimes(1)
-    expect(props.sendReaction).toHaveBeenCalledWith('🔥')
+    // The app's nine (lib/reactions, held against the server's list there),
+    // each sent as it is listed.
+    expect(reactions).toHaveLength(9)
+    for (const [i, button] of reactions.entries()) {
+      await user.click(button)
+      expect(props.sendReaction).toHaveBeenLastCalledWith(QUICK_REACTIONS[i])
+    }
+    expect(props.sendReaction).toHaveBeenCalledTimes(9)
+    // The heart is sent bare, which is what the server lists, and drawn as
+    // the emoji.
+    const heart = screen.getByRole('button', { name: 'React with \u2764\uFE0F' })
+    expect(heart.textContent).toBe('\u2764\uFE0F')
+    await user.click(heart)
+    expect(props.sendReaction).toHaveBeenLastCalledWith('\u2764')
   })
 
   it('sends a typed message once, trimmed, and leaves the field empty and in focus', async () => {
@@ -376,6 +448,162 @@ describe('the companion’s room', () => {
     expect(props.leaveVoice).toHaveBeenCalledTimes(1)
   })
 
+  // Who else is in voice is known only to a phone that is in voice itself.
+  it('says nothing of other people\'s voice while this phone is out of it', () => {
+    room({
+      voice: { ...NO_VOICE, enabled: false, peers: [{ userId: 3, username: 'jonah', speaking: false, connecting: false }] },
+    })
+    const people = within(screen.getByRole('list', { name: 'Participants' })).getAllByRole('listitem')
+    expect(people.map(li => li.textContent)).toEqual(['PpriyaHost', 'JjonahHere', 'DdanaHere', 'MYouOn phone'])
+  })
+
+  it('puts the focus on the room\'s heading on the way in', () => {
+    room()
+    expect(screen.getByRole('heading', { level: 1, name: 'Friday crew' })).toHaveFocus()
+  })
+
+  // The words stay when there is nowhere to send them.
+  it('keeps a message that could not be sent, and says why Send is off while the connection is down', async () => {
+    const user = userEvent.setup()
+    const { rerender, props } = room({ state: { ...ROOM, reconnecting: true, status: 'reconnecting' } })
+    const field = screen.getByLabelText('Message the party')
+    const send = screen.getByRole('button', { name: 'Send message' })
+    await user.type(field, 'back in two minutes')
+    expect(send).toHaveAttribute('aria-disabled', 'true')
+    const why = 'Not connected. What you type is kept here until the connection is back.'
+    expect(send).toHaveAccessibleDescription(why)
+    expect(field).toHaveAccessibleDescription(why)
+    await user.type(field, '{Enter}')
+    await user.click(send)
+    expect(props.sendChat).not.toHaveBeenCalled()
+    expect(field).toHaveValue('back in two minutes')
+
+    // Back: the note goes, and the same words are sent.
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    expect(screen.queryByText(why)).toBeNull()
+    expect(send).toHaveAttribute('aria-disabled', 'false')
+    expect(field).not.toHaveAttribute('aria-describedby')
+    await user.click(send)
+    expect(props.sendChat).toHaveBeenCalledWith('back in two minutes')
+    expect(field).toHaveValue('')
+  })
+
+  // The socket can be gone a moment before the screen has heard of it.
+  it('keeps the words when the connection says it did not send them', async () => {
+    const user = userEvent.setup()
+    const sendChat = vi.fn(() => false)
+    room({ sendChat })
+    const field = screen.getByLabelText('Message the party')
+    await user.type(field, 'still here{Enter}')
+    expect(sendChat).toHaveBeenCalledWith('still here')
+    expect(field).toHaveValue('still here')
+  })
+
+  // The history that arrives with the connection is not news, and a live
+  // region would read all of it out.
+  it('does not announce the chat it arrives to, only what is said after', async () => {
+    const { rerender, props } = room({ state: { ...ROOM, connected: false, status: 'joining', chat: [] } })
+    const log = screen.getByRole('log', { name: 'Chat' })
+    expect(log).toHaveAttribute('aria-live', 'off')
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    // Still off in the commit that draws the history.
+    expect(log).toHaveAttribute('aria-live', 'off')
+    await waitFor(() => expect(log).toHaveAttribute('aria-live', 'polite'))
+    // Reconnecting brings the history again.
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, reconnecting: true, status: 'reconnecting' }} />)
+    expect(log).toHaveAttribute('aria-live', 'off')
+  })
+
+  it('follows a new message when the reader was at the end, and not when they had scrolled back', () => {
+    const msg = (id: string, message = 'more') => ({ id, user_id: 2, username: 'priya', message, timestamp: '' })
+    const { rerender, props } = room()
+    const log = screen.getByRole('log', { name: 'Chat' })
+    let height = 1000
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => height })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, get: () => 300 })
+    // At the end: a new line is followed, however tall it is.
+    log.scrollTop = 700
+    fireEvent.scroll(log)
+    height = 1400
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [...ROOM.chat, msg('c3', 'a very tall message')] }} />)
+    expect(log.scrollTop).toBe(1400)
+    // Scrolled back to read: left where they are.
+    log.scrollTop = 200
+    fireEvent.scroll(log)
+    height = 1500
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [...ROOM.chat, msg('c3'), msg('c4')] }} />)
+    expect(log.scrollTop).toBe(200)
+    // The list is capped: a new message can arrive with the count unchanged.
+    log.scrollTop = 1200
+    fireEvent.scroll(log)
+    height = 1600
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [ROOM.chat[1], msg('c3'), msg('c4'), msg('c5')].slice(-4) }} />)
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, chat: [msg('c3'), msg('c4'), msg('c5'), msg('c6')] }} />)
+    expect(log.scrollTop).toBe(1600)
+  })
+
+  // A note appears above the message field, or the voice row opens, and the
+  // chat's box gets shorter under someone who was at its end.
+  it('stays at the end when the chat\'s own box changes height, unless the reader had scrolled back', () => {
+    let resized: () => void = () => {}
+    vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { resized = cb } observe() {} disconnect() {} })
+    try {
+      room()
+      const log = screen.getByRole('log', { name: 'Chat' })
+      Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => 900 })
+      Object.defineProperty(log, 'clientHeight', { configurable: true, get: () => 300 })
+      log.scrollTop = 600
+      fireEvent.scroll(log)
+      log.scrollTop = 560
+      act(() => resized())
+      expect(log.scrollTop).toBe(900)
+      log.scrollTop = 100
+      fireEvent.scroll(log)
+      act(() => resized())
+      expect(log.scrollTop).toBe(100)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps a name or a message in another script from reordering what is beside it', () => {
+    room({ state: { ...ROOM, chat: [{ id: 'r1', user_id: 2, username: 'נועה', message: 'שלום!', timestamp: '' }] } })
+    const line = screen.getByRole('log', { name: 'Chat' }).querySelector('p')!
+    expect([...line.querySelectorAll('bdi')].map(b => b.textContent)).toEqual(['נועה', 'שלום!'])
+    const people = within(screen.getByRole('list', { name: 'Participants' })).getAllByRole('listitem')
+    expect(people[0].querySelector('bdi')?.textContent).toBe('priya')
+  })
+
+  it('tells a browser with no microphone API that voice is not available, and asks for nothing', async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined })
+    const { props } = room()
+    await user.click(screen.getByRole('button', { name: 'Join voice' }))
+    expect(said('alert')).toEqual(['Voice is not available in this browser.'])
+    expect(props.joinVoice).not.toHaveBeenCalled()
+  })
+
+  // Voice goes with the room's connection, and the button goes back to
+  // "Join voice" by itself.
+  it('says when voice ended by itself, and nothing when the person left it', async () => {
+    const user = userEvent.setup()
+    const inVoice = { ...NO_VOICE, enabled: true, muted: false }
+    const { rerender, props } = room({ voice: inVoice })
+    await user.click(screen.getByRole('button', { name: 'Leave voice' }))
+    rerender(<CompanionRoom {...props} voice={NO_VOICE} />)
+    expect(said('alert')).toEqual([])
+    rerender(<CompanionRoom {...props} voice={inVoice} />)
+    rerender(<CompanionRoom {...props} voice={NO_VOICE} />)
+    expect(said('alert')).toEqual(['Voice ended when the connection dropped. Join voice again once you are reconnected.'])
+  })
+
+  it('reads out only the refusal that changed', () => {
+    room()
+    const alerts = screen.getAllByRole('alert')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toHaveAttribute('aria-atomic', 'false')
+  })
+
   it('leaves the party from the header', async () => {
     const user = userEvent.setup()
     const { props } = room()
@@ -452,10 +680,33 @@ describe('the companion’s sign-in', () => {
     expect(screen.getByLabelText('Password')).toHaveAttribute('readonly')
     fireEvent.click(out)
     expect(api.login).toHaveBeenCalledTimes(1)
-    await act(async () => { refuse(new Error('Invalid username or password.')) })
-    expect(said('alert')).toEqual(['Invalid username or password.'])
+    // What the server really sends for a wrong password, which is not what
+    // is shown.
+    await act(async () => { refuse(new APIError(401, 'invalid credentials', { error: { code: 401, message: 'invalid credentials' } })) })
+    expect(said('alert')).toEqual(['That username and password do not match an account.'])
     expect(screen.getByRole('button', { name: 'Sign in' })).toHaveFocus()
     expect(screen.getByLabelText('Password')).not.toHaveAttribute('readonly')
+  })
+
+  it('words each kind of sign-in refusal itself, never in the server\'s or the browser\'s words', async () => {
+    const user = userEvent.setup()
+    api.login
+      .mockRejectedValueOnce(new APIError(429, 'rate limit exceeded, try again later', { error: { code: 429, message: 'rate limit exceeded, try again later' } }, 180))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new APIError(502, 'Bad Gateway', '<html>Bad Gateway</html>'))
+    mount()
+    await user.click(await screen.findByRole('button', { name: 'Sign in with username' }))
+    expect(screen.getByLabelText('Username')).toHaveAttribute('name', 'username')
+    expect(screen.getByLabelText('Password')).toHaveAttribute('name', 'password')
+    await user.type(screen.getByLabelText('Username'), 'morgan')
+    await user.type(screen.getByLabelText('Password'), 'pw')
+    const submit = screen.getByRole('button', { name: 'Sign in' })
+    await user.click(submit)
+    await waitFor(() => expect(said('alert')).toEqual(['Too many tries. Try again in about 3 minutes.']))
+    await user.click(submit)
+    await waitFor(() => expect(said('alert')).toEqual(['The server could not be reached. Check the connection and try again.']))
+    await user.click(submit)
+    await waitFor(() => expect(said('alert')).toEqual(['The server could not sign you in just now. Try again.']))
   })
 
   it('joins the party in the address once signed in', async () => {

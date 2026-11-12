@@ -11,7 +11,7 @@ export function CompanionHeader() {
     <header className="flex h-11 flex-none items-center gap-2.5">
       <AuroraMark />
       {/* Carries the accessible name "Aurora Pro". */}
-      <AuroraWordmark ink="#F4F4F5" className="h-[15px] w-auto" />
+      <AuroraWordmark ink="var(--ink)" className="h-[15px] w-auto" />
       <span className="ml-auto text-[13px] text-ink-2">Companion</span>
     </header>
   )
@@ -19,8 +19,8 @@ export function CompanionHeader() {
 
 // ── OAuth providers — the 5 existing Aurora providers. Icons + brand
 // colors mirror App.tsx's OAuthSignInButton so the companion sign-in
-// reads as the same product. Kept here (not imported from App.tsx) so
-// the companion tree stays decoupled from the giant App module.
+// reads as the same product. Kept here because App.tsx does not export
+// its own, and importing that module would bring the whole app with it.
 
 export type CompanionOAuthProvider = 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter'
 

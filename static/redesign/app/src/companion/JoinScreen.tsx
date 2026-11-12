@@ -19,6 +19,7 @@ import {
 } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 import { PersonDisc } from '@/components/PersonDisc'
+import { formatPartyTime } from '@/lib/partyInvites'
 import { CompanionHeader } from './companionUi'
 
 const CODE_LEN = 6
@@ -46,13 +47,23 @@ export interface JoinScreenProps {
 export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalError }: JoinScreenProps) {
   const ids = useId()
   const [code, setCode] = useState<string>((initialCode ?? '').slice(0, CODE_LEN))
-  const [error, setError] = useState<string | null>(null)
+  // What stopped a join, and whether it is about the code in the field: only
+  // then is the field marked.
+  const [error, setError] = useState<{ text: string; aboutCode: boolean } | null>(null)
 
   // What is playing in the party the code names. null = none, or not known.
   const [preview, setPreview] = useState<CompanionPartyPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
-  const normalize = (v: string) => v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, CODE_LEN)
+  // What was typed or pasted, as a code: its letters and numbers, upper
+  // case, the first six. A pasted join or invitation link gives the code it
+  // ends in. The field has no maxLength of its own: that cut a pasted
+  // "FRD-4YC" to six characters before the dash was taken out, and lost the
+  // last one.
+  const normalize = (v: string) => {
+    const link = /\/(?:join|p)\/([A-Za-z0-9]{6})(?![A-Za-z0-9])/.exec(v)
+    return (link ? link[1] : v).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, CODE_LEN)
+  }
 
   // Looked up a moment after a complete code is in the field.
   useEffect(() => {
@@ -79,20 +90,23 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
 
   const attempt = useCallback(() => {
     if (!CODE_RE.test(code)) {
-      setError('Enter the full 6-character code.')
+      setError({ text: 'Enter the full 6-character code.', aboutCode: true })
       return
     }
     if (!user) {
-      setError('Sign in to join the party.')
+      setError({ text: 'Sign in to join the party.', aboutCode: false })
       return
     }
     setError(null)
     const res = onJoin(code)
-    if (!res.ok) setError(res.error ?? 'Could not join the party.')
+    if (!res.ok) setError({ text: res.error ?? 'Could not join the party.', aboutCode: false })
   }, [code, user, onJoin])
 
   const canJoin = CODE_RE.test(code) && !!user
-  const shown = error || externalError || null
+  const shown = error?.text || externalError || null
+  // A party the server holds for a planned start is not live yet.
+  const started = !!preview?.startedAt
+  const here = typeof preview?.participantCount === 'number' ? preview.participantCount : null
 
   return (
     // The column scrolls inside the companion's fixed shell, so a small
@@ -118,14 +132,13 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
             // incomplete code disables Join; a signed-out phone has none):
             // it says what is missing.
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); attempt() } }}
-            maxLength={CODE_LEN}
             inputMode="text"
             autoCapitalize="characters"
             autoCorrect="off"
             autoComplete="one-time-code"
             spellCheck={false}
             placeholder="······"
-            aria-invalid={error !== null}
+            aria-invalid={error?.aboutCode === true}
             aria-describedby={shown !== null ? `${ids}-hint ${ids}-error` : `${ids}-hint`}
             className="party-code-field mt-1.5 w-full"
             autoFocus={!initialCode}
@@ -157,13 +170,20 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
             <CompanionPoster poster={preview.mediaPoster} className="h-[60px] w-10 rounded-chip" />
             <p className="min-w-0 flex-1">
               <span className="flex items-center gap-2 text-[15px] font-semibold leading-snug text-ink">
-                {/* The mark of live presence. */}
-                <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full" style={{ background: 'var(--aurora)' }} />
-                <span className="min-w-0 truncate">{preview.partyName ? `${preview.partyName} is live` : 'This party is live'}</span>
+                {/* The mark of live presence, for a party that has started. */}
+                {started && <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full" style={{ background: 'var(--aurora)' }} />}
+                <span className="min-w-0 truncate">
+                  {started
+                    ? (preview.partyName ? `${preview.partyName} is live` : 'This party is live')
+                    : (preview.partyName ? `${preview.partyName} has not started` : 'This party has not started')}
+                </span>
               </span>{' '}
               <span className="block truncate text-[13px] leading-snug text-ink-2">
                 {preview.mediaTitle || 'Watch party'}
-                {typeof preview.participantCount === 'number' && ` · ${preview.participantCount} watching`}
+                {/* Everyone in the room, phones included: "here", not "watching". */}
+                {started
+                  ? (here !== null ? ` · ${here} here` : '')
+                  : preview.scheduledStartAt ? `, starts ${startsWhen(preview.scheduledStartAt)}` : ''}
               </span>
             </p>
           </div>
@@ -185,6 +205,12 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
       )}
     </div>
   )
+}
+
+/** When a planned party starts, for the middle of a sentence: "tonight ·
+ *  8:00 PM", "Fri, Aug 7 · 8:00 PM". */
+function startsWhen(iso: string): string {
+  return formatPartyTime(iso, new Date()).replace(/^(Tonight|Tomorrow)/, day => day.toLowerCase())
 }
 
 // The title's poster, small, on the join and room screens. Where there is

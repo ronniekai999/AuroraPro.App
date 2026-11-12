@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { pushEscapeLayer } from '@/lib/escapeLayers'
 import type { ReactionEvent } from '@/lib/party'
+import { QUICK_REACTIONS, drawnReaction } from '@/lib/reactions'
 
 const ANIM_DURATION_MS = 3000
 const SEEN_CAP = 200
@@ -121,7 +122,7 @@ export function ReactionOverlay({ events }: Props) {
               textShadow: '0 2px 24px rgba(0,0,0,0.6)',
             }}
           >
-            {r.emoji}
+            {drawnReaction(r.emoji)}
             <div className="text-[12px] text-white text-center font-semibold -mt-1">
               {r.username}
             </div>
@@ -167,8 +168,6 @@ interface PickerProps {
   // the party panel's composer and the mini dock.
   variant?: 'compact' | 'player'
 }
-
-const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
 export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange, variant = 'compact' }: PickerProps) {
   const [open, setOpen] = useState(false)
@@ -239,15 +238,17 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
           aria-label="Send a reaction"
           className={`absolute ${popoverV} ${popoverAnchor} bg-surface-raised-2 rounded-control shadow-[0_24px_64px_rgba(0,0,0,0.6)] p-2 flex flex-wrap justify-center gap-1 w-[min(90vw,288px)] z-20`}
         >
-          {QUICK_EMOJI.map(e => (
+          {/* The list is lib/reactions': each is one the server accepts, as
+              it is sent; what is drawn can differ (the heart). */}
+          {QUICK_REACTIONS.map(e => (
             <button
               key={e}
               type="button"
               onClick={() => { onSend(e); close() }}
               className="w-12 h-12 grid place-items-center text-2xl rounded-control hover:bg-action-soft transition-colors"
-              aria-label={`React with ${e}`}
+              aria-label={`React with ${drawnReaction(e)}`}
             >
-              {e}
+              {drawnReaction(e)}
             </button>
           ))}
         </div>

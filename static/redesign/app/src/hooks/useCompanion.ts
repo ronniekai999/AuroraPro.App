@@ -112,7 +112,9 @@ export interface UseCompanion {
   // so awaiters can't see it in time — same contract as useParty.join).
   join: (code: string) => { ok: boolean; error?: string }
   leave: () => void
-  sendChat: (message: string) => void
+  /** Sends a chat message. False when it was not sent (nothing to send, or
+   *  the room socket is not open), so the caller keeps what was typed. */
+  sendChat: (message: string) => boolean
   sendReaction: (emoji: string) => void
   // Voice (delegated to the existing mesh controller).
   joinVoice: () => Promise<void>
@@ -477,13 +479,13 @@ export function useCompanion(): UseCompanion {
     setState(INITIAL_STATE)
   }, [closeSocket])
 
-  const sendChat = useCallback((message: string) => {
+  const sendChat = useCallback((message: string): boolean => {
     const trimmed = message.trim()
-    if (!trimmed) return
+    if (!trimmed) return false
     const ws = roomWsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
     const out: OutboundRoomMessage = { type: 'chat', payload: { message: trimmed } }
-    try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
+    try { ws.send(JSON.stringify(out)); return true } catch { return false }
   }, [])
 
   const sendReaction = useCallback((emoji: string) => {

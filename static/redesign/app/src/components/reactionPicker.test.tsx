@@ -6,7 +6,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { ReactionPicker } from './ReactionOverlay'
+import { ReactionOverlay, ReactionPicker } from './ReactionOverlay'
+import { QUICK_REACTIONS } from '@/lib/reactions'
 
 afterEach(cleanup)
 
@@ -56,5 +57,28 @@ describe('ReactionPicker', () => {
     fireEvent.keyDown(document.body, { key: 'Escape' })
     expect(appHandler).toHaveBeenCalledTimes(1)
     window.removeEventListener('keydown', appHandler)
+  })
+})
+
+// The server lists the bare heart and refuses the one with a variation
+// selector, so that is what is sent; a bare heart is a text glyph on some
+// systems, so what is drawn is the emoji. On the picker, and for a heart
+// that arrives from anyone.
+describe('the heart', () => {
+  it('is sent bare and drawn as the emoji on the picker, with the rest of the app\'s nine', () => {
+    const onSend = vi.fn()
+    render(<ReactionPicker onSend={onSend} />)
+    fireEvent.click(trigger())
+    expect(emoji()).toHaveLength(QUICK_REACTIONS.length)
+    const heart = screen.getByRole('button', { name: 'React with \u2764\uFE0F' })
+    expect(heart.textContent).toBe('\u2764\uFE0F')
+    fireEvent.click(heart)
+    expect(onSend).toHaveBeenCalledWith('\u2764')
+  })
+
+  it('is drawn as the emoji when it floats up the screen', () => {
+    const { container } = render(<ReactionOverlay events={[{ user_id: 2, username: 'priya', emoji: '\u2764', abs_ms: 0, created_at: '2026-10-01T19:00:00Z' }]} />)
+    const floated = container.querySelector('.stage-party-reactions')
+    expect(floated?.textContent).toBe('\u2764\uFE0Fpriya')
   })
 })

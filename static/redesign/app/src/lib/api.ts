@@ -2696,7 +2696,12 @@ export interface CompanionPartyPreview {
   partyName?: string
   mediaTitle?: string
   mediaPoster?: string
+  /** Everyone in the room, phones included. */
   participantCount?: number
+  /** Null while the party has not started: the server holds a planned
+   *  party before anyone is watching. */
+  startedAt?: string | null
+  scheduledStartAt?: string | null
 }
 
 export async function getCompanionPartyPreview(
@@ -2714,6 +2719,8 @@ export async function getCompanionPartyPreview(
     mediaTitle: p?.media_title,
     mediaPoster: p?.media_poster,
     participantCount: p?.participant_count,
+    startedAt: p?.started_at ?? null,
+    scheduledStartAt: p?.scheduled_start_at ?? null,
   }
 }
 

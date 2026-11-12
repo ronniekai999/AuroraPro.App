@@ -19,17 +19,16 @@ import { PersonDisc } from '@/components/PersonDisc'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ambientFor } from '@/lib/ambient'
 import { personColor } from '@/lib/personColor'
+import { QUICK_REACTIONS, drawnReaction } from '@/lib/reactions'
 import type { CompanionState } from '@/hooks/useCompanion'
 import { CompanionPoster } from './JoinScreen'
-
-// The same nine as the big screen's reaction picker.
-const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
 export interface CompanionRoomProps {
   state: CompanionState
   voice: VoiceState
   currentUserId: number
-  sendChat: (message: string) => void
+  /** False when the message was not sent: the draft is then kept. */
+  sendChat: (message: string) => boolean | void
   sendReaction: (emoji: string) => void
   joinVoice: () => Promise<void>
   toggleMute: () => void
@@ -67,15 +66,50 @@ export function CompanionRoom({
   // Follow the newest message, but only for someone already near the end:
   // a person reading back is not pulled down. A chat that has just filled
   // (the history that arrives with the connection) opens at its end.
+  //
+  // "Near the end" is kept from the scroller's own scroll events, as it was
+  // BEFORE the new line arrived: measured after, one tall message put the
+  // end further away than the allowance and the chat stopped following. And
+  // the effect runs for a new last message, not a new count: the list is
+  // capped, so after two hundred messages the count no longer changes.
+  const nearEnd = useRef(true)
   const chatHad = useRef(0)
+  const last = state.chat[state.chat.length - 1]
+  const lastKey = last ? chatKey(last) : ''
   useEffect(() => {
     const el = chatScrollRef.current
     if (!el) return
     const filled = chatHad.current === 0
     chatHad.current = state.chat.length
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-    if (filled || nearBottom) el.scrollTop = el.scrollHeight
-  }, [state.chat.length])
+    if (filled || nearEnd.current) el.scrollTop = el.scrollHeight
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastKey])
+
+  // The chat's own box changes height too (a note appears above the message
+  // field, the voice row opens): someone at the end stays at the end.
+  useEffect(() => {
+    const el = chatScrollRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const watch = new ResizeObserver(() => { if (nearEnd.current) el.scrollTop = el.scrollHeight })
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+
+  // The chat is a live region, and the history that arrives with the
+  // connection is not news: up to a hundred lines would be read out at once.
+  // It is switched on a frame after the first state has been drawn, and off
+  // again while the phone reconnects (the history arrives again).
+  const [chatLive, setChatLive] = useState(false)
+  useEffect(() => {
+    if (state.status !== 'connected') { setChatLive(false); return }
+    const frame = requestAnimationFrame(() => setChatLive(true))
+    return () => cancelAnimationFrame(frame)
+  }, [state.status])
+
+  // Entering the room, the focus goes to its heading: the screen before it
+  // (the code field, the sign-in) is gone, and the focus with it.
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
+  useEffect(() => { headingRef.current?.focus() }, [])
 
   // The others in voice, by user id, and whether each is speaking. The
   // viewer's own voice is on voice.enabled and voice.selfSpeaking.
@@ -88,7 +122,8 @@ export function CompanionRoom({
   const submit = () => {
     const t = draft.trim()
     if (!t) return
-    sendChat(t)
+    // Not sent (the connection is down): what was typed stays in the field.
+    if (!live || sendChat(t) === false) return
     setDraft('')
     inputRef.current?.focus()
   }
@@ -97,6 +132,12 @@ export function CompanionRoom({
     if (micAsking.current) return
     setMicError(null)
     if (!voice.enabled) {
+      // No microphone API at all: a page not served over https, or an old
+      // in-app browser. Trying again cannot help, so it is not what is said.
+      if (typeof navigator === 'undefined' || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+        setMicError('Voice is not available in this browser.')
+        return
+      }
       micAsking.current = true
       setMicBusy(true)
       try {
@@ -120,6 +161,19 @@ export function CompanionRoom({
     toggleMute()
   }
 
+  // Voice that ended without the person leaving it (it goes with the room's
+  // connection) is said: the button has gone back to "Join voice" by itself.
+  const leftVoice = useRef(false)
+  const wasInVoice = useRef(voice.enabled)
+  useEffect(() => {
+    if (wasInVoice.current && !voice.enabled && !leftVoice.current) {
+      setMicError('Voice ended when the connection dropped. Join voice again once you are reconnected.')
+    }
+    wasInVoice.current = voice.enabled
+    leftVoice.current = false
+  }, [voice.enabled])
+  const leave = () => { leftVoice.current = true; leaveVoice() }
+
   const live = state.connected && !state.reconnecting
   // The first connection still on its way counts as connecting, so the
   // header never says "offline" while the phone is in fact getting there.
@@ -141,8 +195,8 @@ export function CompanionRoom({
       <div className="companion-wash" aria-hidden="true" />
       <header className="relative flex flex-none items-center gap-2 pl-4 pr-2 pt-3">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate font-display text-[26px] font-bold leading-[1.15] tracking-[-0.015em] text-ink">
-            {state.partyName || state.mediaTitle || 'Watch party'}
+          <h1 ref={headingRef} tabIndex={-1} className="truncate rounded-chip font-display text-[26px] font-bold leading-[1.15] tracking-[-0.015em] text-ink">
+            <bdi>{state.partyName || state.mediaTitle || 'Watch party'}</bdi>
           </h1>
           <p className="text-[13px] leading-snug text-ink-2">
             {state.code && <>Code <span className="tracking-[0.04em]">{state.code}</span></>}
@@ -164,7 +218,7 @@ export function CompanionRoom({
           <section aria-label="Now playing" className="companion-tall-only mx-4 mt-3 flex-none items-center gap-3 rounded-control bg-surface-raised p-3">
             <CompanionPoster poster={state.mediaPoster} className="h-[60px] w-10 rounded-chip" onArt={onArt} />
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[15px] font-semibold text-ink">{state.mediaTitle || 'Now playing'}</p>
+              <p className="truncate text-[15px] font-semibold text-ink"><bdi>{state.mediaTitle || 'Now playing'}</bdi></p>
               {/* The room's connection is told the position when the phone
                   connects and when the title or the host changes, not as
                   the film runs: so this is where it was, not a clock. */}
@@ -184,7 +238,9 @@ export function CompanionRoom({
                   key={p.user_id}
                   participant={p}
                   isSelf={self}
-                  inVoice={self ? inVoice : speakingByUser.has(p.user_id)}
+                  // Who else is in voice is only known to a phone that is in
+                  // voice itself: out of it, nothing is said of the others'.
+                  inVoice={self ? inVoice : inVoice && speakingByUser.has(p.user_id)}
                   speaking={self ? voice.selfSpeaking : !!speakingByUser.get(p.user_id)}
                 />
               )
@@ -196,7 +252,12 @@ export function CompanionRoom({
           ref={chatScrollRef}
           role="log"
           aria-label="Chat"
-          className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3"
+          aria-live={chatLive ? 'polite' : 'off'}
+          onScroll={e => {
+            const el = e.currentTarget
+            nearEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+          }}
+          className="mt-2 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3"
           // Kept out of a bug report's screenshot, as the reactions are.
           data-screenshot-exclude="true"
         >
@@ -214,21 +275,25 @@ export function CompanionRoom({
 
         {/* The one place this screen reports a refusal: the server's, and
             the microphone's. */}
-        <p role="alert" className={refused || micError ? 'flex-none px-4 pb-2 text-[13px] leading-snug text-danger-ink' : 'sr-only'}>
-          {refused}{refused && micError ? ' ' : ''}{micError && <span id={`${ids}-mic`}>{micError}</span>}
+        {/* Not atomic: when one of the two changes, only that one is read
+            out again. */}
+        <p role="alert" aria-atomic="false" className={refused || micError ? 'flex-none px-4 pb-2 text-[13px] leading-snug text-danger-ink' : 'sr-only'}>
+          {refused && <span>{refused}</span>}{refused && micError ? ' ' : ''}{micError && <span id={`${ids}-mic`}>{micError}</span>}
         </p>
 
         <div className="flex flex-none items-center gap-2 px-4">
           <div role="group" aria-label="Quick reactions" className="scrollbar-hide -my-1 flex min-w-0 flex-1 gap-2 overflow-x-auto py-1">
-            {QUICK_EMOJI.map(e => (
+            {/* lib/reactions' nine: each is one the server accepts, as it is
+                sent; what is drawn can differ (the heart). */}
+            {QUICK_REACTIONS.map(e => (
               <button
                 key={e}
                 type="button"
                 onClick={() => sendReaction(e)}
                 className="grid h-12 w-12 flex-none place-items-center rounded-control bg-surface-raised text-[22px] transition-colors hover:bg-surface-raised-2"
-                aria-label={`React with ${e}`}
+                aria-label={`React with ${drawnReaction(e)}`}
               >
-                {e}
+                {drawnReaction(e)}
               </button>
             ))}
           </div>
@@ -239,7 +304,7 @@ export function CompanionRoom({
           <button
             type="button"
             onClick={() => void onMicClick()}
-            onContextMenu={e => { if (inVoice) { e.preventDefault(); leaveVoice() } }}
+            onContextMenu={e => { if (inVoice) { e.preventDefault(); leave() } }}
             aria-disabled={micBusy}
             aria-describedby={micError ? `${ids}-mic` : undefined}
             className={`stage-btn stage-btn-thumb stage-btn-pill flex-none ${inVoice ? `stage-btn-ghost ${liveMic ? 'is-on' : ''}` : 'stage-btn-primary'}`}
@@ -251,10 +316,17 @@ export function CompanionRoom({
         {inVoice && (
           <p className="flex flex-none items-center justify-between gap-3 px-4 pt-2 text-[13px] leading-snug text-ink-2">
             <span>{liveMic ? 'Your microphone is on.' : 'You are in voice, muted.'}</span>
-            <button type="button" onClick={leaveVoice} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet -mr-3 flex-none">Leave voice</button>
+            <button type="button" onClick={leave} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet -mr-3 flex-none">Leave voice</button>
           </p>
         )}
 
+        {/* Why Send is off while the connection is down, tied to the field
+            and the button. What is typed is kept, not sent into nothing. */}
+        {!live && (
+          <p id={`${ids}-held`} className="flex-none px-4 pt-2 text-[13px] leading-snug text-ink-2">
+            Not connected. What you type is kept here until the connection is back.
+          </p>
+        )}
         <form
           className="flex flex-none gap-2 px-4 pb-[calc(env(safe-area-inset-bottom)+1.75rem)] pt-3"
           onSubmit={e => { e.preventDefault(); submit() }}
@@ -269,13 +341,16 @@ export function CompanionRoom({
             maxLength={1000}
             enterKeyHint="send"
             autoComplete="off"
+            aria-describedby={live ? undefined : `${ids}-held`}
             className="companion-field h-12 min-w-0 flex-1"
           />
-          {/* Off, not disabled, while there is nothing to send: it keeps
-              its place in the tab order and the focus a press gave it. */}
+          {/* Off, not disabled, while there is nothing to send or nowhere to
+              send it: it keeps its place in the tab order and the focus a
+              press gave it. */}
           <button
             type="submit"
-            aria-disabled={!draft.trim()}
+            aria-disabled={!draft.trim() || !live}
+            aria-describedby={live ? undefined : `${ids}-held`}
             aria-label="Send message"
             className="stage-btn stage-btn-thumb stage-btn-square stage-btn-ghost flex-none"
           >
@@ -305,11 +380,16 @@ function Member({ participant, isSelf, inVoice, speaking }: {
     speaking ? 'talking' : inVoice ? 'in voice' : null,
     participant.companion ? 'on phone' : null,
   ].filter((x): x is string => x !== null)
-  const note = parts.length ? parts.join(', ') : 'watching'
+  // With nothing more known of them, a person is here: whether they are
+  // watching, and for others whether they are in voice, is not something
+  // this phone is told.
+  const note = parts.length ? parts.join(', ') : 'here'
   return (
     <li className="flex w-16 flex-none flex-col items-center gap-1 text-center">
-      <PersonDisc name={participant.username} colorKey={participant.user_id} size={48} speaking={speaking} surface="var(--surface-page)" />
-      <span className="w-full truncate text-xs font-semibold text-ink">{isSelf ? 'You' : participant.username}</span>
+      {/* No surface of its own: the people sit on the wash, and a ring in
+          the page's colour showed against it. */}
+      <PersonDisc name={participant.username} colorKey={participant.user_id} size={48} speaking={speaking} surface="transparent" />
+      <span className="w-full truncate text-xs font-semibold text-ink">{isSelf ? 'You' : <bdi>{participant.username}</bdi>}</span>
       <span className="text-xs leading-tight text-ink-2">{note.charAt(0).toUpperCase() + note.slice(1)}</span>
     </li>
   )
@@ -319,8 +399,10 @@ function Member({ participant, isSelf, inVoice, speaking }: {
 function ChatLine({ msg, mine }: { msg: ChatMessageEvent; mine: boolean }) {
   return (
     <p className="text-[15px] leading-[1.4] [overflow-wrap:anywhere]">
-      <span className="font-semibold" style={{ color: personColor(msg.user_id) }}>{mine ? 'You' : msg.username}</span>{' '}
-      <span className="text-ink">{msg.message}</span>
+      {/* Each isolated: a name or a message in a right-to-left script must
+          not reorder what is beside it. */}
+      <span className="font-semibold" style={{ color: personColor(msg.user_id) }}>{mine ? 'You' : <bdi>{msg.username}</bdi>}</span>{' '}
+      <bdi className="text-ink">{msg.message}</bdi>
     </p>
   )
 }
