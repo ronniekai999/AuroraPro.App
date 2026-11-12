@@ -1,0 +1,10 @@
+{
+  "sha": "b8cf1028bd10504599bf2970f775c85d471e483e",
+  "verdict": "clean",
+  "summary": "Merge of main (#557) into the redesign branch, two passes: fix-first (the test #557 added read the page's raw text and failed on the merged tree; fixed in 2c407d3), then clean, covering the merge c19a64d, 2c407d3 and the live strip's poster fix b8cf102. The reviewer also reported an older server defect outside this change: the share image is composed without its poster for a party created in the web app (stored path has no leading slash).",
+  "reviewer": "fresh-context-agent-acb8c453",
+  "findings": "0",
+  "diff_digest": "57ef9ca4a963f11ab547cd88eba31b4bb1c4a5a91d868a186cb0be5452844604",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T16:00:52Z"
+}
