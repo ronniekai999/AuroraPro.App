@@ -1,0 +1,10 @@
+{
+  "sha": "95f437fe7be7716dc3eb3afeaf422b01a34d6e6d",
+  "verdict": "lows-only",
+  "summary": "Library (one commit, the builder's branch applied without two commits for later milestones), two passes with the server's catalog list read: fix-first (list rows lacked the card's actions; a profile-switch probe that could no longer fail; a pressed letter disabled under the keyboard; an A to Z jump with no bound; the sticky strip covering its target at tablet widths; touch targets under 44px; a line colour as a fill), then lows-only. Open lows: the sort select and Back to collections are under 44px on a tablet's coarse pointer; the More button sits inside a role=button row; the strip can vanish under keyboard focus when a refresh takes the total past the limit; Load More's drop after a same-profile switch is unpinned.",
+  "reviewer": "fresh-context-agent-a32af72b",
+  "findings": "4",
+  "diff_digest": "25b24fcbf22ab405226f4670d3b18b119ec246bdff2998280da47dcf8702b361",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T18:46:21Z"
+}
