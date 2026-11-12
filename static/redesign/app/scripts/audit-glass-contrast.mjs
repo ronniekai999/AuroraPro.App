@@ -752,26 +752,6 @@ const EXEMPT = [
     why: 'a request\'s icon-only delete button' },
   { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
     why: 'the dots between the key legend\'s entries' },
-  // ── member pages, voice, the match tool ──
-  { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
-    why: 'the glyph a match candidate shows where its poster is missing' },
-  // ── admin ──
-  { file: 'src/components/admin/AdminView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={16} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the glyph a held request shows where its poster is missing' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: '{isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}', kind: 'decorative',
-    why: 'the tree corner on a cast receiver\'s row; an sr-only line says what the row is' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="text-white/40 hover:text-white" aria-label="Close">', kind: 'non-text',
-    why: 'the session diagnostic\'s icon-only close button' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: "${hostedChat ? 'text-white/30' : 'text-white/70'}", kind: 'disabled',
-    why: 'the Structured outputs label while its checkbox is disabled (hosted providers always use it)' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/[0.06] disabled:opacity-50', kind: 'non-text',
-    why: 'a user row\'s icon-only actions button' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: "color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',", kind: 'non-text',
-    why: 'the Skip Analysis tile\'s state icon with nothing analysed yet; the figures beside it are the text' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: '{hint && <span className="text-white/35">ⓘ</span>}', kind: 'non-text',
-    why: 'the glyph that marks a dashboard tile as having a hover hint' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span>', kind: 'non-text',
-    why: 'the same glyph on the Memory figure' },
   // ── index.css ──
 ]
 

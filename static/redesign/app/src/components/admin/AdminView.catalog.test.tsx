@@ -42,7 +42,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-const moviesTile = () => screen.getByText('Movies + Shows').closest('div')?.parentElement?.textContent ?? ''
+const moviesTile = () => screen.getByText('Movies and shows').closest('div')?.parentElement?.textContent ?? ''
 
 describe('AdminView dashboard and live catalog updates', () => {
   it('refetches its counts when the catalog version moves, keeping the old ones meanwhile', async () => {
