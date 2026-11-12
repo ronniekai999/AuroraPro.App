@@ -731,8 +731,6 @@ const EXEMPT = [
   // ── companion, browse ──
   { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
     why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
-  { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
-    why: 'the attachment\'s icon-only "×" remove button' },
   { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
     why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
   // ── requests, search, top bar ──

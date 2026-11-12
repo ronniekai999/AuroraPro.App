@@ -24,6 +24,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { submitBugReport, type BugReportSubmitResult } from '@/lib/api'
+import { Icon } from '@/components/Icon'
 
 // 2026-05-27 — Capture library: html-to-image (active fork) replaces
 // html2canvas (last release Dec 2021, 1100+ open issues). html-to-image
@@ -918,6 +919,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    // Send stays focusable while a report is out (a disabled button drops
+    // the focus it holds), so a second press is refused here.
+    if (submittingRef.current) return
     setError(null)
     const trimmedTitle = title.trim()
     const trimmedDesc = description.trim()
@@ -937,6 +941,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       setError(`Description exceeds ${MAX_DESC_LEN} characters.`)
       return
     }
+    submittingRef.current = true
     setSubmitting(true)
     const ac = new AbortController()
     submitAcRef.current = ac
@@ -970,6 +975,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       if (err && (err as Error).name === 'AbortError') return
       setError(err instanceof Error ? err.message : 'Submit failed')
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
       // Only clear the ref if this is still the active request
       // (modal might already be unmounting after abort).
@@ -993,17 +999,15 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       //
       // RECORDING (up to 30s, user actively interacts with the
       // page they're recording): `visibility: hidden`. True full
-      // hide — no paint, no layout effect on backdrop-filter, no
-      // a11y tree entry, no pointer events. opacity:0 alone left
-      // the backdrop-blur visibly washing the page underneath on
-      // some browsers, and the user reported "the bug report
+      // hide — no paint, no a11y tree entry, no pointer events.
+      // With opacity:0 alone the user reported "the bug report
       // doesn't minimize." visibility:hidden is unambiguous.
       // The Stop pill is portal'd to document.body so it stays
       // visible even when the modal subtree is hidden.
       //
       // data-screenshot-exclude carries the html-to-image opt-out
       // (`filter` predicate matches launcher + modal + toasts).
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 stage-scrim-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--scrim)] p-4 stage-scrim-in"
       style={
         recording
           ? { visibility: 'hidden' }
@@ -1033,7 +1037,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         // Submit button below the fold unreachable. max-h + overflow-y-auto
         // makes the modal scroll; overscroll-contain stops the chain at its
         // scroll boundaries; overflow-x-hidden preserves the rounded corners.
-        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[color:var(--surface-1)] rounded-2xl border border-white/[0.08] shadow-[shadow:var(--shadow-modal)] stage-dialog-in"
+        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-surface-raised-2 rounded-sheet shadow-[shadow:var(--shadow-modal)] stage-dialog-in"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         // Holistic deep-debug M2 — drop aria-modal during recording
@@ -1050,32 +1054,28 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             chip with a green "Reported" chip and swaps the title +
             subtitle accordingly. Same header structure so the modal
             doesn't visually jump. */}
-        <div className="px-6 pt-6 pb-4 border-b border-white/[0.04]">
+        <div className="px-6 pt-6 pb-4 border-b border-line">
           {submittedResult ? (
             <>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 mb-3">
-                <span className="text-emerald-200 text-xs font-medium uppercase tracking-wider">
-                  Reported · #{submittedResult.issue_number}
-                </span>
-              </div>
-              <h2 id="bug-report-title" className="text-white text-2xl font-bold font-display">
-                Thanks — got it!
+              <p className="mb-2 text-ok text-xs font-semibold uppercase tracking-wider">
+                Reported · #{submittedResult.issue_number}
+              </p>
+              <h2 id="bug-report-title" className="text-ink text-[22px] font-semibold leading-tight font-display">
+                Thanks, got it
               </h2>
-              <p className="text-white/50 text-sm mt-1">
-                Your report was filed as issue <span className="font-mono text-white/70">#{submittedResult.issue_number}</span>. The Aurora team will take a look.
+              <p className="text-ink-2 text-sm mt-1">
+                Your report was filed as issue <span className="font-mono text-ink">#{submittedResult.issue_number}</span>. The Aurora team will take a look.
               </p>
             </>
           ) : (
             <>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 mb-3">
-                <span className="text-rose-200 text-xs font-medium uppercase tracking-wider">
-                  Bug Report
-                </span>
-              </div>
-              <h2 id="bug-report-title" className="text-white text-2xl font-bold font-display">
-                Report a Bug
+              <p className="mb-2 text-ink-2 text-xs font-semibold uppercase tracking-wider">
+                Bug report
+              </p>
+              <h2 id="bug-report-title" className="text-ink text-[22px] font-semibold leading-tight font-display">
+                Report a bug
               </h2>
-              <p className="text-white/50 text-sm mt-1">
+              <p className="text-ink-2 text-sm mt-1">
                 Help us improve Aurora — this opens a GitHub issue with the details below.
               </p>
             </>
@@ -1092,15 +1092,15 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           <div className="px-6 py-6 space-y-4">
             <div className="flex items-start gap-3">
               {/* Checkmark glyph */}
-              <div className="shrink-0 w-10 h-10 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-300">
+              <div className="shrink-0 w-10 h-10 rounded-full bg-surface-raised flex items-center justify-center text-ok">
                 <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
               </div>
-              <div className="text-white/80 text-sm">
+              <div className="text-ink text-sm">
                 <p>Submitted. Aurora's team will triage from here.</p>
-                <p className="text-white/50 text-xs mt-1">
-                  Reference: <span className="font-mono text-white/70">issue #{submittedResult.issue_number}</span>
+                <p className="text-ink-2 text-xs mt-1">
+                  Reference: <span className="font-mono text-ink">issue #{submittedResult.issue_number}</span>
                 </p>
               </div>
             </div>
@@ -1109,7 +1109,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 type="button"
                 onClick={onClose}
                 autoFocus
-                className="px-5 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold transition-colors"
+                className="stage-btn stage-btn-primary"
               >
                 Done
               </button>
@@ -1125,13 +1125,13 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             after submit lands so the success view stays clean. */}
         {!submittedResult && tokenHealthy === false && (
           <div
-            className="mx-6 mt-4 rounded-lg bg-amber-500/10 border border-amber-500/40 px-3 py-2 text-amber-200 text-xs"
+            className="mx-6 mt-4 rounded-chip bg-surface-raised border-l-2 border-current px-3 py-2 text-warn text-xs leading-snug"
             role="alert"
           >
             <strong>Admin notice — GitHub token issue:</strong>{' '}
             {tokenHealthReason || 'The configured PAT failed its most recent health check.'}{' '}
             Users won't be able to submit bug reports until this is resolved. See{' '}
-            <code className="text-amber-100">docs/bug-report-setup.md</code>.
+            <code className="font-mono">docs/bug-report-setup.md</code>.
           </div>
         )}
 
@@ -1139,8 +1139,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           {/* Name. Deep-debug #7 — label clarifies that the value
               is visible in the public GitHub issue. */}
           <div>
-            <label htmlFor="bug-name" className="block text-white/80 text-sm font-medium mb-1">
-              Your name <span className="text-white/50">(optional, visible in the GitHub issue)</span>
+            <label htmlFor="bug-name" className="block text-ink text-sm font-semibold mb-1">
+              Your name <span className="font-normal text-ink-2">(optional, visible in the GitHub issue)</span>
             </label>
             <input
               id="bug-name"
@@ -1148,16 +1148,19 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               value={name}
               onChange={e => setName(e.target.value)}
               maxLength={MAX_NAME_LEN}
-              disabled={submitting || capturing || recording}
+              // Read-only, not disabled, while the report is sent: a disabled
+              // field drops the focus it holds.
+              readOnly={submitting}
+              disabled={capturing || recording}
               placeholder="So we can credit you in the issue thread"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
+              className="w-full disabled:opacity-50"
             />
           </div>
 
           {/* Title */}
           <div>
-            <label htmlFor="bug-title" className="block text-white/80 text-sm font-medium mb-1">
-              Title <span className="text-rose-400">*</span>
+            <label htmlFor="bug-title" className="block text-ink text-sm font-semibold mb-1">
+              Title <span className="text-danger-ink" aria-hidden="true">*</span>
             </label>
             <input
               id="bug-title"
@@ -1167,19 +1170,22 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               onChange={e => setTitle(e.target.value)}
               maxLength={MAX_TITLE_LEN}
               required
-              disabled={submitting || capturing || recording}
+              // Read-only, not disabled, while the report is sent: a disabled
+              // field drops the focus it holds.
+              readOnly={submitting}
+              disabled={capturing || recording}
               placeholder="e.g. Continue Watching card jumps to wrong episode"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
+              className="w-full disabled:opacity-50"
             />
-            <p className="text-white/50 text-[10px] mt-1 tabular-nums">
+            <p className="text-ink-2 text-xs mt-1 tabular-nums">
               {title.length} / {MAX_TITLE_LEN}
             </p>
           </div>
 
           {/* Description */}
           <div>
-            <label htmlFor="bug-desc" className="block text-white/80 text-sm font-medium mb-1">
-              Description <span className="text-rose-400">*</span>
+            <label htmlFor="bug-desc" className="block text-ink text-sm font-semibold mb-1">
+              Description <span className="text-danger-ink" aria-hidden="true">*</span>
             </label>
             <textarea
               id="bug-desc"
@@ -1187,12 +1193,15 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               onChange={e => setDescription(e.target.value)}
               maxLength={MAX_DESC_LEN}
               required
-              disabled={submitting || capturing || recording}
+              // Read-only, not disabled, while the report is sent: a disabled
+              // field drops the focus it holds.
+              readOnly={submitting}
+              disabled={capturing || recording}
               rows={6}
               placeholder="What did you expect to happen? What actually happened? Steps to reproduce?"
-              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50 resize-y min-h-[120px]"
+              className="w-full disabled:opacity-50 resize-y min-h-[120px]"
             />
-            <p className="text-white/50 text-[10px] mt-1 tabular-nums">
+            <p className="text-ink-2 text-xs mt-1 tabular-nums">
               {description.length} / {MAX_DESC_LEN}
             </p>
           </div>
@@ -1203,8 +1212,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 trigger button (not the sr-only file input), so
                 clicking the label focuses the actual visible control
                 instead of an invisible element. */}
-            <label htmlFor="bug-attachment-trigger" className="block text-white/80 text-sm font-medium mb-1">
-              Screenshot or recording <span className="text-white/50">(optional, max 25 MB)</span>
+            <label htmlFor="bug-attachment-trigger" className="block text-ink text-sm font-semibold mb-1">
+              Screenshot or recording <span className="font-normal text-ink-2">(optional, max 25 MB)</span>
             </label>
             {/* 2026-05-27 polish — three matching outlined buttons in a
                 consistent row. Native file <input> is hidden behind a
@@ -1243,7 +1252,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 disabled={submitting || capturing || recording}
                 title="Upload a screenshot or recording from your device"
                 aria-haspopup="dialog"
-                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44 shrink-0"
               >
                 {/* Upload glyph */}
                 <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1267,7 +1276,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 onClick={handleCapture}
                 disabled={submitting || capturing || recording}
                 title="Capture a screenshot of the visible page area"
-                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44 shrink-0"
               >
                 {capturing ? (
                   // Phase 2 (deep-debug #15) — inline spinner during
@@ -1288,7 +1297,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   </svg>
                 )}
                 {capturing ? 'Capturing…' : 'Capture this page'}
-                {!capturing && <span className="text-white/50 font-normal">· PNG</span>}
+                {!capturing && <span className="text-ink-2 font-normal">· PNG</span>}
               </button>
               {/* Phase 3 — Record screen. Stop button shown while
                   recording with a live countdown; auto-stops at 30s.
@@ -1309,18 +1318,18 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   onClick={handleStartRecording}
                   disabled={submitting || capturing || recording}
                   title="Record up to 30 seconds of your screen"
-                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44 shrink-0"
                 >
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-rose-400">
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-danger-ink">
                     <circle cx="12" cy="12" r="9" />
                     <circle cx="12" cy="12" r="3" fill="currentColor" />
                   </svg>
                   Record screen
-                  <span className="text-white/50 font-normal">· WebM 30s</span>
+                  <span className="text-ink-2 font-normal">· WebM 30s</span>
                 </button>
               )}
             </div>
-            <p className="text-white/50 text-[10px] mt-1">
+            <p className="text-ink-2 text-xs mt-2 leading-snug">
               Use Capture for a screenshot or Record screen for up to 30 seconds of video — the form will hide briefly for capture.
             </p>
             {/* Phase 2 (deep-debug #4) — PRE-capture PII notice. Shown
@@ -1329,13 +1338,13 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 already in memory. Separate from the post-attachment
                 warning further down (which reinforces the warning
                 once they see what they captured). */}
-            <p className="text-amber-200/80 text-[10px] mt-1">
+            <p className="text-warn text-xs mt-1 leading-snug">
               Captures show whatever is on screen now — library, currently playing media, profile info.
               If you Record screen and choose to share tab or system audio in the browser's share
               dialog, that audio is recorded into the clip too. Review the thumbnail below before submitting.
             </p>
             {attachment && (
-              <div className="mt-2 flex items-start gap-3 p-2 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+              <div className="mt-2 flex items-center gap-3 p-2 rounded-control bg-surface-raised">
                 {/* Phase 2 — thumbnail preview when the attachment is
                     an image (captured screenshot OR uploaded PNG/JPG).
                     Phase 3 (deep-debug L5) — also preview video/* via
@@ -1348,18 +1357,18 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                     src={attachmentPreviewURL}
                     muted
                     playsInline
-                    className="w-20 h-12 object-cover rounded border border-white/[0.08] shrink-0 bg-black"
+                    className="w-20 h-12 object-cover rounded-chip shrink-0 bg-black"
                   />
                 ) : attachmentPreviewURL ? (
                   <img
                     src={attachmentPreviewURL}
                     alt="Attachment preview"
-                    className="w-20 h-12 object-cover rounded border border-white/[0.08] shrink-0"
+                    className="w-20 h-12 object-cover rounded-chip shrink-0"
                   />
                 ) : null}
                 <div className="flex-1 min-w-0">
-                  <p className="text-white/70 text-xs truncate">{attachment.name}</p>
-                  <p className="text-white/50 text-[10px]">
+                  <p className="text-ink text-xs truncate">{attachment.name}</p>
+                  <p className="text-ink-2 text-xs tabular-nums">
                     {(attachment.size / 1024 / 1024).toFixed(2)} MB
                   </p>
                 </div>
@@ -1368,11 +1377,11 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   type="button"
                   onClick={handleClearAttachment}
                   disabled={submitting || capturing || recording}
-                  className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"
+                  className="grid h-11 w-11 flex-none place-items-center rounded-control text-ink-2 transition-colors hover:bg-action-soft hover:text-ink disabled:opacity-50"
                   aria-label="Remove attachment"
                   title="Remove attachment"
                 >
-                  ×
+                  <Icon name="x" size={16} />
                 </button>
               </div>
             )}
@@ -1386,8 +1395,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               skips request bodies and headers; sensitive URL params
               (tokens, passwords, api keys, etc.) are redacted before
               capture. */}
-          <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-amber-200 text-xs">
-            <strong>Heads-up:</strong> every report includes a recent
+          <div className="rounded-chip bg-surface-raised px-3 py-2 text-ink-2 text-xs leading-snug">
+            <strong className="font-semibold text-ink">Heads-up:</strong> every report includes a recent
             console + network log (last few minutes) for triage. Sensitive
             URL params (tokens, passwords, API keys) are redacted before
             attaching, and bodies/headers are never captured.
@@ -1411,7 +1420,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               failures + server errors. */}
           {error && (
             <div
-              className="rounded-lg bg-red-500/15 border border-red-500/40 px-3 py-2 text-red-300 text-sm"
+              className="text-danger-ink text-sm leading-snug"
               role="alert"
               aria-live="polite"
             >
@@ -1443,7 +1452,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               type="button"
               onClick={handleCancel}
               disabled={capturing || recording}
-              className="px-4 py-2 rounded-lg text-white/70 hover:text-white hover:bg-white/[0.05] transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+              className="stage-btn stage-btn-quiet"
             >
               Cancel
             </button>
@@ -1454,10 +1463,11 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               // the capture is mid-flight (would attach the previous
               // file or null, with the captured screenshot landing
               // after the request was already sent).
-              disabled={submitting || capturing || recording}
-              className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={capturing || recording}
+              aria-disabled={submitting}
+              className="stage-btn stage-btn-primary"
             >
-              {submitting ? 'Submitting…' : 'Submit Report'}
+              {submitting ? 'Sending…' : 'Send report'}
             </button>
           </div>
         </form>}
@@ -1496,7 +1506,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         data-screenshot-exclude="true"
         role="status"
         aria-live="polite"
-        className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] inline-flex items-center gap-3 px-4 py-2.5 rounded-full bg-[color:var(--surface-1)] border border-rose-500/80 shadow-2xl"
+        className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] inline-flex items-center gap-3 pl-4 pr-1.5 py-1.5 rounded-control bg-surface-raised-2 shadow-[shadow:var(--shadow-modal)]"
       >
         {/* Pulsing red dot — the universal "recording active" cue.
             Deep-debug L5 — motion-safe: prefix so users with
@@ -1504,10 +1514,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             ping animation. The static dot + countdown text still
             carry the recording-state meaning. */}
         <span aria-hidden="true" className="relative inline-flex items-center justify-center w-3 h-3">
-          <span className="absolute inset-0 rounded-full bg-rose-500 motion-safe:animate-ping opacity-75" />
-          <span className="relative inline-block w-3 h-3 rounded-full bg-rose-500" />
+          <span className="absolute inset-0 rounded-full bg-[var(--danger-ink)] motion-safe:animate-ping opacity-75" />
+          <span className="relative inline-block w-3 h-3 rounded-full bg-[var(--danger-ink)]" />
         </span>
-        <span className="text-white text-sm font-medium tabular-nums">
+        <span className="text-ink text-sm font-medium tabular-nums">
           {/* Deep-debug M3 — clamp at 1 so the countdown never
               shows "0s left" between the last tick and the
               recorder.stop() callback firing. */}
@@ -1518,9 +1528,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           onClick={handleStopRecording}
           aria-label="Stop screen recording"
           autoFocus
-          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors"
+          className="stage-btn stage-btn-sm stage-btn-destructive stage-hit44"
         >
-          <span aria-hidden="true" className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+          <span aria-hidden="true" className="inline-block w-2.5 h-2.5 rounded-[2px] bg-current" />
           Stop
         </button>
       </div>,

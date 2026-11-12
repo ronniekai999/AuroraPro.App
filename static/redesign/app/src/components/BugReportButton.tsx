@@ -14,12 +14,10 @@
 // killing the in-flight recording. Now the modal stays mounted and
 // the recording completes normally. (Holistic deep-debug M1.)
 //
-// Visual treatment: small subtle pill. z-[40] — above page content,
-// below modals (z-[60-80]), party drawer (z-[70]), server/notif
-// panels (z-[45]), and the toast column (z-[200]). Position is
-// `right-6, bottom: max(5rem, 5rem + safe-area-inset-bottom)` so
-// the pill clears the toast column AND the iOS home-indicator
-// gesture region.
+// Visual treatment: a small raised button in the corner. z-[40] — above
+// page content, below modals (z-[60-80]), party drawer (z-[70]),
+// server/notif panels (z-[45]), and the toast column (z-[200]). It sits
+// 1.25rem above the corner, plus the phone's tab bar where there is one.
 
 import { useState } from 'react'
 import { BugReportModal } from './BugReportModal'
@@ -64,7 +62,7 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
     // for most users. The modal now shows an in-modal thank-you
     // panel with the issue number; this toast is the subtle
     // confirmation that backs it up.
-    onToast(`Bug reported — issue #${result.issue_number} created. Thanks!`, 'success')
+    onToast(`Bug reported as issue #${result.issue_number}. Thank you.`, 'success')
   }
 
   return (
@@ -82,42 +80,22 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
           setModalOpen(true)
         }}
         title="Report a bug or share feedback"
-        aria-label="Report a bug"
         // 2026-05-27 (deep-debug Phase 2 #1) — data-screenshot-exclude
         // signals to the in-modal html2canvas Capture flow that this
         // element should NOT appear in the screenshot. The Capture
         // handler's ignoreElements predicate filters on this attribute
         // so the bug-report meta-UI doesn't leak into bug evidence.
         data-screenshot-exclude="true"
-        // 2026-05-27 — Bottom-right launcher. Original `bottom-4
-        // left-4` was buried behind the sidebar; bottom-right keeps
-        // the launcher in clear space.
-        //
-        // 2026-05-27 polish pass:
-        // - `bottom: 1.25rem` (was 5rem) — the launcher reclaims its
-        //   natural corner anchor. The earlier 5rem position was a
-        //   well-intentioned over-correction: it kept the pill above
-        //   the toast column but floated it in mid-air over content
-        //   instead of hugging the corner where users expect a
-        //   "report" pill (Intercom / Linear / Vercel pattern).
-        //   Toasts shifted upward in App.tsx ToastContainer to
-        //   `bottom-[5.5rem]` so they stack ABOVE the launcher
-        //   instead of covering it.
-        // - Inline `bottom` still resolves to `max(corner, corner +
-        //   safe-area)` so iOS Safari home-indicator gesture region
-        //   doesn't steal taps.
-        // - Subtle purple accent border (was pure white/8%): the
-        //   launcher was almost invisible against Aurora's dark UI;
-        //   `border-purple-500/20` adds just enough chroma to draw
-        //   the eye without shouting. Hover deepens to purple/40.
-        // - Holistic deep-debug H2/M1 retained — `display: none`
-        //   (not conditional unmount) when `hidden` so the modal
-        //   state persists across player open/close events.
+        // In the bottom-right corner, where a "report" button is looked
+        // for, above the phone's tab bar; the toasts stack above it
+        // (App's ToastContainer). `display: none`, not an unmount, while
+        // `hidden`: the dialog's state must outlive a player opening over
+        // it (see the note at the top of this file).
         style={{
           bottom: 'calc(1.25rem + var(--tabbar-space, 0px))',
           ...(hidden ? { display: 'none' } : {}),
         }}
-        className="fixed right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-purple-500/15 border border-purple-500/20 hover:border-purple-500/40 text-white/70 hover:text-white text-xs font-medium transition-ui backdrop-blur-md shadow-lg"
+        className="fixed right-4 z-[40] inline-flex h-11 items-center gap-2 rounded-control bg-surface-raised-2 px-3.5 text-[13px] font-medium text-ink-2 shadow-[shadow:var(--shadow-modal)] transition-colors hover:text-ink sm:right-6"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
             Bug icon = stylized beetle with antennae and legs (Feather's
