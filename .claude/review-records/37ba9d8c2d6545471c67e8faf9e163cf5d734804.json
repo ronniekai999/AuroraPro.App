@@ -1,0 +1,10 @@
+{
+  "sha": "37ba9d8c2d6545471c67e8faf9e163cf5d734804",
+  "verdict": "lows-only",
+  "summary": "Failure words for Settings, members, parties and rooms, the recap, the bug report form and the player (start, cast, hls kind to the console). Review 34 fix-first (1 high: a stream cap read as too many tries; 2 mediums: the just-in card no longer forgot an ended party, the hls kind recorded nowhere), fixed in 37ba9d8; re-check lows-only, 2 wording lows for a follow-up",
+  "reviewer": "fresh-context-agent-a3bf76ea",
+  "findings": "2",
+  "diff_digest": "20fc13db71707250d5632ef4f9704a0febc649162fa749cf65f714cb14d4cdcd",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T09:50:03Z"
+}
