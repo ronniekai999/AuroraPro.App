@@ -235,7 +235,16 @@ async function reference(page, { fromTop = false } = {}) {
     const field = [...document.querySelectorAll('input[placeholder]')]
       .find(el => !el.value && !el.closest('[data-screenshot-exclude="true"]') && box(el))
     if (field) out.push({ name: `field "${field.placeholder}"`, ...box(field) })
-    return { list: out, width: innerWidth }
+    // Every element with words of its own in the window, to say where a
+    // difference is when there is one.
+    const texts = []
+    for (const el of document.body.querySelectorAll('*')) {
+      if (el.closest('[data-screenshot-exclude="true"]')) continue
+      const own = [...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+      const b = own && box(el)
+      if (b) texts.push({ name: `<${el.tagName.toLowerCase()}> "${own.slice(0, 32)}" (${getComputedStyle(el).fontFamily.split(',')[0]})`, ...b })
+    }
+    return { list: out, texts, width: innerWidth }
   })
   await hide.evaluate(el => el.remove())
   if (fromTop) await page.evaluate(top => window.scrollTo(0, top), y)
@@ -287,6 +296,22 @@ async function compare(page, shot, ref) {
         const k = w / ref.parts.width
         return { name: p.name, share: share(p.x * k, p.y * k, (p.x + p.w) * k, (p.y + p.h) * k) }
       }),
+      // Where the differing pixels are, in CSS pixels, and the elements with
+      // words that differ most: what a failure in CI is about.
+      where: (() => {
+        const k = w / ref.parts.width
+        let x0 = w, y0 = h, x1 = -1, y1 = -1
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          if (off[y * w + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y }
+        }
+        if (x1 < 0) return null
+        const texts = ref.parts.texts
+          .map(t => ({ name: t.name, share: share(t.x * k, t.y * k, (t.x + t.w) * k, (t.y + t.h) * k) }))
+          .filter(t => t.share > 0.01)
+          .sort((a, b) => b.share - a.share)
+          .slice(0, 5)
+        return { box: [x0, y0, x1, y1].map(v => Math.round(v / k)), texts }
+      })(),
       band: Math.max(...bands),
       transparent: transparent / (w * h),
     }
@@ -318,6 +343,10 @@ async function judge(name, page, shot, ref) {
   }
   if (problems.length) {
     failed = true
+    if (r.where) {
+      const texts = r.where.texts.map(t => `${t.name} ${pct(t.share)}`).join('; ')
+      problems.push(`differing pixels within x ${r.where.box[0]}-${r.where.box[2]}, y ${r.where.box[1]}-${r.where.box[3]}${texts ? `, most in: ${texts}` : ''}`)
+    }
     console.error(`✗ ${name}: ${problems.join('; ')} (pictures in ${base}-*.png)`)
   } else {
     const parts = r.parts.map(part => `${part.name} ${pct(part.share)}`).join(', ')
