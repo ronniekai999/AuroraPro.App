@@ -19,11 +19,15 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 import AdminView from './AdminView'
 import { RestoreOutcomeAlert } from './RestoreOutcomeAlert'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 let answerRestore: (r: Response | Error) => void
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   resetRestoreOutcomeForTest()
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('fetch', vi.fn((url: RequestInfo | URL) => {
@@ -90,8 +94,10 @@ describe('a restore that ends after the Admin page has gone', () => {
     const user = userEvent.setup()
     await restoreThenLeave(user)
     answerRestore(new TypeError('Failed to fetch'))
-    const said = await screen.findByRole('alertdialog', { name: 'The restore from aurora.dump did not go through' })
-    expect(said).toHaveTextContent('it is not known how far it got: the database may be as it was, restored, or empty')
+    // Not "did not go through": it may still be running past its wipe, and
+    // an admin who took that title at its word could restart Aurora on it.
+    const said = await screen.findByRole('alertdialog', { name: 'No answer came back about the restore from aurora.dump' })
+    expect(said).toHaveTextContent('If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended')
   })
 
   it('shows nothing to a session without the admin UI, and says it when the admin UI is back', async () => {
@@ -129,55 +135,238 @@ describe('a restore that ends after the Admin page has gone', () => {
   })
 })
 
-describe('while a restore is out', () => {
-  // The browser's own leave-this-page check: a cancelled beforeunload.
-  // Both halves of the ask, each checked on its own: the cancel (current
-  // browsers) and a truthy returnValue (Chrome and Edge before 119). jsdom
-  // has no BeforeUnloadEvent, and on its plain Event the legacy setter would
-  // cancel by itself, so returnValue is shadowed and the cancel is watched.
+describe('a restore that outlives its page', () => {
+  // The browser's own leave-this-page check: a cancelled beforeunload. The
+  // restore no longer depends on the page, so nothing asks for it.
   const leavingIsChecked = () => {
     const e = new Event('beforeunload', { cancelable: true })
     Object.defineProperty(e, 'returnValue', { value: undefined, writable: true })
     const cancel = vi.spyOn(e, 'preventDefault')
     window.dispatchEvent(e)
-    const cancelled = cancel.mock.calls.length > 0
-    const legacy = (e as unknown as { returnValue: unknown }).returnValue === true
-    expect(cancelled, 'the cancel and the legacy value go together').toBe(legacy)
-    return cancelled
+    return cancel.mock.calls.length > 0 || (e as unknown as { returnValue: unknown }).returnValue === true
   }
-  async function startRestore(user: ReturnType<typeof userEvent.setup>) {
+  const kept = () => JSON.parse(localStorage.getItem('aurora.restore') ?? 'null') as { ticket: string; file: string; seen: string | null; at?: number } | null
+  /** Answers the status reads: the ticket read by `ticket`, the admin read
+   *  by `admin`, the upload as `answerRestore` decides. */
+  function serve({ ticket, admin }: { ticket?: () => Response; admin?: () => Response }) {
+    vi.stubGlobal('fetch', vi.fn((url: RequestInfo | URL) => {
+      const u = String(url)
+      if (u === '/api/admin/restore') return new Promise<Response>((resolve, reject) => { answerRestore = r => (r instanceof Error ? reject(r) : resolve(r)) })
+      if (u === '/api/restore/status' && ticket) return Promise.resolve(ticket())
+      if (u === '/api/admin/restore/status' && admin) return Promise.resolve(admin())
+      return Promise.resolve(json(503, { error: 'unavailable' }))
+    }))
+  }
+
+  it('sends the restore with a ticket it keeps, and holds nothing', async () => {
+    const user = userEvent.setup()
     const view = render(<Harness page adminUI />)
     await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
     const d = await screen.findByRole('alertdialog')
-    // Said before the admin commits: a reload can stop it, not only lose
-    // the report of it.
-    expect(d).toHaveAccessibleDescription(/Keep this tab open until it says it has finished: reloading or closing it, or losing the connection, stops the restore part way and can leave the database empty\./)
-    expect(leavingIsChecked()).toBe(false)
+    // Said before the admin commits.
+    expect(d).toHaveAccessibleDescription(/Once the file is uploaded the restore runs on the server to its end: reloading or closing this tab does not stop it/)
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
-    return view
-  }
-
-  it.each([
-    ['it succeeds', () => json(200, { status: 'ok' })],
-    ['it is refused', () => json(400, { error: { code: 400, message: 'upload is not a pg_dump custom archive' } })],
-    ['it gets no answer', () => new TypeError('Failed to fetch')],
-  ])('asks the browser to check before the page is left, until %s', async (_how, answer) => {
-    const user = userEvent.setup()
-    await startRestore(user)
-    expect(leavingIsChecked()).toBe(true)
-    await act(async () => { answerRestore(answer()) })
-    await waitFor(() => expect(leavingIsChecked()).toBe(false))
+    const call = vi.mocked(fetch).mock.calls.find(([u]) => String(u) === '/api/admin/restore')!
+    const ticket = (call[1]!.headers as Record<string, string>)['X-Aurora-Restore-Ticket']
+    expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // Kept before the answer, so a reload now can still ask about it.
+    expect(kept()).toEqual({ ticket, file: 'aurora.dump', seen: null, at: expect.any(Number), ended: false })
+    expect(leavingIsChecked()).toBe(false)
+    await act(async () => { answerRestore(json(200, { status: 'ok' })) })
+    await waitFor(() => expect(kept()?.seen).toBe('succeeded'))
   })
 
-  it('keeps the check when the Admin page goes, and drops it when the answer lands', async () => {
+  it('shows a restore still running when the page is opened again, and takes no other', async () => {
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: 'k'.repeat(43), file: 'big.dump', seen: 'running' }))
+    // The record arrives once a file has been chosen, so the button is seen
+    // to go from ready to refused.
+    let answerRecord!: () => void
+    const answered = new Promise<void>(resolve => { answerRecord = resolve })
+    serve({ ticket: () => json(200, { state: 'running', step: 'restoring', database: 'empty', file: 'big.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }) })
+    const served = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url) === '/api/restore/status') await answered
+      return served(url, init)
+    })
     const user = userEvent.setup()
-    const view = await startRestore(user)
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'other.dump'))
+    expect(screen.getByRole('button', { name: 'Restore database' })).toBeEnabled()
+    await act(async () => { answerRecord() })
+    const note = await screen.findByRole('region', { name: 'A restore is running' })
+    expect(note).toHaveTextContent('Aurora is replacing its database with big.dump.')
+    expect(within(note).queryByRole('button', { name: /Dismiss/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Restore database' })).toBeDisabled()
+    expect(view.container.querySelector<HTMLInputElement>('input[type="file"]')).toBeDisabled()
+    // The ticket read carries the ticket, and no session.
+    const call = vi.mocked(fetch).mock.calls.find(([u]) => String(u) === '/api/restore/status')!
+    expect((call[1]!.headers as Record<string, string>)['X-Aurora-Restore-Ticket']).toBe('k'.repeat(43))
+    // Same-origin: a proxy in front of Aurora may need its own cookie.
+    expect(call[1]!.credentials).toBe('same-origin')
+  })
+
+  it('says a restore running, from the record, on whichever section the page opens on', async () => {
+    serve({ admin: () => json(200, { state: 'running', step: 'clearing', database: 'unknown', file: 'other-admin.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }) })
+    render(<Harness page adminUI />)
+    // The page opens on its dashboard; no ticket is kept, so the admin read.
+    expect(await screen.findByRole('region', { name: 'A restore is running' })).toHaveTextContent('other-admin.dump')
+  })
+
+  it('does not call a restore unknown while its upload is out, across a remount of the page', async () => {
+    serve({ ticket: () => json(404, { error: { code: 404, reason: 'restore_unknown' } }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    // The admin leaves the Admin page and comes back while the upload is out.
     view.rerender(<Harness page={false} adminUI />)
-    expect(leavingIsChecked()).toBe(true)
+    view.rerender(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // Nothing about it at all: no "no record", and no "asking" either.
+    expect(screen.queryByRole('region', { name: /no record|Asking Aurora/ })).toBeNull()
+    // And a second restore is not offered meanwhile.
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['y'], 'second.dump'))
+    expect(screen.getByRole('button', { name: 'Restore database' })).toBeDisabled()
+  })
+
+  it('puts back the ticket of a restore already running when its own is refused with a 409', async () => {
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: 'r'.repeat(43), file: 'running.dump', seen: 'running' }))
+    // The record of the running one has not come yet, so the button is free.
+    serve({ ticket: () => json(503, { error: 'unavailable' }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(kept()?.file).toBe('aurora.dump'))
+    await act(async () => { answerRestore(json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } })) })
+    await waitFor(() => expect(kept()).toMatchObject({ ticket: 'r'.repeat(43), file: 'running.dump', seen: 'running' }))
+  })
+
+  it('marks a refused restore as seen ending, so a later 404 for its ticket says nothing', async () => {
+    serve({})
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    await act(async () => { answerRestore(json(400, { error: { code: 400, message: 'upload is too small' } })) })
+    await waitFor(() => expect(kept()?.seen).toBe('failed'))
+  })
+
+  it('says a restore of this tab’s that succeeded in its panel, and not again on the section the admin goes to next', async () => {
+    serve({ ticket: () => json(200, { state: 'succeeded', database: 'restored', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: true }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
     await act(async () => { answerRestore(json(200, { status: 'ok' })) })
-    await waitFor(() => expect(leavingIsChecked()).toBe(false))
+    expect(await screen.findByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
+    // The record, read again after the answer, says the same.
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u) === '/api/restore/status')).toBe(true))
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Users' }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // This tab's answer was said: the record is not said again elsewhere.
+    expect(screen.queryByRole('region', { name: 'Restart Aurora now' })).toBeNull()
+  })
+
+  it('says what the record knows of a failure past the wipe in place of this tab’s vaguer answer', async () => {
+    serve({ ticket: () => json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:05:00Z', restart_required: false }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    const d = await screen.findByRole('alertdialog')
+    await user.click(within(d).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    await act(async () => { answerRestore(json(500, { error: { code: 500, message: 'restore failed; database is in wiped state' } })) })
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    const note = await screen.findByRole('region', { name: 'The restore from aurora.dump failed' })
+    expect(note).toHaveTextContent('Restore a backup from the server’s command line before restarting Aurora')
+    expect(view.container).not.toHaveTextContent('Depending on where it stopped, the database is either as it was or empty.')
+  })
+
+  it('takes a proxy’s own 5xx (Cloudflare’s 524) for no answer, and lets a record of it running say so', async () => {
+    let record: Response = json(404, { error: { code: 404, reason: 'restore_unknown' } })
+    serve({ ticket: () => record })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    record = json(200, { state: 'running', step: 'restoring', database: 'empty', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false })
+    await act(async () => { answerRestore(new Response('<html>A timeout occurred</html>', { status: 524, headers: { 'content-type': 'text/html' } })) })
+    const d = await screen.findByRole('alertdialog')
+    expect(d).toHaveTextContent('do not restart Aurora until you know how it ended')
+    expect(d).not.toHaveTextContent('The restore did not finish')
+    await user.click(within(d).getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByRole('region', { name: 'A restore is running' })).toBeInTheDocument()
+    // Not the seen state of a failure: the record is still to come.
+    expect(kept()?.seen).toBe('running')
+  })
+
+  it('says the record’s success in place of a failure this tab was told', async () => {
+    // A 500 that looks like Aurora's own but is not true of the restore
+    // (say, a proxy that answers JSON): the record outranks it.
+    serve({ ticket: () => json(200, { state: 'succeeded', database: 'restored', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: true }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    await act(async () => { answerRestore(json(500, { error: { code: 500, message: 'upstream said no' } })) })
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
+    expect(view.container).not.toHaveTextContent('Depending on where it stopped')
+    // And on the other sections too.
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Users' }))
+    expect(await screen.findByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
+  })
+
+  it('shows the server’s own text from the admin read, which carries it', async () => {
+    serve({ admin: () => json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'other.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:05:00Z', restart_required: false, message: 'restore failed; database is in wiped state' }) })
+    render(<Harness page adminUI />)
+    const note = await screen.findByRole('region', { name: 'The restore from other.dump failed' })
+    expect(note).toHaveTextContent('The server said: restore failed; database is in wiped state')
+  })
+
+  it('lets the server’s record say how a restore that got no answer ended', async () => {
+    let record: Response = json(503, { error: 'unavailable' })
+    serve({ ticket: () => record })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    const d = await screen.findByRole('alertdialog')
+    await user.click(within(d).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    // As the ticket read answers: never with the server's own text.
+    record = json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:05:00Z', restart_required: false })
+    await act(async () => { answerRestore(new TypeError('Failed to fetch')) })
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    const note = await screen.findByRole('region', { name: 'The restore from aurora.dump failed' })
+    expect(note).toHaveTextContent('the database is now empty')
+    // The panel no longer says it is not known how far it got.
+    expect(view.container).not.toHaveTextContent('The connection to the server was lost during the restore')
   })
 })

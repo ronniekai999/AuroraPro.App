@@ -53,6 +53,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -348,7 +349,8 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //   2. Stream the upload to a temp file. pg_restore needs a seekable
 //      file (custom format has a table of contents it reads first, then
 //      jumps around in). We cap the file size at maxRestoreSizeBytes.
-//   3. Wipe the public schema: per-object DROPs that preserve installed
+//   3. Check that pg_restore can read the whole archive, then wipe the
+//      public schema: per-object DROPs that preserve installed
 //      extensions (see wipeSQL below for the why).
 //   4. Run pg_restore with:
 //        --single-transaction  → BEGIN/COMMIT wrap; any failure rolls back
@@ -359,6 +361,13 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //                                extension-owner privilege)
 //        --exit-on-error       → bail on first error rather than continuing
 //                                with cascading downstream failures
+//
+// Steps 3 and 4 do not belong to the request (runRestore, admin_restore.go):
+// once the upload is on disk they run on the server-lifecycle context to
+// their end, whatever becomes of the client, and record how they went for
+// GET /api/admin/restore/status and the ticket read. A reload or a closed tab
+// used to cancel pg_restore part way and leave the database empty, with
+// nothing to say so.
 //
 // Why we no longer line-filter the dump (2026-05-18 rearchitecture):
 //   The old plain-format + bufio.Scanner filter pipeline could mangle
@@ -402,13 +411,35 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
 	}
 
+	// The restore's ticket, if the client sent one: the credential for the
+	// status read that needs no session (admin_restore.go). Optional, so a
+	// client that sends none still restores; one that is malformed is
+	// refused before anything happens, rather than restoring with a status
+	// its sender cannot read.
+	ticket := r.Header.Get(restoreTicketHeader)
+	if ticket != "" && !validRestoreTicket(ticket) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("%s must be %d to %d characters of A-Z, a-z, 0-9, '-' and '_'",
+				restoreTicketHeader, minRestoreTicketLen, maxRestoreTicketLen))
+		return
+	}
+
 	// 2026-05-16 audit H3 — serialize backup/restore operations. See
 	// Backup for the rationale. Same mutex — both endpoints share it.
+	//
+	// Held until the restore ENDS, not until this handler returns: once the
+	// upload is on disk the restore runs on without the request, and the
+	// goroutine that runs it releases the lock (handedOff).
 	if !h.backupRestoreMu.TryLock() {
 		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
 		return
 	}
-	defer h.backupRestoreMu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			h.backupRestoreMu.Unlock()
+		}
+	}()
 
 	// Use MultipartReader (streaming) rather than ParseMultipartForm
 	// (buffers entire upload to memory/disk). For multi-GB restores
@@ -531,13 +562,15 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Cleanup on every exit path: Close (idempotent — sentinel
-	// errors after first call) and Remove. defers run LIFO, so Close
-	// happens before Remove. The double-close from later f.Close()
-	// after copy is harmless (returns ErrClosed which we ignore).
-	defer tmpFile.Close()
+	// Cleanup on every exit path: Close (a second Close after the one
+	// below returns ErrClosed, ignored) and Remove. Until the hand-off
+	// the handler owns the file; after it, the goroutine running the
+	// restore removes it when the restore ends.
 	defer func() {
-		_ = os.Remove(tmpPath)
+		if !handedOff {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
 	}()
 
 	// Copy the upload to disk, bounded by maxRestoreSizeBytes+1.
@@ -572,8 +605,83 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
+	// From here the restore does not depend on the request. The check,
+	// the wipe and pg_restore run on the server-lifecycle context with the
+	// overall timeout (restoreTimeout); this goroutine owns the lock and the
+	// temp file until they end, and records each step for the status reads.
+	// If the client is still here when the restore ends, it gets the same
+	// answer it always did; if it has gone (a reload, a closed tab, a lost
+	// connection), the restore goes on and the record is the answer.
+	file := restoreFileLabel(part.FileName())
+	run := h.restores.begin(file, ticket, time.Now().UTC())
+	done := make(chan restoreResult, 1)
+	handedOff = true
+	go func() {
+		res := h.runRestoreRecorded(tmpPath, run)
+		// Everything is released before the answer goes, so a client that
+		// is told the restore ended can start the next one at once.
+		_ = os.Remove(tmpPath)
+		h.backupRestoreMu.Unlock()
+		done <- res
+	}()
+
+	select {
+	case res := <-done:
+		if !res.ok {
+			writeError(w, res.httpStatus, res.message)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "ok",
+			"message": res.message,
+		})
+	case <-r.Context().Done():
+		slog.Warn("restore request ended before the restore did; the restore runs on to its end",
+			"file", file, "err", r.Context().Err())
+		// Nothing reaches a client that has gone, but the request log reads
+		// the status from here: 499 (nginx's "client closed request"), not
+		// the 200 a handler that wrote nothing is logged with.
+		w.WriteHeader(499)
+	}
+}
+
+// restoreSucceededMessage is a successful restore's answer and record.
+const restoreSucceededMessage = "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do."
+
+// runRestoreRecorded runs the restore and records how it ended. A panic is
+// recorded too, as a restore that stopped part way: on this goroutine no
+// recoverer would catch it, and the whole server would go down mid-restore.
+func (h *AdminHandler) runRestoreRecorded(tmpPath string, run *restoreRun) (res restoreResult) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("restore panicked", "panic", p)
+			res = restoreResult{
+				httpStatus: http.StatusInternalServerError,
+				message:    "the restore stopped on an internal error; the database may be as it was, empty, or restored — check it before going on",
+				database:   restoreDBUnknown,
+			}
+		}
+		h.restores.finish(run, res, time.Now().UTC())
+	}()
+	return h.runRestore(tmpPath, run)
+}
+
+// runRestore checks the archive at tmpPath, wipes the public schema and
+// restores the archive into it, on the server-lifecycle context with the
+// overall timeout, moving run through its steps. It never reads the request.
+func (h *AdminHandler) runRestore(tmpPath string, run *restoreRun) restoreResult {
+	ctx, cancel := context.WithTimeout(h.restoreContext(), restoreTimeout)
 	defer cancel()
+	command := h.restoreCommand()
+
+	// stopped describes a step the context ended (the timeout, or Aurora
+	// shutting down) rather than one that failed by itself.
+	stopped := func() string {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Sprintf("the restore ran out of time (%d minutes)", int(restoreTimeout.Minutes()))
+		}
+		return "the restore was stopped because Aurora is shutting down"
+	}
 
 	// Validate the upload is FULLY restorable BEFORE the destructive wipe.
 	// The leading-magic + min-size checks above only prove the first bytes
@@ -586,19 +694,21 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	// truncated / corrupt / version-incompatible archive is rejected with the
 	// DB still intact. Costs one extra full read of the archive — restores are
 	// rare and correctness beats speed here. deep-debug H8.
-	validateCmd := exec.CommandContext(ctx, "pg_restore", "-f", os.DevNull, tmpPath)
-	var validateStderr strings.Builder
-	validateCmd.Stderr = &limitedStringWriter{w: &validateStderr, max: 16 * 1024}
-	if err := validateCmd.Run(); err != nil {
-		stderrTail := strings.TrimSpace(validateStderr.String())
+	if stderrTail, err := command(ctx, restoreStepChecking, "pg_restore", []string{"-f", os.DevNull, tmpPath}, nil); err != nil {
+		if ctx.Err() != nil {
+			msg := stopped() + " while checking the file; the database was NOT modified"
+			slog.Warn("restore stopped while checking the archive (database NOT modified)", "err", err, "ctx_err", ctx.Err())
+			// 500, not 503: the web app reads 502-504 as a proxy that gave
+			// up waiting, an answer that says nothing of the restore.
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepChecking, database: restoreDBUnchanged}
+		}
 		slog.Warn("restore rejected: archive is not fully readable by pg_restore (database NOT modified)",
 			"err", err, "stderr", stderrTail)
 		msg := "upload is not a complete, readable pg_dump custom archive (pg_restore validation failed) — the database was NOT modified"
 		if stderrTail != "" {
 			msg += ": " + stderrTail
 		}
-		writeError(w, http.StatusBadRequest, msg)
-		return
+		return restoreResult{httpStatus: http.StatusBadRequest, message: msg, step: restoreStepChecking, database: restoreDBUnchanged}
 	}
 
 	// Phase 1 — wipe the existing schema. Without this, the restore
@@ -720,30 +830,35 @@ $do$;
 	// travels via PGPASSWORD in cmd.Env so it never lands on argv. See
 	// pgConnEnv.
 	connURL, pgEnv := pgConnEnv(h.databaseURL)
-	wipeCmd := exec.CommandContext(ctx, "psql",
-		"--quiet",
-		"--set", "ON_ERROR_STOP=on",
-		"-c", wipeSQL,
-		connURL,
-	)
-	wipeCmd.Env = append(os.Environ(), pgEnv...)
-	var wipeStderr strings.Builder
-	wipeCmd.Stderr = &limitedStringWriter{w: &wipeStderr, max: 16 * 1024}
-	if err := wipeCmd.Run(); err != nil {
+	// The wipe is one DO block, so one statement: when the statement
+	// itself failed, it rolled back as a whole and nothing was cleared
+	// (wipeLeftDatabase reads psql's exit for which failure it was). A
+	// wipe the context cut short is in doubt, since the server can finish
+	// and commit a statement whose client has gone.
+	h.restores.step(run, restoreStepClearing, restoreDBUnknown)
+	if stderrTail, err := command(ctx, restoreStepClearing, "psql",
+		[]string{"--quiet", "--set", "ON_ERROR_STOP=on", "-c", wipeSQL, connURL}, pgEnv); err != nil {
 		// Audit M2 — include the actual psql stderr in the error
 		// response. Previously the message only said "is psql
 		// installed?" which is misleading when the real cause is
 		// "connection refused" / "permission denied on schema public"
 		// / "role does not exist". The stderr tail makes the actual
 		// problem visible to the admin.
-		stderrTail := strings.TrimSpace(wipeStderr.String())
+		if ctx.Err() != nil {
+			msg := stopped() + " while clearing the old data; the database may be as it was or empty — check it before going on"
+			slog.Error("restore stopped during the pre-wipe", "err", err, "ctx_err", ctx.Err(), "stderr", stderrTail)
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepClearing, database: restoreDBUnknown}
+		}
 		slog.Error("restore pre-wipe failed", "err", err, "stderr", stderrTail)
 		msg := "pre-restore wipe failed: " + err.Error()
 		if stderrTail != "" {
 			msg += " — psql said: " + stderrTail
 		}
-		writeError(w, http.StatusInternalServerError, msg)
-		return
+		database := wipeLeftDatabase(err, stderrTail)
+		if database == restoreDBUnknown {
+			msg += " — the connection was lost while clearing the old data, so the database may be as it was or empty; check it before going on"
+		}
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepClearing, database: database}
 	}
 
 	// Phase 2 — pg_restore the upload.
@@ -779,39 +894,82 @@ $do$;
 	// 2026-05-29 audit (MED): --dbname carries the password-free conninfo
 	// (connURL, derived above); the password is supplied via PGPASSWORD in
 	// cmd.Env so it is not exposed on argv. See pgConnEnv.
-	restoreCmd := exec.CommandContext(ctx, "pg_restore",
+	h.restores.step(run, restoreStepRestoring, restoreDBEmpty)
+	stderrTail, runErr := command(ctx, restoreStepRestoring, "pg_restore", []string{
 		"--single-transaction",
 		"--no-owner",
 		"--no-privileges",
 		"--no-comments",
-		"--dbname="+connURL,
+		"--dbname=" + connURL,
 		tmpPath,
-	)
-	restoreCmd.Env = append(os.Environ(), pgEnv...)
-	var restoreStderr strings.Builder
-	restoreCmd.Stderr = &limitedStringWriter{w: &restoreStderr, max: 16 * 1024}
-
-	runErr := restoreCmd.Run()
+	}, pgEnv)
 	if runErr != nil {
-		stderrTail := strings.TrimSpace(restoreStderr.String())
 		slog.Error("restore failed",
 			"err", runErr,
+			"ctx_err", ctx.Err(),
 			"pg_restore_stderr_tail", stderrTail,
 		)
+		if ctx.Err() != nil {
+			// Killed rather than failed: almost always before its COMMIT,
+			// which rolls back to the wiped schema, but a kill that lands
+			// after COMMIT was sent cannot be told apart from here.
+			msg := stopped() + " while restoring; the database is most likely empty, but may have been restored — check it before going on"
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBUnknown}
+		}
 		// The --single-transaction wrapped the whole thing, so on
 		// failure the DB is back to the wiped (empty) state. Tell the
 		// operator that explicitly so they know to retry.
-		msg := "restore failed; database is in wiped state, retry with a valid backup."
+		// Not "retry": nobody can sign in to an empty database, so a retry
+		// from the Admin page is not possible, and a restart first would
+		// let anyone register as its admin.
+		msg := "restore failed; database is in wiped state. Restore a valid backup with pg_restore from the server's command line before restarting Aurora (docs/backup-restore.md)."
 		if stderrTail != "" {
 			msg += " pg_restore said: " + stderrTail
 		}
-		writeError(w, http.StatusInternalServerError, msg)
-		return
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBEmpty}
 	}
 
 	slog.Info("restore succeeded — Aurora MUST be restarted to use new data")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ok",
-		"message": "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do.",
-	})
+	return restoreResult{ok: true, message: restoreSucceededMessage, database: restoreDBRestored}
+}
+
+// wipeLeftDatabase says what a wipe that psql reports as failed left. psql
+// exits 1 or 3 when the statement failed (or psql itself did, before
+// sending it), and the DO block then rolled back as a whole. It exits 2
+// when the connection went bad: that is in doubt unless the connection was
+// never made, since a statement whose client has gone can still finish and
+// commit. A command that never started (psql missing) changed nothing; one
+// killed by a signal may have.
+func wipeLeftDatabase(err error, stderr string) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return restoreDBUnchanged
+	}
+	switch exitErr.ExitCode() {
+	case 1, 3:
+		return restoreDBUnchanged
+	case 2:
+		if neverConnected(stderr) {
+			return restoreDBUnchanged
+		}
+	}
+	return restoreDBUnknown
+}
+
+// neverConnected reports libpq's account of a connection that was never
+// made, as psql prints it at the start of a line: "psql: error: connection
+// to server ... failed" (libpq 14 and later) or "psql: could not connect to
+// server" (before). Read by line, so the wipe's own NOTICE lines (which name
+// the objects dropped) cannot match. A connection lost mid-statement says
+// "server closed the connection unexpectedly" or "connection to server was
+// lost", which this does not match.
+func neverConnected(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "psql: could not connect to server") ||
+			(strings.HasPrefix(line, "psql: error: connection to server") && strings.Contains(line, "failed")) {
+			return true
+		}
+	}
+	return false
 }

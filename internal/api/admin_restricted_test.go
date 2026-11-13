@@ -198,6 +198,7 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 		{http.MethodGet, "/api/admin/dashboard"},
 		{http.MethodGet, "/api/admin/backup"},
 		{http.MethodPost, "/api/admin/restore"},
+		{http.MethodGet, "/api/admin/restore/status"},
 	}
 	// A user's token is refused every one of them, unrestricted session or not.
 	role = "user"
@@ -215,6 +216,12 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 	// The parent's session, unrestricted, is let through.
 	if code, reason := do(http.MethodGet, "/api/users", f.parentRT); code != http.StatusOK {
 		t.Errorf("GET /api/users as the parent: %d %q, want 200", code, reason)
+	}
+	// The restore's record is mounted, and answers an unrestricted admin (the
+	// /api/admin subrouter refuses before routing, so the refusals above
+	// would pass with the route gone).
+	if code, reason := do(http.MethodGet, "/api/admin/restore/status", f.parentRT); code != http.StatusOK {
+		t.Errorf("GET /api/admin/restore/status as the parent: %d %q, want 200", code, reason)
 	}
 	// With no unrestricted profile left on the account (data from before the
 	// rule, a restore, hand-written SQL), the restricted session is all it

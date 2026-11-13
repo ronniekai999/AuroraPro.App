@@ -22,6 +22,7 @@ vi.mock('@/lib/api', async (original) => ({
 import AuthView, { refusalSays } from './AuthView'
 import { APIError } from '@/lib/api'
 import { consumeDeviceIntent, consumeDevicePairing } from '@/lib/devicePairing'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 /** A refusal as the server sends one: a status and its sentence. */
 const refused = (status: number, sentence: string) => new APIError(status, sentence, { error: { code: status, message: sentence } })
@@ -500,5 +501,67 @@ describe('what a refusal says', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create account' }))
     await flush()
     expect(api.register).toHaveBeenLastCalledWith({ username: 'theo', email: 'theo@example.test', password: 'long enough', invite_code: 'LANTERN-7Q4K' })
+  })
+})
+
+describe('a database restore this browser started', () => {
+  // From a restore's wipe until it commits, and after one that fails past
+  // it or succeeds, its admin is signed out and lands here: this page reads
+  // the restore by the ticket the browser kept, with no session.
+  const keep = (seen: string | null = null) =>
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: 't'.repeat(43), file: 'aurora-backup.dump', seen }))
+  const answer = (res: Response | Error) => vi.stubGlobal('fetch', vi.fn((url: RequestInfo | URL) =>
+    String(url) === '/api/restore/status'
+      ? (res instanceof Error ? Promise.reject(res) : Promise.resolve(res.clone()))
+      : Promise.reject(new Error(`unexpected fetch ${String(url)}`))))
+  const json = (code: number, body: unknown) => new Response(JSON.stringify(body), { status: code, headers: { 'content-type': 'application/json' } })
+  afterEach(() => { localStorage.clear(); resetRestoreRecordForTest() })
+
+  it('says one is running, on the sign-in page and the first-run page alike', async () => {
+    keep('running')
+    answer(json(200, { state: 'running', step: 'restoring', database: 'empty', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }))
+    await open()
+    const note = await screen.findByRole('region', { name: 'A restore is running' })
+    expect(note).toHaveTextContent('Until it has finished nobody can sign in.')
+    cleanup()
+    await open('/', status({ has_users: false }))
+    expect(await screen.findByRole('region', { name: 'A restore is running' })).toBeInTheDocument()
+  })
+
+  it('says to restart after one that succeeded, and puts it away when dismissed', async () => {
+    keep('running')
+    answer(json(200, { state: 'succeeded', database: 'restored', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: true, message: 'Restore complete.' }))
+    await open()
+    const note = await screen.findByRole('region', { name: 'Restart Aurora now' })
+    expect(note).toHaveTextContent('Sign-ins from before the restore have ended: sign in again with an account from the backup.')
+    // The sign-in form is still there to use.
+    expect(screen.getByLabelText('Username')).toBeInTheDocument()
+    fireEvent.click(within(note).getByRole('button', { name: /Dismiss/ }))
+    expect(screen.queryByRole('region', { name: 'Restart Aurora now' })).toBeNull()
+    expect(localStorage.getItem('aurora.restore')).toBeNull()
+  })
+
+  it('says the database is empty after one that failed past its wipe', async () => {
+    keep('running')
+    answer(json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: false, message: 'restore failed; database is in wiped state' }))
+    await open()
+    const note = await screen.findByRole('region', { name: 'The restore from aurora-backup.dump failed' })
+    expect(note).toHaveTextContent('Restore a backup from the server’s command line before restarting Aurora')
+    // The server's own text is for the Admin page only.
+    expect(note).not.toHaveTextContent('wiped state')
+  })
+
+  it('says Aurora has no record of one it last saw running', async () => {
+    keep('running')
+    answer(json(404, { error: { code: 404, reason: 'restore_unknown', message: 'no restore with this ticket' } }))
+    await open()
+    expect(await screen.findByRole('region', { name: 'Aurora has no record of the restore from aurora-backup.dump' })).toHaveTextContent('the restore did not finish and the database may be empty')
+  })
+
+  it('says nothing, and asks nothing, without a restore', async () => {
+    answer(new Error('no fetch expected'))
+    await open()
+    expect(fetch).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region')).toBeNull()
   })
 })

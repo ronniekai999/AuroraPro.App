@@ -31,6 +31,7 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 
 import AdminView from './AdminView'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/media/movies'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -41,6 +42,9 @@ let fetchAnswer: (url: string) => Promise<Response>
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
   fetchAnswer = async () => json(503, { error: 'unavailable' })
@@ -463,11 +467,12 @@ describe('a restore’s other answers', () => {
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     return alertLines(await within(d).findByRole('alert'))[0]
   }
-  const LOST = 'The connection to the server failed during the restore, so it is not known how far it got: the database may be as it was, restored, or empty. Check the server before going on.'
+  const LOST = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   it.each([
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],
     ['a proxy that gave up (502)', async () => new Response('<html>Bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), LOST],
+    ['a proxy that gave up (Cloudflare’s 524)', async () => new Response('<html>A timeout occurred</html>', { status: 524, headers: { 'content-type': 'text/html' } }), LOST],
     ['another restore running (409)', async () => json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } }), 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.'],
     ['a file too large (413)', async () => json(413, { error: { code: 413, message: 'upload exceeds the 50 GB limit' } }), 'The file is too large to restore from here, and the database was not changed.'],
   ])('says %s', async (_what, answer, says) => {

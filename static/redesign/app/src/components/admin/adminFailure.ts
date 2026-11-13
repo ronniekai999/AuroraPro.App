@@ -58,3 +58,9 @@ export function adminFailure(e: unknown, doing: string, overrides: FailureOverri
   if (otherwise && !named && (!(e instanceof APIError) || e.status >= 500)) return { says: otherwise, server }
   return { says: failureWords(e, doing, { status, reason: { ...ADMIN_REASONS, ...reason } }) ?? `Could not ${doing} just now.`, server }
 }
+
+/** The server's account of a restore that failed (its record's message), as
+ *  the Admin page's second line. Admin page only, as every server line is. */
+export function restoreServerLine(st: { state: string; message?: string } | null): string | null {
+  return st && st.state === 'failed' && st.message ? serverSaidForAdmin(new APIError(500, st.message, null)) : null
+}

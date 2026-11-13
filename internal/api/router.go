@@ -474,6 +474,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// endpoint. Empty string is a clean disable (Backup returns 500 with
 	// "not configured" — no panic).
 	adminH.SetDatabaseURL(deps.Cfg.Database.URL)
+	// A restore runs on the server's lifecycle once its upload is done, not
+	// on its request (admin_restore.go).
+	if deps.RootCtx != nil {
+		adminH.SetRootContext(deps.RootCtx)
+	}
 	if deps.LLMClient != nil {
 		adminH.SetLLMClient(deps.LLMClient)
 	}
@@ -743,6 +748,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// area is intentionally small: no participants, no chat history,
 		// no playback details — those need auth via the WS join.
 		r.Get("/api/code/{code}/info", partyH.GetCodeInfo)
+
+		// A restore's status, answered only to the ticket its upload carried
+		// (X-Aurora-Restore-Ticket; anything else is a 404). Outside the
+		// session checks on purpose: from a restore's wipe until it commits,
+		// and after one that fails past it, there are no tables to check a
+		// session against, and a successful one brings back no sessions, so
+		// the admin who started it could not otherwise learn how it went.
+		// The upload passed the full admin guard. See admin_restore.go.
+		r.Get("/api/restore/status", adminH.RestoreStatusByTicket)
 
 		// Auth routes (public)
 		r.Route("/api/auth", func(r chi.Router) {
@@ -1235,6 +1249,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// pg_restore. See admin_backup.go header for the full
 			// pipeline rationale.
 			r.With(requireAdmin).Post("/api/admin/restore", adminH.Restore)
+			// The latest restore since this process started: running, how it
+			// ended, whether Aurora needs a restart. A restore no longer ends
+			// with its request, so this is where its outcome is read. For any
+			// admin the database can vouch for; the person who started it
+			// also has the ticket read (GET /api/restore/status, mounted with
+			// the public routes above), which needs no database.
+			r.With(requireAdmin).Get("/api/admin/restore/status", adminH.RestoreStatus)
 
 			// Requests (media request + ARR integration)
 			r.Route("/api/requests", func(r chi.Router) {

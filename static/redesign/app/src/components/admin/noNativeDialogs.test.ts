@@ -8,8 +8,8 @@
 // through another name (`const ask = window.confirm; ask('…')` is caught only
 // at the assignment, and `const w = window; w.confirm(…)` not at all) or
 // from a file outside this folder. The browser's own leave-this-page check
-// (a `beforeunload` listener, restoreOutcome.ts) is not one of these boxes:
-// the page shows none of its words, and it is not matched here.
+// (a `beforeunload` listener) is not one of these boxes and is not matched
+// here; the page no longer uses one (a restore outlives its page).
 import { describe, expect, it } from 'vitest'
 
 const SOURCES = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', '!./**/*.test.tsx'], {

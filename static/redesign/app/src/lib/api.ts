@@ -1,6 +1,7 @@
 import { getDiagnosticBuffer, redactURL } from './diagnosticBuffer'
 import type { CodeInfo } from './party'
 import type { ReferralOption } from './referral'
+import type { RestoreStatus } from './restoreStatus'
 
 // Aurora V2 — API client.
 //
@@ -1542,6 +1543,14 @@ export interface AdminUser {
 
 export async function getAdminDashboard(signal?: AbortSignal): Promise<ServerStats> {
   return apiFetch<ServerStats>('/api/admin/dashboard', { signal })
+}
+
+// The latest database restore since Aurora last started (running, how it
+// ended, whether a restart is due), behind the admin guard. A restore no
+// longer ends with its request, so this is where its outcome is read; the
+// browser that started one also reads it by ticket (lib/restoreStatus).
+export async function getAdminRestoreStatus(signal?: AbortSignal): Promise<RestoreStatus> {
+  return apiFetch<RestoreStatus>('/api/admin/restore/status', { signal })
 }
 
 // Embedding coverage for the admin dashboard. embedded/total count media_items
