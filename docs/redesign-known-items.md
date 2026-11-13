@@ -148,11 +148,17 @@ Fix or file each item, and delete it here when it is no longer true.
   tab keeps for the previous user on that path (the browse grids and their
   totals, which Tonight's closing line falls back to until its own count
   answers; an open title) was not audited in the redesign.
-- Share image (server, older than the redesign, found by reading and not
-  reproduced): the server builds a TMDB address from a party's stored poster
-  path assuming it starts with a slash, and the web app stores it without one,
-  so the share image of a party started from the web app is composed without
-  its poster. Server code, so not changed in the redesign.
+- Share image poster (server, resolved): the share image and the share card
+  build a TMDB address from a party's stored poster path, and used to assume
+  it started with a slash. That was never reachable from the web app:
+  `POST /api/parties` does not read the `media_poster` the web app sends
+  (stripped of its slash) and stores the title's own `/abc.jpg` path, and the
+  web app's change-media sends that stored value back. An API client could
+  store a bare path through change-media or a room's party start; the server
+  now takes either form (`shareTMDBPosterURL`). Still open: a poster fetch
+  that fails (TMDB down, a timeout) leaves the image or card without its
+  poster until the party ends or changes title, since the result is cached;
+  the failure is now logged at Warn.
 - Search: a description search cannot tell "nothing found" from "not set up on
   this server" (the server does not say), so the page says either may be the
   case. The results held while the next words are out keep their headings. On

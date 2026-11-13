@@ -1,0 +1,10 @@
+{
+  "sha": "b9e0b6de1cd0ffda0316cef2bf21649882d74333",
+  "verdict": "lows-only",
+  "summary": "Fresh-context read-only adversarial review of the full diff a98a841..b9e0b6d (party share/card poster URL). Checked every media_poster writer (POST /api/parties ignores the client field and stores poster_path; web change-media echoes the server value; no first-party room start; native clients have no party code), the one-slash URL for abc.jpg and /abc.jpg at the request, SSRF (allowlist before request and CheckRedirect unchanged; posterTransport nil in production, below the client; path values cannot move host), and mutations (old concatenation, deleted allowlist, URL dropped from status error, ResolveReference rewrite: all killed). Found 0 critical/high; 1 low (share-image Warn repeats per request while cache writes fail, whose cause is Debug; pre-existing unlimited route), 3 nits (doc entry wording: 'resolved' label, 'never' vs current web app, cache lifetime list; fire-frequency comment omits restart/reaper; poster appears twice in Warn on non-200). Left as follow-ups. Earlier rounds: lows-only twice (diagnosis wording, unpinned allowlist check, missing party code in Warn, false poster-size comment, stale doc entry), fixed and re-reviewed.",
+  "reviewer": "independent-subagent-general-purpose-round3",
+  "findings": "4",
+  "diff_digest": "5a286a791f5d29be8ab0d16b9775ef3617910f3485731ef25d33b913cf9d77e9",
+  "branch": "claude/awesome-edison-ujzvcc",
+  "recorded_at": "2026-11-13T16:21:03Z"
+}
