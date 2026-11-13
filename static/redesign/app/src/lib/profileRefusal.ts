@@ -50,15 +50,18 @@ export function waitPhrase(retryAfterSec: number | undefined, fallback: string):
 const retryAfter = (e: unknown) => (e instanceof APIError ? e.retryAfterSec : undefined)
 
 /** The sentence for a refusal. `fallback` is for an error with no message at
- *  all (never shown for one the server explained). */
-export function refusalMessage(e: unknown, fallback: string): string {
+ *  all (never shown for one the server explained). `reloaded: false` is for
+ *  a page with no list of profiles that it reloads after a refusal. */
+export function refusalMessage(e: unknown, fallback: string, { reloaded = true }: { reloaded?: boolean } = {}): string {
   switch (refusalReason(e)) {
     case 'profile_restricted':
       return 'The profile you are watching as has a content limit, so it cannot change this. Switch to a profile without a limit first.'
     case 'last_unrestricted_profile':
       return 'One profile has to stay without a limit, so that someone can manage the others. Take the limit off another profile first.'
     case 'profile_changed':
-      return 'This profile was changed on another device a moment ago. The list has been reloaded: check it, then try again.'
+      return reloaded
+        ? 'This profile was changed on another device a moment ago. The list has been reloaded: check it, then try again.'
+        : 'This profile was changed on another device a moment ago. Try again.'
     case 'profile_pin_required':
       return 'This profile is locked. Enter its PIN, or the account password, and try again.'
     case 'profile_pin_invalid':

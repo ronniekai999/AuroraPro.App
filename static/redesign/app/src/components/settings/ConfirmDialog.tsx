@@ -22,6 +22,7 @@ interface WordsProps {
   confirmLabel: string
   cancelLabel: string
   destructive: boolean
+  safeFirst: boolean
   onConfirm: () => void
 }
 
@@ -29,14 +30,17 @@ interface WordsProps {
 // the caller's state has moved on (the list it named is gone, the choice it
 // asked about is put back), and the question must not change under the
 // reader while it fades out.
-const Words = memo(function Words({ title, children, confirmLabel, cancelLabel, destructive, onConfirm }: WordsProps) {
+const Words = memo(function Words({ title, children, confirmLabel, cancelLabel, destructive, safeFirst, onConfirm }: WordsProps) {
   return (
     <>
       <AlertDialogHeader>
         <AlertDialogTitle className="font-display text-[22px] leading-tight">{title}</AlertDialogTitle>
         <AlertDialogDescription className="text-[15px] leading-relaxed text-ink-2">{children}</AlertDialogDescription>
       </AlertDialogHeader>
-      <AlertDialogFooter>
+      {/* Stacked, on a phone, the buttons are drawn last first, which puts
+          the confirm button on top. `safeFirst` keeps them in their own
+          order there: the answer that changes nothing on top. */}
+      <AlertDialogFooter className={safeFirst ? 'flex-col' : undefined}>
         <AlertDialogCancel className="h-11">{cancelLabel}</AlertDialogCancel>
         <AlertDialogAction className={buttonVariants({ variant: destructive ? 'destructive' : 'default', className: 'h-11' })} onClick={onConfirm}>
           {confirmLabel}
@@ -46,7 +50,7 @@ const Words = memo(function Words({ title, children, confirmLabel, cancelLabel, 
   )
 }, (_shown, next) => !next.open)
 
-export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel = 'Cancel', destructive = false, onConfirm, onCancel, fallbackFocus }: {
+export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel = 'Cancel', destructive = false, safeFirst = false, onConfirm, onCancel, fallbackFocus, overlayClassName, contentClassName }: {
   open: boolean
   /** The question, naming what it is about ("Delete Kids?"). */
   title: string
@@ -56,6 +60,9 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
   cancelLabel?: string
   /** The confirm button is the red one. */
   destructive?: boolean
+  /** On a phone, where the buttons stack, the cancel button is the upper
+   *  one: for a question whose confirm is the answer to think twice about. */
+  safeFirst?: boolean
   /** The confirm button was pressed. The caller closes the dialog. */
   onConfirm: () => void
   /** Closed any other way: the cancel button, Escape. */
@@ -64,6 +71,10 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
    *  it back: it is gone (a Save button that goes with the choice it saved),
    *  or the browser never focused it. */
   fallbackFocus?: () => HTMLElement | null | undefined
+  /** The layer, for a dialog asked from a surface that is itself drawn
+   *  above the page (the onboarding overlay): its scrim's and its own. */
+  overlayClassName?: string
+  contentClassName?: string
 }) {
   // The dialog also "closes" when its confirm button is pressed; that is not
   // a cancel. It also means a second press on the confirm button, while the
@@ -73,13 +84,14 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
   const returnFocus = useReturnFocus(fallbackFocus)
   return (
     <AlertDialog open={open} onOpenChange={next => { if (!next && !confirmed.current) onCancel() }}>
-      <AlertDialogContent {...returnFocus}>
+      <AlertDialogContent {...returnFocus} overlayClassName={overlayClassName} className={contentClassName}>
         <Words
           open={open}
           title={title}
           confirmLabel={confirmLabel}
           cancelLabel={cancelLabel}
           destructive={destructive}
+          safeFirst={safeFirst}
           onConfirm={() => {
             if (confirmed.current) return
             confirmed.current = true

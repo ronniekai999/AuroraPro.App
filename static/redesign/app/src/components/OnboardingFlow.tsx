@@ -8,6 +8,7 @@ import {
   getHeroPool,
   getDiscoverRails,
   getEngagementRails,
+  APIError,
   type UIMedia,
   type OnboardingStatus,
   type Profile,
@@ -15,6 +16,7 @@ import {
 } from '@/lib/api'
 import { isRestrictedProfile } from '@/lib/profileSession'
 import { limitPhrase } from '@/lib/profileLimits'
+import { refusalMessage, refusalReason } from '@/lib/profileRefusal'
 import { buildSteps, nextStep, prevStep, type Step } from '@/lib/onboardingSteps'
 import {
   shuffleReferralOptions,
@@ -27,6 +29,7 @@ import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
 import { AuroraMark } from './TopNav'
 import { AuroraWordmark } from './AuroraWordmark'
 import { SkeletonBlock } from './Skeletons'
+import { ConfirmDialog } from './settings/ConfirmDialog'
 
 interface OnboardingFlowProps {
   /** Active profile id, or null for the session's acting profile. */
@@ -46,6 +49,9 @@ interface OnboardingFlowProps {
   /** The profile is the account's only one without a content limit, which
    *  the server refuses to give one (see onboardingProfilePatch). */
   soleUnrestricted?: boolean
+  /** Something is drawn over the flow (the "Who's watching?" picker, a PIN
+   *  prompt): the flow is out of reach until it goes. */
+  covered?: boolean
   /** Called once everything is persisted and the rails are warmed. */
   onDone: () => void
 }
@@ -99,6 +105,14 @@ export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilin
   return patch
 }
 
+/** A seeds write the server refused as a bad request. Under a limit this
+ *  flow has just written, that is how it refuses picks above the limit; it
+ *  has no code of its own for it, so the refusal is confirmed by what the
+ *  grid no longer offers (see recoverPicksUnderLimit). */
+function refusedAsBadRequest(e: unknown): boolean {
+  return e instanceof APIError && e.status === 400
+}
+
 const LOADING_MESSAGES = [
   'Reading what you picked…',
   'Going through your library…',
@@ -119,7 +133,7 @@ function ageForRating(maxRating?: string | null): number {
   return 24 // R / TV-MA / NC-17 / unknown → adult
 }
 
-export function OnboardingFlow({ profileId, profile, status, taste, referral, soleUnrestricted = false, onDone }: OnboardingFlowProps) {
+export function OnboardingFlow({ profileId, profile, status, taste, referral, soleUnrestricted = false, covered = false, onDone }: OnboardingFlowProps) {
   const minPicks = status.min_picks ?? 5
   const previewThreshold = status.threshold ?? 3
 
@@ -193,19 +207,71 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   //
   // The referral step's focus goes to its first answer: a roving tabIndex=0
   // makes the group a tab TARGET; it does not put focus there. Every other
-  // step's goes to its heading, which says where the person now is.
+  // step's goes to its heading, which says where the person now is; or, on
+  // the titles step after picks were taken back out, to the line that says so.
+  //
+  // A step the person moved to by their own press always takes the focus.
+  // The flow appearing does not take it from something drawn above the flow
+  // (the "Who's watching?" picker, a PIN prompt): there the keys belong to
+  // what is on top, and the flow takes the focus when it is uncovered.
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const headingRef = useRef<HTMLHeadingElement | null>(null)
-  useEffect(() => {
-    if (step !== 'referral') { headingRef.current?.focus(); return }
-    const first = referralOptions[0]?.key
-    if (first) referralRefs.current[first]?.focus()
+  const noticeRef = useRef<HTMLParagraphElement | null>(null)
+  const enteredRef = useRef(false)
+  const focusStep = useCallback(() => {
+    if (step === 'referral') {
+      const first = referralOptions[0]?.key
+      if (first) referralRefs.current[first]?.focus()
+      return
+    }
+    ;(noticeRef.current ?? headingRef.current)?.focus()
   }, [step, referralOptions])
+  /** The focus is the flow's to take: it is nowhere, in the flow already,
+   *  or on the page the flow has just covered. Not when another dialog
+   *  holds it: that one is drawn above the flow. */
+  const focusIsOurs = () => {
+    const at = document.activeElement
+    if (!at || at === document.body || rootRef.current?.contains(at)) return true
+    return !at.closest('[role="dialog"], [role="alertdialog"]')
+  }
+  useEffect(() => {
+    const first = !enteredRef.current
+    enteredRef.current = true
+    if (first && (covered || !focusIsOurs())) return
+    focusStep()
+    // `covered` is read as it was when the step opened; uncovering has its
+    // own effect, below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusStep])
+  const wasCovered = useRef(covered)
+  useEffect(() => {
+    const was = wasCovered.current
+    wasCovered.current = covered
+    if (was && !covered && focusIsOurs()) focusStep()
+  }, [covered, focusStep])
 
   // --- loading screen state ---
   const [error, setError] = useState<string | null>(null)
   const [loadNonce, setLoadNonce] = useState(0)
   const [phaseMsg, setPhaseMsg] = useState(0)
   const ranLoadRef = useRef(-1)
+  // What the build says aloud: that it has started, and that it is done.
+  // (A failure is the alert's; the lines that tick by are not announced.)
+  const [buildSaid, setBuildSaid] = useState('')
+  // What this flow's own writes have put on the server so far: the profile
+  // (its name and avatar), and the content limit when the age set one. A
+  // failure says what is true of these, and a way out that is taken after
+  // the limit was written no longer leaves one unset.
+  const [landed, setLanded] = useState<{ profile: boolean; limit: string | null }>({ profile: false, limit: null })
+  const landedRef = useRef(landed)
+  // Picks taken back out because the grid, read again under a limit that
+  // had just been written, no longer offered them.
+  const [removedPicks, setRemovedPicks] = useState(0)
+  // The referral answer has been sent: the question is not asked twice
+  // when the flow comes back to the picks after a refused build.
+  const [referralSent, setReferralSent] = useState(false)
+  // "Show more" has run the list out.
+  const [listEnded, setListEnded] = useState(false)
 
   // seenRef dedupes ids across grid + reactive; popLoadedRef is the page cursor.
   const seenRef = useRef<Set<number>>(new Set())
@@ -250,9 +316,18 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     }
   }, [profileId, remember, taste])
 
+  // "Show more" goes away when the list has run out (a short page, or a page
+  // that could not be read). The focus it held goes to the first title it
+  // added, or to the last title when it added none, and the status says that
+  // is everything.
+  const moreRef = useRef<HTMLButtonElement | null>(null)
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const focusTileRef = useRef<number | 'last' | null>(null)
   const showMore = useCallback(async () => {
     if (loadingMore || !hasMore) return
     setLoadingMore(true)
+    let added: UIMedia[] = []
+    let more = false
     try {
       const items = await getOnboardingGrid({
         profileId: profileId ?? undefined,
@@ -260,14 +335,30 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         offset: popLoadedRef.current,
       })
       popLoadedRef.current += items.length
-      setGrid((prev) => [...prev, ...remember(items)])
-      setHasMore(items.length >= 40)
+      added = remember(items)
+      setGrid((prev) => [...prev, ...added])
+      more = items.length >= 40
     } catch {
-      setHasMore(false)
+      more = false
     } finally {
       setLoadingMore(false)
     }
+    setHasMore(more)
+    if (more) return
+    setListEnded(true)
+    // Only when the button still has the focus: a person who has moved on
+    // is left where they are.
+    if (document.activeElement === moreRef.current) focusTileRef.current = added[0]?.id ?? 'last'
   }, [loadingMore, hasMore, profileId, remember])
+  useEffect(() => {
+    const want = focusTileRef.current
+    if (want === null || hasMore) return
+    focusTileRef.current = null
+    const tiles = gridRef.current?.querySelectorAll<HTMLElement>('button[data-tile]')
+    if (!tiles || tiles.length === 0) return
+    const tile = want === 'last' ? null : gridRef.current?.querySelector<HTMLElement>(`button[data-tile="${want}"]`)
+    ;(tile ?? tiles[tiles.length - 1]).focus()
+  }, [grid, hasMore])
 
   // Reactive "more like your picks" — appends as the user keeps choosing.
   useEffect(() => {
@@ -292,16 +383,11 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
   const selectedSet = useMemo(() => new Set(selected), [selected])
 
-  // Posters for the loading screen: the user's actual picks first, padded with
-  // other poster-bearing grid items so the row is always full.
-  const mosaicPosters = useMemo(() => {
-    const all = [...grid, ...reactive]
-    const byId = new Map(all.map((m) => [m.id, m]))
-    const picked = selected.map((id) => byId.get(id)).filter((m): m is UIMedia => !!m && !!m.poster)
-    const pad = all.filter((m) => m.poster && !selectedSet.has(m.id))
-    const seen = new Set<number>()
-    return [...picked, ...pad].filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true))).slice(0, 10)
-  }, [grid, reactive, selected, selectedSet])
+  // The build's row: the titles that were picked, in the order they were.
+  const pickedTitles = useMemo(() => {
+    const byId = new Map([...grid, ...reactive].map((m) => [m.id, m]))
+    return selected.map((id) => byId.get(id)).filter((m): m is UIMedia => !!m).slice(0, 10)
+  }, [grid, reactive, selected])
 
   // ---- referral submission ----
   // Fire-and-forget by design: attribution is worth less than a signup, so a
@@ -322,6 +408,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
       // down — see settleReferral. Errors are swallowed here so no caller has
       // to handle them; a failed write leaves the row pending, which is the
       // designed fallback.
+      setReferralSent(true)
       referralInFlightRef.current = submitReferral(answer)
         .then(() => undefined)
         .catch((e) => {
@@ -383,12 +470,20 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     setError(null)
     setStep(s)
   }
+  // The step after this one. The question, once answered, is passed over:
+  // the flow can come back to the picks after a build was refused, and what
+  // was answered then is not asked, or sent, again.
+  const stepAfter = (from: Step): Step | null => {
+    const n = nextStep(machine, from)
+    return n === 'referral' && referralSent ? nextStep(machine, 'referral') : n
+  }
   const next = () => {
     if (!canAdvance()) return
     // Commit the referral on the way OUT of its step. Back does NOT submit — reversing out of
     // a step shouldn't record an answer the user was still considering.
     if (step === 'referral') submitReferralChoice()
-    const n = nextStep(machine, step)
+    if (step === 'titles') setRemovedPicks(0)
+    const n = stepAfter(step)
     if (n) { goTo(n); return }
     void settleReferral().then(onDone)
   }
@@ -397,7 +492,12 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     if (p) goTo(p)
   }
 
+  // One skip per press: a second press before the first has answered would
+  // send the skip again and close the flow twice.
+  const skippingRef = useRef(false)
   const skip = useCallback(async () => {
+    if (skippingRef.current) return
+    skippingRef.current = true
     // The flow-level "Skip for now" closes EVERYTHING. If it's pressed while
     // the referral question is on screen, the user has seen it and declined —
     // record that, so a later session doesn't ask again. Pressed from any other
@@ -414,9 +514,94 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     }
   }, [profileId, onDone, step, taste, sendReferral, settleReferral])
 
+  // ---- leaving without finishing ----
+  // An age can set a content limit, and the limit is written when setup
+  // finishes (the build), not when the age is typed. So a way out that does
+  // not run the build can leave a profile without the limit its page has
+  // just described. These two functions are all of that rule: the first
+  // says which limit the age in the field would set, the second which limit
+  // a way out taken now would leave unset.
+  const limitToSet = (): string | null => {
+    if (!ageTouched || ceilingLocked || soleUnrestricted) return null
+    return ratingForAge(age).maxRating || null
+  }
+  const limitLeftUnset = (): string | null => (landed.limit !== null ? null : limitToSet())
+  // The limit the open question is about; null while it is not asked.
+  const [leaveAsk, setLeaveAsk] = useState<string | null>(null)
+  // Every way out that does not finish setup: the header's Skip, "Continue
+  // to Aurora" on an empty list, Skip after a build that failed.
+  const leave = () => {
+    const limit = limitLeftUnset()
+    if (limit) { setLeaveAsk(limit); return }
+    void skip()
+  }
+
   const retryLoad = () => {
+    // The button goes with the failure it was under: the focus it holds goes
+    // to the build's heading before it does.
+    headingRef.current?.focus()
     setError(null)
     setLoadNonce((n) => n + 1)
+  }
+
+  // ---- a build refused because of the limit it had just written ----
+  // The grid on the page was read before the limit existed, so it can hold
+  // titles the limit now hides, and picks among them are refused. A retry
+  // would send the same picks and be refused for good. Instead: read the
+  // grid again (the server now leaves out what the limit hides), keep the
+  // picks that are still on it, and go back to the titles step, which says
+  // how many went. Returns false when nothing went (the refusal was about
+  // something else) or the grid could not be read: the caller then reports
+  // the failure as any other.
+  const recoverPicksUnderLimit = async (stillHere: () => boolean): Promise<boolean> => {
+    const offered: UIMedia[] = []
+    let full = true
+    try {
+      // As many as were on the page, in pages the server allows.
+      const want = Math.max(40, popLoadedRef.current)
+      while (offered.length < want && full) {
+        const size = Math.min(100, want - offered.length)
+        const items = await getOnboardingGrid({ profileId: profileId ?? undefined, limit: size, offset: offered.length })
+        offered.push(...items)
+        full = items.length >= size
+      }
+    } catch {
+      return false
+    }
+    if (!stillHere()) return true
+    const onOffer = new Set(offered.map((m) => m.id))
+    const kept = selected.filter((id) => onOffer.has(id))
+    if (kept.length === selected.length) return false
+    seenRef.current = new Set()
+    popLoadedRef.current = offered.length
+    setGrid(remember(offered))
+    setHasMore(full)
+    setListEnded(false)
+    setReactive([])
+    setSelected(kept)
+    setRemovedPicks(selected.length - kept.length)
+    // The next Finish is a new build.
+    setLoadNonce((n) => n + 1)
+    setError(null)
+    setStep('titles')
+    return true
+  }
+
+  // What to say of a build that did not finish, which is first of all what
+  // it did save: once the profile has been written its name and avatar are
+  // kept, and so is the limit when the age set one, whatever failed after.
+  const buildFailure = (e: unknown, saved: { profile: boolean; limit: string | null }): string => {
+    const kept = saved.profile
+      ? `Your name and avatar are saved${saved.limit ? `, and this profile is now limited to titles ${limitPhrase(saved.limit)}` : ''}. `
+      : ''
+    if (e instanceof BuildTimeout) {
+      return `${kept}${saved.profile ? 'The rest' : 'This'} is taking longer than expected. Check your connection, then try again or skip for now.`
+    }
+    if (saved.profile) return `${kept}Your picks could not be saved just now. Try again, or skip for now.`
+    // The profile write itself was refused. A refusal with a reason is
+    // worded as Settings words it; here there is no list that was reloaded.
+    if (refusalReason(e)) return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved.`
+    return 'Your choices could not be saved just now. Try again, or skip for now.'
   }
 
   // ---- the loading sequence: persist everything, warm the rails, then reveal ----
@@ -428,6 +613,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     let cancelled = false
     const t0 = Date.now()
     setPhaseMsg(0)
+    setBuildSaid('Saving your choices and building your Tonight.')
 
     // cosmetic: advance the status messages
     const msgIv = setInterval(() => setPhaseMsg((m) => Math.min(m + 1, LOADING_MESSAGES.length - 1)), 1000)
@@ -453,6 +639,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         //     LLM/SQL builds finish via Home's own loading path).
         const work = (async () => {
           await updateProfile(pid, patch)
+          // The profile is written, and with it the limit when the patch
+          // carried one. Known from here on, whatever happens next.
+          landedRef.current = { profile: true, limit: patch.max_age_rating || landedRef.current.limit }
+          if (!cancelled) setLanded(landedRef.current)
           await saveOnboardingSeeds(selected, profileId ?? undefined)
           await Promise.race([
             getHeroPool(true, profileId ?? undefined).then(() => {}).catch(() => {}),
@@ -467,19 +657,22 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         let timedOut = false
         await Promise.race([work, sleep(20000).then(() => void (timedOut = true))])
         if (timedOut) throw new BuildTimeout()
+        if (!cancelled) setBuildSaid('Your Tonight is ready.')
         // Hold a minimum beat so the celebratory loader never just flashes.
         const elapsed = Date.now() - t0
         if (elapsed < 4200) await sleep(4200 - elapsed)
         if (!cancelled) onDone()
       } catch (e) {
-        if (!cancelled) {
-          clearInterval(msgIv)
-          // In the app's words: what the server or the browser said of a
-          // failed write is written for logs.
-          setError(e instanceof BuildTimeout
-            ? 'This is taking longer than expected. Check your connection, then try again or skip for now.'
-            : 'Your choices could not be saved just now. Try again, or skip for now.')
-        }
+        if (cancelled) return
+        clearInterval(msgIv)
+        // The person is told in the app's words; what the server or the
+        // browser said is kept for whoever looks at the console.
+        console.warn('onboarding: the build did not finish', e)
+        const saved = landedRef.current
+        if (saved.limit !== null && refusedAsBadRequest(e) && await recoverPicksUnderLimit(() => !cancelled)) return
+        if (cancelled) return
+        setBuildSaid('')
+        setError(buildFailure(e, saved))
       }
     })()
 
@@ -494,25 +687,30 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // contract. Derived from the machine so a new input step gets it for free.
   const showNav = machine.inputs.includes(step)
   // The step after which the flow builds: its button says so.
-  const finishes = nextStep(machine, step) === 'loading'
+  const finishes = stepAfter(step) === 'loading'
   const shownName = name.trim()
   // How wide each step is drawn; its footer follows it.
   const stepWidth = step === 'titles' ? 'max-w-[1040px]' : step === 'you' ? 'max-w-[640px]' : 'max-w-[560px]'
 
+  // A limit this profile has (it came with one, or this flow has just
+  // written one): its age cannot be changed here.
+  const ageLocked = ceilingLocked || landed.limit !== null
+
   // What the age that was entered will do, in words, and why not when it
-  // will not. The limit is worded by the helper Settings uses, so both say
-  // the same of the same limit.
+  // will not. It says WHEN: the limit is written when setup finishes, not as
+  // the age is typed. The limit is worded by the helper Settings uses, so
+  // both say the same of the same limit.
   const ageNote = (): string => {
-    if (ceilingLocked) return `This profile has a content limit (${profile?.max_age_rating}), so its age cannot be changed here.`
+    if (ageLocked) return `This profile is limited to titles ${limitPhrase(landed.limit ?? profile?.max_age_rating)}, so its age cannot be changed here.`
     if (!ageTouched) {
       return soleUnrestricted
         ? 'This is the account’s only profile without a content limit, so an age tunes what is suggested and sets no limit. To limit what a child sees, give them their own profile.'
-        : `An age under 13 limits this profile to titles ${limitPhrase('PG')}, and one under 17 to titles ${limitPhrase('TV-14')}. Leave it empty to change nothing.`
+        : `When you finish setup, an age under 13 limits this profile to titles ${limitPhrase('PG')}, and one under 17 to titles ${limitPhrase('TV-14')}. Leave it empty to change nothing.`
     }
     const r = ratingForAge(age)
     if (r.maxRating === '') return 'Adult: no content limit. Suggestions follow what you watch.'
     if (soleUnrestricted) return `${r.tier}: suggestions lean that way, and no content limit is set, because this is the account’s only profile without one. To limit what a child sees, give them their own profile.`
-    return `${r.tier}: this profile will be limited to titles ${limitPhrase(r.maxRating)}.`
+    return `${r.tier}: when you finish setup, this profile will be limited to titles ${limitPhrase(r.maxRating)}.`
   }
 
   // What the footer says beside its buttons: what is still missing, or what
@@ -520,8 +718,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   const footNote = (): string => {
     if (step === 'you') return !avatarId ? 'Pick an avatar to continue.' : !shownName ? 'Enter a name to continue.' : ''
     if (step === 'titles') {
-      if (selected.length < minPicks) return `Pick ${minPicks - selected.length} more to continue.`
-      return finishes ? 'Aurora builds your first Tonight from these. It takes a few seconds.' : 'Rating or saving a title later counts too.'
+      // "Show more" has gone: said here, the step's one status.
+      const end = listEnded ? 'That is every title. ' : ''
+      if (selected.length < minPicks) return `${end}Pick ${minPicks - selected.length} more to continue.`
+      return end + (finishes ? 'Aurora builds your first Tonight from these. It takes a few seconds.' : 'Rating or saving a title later counts too.')
     }
     return ''
   }
@@ -534,10 +734,14 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // told a modal question arrived rather than leaving the user reading the
     // still-exposed app underneath.
     <div
+      ref={rootRef}
       className="fixed inset-0 z-[80] flex flex-col overflow-hidden bg-surface-page text-ink animate-fade-in"
       role="dialog"
       aria-modal="true"
       aria-label={taste ? 'Set up your Aurora' : 'One quick question'}
+      // Out of reach while something is drawn over it: the keys then belong
+      // to what is on top, and none of them may land on a control down here.
+      inert={covered || undefined}
     >
       {/* Top bar: brand, progress, skip. */}
       <header className="flex h-14 flex-none items-center gap-2.5 px-4 sm:h-16 sm:px-12">
@@ -553,10 +757,13 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             ))}
           </div>
         )}
-        {step !== 'loading' && (
+        {/* Not beside the question that ends setup: "Skip this question"
+            there goes on to the build, and a second Skip that discards
+            everything would sit on the same screen. Back reaches this one. */}
+        {step !== 'loading' && !(taste && step === 'referral') && (
           <button
             type="button"
-            onClick={() => void skip()}
+            onClick={leave}
             className="-mr-2 ml-2 inline-flex min-h-11 items-center rounded-control px-2 text-sm text-ink-2 hover:text-ink hover:underline sm:ml-4"
           >
             Skip for now
@@ -621,6 +828,25 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           </div>
         </footer>
       )}
+
+      {/* Asked before any way out that would leave unset the limit this page
+          has described (see limitLeftUnset). Drawn above the flow, under the
+          "Who's watching?" picker. */}
+      <ConfirmDialog
+        open={leaveAsk !== null}
+        title="Skip without setting a limit?"
+        cancelLabel="Go back"
+        confirmLabel="Skip, no limit"
+        destructive
+        safeFirst
+        overlayClassName="z-[82]"
+        contentClassName="z-[83]"
+        onCancel={() => setLeaveAsk(null)}
+        onConfirm={() => { setLeaveAsk(null); void skip() }}
+        fallbackFocus={() => headingRef.current}
+      >
+        The age you entered would have limited this profile to titles {limitPhrase(leaveAsk)}. Skipping now sets no limit and saves nothing from this page. You can set a limit in Settings, under Profiles and parental controls.
+      </ConfirmDialog>
     </div>
   )
 
@@ -628,7 +854,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // headingRef).
   function heading(text: string) {
     return (
-      <h1 ref={headingRef} tabIndex={-1} className="rounded-chip font-display text-[clamp(2.25rem,9vw,3.5rem)] font-extrabold leading-none tracking-[-0.02em] text-ink">
+      <h1 ref={headingRef} tabIndex={-1} className="rounded-chip font-display text-[clamp(2.25rem,9vw,3.5rem)] font-extrabold leading-none tracking-[-0.02em] text-ink [overflow-wrap:anywhere]">
         {text}
       </h1>
     )
@@ -659,10 +885,17 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   aria-pressed={sel}
                   aria-label={n.name}
                   // The chosen one is ringed in white, a gap of the page's
-                  // colour from it: the same mark a chosen poster has.
+                  // colour from it, and checked: the marks a chosen poster
+                  // has. The check is what still says "chosen" while the
+                  // focus ring is drawn where the ring was.
                   className={`relative block aspect-square w-full rounded-full p-0 ${sel ? 'shadow-[0_0_0_3px_var(--surface-page),0_0_0_5px_#ffffff]' : ''}`}
                 >
                   <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />
+                  {sel && (
+                    <span aria-hidden="true" data-avatar-check="" className="absolute -right-0.5 -top-0.5 grid h-6 w-6 place-items-center rounded-full bg-action text-action-on">
+                      <CheckIcon className="h-3.5 w-3.5" />
+                    </span>
+                  )}
                 </button>
               )
             })}
@@ -696,7 +929,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
               pattern="[0-9]*"
               maxLength={2}
               value={ageText}
-              disabled={ceilingLocked}
+              disabled={ageLocked}
               aria-describedby="ob-age-note"
               autoComplete="off"
               onChange={(e) => {
@@ -709,13 +942,15 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
               className="onboarding-field w-full"
             />
           </div>
-          <p id="ob-age-note" className="basis-full text-[13px] leading-snug text-ink-2">{ageNote()}</p>
+          {/* Said as the age is typed: what it will do changes with it. */}
+          <p id="ob-age-note" aria-live="polite" className="basis-full text-[13px] leading-snug text-ink-2">{ageNote()}</p>
         </div>
       </div>
     )
   }
 
   function renderTitles() {
+    const limit = landed.limit
     return (
       <div className="flex flex-col gap-7">
         <div className="flex flex-wrap items-end gap-4">
@@ -725,8 +960,20 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
               {minPicks} or more, from this library. Aurora uses them for your first picks.
             </p>
           </div>
-          <p role="status" className="text-[15px] font-semibold text-ink">{selected.length} picked</p>
+          {/* A count to look at. What is said aloud as picks are made is the
+              footer's line (how many more it needs): one voice, not two. */}
+          <p className="text-[15px] font-semibold text-ink" data-picked="">{selected.length} picked</p>
         </div>
+
+        {/* After a build that was refused because of the limit it had just
+            written: what happened to the picks. It takes the focus when the
+            step opens, so it is what is read first. */}
+        {removedPicks > 0 && limit && (
+          <p ref={noticeRef} tabIndex={-1} data-picks-removed="" className="rounded-control bg-surface-raised px-4 py-3 text-[15px] leading-snug text-ink">
+            This profile is now limited to titles {limitPhrase(limit)}, so the titles here were loaded again.{' '}
+            {removedPicks === 1 ? '1 of your picks is no longer among them and was removed.' : `${removedPicks} of your picks are no longer among them and were removed.`}
+          </p>
+        )}
 
         {gridLoading ? (
           <div className="onboarding-grid" aria-hidden="true">
@@ -737,13 +984,13 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         ) : grid.length === 0 ? (
           <div className="py-16">
             <p className="text-[15px] text-ink-2">Your library is still being prepared for recommendations.</p>
-            <button type="button" onClick={() => void skip()} className="stage-btn stage-btn-ghost mt-4">
+            <button type="button" onClick={leave} className="stage-btn stage-btn-ghost mt-4">
               Continue to Aurora
             </button>
           </div>
         ) : (
           <>
-            <div role="group" aria-label="Titles" className="onboarding-grid">
+            <div ref={gridRef} role="group" aria-label="Titles" className="onboarding-grid">
               {grid.map((m) => (
                 <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} dim={selected.length > 0} onToggle={toggle} />
               ))}
@@ -752,7 +999,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
               <div className="flex justify-center">
                 {/* Off, not disabled, while more are fetched: it keeps the
                     focus the press gave it. showMore refuses a second press. */}
-                <button type="button" onClick={() => void showMore()} aria-disabled={loadingMore} className="stage-btn stage-btn-ghost">
+                <button ref={moreRef} type="button" onClick={() => void showMore()} aria-disabled={loadingMore} className="stage-btn stage-btn-ghost">
                   {loadingMore ? 'Loading…' : 'Show more'}
                 </button>
               </div>
@@ -795,7 +1042,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           {heading('One quick thing')}
           {/* Admin-authored text, rendered as text. Never dangerouslySetInnerHTML. */}
           <p className="mt-2 text-[17px] leading-snug text-ink-2" data-referral-ask="">
-            {question} Whoever runs this server asked. It is optional.
+            {question} It is optional.
           </p>
         </div>
 
@@ -911,24 +1158,35 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     return (
       <div>
         {heading('Building your Tonight')}
-        {/* What it is doing now, said as it changes. */}
-        <p role="status" className="mt-2 text-[17px] leading-snug text-ink-2">{error ? '' : LOADING_MESSAGES[phaseMsg]}</p>
+        {/* What it is doing now. These lines tick by on a timer and are not
+            announced; what is, is below. */}
+        <p className="mt-2 text-[17px] leading-snug text-ink-2" data-build-line="">{error ? '' : LOADING_MESSAGES[phaseMsg]}</p>
+        {/* Said aloud: that the build has started, and that it is done. */}
+        <p role="status" className="sr-only">{buildSaid}</p>
 
-        {mosaicPosters.length > 0 && (
-          <div className="mt-8 flex flex-wrap gap-2" aria-hidden="true">
-            {mosaicPosters.map((m) => (
-              <img key={m.id} src={m.poster} alt="" className="h-[92px] w-[62px] rounded-art object-cover" />
+        {pickedTitles.length > 0 && (
+          <div className="mt-8 flex flex-wrap gap-2" aria-hidden="true" data-build-picks="">
+            {pickedTitles.map((m) => (
+              <span key={m.id} className="block h-[92px] w-[62px]">
+                <TitleArt m={m} className="h-full w-full" small />
+              </span>
             ))}
           </div>
         )}
 
         {error ? (
           <div className="mt-8">
-            <p role="alert" className="text-[15px] leading-snug text-danger-ink">{error}</p>
+            <p role="alert" className="max-w-[560px] text-[15px] leading-snug text-danger-ink">{error}</p>
             <div className="mt-4 flex flex-wrap gap-3">
               <button type="button" onClick={retryLoad} className="stage-btn stage-btn-primary">Try again</button>
-              <button type="button" onClick={() => void skip()} className="stage-btn stage-btn-ghost">Skip</button>
+              <button type="button" onClick={leave} className="stage-btn stage-btn-ghost">Skip</button>
             </div>
+            {/* The limit is already written: skipping does not take it back. */}
+            {landed.limit && (
+              <p className="mt-3 max-w-[560px] text-[13px] leading-snug text-ink-2" data-skip-keeps-limit="">
+                Skipping leaves the limit set. Your picks can wait: rating or saving a title later counts too.
+              </p>
+            )}
           </div>
         ) : (
           <div className="mt-8 h-1 max-w-[330px] overflow-hidden rounded-[2px]" style={{ background: 'var(--track)' }}>
@@ -945,9 +1203,33 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
 // ---- small pieces ----
 
-// A title to pick: its poster and nothing drawn over it but the mark of
-// having been picked. The title is the button's name. Once something is
-// picked, what is not is dimmed, so the picks stand out of the wall.
+// A title's tile: its name on the app's raised surface, with its poster
+// drawn over that. The name is the base, not a fallback: it is what the
+// tile shows while the picture is on its way, when the picture fails to
+// load, and when the title has none.
+function TitleArt({ m, className = '', small = false }: { m: UIMedia; className?: string; small?: boolean }) {
+  const [failed, setFailed] = useState(false)
+  return (
+    <span className={`relative block overflow-hidden rounded-art bg-surface-raised-2 ${className}`}>
+      <span aria-hidden="true" className={`absolute inset-0 flex items-end font-semibold leading-tight text-ink ${small ? 'p-1 text-[9px]' : 'p-2.5 text-[13px]'}`}>
+        <span className="line-clamp-3 [overflow-wrap:anywhere]">{m.title}</span>
+      </span>
+      {m.poster && !failed && (
+        <img
+          src={m.poster}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="absolute inset-0 block h-full w-full object-cover"
+        />
+      )}
+    </span>
+  )
+}
+
+// A title to pick: its tile, and the mark of having been picked. The title
+// is the button's name. Once something is picked, what is not is dimmed, so
+// the picks stand out of the wall.
 function PosterTile({
   m,
   selected,
@@ -962,6 +1244,7 @@ function PosterTile({
   return (
     <button
       type="button"
+      data-tile={m.id}
       onClick={() => onToggle(m.id)}
       aria-pressed={selected}
       aria-label={m.year > 0 ? `${m.title} (${m.year})` : m.title}
@@ -970,19 +1253,7 @@ function PosterTile({
         (selected ? 'shadow-[0_0_0_3px_var(--surface-page),0_0_0_5px_#ffffff]' : '')
       }
     >
-      {m.poster ? (
-        <img
-          src={m.poster}
-          alt=""
-          loading="lazy"
-          className={`block aspect-[2/3] w-full rounded-art object-cover ${dim && !selected ? 'opacity-[0.72]' : ''}`}
-        />
-      ) : (
-        // No artwork: the title stands in for it.
-        <span className="flex aspect-[2/3] w-full items-end rounded-art bg-surface-raised-2 p-2.5 text-[13px] font-semibold leading-tight text-ink">
-          <span className="line-clamp-3">{m.title}</span>
-        </span>
-      )}
+      <TitleArt m={m} className={`aspect-[2/3] w-full ${dim && !selected ? 'opacity-[0.72]' : ''}`} />
       {selected && (
         <span aria-hidden="true" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-action text-action-on">
           <CheckIcon className="h-4 w-4" />

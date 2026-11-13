@@ -1956,6 +1956,9 @@ export default function App() {
   // Reported UP by the gate, which owns the policy. App needs it only to keep
   // Cmd+K from putting the focus in the search field behind the gate.
   const [profilesGateOpen, setProfilesGateOpen] = useState(false)
+  // The onboarding flow covers the whole page: while it is up the page
+  // behind it (<main>, the top bar included) is out of reach of the keys.
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
   const theaterActive = playerSurface === 'theater'
   // Whether a page a restricted session is not shown may render on THIS
   // commit (lib/navScope.mayRenderHidden): never for a restricted session,
@@ -6697,7 +6700,7 @@ export default function App() {
 
           `inert={x || undefined}` rather than `inert={x}` so the attribute is
           absent, not `inert="false"` — the HTML attribute is presence-based. */}
-      <main className={`min-h-screen stage-shell ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
+      <main className={`min-h-screen stage-shell ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || onboardingOpen || undefined}>
         {/* Sticky stack: scan bar + nav in one sticky container so the
             scan bar contributes its height to flow and both pin together
             on scroll. The bar stays ABOVE the nav, as in the mockup. */}
@@ -7652,6 +7655,10 @@ export default function App() {
           profileId={activeProfileId}
           profile={profiles.find(p => p.id === activeProfileId) ?? null}
           soleUnrestricted={isSoleUnrestrictedProfile(profiles, activeProfileId)}
+          // The picker and the PIN prompt are drawn over the flow: while
+          // either is up the flow is out of reach.
+          covered={profilesGateOpen || !!pinTarget}
+          onOpenChange={setOnboardingOpen}
           onComplete={() => window.location.reload()}
         />
       )}

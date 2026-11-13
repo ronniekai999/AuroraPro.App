@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   getOnboardingStatus,
   getReferralPrompt,
@@ -16,6 +16,12 @@ interface TasteOnboardingGateProps {
   profile?: Profile | null
   /** The profile is the account's only one without a content limit. */
   soleUnrestricted?: boolean
+  /** Something is drawn over the flow (the "Who's watching?" picker, a PIN
+   *  prompt): the flow is out of reach until it goes. */
+  covered?: boolean
+  /** Told when the flow comes up and when it goes, so the host can put the
+   *  page behind it out of reach. */
+  onOpenChange?: (open: boolean) => void
   /** Called after the user finishes or skips — host can refresh Home. */
   onComplete?: () => void
 }
@@ -46,7 +52,7 @@ type Phase = 'checking' | 'show' | 'hidden'
  * close. When only the referral is owed, the flow collapses to that one
  * question plus a send-off (see buildSteps).
  */
-export function TasteOnboardingGate({ profileId, profile, soleUnrestricted, onComplete }: TasteOnboardingGateProps) {
+export function TasteOnboardingGate({ profileId, profile, soleUnrestricted, covered, onOpenChange, onComplete }: TasteOnboardingGateProps) {
   const [phase, setPhase] = useState<Phase>('checking')
   const [status, setStatus] = useState<OnboardingStatus | null>(null)
   const [taste, setTaste] = useState(false)
@@ -82,6 +88,17 @@ export function TasteOnboardingGate({ profileId, profile, soleUnrestricted, onCo
     }
   }, [profileId])
 
+  // The host hears that the flow is up, and that it has gone: when it
+  // closes, and when this gate is itself taken down with it still up.
+  const shown = phase === 'show'
+  const tell = useRef(onOpenChange)
+  useEffect(() => { tell.current = onOpenChange })
+  useEffect(() => {
+    if (!shown) return
+    tell.current?.(true)
+    return () => tell.current?.(false)
+  }, [shown])
+
   if (phase !== 'show') return null
   // The flow reads status.profile_id and status.min_picks. In a referral-only
   // pass the status fetch may have failed or reported ineligible, so synthesize
@@ -105,6 +122,7 @@ export function TasteOnboardingGate({ profileId, profile, soleUnrestricted, onCo
       taste={taste}
       referral={referral}
       soleUnrestricted={soleUnrestricted}
+      covered={covered}
       onDone={() => {
         setPhase('hidden')
         onComplete?.()

@@ -564,6 +564,43 @@ function twFill(file, anchor) {
   return found[0]
 }
 
+/** The onboarding flow's text field, read from the field: the tag that
+ *  holds the "Other" answer's placeholder must carry the class that makes it
+ *  one of the flow's fields, and no fill or placeholder colour of its own;
+ *  its fill is then that class's rule's when the rule sets one, and the
+ *  app's field rule's when it does not, composited on the flow's own ink;
+ *  and its placeholder is the app's one placeholder colour. A field that
+ *  gains a utility or a rule this cannot follow stops the audit instead of
+ *  passing on a colour the field no longer has. */
+function onboardingField() {
+  const tag = tagOf(ONB, 'A podcast, a forum')
+  if (!/(?:^|[\s"'`{])onboarding-field(?=[\s"'`}])/.test(tag))
+    throw new Error(`audit: the "Other" field in ${ONB} no longer carries onboarding-field — the audit is out of date, not passing`)
+  const own = tag.match(/(?:^|[\s"'`{])((?:[\w-]+:)*(?:bg-|placeholder:)[^\s"'`}]*)/)
+  if (own)
+    throw new Error(`audit: the "Other" field in ${ONB} sets ${own[1]} on its own tag; this probe reads its fill and placeholder from the stylesheet — the audit is out of date, not passing`)
+  const FIELD = 'input.onboarding-field:not([type="range"])'
+  const APP_FIELD = 'input:not([type="range"]), select, textarea'
+  const rule = ruleBody(FIELD)
+  if (/\.onboarding-field[^{]*::placeholder/.test(css))
+    throw new Error(`audit: ${CSS} now has a placeholder rule for .onboarding-field; this probe reads the app's — the audit is out of date, not passing`)
+  const sets = (body, prop) => new RegExp(String.raw`(?:^|;|\{)\s*${prop}\s*:`).test(body)
+  const from = sets(rule, 'background') ? [FIELD, 'background'] : sets(rule, 'background-color') ? [FIELD, 'background-color'] : [APP_FIELD, 'background']
+  const fill = cssColor(from[0], from[1])
+  return {
+    fill: over(fill.rgb, fill.a, ONB_INK),
+    placeholder: cssColor('input::placeholder, textarea::placeholder', 'color'),
+  }
+}
+
+/** A rule's declarations, as written. Dies when the rule is gone. */
+function ruleBody(selector) {
+  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const rule = css.match(new RegExp(String.raw`(?:^|\n)\s*${esc}\s*\{([\s\S]*?)\n\s*\}`))
+  if (!rule) throw new Error(`audit: rule ${selector} not found in ${CSS} — the audit is out of date, not passing`)
+  return rule[1]
+}
+
 // The page ink, derived from the app root's own utility rather than assumed:
 // the root element in App.tsx carries `bg-surface-page`, which Tailwind maps
 // to the --surface-page token. Reading the wrong base is how a backdrop model
@@ -907,13 +944,13 @@ const SURFACES = [
     px: 13, on: () => [ONB_INK],
   },
   {
-    // On the field's own fill, not the page: the app's fields are filled
-    // one step up, and the placeholder is the app's one placeholder colour.
+    // On the field's own fill, not the page, and read from the field
+    // itself: see onboardingField.
     what: 'referral "Other" field placeholder', where: `${ONB} (referral step)`,
-    color: () => cssColor('input::placeholder, textarea::placeholder', 'color').rgb,
-    alpha: () => cssColor('input::placeholder, textarea::placeholder', 'color').a,
+    color: () => onboardingField().placeholder.rgb,
+    alpha: () => onboardingField().placeholder.a,
     px: 17,
-    on: () => [rootToken('--surface-raised').rgb],
+    on: () => [onboardingField().fill],
   },
   // ── The search page's own field, where a phone types a title or a
   //    description (the top bar has no field there). The text this script
