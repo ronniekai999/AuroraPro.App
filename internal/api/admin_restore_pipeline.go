@@ -81,8 +81,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -399,8 +397,9 @@ func (p *restoreProgress) stderr() string {
 // restoreProcs are the pipeline's running children, for stopOnCancel. Each is
 // started in a process group of its own (restoreChild), and signalled as a
 // group, so nothing it started is left holding the stream. A child leaves the
-// list before it is reaped (wait), so no signal can reach a group id the
-// kernel has handed to another process since.
+// list when it is waited for (wait, admin_restore_wait_*.go): on Linux before
+// it is reaped, so no signal can reach a group id the kernel has handed to
+// another process since.
 type restoreProcs struct {
 	mu   sync.Mutex
 	live map[int]bool
@@ -430,24 +429,6 @@ func (r *restoreProcs) signalOne(pid int, sig syscall.Signal) {
 	if r.live[pid] {
 		_ = syscall.Kill(-pid, sig)
 	}
-}
-
-// wait waits for cmd to exit and reaps it. It first waits without reaping
-// (waitid WNOWAIT): until a process is reaped its pid, and so its group id,
-// stays its own, so taking it off the list in between leaves no moment in
-// which a signal could reach a reused id.
-func (r *restoreProcs) wait(cmd *exec.Cmd) error {
-	pid := cmd.Process.Pid
-	var info unix.Siginfo
-	for {
-		if err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != unix.EINTR {
-			break
-		}
-	}
-	r.mu.Lock()
-	delete(r.live, pid)
-	r.mu.Unlock()
-	return cmd.Wait()
 }
 
 // restoreChild prepares a pipeline child: its own process group, and a bound
