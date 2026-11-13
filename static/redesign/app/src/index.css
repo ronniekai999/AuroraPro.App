@@ -5269,6 +5269,16 @@ textarea:focus-visible {
   .toast-stack,
   .update-notice { --corner-base: calc(16px + var(--tabbar-space, 0px)); }
 }
+/* With the party's rail open (`data-party-rail`: a 340px column 16px from
+   the right, from 640px), the corner ends 16px to the left of the rail,
+   so the notice's Reload is not under the rail and a toast does not lie
+   over its chat. A narrower notice wraps; it measures its own height. */
+@media (min-width: 640px) {
+  html[data-party-rail] .toast-stack,
+  html[data-party-rail] .update-notice {
+    max-width: calc(100% - var(--page-pad-x) - 16px - 340px - 16px);
+  }
+}
 /* --update-notice-space: the notice's own measured height and the gap
    above it, while it is up (UpdateAvailableNotice). */
 .toast-stack {

@@ -1038,9 +1038,14 @@ for (const [width, touch] of [[320, true], [390, true], [768, true], [1280, true
 // lane over the timeline (the Skip button's: 28px up, 48px high).
 // The card's, the dock's and the rail's classes are read from the source,
 // the card's in source order; the structure is this file's model of them.
+// With the party's rail open (640, 768, 1024 and 844x390), with the card
+// and without, the notice and the toast also end left of the rail, and
+// every one of their buttons (Reload, Undo, the dismiss buttons) takes a
+// press.
 // MUTATION-TESTED: with the lift written for the old card (142px from the
 // bottom) the notice lies on the card on a phone, with the dock, and beside
-// the rail.
+// the rail; without the rule that ends the corner left of the rail, the
+// notice runs under it and its Reload is covered.
 const PLAYER = 'src/components/VideoPlayer.tsx'
 const CAST_SRC = (() => {
   const src = fs.readFileSync(path.join(APP, PLAYER), 'utf8')
@@ -1070,7 +1075,7 @@ const CORNER_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="ut
 <link rel="stylesheet" href="/v2/assets/${cssFile}">
 <style>body{margin:0}*,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
 <div class="update-notice"><div class="toast"><p class="toast-text">A new version of Aurora is ready.</p><button type="button" class="toast-action is-primary">Reload</button><button type="button" class="toast-x"><svg width="16" height="16"></svg></button></div></div>
-<div class="toast-stack"><div class="toast" data-type="info"><p class="toast-text">Removed The Assassination of Jesse James by the Coward Robert Ford, The Lord of the Rings: The Return of the King (Extended Edition) and Dr. Strangelove or: How I Learned to Stop Worrying and Love the Bomb from My Library.</p><button type="button" class="toast-action">Undo</button></div></div>
+<div class="toast-stack"><div class="toast" data-type="info"><p class="toast-text">Removed The Assassination of Jesse James by the Coward Robert Ford, The Lord of the Rings: The Return of the King (Extended Edition) and Dr. Strangelove or: How I Learned to Stop Worrying and Love the Bomb from My Library.</p><button type="button" class="toast-action">Undo</button><button type="button" class="toast-x"><svg width="16" height="16"></svg></button></div></div>
 <template id="card"><div class="${CAST[0]}"><div class="${CAST[1]}"><div class="${CAST[2]}" style="width:40%"></div></div><div class="${CAST[3]}"><div class="${CAST[4]}"><p class="${CAST[5]}">Night Train to Meridian</p><p class="${CAST[6]}"><span class="${CAST[7]}">Casting to Living room</span><span class="${CAST[8]}" data-cast-position="">· 41:07</span></p></div><button type="button" class="${CAST[9]}"></button><button type="button" class="${CAST[10]}"></button><button type="button" class="${CAST[11]}"></button></div></div></template>
 <template id="dock"><div class="${CAST_DOCK}"><button type="button" class="w-10 h-10"></button></div></template>
 <template id="rail"><aside class="${CAST_RAIL}"></aside></template>
@@ -1102,6 +1107,23 @@ for (const [width, height, touch] of [[320, 568, true], [390, 844, true], [640, 
     const say = () => root.style.setProperty('--update-notice-space', `${Math.ceil(notice.getBoundingClientRect().height) + 12}px`)
     say()
     const plain = { notice: box(notice), toast: box(stack) }
+    // Every button of the notice and the toast: the middle of each is that
+    // button.
+    const corner = () => [...notice.querySelectorAll('button'), ...stack.querySelectorAll('button')].map(b => {
+      const x = b.getBoundingClientRect(); const at = document.elementFromPoint(x.left + x.width / 2, x.top + x.height / 2)
+      return { name: b.textContent.trim() || 'dismiss', ok: !!at && b.contains(at) }
+    })
+    // The party's rail open, with no card: the corner ends left of it.
+    let railed = null
+    if (party.includes('rail')) {
+      root.dataset.partyRail = 'open'
+      const rail = document.getElementById('rail').content.firstElementChild.cloneNode(true)
+      document.body.appendChild(rail)
+      say()
+      railed = { rail: box(rail), notice: box(notice), toast: box(stack), corner: corner() }
+      rail.remove(); delete root.dataset.partyRail
+      say()
+    }
     // The player's card while it casts minimized, alone, with the dock under
     // it, and beside the rail.
     const cast = []
@@ -1113,7 +1135,8 @@ for (const [width, height, touch] of [[320, 568, true], [390, 844, true], [640, 
       say()
       const card = document.querySelector('.player-cast-widget')
       const reach = [...card.querySelectorAll('button')].map(b => { const x = b.getBoundingClientRect(); const at = document.elementFromPoint(x.left + x.width / 2, x.top + x.height / 2); return !!at && b.contains(at) })
-      cast.push({ with: with_, card: box(card), notice: box(notice), toast: box(stack), reach })
+      const railEl = document.querySelector('.stage-party-rail')
+      cast.push({ with: with_, card: box(card), notice: box(notice), toast: box(stack), reach, rail: railEl && box(railEl), corner: corner() })
       for (const el of added) el.remove()
       delete root.dataset.partyDock; delete root.dataset.partyRail; delete root.dataset.playerSurface
     }
@@ -1123,13 +1146,23 @@ for (const [width, height, touch] of [[320, 568, true], [390, 844, true], [640, 
     root.style.removeProperty('--update-notice-space')
     root.dataset.playerSurface = 'theater'
     const theater = { toast: box(stack), timelineTop: parseFloat(getComputedStyle(root).getPropertyValue('--player-timeline-top')) }
-    return { plain, cast, theater, vh: window.innerHeight }
+    return { plain, railed, cast, theater, vh: window.innerHeight }
   }, party)
   const at = `${width}x${height}${touch ? ' touch' : ''}`
   const apart = (a, b) => a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5 || a.right <= b.left + 0.5 || b.right <= a.left + 0.5
   if (r.plain.toast.bottom > r.plain.notice.top - 11.5) fail(`${at}: a toast ends ${(r.plain.notice.top - r.plain.toast.bottom).toFixed(1)}px above the update notice, under the 12px between two cards`)
+  // With the rail open the notice and the toast end left of it, and their
+  // buttons (Reload, Undo, the dismiss buttons) take a press.
+  const clearOfRail = (c, w) => {
+    if (!c.rail) return
+    if (!apart(c.notice, c.rail)) fail(`${w}: the update notice (${c.notice.left.toFixed(0)}-${c.notice.right.toFixed(0)}) runs under the party's rail (from ${c.rail.left.toFixed(0)})`)
+    if (!apart(c.toast, c.rail)) fail(`${w}: a toast (${c.toast.left.toFixed(0)}-${c.toast.right.toFixed(0)}) lies over the party's rail (from ${c.rail.left.toFixed(0)})`)
+    for (const b of c.corner) if (!b.ok) fail(`${w}: the corner's "${b.name}" button has something drawn over its middle`)
+  }
+  if (r.railed) clearOfRail(r.railed, `${at} with the rail, no card`)
   for (const c of r.cast) {
     const w = `${at}${c.with ? ` with the ${c.with}` : ''}`
+    clearOfRail(c, w)
     if (!apart(c.notice, c.card) || c.notice.bottom > c.card.top - 11.5) fail(`${w}: the update notice (to ${c.notice.bottom.toFixed(0)}px) is not 12px clear of the player's cast card (from ${c.card.top.toFixed(0)}px)`)
     if (!apart(c.toast, c.card) || c.toast.bottom > c.notice.top - 11.5) fail(`${w}: a toast (to ${c.toast.bottom.toFixed(0)}px) is not clear of the notice and the cast card under it`)
     c.reach.forEach((ok, i) => { if (!ok) fail(`${w}: the cast card's button ${i + 1} has something drawn over its middle`) })

@@ -2002,15 +2002,18 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   `--castcard-h`, 64px for both of the player's cards, and, while a card
   is on the page, `--castcard-top`), and the update notice and the toasts
   stand 12px above `--castcard-top` at every width (`--corner-base`, by
-  `html:has(.player-cast-widget)`). In the window the player's play, skip
-  and mute are in the corner, and a toast goes to the row above the
-  timeline's lane (`--player-timeline-top` + 88px, the player's own
-  `.player-lane-upper`). `scripts/verify-mobile-layout.mjs` checks both
-  against the built stylesheet, the card's classes read from the player:
-  a toast and the notice clear of the card, alone, with the dock at phone
-  widths and beside the rail, and the card's buttons still reachable; the
-  card's height against `--castcard-h` is checked in
-  `scripts/verify-player-lane.mjs`. A toast in the window can lie over the
+  `html:has(.player-cast-widget)`). With a party's rail open, from 640px,
+  the notice and the toasts end 16px left of the rail (narrower there, so
+  they wrap; the notice measures its own height). In the window the
+  player's play, skip and mute are in the corner, and a toast goes to the
+  row above the timeline's lane (`--player-timeline-top` + 88px, the
+  player's own `.player-lane-upper`). `scripts/verify-mobile-layout.mjs`
+  checks both against the built stylesheet, the card's classes read from
+  the player: a toast and the notice clear of the card, alone, with the
+  dock at phone widths and beside the rail, and the card's buttons still
+  reachable; with the rail open, with and without the card, the two clear
+  of the rail and their buttons reachable. The card's height against
+  `--castcard-h` is checked in `scripts/verify-player-lane.mjs`. A toast in the window can lie over the
   party's chat ticker for its few seconds; the renders put the card's
   markup on a page, and no real cast session was rendered.
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
