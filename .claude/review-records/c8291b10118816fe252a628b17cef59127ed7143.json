@@ -1,0 +1,10 @@
+{
+  "sha": "c8291b10118816fe252a628b17cef59127ed7143",
+  "verdict": "lows-only",
+  "summary": "Onboarding follow-up: the recovery's re-read under the build's watchdog; the exit question saying what it cannot know while a profile write is unanswered; a way back to the details after a refused profile write; three rules added to CLAUDE.md. First check fix-first (what was out and what had landed were tracked per build, so a retry could leave the page saying no limit was set while an earlier write carrying one landed); fixed by tracking them for the profile; re-check lows-only. Left: the failure's sentence can go stale after a late landing; a superseded build still sends its picks.",
+  "reviewer": "fresh-context-agent-a77139b5",
+  "findings": "3",
+  "diff_digest": "ecaa24fc4821261c833f13f448c00b1fa3075f09a9b5ea44800e3d8a0f3508bf",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T04:05:01Z"
+}
